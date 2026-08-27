@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+  }
+  body {
+    margin: 0;
+    background: var(--c-bg);
+    color: var(--c-ink);
+    font-size: var(--fs-base);
+    line-height: var(--lh-base);
+  }
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+    color: inherit;
+  }
+  /* フォーカスリングは消さない（地色2px＋フォーカス色3pxの二重リング） */
+  :focus-visible {
+    outline: none;
+    box-shadow:
+      0 0 0 2px var(--c-bg),
+      0 0 0 calc(2px + var(--focus-w)) var(--c-focus);
+  }
+}
+
+@layer utilities {
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+  /* タイムラインの日セクション: 画面外の描画コストを遮断する */
+  .day-section {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 800px;
+  }
+  .clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+}
