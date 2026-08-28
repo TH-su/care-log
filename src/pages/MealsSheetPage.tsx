@@ -1278,9 +1278,12 @@ export function MealsSheetPage({
           {loading ? '↻ 読み込み中です。表示がそろうまでお待ちください（この間は入力できません）' : ''}
         </p>
 
-        <div className="mt-3">
-          <span className="text-sm text-ink2">フロア</span>
-          <div className="mt-1">
+        {/* フロアと日数は横に並べて1行に収める（2026-08-28 指示）。
+            見出しはボタンの左に置き、ボタンは文字ぶんの幅にする（sheet.css の .sheet-pickbar）。
+            高さ 44px は変えない＝手袋・片手でも押せる大きさは保つ */}
+        <div className="mt-3 sheet-pickbar">
+          <div className="sheet-pickbar-group">
+            <span className="text-sm text-ink2">フロア</span>
             <SegmentPicker
               options={floorOptions}
               value={floor}
@@ -1288,11 +1291,9 @@ export function MealsSheetPage({
               ariaLabel="フロアを選ぶ"
             />
           </div>
-        </div>
 
-        <div className="mt-3">
-          <span className="text-sm text-ink2">横に並べる日数</span>
-          <div className="mt-1">
+          <div className="sheet-pickbar-group">
+            <span className="text-sm text-ink2">横に並べる日数</span>
             <SegmentPicker
               options={DAYS_OPTIONS}
               value={String(days)}

@@ -673,12 +673,17 @@
   --dsheet-c-sun-bg: #f2b0b0; /* 日曜＝赤 */
   --dsheet-c-sun-ink: #6b1414;
 
-  /* 1行おきの縞（白 ↔ 薄いグレー）。行を目で追いやすくする */
-  --sheet-zebra-bg: #f4f5f7;
+  /* 1行おきの縞（白 ↔ 薄いグレー）。行を目で追いやすくする。
+     2026-08-28 追記: #f4f5f7 は氏名欄のような広い面でしか見えず、罫線で細かく割れる
+     入力欄側では白と見分けが付かなかった（実機で確認）。入力欄でも縞が見える濃さへ下げる */
+  --sheet-zebra-bg: #e9ecf1;
 
-  /* 食事の食事枠ごとの文字色（朝＝赤・昼＝緑・夕＝黒。すべて太字） */
-  --msheet-c-breakfast: #a3282a;
-  --msheet-c-lunch: #14632a;
+  /* 食事の食事枠ごとの文字色（朝＝赤・昼＝緑・夕＝黒。すべて太字）。
+     2026-08-28 追記: 「もう少し鮮やか」の指示で彩度を上げた（明るさはほぼ据え置き）。
+     白地とのコントラスト実測 朝 6.2:1 / 昼 5.5:1（下限 4.5:1 は満たす。7:1 目標には届かない
+     ＝鮮やかさを優先した結果なので、暗い所で読みづらければ元の濃さへ戻せる） */
+  --msheet-c-breakfast: #c1121f;
+  --msheet-c-lunch: #0b7a30;
   --msheet-c-dinner: var(--c-ink);
 }
 :root[data-mode='dark'] {
@@ -692,9 +697,9 @@
   --dsheet-c-sat-ink: #a6d9ee;
   --dsheet-c-sun-bg: #4a1d1d;
   --dsheet-c-sun-ink: #ffb3b8;
-  --sheet-zebra-bg: #1b2027;
-  --msheet-c-breakfast: #ff9a9d;
-  --msheet-c-lunch: #7fd39a;
+  --sheet-zebra-bg: #232a34;
+  --msheet-c-breakfast: #ff7a7e;
+  --msheet-c-lunch: #5fe08c;
   --msheet-c-dinner: var(--c-ink);
 }
 @media (prefers-color-scheme: dark) {
@@ -709,9 +714,9 @@
     --dsheet-c-sat-ink: #a6d9ee;
     --dsheet-c-sun-bg: #4a1d1d;
     --dsheet-c-sun-ink: #ffb3b8;
-    --sheet-zebra-bg: #1b2027;
-    --msheet-c-breakfast: #ff9a9d;
-    --msheet-c-lunch: #7fd39a;
+    --sheet-zebra-bg: #232a34;
+    --msheet-c-breakfast: #ff7a7e;
+    --msheet-c-lunch: #5fe08c;
     --msheet-c-dinner: var(--c-ink);
   }
 }
@@ -763,8 +768,18 @@
   background: var(--c-surface);
 }
 .dsheet-day + .dsheet-day {
-  /* 日と日の切れ目を目で分けるための余白（2026-08-28 指示。sp-1=4px では詰まって見えた） */
-  margin-top: var(--sp-4);
+  /* 日と日の切れ目を目で分けるための余白（2026-08-28 指示。sp-1=4px では詰まって見えた）。
+     同日内のブロック間の余白（.dsheet-gap-block = 12px）より必ず広くする
+     ＝「日が変わった」と「同じ日の別の欄」を余白の広さだけで見分けられるようにする */
+  margin-top: var(--sp-6); /* 32px */
+}
+
+/* 同じ日の中で、前後のブロックから離して置く欄（デイサービス）。
+   日が変わる余白（32px）より狭い 12px にする＝余白の広さの序列を
+   「日の切れ目 ＞ 同日内の欄の切れ目 ＞ 行」に保つ（2026-08-28 指示） */
+.dsheet-gap-block {
+  margin-top: var(--sp-3); /* 12px */
+  margin-bottom: var(--sp-3);
 }
 
 /* ブロックの見出し行（外出者・外泊者・発熱者・他症状者）＝黒枠・太線 */
@@ -850,6 +865,36 @@
    **.sheet-table（バイタル一覧・食事一覧）には掛けない**＝あちらの現行の当たり判定を変えない。 */
 .sheet-dense {
   --sheet-hit-pad: 0px;
+}
+
+/* ── 一覧の上の操作バー（フロア・横に並べる日数）──────────────
+   SegmentPicker（ui.tsx＝変更禁止ファイル）のボタンは flex:1 で入れ物いっぱいに伸びる。
+   食事一覧では見出しを上に置いた全幅の入れ物に入れていたため、ボタン1つが画面の1/3ほどに
+   なって2行を占めていた（2026-08-28 指示「上部のボタンが全て大きすぎる」）。
+   ui.tsx は触らずに、この入れ物の中でだけ「文字ぶんの幅・折り返さない」へ上書きする。
+   高さ（min-height:44px＝--tap-min）はそのまま＝押しやすさは落とさない。 */
+.sheet-pickbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2) var(--sp-4);
+}
+.sheet-pickbar-group {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.sheet-pickbar-group > span {
+  flex: 0 0 auto;
+}
+/* SegmentPicker の入れ物（role=group）と中のボタン */
+.sheet-pickbar-group [role='group'] {
+  flex-wrap: nowrap;
+}
+.sheet-pickbar-group [role='group'] > button {
+  flex: 0 0 auto;
+  padding-left: var(--sp-2);
+  padding-right: var(--sp-2);
 }
 
 /* ── ブロック見出し（外出者・外泊者・発熱者…）──────────── */

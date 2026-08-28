@@ -438,6 +438,21 @@ function fmtSheetDay(iso: string): string {
 }
 
 /**
+ * 記載欄のタイトル帯だけで使う短い日付（「8/28(金)」）。
+ * 帯は1行の高さしか無く、「26年8月28日(金)」だと日付だけで折り返して
+ * 欄の名前（夜勤申し送り 等）が2行目に落ちていた（2026-08-28 指示で簡略化）。
+ * どの日かはヘッダの日付欄と枠（.dsheet-day）が示すので、帯は月日と曜日で足りる。
+ * 壊れた値はそのまま返す（画面を落とさない）。
+ */
+function fmtSheetDayShort(iso: string): string {
+  if (!ISO_DATE_RE.test(iso)) return iso
+  const m = Number(iso.slice(5, 7))
+  const d = Number(iso.slice(8, 10))
+  const dt = new Date(Number(iso.slice(0, 4)), m - 1, d)
+  return `${m}/${d}(${WEEKDAY[dt.getDay()]})`
+}
+
+/**
  * 土日の日付セルに付ける色（指示12・sheet.css の .sheet-sat / .sheet-sun）。
  * 平日は色を付けない。壊れた値でも落とさず「色なし」を返す。
  * 曜日は日付の文字（土）（日）にも出るので、この色はあくまで補助
@@ -916,7 +931,7 @@ function NoteTitleBand({
       className={`flex flex-wrap items-center gap-1 px-1 font-bold ${NOTE_TONE_CLASS[tone]}`}
       style={{ minHeight: 'var(--sheet-row-h-note)' }}
     >
-      <span className="tabular">{fmtSheetDay(day)}</span>
+      <span className="tabular">{fmtSheetDayShort(day)}</span>
       <span>{title}</span>
       <span className="tabular">{count}件</span>
       {onAdd ? <AddRowButton label={`${title}に1行追加`} onClick={onAdd} /> : null}
@@ -2529,8 +2544,11 @@ function DaySheet({
             onMarkRead={markNoteRead}
           />
 
+          {/* デイサービスは日勤・夜勤の申し送りと運営主体が違うので、上下に余白を入れて
+              前後の欄から離す（2026-08-28 指示）。余白は日が変わる切れ目より狭い12px */}
           <NoteBlock
             ctx={ctx}
+            className="dsheet-gap-block"
             title="デイサービス"
             tone="care"
             rows={careNotes}
@@ -3619,6 +3637,8 @@ interface NoteBlockProps {
   ) => Promise<void>
   onDelete: (key: string) => void
   onMarkRead: (note: Note) => void
+  /** 枠の外側の余白を足したい時だけ渡す（デイサービス欄の .dsheet-gap-block） */
+  className?: string
 }
 
 function NoteBlock({
@@ -3637,10 +3657,11 @@ function NoteBlock({
   onUpdateNote,
   onDelete,
   onMarkRead,
+  className = '',
 }: NoteBlockProps) {
   const count = rows.length
   return (
-    <section aria-label={title}>
+    <section aria-label={title} className={className}>
       {/* 実物のタイトル帯（日付＋ブロック名。配色は指示8） */}
       <NoteTitleBand day={ctx.day} title={title} tone={tone} count={count} onAdd={onAdd} />
       <HeadRow className="dsheet-head">

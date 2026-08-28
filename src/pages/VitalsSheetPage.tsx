@@ -8,7 +8,10 @@
 // - 再検枠（kind='recheck'）は**既定では出さない**（2026-08-28 追加指示1）。
 //   氏名欄の右の「再検」ボタンを押すと、その入居者の直下に1本ずつ生える（画面内の状態・保存しない）。
 //   **記録がある入居者・日は隠さない**＝保存済みの本数＋空行1本を必ず出し、
-//   末尾の空行に入力されたら次の空行が生える（既存の挙動をそのまま維持する）
+//   末尾の空行に入力されたら次の空行が生える（既存の挙動をそのまま維持する）。
+//   押し間違いで出した枠は、その入居者の**一番下の空の枠**の右端の「✕」で消せる
+//   （2026-08-28 追加指示。記録のある枠・途中の枠は消せない＝記録を隠さない・番号をずらさない。
+//    消すのは画面の行だけで、サーバーの記録には一切触らない）
 // - 日付見出しは土曜＝濃い水色（.sheet-sat）・日曜＝赤（.sheet-sun）。曜日は日付文字
 //   （8/29（土））にも出るので色は補助（色だけで意味を伝えない）
 // - 行は1行おきに薄いグレー（.sheet-alt）。縞は**行（tr）が持ち**、しきい値の色は
@@ -637,6 +640,47 @@ export function VitalsSheetPage({
     [commitRecheckRows],
   )
 
+  /**
+   * その再検行が「空」か（保存済みの記録も、入力中・送信待ちの控えも無い）。
+   * 表示中の全ての日を見る＝1日でも値が入っていれば空ではない。
+   */
+  const isRecheckRowEmpty = useCallback(
+    (residentId: number, slot: number): boolean => {
+      for (const day of dayList) {
+        const rec = recs.get(recKey(residentId, day, 'recheck', slot))
+        if (!rec) continue
+        if (rec.vitalId != null) return false
+        if (FIELDS.some((f) => rec.buf[f].trim() !== '')) return false
+        // 送信キューへ渡した控え（応答待ち）が残っている行も消さない
+        if (rec.sent && FIELDS.some((f) => rec.sent?.[f] != null)) return false
+      }
+      return true
+    },
+    [dayList, recs],
+  )
+
+  /**
+   * 「✕」ボタン: 押し間違いで出した再検欄を1本消す（画面内の状態・保存しない）。
+   * **消せるのはその入居者の一番下の空の再検欄だけ**（呼ぶ側で isRecheckRowEmpty を確かめる）:
+   * ・記録のある枠を消さない（原則4＝データを消さない。表示から隠すのも取り違えのもと）
+   * ・途中の枠を抜くと下の枠の通し番号がずれ、別の記録が別の枠に見えてしまう
+   * サーバーの行は一切触らない＝この操作でDBの記録が消えることはない。
+   */
+  const removeRecheckRow = useCallback(
+    (residentId: number) => {
+      const cur = recheckRowsRef.current.get(residentId) ?? 0
+      if (cur <= 0) return
+      const next = cur - 1
+      // 「再検」ボタンで出した本数の控えも一緒に減らす（減らさないと読み込み直しで復活する）
+      const opened = recheckOpenRef.current.get(residentId) ?? 0
+      if (opened > next) recheckOpenRef.current.set(residentId, next)
+      const out = new Map(recheckRowsRef.current)
+      out.set(residentId, next)
+      commitRecheckRows(out)
+    },
+    [commitRecheckRows],
+  )
+
   // ── 保存 ───────────────────────────────────────────────────
 
   const askClear = useCallback((labels: string, day: string): Promise<boolean> => {
@@ -1152,6 +1196,12 @@ export function VitalsSheetPage({
                 const notices = dayList
                   .map((d) => ({ day: d, rec: recs.get(recKey(row.residentId, d, row.kind, row.slot)) }))
                   .filter((x) => x.rec && x.rec.message !== '')
+                // 「✕」を出すのは、その入居者の一番下の再検行で、かつ中身が空の時だけ
+                // （記録のある枠・途中の枠は消せない＝記録を隠さない／通し番号をずらさない）
+                const isLastRecheck =
+                  !isRoutine && row.slot === (recheckRows.get(row.residentId) ?? 0) - 1
+                const removable =
+                  isLastRecheck && editable && isRecheckRowEmpty(row.residentId, row.slot)
                 return (
                   <FragmentRow
                     key={row.rowId}
@@ -1164,9 +1214,11 @@ export function VitalsSheetPage({
                     dayList={dayList}
                     recs={recs}
                     editable={editable}
+                    removable={removable}
                     notices={notices}
                     onCommitCell={onCommitCell}
                     onAddRecheck={addRecheckRow}
+                    onRemoveRecheck={removeRecheckRow}
                     onReload={() => void load()}
                   />
                 )
@@ -1215,9 +1267,12 @@ interface FragmentRowProps {
   dayList: string[]
   recs: Map<string, Rec>
   editable: boolean
+  /** この再検行に「✕」を出すか（一番下の空の再検行だけ true） */
+  removable?: boolean
   notices: { day: string; rec: Rec | undefined }[]
   onCommitCell: (row: TableRow, day: string, field: Field, raw: string) => void
   onAddRecheck: (residentId: number) => void
+  onRemoveRecheck: (residentId: number) => void
   onReload: () => void
 }
 
@@ -1230,9 +1285,11 @@ function FragmentRow({
   dayList,
   recs,
   editable,
+  removable = false,
   notices,
   onCommitCell,
   onAddRecheck,
+  onRemoveRecheck,
   onReload,
 }: FragmentRowProps) {
   // 縞は行が持つ。左固定の2列は他の列の上に重なるので、透けないよう同じ色を自分でも持つ
@@ -1274,12 +1331,28 @@ function FragmentRow({
               </button>
             </div>
           ) : (
-            <span className="block truncate text-ink2">
-              <span aria-hidden="true">↳ 再検</span>
-              <span className="sr-only">
-                {name} の再検 {row.slot + 1}本目
+            // 再検行。押し間違いで出した空の枠は右端の「✕」で消せる（2026-08-28 指示）。
+            // ✕ が出るのは一番下の**空の**枠だけ＝記録のある枠は消せない（原則4）
+            <div className="flex items-center gap-1">
+              <span className="min-w-0 flex-1 truncate text-ink2">
+                <span aria-hidden="true">↳ 再検</span>
+                <span className="sr-only">
+                  {name} の再検 {row.slot + 1}本目
+                </span>
               </span>
-            </span>
+              {removable ? (
+                <button
+                  type="button"
+                  onClick={() => onRemoveRecheck(row.residentId)}
+                  aria-label={`${name} の再検欄（空）を消す`}
+                  // 「再検」ボタンと同じ理由で行の高さに収める（押しやすさは倍率200%で担保）
+                  style={{ minHeight: ROW_H }}
+                  className="min-w-0 shrink-0 rounded border border-border-strong px-1 text-ink2"
+                >
+                  <span aria-hidden="true">✕</span>
+                </button>
+              ) : null}
+            </div>
           )}
         </td>
         {dayList.map((day) => (
