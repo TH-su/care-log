@@ -24,6 +24,7 @@ import { useTimeline } from '../hooks/useTimeline'
 import {
   DbError,
   endOngoingNote,
+  fetchNoteReaders,
   fetchResidents,
   fetchStaff,
   getNativeInputEnabled,
@@ -87,6 +88,21 @@ const NO_ACTOR_REASON = '記録する職員が選ばれていません。画面�
 /** 参照の同一性を保つための空配列（React.memo の無効化を防ぐ） */
 const NO_RESIDENTS: Resident[] = []
 const NO_STAFF: Staff[] = []
+
+/**
+ * 氏名リンク（カルテを開くボタン）の縦ヒット領域を 44px 以上にする追加クラス。
+ * 行の見た目の高さは変えずに、擬似要素 ::before を上下 10px ずつはみ出させる
+ * （Chip・KartePage・SearchPage と同じ手法。本文 text-base の行高は約25px なので 25+20=45px）。
+ * 横方向は広げないので、gap-2（8px）で並べた隣の要素とヒットが重ならない。
+ */
+const NAME_HIT = 'relative before:absolute before:inset-x-0 before:-inset-y-2.5'
+
+/**
+ * 「✓既読 n」の縦ヒット拡張。text-sm（15px・行高1.55≒23px）なので上下 12px ずつで 47px。
+ * 同じ行の「既読にする」ボタン（44px）と隣り合うが、拡張するのは縦だけなので
+ * gap-gap（8px）の横の間隔は保たれる。
+ */
+const READ_HIT = 'relative before:absolute before:inset-x-0 before:-inset-y-3'
 
 // ── 小さなヘルパ（純関数・この画面専用）────────────────────
 
@@ -390,9 +406,13 @@ export function TimelinePage({
 
   // 追加読み込み（IntersectionObserver・rootMargin 600px）。
   // キーボード操作・非対応環境のために「さらに読み込む」ボタンも併置する。
+  // 失敗したら自動での再試行はしない（error の間は監視を張らない）。張ったままだと
+  // 検知点が画面内に残るかぎり失敗し続ける通信を繰り返し、電池と回線を空回りで消費する。
+  // 再開は職員の明示操作（「再試行」「さらに10日分を読み込む」）だけにする。
+  // どちらも useTimeline 側で error を消してから取得し直すため、この effect が張り直される。
   const sentinelRef = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
-    if (!hasMore || loading) return
+    if (!hasMore || loading || error) return
     if (typeof IntersectionObserver === 'undefined') return
     const el = sentinelRef.current
     if (!el) return
@@ -404,7 +424,7 @@ export function TimelinePage({
     )
     io.observe(el)
     return () => io.disconnect()
-  }, [hasMore, loading, loadMore])
+  }, [hasMore, loading, error, loadMore])
 
   const showInitialLoading = loading && days.length === 0
   const showInitialError = !!error && days.length === 0
@@ -972,6 +992,9 @@ function NoteCard({
   const readCount = (note.read_count ?? 0) + (locallyRead && note.my_read !== true ? 1 : 0)
   const bodyId = `cl-note-${note.id}-body`
 
+  // 既読者一覧（開いた時にだけ取りに行く。閉じている間は通信しない）
+  const [readersOpen, setReadersOpen] = useState(false)
+
   // 訂正・削除の状態（展開中だけ操作できる。入力封鎖中・操作者未選択はディセーブル）
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(note.body)
@@ -1016,7 +1039,7 @@ function NoteCard({
         ) : (
           <button
             type="button"
-            className="rounded-md px-2 text-base font-bold text-link"
+            className={`${NAME_HIT} rounded-md px-2 text-base font-bold text-link`}
             onClick={() => onOpenKarte(note.resident_id as number)}
             aria-label={`${residentName(resident, note.resident_id)}のカルテを開く`}
           >
@@ -1034,10 +1057,12 @@ function NoteCard({
         {unread && <Chip tone="accent">未読</Chip>}
       </div>
 
-      {/* 2行目: 本文（既定2行clamp・タップで展開＝明示操作。展開状態は保存しない） */}
+      {/* 2行目: 本文（既定2行clamp・タップで展開＝明示操作。展開状態は保存しない）。
+          relative は「氏名リンクの縦ヒット拡張（NAME_HIT）が本文の上端に重ならない」ようにするため
+          （位置指定要素どうしは後に書いたこちらが上になる＝本文タップが氏名リンクに吸われない） */}
       <button
         type="button"
-        className="mt-1 block w-full text-left"
+        className="relative mt-1 block w-full text-left"
         onClick={() => onToggleExpand(note)}
         aria-expanded={expanded}
         aria-controls={bodyId}
@@ -1058,14 +1083,16 @@ function NoteCard({
             ? '未記入'
             : (reporterName ?? `ID ${note.reporter_id}`)}
         </span>
-        {/*
-          ui-design.md §0/§2 の「タップで既読者一覧をポップオーバー表示」は初版スコープ外（積み残し）。
-          既読職員を引く API が contracts.md の凍結契約（db.ts）に無く、追加は契約改訂＝裁定事項のため、
-          ここは件数の表示のみにしてある（非タップ）。
-        */}
-        <span className="text-sm text-ink2 tabular">
+        {/* ui-design.md §0/§2「タップで既読者一覧を表示」。開いた時にだけ既読者を取りに行く */}
+        <button
+          type="button"
+          className={`${READ_HIT} rounded-md text-sm text-link tabular`}
+          onClick={() => setReadersOpen(true)}
+          aria-haspopup="dialog"
+          aria-label={`既読 ${readCount}名。既読にした職員の一覧を開く`}
+        >
           <span aria-hidden="true">✓</span>既読 {readCount}
-        </span>
+        </button>
         {actorId != null &&
           (read ? (
             <span className="text-sm text-ok">
@@ -1162,6 +1189,12 @@ function NoteCard({
         </div>
       )}
 
+      <ReadersDialog
+        open={readersOpen}
+        noteId={note.id}
+        onClose={() => setReadersOpen(false)}
+      />
+
       <ConfirmDialog
         open={asking}
         title="この申し送りを削除しますか"
@@ -1175,6 +1208,123 @@ function NoteCard({
         onCancel={() => setAsking(false)}
       />
     </article>
+  )
+}
+
+// ── 既読者一覧（「✓既読 n」をタップして開く）─────────────────
+
+interface ReadersDialogProps {
+  open: boolean
+  noteId: number
+  onClose: () => void
+}
+
+const ERR_READERS =
+  '既読の職員を読み込めませんでした（通信エラー）。電波状態を確認して、再試行してください。'
+
+/**
+ * 既読にした職員の一覧。開いた時だけ取得する（読み取りのみ・既読は付けない＝原則9）。
+ * ローディング・エラー・0件の3状態を持ち、Esc と「閉じる」で閉じられる。
+ * 申し送り本文・利用者名は載せない（肩越しの覗き見を想定し、必要最小限の表示にする）。
+ */
+function ReadersDialog({ open, noteId, onClose }: ReadersDialogProps) {
+  const [phase, setPhase] = useState<'loading' | 'error' | 'ready'>('loading')
+  const [readers, setReaders] = useState<Staff[]>([])
+  const [reload, setReload] = useState(0)
+  const closeRef = useRef<HTMLButtonElement | null>(null)
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+
+  useEffect(() => {
+    if (!open) return
+    let alive = true
+    setPhase('loading')
+    fetchNoteReaders(noteId)
+      .then((rows) => {
+        if (!alive) return
+        setReaders(Array.isArray(rows) ? rows : [])
+        setPhase('ready')
+      })
+      .catch(() => {
+        if (alive) setPhase('error')
+      })
+    return () => {
+      alive = false
+    }
+  }, [open, noteId, reload])
+
+  // 開いたら「閉じる」へフォーカスし、閉じたら元の要素へ戻す。Esc でも閉じる
+  useEffect(() => {
+    if (!open) return
+    const restore = typeof document === 'undefined' ? null : (document.activeElement as HTMLElement | null)
+    closeRef.current?.focus()
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      onCloseRef.current()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      restore?.focus?.()
+    }
+  }, [open])
+
+  if (!open) return null
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      {/* 背景の覆い。タブ順には入れず、タップで閉じられるようにする */}
+      <button
+        type="button"
+        aria-label="閉じる"
+        tabIndex={-1}
+        onClick={onClose}
+        className="absolute inset-0 cursor-default bg-ink opacity-60"
+      />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="既読にした職員"
+        className="relative flex max-h-full w-full max-w-md flex-col rounded-md border border-border-strong bg-surface"
+      >
+        <div className="flex items-center justify-between gap-gap border-b border-border p-3">
+          <h2 className="text-lg font-bold text-ink">既読にした職員</h2>
+          <button
+            type="button"
+            ref={closeRef}
+            onClick={onClose}
+            className="min-h-tap min-w-tap shrink-0 rounded-md border border-border-strong px-3 text-base text-ink"
+          >
+            閉じる
+          </button>
+        </div>
+        <div className="overflow-y-auto p-3">
+          {phase === 'loading' && <LoadingBlock label="既読の職員を読み込んでいます…" />}
+          {phase === 'error' && (
+            <ErrorBlock message={ERR_READERS} onRetry={() => setReload((n) => n + 1)} />
+          )}
+          {phase === 'ready' && readers.length === 0 && (
+            <EmptyBlock message="まだ誰も既読にしていません。" />
+          )}
+          {phase === 'ready' && readers.length > 0 && (
+            <ul>
+              {readers.map((s) => (
+                <li
+                  key={s.id}
+                  className="flex min-h-tap items-center border-b border-border px-1 text-base text-ink last:border-b-0"
+                >
+                  <span aria-hidden="true" className="mr-2 text-ok">
+                    ✓
+                  </span>
+                  {s.name}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -1231,7 +1381,7 @@ function OutingRow({ outing, dayIso, resident, inputEnabled, onOpenKarte, onSave
         <span className="text-sm text-ink2 tabular">{roomText(resident)}</span>
         <button
           type="button"
-          className="rounded-md px-2 text-base font-bold text-link"
+          className={`${NAME_HIT} rounded-md px-2 text-base font-bold text-link`}
           onClick={() => onOpenKarte(outing.resident_id)}
           aria-label={`${residentName(resident, outing.resident_id)}のカルテを開く`}
         >
@@ -1444,7 +1594,7 @@ function VitalsTable({ rows, residentById, onOpenKarte, showKind }: VitalsTableP
               <td className="whitespace-nowrap px-2 py-3 text-base font-bold">
                 <button
                   type="button"
-                  className="rounded-md px-1 text-left text-base font-bold text-link"
+                  className={`${NAME_HIT} rounded-md px-1 text-left text-base font-bold text-link`}
                   onClick={() => onOpenKarte(residentId)}
                   aria-label={`${residentName(r, residentId)}のカルテを開く`}
                 >
@@ -1552,7 +1702,7 @@ function MealsBlock({ day, residents, residentById, imported, onOpenKarte }: Mea
                 <span className="text-sm text-ink2 tabular">{roomText(r)}</span>
                 <button
                   type="button"
-                  className="rounded-md px-2 text-base font-bold text-link"
+                  className={`${NAME_HIT} rounded-md px-2 text-base font-bold text-link`}
                   onClick={() => onOpenKarte(m.resident_id)}
                   aria-label={`${residentName(r, m.resident_id)}のカルテを開く`}
                 >
@@ -1611,7 +1761,7 @@ function MealsBlock({ day, residents, residentById, imported, onOpenKarte }: Mea
                       <td className="whitespace-nowrap px-2 py-3">
                         <button
                           type="button"
-                          className="rounded-md px-1 text-left text-base font-bold text-link"
+                          className={`${NAME_HIT} rounded-md px-1 text-left text-base font-bold text-link`}
                           onClick={() => onOpenKarte(r.id)}
                           aria-label={`${r.name}のカルテを開く`}
                         >

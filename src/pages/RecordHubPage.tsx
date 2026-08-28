@@ -25,7 +25,7 @@
 import { useCallback, useEffect, useId, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { getNativeInputEnabled } from '../lib/db'
+import { getNativeInputGate } from '../lib/db'
 import { ErrorBlock, LoadingBlock, SectionCard } from '../components/ui'
 
 /** 入力封鎖中の理由文（ui-design.md §0.5 の定型文。文言を変えない） */
@@ -115,13 +115,20 @@ export function RecordHubPage({ inputEnabled: inputEnabledProp }: RecordHubPageP
 
   // 入力解禁フラグは「記録タブを表示するたびに毎回取り直す」（ui-design.md §0.5・前提情報は毎回取り直す規範）。
   // 取得できなければ入力へ進ませない（安全側フォールバック）。
+  // 「false を観測した（＝スプシ期間）」と「観測できなかった（＝通信エラー）」は別物なので、
+  // 後者は封鎖の理由文ではなくエラー＋再試行を出す（observed で区別する）。
   useEffect(() => {
     let alive = true
     setLoadError(null)
     setFetchedEnabled(null)
-    getNativeInputEnabled()
-      .then((enabled) => {
-        if (alive) setFetchedEnabled(enabled === true)
+    getNativeInputGate()
+      .then((gate) => {
+        if (!alive) return
+        if (!gate.observed) {
+          setLoadError(LOAD_ERROR)
+          return
+        }
+        setFetchedEnabled(gate.value === true)
       })
       .catch(() => {
         if (alive) setLoadError(LOAD_ERROR)

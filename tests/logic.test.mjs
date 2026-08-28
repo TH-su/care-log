@@ -168,15 +168,166 @@ function observeInTz(tz) {
   }
 }
 
+// ── src/lib/db.ts（未送信件数・入力解禁ゲート）の読み込み ──
+//
+// db.ts は相対 import に拡張子を書かない（バンドラが解決する前提）ので、Node からそのままは
+// 読めない。テスト側で解決フックを1つ足して '.ts' を補う（本体のコードは変えない）。
+// フックが使えない Node ではこの節を登録せず、理由を実行結果に残す。
+//
+// 併せて localStorage の代役を先に置く（db.ts は typeof で存在を確かめてから使う）。
+// window は定義しない＝起動時の自動読み込み・自動再送は動かないので、通信は一切発生しない。
+const DB_UNSUPPORTED =
+  'この Node では解決フック（module.registerHooks）が使えないため、送信キュー・入力解禁ゲートの検証をスキップしました（Node 22.15 以降で実行してください）。'
+
+/** localStorage の代役。中身はテストごとに差し替える（個人情報は入れない） */
+const lsStore = new Map()
+
+let DB = null
+if (process.env[PROBE_ENV] !== '1') {
+  try {
+    const { registerHooks } = await import('node:module')
+    if (typeof registerHooks !== 'function') throw new Error('no registerHooks')
+    registerHooks({
+      resolve(specifier, context, next) {
+        // 拡張子の無い相対 import だけ '.ts' を補う（node: や依存パッケージには触らない）
+        if (/^\.{1,2}\//.test(specifier) && !/\.[a-zA-Z0-9]+$/.test(specifier)) {
+          try {
+            return next(`${specifier}.ts`, context)
+          } catch {
+            // .ts が無いものは元の指定へ戻す
+          }
+        }
+        return next(specifier, context)
+      },
+    })
+    globalThis.localStorage = {
+      getItem: (k) => (lsStore.has(k) ? lsStore.get(k) : null),
+      setItem: (k, v) => {
+        lsStore.set(k, String(v))
+      },
+      removeItem: (k) => {
+        lsStore.delete(k)
+      },
+    }
+    DB = await import('../src/lib/db.ts')
+  } catch {
+    DB = null
+  }
+}
+
+/** cl_sendQueue の中身を差し替える（未指定ならキーごと消す） */
+function setQueueRaw(raw) {
+  if (raw === null) lsStore.delete('cl_sendQueue')
+  else lsStore.set('cl_sendQueue', raw)
+}
+
+/** 退避 op の最小形（業務データは持たせない。table/kind/payload だけ整っていればよい） */
+function op(qid, over = {}) {
+  return { qid, table: 'notes', kind: 'insert', payload: { note_on: '2026-08-27' }, ...over }
+}
+
 // ── 子プロセスモード: テストを登録せず観測値だけを出力する ──
 
 if (process.env[PROBE_ENV] === '1') {
   process.stdout.write(JSON.stringify(tzObservations()))
 } else if (TS_READY) {
   registerTests()
+  if (DB) registerDbTests()
+  else it('送信キュー・入力解禁ゲートの検証', { skip: DB_UNSUPPORTED }, () => {})
 } else {
   // 対象を読み込めない Node。テスト本体は登録せず、スキップの理由だけを結果に残す
   it('純ロジックの回帰テスト', { skip: TS_UNSUPPORTED }, () => {})
+}
+
+// ══════════════════════════════════════════════════════════════
+// 未送信件数（queuePending / queueSubscribe）と入力解禁ゲート（getNativeInputGate）
+//
+// - 未送信件数は「メモリのキュー ∪ localStorage の qid 付き op」。同じ端末の別タブが
+//   退避した分も数える（数えないと2つ目のタブで「0件」と出たまま送られていない記録が残る）。
+// - 入力解禁ゲートは「false を観測した（＝スプシ期間）」と「観測できなかった（＝通信エラー）」を
+//   区別して返す。接続先未設定のこの環境では常に後者（observed:false）になる。
+// ══════════════════════════════════════════════════════════════
+
+function registerDbTests() {
+  describe('queuePending（未送信件数）', () => {
+    it('localStorage が空なら0件', () => {
+      setQueueRaw(null)
+      assert.equal(DB.queuePending(), 0)
+    })
+
+    it('別タブが退避した qid 付き op を数える（メモリのキューが空でも件数に出る）', () => {
+      setQueueRaw(JSON.stringify({ ops: [op('a'), op('b'), op('c')] }))
+      assert.equal(DB.queuePending(), 3)
+    })
+
+    it('同じ qid は1件として数える（和集合＝重複計上しない）', () => {
+      setQueueRaw(JSON.stringify({ ops: [op('a'), op('a')] }))
+      assert.equal(DB.queuePending(), 1)
+    })
+
+    it('qid の無い行は数えない（同一性を判定できないため）', () => {
+      const noQid = op('x')
+      delete noQid.qid
+      setQueueRaw(JSON.stringify({ ops: [op('a'), noQid] }))
+      assert.equal(DB.queuePending(), 1)
+    })
+
+    it('table/kind が壊れた行は数えない（未送信の記録として扱わない）', () => {
+      setQueueRaw(JSON.stringify({ ops: [op('a'), op('b', { table: 'unknown_table' })] }))
+      assert.equal(DB.queuePending(), 1)
+    })
+
+    it('自動再送を止めた op（blocked）も未送信として数える', () => {
+      setQueueRaw(JSON.stringify({ ops: [op('a', { blocked: 'conflict' })] }))
+      assert.equal(DB.queuePending(), 1)
+    })
+
+    it('旧形式（op の配列そのもの）も数える', () => {
+      setQueueRaw(JSON.stringify([op('a'), op('b')]))
+      assert.equal(DB.queuePending(), 2)
+    })
+
+    it('JSON として読めない値でも例外を投げず0件（画面を落とさない）', () => {
+      setQueueRaw('{壊れた値')
+      assert.equal(DB.queuePending(), 0)
+    })
+
+    it('件数を数えても localStorage の中身は書き換えない（読むだけ）', () => {
+      const raw = JSON.stringify({ ops: [op('a')] })
+      setQueueRaw(raw)
+      DB.queuePending()
+      assert.equal(lsStore.get('cl_sendQueue'), raw)
+    })
+  })
+
+  describe('queueSubscribe（未送信件数の通知）', () => {
+    it('登録直後に現在値を1回通知する（別タブ由来の件数を含む）', () => {
+      setQueueRaw(JSON.stringify({ ops: [op('a'), op('b')] }))
+      const seen = []
+      const unsub = DB.queueSubscribe((n) => seen.push(n))
+      unsub()
+      assert.deepEqual(seen, [2])
+    })
+
+    it('解除後は通知されない', () => {
+      setQueueRaw(JSON.stringify({ ops: [op('a')] }))
+      const seen = []
+      DB.queueSubscribe((n) => seen.push(n))()
+      assert.equal(seen.length, 1)
+    })
+  })
+
+  describe('getNativeInputGate（入力解禁フラグ）', () => {
+    it('サーバー値を観測できない時は observed:false・value:false（封鎖と区別できる）', async () => {
+      const gate = await DB.getNativeInputGate()
+      assert.deepEqual(gate, { value: false, observed: false })
+    })
+
+    it('getNativeInputEnabled は gate.value と同じ値を返す（互換）', async () => {
+      const gate = await DB.getNativeInputGate()
+      assert.equal(await DB.getNativeInputEnabled(), gate.value)
+    })
+  })
 }
 
 function registerTests() {

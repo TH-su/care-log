@@ -7,6 +7,8 @@
 //   ・全読取に .is('deleted_at', null)（列を持つ業務表のみ）と limit を機械付与する。
 //     日付レンジ or resident_id の無いクエリを書かない（全件ロード禁止）。
 //   ・upsert は使わない。insert が 23505（他端末先行の証拠）なら既存行を読み直して update に切替える。
+//     自然キーを持たない表（notes / fluid_intake / outings）は端末生成の冪等キー client_key を必ず付け、
+//     23505 なら「既に届いている」証拠として既存行を読み直し、二重登録を作らない。
 //   ・物理削除はしない（soft delete = deleted_at のみ）。
 //   ・更新は rev 照合（.eq('rev', rev)）。0行 = 競合 → 'conflict' を返し、呼び出し側の入力は消さない。
 //   ・通信失敗・認証切れの書込は永続キュー（localStorage cl_sendQueue）へ退避し 'queued' を返す。
@@ -64,6 +66,10 @@ const RETRY_BASE_MS = 30_000
 const RETRY_MAX_MS = 30 * 60_000
 /** 自動再送を打ち切ってキューに留め置く試行回数（消さずに残す＝保全ゲート） */
 const MAX_TRIES = 10
+/** 既読者一覧の取得上限（氏名の表示だけに使う。1件の申し送りを100名が既読にする運用は無い） */
+const READERS_ROWS = 100
+/** 送信主体を1タブに絞るための Web Locks 名（同一端末で2タブ開いた時の二重送信を防ぐ） */
+const SEND_LOCK = 'cl_sendQueue_flush'
 
 const VITAL_KINDS: readonly VitalKind[] = ['routine', 'recheck', 'observation']
 const MEAL_SLOTS: readonly MealSlot[] = ['breakfast', 'lunch', 'dinner', 'snack']
@@ -539,6 +545,61 @@ function normalizeQueueOp(row: unknown): QueueOp | null {
   return op
 }
 
+/** 端末側で作る一意キー。送信キューの qid と、insert の冪等キー client_key に同じ値を使う */
+function newQid(): string {
+  return `q${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+/** 捨てずに控えるための原文。文字列化できない値は空文字（＝控えない）を返す */
+function rawOf(row: unknown): string {
+  try {
+    const s = JSON.stringify(row)
+    return typeof s === 'string' ? s : ''
+  } catch {
+    return '' // 循環参照など。JSON 由来の値では起きないが、控えの作成で例外を外へ出さない
+  }
+}
+
+/**
+ * 解釈できなかった原文を brokenRaw へ畳む（消さずに持ち続ける＝保全ゲート）。
+ * 同じ原文は重ねない（書き戻しのたびに増え続けないようにする）。
+ */
+function keepBroken(chunks: string[]): void {
+  for (const c of chunks) {
+    if (c === '') continue
+    if (queueBrokenRaw === null) queueBrokenRaw = c
+    else if (!queueBrokenRaw.includes(c)) queueBrokenRaw = `${queueBrokenRaw}\n${c}`
+    queueBroken = true
+  }
+}
+
+/**
+ * 退避 op の配列を正規化する。解釈できなかった行・上限超過で入りきらなかった行は
+ * 捨てずに原文（dropped）で返し、呼び出し側が brokenRaw へ畳む。
+ * 黙って落とすと「端末に保存しました」と案内した入力が観測なしに消える（原則5・8）。
+ * requireQid=true は他タブの控えを読む時に使う（qid が無いと同一性を判定できず、
+ * 書き戻すたびに別の op として増えてしまうため取り込まない）。
+ */
+function parseQueueOps(rawOps: unknown, requireQid: boolean): { ops: QueueOp[]; dropped: string[] } {
+  const ops: QueueOp[] = []
+  const dropped: string[] = []
+  if (!Array.isArray(rawOps)) return { ops, dropped }
+  for (const row of rawOps) {
+    if (ops.length >= MAX_ROWS) {
+      dropped.push(rawOf(row))
+      continue
+    }
+    if (requireQid && typeof asRecord(row)?.qid !== 'string') {
+      dropped.push(rawOf(row))
+      continue
+    }
+    const op = normalizeQueueOp(row)
+    if (op === null) dropped.push(rawOf(row))
+    else ops.push(op)
+  }
+  return { ops, dropped }
+}
+
 function loadQueue(): void {
   if (typeof localStorage === 'undefined') return
   let raw: string | null = null
@@ -552,18 +613,17 @@ function loadQueue(): void {
       const parsed: unknown = JSON.parse(raw)
       // 現行形式 { ops, brokenRaw } と旧形式（op の配列）の両方を受ける
       const box = asRecord(parsed)
-      queue = list(box === null ? parsed : box.ops, normalizeQueueOp)
+      const parsedOps = parseQueueOps(box === null ? parsed : box.ops, false)
+      queue = parsedOps.ops
+      // 正規化できなかった行も消さない（設定画面の「読み取れませんでした」に乗せて残す）
+      keepBroken(parsedOps.dropped)
       const kept = box === null ? null : str(box.brokenRaw)
-      if (kept !== null && kept !== '') {
-        // 前に解釈できなかった原文。消さずに持ち続け「未送信データあり」を出し続ける
-        queueBrokenRaw = kept
-        queueBroken = true
-      }
+      // 前に解釈できなかった原文。消さずに持ち続け「未送信データあり」を出し続ける
+      if (kept !== null) keepBroken([kept])
     } catch {
       // 壊れた値は解釈できないが、消さない。原文を控え、次の書き込みで同じキーの
       // brokenRaw として一緒に書き戻す（multi-device-sync 原則8: 消去は保全ゲートの後ろ）
-      queueBroken = true
-      queueBrokenRaw = raw
+      keepBroken([raw])
       queue = []
       console.warn('未送信データの読み込みに失敗しました（内容は表示しません）')
     }
@@ -602,19 +662,15 @@ function mergeForPersist(): QueueOp[] {
     parsed = JSON.parse(raw)
   } catch {
     // 解釈できない値（別版・別タブが書いた原文）も消さずに持ち続ける（保全ゲート）
-    if (queueBrokenRaw === null) queueBrokenRaw = raw
-    else if (!queueBrokenRaw.includes(raw)) queueBrokenRaw = `${queueBrokenRaw}\n${raw}`
-    queueBroken = true
+    keepBroken([raw])
     return queue
   }
   const box = asRecord(parsed)
-  const rawOps = box === null ? parsed : box.ops
-  // qid を持たない値は同一性を判定できない。取り込むと書き戻すたびに別の op として増え、
-  // 二重登録になるため対象外にする（この起動時に読めた分は既にメモリ側のキューにある）
-  const withQid = Array.isArray(rawOps)
-    ? rawOps.filter((r) => typeof asRecord(r)?.qid === 'string')
-    : []
-  const stored = list(withQid, normalizeQueueOp)
+  // qid を持たない値・正規化できない行は同一性を判定できない。取り込むと書き戻すたびに
+  // 別の op として増え二重登録になるため、op としては取り込まず原文を brokenRaw へ畳んで残す
+  const parsedOps = parseQueueOps(box === null ? parsed : box.ops, true)
+  keepBroken(parsedOps.dropped)
+  const stored = parsedOps.ops
   const mine = new Set(queue.map((o) => o.qid))
   // 送信できたことを観測した op は復活させない（他タブの古い控えからの二重送信を防ぐ）
   const others = stored.filter((o) => !mine.has(o.qid) && !sentQids.has(o.qid))
@@ -647,7 +703,7 @@ function persistQueue(): void {
 }
 
 function notifyQueue(): void {
-  const n = queue.length
+  const n = queuePending()
   for (const cb of queueCbs) {
     try {
       cb(n)
@@ -657,16 +713,55 @@ function notifyQueue(): void {
   }
 }
 
-/** 未送信件数（自動再送を止めた分も「未送信」として数える） */
+/**
+ * localStorage に控えてある未送信 op の qid。
+ * このタブのメモリキューに無い（＝同じ端末の別タブが退避した）分も数えるために読み直す。
+ * 送信できたと観測済みの qid は除く。解釈できない行はここでは数えない（isQueueBroken 側で示す）。
+ */
+function storedPendingQids(): Set<string> {
+  const out = new Set<string>()
+  if (typeof localStorage === 'undefined') return out
+  let raw: string | null = null
+  try {
+    raw = localStorage.getItem(LS.sendQueue)
+  } catch {
+    return out
+  }
+  if (raw === null || raw === '') return out
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return out
+  }
+  const box = asRecord(parsed)
+  const rawOps = box === null ? parsed : box.ops
+  if (!Array.isArray(rawOps)) return out
+  for (const row of rawOps) {
+    const qid = str(asRecord(row)?.qid)
+    if (qid === null || qid === '' || sentQids.has(qid)) continue
+    if (normalizeQueueOp(row) === null) continue
+    out.add(qid)
+  }
+  return out
+}
+
+/**
+ * 未送信件数（自動再送を止めた分も「未送信」として数える）。
+ * 同じ端末の別タブが退避した分も数える（メモリキューと localStorage の和集合）。
+ * 数えないと、2つ目のタブでは「未送信 0件」と表示されたまま送られていない記録が残る。
+ */
 export function queuePending(): number {
-  return queue.length
+  const qids = storedPendingQids()
+  for (const op of queue) qids.add(op.qid)
+  return qids.size
 }
 
 /** 未送信件数の変化を購読する。登録直後に現在値を1回通知する */
 export function queueSubscribe(cb: (n: number) => void): () => void {
   queueCbs.add(cb)
   try {
-    cb(queue.length)
+    cb(queuePending())
   } catch {
     // 初回通知の例外は無視する
   }
@@ -734,9 +829,12 @@ function enqueue(op: PendingOp): Queued {
     target.tries = 0
     target.nextAt = 0 // 新しい入力が乗ったので待ち時間を置かずに次の再送で送る
   } else {
+    // insert は端末生成の冪等キー（client_key）をそのまま qid にする。
+    // 再送のたびに同じ client_key で送るので、二重送信になっても DB 側で1行に収束する
+    const ck = str(op.payload.client_key)
     queue.push({
       ...op,
-      qid: `q${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      qid: ck !== null && ck !== '' ? ck : newQid(),
       at: Date.now(),
       tries: 0,
       nextAt: 0,
@@ -765,41 +863,65 @@ export async function flushQueue(force = false): Promise<void> {
   if (!isSupabaseConfigured()) return
   flushing = true
   try {
-    const sb = await getClient()
-    const now = Date.now()
-    const due = queue.filter((op) => op.blocked === undefined && (force || op.nextAt <= now))
-    for (const op of due) {
-      // 送信中は統合先にしない印を立てる（応答待ちの間にペイロードを差し替えられると、
-      // 'sent' の判定で「まだ送っていない入力」ごと消えるため）
-      op.sending = true
-      let result: SendResult
-      try {
-        result = await sendQueuedOp(sb, op)
-      } finally {
-        delete op.sending
-      }
-      if (result === 'sent') {
-        sentQids.add(op.qid) // 他タブの古い控えから書き戻されても復活させない
-        queue = queue.filter((o) => o.qid !== op.qid) // 観測できた時だけ消す（保全ゲート）
-        continue
-      }
-      op.tries += 1
-      if (result === 'conflict') {
-        op.blocked = 'conflict'
-      } else if (result === 'rejected') {
-        if (op.tries >= MAX_TRIES) op.blocked = 'rejected'
-        else op.nextAt = Date.now() + backoff(op.tries)
-      } else {
-        // 通信不能・認証切れ: 回数では諦めず、間隔だけ広げて待つ
-        op.nextAt = Date.now() + backoff(op.tries)
-        break // つながっていないので、この回はここで打ち切る
-      }
-    }
+    await withSendLock(() => sendDueOps(force))
   } catch {
-    // 接続先未設定・クライアント初期化失敗。キューはそのまま保持する
+    // 接続先未設定・クライアント初期化失敗・ロックを取れなかった。キューはそのまま保持する
   } finally {
     flushing = false
     persistQueue()
+  }
+}
+
+/**
+ * 送信の主体を1タブに絞る（Web Locks）。同じ端末で2つのタブを開いていると、起動時に
+ * 双方が同じ未送信 op を取り込み、同時に送って二重登録になるため。
+ * ロックを取れないタブはこの回は送らない（相手のタブが送る／次の機会に送る）。
+ * navigator.locks が無い環境（古い WebView 等）は従来どおりそのまま送る。
+ */
+async function withSendLock(run: () => Promise<void>): Promise<void> {
+  const nav = typeof navigator === 'undefined' ? null : (navigator as Navigator & { locks?: LockManager })
+  const locks = nav?.locks
+  if (!locks || typeof locks.request !== 'function') {
+    await run()
+    return
+  }
+  await locks.request(SEND_LOCK, { ifAvailable: true }, async (lock) => {
+    if (lock === null) return // 別のタブが送信中。ここでは送らない（未送信のまま残す＝消さない）
+    await run()
+  })
+}
+
+/** 期限の来た op を順に送る（flushQueue の送信ループ本体。ロックの内側でだけ動かす） */
+async function sendDueOps(force: boolean): Promise<void> {
+  const sb = await getClient()
+  const now = Date.now()
+  const due = queue.filter((op) => op.blocked === undefined && (force || op.nextAt <= now))
+  for (const op of due) {
+    // 送信中は統合先にしない印を立てる（応答待ちの間にペイロードを差し替えられると、
+    // 'sent' の判定で「まだ送っていない入力」ごと消えるため）
+    op.sending = true
+    let result: SendResult
+    try {
+      result = await sendQueuedOp(sb, op)
+    } finally {
+      delete op.sending
+    }
+    if (result === 'sent') {
+      sentQids.add(op.qid) // 他タブの古い控えから書き戻されても復活させない
+      queue = queue.filter((o) => o.qid !== op.qid) // 観測できた時だけ消す（保全ゲート）
+      continue
+    }
+    op.tries += 1
+    if (result === 'conflict') {
+      op.blocked = 'conflict'
+    } else if (result === 'rejected') {
+      if (op.tries >= MAX_TRIES) op.blocked = 'rejected'
+      else op.nextAt = Date.now() + backoff(op.tries)
+    } else {
+      // 通信不能・認証切れ: 回数では諦めず、間隔だけ広げて待つ
+      op.nextAt = Date.now() + backoff(op.tries)
+      break // つながっていないので、この回はここで打ち切る
+    }
   }
 }
 
@@ -816,6 +938,14 @@ async function sendQueuedOp(sb: SupabaseClient, op: QueueOp): Promise<SendResult
     }
     if (isTransient(res)) return 'retry'
     if (isUniqueViolation(res)) {
+      const ck = clientKeyOf(op.payload)
+      if (ck !== null) {
+        // 端末が付けた冪等キーの衝突＝この op は既にサーバーへ届いている（二重送信）。
+        // 届いていることを読んで確かめられた時だけキューから外す（削除済みでも「届いた」証拠）。
+        // 読めなければ消さずに再試行へ回す（観測できない消去はしない＝原則8）
+        const landed = await findByKey(sb, op.table, ck, 'id,rev', true)
+        return landed === null ? 'retry' : 'sent'
+      }
       // 他端末（または同じ端末の後続入力）が先に同じ行を作っていた。再読込して update へ切り替える。
       // ただし退避した値は「退避した時点のスナップショット」なので、既に値が入っている列は
       // 上書きしない（＝空いている列だけ埋める和集合）。食い違う列が残る場合は送らずに
@@ -895,14 +1025,29 @@ function conflictKeyOf(table: QueueTable, payload: Record<string, unknown>): Rec
   return null
 }
 
-/** 自然キーで既存行を1件だけ読み直す（23505 の切替先を特定するため） */
+/**
+ * 端末生成の冪等キー（client_key）。自然キーを持たない表（申し送り・水分・外出）で
+ * 「23505 = この端末が送った行が既に載っている」ことを確かめるために使う。
+ */
+function clientKeyOf(payload: Record<string, unknown>): Record<string, unknown> | null {
+  const k = str(payload.client_key)
+  return k === null || k === '' ? null : { client_key: k }
+}
+
+/**
+ * 自然キーで既存行を1件だけ読み直す（23505 の切替先を特定するため）。
+ * includeDeleted=true は「その行が届いているか」だけを見る用途（client_key の衝突確認）。
+ * 削除済みでも「届いた」ことに変わりはないので、退避 op を消してよい判断材料になる。
+ */
 async function findByKey(
   sb: SupabaseClient,
   table: QueueTable,
   key: Record<string, unknown>,
   cols = 'id,rev',
+  includeDeleted = false,
 ): Promise<{ id: number; rev: number; row: unknown } | null> {
-  let q = sb.from(table).select(cols).is('deleted_at', null).limit(1)
+  let q = sb.from(table).select(cols).limit(1)
+  if (!includeDeleted) q = q.is('deleted_at', null)
   for (const [k, v] of Object.entries(key)) q = q.eq(k, v as never)
   const res = (await q.maybeSingle()) as Res<unknown>
   if (res.error !== null || res.data === null) return null
@@ -975,6 +1120,17 @@ function cleanPayload(src: Record<string, unknown>): Record<string, unknown> {
   return out
 }
 
+/**
+ * 自然キー（部分unique索引）を持たない表の insert に、端末生成の冪等キーを付ける。
+ * 同じ入力を再送しても DB 側の unique 制約で1行に収束する（2タブ・再送の行き違いでの二重登録防止）。
+ * 定時バイタル・食事は部分unique索引が同じ役目を果たすので付けない。
+ */
+function withClientKey(src: Record<string, unknown>): Record<string, unknown> {
+  const out = cleanPayload(src)
+  out.client_key = newQid()
+  return out
+}
+
 // 電波復帰・画面復帰で自動再送する（ui-design §6.5「電波復帰で自動再送」）
 if (typeof window !== 'undefined') {
   loadQueue()
@@ -1007,10 +1163,26 @@ async function refreshGate(): Promise<boolean | null> {
   }
 }
 
-/** app_settings.native_input_enabled。取得できない時は最後に観測した値、それも無ければ false */
-export async function getNativeInputEnabled(): Promise<boolean> {
+/**
+ * app_settings.native_input_enabled と「サーバーの値を観測できたか」。
+ * observed=false は「入力できるかどうかが分からない」状態で、封鎖（＝スプシ期間）とは別物。
+ * 画面はこの2つを区別し、observed=false では封鎖理由ではなく通信エラーと再試行を出す
+ * （multi-device-sync 原則5: 観測できていないことを断定しない）。
+ */
+export async function getNativeInputGate(): Promise<{ value: boolean; observed: boolean }> {
   const v = await refreshGate()
-  return v ?? gateValue ?? false
+  if (v !== null) return { value: v, observed: true }
+  // 取り直せなかった。この起動中に一度でも観測できていれば、その値を使う（観測済み扱い）
+  if (gateValue !== null) return { value: gateValue, observed: true }
+  return { value: false, observed: false }
+}
+
+/**
+ * app_settings.native_input_enabled。取得できない時は最後に観測した値、それも無ければ false。
+ * 「観測できなかった」と「false を観測した」を区別したい画面は getNativeInputGate を使う。
+ */
+export async function getNativeInputEnabled(): Promise<boolean> {
+  return (await getNativeInputGate()).value
 }
 
 /**
@@ -1116,13 +1288,32 @@ export async function fetchKarte(
       .order('id', { ascending: false })
       .limit(cap) as unknown as Promise<Res<T>>
 
+  // 外出・外泊は「期間に重なるもの」を採る（開始が期間より前でも、期間内に在室していない日は
+  // カルテ上で外出中として扱う必要があるため）。帰着未定（end_on is null）は継続中とみなす。
+  // or フィルタへ値を差し込むので、日付の形を検査してから使う（予約文字の混入を防ぐ）。
+  const rangeOk = /^\d{4}-\d{2}-\d{2}$/.test(fromIso) && /^\d{4}-\d{2}-\d{2}$/.test(toIso)
+  const outingsQuery = (
+    rangeOk
+      ? sb
+          .from('outings')
+          .select(OUTING_COLS)
+          .eq('resident_id', residentId)
+          .lte('start_on', toIso)
+          .or(`end_on.is.null,end_on.gte.${fromIso}`)
+          .is('deleted_at', null)
+          .order('start_on', { ascending: false })
+          .order('id', { ascending: false })
+          .limit(KARTE_ROWS)
+      : // 日付の形が想定外なら従来どおり開始日レンジで絞る（不正値をフィルタ式へ載せない）
+        range<unknown>('outings', OUTING_COLS, 'start_on', KARTE_ROWS)
+  ) as unknown as Promise<Res<unknown>>
+
   const [vitals, meals, fluids, notes, outings] = await Promise.all([
     range<unknown>('vitals', VITAL_COLS, 'measured_on', KARTE_ROWS),
     range<unknown>('meals', MEAL_COLS, 'meal_on', MAX_ROWS),
     range<unknown>('fluid_intake', FLUID_COLS, 'taken_on', MAX_ROWS),
     range<unknown>('notes', NOTE_COLS, 'note_on', KARTE_ROWS),
-    // 外出は開始日で絞る（開始日索引を使うため。期間をまたぐ外泊は開始日の側に出る）
-    range<unknown>('outings', OUTING_COLS, 'start_on', KARTE_ROWS),
+    outingsQuery,
   ])
   for (const res of [vitals, meals, fluids, notes, outings]) {
     if (res.error !== null) throw readError(res)
@@ -1233,6 +1424,36 @@ export async function fetchUnreadCount(staffId: number, sinceIso: string): Promi
   return ids.filter((id) => !read.has(id)).length
 }
 
+/**
+ * 1件の申し送りを既読にした職員（既読の早い順・最大100名）。
+ * 使うのは氏名の表示だけ（誰がいつ読んだかの時刻は画面に出さない）。
+ * note_reads は soft delete 列を持たない表なので deleted_at の条件は付けない。
+ */
+export async function fetchNoteReaders(noteId: number): Promise<Staff[]> {
+  const sb = await getClient()
+  const res = (await sb
+    .from('note_reads')
+    .select(`read_at,staff:staff_id(${STAFF_COLS})`)
+    .eq('note_id', noteId)
+    .order('read_at', { ascending: true })
+    .limit(READERS_ROWS)) as Res<unknown>
+  if (res.error !== null) throw readError(res)
+  const rows = Array.isArray(res.data) ? res.data : []
+  const out: Staff[] = []
+  const seen = new Set<number>()
+  for (const row of rows) {
+    if (out.length >= READERS_ROWS) break
+    // 埋め込みは1対1でも配列で返る実装があるため、どちらの形でも受ける（受信を信じない）
+    const embedded = asRecord(row)?.staff
+    const one = Array.isArray(embedded) ? embedded[0] : embedded
+    const staff = normalizeStaff(one)
+    if (staff === null || seen.has(staff.id)) continue
+    seen.add(staff.id)
+    out.push(staff)
+  }
+  return out
+}
+
 /** app_settings（key/value・1行）の値。未登録は null */
 export async function getAppSetting(key: string): Promise<string | null> {
   const sb = await getClient()
@@ -1264,7 +1485,17 @@ async function insertRow<T>(
       return enqueue({ table, kind: 'insert', payload })
     }
     if (isTransient(res)) return enqueue({ table, kind: 'insert', payload })
-    if (isUniqueViolation(res)) return insertAsUpdate(sb, table, payload, normalize)
+    if (isUniqueViolation(res)) {
+      const ck = clientKeyOf(payload)
+      if (ck !== null) {
+        // 端末が付けた冪等キーの衝突＝同じ入力が既にサーバーへ載っている（再送の行き違い）。
+        // 新しい行を作らず、載っている行をそのまま返す。読めなければ退避して次の再送で確かめる
+        const landed = await findByKey(sb, table, ck, cols, true)
+        const row = landed === null ? null : normalize(landed.row)
+        return row ?? enqueue({ table, kind: 'insert', payload })
+      }
+      return insertAsUpdate(sb, table, payload, normalize)
+    }
     throw new DbError('server', serverMsg('保存でき', errCode(res)))
   }
   const row = normalize(res.data)
@@ -1418,7 +1649,7 @@ export async function updateMeal(
 // ── 水分 ─────────────────────────────────────────────────────────────────────
 
 export async function insertFluid(f: Omit<FluidIntake, 'id' | 'rev'>): Promise<FluidIntake | Queued> {
-  return insertRow('fluid_intake', cleanPayload(f as unknown as Record<string, unknown>), normalizeFluid)
+  return insertRow('fluid_intake', withClientKey(f as unknown as Record<string, unknown>), normalizeFluid)
 }
 
 export async function softDeleteFluid(id: number, rev: number): Promise<true | Conflict> {
@@ -1431,7 +1662,7 @@ export async function insertNote(
   n: Omit<Note, 'id' | 'rev' | 'read_count' | 'my_read'>,
 ): Promise<Note | Queued> {
   if (n.body.trim() === '') throw new DbError('server', MSG.emptyBody)
-  return insertRow('notes', cleanPayload(n as unknown as Record<string, unknown>), normalizeNote)
+  return insertRow('notes', withClientKey(n as unknown as Record<string, unknown>), normalizeNote)
 }
 
 export async function updateNote(
@@ -1462,7 +1693,7 @@ export async function endOngoingNote(id: number, rev: number): Promise<Note | Co
 // ── 外出・外泊 ───────────────────────────────────────────────────────────────
 
 export async function insertOuting(o: Omit<Outing, 'id' | 'rev'>): Promise<Outing | Queued> {
-  return insertRow('outings', cleanPayload(o as unknown as Record<string, unknown>), normalizeOuting)
+  return insertRow('outings', withClientKey(o as unknown as Record<string, unknown>), normalizeOuting)
 }
 
 /** 帰着の後追い記入。end_on / end_at だけを送り、他の項目はサーバーの値を温存する */

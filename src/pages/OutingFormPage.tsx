@@ -15,7 +15,7 @@
 
 import { useEffect, useId, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
-import { fetchResidents, getNativeInputEnabled, insertOuting, isQueuePersisted } from '../lib/db'
+import { fetchResidents, getNativeInputGate, insertOuting, isQueuePersisted } from '../lib/db'
 import { getActorId, touchActivity } from '../lib/actor'
 import { OUTING_KIND_LABEL } from '../lib/types'
 import type { Outing, OutingKind, Resident } from '../lib/types'
@@ -41,6 +41,10 @@ const KIND_OPTIONS = [
 
 const LOAD_ERROR =
   '利用者の一覧と入力設定を読み込めませんでした。通信状態を確認して、再試行してください。'
+
+/** 入力解禁フラグを一度も観測できていない時の案内（封鎖の理由文と混同させない） */
+const GATE_UNKNOWN_ERROR =
+  '入力できるかどうかを確認できませんでした（通信エラー）。電波状態を確認して、再試行してください。入力は消えていません。'
 
 /** 送信待ちにしたのに端末へ残せなかった時の案内（入力欄は消さない・NoteFormPage と同型） */
 const NOT_PERSISTED_REASON =
@@ -120,12 +124,17 @@ export function OutingFormPage({
     if (needResidentFetch) setFetchedResidents(null)
     Promise.all([
       needResidentFetch ? fetchResidents() : Promise.resolve(null),
-      getNativeInputEnabled(),
+      getNativeInputGate(),
     ])
-      .then(([rs, enabled]) => {
+      .then(([rs, gate]) => {
         if (!alive) return
         if (rs) setFetchedResidents(rs)
-        setFetchedEnabled(enabled)
+        if (!gate.observed) {
+          // 観測できていない＝「スプシ期間」と決めつけない。通信エラーとして再試行の導線を出す
+          setLoadError(GATE_UNKNOWN_ERROR)
+          return
+        }
+        setFetchedEnabled(gate.value === true)
       })
       .catch(() => {
         if (!alive) return

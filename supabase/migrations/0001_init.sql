@@ -16,6 +16,8 @@
 --      （版数照合を「書く側の善意」に依存させない）。
 --   3. 部分unique（定時バイタル・食事コマ）は二重登録に対する DB 側の防波堤。
 --      アプリは upsert を使わず insert → 23505 なら再読込して update に切り替える。
+--      自然キーを作れない表（申し送り・水分・外出）は端末が付ける冪等キー client_key を
+--      unique にして同じ役目を持たせる（再送・2タブ同時送信でも1行に収束する）。
 --
 -- 個人情報: このファイルに実在の氏名・居室・記録本文を書かない（構造だけを定義する）。
 -- =====================================================================
@@ -121,6 +123,7 @@ create table if not exists fluid_intake (
   taken_at    time,
   amount_ml   int not null check (amount_ml between 0 and 2000),
   kind        text,                                -- 茶・水・汁物 等（自由記述）
+  client_key  text,                                -- 端末生成の冪等キー（下の unique 索引で二重登録を防ぐ。取込・旧データは null）
   recorded_by bigint references staff(id),
   rev         int not null default 1,
   created_at  timestamptz not null default now(),
@@ -149,6 +152,7 @@ create table if not exists notes (
   ended_at    timestamptz,
   ended_by    bigint references staff(id),
   import_key  text unique,
+  client_key  text,                                -- 端末生成の冪等キー（下の unique 索引で二重登録を防ぐ。取込・旧データは null）
   reporter_id bigint references staff(id),
   rev         int not null default 1,
   created_at  timestamptz not null default now(),
@@ -178,6 +182,7 @@ create table if not exists outings (
   end_at      time,
   companion   text,
   note        text,
+  client_key  text,                                -- 端末生成の冪等キー（下の unique 索引で二重登録を防ぐ。取込・旧データは null）
   recorded_by bigint references staff(id),
   rev         int not null default 1,
   created_at  timestamptz not null default now(),
@@ -259,6 +264,22 @@ create unique index if not exists uq_vitals_routine_day
 create unique index if not exists uq_meals_slot
   on meals (resident_id, meal_on, meal_slot)
   where deleted_at is null;
+
+-- 自然キーを作れない表（申し送り・水分・外出）の二重登録の防波堤。
+--   ・client_key は端末が1入力につき1つ生成する冪等キー。再送のたびに同じ値を送る。
+--   ・null は複数行あってよい（Postgres の unique 索引は null どうしを重複扱いしない）。
+--     取込データ・切替前の行は null のまま入る。
+--   ・deleted_at で絞らない全体unique にする。削除済みの行が同じキーを押さえたままになるので、
+--     退避していた再送が「もう届いている」ことを 23505 で判定できる（消えた行を作り直さない）。
+-- 既に作成済みのデータベースへ後から足せるよう、列追加と索引作成を冪等に書く
+-- （create table if not exists は既存テーブルに列を足さないため）。
+alter table notes        add column if not exists client_key text;
+alter table fluid_intake add column if not exists client_key text;
+alter table outings      add column if not exists client_key text;
+
+create unique index if not exists uq_notes_client_key   on notes        (client_key);
+create unique index if not exists uq_fluid_client_key   on fluid_intake (client_key);
+create unique index if not exists uq_outings_client_key on outings      (client_key);
 
 -- 申し送り本文の部分一致検索（pg_trgm GIN）。
 -- 演算子クラス名は拡張を入れたスキーマ側にあるため、実際の格納先を引いて修飾する

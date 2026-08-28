@@ -29,7 +29,7 @@ import {
   DbError,
   fetchResidents,
   fetchStaff,
-  getNativeInputEnabled,
+  getNativeInputGate,
   insertNote,
   isQueuePersisted,
   softDeleteNote,
@@ -289,7 +289,11 @@ export function NoteFormPage() {
         let gate = false
         let unknown = false
         try {
-          gate = (await getNativeInputEnabled()) === true
+          // 「false を観測した（＝スプシ期間）」と「観測できなかった（＝通信エラー）」を区別する。
+          // 後者は封鎖の理由文ではなく、再確認できる案内を出す（observed で分ける）
+          const g = await getNativeInputGate()
+          gate = g.value === true
+          unknown = !g.observed
         } catch {
           unknown = true // 取得できない間は封鎖のまま（安全側）
         }
@@ -398,9 +402,9 @@ export function NoteFormPage() {
   /** 入力解禁フラグだけを取り直す（フラグを観測できなかった時の再確認） */
   const refreshGate = useCallback(async () => {
     try {
-      const v = (await getNativeInputEnabled()) === true
-      setEnabled(v)
-      setGateUnknown(false)
+      const g = await getNativeInputGate()
+      setEnabled(g.value === true)
+      setGateUnknown(!g.observed) // まだ観測できない＝案内を出したまま再確認できるようにする
     } catch {
       setEnabled(false)
       setGateUnknown(true)
@@ -480,8 +484,12 @@ export function NoteFormPage() {
         // （観測済みの解禁をオフラインで取り消さない。最終強制は RLS/DB 側）
         let gate = enabled
         try {
-          gate = (await getNativeInputEnabled()) === true
-          setGateUnknown(false)
+          const g = await getNativeInputGate()
+          if (g.observed) {
+            gate = g.value === true
+            setGateUnknown(false)
+          }
+          // 観測できなかった時は、直前に観測した値のまま進める（案内は出し直さない）
         } catch {
           // 取り直せなかっただけなので、観測済みの値のまま進める（案内は出し直さない）
         }

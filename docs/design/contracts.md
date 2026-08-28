@@ -49,8 +49,10 @@ insertOuting(o: Omit<Outing, 'id' | 'rev'>): Promise<Outing | Queued>
 setOutingEnd(id: number, rev: number, endOn: string, endAt: string | null): Promise<Outing | Conflict>  // 部分更新・他項目を送らない
 
 markRead(noteId: number, staffId: number): Promise<void>       // 明示操作からのみ呼ぶ
+fetchNoteReaders(noteId: number): Promise<Staff[]>             // note_reads×staff・read_at昇順・limit100・氏名表示のみ
 fetchUnreadCount(staffId: number, sinceIso: string): Promise<number>
-getNativeInputEnabled(): Promise<boolean>                      // app_settings.native_input_enabled（既定 false）
+getNativeInputGate(): Promise<{ value: boolean; observed: boolean }>  // observed=サーバー値を一度でも観測できたか
+getNativeInputEnabled(): Promise<boolean>                      // 互換用。gate.value を返す（既定 false）
 getAppSetting(key: string): Promise<string | null>
 
 subscribeChanges(cb: (table: string) => void): () => void      // Realtime。受信値は型検査・表示ウィンドウ外は無視
@@ -61,7 +63,14 @@ onAuthExpired(cb: () => void): void                            // 401検知→�
 ```
 
 - insert系: 23505（unique衝突）は他端末先行の証拠 → 既存行を再読込して update に切替（upsert は使わない）
+- 自然キーを持たない insert（notes / fluid_intake / outings）は端末生成の冪等キー `client_key` を必ず付ける。
+  キューへ退避した op は同じ client_key で再送し、23505 は「既に届いている」証拠として既存行を読み直して成功扱いにする
+  （vitals routine・meals は部分unique索引が同じ役目を果たすため付けない）
+- 送信キューの flush は Web Locks（`cl_sendQueue_flush` / `ifAvailable`）で1タブに絞る。取れなければ送らない
+  （navigator.locks が無い環境は従来どおり送る＝冪等キー側で二重登録を防ぐ）
+- `queuePending()` / `queueSubscribe` は localStorage 上の qid 付き未送信 op とメモリキューの和集合を数える（他タブ由来も含む）
 - 全読取に `.is('deleted_at', null)` と limit（既定上限2000）。日付レンジ or resident_id の無いクエリを書かない
+- `fetchKarte` の outings は「start_on ≤ to かつ（end_on is null または end_on ≥ from）」＝期間に重なる行を採る
 
 ## src/lib/actor.ts
 
@@ -126,6 +135,8 @@ ResidentPickerModal({ open, residents: Resident[], onPick(id: number | null), on
   テーブル・列は types.ts と完全一致＋監査列（created_at/updated_at/deleted_at/deleted_by/import_key/raw_flags は db-design.md どおり）。
   RLS: 全表 select/insert/update を authenticated のみ・delete ポリシー無し。anon はポリシー不存在で全拒否。
   updated_at トリガで rev = rev + 1。部分unique（vitals routine・meals slot）。pg_trgm 拡張＋notes.body GIN。
+  notes / fluid_intake / outings は `client_key text`（null許容）＋ 全体unique索引（`uq_*_client_key`）。
+  deleted_at で絞らない＝削除済みの行もキーを押さえたままにし、再送を「もう届いている」と判定できる。
 - `0002_timeline_rpc.sql`: `timeline_chunk(p_from date, p_to date, p_staff_id bigint)` → jsonb
   `{ notes（read_count・my_read 畳み込み・deleted除外）, vitals, meals, fluids, outings, import_days, pinned（期間内に有効な ongoing） }`。
   security invoker・`revoke execute from anon` ＋ `grant execute to authenticated`。

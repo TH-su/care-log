@@ -17,9 +17,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  DbError,
   fetchResidents,
   fetchTimelineChunk,
-  getNativeInputEnabled,
+  getNativeInputGate,
   insertVital,
   queuePending,
   queueSubscribe,
@@ -112,6 +113,8 @@ const MSG_QUEUED_EDIT =
   'この行には送信待ちの保存があります。あとから入力した値はまだ保存されていません。電波が戻って送信が終わってから「読み込み直す」を押して、入力し直してください。'
 const MSG_BLOCKED =
   '現在はスプレッドシートで記録する期間です（アプリ入力の開始日は施設で決定します）'
+const MSG_GATE_UNKNOWN =
+  '入力できるかどうかを確認できませんでした（通信エラー）。電波状態を確認して、「もう一度確認する」を押してください。入力は消えていません。'
 
 // ── 純ロジック（副作用なし） ─────────────────────────────────
 
@@ -286,6 +289,8 @@ export function VitalsGridPage({
   const [error, setError] = useState<string | null>(null)
   const [residents, setResidents] = useState<Resident[]>(propResidents ?? [])
   const [inputEnabled, setInputEnabled] = useState<boolean>(propInputEnabled ?? false)
+  /** 入力できるかどうかを観測できなかった（通信エラー）。封鎖の理由文とは分けて案内する */
+  const [gateUnknown, setGateUnknown] = useState(false)
   const [rows, setRows] = useState<GridRow[]>([])
   const [floor, setFloor] = useState<string>(() => readFloor() ?? '1')
   const [sel, setSel] = useState<{ rowId: string; field: Field } | null>(null)
@@ -327,12 +332,14 @@ export function VitalsGridPage({
     setError(null)
     try {
       const from = addDays(day, -PREV_LOOKBACK_DAYS)
-      // 日付レンジ付きの1往復で「当日の測定」と「前回値ゴースト」の両方をまかなう
-      const [rs, enabled, chunk] = await Promise.all([
+      // 日付レンジ付きの1往復で「当日の測定」と「前回値ゴースト」の両方をまかなう。
+      // 入力解禁フラグは「観測できた値」と「観測できなかった」を区別して受け取る
+      // （親から渡された既知値は観測済みとして扱う）
+      const [rs, gate, chunk] = await Promise.all([
         propResidents ? Promise.resolve(propResidents) : fetchResidents(),
         propInputEnabled === undefined
-          ? getNativeInputEnabled()
-          : Promise.resolve(propInputEnabled),
+          ? getNativeInputGate()
+          : Promise.resolve({ value: propInputEnabled, observed: true }),
         fetchTimelineChunk(from, day, null),
       ])
       if (!aliveRef.current) return
@@ -385,7 +392,8 @@ export function VitalsGridPage({
       }
 
       setResidents(sorted)
-      setInputEnabled(enabled === true)
+      setInputEnabled(gate.value === true)
+      setGateUnknown(!gate.observed)
       commitRows(next)
       setSel(null)
       setEdit('')
@@ -616,9 +624,14 @@ export function VitalsGridPage({
             ...done(),
           })
         }
-      } catch {
+      } catch (e) {
         if (!aliveRef.current) return
-        patchRow(rowId, { state: 'error', message: ERR_SAVE })
+        // db.ts の DbError は「何が起きたか＋次にどうすればよいか」を持っているので、
+        // 一律の定型文で上書きせずそのまま行に出す（MealsGridPage と同型）
+        patchRow(rowId, {
+          state: 'error',
+          message: e instanceof DbError && e.message ? e.message : ERR_SAVE,
+        })
       }
     },
     [actorId, askClear, day, patchRow],
@@ -843,7 +856,22 @@ export function VitalsGridPage({
           </p>
         </div>
 
-        {!inputEnabled ? (
+        {gateUnknown ? (
+          // 観測できていない＝「スプシ期間」と決めつけない。通信エラーとして再確認の導線を出す
+          <div role="alert" className="mt-3 rounded border border-warn bg-warn-bg p-3">
+            <p className="text-base text-ink">
+              <span aria-hidden="true">▲ </span>
+              {MSG_GATE_UNKNOWN}
+            </p>
+            <button
+              type="button"
+              onClick={() => void load()}
+              className="mt-3 min-h-tap rounded border border-primary bg-surface px-4 text-base font-bold text-primary"
+            >
+              もう一度確認する
+            </button>
+          </div>
+        ) : !inputEnabled ? (
           <p
             role="status"
             className="mt-3 rounded border border-warn bg-warn-bg p-3 text-base text-ink"

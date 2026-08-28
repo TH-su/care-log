@@ -17,7 +17,7 @@ import {
   DbError,
   fetchResidents,
   fetchTimelineChunk,
-  getNativeInputEnabled,
+  getNativeInputGate,
   insertFluid,
   insertMeal,
   softDeleteFluid,
@@ -609,16 +609,19 @@ export function MealsGridPage({
   }, [])
 
   // ── 入力解禁フラグ（この画面を開くたびに取り直す） ──
+  // 「false を観測した（＝スプシ期間）」と「観測できなかった（＝通信エラー）」は別物として扱う。
+  // 後者は封鎖の理由文ではなく、再試行できるエラー表示にする。
   const loadFlag = useCallback(async () => {
     setFlagError(null)
     try {
-      const ok = await getNativeInputEnabled()
+      const gate = await getNativeInputGate()
       if (!aliveRef.current) return
-      setInputEnabled(ok === true)
-      setFlagChecked(true)
+      setInputEnabled(gate.value === true)
+      setFlagChecked(gate.observed)
+      // 取得できない間は入力させない（封鎖側に倒す）
+      if (!gate.observed) setFlagError(ERR_FLAG)
     } catch {
       if (!aliveRef.current) return
-      // 取得できない間は入力させない（封鎖側に倒す）
       setInputEnabled(false)
       setFlagChecked(false)
       setFlagError(ERR_FLAG)

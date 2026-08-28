@@ -152,6 +152,11 @@ function pickText(v: unknown): string | undefined {
   return s === '' ? undefined : s
 }
 
+/** 名簿にその項目が実際に載っているか（欠落・空文字は「値なし」＝更新の対象にしない） */
+function hasText(v: string | undefined): v is string {
+  return typeof v === 'string' && v.trim() !== ''
+}
+
 /**
  * 氏名の照合キー（M-034 二重照合の氏名側）。
  * NFKC で全角英数字・全角スペースを揃え、空白をすべて落として比較する。
@@ -289,6 +294,9 @@ async function updateStaffRow(id: number, patch: Record<string, unknown>): Promi
  * - source_id 不一致 かつ 同名の既存行あり → ID振り直しの可能性。重複行を作らず needs_review=true で保留
  * - どちらでも当たらない → 新規 insert（upsert は使わない）
  * - 名簿に居ない在籍行 → active=false（物理削除しない。過去記録は不変）
+ * - 任意項目（かな・居室・性別・介護度）は「名簿に値が載っている時だけ」更新する。
+ *   欠落・空文字は「空にせよ」ではなく「変更なし」とみなし、既存値を温存する（原則4）。
+ *   全エントリでその列が欠落している場合はその列を一切触らない（正本が返していないだけ）。
  * needs_review は立てるだけで自動解除しない（人が設定画面で裁定する保留印のため）。
  */
 async function applyResidents(entries: RosterEntry[]): Promise<SyncResult> {
@@ -320,6 +328,16 @@ async function applyResidents(entries: RosterEntry[]): Promise<SyncResult> {
   }
 
   const incomingIds = new Set(entries.map((e) => e.id))
+  // 任意項目（かな・居室・性別・介護度）が「名簿に載っている列」かどうかを先に見る。
+  // 全エントリで欠落＝正本がその列を返していないだけなので、その列は一切触らない。
+  // 1件でも載っていれば、値のあるエントリだけ更新し、欠けているエントリでは既存値を温存する
+  // （欠落を「空にせよ」と解釈して無言で消さない＝multi-device-sync 原則4）。
+  const rosterHas = {
+    kana: entries.some((e) => hasText(e.kana)),
+    room: entries.some((e) => hasText(e.room)),
+    gender: entries.some((e) => hasText(e.gender)),
+    careLevel: entries.some((e) => hasText(e.careLevel)),
+  }
   const matched = new Set<number>() // 今回の名簿に対応づいた既存行（退去判定から除外する）
   const toInsert: Record<string, unknown>[] = []
   let renamed = 0
@@ -341,10 +359,13 @@ async function applyResidents(entries: RosterEntry[]): Promise<SyncResult> {
         patch.name = e.name // 正規化後は同一＝空白幅などの表記ゆれ
         renamed++
       }
-      if ((cur.kana ?? null) !== (e.kana ?? null)) patch.kana = e.kana ?? null
-      if ((cur.room ?? null) !== (e.room ?? null)) patch.room = e.room ?? null
-      if ((cur.gender ?? null) !== (e.gender ?? null)) patch.gender = e.gender ?? null
-      if ((cur.care_level ?? null) !== (e.careLevel ?? null)) patch.care_level = e.careLevel ?? null
+      // 値が載っている時だけ書く（欠落・空文字は「変更なし」＝サーバーの値を温存する）
+      if (rosterHas.kana && hasText(e.kana) && cur.kana !== e.kana) patch.kana = e.kana
+      if (rosterHas.room && hasText(e.room) && cur.room !== e.room) patch.room = e.room
+      if (rosterHas.gender && hasText(e.gender) && cur.gender !== e.gender) patch.gender = e.gender
+      if (rosterHas.careLevel && hasText(e.careLevel) && cur.care_level !== e.careLevel) {
+        patch.care_level = e.careLevel
+      }
       if (!cur.active) {
         patch.active = true // 名簿に戻った＝在籍（復活は消失より安全側）
         reactivated++
