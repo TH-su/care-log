@@ -546,6 +546,23 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
           入力封鎖の見せ方（理由文＋ディセーブル）は各記録画面が自前で持つため、ここでは重ねない。
           シェルの担当は「起動時と記録画面に入るたびフラグを取り直し、既知値として渡す」ところまで。
         */}
+        {/* 職員マスタが空＝操作者を選べない。モーダルで塞がず、案内バーで設定タブへ誘導する
+            （picker が none でない＝名簿の取得は完了していて空、の状態だけで出す） */}
+        {picker !== 'none' && staff.length === 0 && (
+          <div className="mb-4 flex flex-wrap items-center gap-gap rounded-md border border-info bg-info-bg p-3">
+            <p className="flex-1 text-base text-ink">
+              <span aria-hidden="true">ⓘ </span>
+              職員の一覧がまだありません。設定タブで「マスタ同期」を実行すると記録者を選べるようになります（閲覧はこのまま可能です）。
+            </p>
+            <button
+              type="button"
+              onClick={() => navigate('/settings')}
+              className="min-h-tap rounded-md border border-primary bg-surface px-4 text-base font-bold text-primary"
+            >
+              設定を開く
+            </button>
+          </div>
+        )}
         <Suspense
           fallback={
             <div className="py-8">
@@ -633,7 +650,10 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
       </nav>
 
       <ui.StaffPickerModal
-        open={picker !== 'none'}
+        // 職員マスタが空のときはモーダルを出さない。出すと「設定タブで同期を」と案内しながら
+        // 閉じられず設定タブへも行けない行き止まりになる（2026-08-28 実機で発生）。
+        // 空の間は上部の案内バーが設定タブへ誘導し、記録系は操作者未選択ガードが止める
+        open={picker !== 'none' && staff.length > 0}
         staff={staff}
         onPick={pickActor}
         // 初回選択（required）は閉じられない＝誤帰属を防ぐ
