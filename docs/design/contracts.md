@@ -63,9 +63,11 @@ onAuthExpired(cb: () => void): void                            // 401検知→�
 ```
 
 - insert系: 23505（unique衝突）は他端末先行の証拠 → 既存行を再読込して update に切替（upsert は使わない）
-- 自然キーを持たない insert（notes / fluid_intake / outings）は端末生成の冪等キー `client_key` を必ず付ける。
-  キューへ退避した op は同じ client_key で再送し、23505 は「既に届いている」証拠として既存行を読み直して成功扱いにする
-  （vitals routine・meals は部分unique索引が同じ役目を果たすため付けない）
+- 自然キーを持たない insert（notes / fluid_intake / outings / **vitals の routine 以外＝recheck・observation・symptom**）は
+  端末生成の冪等キー `client_key` を必ず付ける。キューへ退避した op は同じ client_key で再送し、
+  23505 は「既に届いている」証拠として既存行を読み直して成功扱いにする
+  （**vitals routine と meals は部分unique索引が同じ役目を果たすため付けない**。routine に付けると 23505 の切替先が
+  client_key になり、他端末が先に作った定時行へ update で合流できなくなる）
 - 送信キューの flush は Web Locks（`cl_sendQueue_flush` / `ifAvailable`）で1タブに絞る。取れなければ送らない
   （navigator.locks が無い環境は従来どおり送る＝冪等キー側で二重登録を防ぐ）
 - `queuePending()` / `queueSubscribe` は localStorage 上の qid 付き未送信 op とメモリキューの和集合を数える（他タブ由来も含む）
@@ -140,3 +142,10 @@ ResidentPickerModal({ open, residents: Resident[], onPick(id: number | null), on
 - `0002_timeline_rpc.sql`: `timeline_chunk(p_from date, p_to date, p_staff_id bigint)` → jsonb
   `{ notes（read_count・my_read 畳み込み・deleted除外）, vitals, meals, fluids, outings, import_days, pinned（期間内に有効な ongoing） }`。
   security invoker・`revoke execute from anon` ＋ `grant execute to authenticated`。
+- `0003_sheet_ui.sql`: スプシ模倣UIの追加分（`vitals.symptom` / kind に `'symptom'` / `notes.color` / `notes.after16` /
+  `attendance` 表＋RLS＋索引）。**追加のみ・既存の列とデータは触らない**。
+- `0004_vitals_client_key.sql`: `vitals.client_key`＋全体unique索引。routine 以外の再送二重登録を DB 側で止める。
+- `0005_meals_sheet_fluids.sql`: RPC `meals_sheet_fluids(p_from, p_to)` → 1名1日=1行に畳み、内訳を jsonb で返す。
+  食事一覧が水分で行数上限を食い潰さないための集約（security invoker・anon revoke・期間ガード付き）。
+- **適用順は 0001 → 0002 → 0003 → 0004 → 0005**。0003〜0005 は互いに独立だが、
+  0003 未適用のまま新UIを配ると「定時以外のバイタル保存」と「食事一覧の読み込み」が失敗する（意図的にフォールバックを作っていない）。

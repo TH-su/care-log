@@ -7,7 +7,8 @@
 //   ・全読取に .is('deleted_at', null)（列を持つ業務表のみ）と limit を機械付与する。
 //     日付レンジ or resident_id の無いクエリを書かない（全件ロード禁止）。
 //   ・upsert は使わない。insert が 23505（他端末先行の証拠）なら既存行を読み直して update に切替える。
-//     自然キーを持たない表（notes / fluid_intake / outings）は端末生成の冪等キー client_key を必ず付け、
+//     自然キーを持たない insert（notes / fluid_intake / outings と、定時以外のバイタル
+//     ＝recheck / observation / symptom）は端末生成の冪等キー client_key を必ず付け、
 //     23505 なら「既に届いている」証拠として既存行を読み直し、二重登録を作らない。
 //   ・物理削除はしない（soft delete = deleted_at のみ）。
 //   ・更新は rev 照合（.eq('rev', rev)）。0行 = 競合 → 'conflict' を返し、呼び出し側の入力は消さない。
@@ -24,6 +25,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type {
+  Attendance,
   FluidIntake,
   ImportDay,
   Importance,
@@ -31,6 +33,7 @@ import type {
   MealSlot,
   MealStatus,
   Note,
+  NoteColor,
   Outing,
   OutingKind,
   Resident,
@@ -70,8 +73,35 @@ const MAX_TRIES = 10
 const READERS_ROWS = 100
 /** 送信主体を1タブに絞るための Web Locks 名（同一端末で2タブ開いた時の二重送信を防ぐ） */
 const SEND_LOCK = 'cl_sendQueue_flush'
+/** 日報1日分の1系列あたりの取得上限（1日の申し送り・付帯行がこれを超える運用は無い） */
+const DAY_ROWS = 500
+/** 1日の取込台帳（source 別に数行）の取得上限 */
+const IMPORT_DAY_ROWS = 10
+/** 日報で既読状態を引く申し送りの件数上限（URL 長対策。1日の申し送りがこれを超える運用は無い） */
+const READ_LOOKUP_ROWS = 200
+/**
+ * 食事一覧（横並び）の食事の取得上限。1行 = 1名1日1コマ なので 人数 × 4コマ × 日数 で増える
+ * （既定11日なら 45名分まで載る）。水分とは別枠にして、片方を触ってももう片方の余裕が
+ * 動かないようにする（同じ定数を共有すると、どちらの都合で決めた値か分からなくなる）。
+ */
+const MEALS_SHEET_ROWS = MAX_ROWS
+/**
+ * 食事一覧の水分の取得上限。RPC meals_sheet_fluids が 1行 = 1名1日（合計＋内訳）にまとめて
+ * 返すので 人数 × 日数 で増える（既定11日なら 181名分まで載る）。
+ */
+const FLUID_DAY_ROWS = MAX_ROWS
+/**
+ * 水分の内訳（1回 = 1件）をほどいた後の総件数の上限。
+ * 規模モデル（33名 × 11日 × 5件/日 ≒ 1,800件）の5倍以上の余裕を取った歯止めで、
+ * 超えた時は黙って切り捨てず日数を減らす案内を出す（無言の欠落を作らない）。
+ */
+const FLUID_ENTRY_ROWS = 10_000
+/** 出勤者から外した行に付ける並び順（物理削除しないので、この印で非表示にして復活もできる） */
+const ATTENDANCE_HIDDEN_SORT = -1
 
-const VITAL_KINDS: readonly VitalKind[] = ['routine', 'recheck', 'observation']
+const VITAL_KINDS: readonly VitalKind[] = ['routine', 'recheck', 'observation', 'symptom']
+const NOTE_COLORS: readonly NoteColor[] = ['pink', 'yellow', 'blue', 'green', 'orange']
+const ATTENDANCE_ROLES: readonly Attendance['role'][] = ['manager', 'staff']
 const MEAL_SLOTS: readonly MealSlot[] = ['breakfast', 'lunch', 'dinner', 'snack']
 const MEAL_STATUSES: readonly MealStatus[] = ['eaten', 'out', 'hospital', 'refused']
 const SHIFTS: readonly Shift[] = ['day', 'daycare', 'night']
@@ -82,15 +112,29 @@ const OUTING_KINDS: readonly OutingKind[] = ['outing', 'overnight']
 const RESIDENT_COLS = 'id,source_id,name,kana,room,gender,care_level,active,needs_review'
 const STAFF_COLS = 'id,name,active'
 const VITAL_COLS =
-  'id,resident_id,measured_on,kind,measured_at,temp,sys_bp,dia_bp,pulse,spo2,note,recorded_by,rev'
+  'id,resident_id,measured_on,kind,measured_at,temp,sys_bp,dia_bp,pulse,spo2,note,symptom,recorded_by,rev'
 const MEAL_COLS = 'id,resident_id,meal_on,meal_slot,main_amount,side_amount,status,note,recorded_by,rev'
 const FLUID_COLS = 'id,resident_id,taken_on,taken_at,amount_ml,kind,recorded_by,rev'
 const NOTE_COLS =
-  'id,note_on,shift,facility,category,resident_id,role_tags,importance,body,occurred_at,ongoing,ended_at,reporter_id,rev'
+  'id,note_on,shift,facility,category,resident_id,role_tags,importance,body,occurred_at,ongoing,ended_at,reporter_id,color,after16,rev'
 const OUTING_COLS = 'id,resident_id,kind,start_on,start_at,end_on,end_at,companion,note,recorded_by,rev'
+const ATTENDANCE_COLS = 'day,staff_id,role,sort'
+const IMPORT_DAY_COLS = 'source,day,imported_at,src_rows,inserted,updated,skipped,native_skip,unmatched'
 
-/** Realtime を購読する表（受信は「どの表が変わったか」だけを伝える） */
-const REALTIME_TABLES = ['notes', 'vitals', 'meals', 'fluid_intake', 'outings', 'note_reads'] as const
+/**
+ * Realtime を購読する表（受信は「どの表が変わったか」だけを伝える）。
+ * attendance も対象（0003_sheet_ui.sql で publication に追加済み）。
+ * 他端末の出勤者の追加・取り消しでも日報シートに「最新に更新」を出すため。
+ */
+const REALTIME_TABLES = [
+  'notes',
+  'vitals',
+  'meals',
+  'fluid_intake',
+  'outings',
+  'note_reads',
+  'attendance',
+] as const
 
 // ── エラー ───────────────────────────────────────────────────────────────────
 
@@ -105,10 +149,17 @@ export type DbErrorKind =
 /** 画面にそのまま出せる日本語メッセージ（何が起きたか＋次にどうすればよいか）を持つエラー */
 export class DbError extends Error {
   readonly kind: DbErrorKind
-  constructor(kind: DbErrorKind, message: string) {
+  /**
+   * サーバーへ**一部だけ書き込んだ後**に失敗したか（既定 false ＝1行も書けていない）。
+   * true の時、画面は入力を保存前へ巻き戻してはいけない（載った分を「保存されていない」と
+   * 見せることになるため）。読み直しを促す案内に切り替える。
+   */
+  readonly partial: boolean
+  constructor(kind: DbErrorKind, message: string, partial = false) {
     super(message)
     this.name = 'DbError'
     this.kind = kind
+    this.partial = partial
   }
 }
 
@@ -351,6 +402,8 @@ function normalizeVital(row: unknown): Vital | null {
     pulse: num(r.pulse),
     spo2: num(r.spo2),
     note: str(r.note),
+    // 他症状者ブロックの症状欄（0003 で追加した列。旧サーバーが返さなければ null）
+    symptom: str(r.symptom),
     recorded_by: idNum(r.recorded_by),
     rev: num(r.rev) ?? 1,
   }
@@ -421,6 +474,9 @@ function normalizeNote(row: unknown): Note | null {
     ongoing: bool(r.ongoing, false),
     ended_at: str(r.ended_at),
     reporter_id: idNum(r.reporter_id),
+    // 行の色・16時区切り（0003 で追加した列。旧サーバーが返さなければ色なし・区切り前として扱う）
+    color: oneOf(r.color, NOTE_COLORS),
+    after16: bool(r.after16, false),
     rev: num(r.rev) ?? 1,
   }
   if (readCount !== null) note.read_count = readCount
@@ -1006,7 +1062,8 @@ function colsOf(table: QueueTable): string {
 
 /**
  * 部分unique索引に対応する自然キー。23505 の時にこのキーで既存行を読み直す。
- * 該当が無い表（水分・申し送り・外出）は null＝再読込先を特定できないため update へ切り替えない。
+ * 該当が無いもの（水分・申し送り・外出・定時以外のバイタル）は null＝再読込先を特定できないため
+ * update へ切り替えない。これらは冪等キー client_key の衝突として処理する（clientKeyOf 参照）。
  */
 function conflictKeyOf(table: QueueTable, payload: Record<string, unknown>): Record<string, unknown> | null {
   if (table === 'vitals' && payload.kind === 'routine') {
@@ -1121,9 +1178,9 @@ function cleanPayload(src: Record<string, unknown>): Record<string, unknown> {
 }
 
 /**
- * 自然キー（部分unique索引）を持たない表の insert に、端末生成の冪等キーを付ける。
+ * 自然キー（部分unique索引）を持たない insert に、端末生成の冪等キーを付ける。
  * 同じ入力を再送しても DB 側の unique 制約で1行に収束する（2タブ・再送の行き違いでの二重登録防止）。
- * 定時バイタル・食事は部分unique索引が同じ役目を果たすので付けない。
+ * 定時バイタル（kind='routine'）・食事は部分unique索引が同じ役目を果たすので付けない。
  */
 function withClientKey(src: Record<string, unknown>): Record<string, unknown> {
   const out = cleanPayload(src)
@@ -1620,8 +1677,22 @@ async function softDelete(table: QueueTable, id: number, rev: number): Promise<t
 
 // ── バイタル ─────────────────────────────────────────────────────────────────
 
+/**
+ * バイタルの追加。kind によって二重登録の防ぎ方を変える（挙動そのものは従来どおり）。
+ *
+ * ・kind='routine'（定時）… 部分unique索引 uq_vitals_routine_day（resident_id, measured_on）が
+ *   自然キーの役目を果たすので冪等キーを付けない。付けてしまうと 23505 の切替先が client_key に
+ *   なり、他端末が先に作った定時行へ update で合流できなくなる（既存の作法を壊さない）。
+ * ・それ以外（recheck / observation / symptom）… 同じ人の同じ日に複数行を書ける運用＝自然キーが
+ *   無い。サーバーには届いたが応答だけが失われた場合、送信キューの再送で同じ記録が2行できる。
+ *   notes / fluid_intake / outings と同じく端末生成の冪等キー client_key を付けて1行へ収束させる
+ *   （0004_vitals_client_key.sql の uq_vitals_client_key に載る。未適用だと insert が失敗するので
+ *   0003 と同じく先に当てておくこと）。
+ */
 export async function insertVital(v: Omit<Vital, 'id' | 'rev'>): Promise<Vital | Queued> {
-  return insertRow('vitals', cleanPayload(v as unknown as Record<string, unknown>), normalizeVital)
+  const src = v as unknown as Record<string, unknown>
+  const payload = v.kind === 'routine' ? cleanPayload(src) : withClientKey(src)
+  return insertRow('vitals', payload, normalizeVital)
 }
 
 export async function updateVital(
@@ -1759,6 +1830,517 @@ export function subscribeChanges(cb: (table: string) => void): () => void {
     if (client !== null && channel !== null) void client.removeChannel(channel)
     channel = null
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// スプレッドシート模倣UI（日報シート・バイタル一覧・食事一覧）の追加API
+//
+// 契約: docs/design/sheet-contracts.md §3。既存の関数・型は変更していない（追加のみ）。
+// 前提: supabase/migrations の 0003 → 0004 → 0005 を適用済みであること
+//       ・0003_sheet_ui.sql        … vitals.symptom / vitals.kind='symptom' / notes.color /
+//                                    notes.after16 / attendance
+//       ・0004_vitals_client_key.sql … vitals.client_key（定時以外のバイタルの冪等キー）
+//       ・0005_meals_sheet_fluids.sql … RPC meals_sheet_fluids（水分を1名1日=1行で返す）
+// 規律は既存と同じ: 全読取に .is('deleted_at', null)（列を持つ表のみ）と limit を機械付与、
+//       日付レンジ無しのクエリを書かない、upsert を使わない、更新は rev 照合、物理削除はしない。
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SHEET_MSG = {
+  badDay: '日付を読み取れませんでした。画面を再読み込みして、日付を選び直してください。',
+  tooManyDays:
+    '表示する日数が多すぎて、すべてを読み込めませんでした。日数を減らして（例: 4日）から、もう一度お試しください。',
+  badColor:
+    '行の色を保存できませんでした（対応していない色です）。色を選び直してから、もう一度お試しください。入力は消えていません。',
+  badStaff:
+    '出勤者を保存できませんでした（職員を特定できない行があります）。職員を選び直してから、もう一度お試しください。',
+  attendanceRace:
+    '他の端末が同時に出勤者を保存したため、保存できませんでした。画面を再読み込みしてから、もう一度お試しください。',
+  attendancePartial:
+    '出勤者の一部だけが保存されました。「最新に更新」を押して、いまの出勤者を確認してから足りない人を選び直してください。',
+} as const
+
+/**
+ * サーバーへ一部だけ書き込んだ後の失敗（saveAttendance は追加・更新・非表示を逐次実行するため、
+ * 途中で失敗すると「もう載っている行」と「まだの行」が混ざる）。
+ * partial=true を立てて、呼び出し側が画面を保存前へ巻き戻さないようにする。
+ */
+function partialWriteError(): DbError {
+  return new DbError('server', SHEET_MSG.attendancePartial, true)
+}
+
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/
+
+/** 日付の形（YYYY-MM-DD）を検査する。or フィルタへ値を差し込む前の予約文字ガードも兼ねる */
+function assertDay(iso: string): void {
+  if (!DAY_RE.test(iso)) throw new DbError('server', SHEET_MSG.badDay)
+}
+
+/**
+ * limit いっぱいまで返ってきた＝取り切れていない可能性がある。
+ * 黙って切り捨てると「入力したのに一覧に出ない」＝無言の欠落になるため、
+ * 日数を減らす案内を出して読み込みを失敗させる（qa-verification「1リクエスト ≤2,000行」も守る）。
+ */
+function assertLoadedAll(res: Res<unknown>, cap: number): void {
+  if (Array.isArray(res.data) && res.data.length >= cap) {
+    throw new DbError('server', SHEET_MSG.tooManyDays)
+  }
+}
+
+function normalizeAttendance(row: unknown): Attendance | null {
+  const r = asRecord(row)
+  if (!r) return null
+  const day = dateStr(r.day)
+  const staff_id = idNum(r.staff_id)
+  if (day === null || staff_id === null) return null
+  return {
+    day,
+    staff_id,
+    role: oneOf(r.role, ATTENDANCE_ROLES) ?? 'staff',
+    sort: num(r.sort) ?? 0,
+  }
+}
+
+/** 日報シート（現行スプシ「申し送り」タブ）1日分 */
+export interface DailyReport {
+  day: string
+  /** 全 shift。画面側が shift と after16 で仕分ける */
+  notes: Note[]
+  /** その日に在るもの（start_on ≤ day かつ（end_on is null または end_on ≥ day）） */
+  outings: Outing[]
+  /** 発熱者ブロック（kind='observation'） */
+  observations: Vital[]
+  /** 他症状者ブロック（kind='symptom'） */
+  symptoms: Vital[]
+  /** 出勤者（sort < 0 ＝ 取り消し済みは除く） */
+  attendance: Attendance[]
+  /** その日の取込台帳（複数 source があれば直近1件）。null = 未取込 */
+  importDay: ImportDay | null
+}
+
+/**
+ * 日報1日分をまとめて取る（申し送り・付帯ブロック・出勤者・取込状態を並列で）。
+ * staffId は既読の表示にだけ使う。ここから既読を書かない（multi-device-sync 原則9）。
+ */
+export async function fetchDailyReport(dayIso: string, staffId: number | null): Promise<DailyReport> {
+  assertDay(dayIso)
+  const sb = await getClient()
+
+  const [notesRes, outingsRes, vitalsRes, attendanceRes, importRes] = await Promise.all([
+    sb
+      .from('notes')
+      .select(NOTE_COLS)
+      .eq('note_on', dayIso)
+      .is('deleted_at', null)
+      .order('id', { ascending: true }) // 記入順＝スプシの行順
+      .limit(DAY_ROWS) as unknown as Promise<Res<unknown>>,
+    // 外出・外泊は「その日に在るもの」を採る（開始が前日以前でも、帰着前ならその日の外出者）
+    sb
+      .from('outings')
+      .select(OUTING_COLS)
+      .lte('start_on', dayIso)
+      .or(`end_on.is.null,end_on.gte.${dayIso}`)
+      .is('deleted_at', null)
+      .order('start_on', { ascending: true })
+      .order('id', { ascending: true })
+      .limit(DAY_ROWS) as unknown as Promise<Res<unknown>>,
+    // 発熱者（observation）と他症状者（symptom）は1往復で取り、画面側の2ブロックへ振り分ける
+    sb
+      .from('vitals')
+      .select(VITAL_COLS)
+      .eq('measured_on', dayIso)
+      .in('kind', ['observation', 'symptom'])
+      .is('deleted_at', null)
+      .order('id', { ascending: true })
+      .limit(DAY_ROWS) as unknown as Promise<Res<unknown>>,
+    // attendance は soft delete 列を持たない表（note_reads と同じ）。取り消しは sort < 0 で表す
+    sb
+      .from('attendance')
+      .select(ATTENDANCE_COLS)
+      .eq('day', dayIso)
+      .gte('sort', 0)
+      .order('sort', { ascending: true })
+      .order('staff_id', { ascending: true })
+      .limit(DAY_ROWS) as unknown as Promise<Res<unknown>>,
+    sb
+      .from('import_days')
+      .select(IMPORT_DAY_COLS)
+      .eq('day', dayIso)
+      .order('imported_at', { ascending: false })
+      .limit(IMPORT_DAY_ROWS) as unknown as Promise<Res<unknown>>,
+  ])
+
+  for (const res of [notesRes, outingsRes, vitalsRes, attendanceRes, importRes]) {
+    if (res.error !== null) throw readError(res)
+  }
+
+  const notes = list(notesRes.data, normalizeNote, DAY_ROWS)
+  const vitals = list(vitalsRes.data, normalizeVital, DAY_ROWS)
+  const importDays = list(importRes.data, normalizeImportDay, IMPORT_DAY_ROWS)
+
+  await attachReadState(sb, notes, staffId)
+
+  return {
+    day: dayIso,
+    notes,
+    outings: list(outingsRes.data, normalizeOuting, DAY_ROWS),
+    observations: vitals.filter((v) => v.kind === 'observation'),
+    symptoms: vitals.filter((v) => v.kind === 'symptom'),
+    attendance: list(attendanceRes.data, normalizeAttendance, DAY_ROWS),
+    importDay: importDays[0] ?? null,
+  }
+}
+
+/**
+ * 申し送りに既読の表示情報（既読人数・自分が読んだか）を付ける。
+ * 失敗しても日報本体は出す（既読は補助表示なので、これで1日分の記録を隠さない）。
+ * 取れなかった時は read_count / my_read を未設定のまま残す＝画面は「0人」ではなく何も出さない
+ * （観測できていない値を断定しない）。
+ */
+async function attachReadState(sb: SupabaseClient, notes: Note[], staffId: number | null): Promise<void> {
+  if (staffId === null || notes.length === 0) return
+  const ids = notes.slice(0, READ_LOOKUP_ROWS).map((n) => n.id)
+  let res: Res<unknown>
+  try {
+    res = (await sb
+      .from('note_reads')
+      .select('note_id,staff_id')
+      .in('note_id', ids)
+      .limit(MAX_ROWS)) as Res<unknown>
+  } catch {
+    return // 通信できない。既読の印は出さない（本体の表示は続ける）
+  }
+  if (res.error !== null || !Array.isArray(res.data)) return
+  const counts = new Map<number, number>()
+  const mine = new Set<number>()
+  for (const row of res.data) {
+    const r = asRecord(row)
+    const noteId = idNum(r?.note_id)
+    if (noteId === null) continue
+    counts.set(noteId, (counts.get(noteId) ?? 0) + 1)
+    if (idNum(r?.staff_id) === staffId) mine.add(noteId)
+  }
+  const lookedUp = new Set(ids)
+  for (const n of notes) {
+    if (!lookedUp.has(n.id)) continue
+    n.read_count = counts.get(n.id) ?? 0
+    n.my_read = mine.has(n.id)
+  }
+}
+
+/**
+ * 一覧（横並び）用。期間 × 全利用者のバイタルを取る。
+ * kind は絞らない（画面が routine / recheck / observation / symptom を仕分ける）。
+ */
+export async function fetchVitalsSheet(fromIso: string, toIso: string): Promise<Vital[]> {
+  assertDay(fromIso)
+  assertDay(toIso)
+  const sb = await getClient()
+  const res = (await sb
+    .from('vitals')
+    .select(VITAL_COLS)
+    .gte('measured_on', fromIso)
+    .lte('measured_on', toIso)
+    .is('deleted_at', null)
+    .order('measured_on', { ascending: false }) // 新しい日が左（sheet-contracts §6）
+    .order('resident_id', { ascending: true })
+    .order('id', { ascending: true })
+    .limit(MAX_ROWS)) as Res<unknown>
+  if (res.error !== null) throw readError(res)
+  assertLoadedAll(res, MAX_ROWS)
+  return list(res.data, normalizeVital)
+}
+
+/**
+ * RPC meals_sheet_fluids の1行（1名1日）を、画面が使う「1回 = 1行」の並びへ戻す。
+ * resident_id / taken_on は親の行にしか持たせていない（内訳で繰り返さない）ので、ここで補う。
+ * 壊れた行・読めない内訳は落とす（既存の list と同じ扱い）。
+ * 総件数が上限を超えたら、黙って切り捨てず日数を減らす案内を出す（無言の欠落を作らない）。
+ */
+function expandFluidDays(data: unknown): FluidIntake[] {
+  if (!Array.isArray(data)) return []
+  const out: FluidIntake[] = []
+  for (const row of data) {
+    const r = asRecord(row)
+    if (r === null) continue
+    const resident_id = idNum(r.resident_id)
+    const taken_on = dateStr(r.taken_on)
+    if (resident_id === null || taken_on === null || !Array.isArray(r.entries)) continue
+    for (const entry of r.entries) {
+      const e = asRecord(entry)
+      if (e === null) continue
+      const f = normalizeFluid({ ...e, resident_id, taken_on })
+      if (f === null) continue
+      if (out.length >= FLUID_ENTRY_ROWS) throw new DbError('server', SHEET_MSG.tooManyDays)
+      out.push(f)
+    }
+  }
+  return out
+}
+
+/**
+ * 一覧（横並び）用。期間 × 全利用者の食事と水分を取る（水分の日合計・内訳は画面側で出す）。
+ *
+ * 水分は RPC meals_sheet_fluids で「1名1日 = 1行（合計＋内訳）」にまとめて受け取り、
+ * expandFluidDays で従来どおりの1回=1行へ戻す。**呼び出し側が受け取る形は変えていない。**
+ * 生の行のまま引くと、既定の11日表示では水分だけで取得上限の 7〜9割を占め、利用者が増える・
+ * 水分記録の粒度が上がるだけで、食事一覧が「一部が欠けた表」ではなく画面ごとエラーになって
+ * 開けなくなるため（背景は 0005_meals_sheet_fluids.sql の冒頭）。
+ * 食事と水分は取得上限の枠を分けている（MEALS_SHEET_ROWS / FLUID_DAY_ROWS）。
+ */
+export async function fetchMealsSheet(
+  fromIso: string,
+  toIso: string,
+): Promise<{ meals: Meal[]; fluids: FluidIntake[] }> {
+  assertDay(fromIso)
+  assertDay(toIso)
+  const sb = await getClient()
+  const [mealsRes, fluidsRes] = await Promise.all([
+    sb
+      .from('meals')
+      .select(MEAL_COLS)
+      .gte('meal_on', fromIso)
+      .lte('meal_on', toIso)
+      .is('deleted_at', null)
+      .order('meal_on', { ascending: false })
+      .order('resident_id', { ascending: true })
+      .order('id', { ascending: true })
+      .limit(MEALS_SHEET_ROWS) as unknown as Promise<Res<unknown>>,
+    // 期間の絞り込みは RPC の引数（両端のある日付レンジ・期間上限つき）が担う
+    sb
+      .rpc('meals_sheet_fluids', { p_from: fromIso, p_to: toIso })
+      .limit(FLUID_DAY_ROWS) as unknown as Promise<Res<unknown>>,
+  ])
+  if (mealsRes.error !== null) throw readError(mealsRes)
+  assertLoadedAll(mealsRes, MEALS_SHEET_ROWS)
+  if (fluidsRes.error !== null) throw readError(fluidsRes)
+  assertLoadedAll(fluidsRes, FLUID_DAY_ROWS)
+  return {
+    meals: list(mealsRes.data, normalizeMeal, MEALS_SHEET_ROWS),
+    fluids: expandFluidDays(fluidsRes.data),
+  }
+}
+
+/** updateNoteFields が書き込んでよい項目（これ以外は送らない＝サーバーの値を温存する） */
+type NoteFieldPatch = Partial<
+  Pick<
+    Note,
+    | 'body'
+    | 'resident_id'
+    | 'importance'
+    | 'color'
+    | 'after16'
+    | 'occurred_at'
+    | 'reporter_id'
+    | 'role_tags'
+    | 'shift'
+  >
+>
+
+/**
+ * 申し送りの部分更新（セル直接編集用）。
+ * 渡された項目だけを書き、渡していない項目はサーバーの値を温存する（multi-device-sync 原則3）。
+ * rev 照合で 0行 なら 'conflict'（呼び出し側の入力は消さない）。通信失敗は永続キューへ退避して 'queued'。
+ */
+export async function updateNoteFields(
+  id: number,
+  rev: number,
+  patch: NoteFieldPatch,
+): Promise<Note | Conflict | Queued> {
+  const src = patch as Record<string, unknown>
+  const payload: Record<string, unknown> = {}
+  const has = (k: string): boolean => Object.prototype.hasOwnProperty.call(src, k) && src[k] !== undefined
+
+  if (has('body')) {
+    const body = str(src.body)
+    // 空文字での上書きは DB 側の check でも拒否される。手前で理由を出して入力を残す
+    if (body === null || body.trim() === '') throw new DbError('server', MSG.emptyBody)
+    payload.body = body
+  }
+  if (has('resident_id')) payload.resident_id = idNum(src.resident_id) // 不正値は「全体連絡」= null
+  if (has('importance')) payload.importance = oneOf(src.importance, IMPORTANCES) ?? 'normal'
+  if (has('color')) {
+    const color = src.color === null ? null : oneOf(src.color, NOTE_COLORS)
+    if (color === null && src.color !== null) throw new DbError('server', SHEET_MSG.badColor)
+    payload.color = color // null = 色なし（明示的な消去）
+  }
+  if (has('after16')) payload.after16 = bool(src.after16, false)
+  if (has('occurred_at')) payload.occurred_at = str(src.occurred_at)
+  if (has('reporter_id')) payload.reporter_id = idNum(src.reporter_id)
+  if (has('role_tags')) payload.role_tags = strArray(src.role_tags)
+  if (has('shift')) {
+    const shift = oneOf(src.shift, SHIFTS)
+    if (shift !== null) payload.shift = shift // 未知の値は送らない（現在のシフトを温存する）
+  }
+
+  return updateRow('notes', id, rev, payload, normalizeNote)
+}
+
+/**
+ * バイタル（発熱者・他症状者を含む）の追加。kind を明示して呼ぶ。
+ * 既存の insertVital と同じ経路（23505 の切替・キュー退避）に乗る。
+ */
+export async function insertVitalKind(v: Omit<Vital, 'id' | 'rev'>): Promise<Vital | Queued> {
+  return insertVital(v)
+}
+
+/**
+ * 出勤者の登録（rows に有る人を追加・更新し、**baseline に有って rows に無い人だけ**取り消す）。
+ * **その日の一覧を丸ごと置き換えるのではない**（rows=[] は「baseline の人を全員取り消す」であって
+ * 「その日の出勤者を全員取り消す」ではない）。baseline は必須引数にしてある＝渡し忘れると
+ * 取り消しが1件も起きないまま成功して見える無言の no-op になるため、型で弾く。
+ *
+ * attendance には delete ポリシーが無く、物理削除もしない契約なので「置き換え」は
+ *   ・一覧に無い既存行 → sort = -1 に更新して非表示にする（行は残るので再登録で復活する）
+ *   ・一覧に有って既存行が無い → insert
+ *   ・両方に有る → role / sort が変わった時だけ update
+ * で表す。追加・更新を先に、非表示を最後に実行する（途中で失敗した時に「消える」側でなく
+ * 「残る」側へ倒す＝multi-device-sync 原則5）。
+ *
+ * rev 列を持たない表なので rev 照合はできない。競合の粒度は (day, staff_id) の1行単位で、
+ * 同じ職員の役割・並び順を2端末が同時に変えた場合だけ後勝ちになる。
+ * 通信失敗は永続キューに載せない（退避したスナップショットを後から流すと、その間に他端末が
+ * 入れた出勤者を無言で消してしまうため）。失敗は理由を返し、画面の入力はそのまま残す。
+ * **1件でも書き込んだ後の失敗は DbError.partial=true** で返す（呼び出し側は画面を
+ * 保存前へ巻き戻さず、読み直しを促す＝載った分を「保存されていない」と見せない）。
+ *
+ * **非表示にしてよいのは「この端末が画面に持っていた行（baseline）」だけ**。
+ * baseline に無い行は、他端末がこの端末の読み込み後に足した行かもしれないので触らない
+ * （未知の行は消さない＝和集合側へ倒す。multi-device-sync 原則5「消失より復活・無言消失の禁止」）。
+ * 呼び出し側は fetchDailyReport で受け取った attendance の staff_id をそのまま渡す。
+ */
+export async function saveAttendance(
+  dayIso: string,
+  rows: { staff_id: number; role: 'manager' | 'staff'; sort: number }[],
+  options: { baseline: number[] },
+): Promise<void> {
+  assertDay(dayIso)
+  await assertWritable()
+
+  // 入力の正規化（同じ職員が2回来たら先勝ち＝主キー day+staff_id に合わせる）
+  const wanted = new Map<number, { role: Attendance['role']; sort: number }>()
+  rows.forEach((row, i) => {
+    const staffId = idNum(row?.staff_id)
+    if (staffId === null) throw new DbError('server', SHEET_MSG.badStaff)
+    if (wanted.has(staffId)) return
+    const sort = Number.isInteger(row.sort) && row.sort >= 0 ? row.sort : i
+    wanted.set(staffId, { role: oneOf(row.role, ATTENDANCE_ROLES) ?? 'staff', sort })
+  })
+
+  const sb = await getClient()
+  const existing = await fetchAttendanceRows(sb, dayIso)
+
+  const toInsert: Attendance[] = []
+  const toUpdate: Attendance[] = []
+  for (const [staffId, want] of wanted) {
+    const cur = existing.get(staffId)
+    if (cur === undefined) {
+      toInsert.push({ day: dayIso, staff_id: staffId, role: want.role, sort: want.sort })
+    } else if (cur.role !== want.role || cur.sort !== want.sort) {
+      // 取り消し済み（sort < 0）の行もここで復活する
+      toUpdate.push({ day: dayIso, staff_id: staffId, role: want.role, sort: want.sort })
+    }
+  }
+  // この端末が観測していた行だけを非表示の対象にする（未観測の行は他端末が足したものとして残す）。
+  // baseline は必須引数だが、型検査を通らない経路から呼ばれても落ちないよう実行時は空配列へ倒す
+  // （＝1件も取り消さない＝消える側ではなく残る側へ倒す）
+  const baseline = new Set<number>()
+  for (const id of options?.baseline ?? []) {
+    const staffId = idNum(id)
+    if (staffId !== null) baseline.add(staffId)
+  }
+  const toHide: number[] = []
+  for (const [staffId, cur] of existing) {
+    if (!wanted.has(staffId) && cur.sort >= 0 && baseline.has(staffId)) toHide.push(staffId)
+  }
+  if (toInsert.length === 0 && toUpdate.length === 0 && toHide.length === 0) return // 差分なし
+
+  // 「1件でもサーバーへ書き込んだ後」に失敗したかを持ち回る。
+  // 途中失敗を素の writeError（「記録は変わっていません」）で返すと、
+  // 既に載った追加・更新まで「保存されていない」と案内することになるため
+  let wrote = false
+
+  // 1. 追加（不足分だけ）
+  if (toInsert.length > 0) {
+    await insertAttendanceRows(sb, dayIso, toInsert) // 途中失敗は内部で partial を投げ分ける
+    wrote = true
+  }
+  // 2. 役割・並び順の変更（1行ずつ。主キーで1行だけを狙う）
+  for (const row of toUpdate) {
+    const res = (await sb
+      .from('attendance')
+      .update({ role: row.role, sort: row.sort })
+      .eq('day', dayIso)
+      .eq('staff_id', row.staff_id)
+      .select('staff_id')
+      .maybeSingle()) as Res<unknown>
+    if (res.error !== null) throw wrote ? partialWriteError() : writeError(res)
+    wrote = true
+  }
+  // 3. 一覧から外れた人を非表示にする（行は消さない＝再登録で戻せる）
+  if (toHide.length > 0) {
+    const res = (await sb
+      .from('attendance')
+      .update({ sort: ATTENDANCE_HIDDEN_SORT })
+      .eq('day', dayIso)
+      .in('staff_id', toHide)
+      .select('staff_id')) as Res<unknown>
+    if (res.error !== null) throw wrote ? partialWriteError() : writeError(res)
+  }
+}
+
+/** その日の出勤者行（取り消し済み＝sort < 0 も含む）。置き換えの差分計算に使う */
+async function fetchAttendanceRows(
+  sb: SupabaseClient,
+  dayIso: string,
+): Promise<Map<number, Attendance>> {
+  const res = (await sb
+    .from('attendance')
+    .select(ATTENDANCE_COLS)
+    .eq('day', dayIso)
+    .order('staff_id', { ascending: true })
+    .limit(MAX_ROWS)) as Res<unknown>
+  if (res.error !== null) throw readError(res)
+  const out = new Map<number, Attendance>()
+  for (const row of list(res.data, normalizeAttendance)) out.set(row.staff_id, row)
+  return out
+}
+
+/**
+ * 出勤者を追加する。23505（他端末が同じ職員を先に登録した）は1度だけ読み直して、
+ * 本当に足りない分だけを入れ直す。upsert は使わない（既存契約）。
+ */
+async function insertAttendanceRows(
+  sb: SupabaseClient,
+  dayIso: string,
+  rows: Attendance[],
+): Promise<void> {
+  const res = (await sb.from('attendance').insert(rows).select('staff_id')) as Res<unknown>
+  if (res.error === null) return
+  if (!isUniqueViolation(res)) throw writeError(res)
+
+  const existing = await fetchAttendanceRows(sb, dayIso)
+  const missing = rows.filter((r) => !existing.has(r.staff_id))
+  // 最初の insert は1文なので、23505 で戻った時点ではまだ1行も書けていない。
+  // ここから下は書けた分と書けていない分が混ざりうるので、書けたかどうかを持ち回る
+  let wrote = false
+  // 既に載っている行は role / sort を書き直す（他端末が先に作った行を自分の並びへ合わせる）
+  for (const row of rows) {
+    const cur = existing.get(row.staff_id)
+    if (cur === undefined || (cur.role === row.role && cur.sort === row.sort)) continue
+    const up = (await sb
+      .from('attendance')
+      .update({ role: row.role, sort: row.sort })
+      .eq('day', dayIso)
+      .eq('staff_id', row.staff_id)
+      .select('staff_id')
+      .maybeSingle()) as Res<unknown>
+    if (up.error !== null) throw wrote ? partialWriteError() : writeError(up)
+    wrote = true
+  }
+  if (missing.length === 0) return
+  const retry = (await sb.from('attendance').insert(missing).select('staff_id')) as Res<unknown>
+  if (retry.error === null) return
+  throw wrote ? partialWriteError() : new DbError('server', SHEET_MSG.attendanceRace)
 }
 
 // ── 保守用（積み残しの可視化） ───────────────────────────────────────────────

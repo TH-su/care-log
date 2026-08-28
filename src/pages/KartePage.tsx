@@ -154,7 +154,7 @@ function ownedBy<T extends { resident_id: number }>(rows: unknown, residentId: n
   return asArray<T>(rows).filter((r) => r != null && r.resident_id === residentId)
 }
 
-const KIND_ORDER: Record<VitalKind, number> = { routine: 0, recheck: 1, observation: 2 }
+const KIND_ORDER: Record<VitalKind, number> = { routine: 0, recheck: 1, observation: 2, symptom: 3 }
 
 /** 時刻（HH:MM[:SS]）の昇順比較。null は末尾 */
 function cmpTime(a: string | null, b: string | null): number {

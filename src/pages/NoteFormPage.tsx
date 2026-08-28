@@ -514,6 +514,9 @@ export function NoteFormPage() {
           ongoing: form.ongoing,
           ended_at: form.ongoing && form.endedOn !== '' ? endOfDayStamp(form.endedOn) : null,
           reporter_id: form.reporterId,
+          // 色・16時区切りはシート画面で扱う項目。この入力画面では既定のまま送る
+          color: null,
+          after16: false,
         }
 
         const snapshot = form

@@ -89,6 +89,7 @@ const KIND_LABEL: Record<VitalKind, string> = {
   routine: '定時',
   recheck: '再検',
   observation: '経過観察',
+  symptom: '他症状',
 }
 
 /** 前回値ゴーストの遡り日数（この範囲に記録が無ければゴーストは出さない） */
@@ -584,6 +585,8 @@ export function VitalsGridPage({
             pulse: changes.pulse ?? null,
             spo2: changes.spo2 ?? null,
             note: null,
+            // 新規行は定時・再検のみなので症状欄は使わない（他症状者ブロックは申し送りシート側で扱う）
+            symptom: null,
             recorded_by: actorId ?? null,
           }
           const res = await insertVital(rec)

@@ -96,7 +96,12 @@ export interface DailyReport {
 
 /** 一覧（横並び）用。期間 × 全利用者のバイタルを取る */
 fetchVitalsSheet(fromIso: string, toIso: string): Promise<Vital[]>
-/** 一覧（横並び）用。期間 × 全利用者の食事と水分を取る */
+/**
+ * 一覧（横並び）用。期間 × 全利用者の食事と水分を取る。
+ * 水分は RPC meals_sheet_fluids（0005）で「1名1日 = 1行（合計＋内訳）」にまとめて受け取り、
+ * db.ts が従来どおりの1回=1行へ戻して返す。**呼び出し側が受け取る形は変わらない**（内訳も落とさない）。
+ * 食事と水分は取得上限の枠を分ける（同じ定数を共有しない）。
+ */
 fetchMealsSheet(fromIso: string, toIso: string): Promise<{ meals: Meal[]; fluids: FluidIntake[] }>
 
 /** 申し送りの部分更新（セル直接編集用。送った項目だけ書き、他は温存する） */
@@ -104,15 +109,38 @@ updateNoteFields(id: number, rev: number,
   patch: Partial<Pick<Note, 'body' | 'resident_id' | 'importance' | 'color' | 'after16' | 'occurred_at' | 'reporter_id' | 'role_tags' | 'shift'>>
 ): Promise<Note | Conflict | Queued>
 
-/** バイタル（発熱者・他症状者を含む）の追加・更新。kind を明示する */
-insertVitalKind(v: Omit<Vital, 'id' | 'rev'>): Promise<Vital | Queued>   // insertVital のエイリアスでよい
+/**
+ * バイタル（発熱者・他症状者を含む）の追加。kind を明示する（insertVital のエイリアスでよい）。
+ * kind='routine' 以外は自然キーが無い（同じ人の同じ日に複数行を書ける）ので、
+ * 端末生成の冪等キー client_key を必ず付ける＝キューの再送で同じ記録が2行にならない。
+ * 0004 の uq_vitals_client_key に載る。定時（routine）には付けない（uq_vitals_routine_day が担う）。
+ */
+insertVitalKind(v: Omit<Vital, 'id' | 'rev'>): Promise<Vital | Queued>
 
-/** 出勤者の登録（その日の一覧を丸ごと置き換える。空配列＝全員取り消し） */
-saveAttendance(dayIso: string, rows: { staff_id: number; role: 'manager' | 'staff'; sort: number }[]): Promise<void>
+/**
+ * 出勤者の登録。rows に有る人を追加・更新し、**baseline に有って rows に無い人だけ**取り消す。
+ * **その日の一覧を丸ごと置き換えるのではない**（`rows=[]` は「baseline の人を全員取り消す」であって
+ * 「その日の出勤者を全員取り消す」ではない）。baseline に無い行は、この端末の読み込み後に
+ * 他端末が足した行かもしれないので触らない（未知の行は消さない＝和集合側へ倒す）。
+ * その日の全員を取り消したい時は、読み込み時の staff_id を全部 baseline に渡す。
+ * baseline は必須引数（省略すると取り消しが1件も起きないまま成功して見える無言の no-op になるため）。
+ * 呼び出し側は fetchDailyReport で受け取った attendance の staff_id をそのまま渡す。
+ */
+saveAttendance(
+  dayIso: string,
+  rows: { staff_id: number; role: 'manager' | 'staff'; sort: number }[],
+  options: { baseline: number[] },
+): Promise<void>
 ```
 
 **規律（既存のまま）**: `.is('deleted_at', null)` と limit を機械付与。upsert は使わない。更新は rev 照合。
 通信失敗は既存の永続キューへ退避（`enqueue`）。**新 API も必ずこの経路に乗せる**。
+自然キー（部分unique索引）を持たない insert には端末生成の冪等キー `client_key` を必ず付ける
+（notes / fluid_intake / outings ＋ **定時以外のバイタル**）。
+
+**前提マイグレーション**: `0003_sheet_ui.sql` → `0004_vitals_client_key.sql`（vitals.client_key）
+→ `0005_meals_sheet_fluids.sql`（RPC meals_sheet_fluids）の順で適用済みであること。
+未適用のまま動かすと、定時以外のバイタルの保存と食事一覧の読み込みが失敗する。
 
 ---
 
@@ -137,7 +165,16 @@ CollapsibleBlock({ title, count, children, onAdd, addLabel, defaultOpen? })
 
 - `SheetCell` は **セル自体がボタン**（tabIndex）で、クリック/Enter で入力に切り替わる。
 - 入力中は `input`/`textarea` をその場に描画。確定で `onCommit(value)`、Esc で破棄。
-- **タップ領域**: セルの高さは 22px でスプシと同じだが、`SheetCell` は擬似要素で**縦の当たり判定を44px**へ広げる（`TimelinePage` の `NAME_HIT` と同じ手法）。行が詰まっていて広げられない場合は、`title` 属性ではなく `aria-label` で読み上げを担保する。
+- **タップ領域（2026-08-28 実装時に裁定を確定）**: セルの高さは 22px でスプシと同じ。`SheetCell` は擬似要素で
+  縦の当たり判定を**下方向にだけ**広げる（`TimelinePage` の `NAME_HIT` と同じ手法）。上へ広げないのは、
+  上方向の拡張がツリー順で前の行の操作を奪い「押した行の1つ上が反応する」取り違えを生むため。
+  - **22px ピッチの連続行に全行 44px を配ることは幾何学的に不可能**（総面積が2倍要る＝必ず隣の行から奪う）。
+    したがって実効 44px になるのは「直下に操作対象が無い場所」（表・ブロックの最終行など）に限られる。
+  - 詰まった行で 44px が要る場面は、**表示倍率 200%**（行高 22px × 2 = 44px）で満たす。既定は 100%（スプシ完全一致）。
+    介護現場要件（タップ44px）は「その密度を選べること」で満たし、密度そのものは職員が選ぶ。
+  - `overflow: hidden`（Tailwind の `truncate`）を当たり判定を持つボタン自身に付けない。`::before` が切り取られて拡張が死ぬ。
+    省略は内側の span に持たせる。
+  - 行が詰まっていて広げられない場合は、`title` 属性ではなく `aria-label` で読み上げを担保する。
 - しきい値の色は `level` を渡すと `LEVEL_MARK` の記号を自動で併記する。
 
 ---
@@ -166,6 +203,7 @@ CollapsibleBlock({ title, count, children, onAdd, addLabel, defaultOpen? })
 - 行の色: 行頭の小さな色ボタン（`ColorPicker`）。既定は色なし。**予定を書くならピンク、全体連絡なら黄**を候補の先頭に置く
 - 「＋追加」で空行を1行足す（**保存は本文が入った時点**。空行は送信しない＝空データを作らない）
 - 発熱者・他症状者は `vitals`（kind='observation' / 'symptom'）に保存する。**同じ人の同じ日を複数行**書ける
+  （＝自然キーが無いので、insert には冪等キー `client_key` を付ける。§3 の `insertVitalKind` を参照）
 - 既読・重要度・職種タグは行の右端に小さく置く（スプシには無いが既存機能を殺さないため）
 
 ---
@@ -204,7 +242,8 @@ CollapsibleBlock({ title, count, children, onAdd, addLabel, defaultOpen? })
 
 - 主食・副食は 0〜10 の直接入力（セルをタップ→数字キーパッドは出さず、その場で数値入力。既存の一括画面がキーパッド担当）
 - 欠食は `status`（外出/入院/拒食）を選ぶと 2セットにまたがって「外出」等を表示（スプシと同じ見せ方）
-- **水分は日合計の列を1つ足す**（スプシには無い新設項目。タップで内訳と加算チップ）
+- **水分は日合計の列を1つ足す**（スプシには無い新設項目。タップで内訳と加算チップ）。
+  取得は1名1日にまとめた形（§3 `fetchMealsSheet`）。既定11日でも取得行数は 人数 × 日数 に収まる
 - 朝＝赤系文字・昼＝緑系文字・夕＝通常（スプシの色分けを踏襲。**記号ではなく列見出しで区別がつくので色は補助**）
 - 低摂取（`isLowIntake`）は淡い背景＋「▲」
 

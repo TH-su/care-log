@@ -5,9 +5,14 @@
  *   ①接続未設定ゲート（VITE_SUPABASE_URL / ANON_KEY が無くても白画面にしない）
  *   ②認証ゲート（useAuth: 未ready=ローディング／未ログイン=/login）
  *   ③入力解禁フラグ（getNativeInputEnabled を起動時と記録画面に入るたび取り直し、既知値として各画面へ渡す。
- *     封鎖中の理由文とディセーブル表示は各記録画面が自前で持つので、ここでは重ねない）
+ *     封鎖中の理由文とディセーブル表示は各記録画面が自前で持つので、ここでは重ねない。
+ *     ここで渡せるのは値だけで「観測できたか」は渡せない＝取得に失敗した時も false を渡す。
+ *     そのため**セル直接編集を持つ一覧（日報・バイタル・食事）は自前で getNativeInputGate を呼び直し**、
+ *     「封鎖」と「観測できなかった（通信エラー）」を自分で区別する。この prop は初期値として使う）
  *   ④操作者ゲート（resolveActor 失敗 or shouldReconfirm で StaffPickerModal）
- *   ⑤シェル（スティッキーヘッダ＝画面名・未送信n件・操作者チップ／タブ＝<1024px下部・≥1024px左レール）
+ *   ⑤シェル（スティッキーヘッダ＝画面名・未送信n件・操作者チップ／
+ *     タブ＝<1024px下部5つ・≥1024px左レール8つ。sheet-contracts.md §2）
+ *     ※表示倍率（ZoomBar）は各シート画面の操作バーが1つだけ持つ（二重表示にしない）
  *
  * 読み込み方式について:
  *   src/lib/supabase.ts は createClient() を module scope で実行するため、接続未設定だと
@@ -18,9 +23,12 @@
  */
 import { Component, lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+// スプシ模倣UIの寸法変数（--sheet-*）。本来は main.tsx / index.css で読むのが筋だが、
+// main.tsx が変更禁止のため暫定でここから読み込む（index.css への移設は積み残し）。
+import './styles/sheet.css'
 import {
   HashRouter,
-  NavLink,
+  Link,
   Navigate,
   Route,
   Routes,
@@ -46,9 +54,23 @@ type Deps = {
   db: typeof import('./lib/db')
   actor: typeof import('./lib/actor')
   ui: typeof import('./components/ui')
+  sheet: typeof import('./components/sheet')
   useAuth: (typeof import('./hooks/useAuth'))['useAuth']
 }
 
+// スプシ模倣の一覧（sheet-contracts.md §2）
+const DailySheetPage = lazy(() =>
+  import('./pages/DailySheetPage').then((m) => ({ default: m.DailySheetPage })),
+)
+const VitalsSheetPage = lazy(() =>
+  import('./pages/VitalsSheetPage').then((m) => ({ default: m.VitalsSheetPage })),
+)
+const MealsSheetPage = lazy(() =>
+  import('./pages/MealsSheetPage').then((m) => ({ default: m.MealsSheetPage })),
+)
+const MorePage = lazy(() => import('./pages/MorePage').then((m) => ({ default: m.MorePage })))
+
+// 既存画面（1つも削除しない。TimelinePage は中身を変えずパスだけ /timeline へ移す）
 const TimelinePage = lazy(() => import('./pages/TimelinePage').then((m) => ({ default: m.TimelinePage })))
 const RecordHubPage = lazy(() => import('./pages/RecordHubPage').then((m) => ({ default: m.RecordHubPage })))
 const VitalsGridPage = lazy(() => import('./pages/VitalsGridPage').then((m) => ({ default: m.VitalsGridPage })))
@@ -64,10 +86,27 @@ const NotConfiguredPage = lazy(() =>
 )
 
 // ── UI状態の復元（dev-principles 原則11: 既知値のホワイトリスト照合）──
-const VIEWS = ['timeline', 'record', 'karte', 'search', 'settings'] as const
+// 既定（不正値・未知値のフォールバック先）は日報シート。
+// 'timeline' は既知値のまま残す＝この改修前に保存された値でも /timeline へ正しく復元される
+const VIEWS = [
+  'daily',
+  'vitalsSheet',
+  'mealsSheet',
+  'more',
+  'timeline',
+  'record',
+  'karte',
+  'search',
+  'settings',
+] as const
 type View = (typeof VIEWS)[number]
+const DEFAULT_VIEW: View = 'daily'
 const VIEW_PATH: Record<View, string> = {
-  timeline: '/',
+  daily: '/',
+  vitalsSheet: '/sheet/vitals',
+  mealsSheet: '/sheet/meals',
+  more: '/more',
+  timeline: '/timeline',
   record: '/record',
   karte: '/karte',
   search: '/search',
@@ -93,7 +132,11 @@ function writeView(v: View): void {
 
 /** URL のパスから「どのタブにいるか」を判定する。未知のパスは null */
 function viewOf(pathname: string): View | null {
-  if (pathname === '/') return 'timeline'
+  if (pathname === '/') return 'daily'
+  if (pathname === '/sheet/vitals') return 'vitalsSheet'
+  if (pathname === '/sheet/meals') return 'mealsSheet'
+  if (pathname === '/more') return 'more'
+  if (pathname === '/timeline') return 'timeline'
   if (pathname === '/record' || pathname.startsWith('/record/')) return 'record'
   if (pathname === '/karte' || pathname.startsWith('/karte/')) return 'karte'
   if (pathname === '/search') return 'search'
@@ -120,17 +163,59 @@ function applyStoredMode(): void {
 }
 if (typeof window !== 'undefined') applyStoredMode()
 
-// ── ナビゲーション定義（5タブ・位置は画面間で一貫）─────────────────
+// ── ナビゲーション定義（sheet-contracts.md §2・位置は画面間で一貫）───
+// <1024px: 下部タブ5つ。入りきらない画面は「その他」（MorePage）から入る
+// ≥1024px: 左レール8つ。幅に余裕があるので全画面を直接出す
 type IconName = View
-const NAV: { view: View; to: string; label: string }[] = [
-  { view: 'timeline', to: '/', label: 'タイムライン' },
-  { view: 'record', to: '/record', label: '記録' },
+type NavItem = { view: View; to: string; label: string }
+
+const NAV_BOTTOM: NavItem[] = [
+  { view: 'daily', to: '/', label: '日報' },
+  { view: 'vitalsSheet', to: '/sheet/vitals', label: 'バイタル' },
+  { view: 'mealsSheet', to: '/sheet/meals', label: '食事' },
+  { view: 'karte', to: '/karte', label: 'カルテ' },
+  { view: 'more', to: '/more', label: 'その他' },
+]
+
+const NAV_RAIL: NavItem[] = [
+  { view: 'daily', to: '/', label: '日報' },
+  { view: 'vitalsSheet', to: '/sheet/vitals', label: 'バイタル' },
+  { view: 'mealsSheet', to: '/sheet/meals', label: '食事' },
   { view: 'karte', to: '/karte', label: 'カルテ' },
   { view: 'search', to: '/search', label: '検索' },
+  { view: 'timeline', to: '/timeline', label: 'タイムライン' },
+  { view: 'record', to: '/record', label: '記録' },
   { view: 'settings', to: '/settings', label: '設定' },
 ]
 
+// 下部タブに枠が無い画面は「その他」の配下扱いにして、現在地の表示が消えないようにする
+const MORE_VIEWS: View[] = ['more', 'timeline', 'record', 'search', 'settings']
+
 const ICON_PATHS: Record<IconName, ReactNode> = {
+  daily: (
+    <>
+      <path d="M6 3h9l3 3v15H6z" />
+      <path d="M9 9h6M9 13h6M9 17h4" />
+    </>
+  ),
+  vitalsSheet: (
+    <>
+      <path d="M3 12h3.5l2-5 3 10 2.5-6 1.5 3H21" />
+    </>
+  ),
+  mealsSheet: (
+    <>
+      <path d="M3.5 11h17c0 4.4-3.8 8-8.5 8s-8.5-3.6-8.5-8z" />
+      <path d="M8 7.5c0-1 1-1.5 1-2.5M12 7c0-1.2 1-1.8 1-3M16 7.5c0-1 1-1.5 1-2.5" />
+    </>
+  ),
+  more: (
+    <>
+      <circle cx="5" cy="12" r="1.5" />
+      <circle cx="12" cy="12" r="1.5" />
+      <circle cx="19" cy="12" r="1.5" />
+    </>
+  ),
   timeline: (
     <>
       <circle cx="5" cy="6" r="1.5" />
@@ -187,9 +272,19 @@ function NavIcon({ name }: { name: IconName }) {
   )
 }
 
+/** スプシ模倣の一覧（セル直接編集を持つ＝入力解禁フラグを取り直す画面） */
+const SHEET_PATHS = ['/', '/sheet/vitals', '/sheet/meals']
+function isSheetPath(pathname: string): boolean {
+  return SHEET_PATHS.includes(pathname)
+}
+
 /** ヘッダに出す画面名 */
 function screenTitle(pathname: string): string {
-  if (pathname === '/') return 'タイムライン'
+  if (pathname === '/') return '日報'
+  if (pathname === '/sheet/vitals') return 'バイタル一覧'
+  if (pathname === '/sheet/meals') return '食事一覧'
+  if (pathname === '/more') return 'その他'
+  if (pathname === '/timeline') return 'タイムライン'
   if (pathname === '/record') return '記録'
   if (pathname === '/record/vitals') return 'バイタル一括'
   if (pathname === '/record/meals') return '食事・水分'
@@ -337,6 +432,7 @@ type PickerMode = 'none' | 'required' | 'reconfirm' | 'switch'
 
 // ── ログイン後のシェル（封鎖フラグ → 操作者ゲート → タブ／ルート）──
 function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
+  // sheet モジュールは deps で先読みするだけ（部品は各ページが直接 import する）
   const { db, actor, ui } = deps
   const location = useLocation()
   const navigate = useNavigate()
@@ -351,7 +447,12 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
   const [pending, setPending] = useState(0)
   const restoredRef = useRef(false)
 
-  const isRecord = location.pathname === '/record' || location.pathname.startsWith('/record/')
+  // 入力を受け付ける画面（＝入力解禁フラグを入るたび取り直す対象）。
+  // 既存の /record 系に加え、セル直接編集を持つ一覧（日報・バイタル・食事）も含める
+  const isEditScreen =
+    location.pathname === '/record' ||
+    location.pathname.startsWith('/record/') ||
+    isSheetPath(location.pathname)
 
   // 未送信キュー件数（ヘッダの「⚠ 未送信n件」）
   useEffect(() => {
@@ -411,8 +512,11 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
     }
   }, [db, actor, reload])
 
-  // 入力解禁フラグ: 起動時と、記録画面に入るたびに取り直す（前提情報は毎回実測する）
-  const flagKey = isRecord ? location.pathname : 'view'
+  // 入力解禁フラグ: 起動時と、入力画面に入るたびに取り直す（前提情報は毎回実測する）。
+  // 取得できなかった時も false（封鎖側）を渡すため、この値だけでは
+  // 「スプシ期間」と「通信エラー」を区別できない。区別が要る画面は自前で
+  // getNativeInputGate を呼ぶ（日報・バイタル・食事の各一覧／記録ハブ／その他）
+  const flagKey = isEditScreen ? location.pathname : 'view'
   useEffect(() => {
     let alive = true
     void (async () => {
@@ -437,7 +541,8 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
     restoredRef.current = true
     if (!OPENED_BARE) return
     if (location.pathname !== '/') return
-    if (!STORED_VIEW || STORED_VIEW === 'timeline') return
+    // 未保存・不正値・既定（日報）はそのまま '/' ＝ DailySheetPage
+    if (!STORED_VIEW || STORED_VIEW === DEFAULT_VIEW) return
     navigate(VIEW_PATH[STORED_VIEW], { replace: true })
   }, [location.pathname])
 
@@ -501,6 +606,7 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
 
   const actorName = staff.find((s) => s.id === actorId)?.name ?? null
   const back = backTarget(location.pathname)
+  const currentView = viewOf(location.pathname)
   const pickerTitle =
     picker === 'required'
       ? '記録する職員を選んでください'
@@ -526,6 +632,9 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
             </button>
           )}
           <h1 className="min-w-tap flex-1 truncate text-lg font-bold">{screenTitle(location.pathname)}</h1>
+          {/* 表示倍率（100/125/150%）は各シート画面の操作バー側に1つだけ置く
+              （契約 §5〜§7）。ヘッダにも出すと ZoomBar が同一画面に2つ並び、
+              片方で切り替えても他方は選択表示が変わらず「現在の倍率」が食い違うため */}
           <span role="status">
             {pending > 0 && <ui.Chip tone="warn">{`⚠ 未送信 ${pending}件`}</ui.Chip>}
           </span>
@@ -571,8 +680,23 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
           }
         >
           <Routes>
+            {/* スプシ模倣の一覧（既定は日報シート） */}
             <Route
               path="/"
+              element={<DailySheetPage actorId={actorId} staff={staff} inputEnabled={inputEnabled} />}
+            />
+            <Route
+              path="/sheet/vitals"
+              element={<VitalsSheetPage actorId={actorId} inputEnabled={inputEnabled} />}
+            />
+            <Route
+              path="/sheet/meals"
+              element={<MealsSheetPage actorId={actorId} inputEnabled={inputEnabled} />}
+            />
+            <Route path="/more" element={<MorePage inputEnabled={inputEnabled} />} />
+            {/* 既存タイムライン（中身は変更なし・パスのみ移設） */}
+            <Route
+              path="/timeline"
               element={<TimelinePage actorId={actorId} staff={staff} nativeInputEnabled={inputEnabled} />}
             />
             <Route path="/record" element={<RecordHubPage inputEnabled={inputEnabled} />} />
@@ -599,53 +723,60 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
         </Suspense>
       </main>
 
-      {/* <1024px: 下部タブ（親指圏） */}
+      {/* <1024px: 下部タブ5つ（親指圏） */}
       <nav
         aria-label="メインナビゲーション"
         className="fixed inset-x-0 bottom-0 z-20 border-t border-border bg-surface lg:hidden"
         style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
       >
         <ul className="grid grid-cols-5">
-          {NAV.map((item) => (
-            <li key={item.view}>
-              <NavLink
-                to={item.to}
-                end={item.to === '/'}
-                className={({ isActive }) =>
-                  `flex h-14 min-h-tap flex-col items-center justify-center gap-1 border-t-2 ${
-                    isActive ? 'border-primary font-bold text-primary' : 'border-transparent text-ink2'
-                  }`
-                }
-              >
-                <NavIcon name={item.view} />
-                {/* 幅の狭い端末でも隣の項目に重ならないよう、はみ出す時だけ省略する */}
-                <span className="w-full truncate text-center text-2xs leading-tight">{item.label}</span>
-              </NavLink>
-            </li>
-          ))}
+          {NAV_BOTTOM.map((item) => {
+            // 下部タブに枠が無い画面（検索・タイムライン・記録・設定）にいる間は「その他」を現在地にする
+            const active =
+              item.view === currentView ||
+              (item.view === 'more' && currentView != null && MORE_VIEWS.includes(currentView))
+            return (
+              <li key={item.view}>
+                {/* NavLink ではなく Link ＋ 自前判定にしている。NavLink は自分の URL 一致でしか
+                    aria-current を付けられず、「その他」配下（検索等）で読み上げと見た目がずれるため */}
+                <Link
+                  to={item.to}
+                  aria-current={active ? 'page' : undefined}
+                  className={`flex h-14 min-h-tap flex-col items-center justify-center gap-1 border-t-2 ${
+                    active ? 'border-primary font-bold text-primary' : 'border-transparent text-ink2'
+                  }`}
+                >
+                  <NavIcon name={item.view} />
+                  {/* 幅の狭い端末でも隣の項目に重ならないよう、はみ出す時だけ省略する */}
+                  <span className="w-full truncate text-center text-2xs leading-tight">{item.label}</span>
+                </Link>
+              </li>
+            )
+          })}
         </ul>
       </nav>
 
-      {/* ≥1024px: 左レール（同じ5項目・順序も同一） */}
+      {/* ≥1024px: 左レール8つ（順序は下部タブと同じ並びで始める）。
+          縦に入りきらない画面高でも全項目へ届くようスクロールさせる */}
       <nav
         aria-label="メインナビゲーション"
-        className="fixed inset-y-0 left-0 z-30 hidden w-24 flex-col gap-gap border-r border-border bg-surface pt-4 lg:flex"
+        className="fixed inset-y-0 left-0 z-30 hidden w-24 flex-col gap-gap overflow-y-auto border-r border-border bg-surface pt-4 lg:flex"
       >
-        {NAV.map((item) => (
-          <NavLink
+        {NAV_RAIL.map((item) => (
+          <Link
             key={item.view}
             to={item.to}
-            end={item.to === '/'}
-            className={({ isActive }) =>
-              `flex h-14 min-h-tap flex-col items-center justify-center gap-1 border-l-2 ${
-                isActive ? 'border-primary font-bold text-primary' : 'border-transparent text-ink2'
-              }`
-            }
+            aria-current={item.view === currentView ? 'page' : undefined}
+            className={`flex h-14 min-h-tap shrink-0 flex-col items-center justify-center gap-1 border-l-2 ${
+              item.view === currentView
+                ? 'border-primary font-bold text-primary'
+                : 'border-transparent text-ink2'
+            }`}
           >
             <NavIcon name={item.view} />
             {/* 幅の狭い端末でも隣の項目に重ならないよう、はみ出す時だけ省略する */}
             <span className="w-full truncate text-center text-2xs leading-tight">{item.label}</span>
-          </NavLink>
+          </Link>
         ))}
       </nav>
 
@@ -666,13 +797,14 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
 
 // supabase 依存モジュールをまとめて遅延読込し、解決後にシェルへ渡す
 const AppRoot = lazy(async () => {
-  const [db, actor, ui, auth] = await Promise.all([
+  const [db, actor, ui, sheet, auth] = await Promise.all([
     import('./lib/db'),
     import('./lib/actor'),
     import('./components/ui'),
+    import('./components/sheet'),
     import('./hooks/useAuth'),
   ])
-  const deps: Deps = { db, actor, ui, useAuth: auth.useAuth }
+  const deps: Deps = { db, actor, ui, sheet, useAuth: auth.useAuth }
   return { default: () => <Shell deps={deps} /> }
 })
 

@@ -1,0 +1,623 @@
+/* ══════════════════════════════════════════════════════════════
+   スプレッドシート模倣UI — 寸法・色の変数とシート表の基本スタイル
+
+   正本: docs/design/sheet-contracts.md §1（2026-08-28 実測値）
+   色  : src/styles/tokens.css のトークンのみを使う（生の色コードは書かない）。
+         ダークモードはトークン側が data-mode で追従するため、ここでは定義しない。
+
+   ▼ 読み込み方
+     main.tsx は変更禁止ファイルのため、このファイルは App.tsx が
+     import './styles/sheet.css' で読み込む（確認済み）。
+
+   ▼ 倍率
+     ZoomBar が --sheet-zoom を 1 / 1.25 / 1.5 のいずれかに書き換える
+     （LS.zoom の 100/125/150 を 100 で割った値。既知値以外は 1 へフォールバックすること）。
+     **書き換え先は document.documentElement だけ**（sheet.tsx の applyZoom）。
+     下の「.sheet-frame」側の算出は、この class を付けた枠を作った場合に備えた予備であって、
+     現状 SheetFrame は付けていない＝フレームに直接 --sheet-zoom を設定する経路は無い。
+     **契約名（--sheet-font・--sheet-row-h・--w-* 等）は倍率適用済みの値**なので、
+     利用側は var(--w-room) をそのまま width に当ててよい。素の実測値が要るときだけ
+     --*-base を見る。
+
+   ▼ 実装上の裁定（レビュー用に明記）
+     1) 実測 px を rem 換算で持つ（13px = 0.8125rem 等）。既定ルート16pxで実測値と厳密に一致し、
+        かつ端末・ブラウザの文字サイズ設定に追従する（デザインシステムの px 直書き禁止・rem基準）。
+        罫線の 1px だけは実測どおり px（ヘアラインは拡大しない）。
+     2) セル内の左右余白は 2px 相当のみ確保する（--sheet-cell-pad）。完全な 0 にすると
+        文字が罫線に接して読めなくなるため。上下余白は 0（スプシの密度を再現）。
+     3) 縦の当たり判定 44px 化（.sheet-hit）は **下方向にだけ** 広げる（2026-08-28 改）。
+        上下へ半分ずつ広げると隣接行とヒットが 22px 重なり、後から描かれる下の行の拡張が
+        上の行の見えている範囲を奪う＝「見えている行を押すと1つ下の行が反応する」
+        （記録の取り違え）になるため、上方向へは広げない。
+        下方向だけなら **同じ z-index の位置指定要素はツリー順で後勝ち** になるので、
+        下に来る操作対象（次の行のセル）が必ず自分の箱で拡張を上書きする＝取り違えが起きない。
+        この「後勝ち」を読み取り専用セルにも効かせるため、SheetCell の入れ物（td / div）には
+        position: relative を付けている（sheet.tsx）。
+        ただし **行が縦に詰まっている部分の実効タップ高は行高のまま**（100%で22px）で、
+        44px に届くのは「下に操作対象が無い場所」＝表・ブロックの最終行、ブロック末尾の
+        ボタンなどに限られる。22px ピッチの全行へ 44px を配ると必ず隣の行から奪うので
+        原理的に不可能で、密な行の操作しやすさは ZoomBar（125/150%）と aria-label で担保する
+        （sheet-contracts §4 の「行が詰まっていて広げられない場合」の分岐）。
+        拡張量の裁定は --sheet-hit-pad の1か所だけで決める（TSX 側に px を直書きしない）。
+
+   ▼ このファイルと TSX の分担（2026-08-28 レビュー指摘の裁定）
+     見た目（sticky 左固定・見出しの上固定・背景色・行の色）は **各ページの Tailwind が正本**。
+     このファイルが実際に当たっているのは
+       ・:root の寸法変数（--sheet-font / --sheet-row-h / --w-* / --sheet-zoom）
+       ・.sheet-table（表の組み方＝table-layout: fixed ＋ border-collapse: separate ＋ 当たり判定 0）
+       ・.sheet-dense（div で組んだ密な行の目印）
+       ・.sheet-hit（当たり判定を下方向へ拡張。裁定3のとおり上へは広げない）
+       ・.sheet-frame-fit（枠の高さ上限＝画面高 − 実測の上下UI。sheet.tsx が実測値を書き戻す）
+       ・.sheet-mark（しきい値・低摂取の記号を半角幅で描く）
+       ・.sheet-group-end（日付グループの最後の列の右罫線を濃くする＝日の切れ目）
+     の6つ。それ以外の class 規則（.sheet-frame / .sheet-cell / .sheet-row-* / .sheet-fix-* /
+     .sheet-table-meals / .sheet-swatch 等）は
+     **参照用の見本であって適用されていない**。寸法・色を変えるときはページ側の Tailwind を直す。
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── §1 実測値（100% 表示時の基準）──────────────────────
+   ここは倍率を掛ける前の素の値。画面には直接当てず、下の「契約名」を使う。 */
+:root {
+  --sheet-font-base: 0.8125rem; /* 13px  スプシ 10〜11pt 相当 */
+  --sheet-row-h-base: 1.375rem; /* 22px  バイタル・食事の1行 */
+  --sheet-row-h-note-base: 1.4375rem; /* 23px  申し送りの1行（長文は伸びる） */
+  --sheet-head-h-base: 1.5rem; /* 24px  見出し行 */
+
+  /* 列幅（バイタル） */
+  --w-room-base: 3.75rem; /* 60px */
+  --w-name-base: 6.875rem; /* 110px */
+  --w-temp-base: 3.75rem; /* 60px */
+  --w-sys-base: 3.75rem; /* 60px */
+  --w-dia-base: 3.75rem; /* 60px */
+  --w-pulse-base: 3.125rem; /* 50px */
+  --w-spo2-base: 4.0625rem; /* 65px */
+
+  /* 列幅（食事） */
+  --w-room-m-base: 4.25rem; /* 68px */
+  --w-name-m-base: 7.375rem; /* 118px */
+  --w-meal-base: 1.875rem; /* 30px  主食・副食それぞれ */
+
+  /* 列幅（申し送り） */
+  --w-datelink-base: 7.3125rem; /* 117px */
+  --w-target-base: 8.625rem; /* 138px */
+  --w-reporter-base: 3.75rem; /* 60px */
+
+  /* セル内の左右余白（上下は 0） */
+  --sheet-cell-pad-base: 0.125rem; /* 2px */
+
+  /* 罫線（実測どおり 1px 固定。倍率を掛けない） */
+  --sheet-rule: 1px;
+
+  /* 表示倍率の既定。ZoomBar が documentElement に書き換える */
+  --sheet-zoom: 1;
+}
+
+/* ── 画面に当てる値（実測値 × 倍率）─────────────────────
+   名前は sheet-contracts §1 のとおり。**倍率はここで解決済み**なので、
+   利用側は var(--sheet-font) / var(--w-room) 等をそのまま当ててよい
+   （sheet.tsx・VitalsSheetPage・MealsSheetPage がこの前提で書かれている）。
+
+   :root と .sheet-frame の両方で算出する。カスタムプロパティの var() は
+   宣言された要素で解決されるため、両方に書かないと
+   「フレームに --sheet-zoom を直接指定した場合」に再計算されない。 */
+:root,
+.sheet-frame {
+  --sheet-font: calc(var(--sheet-font-base) * var(--sheet-zoom, 1));
+  --sheet-row-h: calc(var(--sheet-row-h-base) * var(--sheet-zoom, 1));
+  --sheet-row-h-note: calc(var(--sheet-row-h-note-base) * var(--sheet-zoom, 1));
+  --sheet-head-h: calc(var(--sheet-head-h-base) * var(--sheet-zoom, 1));
+  --sheet-cell-pad: calc(var(--sheet-cell-pad-base) * var(--sheet-zoom, 1));
+
+  --w-room: calc(var(--w-room-base) * var(--sheet-zoom, 1));
+  --w-name: calc(var(--w-name-base) * var(--sheet-zoom, 1));
+  --w-temp: calc(var(--w-temp-base) * var(--sheet-zoom, 1));
+  --w-sys: calc(var(--w-sys-base) * var(--sheet-zoom, 1));
+  --w-dia: calc(var(--w-dia-base) * var(--sheet-zoom, 1));
+  --w-pulse: calc(var(--w-pulse-base) * var(--sheet-zoom, 1));
+  --w-spo2: calc(var(--w-spo2-base) * var(--sheet-zoom, 1));
+
+  --w-room-m: calc(var(--w-room-m-base) * var(--sheet-zoom, 1));
+  --w-name-m: calc(var(--w-name-m-base) * var(--sheet-zoom, 1));
+  --w-meal: calc(var(--w-meal-base) * var(--sheet-zoom, 1));
+
+  --w-datelink: calc(var(--w-datelink-base) * var(--sheet-zoom, 1));
+  --w-target: calc(var(--w-target-base) * var(--sheet-zoom, 1));
+  --w-reporter: calc(var(--w-reporter-base) * var(--sheet-zoom, 1));
+
+  /* 別名（このファイルの class 群が使う。上の契約名と同じ値） */
+  --sheet-fs: var(--sheet-font);
+  --sheet-row: var(--sheet-row-h);
+  --sheet-row-note: var(--sheet-row-h-note);
+  --sheet-head: var(--sheet-head-h);
+  --sheet-pad: var(--sheet-cell-pad);
+  --sheet-w-room: var(--w-room);
+  --sheet-w-name: var(--w-name);
+  --sheet-w-temp: var(--w-temp);
+  --sheet-w-sys: var(--w-sys);
+  --sheet-w-dia: var(--w-dia);
+  --sheet-w-pulse: var(--w-pulse);
+  --sheet-w-spo2: var(--w-spo2);
+  --sheet-w-room-m: var(--w-room-m);
+  --sheet-w-name-m: var(--w-name-m);
+  --sheet-w-meal: var(--w-meal);
+  --sheet-w-datelink: var(--w-datelink);
+  --sheet-w-target: var(--w-target);
+  --sheet-w-reporter: var(--w-reporter);
+
+  /* 左固定2列目（氏名）の左位置。既定はバイタル幅、食事表は .sheet-table-meals で差し替える */
+  --sheet-fix2-left: var(--sheet-w-room);
+
+  /* 当たり判定の縦拡張量（**下方向だけ**に足す量。ファイル冒頭の裁定3）。
+     行高が 44px に足りない分をそのまま下へ伸ばす＝行高 + 拡張量 = 44px。
+     上へ広げないので、ツリー順で後に来る操作対象（下の行）が必ず勝つ
+     ＝隣接行の取り違えが起きない。 */
+  --sheet-hit-pad: max(0px, calc(var(--tap-min) - var(--sheet-row)));
+
+  /* シート枠（.sheet-frame-fit）の高さ上限を出すための実測値。
+     上限を付けないと表の高さぶん枠が伸び、枠ごと画面外へ出て上固定の見出しが消える。
+     固定値（旧 --sheet-chrome: 12rem）では画面ごとの上部UIの高さと合わず、
+     食事一覧（操作バーが高い）で枠が画面外へはみ出していた（2026-08-28 レビュー指摘1）。
+     そこで **SheetFrame（sheet.tsx）が枠の実際の位置を測って px で書き戻す**：
+       --sheet-frame-top   … ページ最上部から枠の上端まで（固定ヘッダ＋各画面の操作バー）
+       --sheet-frame-below … 枠より下に積まれる高さ（main の下余白＝下部タブの逃げ など）
+     ここに書いてある値は実測が入るまでの暫定値（初回描画前に差し替わる）。 */
+  --sheet-frame-top: 12rem;
+  --sheet-frame-below: 6rem;
+  /* 上部UIが極端に高い狭幅端末でも枠が潰れないための下限（安全弁） */
+  --sheet-frame-min: 10rem;
+}
+
+/* 枠の高さ上限（見出しの上固定を画面内に留める）。
+   SheetFrame は overflow: auto を持つので、この上限を付けた枠は
+   「枠の中だけが縦にスクロールする」＝見出しが枠の上端に貼り付いたまま見え続ける。
+   ※ max-height を var() 1つにまとめない：dvh 非対応環境で計算が無効になったとき、
+     カスタムプロパティ経由だと前の宣言へ戻らず max-height: none になるため、
+     単位ごとに宣言を分けて @supports で切り替える。 */
+.sheet-frame-fit {
+  max-height: max(
+    var(--sheet-frame-min),
+    calc(100vh - var(--sheet-frame-top) - var(--sheet-frame-below))
+  );
+}
+@supports (height: 100dvh) {
+  /* モバイルの URL バー開閉に追従させる（100vh は最大高で固定＝下端が隠れる） */
+  .sheet-frame-fit {
+    max-height: max(
+      var(--sheet-frame-min),
+      calc(100dvh - var(--sheet-frame-top) - var(--sheet-frame-below))
+    );
+  }
+}
+
+/* ── 枠（横スクロールの担当。sticky の基準になるスクロール容器）── */
+.sheet-frame {
+  box-sizing: border-box;
+  overflow: auto;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+  background: var(--c-surface);
+  border: var(--sheet-rule) solid var(--c-border);
+  border-radius: var(--r-sm);
+}
+
+/* ── 表本体 ───────────────────────────────────────────
+   border-collapse: separate ＋ 各セルの右・下だけに罫線を引く。
+   collapse だと sticky セルの罫線が消える既知の不具合があるため。 */
+.sheet-table {
+  box-sizing: border-box;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+  width: max-content;
+  font-size: var(--sheet-fs);
+  line-height: var(--lh-tight);
+  font-variant-numeric: tabular-nums;
+  color: var(--c-ink);
+  /* 縦の当たり判定は上の「.sheet-table, .sheet-dense」で 0 に落としている */
+}
+
+/* 申し送りのように本文列を伸ばす表（横方向は画面幅いっぱい） */
+.sheet-table-fluid {
+  width: 100%;
+}
+
+/* 食事表: 左固定2列目の位置を食事の居室幅に合わせる */
+.sheet-table-meals {
+  --sheet-fix2-left: var(--sheet-w-room-m);
+}
+
+/* ── 行 ─────────────────────────────────────────────
+   height は td にとっては最小値。内容が増えれば伸びる（申し送りの長文行） */
+.sheet-row {
+  height: var(--sheet-row);
+}
+.sheet-row-note {
+  height: var(--sheet-row-note);
+}
+
+/* 行の背景。行の色（NoteColor）はこの変数を差し替えて実現し、
+   左固定セルにも同じ色が乗るようにする */
+.sheet-row,
+.sheet-table {
+  --sheet-row-bg: var(--c-surface);
+}
+
+/* ── セル ───────────────────────────────────────────
+   余白は左右のみ最小限、上下 0。罫線は右・下の 1px。 */
+.sheet-cell {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0 var(--sheet-pad);
+  border-right: var(--sheet-rule) solid var(--c-border);
+  border-bottom: var(--sheet-rule) solid var(--c-border);
+  background: var(--sheet-cell-bg, var(--sheet-row-bg, var(--c-surface)));
+  vertical-align: middle;
+  text-align: start;
+  font-weight: var(--fw-normal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 申し送りの行は、本文が複数行に伸びても対象・記入者が本文1行目と揃うよう上寄せにする */
+.sheet-row-note > .sheet-cell {
+  vertical-align: top;
+  padding-block: calc(var(--sheet-pad) / 2);
+}
+
+/* 申し送り本文など、折り返して行が伸びるセル（clamp しない） */
+.sheet-cell-note {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: visible;
+  text-overflow: clip;
+  vertical-align: top;
+  padding-block: calc(var(--sheet-pad) / 2);
+}
+
+/* 見出し帯（--c-surface2 ＋ 下罫線）。上に固定する */
+.sheet-head-cell {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  height: var(--sheet-head);
+  --sheet-cell-bg: var(--c-surface2);
+  color: var(--c-ink);
+  font-weight: var(--fw-bold);
+  text-align: center;
+  border-bottom-color: var(--c-border-strong);
+}
+
+/* 見出しが2段（日付行＋項目行）のとき、2段目に付ける */
+.sheet-head-cell-2 {
+  top: var(--sheet-head);
+}
+
+/* ── 左固定列（居室・氏名）─────────────────────────── */
+.sheet-fix-1,
+.sheet-fix-2 {
+  position: sticky;
+  z-index: 2;
+}
+.sheet-fix-1 {
+  left: 0;
+}
+.sheet-fix-2 {
+  left: var(--sheet-fix2-left);
+  /* 固定列と日付列の境目をはっきりさせる（太さは 1px のまま濃い色にする） */
+  border-right-color: var(--c-border-strong);
+}
+/* 左固定 かつ 上固定 の角セルは最前面 */
+.sheet-head-cell.sheet-fix-1,
+.sheet-head-cell.sheet-fix-2 {
+  z-index: 4;
+}
+
+/* 日付グループの切れ目。各グループの「最後の列」に付ける
+   （最初の列に border-left を足すと右罫線と重なって 2px になるため） */
+.sheet-group-end {
+  border-right-color: var(--c-border-strong);
+}
+
+/* ── 列幅（実測値 × 倍率）───────────────────────────── */
+.sheet-w-room {
+  width: var(--sheet-w-room);
+  min-width: var(--sheet-w-room);
+  max-width: var(--sheet-w-room);
+}
+.sheet-w-name {
+  width: var(--sheet-w-name);
+  min-width: var(--sheet-w-name);
+  max-width: var(--sheet-w-name);
+}
+.sheet-w-temp {
+  width: var(--sheet-w-temp);
+  min-width: var(--sheet-w-temp);
+  max-width: var(--sheet-w-temp);
+}
+.sheet-w-sys {
+  width: var(--sheet-w-sys);
+  min-width: var(--sheet-w-sys);
+  max-width: var(--sheet-w-sys);
+}
+.sheet-w-dia {
+  width: var(--sheet-w-dia);
+  min-width: var(--sheet-w-dia);
+  max-width: var(--sheet-w-dia);
+}
+.sheet-w-pulse {
+  width: var(--sheet-w-pulse);
+  min-width: var(--sheet-w-pulse);
+  max-width: var(--sheet-w-pulse);
+}
+.sheet-w-spo2 {
+  width: var(--sheet-w-spo2);
+  min-width: var(--sheet-w-spo2);
+  max-width: var(--sheet-w-spo2);
+}
+.sheet-w-room-m {
+  width: var(--sheet-w-room-m);
+  min-width: var(--sheet-w-room-m);
+  max-width: var(--sheet-w-room-m);
+}
+.sheet-w-name-m {
+  width: var(--sheet-w-name-m);
+  min-width: var(--sheet-w-name-m);
+  max-width: var(--sheet-w-name-m);
+}
+.sheet-w-meal {
+  width: var(--sheet-w-meal);
+  min-width: var(--sheet-w-meal);
+  max-width: var(--sheet-w-meal);
+}
+.sheet-w-datelink {
+  width: var(--sheet-w-datelink);
+  min-width: var(--sheet-w-datelink);
+  max-width: var(--sheet-w-datelink);
+}
+.sheet-w-target {
+  width: var(--sheet-w-target);
+  min-width: var(--sheet-w-target);
+  max-width: var(--sheet-w-target);
+}
+.sheet-w-reporter {
+  width: var(--sheet-w-reporter);
+  min-width: var(--sheet-w-reporter);
+  max-width: var(--sheet-w-reporter);
+}
+/* 残り幅を吸う列（申し送りの本文列）。固有の実測値は無いため幅は指定しない */
+.sheet-col-grow {
+  width: 100%;
+  max-width: none;
+}
+
+/* ── 揃え・数字 ─────────────────────────────────────── */
+.sheet-l {
+  text-align: start;
+}
+.sheet-c {
+  text-align: center;
+}
+.sheet-r {
+  text-align: end;
+}
+.sheet-num {
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+/* ── 朝・昼・夕の文字色（スプシの色分けを踏襲）───────────
+   列見出しの文字でも区別が付くため、色はあくまで補助。 */
+.sheet-slot-breakfast {
+  color: var(--c-danger);
+}
+.sheet-slot-lunch {
+  color: var(--c-ok);
+}
+.sheet-slot-dinner {
+  color: var(--c-ink);
+}
+
+/* ── しきい値（types.ts の Level）───────────────────────
+   ui.tsx の LEVEL_STYLE と同じ割り当て。記号（↑↑ ↑ ↓ ↓↓）の併記は
+   描画側の責務（色だけで意味を伝えない）。 */
+.sheet-lv-danger-high {
+  --sheet-cell-bg: var(--c-danger-bg);
+  color: var(--c-danger);
+  font-weight: var(--fw-bold);
+}
+.sheet-lv-warn-high,
+.sheet-lv-warn-low {
+  --sheet-cell-bg: var(--c-warn-bg);
+  color: var(--c-warn);
+  font-weight: var(--fw-bold);
+}
+.sheet-lv-danger-low {
+  --sheet-cell-bg: var(--c-info-bg);
+  color: var(--c-info);
+  font-weight: var(--fw-bold);
+}
+/* しきい値・低摂取の記号（↑↑ ↑ ↓ ↓↓ ▲）を包む span に付ける。
+   和文フォントでは矢印が全角幅で描かれ、実測列幅（脈50px・主食30px 等）から
+   はみ出して記号だけが「…」で消える＝色だけの表示になってしまうため、
+   数字用フォント（--font-num・矢印が半角幅）で少し小さく描く。
+   実測: 脈「101↑↑」体温「38.4↑↑」主食「10▲」が 100%・125%・150% すべてで収まる。 */
+.sheet-mark {
+  font-family: var(--font-num);
+  font-size: 0.85em;
+  letter-spacing: -0.02em;
+}
+/* 記号を持つセルは数字側もわずかに詰めて余裕を作る（:has 非対応環境では何も起きない） */
+.sheet-cell:has(> .sheet-mark) {
+  letter-spacing: -0.02em;
+}
+
+/* 食事の低摂取（記号「▲」の併記は描画側） */
+.sheet-low-intake {
+  --sheet-cell-bg: var(--c-warn-bg);
+  color: var(--c-warn);
+  font-weight: var(--fw-bold);
+}
+/* 未測定・未記録の「—」 */
+.sheet-none {
+  color: var(--c-ink3);
+}
+
+/* ── 行の色（NoteColor）────────────────────────────────
+   意味は types.ts の NOTE_COLOR_LABEL（pink=予定 / yellow=全体連絡 /
+   blue=医療・受診 / green=完了・確認済み / orange=要注意）。
+   色だけで意味が伝わらないよう、ラベルの併記は描画側の責務。 */
+.sheet-table,
+.sheet-row {
+  --sheet-c-pink: var(--c-danger-bg);
+  --sheet-c-yellow: var(--c-warn-bg);
+  --sheet-c-blue: var(--c-info-bg);
+  --sheet-c-green: var(--c-ok-bg);
+  --sheet-c-orange: var(--c-accent-bg);
+}
+.sheet-row-pink {
+  --sheet-row-bg: var(--sheet-c-pink);
+}
+.sheet-row-yellow {
+  --sheet-row-bg: var(--sheet-c-yellow);
+}
+.sheet-row-blue {
+  --sheet-row-bg: var(--sheet-c-blue);
+}
+.sheet-row-green {
+  --sheet-row-bg: var(--sheet-c-green);
+}
+.sheet-row-orange {
+  --sheet-row-bg: var(--sheet-c-orange);
+}
+
+/* 色を選ぶボタンの見本（ColorPicker 用。生の色コードを書かせないために置く） */
+.sheet-swatch {
+  box-sizing: border-box;
+  display: inline-block;
+  width: var(--sp-5); /* 24px */
+  height: var(--sp-5);
+  border: var(--sheet-rule) solid var(--c-border-strong);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+}
+.sheet-swatch-pink {
+  background: var(--c-danger-bg);
+}
+.sheet-swatch-yellow {
+  background: var(--c-warn-bg);
+}
+.sheet-swatch-blue {
+  background: var(--c-info-bg);
+}
+.sheet-swatch-green {
+  background: var(--c-ok-bg);
+}
+.sheet-swatch-orange {
+  background: var(--c-accent-bg);
+}
+/* 選択中の見本（枠の太さでも分かるようにする＝色だけに頼らない） */
+.sheet-swatch-on {
+  border-color: var(--c-focus);
+  box-shadow: inset 0 0 0 2px var(--c-surface);
+}
+
+/* ── 編集できるセル ────────────────────────────────── */
+.sheet-cell-edit {
+  cursor: text;
+}
+.sheet-cell-edit:hover {
+  --sheet-cell-bg: var(--c-surface2);
+}
+/* フォーカスリングは消さない。ただし表の中は overflow:hidden で
+   トークン既定の box-shadow リングが切れるため、内側 outline に置き換える */
+.sheet-cell-edit:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: -2px;
+  box-shadow: none;
+}
+/* セル内に出すその場入力。行の高さと文字サイズをセルと完全に一致させる */
+.sheet-input {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: var(--c-surface);
+  color: var(--c-ink);
+  font: inherit;
+  line-height: inherit;
+  outline: 2px solid var(--c-focus);
+  outline-offset: -2px;
+}
+.sheet-input-note {
+  min-height: var(--sheet-row-note);
+  resize: vertical;
+  white-space: pre-wrap;
+}
+/* 入力封鎖中（native_input_enabled=false）。隠さずに読めるまま無効化する */
+.sheet-cell[aria-disabled='true'],
+.sheet-cell-edit[aria-disabled='true'] {
+  cursor: default;
+  color: var(--c-ink3);
+}
+.sheet-cell[aria-disabled='true']:hover {
+  --sheet-cell-bg: var(--sheet-row-bg, var(--c-surface));
+}
+
+/* ── 縦の当たり判定を 44px へ広げる（下方向のみ。冒頭の裁定3）────
+   SheetCell・ColorPicker・PickerCell はこのクラスを付けて呼ぶ＝拡張量の判断を
+   このファイルに預ける（TSX 側に before:-inset-y-3 のような px を書かない）。
+
+   ・上へ広げない: 上方向の拡張はツリー順で前に来る操作対象（上の行・ブロック見出し）を
+     奪ってしまう。下方向だけなら、後に来る位置指定要素が必ず上に描かれる＝
+     次の行のセルが自分の箱で拡張を上書きするので、押した行がそのまま反応する。
+   ・実効 44px になるのは下に操作対象が無い場所（各スタックの最終行・ブロック末尾）。
+     行が詰まっている部分は行高のまま（22px）＝ ZoomBar と aria-label で担保する。
+   ・このクラスを付ける要素に overflow: hidden（truncate）を当てないこと。
+     ::before の切り抜き元はその要素自身なので、はみ出した当たり判定が切り取られる
+     （SheetCell は truncate を内側の span へ移してこれを避けている）。 */
+.sheet-hit {
+  position: relative;
+}
+.sheet-hit::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: calc(-1 * var(--sheet-hit-pad));
+}
+
+/* ── 「↓16時以降の記録」区切り帯 ────────────────────────
+   スプシの黒帯。--c-ink / --c-bg はライト・ダークで反転するので
+   どちらのモードでも「地色と最大コントラストの帯」になる。 */
+.sheet-divider {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--c-ink);
+  color: var(--c-bg);
+  font-size: var(--sheet-fs);
+  font-weight: var(--fw-bold);
+  line-height: var(--lh-tight);
+  text-align: center;
+}
+
+/* ── ブロック見出し（外出者・外泊者・発熱者…）──────────── */
+.sheet-block-head {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: var(--tap-gap);
+  min-height: var(--tap-min);
+  padding: 0 var(--sp-2);
+  background: var(--c-surface2);
+  border-bottom: var(--sheet-rule) solid var(--c-border-strong);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-bold);
+  color: var(--c-ink);
+}

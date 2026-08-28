@@ -70,6 +70,7 @@ const VITAL_KIND_LABEL: Record<VitalKind, string> = {
   routine: '定時',
   recheck: '再検',
   observation: '経過観察',
+  symptom: '他症状',
 }
 
 /** 入力封鎖中（切替日D前）の理由文。ui-design.md §0.5 の定型文をそのまま使う */
