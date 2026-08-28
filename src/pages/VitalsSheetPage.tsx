@@ -5,8 +5,14 @@
 // - 操作バー: フロア(1階/2階/全) | 日数(1/4/7/11・既定4) | ‹ 期間 › | ZoomBar
 // - 表: 居室・入居者名の2列は sticky で左固定、見出し2行は sticky で上固定
 // - 1日 = 体温 / 血圧(上) / 血圧(下) / 脈 / SpO2 の5列。**新しい日が左**
-// - 各入居者の行の下に「再検」枠（kind='recheck'）。空行は常に1行だけ出し、
-//   入力されたら次の空行が生える
+// - 再検枠（kind='recheck'）は**既定では出さない**（2026-08-28 追加指示1）。
+//   氏名欄の右の「再検」ボタンを押すと、その入居者の直下に1本ずつ生える（画面内の状態・保存しない）。
+//   **記録がある入居者・日は隠さない**＝保存済みの本数＋空行1本を必ず出し、
+//   末尾の空行に入力されたら次の空行が生える（既存の挙動をそのまま維持する）
+// - 日付見出しは土曜＝濃い水色（.sheet-sat）・日曜＝赤（.sheet-sun）。曜日は日付文字
+//   （8/29（土））にも出るので色は補助（色だけで意味を伝えない）
+// - 行は1行おきに薄いグレー（.sheet-alt）。縞は**行（tr）が持ち**、しきい値の色は
+//   **セル（td）が持つ**ので、意味のある色が縞に負けない
 // - セル直接編集。確定値は normalizeVitalInput（「365」→36.5・全角→半角）を通す
 // - VITAL_RANGE 外はその日のインライン警告を出し、その項目は保存しない
 // - **空欄と「数字として読めない入力」は別物として扱う**。空欄だけが「消す意思」で、
@@ -61,11 +67,16 @@ type Field = 'temp' | 'sys_bp' | 'dia_bp' | 'pulse' | 'spo2'
 /** 1日ブロックの列の並び（契約 §6「体温 血圧(上) 血圧(下) 脈 SpO2」） */
 const FIELDS: Field[] = ['temp', 'sys_bp', 'dia_bp', 'pulse', 'spo2']
 
-/** 見出しの表記（スプシの見出しに合わせる。読み上げ用の正式名は FIELD_LABEL） */
+/**
+ * 見出しの表記。列幅を「値＋記号が収まる最小」まで詰めるため、血圧は「上」「下」と短くする
+ * （2026-08-28 指示「記入欄を狭くして1画面により多くの日を出す」）。
+ * 血圧の列であることは日付ブロックの並び（体温→上→下→脈→SpO2）と、
+ * 読み上げ用の正式名（FIELD_LABEL・sr-only）が担保する。
+ */
 const FIELD_HEAD: Record<Field, string> = {
   temp: '体温',
-  sys_bp: '血圧(上)',
-  dia_bp: '血圧(下)',
+  sys_bp: '上',
+  dia_bp: '下',
   pulse: '脈',
   spo2: 'SpO2',
 }
@@ -105,6 +116,16 @@ const CELL_BASE = 'border-b border-r border-border p-0 px-1 align-middle'
  * （色だけを当てる書き方は border-left-width が 0 のままで線にならない）。
  */
 const DAY_END = 'sheet-group-end'
+/**
+ * 1行おきの縞（sheet.css の .sheet-alt）。**行（tr）に当てる**。
+ * セルが背景を持つと縞が隠れるので、日付のセルは SheetCell の tone='row'（背景なし）で描き、
+ * 左固定の2列（居室・氏名）だけは縞と同じ不透明な背景を自分で持つ
+ * （sticky で他の列の上に重なるため、透明だと下の列が透けて読めなくなる）。
+ * しきい値の色は SheetCell が td 側に置くので、縞より上に来る＝意味のある色が負けない。
+ */
+const ROW_ALT = 'sheet-alt'
+/** 縞なしの行の地色（従来どおり面の色）。alt 行と同じ要素に両方は当てない */
+const ROW_PLAIN = 'bg-surface'
 const FIELD_DIGITS: Record<Field, number> = { temp: 1, sys_bp: 0, dia_bp: 0, pulse: 0, spo2: 0 }
 const LEVEL_FN: Record<Field, (v: number | null) => Level> = {
   temp: tempLevel,
@@ -153,6 +174,20 @@ function floorOf(room: string | null | undefined): string {
   if (!room) return FLOOR_OTHER
   const m = /\d/.exec(room)
   return m ? m[0] : FLOOR_OTHER
+}
+
+/**
+ * 日付見出しのセルに当てる色。土曜＝濃い水色・日曜＝赤（sheet.css の .sheet-sat / .sheet-sun）。
+ * 平日は従来どおり見出し帯の色。曜日は日付の文字（8/29（土））にも出ているので色は補助。
+ * format.ts は凍結契約で曜日を返す関数が無いため、ここで日付から取る
+ * （壊れた日付文字列では getDay() が NaN になり、どちらにも一致しない＝平日の見た目へ倒れる）。
+ */
+function dayHeadClass(iso: string): string {
+  const [y, m, d] = iso.split('-').map(Number)
+  const w = new Date(y, m - 1, d).getDay()
+  if (w === 6) return 'sheet-sat'
+  if (w === 0) return 'sheet-sun'
+  return 'bg-surface2 text-ink'
 }
 
 /** 居室の数値部分（昇順並べ替え用）。数字が無ければ null */
@@ -352,13 +387,24 @@ export function VitalsSheetPage({
   /** 入力できるかどうかを観測できなかった（通信エラー）。封鎖の理由文とは分けて案内する */
   const [gateUnknown, setGateUnknown] = useState(false)
   const [recs, setRecs] = useState<Map<string, Rec>>(() => new Map())
-  /** 入居者ごとに表示する再検の行数（最後の1本が常に空行） */
+  /**
+   * 入居者ごとに**画面に出している**再検の行数（0＝出さない）。
+   * 記録がある人は「保存済みの本数＋空行1本」、記録が無い人は「再検」ボタンを押した本数。
+   */
   const [recheckRows, setRecheckRows] = useState<Map<number, number>>(() => new Map())
   const [pending, setPending] = useState(0)
   const [clearAsk, setClearAsk] = useState<{ labels: string; day: string } | null>(null)
 
   const aliveRef = useRef(true)
   const recsRef = useRef<Map<string, Rec>>(new Map())
+  /** recheckRows の同期用の控え（recsRef と同じ作法。同じ描画の中で続けて増やしても取りこぼさない） */
+  const recheckRowsRef = useRef<Map<number, number>>(new Map())
+  /**
+   * 「再検」ボタンで出した行数（入居者id → 出したい本数）。
+   * 画面内の状態なので保存しないが、読み込み直し・期間送りで**押した行が消えないよう**控える
+   * （入力途中の空行が黙って消えると、打とうとしていた値を落とす）。
+   */
+  const recheckOpenRef = useRef<Map<number, number>>(new Map())
   const savingRef = useRef(new Set<string>())
   /** 保存の応答待ち中に重なった保存要求（先行保存の完了後にやり直す＝要求を黙って捨てない） */
   const resaveRef = useRef(new Set<string>())
@@ -386,6 +432,11 @@ export function VitalsSheetPage({
   const commitRecs = useCallback((next: Map<string, Rec>) => {
     recsRef.current = next
     setRecs(next)
+  }, [])
+
+  const commitRecheckRows = useCallback((next: Map<number, number>) => {
+    recheckRowsRef.current = next
+    setRecheckRows(next)
   }, [])
 
   const patchRec = useCallback(
@@ -470,15 +521,22 @@ export function VitalsSheetPage({
         }
       }
 
-      // 再検枠は「保存済みの最大本数 ＋ 空行1本」を出す
+      // 再検枠は「記録がある人だけ」出す（2026-08-28 追加指示1）。
+      // ・保存済み（または送信待ちの控え）がある人 … その最大本数 ＋ 空行1本
+      //   ＝記録があるのに隠さない／記録が入ったら次の空行が出る、を両方満たす
+      // ・記録が無い人 … 0本。「再検」ボタンを押した人だけ、その本数を出す
       const rowCounts = new Map<number, number>()
-      for (const r of sorted) rowCounts.set(r.id, (counts.get(r.id) ?? 0) + 1)
+      for (const r of sorted) {
+        const saved = counts.get(r.id) ?? 0
+        const opened = recheckOpenRef.current.get(r.id) ?? 0
+        rowCounts.set(r.id, Math.max(saved > 0 ? saved + 1 : 0, opened))
+      }
 
       setResidents(sorted)
       setInputEnabled(gate.value === true)
       setGateUnknown(!gate.observed)
       commitRecs(next)
-      setRecheckRows(rowCounts)
+      commitRecheckRows(rowCounts)
       setError(null)
     } catch (e) {
       if (!aliveRef.current) return
@@ -490,7 +548,7 @@ export function VitalsSheetPage({
     } finally {
       if (aliveRef.current) setLoading(false)
     }
-  }, [anchor, commitRecs, fromIso, propResidents])
+  }, [anchor, commitRecheckRows, commitRecs, fromIso, propResidents])
 
   useEffect(() => {
     void load()
@@ -551,18 +609,33 @@ export function VitalsSheetPage({
     [residents, floor],
   )
 
-  /** 表の行（定時1行＋再検n行）を入居者ごとに並べる */
+  /**
+   * 表の行（定時1行＋再検n行）を入居者ごとに並べる。
+   * 再検は n=0 が既定＝行を出さない（記録がある人・「再検」を押した人だけ n≥1 になる）。
+   */
   const tableRows = useMemo(() => {
     const out: TableRow[] = []
     for (const r of visibleResidents) {
       out.push({ rowId: `r${r.id}`, residentId: r.id, kind: 'routine', slot: 0 })
-      const n = Math.max(1, recheckRows.get(r.id) ?? 1)
+      const n = Math.max(0, recheckRows.get(r.id) ?? 0)
       for (let i = 0; i < n; i++) {
         out.push({ rowId: `c${r.id}-${i}`, residentId: r.id, kind: 'recheck', slot: i })
       }
     }
     return out
   }, [visibleResidents, recheckRows])
+
+  /** 「再検」ボタン: その入居者の直下に再検欄を1本足す（画面内の状態・保存しない） */
+  const addRecheckRow = useCallback(
+    (residentId: number) => {
+      const next = (recheckRowsRef.current.get(residentId) ?? 0) + 1
+      recheckOpenRef.current.set(residentId, next)
+      const out = new Map(recheckRowsRef.current)
+      out.set(residentId, next)
+      commitRecheckRows(out)
+    },
+    [commitRecheckRows],
+  )
 
   // ── 保存 ───────────────────────────────────────────────────
 
@@ -785,20 +858,19 @@ export function VitalsSheetPage({
       })
       commitRecs(next)
 
-      // 末尾の空行に入力されたら、次の空行を生やす（契約 §6）
+      // 末尾の空行に入力されたら、次の空行を生やす（契約 §6・既存の挙動を維持）
       if (row.kind === 'recheck' && raw.trim() !== '') {
-        setRecheckRows((prev) => {
-          const n = Math.max(1, prev.get(row.residentId) ?? 1)
-          if (row.slot < n - 1) return prev
-          const out = new Map(prev)
+        const n = Math.max(recheckRowsRef.current.get(row.residentId) ?? 0, row.slot + 1)
+        if (row.slot >= n - 1) {
+          const out = new Map(recheckRowsRef.current)
           out.set(row.residentId, n + 1)
-          return out
-        })
+          commitRecheckRows(out)
+        }
       }
 
       void saveSerialized(key)
     },
-    [commitRecs, saveSerialized],
+    [commitRecheckRows, commitRecs, saveSerialized],
   )
 
   // ── 期間送り ───────────────────────────────────────────────
@@ -1035,12 +1107,15 @@ export function VitalsSheetPage({
                   入居者名
                 </th>
                 {dayList.map((d) => (
+                  // 土日は日付欄のセル色を変える（土＝濃い水色・日＝赤）。
+                  // 色と地色の指定は .sheet-sat / .sheet-sun が持つので、平日用の
+                  // bg-surface2 は当てない（同じ要素に2つの背景色を当てて優先順位を作らない）
                   <th
                     key={d}
                     scope="colgroup"
                     colSpan={FIELDS.length}
                     style={{ top: 0 }}
-                    className={`${CELL_BASE} ${DAY_END} sticky z-20 bg-surface2 font-bold text-ink`}
+                    className={`${CELL_BASE} ${DAY_END} ${dayHeadClass(d)} sticky z-20 font-bold`}
                   >
                     {fmtDayLabel(d)}
                     {d === today ? <span className="sr-only">（本日）</span> : null}
@@ -1068,7 +1143,7 @@ export function VitalsSheetPage({
               </tr>
             </thead>
             <tbody>
-              {tableRows.map((row) => {
+              {tableRows.map((row, i) => {
                 const resident = visibleResidents.find((r) => r.id === row.residentId)
                 const name = resident?.name ?? ''
                 const room = resident?.room ?? null
@@ -1084,11 +1159,14 @@ export function VitalsSheetPage({
                     name={name}
                     room={room}
                     isRoutine={isRoutine}
+                    // 1行おきの縞（2行目・4行目…に付ける）。行を目で追いやすくする
+                    alt={i % 2 === 1}
                     dayList={dayList}
                     recs={recs}
                     editable={editable}
                     notices={notices}
                     onCommitCell={onCommitCell}
+                    onAddRecheck={addRecheckRow}
                     onReload={() => void load()}
                   />
                 )
@@ -1132,11 +1210,14 @@ interface FragmentRowProps {
   name: string
   room: string | null
   isRoutine: boolean
+  /** 1行おきの縞（薄いグレー）を敷く行 */
+  alt: boolean
   dayList: string[]
   recs: Map<string, Rec>
   editable: boolean
   notices: { day: string; rec: Rec | undefined }[]
   onCommitCell: (row: TableRow, day: string, field: Field, raw: string) => void
+  onAddRecheck: (residentId: number) => void
   onReload: () => void
 }
 
@@ -1145,31 +1226,55 @@ function FragmentRow({
   name,
   room,
   isRoutine,
+  alt,
   dayList,
   recs,
   editable,
   notices,
   onCommitCell,
+  onAddRecheck,
   onReload,
 }: FragmentRowProps) {
+  // 縞は行が持つ。左固定の2列は他の列の上に重なるので、透けないよう同じ色を自分でも持つ
+  const rowBg = alt ? ROW_ALT : ROW_PLAIN
   return (
     <>
-      <tr style={{ height: ROW_H }}>
+      <tr style={{ height: ROW_H }} className={rowBg}>
         <th
           scope="row"
           style={{ width: W_ROOM, minWidth: W_ROOM, left: 0 }}
-          className={`${CELL_BASE} tabular sticky z-10 bg-surface text-center font-normal text-ink2`}
+          className={`${CELL_BASE} tabular sticky z-10 ${rowBg} text-center font-normal text-ink2`}
         >
           {isRoutine ? (room ?? '—') : ''}
         </th>
         <td
           style={{ width: W_NAME, minWidth: W_NAME, maxWidth: W_NAME, left: W_ROOM }}
-          className={`${CELL_BASE} sticky z-10 overflow-hidden whitespace-nowrap bg-surface text-left text-ink`}
+          className={`${CELL_BASE} sticky z-10 ${rowBg} text-left text-ink`}
         >
           {isRoutine ? (
-            name
+            // 氏名の右に「再検」ボタン。押すとこの入居者の直下に再検欄が1本増える。
+            // 切り詰め（truncate）はセルではなく氏名の span に持たせる
+            // ＝ボタンのフォーカスリングがセルに切り取られない
+            <div className="flex items-center gap-1">
+              <span className="min-w-0 flex-1 truncate">{name}</span>
+              <button
+                type="button"
+                disabled={!editable}
+                onClick={() => onAddRecheck(row.residentId)}
+                aria-label={
+                  editable ? `${name} の再検欄を追加する` : `${name} の再検欄（今は追加できません）`
+                }
+                // 行の高さに収める（トークン既定の 44px のままだと1行だけ倍に広がる）。
+                // 押しやすさは表示倍率（200% で行高 44px）と読み上げ名で担保する
+                // ＝ sheet-contracts §4 の裁定（行が詰まっていて広げられない場合）に従う
+                style={{ minHeight: ROW_H }}
+                className="min-w-0 shrink-0 rounded border border-primary px-1 text-primary disabled:border-border disabled:text-ink3"
+              >
+                <span aria-hidden="true">再検</span>
+              </button>
+            </div>
           ) : (
-            <span className="text-ink2">
+            <span className="block truncate text-ink2">
               <span aria-hidden="true">↳ 再検</span>
               <span className="sr-only">
                 {name} の再検 {row.slot + 1}本目
@@ -1194,6 +1299,9 @@ function FragmentRow({
                   align="center"
                   width={FIELD_WIDTH[f]}
                   level={level}
+                  // 背景を持たないセル（tone='row'）にして、行の縞を透けさせる。
+                  // しきい値の色がある時は SheetCell が level の色をセルに置く＝縞より上に来る
+                  tone="row"
                   // 日の切れ目は各日の最後の列（SpO2）の右罫線で示す
                   groupEnd={i === FIELDS.length - 1}
                   ariaLabel={`${room ?? '居室未設定'} ${name} ${fmtDayLabel(day)} ${
@@ -1206,7 +1314,8 @@ function FragmentRow({
         ))}
       </tr>
       {notices.length > 0 ? (
-        <tr>
+        // 警告行は同じ入居者・同じ枠の続きなので、縞も同じ色にする
+        <tr className={rowBg}>
           <td
             colSpan={2 + dayList.length * FIELDS.length}
             className="border-b border-r border-border px-1 py-2"

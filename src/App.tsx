@@ -638,15 +638,21 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
           <span role="status">
             {pending > 0 && <ui.Chip tone="warn">{`⚠ 未送信 ${pending}件`}</ui.Chip>}
           </span>
-          <button
-            type="button"
-            onClick={() => setPicker('switch')}
-            aria-label={`記録する職員: ${actorName ?? '未選択'}。押すと切り替えます`}
-            className="inline-flex min-h-tap items-center gap-1 rounded-md border border-border bg-surface2 px-3 text-sm text-ink"
-          >
-            <span aria-hidden="true">記録者</span>
-            <span className="font-bold">{actorName ?? '未選択'}</span>
-          </button>
+          {/*
+            記録者（操作者）の常時表示は 2026-08-28 の指示で廃止した。
+            日報・バイタル・食事は行ごとに記入者を選ぶため、画面全体の記録者表示は場所を取るだけになる。
+            操作者の仕組み自体は残す（各行の記入者の既定値・既読の主体）。
+            切り替えの導線は設定タブ（記録する職員）へ移した。
+            未選択のときだけは、記録できない理由が分かるよう案内を出す。
+          */}
+          {actorId == null && (
+            <Link
+              to="/settings"
+              className="inline-flex min-h-tap items-center gap-1 rounded-md border border-warn bg-warn-bg px-3 text-sm text-ink"
+            >
+              <span aria-hidden="true">▲ </span>記録する職員が未選択
+            </Link>
+          )}
         </div>
       </header>
 

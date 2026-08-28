@@ -14,6 +14,17 @@
 //   9) 付帯ブロックは常時表示（折りたたまない）
 //  10) 「保存しました」は出さない。保存失敗・競合・未送信は残す
 //
+// 2026-08-28 の追加指示（第2次・管理者が実物と見比べて出したもの。CSS は sheet.css に用意済み）:
+//  11) 付帯ブロック（外出者・外泊者・発熱者・他症状者）の空行は既定1行だけ。以降は「＋行」で足す
+//  12) 日付セルは土曜＝濃い水色・日曜＝赤（.sheet-sat / .sheet-sun）。曜日は日付の文字
+//      「(土)」「(日)」にも出るので、色は補助（色だけで意味を伝えない）
+//  13) 日付ごとの枠の間に余白（sheet.css の .dsheet-day + .dsheet-day。この画面の追加作業は無し）
+//  14) 日付セルはクリック・Enter・Space でカレンダーが開く（showPicker()。使えない環境では
+//      従来どおりネイティブの日付入力として動く＝押せば入力・キーボードで日付を打てる）
+//  15) 夜勤申し送りの記載内容は赤字の太字（.dsheet-night-body）
+//  16) 1行おきに薄いグレーの縞（.sheet-alt）。しきい値の色・行の色（NoteColor）・土日の色を
+//      持つセルはセル側が上に来る＝縞に負けない（縞は行の器、意味色はセル）
+//
 // 10日表示の取得（管理者指示「全件ロードしない」）:
 //   fetchDailyReport は1日単位なので、日ごとに取りに行く。
 //   ・同時に走らせるのは MAX_PARALLEL_LOADS 件まで（回線の細い現場で一斉に叩かない）
@@ -147,7 +158,7 @@ const ERR_SAVE_ATTENDANCE =
 const ERR_CONFLICT =
   '他の端末で先に更新されました。入力は消えていません。「最新に更新」を押して内容を確認してから、もう一度お試しください'
 const ERR_EMPTY_BODY = '本文は空にできません。行ごと消す場合は「詳細」から削除してください'
-const ERR_NO_ACTOR = '記録する職員が選ばれていません。画面上部の「記録者」から選んでください'
+const ERR_NO_ACTOR = '記録する職員が選ばれていません。設定タブの「記録する職員」から選んでください'
 const MSG_QUEUED = '⚠ 未送信（電波が戻ると自動で送信します）'
 const MSG_NOT_PERSISTED =
   '▲ 送信待ちにしましたが端末に控えを残せませんでした。この画面を閉じずに電波の回復をお待ちください'
@@ -206,11 +217,14 @@ const W_FEVER_SET = `calc(var(--w-pulse) * 2 + var(--w-temp) + var(--w-spo2) + $
 const SHEET_MIN_W = `calc(var(--w-block) + var(--w-name) + ${W_FEVER_SET} * ${FEVER_SETS} + var(--sheet-rule-bold) * 2)`
 
 /**
- * ブロックごとに最初から出しておく空の入力行の数（実物のスプシは固定行数）。
- * 保存済みの行と「＋行」で足した行を合わせてこの数に満たなければ、空行で埋める。
+ * ブロックごとに最初から出しておく空の入力行の数。
+ * 2026-08-28 の追加指示11で **すべて1行**にした（旧: 外出4・外泊2・発熱4・他症状4）。
+ * 足りない時はブロック見出しの「＋行」で増やす。
+ * 保存済みの行と「＋行」で足した行を合わせてこの数に満たなければ、空行で埋める
+ * ＝保存済みの行がある日は空行を出さず、「＋行」を押した時だけ入力欄が増える。
  * 空行は値が入るまで保存しない（空データを作らない）ので、記録は増えない。
  */
-const MIN_ROWS = { outing: 4, overnight: 2, fever: 4, symptom: 4, note: 1 } as const
+const MIN_ROWS = { outing: 1, overnight: 1, fever: 1, symptom: 1, note: 1 } as const
 
 /** 10日表示の区切り（1〜10 / 11〜20 / 21〜月末。月末が31日なら 21〜31） */
 const BLOCK_STARTS = [1, 11, 21] as const
@@ -421,6 +435,30 @@ function fmtSheetDay(iso: string): string {
   const d = Number(iso.slice(8, 10))
   const dt = new Date(y, m - 1, d)
   return `${pad2(y % 100)}年${m}月${d}日(${WEEKDAY[dt.getDay()]})`
+}
+
+/**
+ * 土日の日付セルに付ける色（指示12・sheet.css の .sheet-sat / .sheet-sun）。
+ * 平日は色を付けない。壊れた値でも落とさず「色なし」を返す。
+ * 曜日は日付の文字（土）（日）にも出るので、この色はあくまで補助
+ * （色だけで意味を伝えない＝介護現場要件4）。
+ */
+function weekendClass(iso: string): string {
+  if (!ISO_DATE_RE.test(iso)) return ''
+  const dt = new Date(Number(iso.slice(0, 4)), Number(iso.slice(5, 7)) - 1, Number(iso.slice(8, 10)))
+  const d = dt.getDay()
+  return d === 6 ? 'sheet-sat' : d === 0 ? 'sheet-sun' : ''
+}
+
+/**
+ * 1行おきの縞（指示16・sheet.css の .sheet-alt）。
+ * index は「保存済みの行 → 追加した行」を通した 0 始まりの並び順で、
+ * 偶数行（画面の2行目・4行目…＝index が奇数）に縞を敷く。
+ * **縞は行（器）が持ち、意味のある色はセルが持つ**ので、しきい値の色・行の色・土日の色は
+ * セル側が上に描かれて縞に負けない。
+ */
+function altClass(index: number): string {
+  return index % 2 === 1 ? 'sheet-alt' : ''
 }
 
 /**
@@ -2678,21 +2716,62 @@ function DateBar({
 // ══════════════════════════════════════════════════════════════
 
 /**
- * 日付セル（指示1）。見えている文字は実物と同じ「26年8月28日(金)」で、
- * 実際に押されるのは重ねた input[type=date]＝OS のカレンダーがそのまま開く
- * （showPicker() は対応していない端末があるため使わない）。
+ * 日付セル（指示1・4・12）。見えている文字は実物と同じ「26年8月28日(金)」で、
+ * 実際に押されるのは重ねた input[type=date]。
+ *
+ * 指示4「各日付をクリックするとカレンダーが開く」:
+ *   input を重ねただけでは、多くのブラウザで**カレンダーのアイコンを押した時しか**
+ *   カレンダーが開かない（アイコンは opacity:0 で見えていない＝実質開けない）。
+ *   そこで押した時・Enter / Space を押した時に showPicker() を呼んで確実に開く。
+ *   showPicker() が無い環境（未対応・利用者操作から外れた呼び出しで例外）では
+ *   既定動作を止めないので、**従来どおりのネイティブの日付入力**として使える。
+ *
+ * 指示12「土曜＝濃い水色・日曜＝赤」:
+ *   sheet.css の .sheet-sat / .sheet-sun を日付セルに付ける。
+ *   ※ 枠（.dsheet-date）は sheet.css で .sheet-sat / .sheet-sun より後に
+ *     background: var(--c-surface) を宣言しているため、**枠の地色は上書きできない**。
+ *     いま色が乗るのは日付の文字（下の span）まで。枠ごと色を敷くには sheet.css 側に
+ *     .dsheet-date.sheet-sat / .dsheet-date.sheet-sun の指定が要る（チーフへ申し送り済み）。
  */
 function DayPicker({ day, onPick }: { day: string; onPick: (iso: string) => void }) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  const tone = weekendClass(day)
+
+  /** カレンダーを開く。開けない環境では何もしない＝既定の日付入力のまま使える */
+  const openPicker = (): boolean => {
+    const el = inputRef.current
+    if (el === null) return false
+    // showPicker() は比較的新しい API。型・実体の両方が無い環境を想定して都度確かめる
+    const withPicker = el as HTMLInputElement & { showPicker?: () => void }
+    if (typeof withPicker.showPicker !== 'function') return false
+    try {
+      withPicker.showPicker()
+      return true
+    } catch {
+      // 利用者の操作から外れた呼び出し等で開けなかった。入力欄としては今までどおり使える
+      return false
+    }
+  }
+
   return (
-    <label className="dsheet-date">
-      <span aria-hidden="true" className="text-lg font-bold tabular text-ink">
+    <label className={`dsheet-date ${tone}`}>
+      {/* 平日は今までどおり text-ink。土日は .sheet-sat / .sheet-sun が文字色も持つので重ねない */}
+      <span aria-hidden="true" className={`text-lg font-bold tabular ${tone === '' ? 'text-ink' : tone}`}>
         {fmtSheetDay(day)}
       </span>
       <input
+        ref={inputRef}
         type="date"
         className="dsheet-date-input"
         value={day}
         onChange={(e) => onPick(e.target.value)}
+        // 入力欄が枠いっぱいに重なっているので、日付の文字を押してもここへ届く
+        onClick={() => openPicker()}
+        onKeyDown={(e) => {
+          if (e.key !== 'Enter' && e.key !== ' ') return
+          // 開ける時だけ既定動作を止める（開けない環境ではキーボード入力を妨げない）
+          if (openPicker()) e.preventDefault()
+        }}
         aria-label={`日報の日付 ${fmtSheetDay(day)}。押すとカレンダーから日にちを選べます`}
       />
     </label>
@@ -2885,7 +2964,8 @@ function OutingBlock({
         const name = residentName(ctx.residentById.get(o.resident_id), o.resident_id)
         return (
           <div key={key}>
-            <Row>
+            {/* 1行おきの縞（指示16）。保存済みの行 → 追加した行 の並び順で数える */}
+            <Row className={altClass(i)}>
               <LeadCell text={i === 0 ? `${count}名` : ''} />
               <Cell width="var(--w-name)" className="flex items-center">
                 <span className="truncate font-bold">{name}</span>
@@ -2915,6 +2995,9 @@ function OutingBlock({
                   placeholder={isStay ? '例 8/30 10:30' : '例 10:30'}
                   ariaLabel={`${name} の${endLabel}`}
                   as="div"
+                  // 行の地色（縞・書きかけの行）を透かす。既定の plain は不透明な白を敷くので
+                  // このセルだけ縞が白く抜ける（指示16「縞は行の器」）
+                  tone="row"
                 />
               </Cell>
               <Cell width="var(--w-target)" className="flex items-center">
@@ -2953,8 +3036,10 @@ function OutingBlock({
           (d.place.trim() !== '' || d.startAt !== '' || d.endText !== '' || d.companion.trim() !== '')
         return (
           <div key={d.key}>
-            {/* 空の行は実物のスプシと同じ「固定の空欄」。書き始めた行だけ背景を変える */}
-            <Row className={dirty ? 'bg-surface2' : ''}>
+            {/* 空の行は実物のスプシと同じ「固定の空欄」。書き始めた行だけ背景を変える。
+                書きかけでない行は1行おきの縞（指示16）。書きかけの背景は縞より優先する
+                ＝どの行を書いているかの合図を縞で消さない */}
+            <Row className={dirty ? 'bg-surface2' : altClass(rows.length + di)}>
               <LeadCell text={rows.length === 0 && di === 0 ? `${count}名` : ''} />
               <PickerCell
                 width="var(--w-name)"
@@ -2972,6 +3057,7 @@ function OutingBlock({
                   placeholder={placeLabel}
                   ariaLabel={placeLabel}
                   as="div"
+                  tone="row"
                 />
               </Cell>
               <Cell width="var(--w-datelink)" pad={false}>
@@ -2983,6 +3069,7 @@ function OutingBlock({
                   placeholder="例 10:30"
                   ariaLabel={startLabel}
                   as="div"
+                  tone="row"
                 />
               </Cell>
               <Cell width="var(--w-tilde)" className="flex items-center">
@@ -2999,6 +3086,7 @@ function OutingBlock({
                   placeholder={isStay ? '例 8/30 10:30' : '例 10:30'}
                   ariaLabel={endLabel}
                   as="div"
+                  tone="row"
                 />
               </Cell>
               <Cell width="var(--w-target)" pad={false}>
@@ -3010,6 +3098,7 @@ function OutingBlock({
                   placeholder="付添"
                   ariaLabel="付添"
                   as="div"
+                  tone="row"
                 />
               </Cell>
               {/* 余白はボタン（px-1）だけが持つ */}
@@ -3153,6 +3242,9 @@ function VitalSetCells({
         level={level}
         ariaLabel={`${name} ${label}`}
         as="div"
+        // 行の地色（縞・書きかけの行）を透かす。しきい値がある時は SheetCell 側で
+        // level の色が優先されるので、意味のある色は縞に負けない（指示16）
+        tone="row"
       />
     </Cell>
   )
@@ -3212,7 +3304,8 @@ function FeverBlock({
         const name = residentName(ctx.residentById.get(row.residentId), row.residentId)
         return (
           <div key={row.key}>
-            <Row>
+            {/* 1行おきの縞（指示16） */}
+            <Row className={altClass(i)}>
               <LeadCell text={i === 0 ? `${count}名` : ''} />
               <Cell width="var(--w-name)" className="flex items-center">
                 <span className="truncate font-bold">{name}</span>
@@ -3246,8 +3339,9 @@ function FeverBlock({
           d.residentId != null || d.sets.some((s) => s.at || s.temp || s.spo2 || s.bp || s.pulse)
         return (
           <div key={d.key}>
-            {/* 空の行は実物と同じ「固定の空欄」。書き始めた行だけ背景を変える */}
-            <Row className={dirty ? 'bg-surface2' : ''}>
+            {/* 空の行は実物と同じ「固定の空欄」。書き始めた行だけ背景を変える。
+                書きかけでない行は1行おきの縞（指示16。書きかけの背景を縞で消さない） */}
+            <Row className={dirty ? 'bg-surface2' : altClass(rows.length + di)}>
               <LeadCell text={rows.length === 0 && di === 0 ? `${count}名` : ''} />
               <PickerCell
                 width="var(--w-name)"
@@ -3361,7 +3455,8 @@ function SymptomBlock({
         const name = residentName(ctx.residentById.get(v.resident_id), v.resident_id)
         return (
           <div key={key}>
-            <Row>
+            {/* 1行おきの縞（指示16） */}
+            <Row className={altClass(i)}>
               <LeadCell text={i === 0 ? `${count}名` : ''} />
               <Cell width="var(--w-name)" className="flex items-center">
                 <span className="truncate font-bold">{name}</span>
@@ -3395,6 +3490,7 @@ function SymptomBlock({
                   placeholder="症状"
                   ariaLabel={`${name} の症状`}
                   as="div"
+                  tone="row"
                 />
               </Cell>
             </Row>
@@ -3413,8 +3509,9 @@ function SymptomBlock({
           Boolean(set.at || set.temp || set.spo2 || set.bp || set.pulse)
         return (
           <div key={d.key}>
-            {/* 空の行は実物と同じ「固定の空欄」。書き始めた行だけ背景を変える */}
-            <Row className={dirty ? 'bg-surface2' : ''}>
+            {/* 空の行は実物と同じ「固定の空欄」。書き始めた行だけ背景を変える。
+                書きかけでない行は1行おきの縞（指示16。書きかけの背景を縞で消さない） */}
+            <Row className={dirty ? 'bg-surface2' : altClass(rows.length + di)}>
               <LeadCell text={rows.length === 0 && di === 0 ? `${count}名` : ''} />
               <PickerCell
                 width="var(--w-name)"
@@ -3462,6 +3559,7 @@ function SymptomBlock({
                   placeholder="症状"
                   ariaLabel="症状"
                   as="div"
+                  tone="row"
                 />
               </Cell>
             </Row>
@@ -3562,6 +3660,10 @@ function NoteBlock({
           lead={i === 0 ? `${count}件` : ''}
           note={note}
           draft={null}
+          // 夜勤ブロックの記載内容は赤字の太字（指示15）
+          night={tone === 'night'}
+          // 1行おきの縞（指示16）。保存済みの行 → 追加した行 の並び順で数える
+          alt={altClass(i) !== ''}
           showReporter={showReporter}
           actorId={actorId}
           expanded={expanded === `n${note.id}`}
@@ -3582,6 +3684,8 @@ function NoteBlock({
           lead={rows.length === 0 && i === 0 ? `${count}件` : ''}
           note={null}
           draft={d}
+          night={tone === 'night'}
+          alt={altClass(rows.length + i) !== ''}
           showReporter={showReporter}
           actorId={actorId}
           expanded={expanded === d.key}
@@ -3604,6 +3708,10 @@ interface NoteRowProps
   lead: string
   note: Note | null
   draft: NoteDraft | null
+  /** 夜勤申し送りの行（記載内容を赤字の太字にする・指示15） */
+  night: boolean
+  /** 1行おきの縞を敷く行か（指示16。行の色が付いている行では色を優先する） */
+  alt: boolean
   /** この行の詳細を開いているか（申し送りブロック内で1行だけ開く） */
   expanded: boolean
 }
@@ -3614,6 +3722,8 @@ function NoteRow({
   lead,
   note,
   draft,
+  night,
+  alt,
   showReporter,
   actorId,
   expanded,
@@ -3649,7 +3759,9 @@ function NoteRow({
     : '詳細を開く'
 
   return (
-    <div className={color ? NOTE_COLOR_CLASS[color] : undefined}>
+    // 行の色（NoteColor）を選んである行は、その色をそのまま敷く（指示8の機能を維持）。
+    // 色の無い行だけ1行おきの縞を敷く＝意味のある色が縞に負けない（指示16）
+    <div className={color ? NOTE_COLOR_CLASS[color] : alt ? 'sheet-alt' : undefined}>
       <Row>
         <LeadCell text={lead} />
         <Cell width="var(--w-reporter)" className="flex items-center">
@@ -3663,8 +3775,12 @@ function NoteRow({
           disabled={disabled}
           onClick={() => ctx.openResident({ for: 'noteTarget', key: rowKey })}
         />
-        {/* 余白は SheetCell 側だけが持つ（対象・記入者と本文の左端をそろえる） */}
-        <Cell grow pad={false}>
+        {/* 余白は SheetCell 側だけが持つ（対象・記入者と本文の左端をそろえる）。
+            夜勤の記載内容は赤字の太字（指示15・sheet.css の .dsheet-night-body）。
+            ※ いまの .dsheet-night-body は自分自身にだけ色を当てる書き方なので、
+              本文を描く SheetCell が自前で持つ文字色（tone='row' → text-ink）が勝ち、
+              **本文の文字までは赤くならない**。子孫にも当たる書き方が要る（チーフへ申し送り済み） */}
+        <Cell grow pad={false} className={night ? 'dsheet-night-body' : ''}>
           <SheetCell
             value={body}
             onCommit={disabled ? undefined : (v) => onCommitBody(rowKey, v)}

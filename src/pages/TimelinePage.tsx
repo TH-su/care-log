@@ -84,7 +84,7 @@ const ERR_NOTE_CONFLICT =
 const ERR_NOTE_ACTION =
   '操作できませんでした（通信エラー）。電波状態を確認して、もう一度お試しください。記録は変わっていません'
 const ERR_NOTE_EMPTY = '本文が空です。内容を入力してから保存してください'
-const NO_ACTOR_REASON = '記録する職員が選ばれていません。画面上部の「記録者」から選んでください'
+const NO_ACTOR_REASON = '記録する職員が選ばれていません。設定タブの「記録する職員」から選んでください'
 
 /** 参照の同一性を保つための空配列（React.memo の無効化を防ぐ） */
 const NO_RESIDENTS: Resident[] = []

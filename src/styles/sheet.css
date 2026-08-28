@@ -69,12 +69,18 @@
 
   /* 列幅（バイタル） */
   --w-room-base: 3.75rem; /* 60px */
-  --w-name-base: 6.875rem; /* 110px */
-  --w-temp-base: 3.75rem; /* 60px */
-  --w-sys-base: 3.75rem; /* 60px */
-  --w-dia-base: 3.75rem; /* 60px */
-  --w-pulse-base: 3.125rem; /* 50px */
-  --w-spo2-base: 4.0625rem; /* 65px */
+  /* 氏名は取り違え防止の最優先情報なので省略させない。
+     「再検」ボタンを氏名セルへ入れたぶん（36px＋間隔4px）を足して 140px にした
+     （110px のままだと5文字以上の氏名が「…」で切れる。2026-08-28 実測） */
+  --w-name-base: 8.75rem; /* 140px */
+  /* 数値の列は「値＋記号（↑↑ ↓↓）が収まる最小」まで詰める＝1画面に入る日数を増やす。
+     見出しは「上」「下」と短くして列幅の下限を見出しではなく値で決められるようにした
+     （読み上げ用の「血圧（上）」は sr-only で残す） */
+  --w-temp-base: 3.375rem; /* 54px 「38.4↑↑」42.6px + 余白8 + 罫線1 */
+  --w-sys-base: 3.125rem; /* 50px 「151↑↑」39.4px + 余白8 + 罫線1 */
+  --w-dia-base: 3.125rem; /* 50px */
+  --w-pulse-base: 3.125rem; /* 50px 「101↑↑」39.4px（下限） */
+  --w-spo2-base: 3.125rem; /* 50px 「100↓↓」39.4px（下限） */
 
   /* 列幅（食事） */
   --w-room-m-base: 4.25rem; /* 68px */
@@ -659,6 +665,21 @@
   --dsheet-c-care-ink: #0b2e63; /* 濃い青 */
   --dsheet-c-night-bg: #1f3864; /* ネイビー（夜勤） */
   --dsheet-c-night-ink: #ffc4c7; /* 赤（ネイビーの上で読める明度に上げた赤） */
+
+  /* 土日の日付セル（2026-08-28 追加指示）。3画面（日報・バイタル・食事）で同じ色を使う。
+     曜日は日付文字（土）（日）にも出るので、色は補助＝色だけで意味を伝えない */
+  --dsheet-c-sat-bg: #a8d4ec; /* 土曜＝濃い水色 */
+  --dsheet-c-sat-ink: #0b2e63;
+  --dsheet-c-sun-bg: #f2b0b0; /* 日曜＝赤 */
+  --dsheet-c-sun-ink: #6b1414;
+
+  /* 1行おきの縞（白 ↔ 薄いグレー）。行を目で追いやすくする */
+  --sheet-zebra-bg: #f4f5f7;
+
+  /* 食事の食事枠ごとの文字色（朝＝赤・昼＝緑・夕＝黒。すべて太字） */
+  --msheet-c-breakfast: #a3282a;
+  --msheet-c-lunch: #14632a;
+  --msheet-c-dinner: var(--c-ink);
 }
 :root[data-mode='dark'] {
   --dsheet-c-note-bg: #4a1e2c;
@@ -667,6 +688,14 @@
   --dsheet-c-care-ink: #a6d9ee; /* 暗い面では「濃い青」を同じ意味の明るい青へ */
   --dsheet-c-night-bg: #0e1b33;
   --dsheet-c-night-ink: #ffb3b8;
+  --dsheet-c-sat-bg: #17384c;
+  --dsheet-c-sat-ink: #a6d9ee;
+  --dsheet-c-sun-bg: #4a1d1d;
+  --dsheet-c-sun-ink: #ffb3b8;
+  --sheet-zebra-bg: #1b2027;
+  --msheet-c-breakfast: #ff9a9d;
+  --msheet-c-lunch: #7fd39a;
+  --msheet-c-dinner: var(--c-ink);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-mode='light']) {
@@ -676,7 +705,56 @@
     --dsheet-c-care-ink: #a6d9ee;
     --dsheet-c-night-bg: #0e1b33;
     --dsheet-c-night-ink: #ffb3b8;
+    --dsheet-c-sat-bg: #17384c;
+    --dsheet-c-sat-ink: #a6d9ee;
+    --dsheet-c-sun-bg: #4a1d1d;
+    --dsheet-c-sun-ink: #ffb3b8;
+    --sheet-zebra-bg: #1b2027;
+    --msheet-c-breakfast: #ff9a9d;
+    --msheet-c-lunch: #7fd39a;
+    --msheet-c-dinner: var(--c-ink);
   }
+}
+
+/* ── 土日の日付セル（3画面共通） ───────────────────────── */
+.sheet-sat {
+  background: var(--dsheet-c-sat-bg);
+  color: var(--dsheet-c-sat-ink);
+}
+.sheet-sun {
+  background: var(--dsheet-c-sun-bg);
+  color: var(--dsheet-c-sun-ink);
+}
+
+/* ── 1行おきの縞（3画面共通）─────────────────────────────
+   使い方: 縞にしたい行そのものに .sheet-alt を付ける（偶数行に付ける）。
+   セルが背景色を持つ場合（しきい値の色・行の色・土日）はセル側が上に来るので、
+   意味のある色が縞に負けない（縞は行の器、意味色はセル）。 */
+.sheet-alt {
+  background: var(--sheet-zebra-bg);
+}
+
+/* ── 食事の枠ごとの文字色（朝＝赤太字・昼＝緑太字・夕＝黒太字）───── */
+.msheet-breakfast {
+  color: var(--msheet-c-breakfast);
+  font-weight: var(--fw-bold);
+}
+.msheet-lunch {
+  color: var(--msheet-c-lunch);
+  font-weight: var(--fw-bold);
+}
+.msheet-dinner {
+  color: var(--msheet-c-dinner);
+  font-weight: var(--fw-bold);
+}
+
+/* ── 夜勤の記載は赤字の太字（帯だけでなく行の中身も）─────────────
+   セル側が自前で文字色（.text-ink 等）を持つため、継承だけでは届かない。
+   子孫にも当てて、夜勤ブロックの中身をまとめて赤太字にする。 */
+.dsheet-night-body,
+.dsheet-night-body * {
+  color: var(--c-danger);
+  font-weight: var(--fw-bold);
 }
 
 /* 1日ぶんの枠（10日表示で日の切れ目を太線で示す） */
@@ -685,7 +763,8 @@
   background: var(--c-surface);
 }
 .dsheet-day + .dsheet-day {
-  margin-top: var(--sp-1);
+  /* 日と日の切れ目を目で分けるための余白（2026-08-28 指示。sp-1=4px では詰まって見えた） */
+  margin-top: var(--sp-4);
 }
 
 /* ブロックの見出し行（外出者・外泊者・発熱者・他症状者）＝黒枠・太線 */
@@ -736,6 +815,16 @@
   border-radius: var(--r-sm);
   background: var(--c-surface);
   cursor: pointer;
+}
+/* 土日は枠ごと色を変える。.dsheet-date の background より後に置いて後勝ちにする
+   （同じ詳細度なので順序で決まる。曜日は日付文字の（土）（日）にも出るので色は補助） */
+.dsheet-date.sheet-sat {
+  background: var(--dsheet-c-sat-bg);
+  color: var(--dsheet-c-sat-ink);
+}
+.dsheet-date.sheet-sun {
+  background: var(--dsheet-c-sun-bg);
+  color: var(--dsheet-c-sun-ink);
 }
 .dsheet-date:focus-within {
   box-shadow: 0 0 0 2px var(--c-surface), 0 0 0 calc(2px + var(--focus-w)) var(--c-focus);

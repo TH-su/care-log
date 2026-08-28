@@ -23,9 +23,17 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
-import { fetchResidents, fetchTimelineChunk, flushQueue, isQueueBroken, queueSubscribe } from '../lib/db'
+import {
+  fetchResidents,
+  fetchStaff,
+  fetchTimelineChunk,
+  flushQueue,
+  isQueueBroken,
+  queueSubscribe,
+} from '../lib/db'
+import { getActorId, setActorId as persistActorId, touchActivity } from '../lib/actor'
 import { LS } from '../lib/types'
-import type { ImportDay, Resident } from '../lib/types'
+import type { ImportDay, Resident, Staff } from '../lib/types'
 import type { SyncResult } from '../lib/gasClient'
 import { addDays, fmtDayLabel, todayIso } from '../lib/format'
 import {
@@ -193,6 +201,13 @@ export function SettingsPage() {
   const [tokenSaved, setTokenSaved] = useState(() => lsGet(LS.gasToken) !== '')
   const [connError, setConnError] = useState<string | null>(null)
 
+  // 記録する職員（操作者）。2026-08-28 の指示で画面ヘッダの常時表示をやめ、切替はここへ移した。
+  // 保存するのは staff_id（数値）だけで、氏名は保存しない（dev-principles 原則11）
+  const [staffList, setStaffList] = useState<Staff[] | null>(null)
+  const [staffError, setStaffError] = useState(false)
+  const [actorId, setActorIdState] = useState<number | null>(() => getActorId())
+  const [staffFilter, setStaffFilter] = useState('')
+
   // マスタ同期
   const [syncing, setSyncing] = useState(false)
   const [syncResult, setSyncResult] = useState<{ residents: SyncResult; staff: SyncResult } | null>(null)
@@ -242,6 +257,45 @@ export function SettingsPage() {
       alive = false
     }
   }, [residentsReload])
+
+  // 記録する職員の一覧（在籍のみ）。取得に失敗しても他の設定は使えるようにする
+  useEffect(() => {
+    let alive = true
+    setStaffError(false)
+    fetchStaff()
+      .then((rows) => {
+        if (alive) setStaffList(Array.isArray(rows) ? rows : [])
+      })
+      .catch(() => {
+        if (alive) setStaffError(true)
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  const pickActor = useCallback(
+    (id: number, name: string) => {
+      persistActorId(id)
+      touchActivity()
+      setActorIdState(id)
+      show(`記録する職員を ${name} にしました`)
+    },
+    [show],
+  )
+
+  /** かなでも氏名でも絞れる（職員一覧は最大でも数十件なので端末内で絞る） */
+  const staffMatches = useMemo(() => {
+    const q = staffFilter.trim()
+    const list = (staffList ?? []).filter((s) => s.active)
+    if (q === '') return list
+    return list.filter((s) => s.name.includes(q))
+  }, [staffList, staffFilter])
+
+  const actorName = useMemo(
+    () => (staffList ?? []).find((s) => s.id === actorId)?.name ?? null,
+    [staffList, actorId],
+  )
 
   const reviewList = useMemo(
     () => (residents ?? []).filter((r) => r.needs_review),
@@ -438,6 +492,78 @@ export function SettingsPage() {
 
   return (
     <div className="mx-auto w-full max-w-2xl space-y-4 p-4">
+      {/* ⓪ 記録する職員（操作者）。画面ヘッダの常時表示をやめた代わりの切替導線 */}
+      <SectionCard title="記録する職員">
+        <p className="text-base text-ink2">
+          この端末で記録したときに、記入者としてはじめに入る職員です。各行では行ごとに選び直せます。
+        </p>
+        <p className="mt-2 text-base text-ink">
+          いまの記録者:{' '}
+          <span className="font-bold">{actorName ?? (actorId == null ? '未選択' : `ID ${actorId}`)}</span>
+        </p>
+
+        {staffError && (
+          <div className="mt-3">
+            <ErrorBlock
+              message="職員の一覧を読み込めませんでした（通信エラー）。電波状態を確認して、画面を開き直してください。"
+            />
+          </div>
+        )}
+        {!staffError && staffList === null && (
+          <div className="mt-3">
+            <LoadingBlock label="職員の一覧を読み込んでいます…" />
+          </div>
+        )}
+        {!staffError && staffList !== null && staffList.length === 0 && (
+          <div className="mt-3">
+            <EmptyBlock message="職員の一覧がまだありません。下の「マスタ同期」を実行してください。" />
+          </div>
+        )}
+        {!staffError && staffList !== null && staffList.length > 0 && (
+          <>
+            <label className="mt-3 block text-base text-ink2" htmlFor="cl-staff-filter">
+              絞り込み
+            </label>
+            <input
+              id="cl-staff-filter"
+              type="text"
+              value={staffFilter}
+              onChange={(e) => setStaffFilter(e.target.value)}
+              placeholder="氏名の一部を入力"
+              className="mt-1 w-full rounded-md border border-border bg-surface px-3 text-base text-ink"
+              style={{ minHeight: 'var(--tap-min)' }}
+            />
+            <ul className="mt-2 max-h-64 overflow-y-auto rounded-md border border-border">
+              {staffMatches.length === 0 && (
+                <li className="p-3 text-base text-ink2">
+                  該当する職員がいません。別の語をお試しください。
+                </li>
+              )}
+              {staffMatches.map((s) => {
+                const selected = s.id === actorId
+                return (
+                  <li key={s.id} className="border-b border-border last:border-b-0">
+                    <button
+                      type="button"
+                      onClick={() => pickActor(s.id, s.name)}
+                      aria-pressed={selected}
+                      className={`flex min-h-tap w-full items-center gap-2 px-3 text-left text-base ${
+                        selected ? 'bg-primary-bg font-bold text-ink' : 'text-ink'
+                      }`}
+                    >
+                      <span aria-hidden="true" className={selected ? 'text-ok' : 'invisible'}>
+                        ✓
+                      </span>
+                      {s.name}
+                    </button>
+                  </li>
+                )
+              })}
+            </ul>
+          </>
+        )}
+      </SectionCard>
+
       {/* ① GAS接続設定 */}
       <SectionCard title="GAS接続設定">
         <p className="text-base text-ink2">

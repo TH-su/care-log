@@ -102,12 +102,41 @@ const CELL_BASE = 'border-b border-r border-border p-0 align-middle'
  */
 const DAY_END = 'sheet-group-end'
 
-/** 食事枠ごとの文字色（スプシの色分け。列見出しで区別が付くので色は補助） */
+/**
+ * 食事枠ごとの文字色（朝＝赤・昼＝緑・夕＝黒。すべて太字）。
+ * 色と太さの実体は sheet.css の .msheet-*（--msheet-c-* を参照＝ダークモード追従）。
+ * 列見出し「朝・昼・夕」で区別が付くので色は補助（色だけで意味を伝えない）。
+ */
 const SLOT_TEXT: Record<MealSlot, string> = {
-  breakfast: 'text-danger',
-  lunch: 'text-ok',
-  dinner: 'text-ink',
-  snack: 'text-ink',
+  breakfast: 'msheet-breakfast',
+  lunch: 'msheet-lunch',
+  dinner: 'msheet-dinner',
+  snack: 'msheet-dinner',
+}
+
+/**
+ * 日付見出しセルに当てる曜日の色（土＝濃い水色・日＝赤。sheet.css の .sheet-sat / .sheet-sun）。
+ * 平日は空文字＝既定の見出し色のまま。曜日は日付文字「8/29（土）」にも出るので色は補助。
+ * .sheet-sat / .sheet-sun は background と color を両方持つので、当てる側では
+ * Tailwind の bg-surface2・text-ink を重ねない（同じ詳細度で打ち消し合わないようにする）。
+ */
+function weekdayToneClass(iso: string): string {
+  const [y, m, d] = iso.split('-').map(Number)
+  const dow = new Date(y, m - 1, d).getDay()
+  if (dow === 6) return 'sheet-sat'
+  if (dow === 0) return 'sheet-sun'
+  return ''
+}
+
+/**
+ * 1行おきの縞（白 ↔ 薄いグレー。sheet.css の .sheet-alt）。偶数行（2・4・6…行目）に付ける。
+ * 縞は tr（行の器）に置く＝背景を持つセル（低摂取の bg-warn-bg・土日の見出し）は
+ * 行より上に描かれるので、意味のある色が縞に負けない。
+ * 左固定列（居室・入居者）は sticky で下の行が透けてはいけないため、セル自身にも当てる
+ * （平日行の bg-surface とは排他。重ねると同じ詳細度で打ち消し合う）。
+ */
+function altClass(rowIndex: number): string {
+  return rowIndex % 2 === 1 ? 'sheet-alt' : ''
 }
 
 /** 入力封鎖中の理由文（ui-design §0.5 の定型文。文言を変えない） */
@@ -1413,18 +1442,24 @@ export function MealsSheetPage({
                 >
                   入居者
                 </th>
-                {dayList.map((d) => (
-                  <th
-                    key={d}
-                    scope="colgroup"
-                    colSpan={COLS_PER_DAY}
-                    style={{ top: 0 }}
-                    className={`${CELL_BASE} ${DAY_END} sticky z-20 bg-surface2 font-bold text-ink`}
-                  >
-                    {fmtDayLabel(d)}
-                    {d === today ? <span className="sr-only">（本日）</span> : null}
-                  </th>
-                ))}
+                {dayList.map((d) => {
+                  // 土日は日付見出しセルだけ色を変える（.sheet-sat / .sheet-sun は
+                  // 背景と文字色を両方持つので、平日用の bg-surface2 / text-ink とは排他で当てる）。
+                  // sticky セルなので背景は透けない色であること（.sheet-* 側は不透明）
+                  const tone = weekdayToneClass(d)
+                  return (
+                    <th
+                      key={d}
+                      scope="colgroup"
+                      colSpan={COLS_PER_DAY}
+                      style={{ top: 0 }}
+                      className={`${CELL_BASE} ${DAY_END} sticky z-20 font-bold ${tone === '' ? 'bg-surface2 text-ink' : tone}`}
+                    >
+                      {fmtDayLabel(d)}
+                      {d === today ? <span className="sr-only">（本日）</span> : null}
+                    </th>
+                  )
+                })}
               </tr>
               <tr style={{ height: HEAD_H }}>
                 {dayList.map((d) => (
@@ -1489,18 +1524,18 @@ export function MealsSheetPage({
               </tr>
             </thead>
             <tbody>
-              {visible.map((r) => (
-                <tr key={r.id} style={{ height: ROW_H }}>
+              {visible.map((r, rowIndex) => (
+                <tr key={r.id} style={{ height: ROW_H }} className={altClass(rowIndex)}>
                   <th
                     scope="row"
                     style={{ width: W_ROOM, minWidth: W_ROOM, left: 0 }}
-                    className={`${CELL_BASE} sticky z-10 bg-surface text-center font-normal text-ink2`}
+                    className={`${CELL_BASE} sticky z-10 ${altClass(rowIndex) || 'bg-surface'} text-center font-normal text-ink2`}
                   >
                     {r.room ?? '—'}
                   </th>
                   <td
                     style={{ width: W_NAME, minWidth: W_NAME, maxWidth: W_NAME, left: W_ROOM }}
-                    className={`${CELL_BASE} sticky z-10 truncate bg-surface px-1 text-ink`}
+                    className={`${CELL_BASE} sticky z-10 truncate ${altClass(rowIndex) || 'bg-surface'} px-1 text-ink`}
                   >
                     {r.name}
                   </td>
