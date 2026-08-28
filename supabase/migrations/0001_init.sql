@@ -23,18 +23,13 @@
 -- =====================================================================
 
 -- ---------- 拡張 ----------
--- 申し送り本文の部分一致検索（ilike）用。Supabase では拡張は extensions スキーマへ入れる慣例だが、
--- ローカル PostgreSQL（復元試験用）には extensions スキーマが無いため、有無を見て入れ先を切り替える。
-do $$
-begin
-  if not exists (select 1 from pg_extension where extname = 'pg_trgm') then
-    if exists (select 1 from pg_namespace where nspname = 'extensions') then
-      execute 'create extension pg_trgm with schema extensions';
-    else
-      execute 'create extension pg_trgm';
-    end if;
-  end if;
-end $$;
+-- 申し送り本文の部分一致検索（ilike）用。Supabase の慣例どおり extensions スキーマへ入れる。
+-- ローカル PostgreSQL（復元試験用）には extensions スキーマが無いので先に作る（両環境で同じ置き場になる）。
+-- ※初版は do ブロックで有無を判定していたが、Supabase SQL Editor が PL/pgSQL ブロックの一部を
+--   誤解釈して 42P01 を出したため、本ファイルの do ブロックはすべて静的SQLへ差し替えた
+--   （2026-08-28 実測。psql では旧形も通る＝エディタ固有の問題）。
+create schema if not exists extensions;
+create extension if not exists pg_trgm with schema extensions;
 
 -- =====================================================================
 -- マスタ系スナップショット（正本は既存GAS。care-log からは書き戻さない＝読み取り専用の写し）
@@ -282,23 +277,10 @@ create unique index if not exists uq_fluid_client_key   on fluid_intake (client_
 create unique index if not exists uq_outings_client_key on outings      (client_key);
 
 -- 申し送り本文の部分一致検索（pg_trgm GIN）。
--- 演算子クラス名は拡張を入れたスキーマ側にあるため、実際の格納先を引いて修飾する
--- （extensions スキーマの有無で分岐した上の do ブロックに対応させる）。
-do $$
-declare ext_schema text;
-begin
-  if to_regclass('public.idx_notes_body_trgm') is null then
-    select n.nspname into ext_schema
-      from pg_extension e join pg_namespace n on n.oid = e.extnamespace
-     where e.extname = 'pg_trgm';
-    if ext_schema is null then
-      raise exception 'pg_trgm 拡張が見つかりません。このファイル冒頭の拡張ブロックを先に実行してください。';
-    end if;
-    execute format(
-      'create index idx_notes_body_trgm on notes using gin (body %I.gin_trgm_ops) where deleted_at is null',
-      ext_schema);
-  end if;
-end $$;
+-- 演算子クラスは拡張の置き場（extensions スキーマ＝冒頭で固定）で修飾する。
+create index if not exists idx_notes_body_trgm
+  on notes using gin (body extensions.gin_trgm_ops)
+  where deleted_at is null;
 
 -- =====================================================================
 -- updated_at ＋ rev 自動加算トリガ
@@ -314,15 +296,11 @@ begin
 end;
 $$ language plpgsql;
 
-do $$
-declare t text;
-begin
-  foreach t in array array['vitals','meals','fluid_intake','notes','outings'] loop
-    execute format('drop trigger if exists trg_updated_%I on %I;', t, t);
-    execute format('create trigger trg_updated_%I before update on %I
-                    for each row execute function set_updated_at_rev();', t, t);
-  end loop;
-end $$;
+create or replace trigger trg_updated_vitals       before update on vitals       for each row execute function set_updated_at_rev();
+create or replace trigger trg_updated_meals        before update on meals        for each row execute function set_updated_at_rev();
+create or replace trigger trg_updated_fluid_intake before update on fluid_intake for each row execute function set_updated_at_rev();
+create or replace trigger trg_updated_notes        before update on notes        for each row execute function set_updated_at_rev();
+create or replace trigger trg_updated_outings      before update on outings      for each row execute function set_updated_at_rev();
 
 -- =====================================================================
 -- RLS
@@ -332,27 +310,71 @@ end $$;
 --   ・delete ポリシーは意図的に「作らない」。ポリシー不存在 = 該当操作は全拒否。
 --     したがって anon は select/insert/update/delete のすべてが拒否される。
 -- =====================================================================
-do $$
-declare t text;
-begin
-  foreach t in array array[
-    'residents','staff','vitals','meals','fluid_intake','notes','note_reads','outings',
-    'app_settings','import_days','master_sync_log'
-  ] loop
-    execute format('alter table %I enable row level security;', t);
+alter table residents enable row level security;
+drop policy if exists "read_auth" on residents; drop policy if exists "insert_auth" on residents; drop policy if exists "update_auth" on residents;
+create policy "read_auth"   on residents for select to authenticated using (true);
+create policy "insert_auth" on residents for insert to authenticated with check (true);
+create policy "update_auth" on residents for update to authenticated using (true) with check (true);
 
-    execute format('drop policy if exists "read_auth"   on %I;', t);
-    execute format('drop policy if exists "insert_auth" on %I;', t);
-    execute format('drop policy if exists "update_auth" on %I;', t);
-    -- 参考: kitchen-app 0001 由来の名前が残っている場合に備えて落としておく（care-log では作らない）
-    execute format('drop policy if exists "read_all"    on %I;', t);
-    execute format('drop policy if exists "write_auth"  on %I;', t);
+alter table staff enable row level security;
+drop policy if exists "read_auth" on staff; drop policy if exists "insert_auth" on staff; drop policy if exists "update_auth" on staff;
+create policy "read_auth"   on staff for select to authenticated using (true);
+create policy "insert_auth" on staff for insert to authenticated with check (true);
+create policy "update_auth" on staff for update to authenticated using (true) with check (true);
 
-    execute format('create policy "read_auth"   on %I for select to authenticated using (true);', t);
-    execute format('create policy "insert_auth" on %I for insert to authenticated with check (true);', t);
-    execute format('create policy "update_auth" on %I for update to authenticated using (true) with check (true);', t);
-  end loop;
-end $$;
+alter table vitals enable row level security;
+drop policy if exists "read_auth" on vitals; drop policy if exists "insert_auth" on vitals; drop policy if exists "update_auth" on vitals;
+create policy "read_auth"   on vitals for select to authenticated using (true);
+create policy "insert_auth" on vitals for insert to authenticated with check (true);
+create policy "update_auth" on vitals for update to authenticated using (true) with check (true);
+
+alter table meals enable row level security;
+drop policy if exists "read_auth" on meals; drop policy if exists "insert_auth" on meals; drop policy if exists "update_auth" on meals;
+create policy "read_auth"   on meals for select to authenticated using (true);
+create policy "insert_auth" on meals for insert to authenticated with check (true);
+create policy "update_auth" on meals for update to authenticated using (true) with check (true);
+
+alter table fluid_intake enable row level security;
+drop policy if exists "read_auth" on fluid_intake; drop policy if exists "insert_auth" on fluid_intake; drop policy if exists "update_auth" on fluid_intake;
+create policy "read_auth"   on fluid_intake for select to authenticated using (true);
+create policy "insert_auth" on fluid_intake for insert to authenticated with check (true);
+create policy "update_auth" on fluid_intake for update to authenticated using (true) with check (true);
+
+alter table notes enable row level security;
+drop policy if exists "read_auth" on notes; drop policy if exists "insert_auth" on notes; drop policy if exists "update_auth" on notes;
+create policy "read_auth"   on notes for select to authenticated using (true);
+create policy "insert_auth" on notes for insert to authenticated with check (true);
+create policy "update_auth" on notes for update to authenticated using (true) with check (true);
+
+alter table note_reads enable row level security;
+drop policy if exists "read_auth" on note_reads; drop policy if exists "insert_auth" on note_reads; drop policy if exists "update_auth" on note_reads;
+create policy "read_auth"   on note_reads for select to authenticated using (true);
+create policy "insert_auth" on note_reads for insert to authenticated with check (true);
+create policy "update_auth" on note_reads for update to authenticated using (true) with check (true);
+
+alter table outings enable row level security;
+drop policy if exists "read_auth" on outings; drop policy if exists "insert_auth" on outings; drop policy if exists "update_auth" on outings;
+create policy "read_auth"   on outings for select to authenticated using (true);
+create policy "insert_auth" on outings for insert to authenticated with check (true);
+create policy "update_auth" on outings for update to authenticated using (true) with check (true);
+
+alter table app_settings enable row level security;
+drop policy if exists "read_auth" on app_settings; drop policy if exists "insert_auth" on app_settings; drop policy if exists "update_auth" on app_settings;
+create policy "read_auth"   on app_settings for select to authenticated using (true);
+create policy "insert_auth" on app_settings for insert to authenticated with check (true);
+create policy "update_auth" on app_settings for update to authenticated using (true) with check (true);
+
+alter table import_days enable row level security;
+drop policy if exists "read_auth" on import_days; drop policy if exists "insert_auth" on import_days; drop policy if exists "update_auth" on import_days;
+create policy "read_auth"   on import_days for select to authenticated using (true);
+create policy "insert_auth" on import_days for insert to authenticated with check (true);
+create policy "update_auth" on import_days for update to authenticated using (true) with check (true);
+
+alter table master_sync_log enable row level security;
+drop policy if exists "read_auth" on master_sync_log; drop policy if exists "insert_auth" on master_sync_log; drop policy if exists "update_auth" on master_sync_log;
+create policy "read_auth"   on master_sync_log for select to authenticated using (true);
+create policy "insert_auth" on master_sync_log for insert to authenticated with check (true);
+create policy "update_auth" on master_sync_log for update to authenticated using (true) with check (true);
 
 -- =====================================================================
 -- Realtime（postgres_changes）
@@ -364,22 +386,12 @@ end $$;
 --     その場合はダッシュボードの Database → Replication で supabase_realtime を作り、
 --     下の6表を有効にしてからこのブロックを再実行する。
 -- =====================================================================
-do $$
-declare t text;
-begin
-  if not exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
-    raise notice 'supabase_realtime が無いため Realtime 登録をスキップしました（ダッシュボードで有効化してください）';
-    return;
-  end if;
-  foreach t in array array['notes','vitals','meals','fluid_intake','outings','note_reads'] loop
-    if not exists (
-      select 1 from pg_publication_tables
-       where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = t
-    ) then
-      execute format('alter publication supabase_realtime add table public.%I;', t);
-    end if;
-  end loop;
-end $$;
+-- set table は「配信対象の一覧をこの6表に置き換える」＝再実行しても増殖しない（冪等）。
+-- この Supabase プロジェクトは care-log 専用のため、他アプリの配信対象を消す心配はない。
+-- ※「publication "supabase_realtime" does not exist」エラーになった場合のみ:
+--   ダッシュボード Database → Replication で supabase_realtime を有効化してから、この文を再実行する。
+alter publication supabase_realtime
+  set table notes, vitals, meals, fluid_intake, outings, note_reads;
 
 -- PostgREST のスキーマキャッシュを即時リロード（適用直後の 404/PGRST205 期間を短縮）
 notify pgrst, 'reload schema';
@@ -408,7 +420,7 @@ notify pgrst, 'reload schema';
 --     where pubname = 'supabase_realtime' and schemaname = 'public' order by tablename;
 --    → fluid_intake / meals / note_reads / notes / outings / vitals の6行が含まれること。
 --      0行・パブリケーション無しの場合はダッシュボード Database → Replication で
---      supabase_realtime を有効にしてから、上の do $$ ブロックを再実行する
+--      supabase_realtime を有効にしてから、上の alter publication 文を再実行する
 --
 -- 5) 本文検索が索引を使うか
 --    explain analyze select id from notes

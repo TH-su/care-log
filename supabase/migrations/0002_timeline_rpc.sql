@@ -232,22 +232,13 @@ comment on function public.timeline_chunk(date, date, bigint) is
 
 -- ---------------------------------------------------------------------
 -- 実行権限: PUBLIC の既定 EXECUTE を剥がし、anon を明示 revoke・authenticated に grant。
--- ロール不在の環境（バックアップからのローカル復元試験など）でも失敗しないように存在確認を挟む。
+-- （anon / authenticated ロールは Supabase に常在。ローカル復元試験の環境ではロールを先に作る
+--   ＝ tools/backup の手順書に記載。do ブロックでの存在判定は Supabase SQL Editor が
+--   PL/pgSQL を誤解釈して失敗した実績があるため使わない・2026-08-28）
 -- ---------------------------------------------------------------------
-do $$
-declare
-  v_sig constant text := 'public.timeline_chunk(date, date, bigint)';
-begin
-  execute format('revoke all on function %s from public', v_sig);
-
-  if exists (select 1 from pg_roles where rolname = 'anon') then
-    execute format('revoke execute on function %s from anon', v_sig);
-  end if;
-
-  if exists (select 1 from pg_roles where rolname = 'authenticated') then
-    execute format('grant execute on function %s to authenticated', v_sig);
-  end if;
-end $$;
+revoke all on function public.timeline_chunk(date, date, bigint) from public;
+revoke execute on function public.timeline_chunk(date, date, bigint) from anon;
+grant execute on function public.timeline_chunk(date, date, bigint) to authenticated;
 
 -- PostgREST のスキーマキャッシュを即時リロード（適用直後の 404/PGRST202 期間を短縮）
 notify pgrst, 'reload schema';
