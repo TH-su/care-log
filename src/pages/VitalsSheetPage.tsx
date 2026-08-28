@@ -985,30 +985,40 @@ export function VitalsSheetPage({
           </p>
         </div>
 
-        <div className="mt-3 flex flex-wrap items-center gap-gap">
+        {/* フロア・日数のボタンは文字ぶんの幅にする（sheet.css の .sheet-pickbar）。
+            既定の flex:1 のままだと、同じ行にある期間送り・倍率と幅を取り合って
+            「1階」が「1」「階」の2行に折れていた（2026-08-28 実機で確認）。
+            食事一覧と同じ仕組み。高さ 44px は変えない＝押しやすさは落とさない。
+            見出し（フロア／横に並べる日数）はこの行に入れると横幅が足りなくなるため付けない
+            （ボタンの文字だけで何の切替か分かる。読み上げ名は ariaLabel が持つ） */}
+        <div className="mt-3 sheet-pickbar">
           {floorOptions.length > 1 ? (
-            <SegmentPicker
-              options={floorOptions}
-              value={floor}
-              onChange={(v) => {
-                setFloor(v)
-                writeFloor(v)
-              }}
-              ariaLabel="フロアを選ぶ"
-            />
+            <div className="sheet-pickbar-group">
+              <SegmentPicker
+                options={floorOptions}
+                value={floor}
+                onChange={(v) => {
+                  setFloor(v)
+                  writeFloor(v)
+                }}
+                ariaLabel="フロアを選ぶ"
+              />
+            </div>
           ) : null}
 
-          <SegmentPicker
-            options={SHEET_DAYS.map((d) => ({ value: String(d), label: `${d}日` }))}
-            value={String(days)}
-            onChange={(v) => {
-              const n = Number(v)
-              if (!(SHEET_DAYS as readonly number[]).includes(n)) return
-              setDays(n as SheetDays)
-              writeDays(n as SheetDays)
-            }}
-            ariaLabel="横に並べる日数を選ぶ"
-          />
+          <div className="sheet-pickbar-group">
+            <SegmentPicker
+              options={SHEET_DAYS.map((d) => ({ value: String(d), label: `${d}日` }))}
+              value={String(days)}
+              onChange={(v) => {
+                const n = Number(v)
+                if (!(SHEET_DAYS as readonly number[]).includes(n)) return
+                setDays(n as SheetDays)
+                writeDays(n as SheetDays)
+              }}
+              ariaLabel="横に並べる日数を選ぶ"
+            />
+          </div>
 
           <div className="flex items-center gap-gap">
             {/* 読み込み中の連打は、表示が空欄のまま期間だけ進む＝取り違えのもとになるので止める */}
