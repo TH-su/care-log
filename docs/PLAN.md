@@ -81,7 +81,7 @@
 
 ## 実装フェーズ（承認後・dev-team L編成）
 
-- **Phase 0（橋爪氏・初回のみ約15分）**: ①Supabase 新規プロジェクト作成 ②GitHub リポ `TH-su/care-log` 作成（gh CLI 代行可・要承認） ③Secrets 登録+Pages 有効化 ※手順は初心者向け粒度で都度案内
+- **Phase 0（管理者・初回のみ約15分）**: ①Supabase 新規プロジェクト作成 ②GitHub リポ `TH-su/care-log` 作成（gh CLI 代行可・要承認） ③Secrets 登録+Pages 有効化 ※手順は初心者向け粒度で都度案内
 - **Phase 1**: スパイク2件（23505経路・pgroonga可否）→ リポ雛形（kitchen-app 複製+tokens.css）。work-folder-map.md / data-contracts §0 への行追加を提案
 - **Phase 2**: migrations（スキーマ+RLS+rev トリガ+timeline_chunk）→ anon 全拒否を pg_policies で検証
 - **Phase 3**: マスタ取込（読み取り専用）／**Phase 4**: 入力画面群／**Phase 5**: タイムライン+検索+カルテ／**Phase 6**: バックアップ整備＋L4検証→公開／**Phase 7**: importer+並走14日→切替判断材料の提示

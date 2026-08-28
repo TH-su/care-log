@@ -185,4 +185,4 @@
 - スマホ縦での33名一括グリッドは非対応（1名ずつ画面へフォールバック）で良いか
 - 切替日D以前の入力封鎖の解除手順（誰が・どこで切り替えるか。app_settings 管理UIの要否）【#2】— Subagent 1 と協議
 
-参照根拠: `/Users/Takeshi/.claude/plans/temporal-rolling-truffle.md`（L33-43 実測構造・L37 付帯ブロック・L40 しきい値凡例・L45-51 ハウス制約・L70-74 未決事項）／`/Users/Takeshi/.claude/design/tokens.css`（--c-surface2・--fs-2xs〜2xl・--tap-min/gap 等の実在を確認済み）／`/Users/Takeshi/.claude/rules/dev-principles.md`（原則4・11・12）／`/Users/Takeshi/Claude/Projects/kitchen-app/.claude/worktrees/remote-control-65a07c/tailwind.config.js`／engineer-brain 01/08（[2][8][73][74][81]）
+参照根拠: `~/.claude/plans/temporal-rolling-truffle.md`（L33-43 実測構造・L37 付帯ブロック・L40 しきい値凡例・L45-51 ハウス制約・L70-74 未決事項）／`~/.claude/design/tokens.css`（--c-surface2・--fs-2xs〜2xl・--tap-min/gap 等の実在を確認済み）／`~/.claude/rules/dev-principles.md`（原則4・11・12）／`（別プロジェクト）/tailwind.config.js`／engineer-brain 01/08（[2][8][73][74][81]）

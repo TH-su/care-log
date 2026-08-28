@@ -1,4 +1,4 @@
-照合完了。監査指摘9の根拠（events の facility・kind 列）と移行API構造を実物で確認しました（実在パスは `/Users/Takeshi/Claude/Repos/gas-sync/moushiokuri-viewer/コード.js`。元設計が引いた `gas/moushiokuri-api.gs` は存在せず、本改訂版では実在パスへ差し替えます）。
+照合完了。監査指摘9の根拠（events の facility・kind 列）と移行API構造を実物で確認しました（実在パスは `~/Repos/gas-sync/moushiokuri-viewer/コード.js`。元設計が引いた `gas/moushiokuri-api.gs` は存在せず、本改訂版では実在パスへ差し替えます）。
 
 ---
 
@@ -10,7 +10,7 @@
 
 ## 1. テーブル設計（DDLスケッチ）
 
-方針は元設計どおり: 冪等DDL（0008/0009 の流儀。根拠: `/Users/Takeshi/Claude/Projects/kitchen-app/.claude/worktrees/remote-control-65a07c/supabase/migrations/0008_restrict_read_to_authenticated.sql`・`0009_app_settings.sql`）、**delete ポリシー不作成＝物理削除構造的不可**、soft delete のみ。
+方針は元設計どおり: 冪等DDL（0008/0009 の流儀。根拠: `（別プロジェクト）/supabase/migrations/0008_restrict_read_to_authenticated.sql`・`0009_app_settings.sql`）、**delete ポリシー不作成＝物理削除構造的不可**、soft delete のみ。
 
 ```sql
 -- 利用者スナップショット（正本= GAS master.gs getRoster。読み取り専用の写し）
@@ -140,7 +140,7 @@ updated_at トリガ（0001 の `set_updated_at()` 踏襲）で `new.rev = old.r
 - 制約の明示: 共有アカウントゆえ actor は**自己申告**であり証跡性は弱い。この限界は承認時に本人へ明示し、認証方式の裁定と一体で確定する。
 
 RLS（全表共通・0008 流儀）: `read_auth`（select・authenticated）／`write_auth`（insert/update・authenticated）／**delete ポリシーなし**。anon はポリシー不存在で全拒否（pg_policies 照合で検証）。RPC も authenticated 限定（§2）。
-PII: 実名ゼロ・`VITE_*` に施設情報を置かない（0009 実測知見）・GAS トークンは localStorage 手入力のみ・console に応答本文を出さない（根拠: `/Users/Takeshi/Claude/Projects/kitchen-app/.claude/worktrees/remote-control-65a07c/src/lib/wsClient.ts` 規約1・3）。
+PII: 実名ゼロ・`VITE_*` に施設情報を置かない（0009 実測知見）・GAS トークンは localStorage 手入力のみ・console に応答本文を出さない（根拠: `（別プロジェクト）/src/lib/wsClient.ts` 規約1・3）。
 
 ## 5. 書込・同期設計
 
@@ -159,7 +159,7 @@ PII: 実名ゼロ・`VITE_*` に施設情報を置かない（0009 実測知見�
 
 ## 7. 移行設計
 
-- **取込元は蓄積スプシ**（パース済み・回帰テスト付き）。`apiEvents`/`apiMeasures`（from/to 指定・上限150日/呼）で遡りページング。根拠: `/Users/Takeshi/Claude/Repos/gas-sync/moushiokuri-viewer/コード.js` L1596-1602（期間丸め）・L1609・L1710。events の列は `key,date,facility,shift,row,residentRaw,residentName,kind,timeHM,body,reporter,…`（同 L127-130 実測）— **facility→notes.facility、kind→notes.category に格納**（監査#9受諾。列単位の落丁も M-024 計数対象に含める）。
+- **取込元は蓄積スプシ**（パース済み・回帰テスト付き）。`apiEvents`/`apiMeasures`（from/to 指定・上限150日/呼）で遡りページング。根拠: `~/Repos/gas-sync/moushiokuri-viewer/コード.js` L1596-1602（期間丸め）・L1609・L1710。events の列は `key,date,facility,shift,row,residentRaw,residentName,kind,timeHM,body,reporter,…`（同 L127-130 実測）— **facility→notes.facility、kind→notes.category に格納**（監査#9受諾。列単位の落丁も M-024 計数対象に含める）。
 - **importer は直結Postgres接続 — 監査#6受諾**: PostgREST 経由では複数行トランザクション不可のため、Mac ローカル Node スクリプト＋`pg` ライブラリ＋**session pooler 直結**（接続文字列は環境変数のみ・リポ外）で期間単位トランザクション。計数不一致時は rollback。`import_key` unique で冪等。
 - **並走期間の衝突規則 — 監査#4受諾**: **切替日Dまで care-log の入力UIを機能フラグ（app_settings.native_input_enabled）で封鎖**（閲覧・検証専用）。万一のネイティブ行混入に備え、importer は import_key 無しの既存 (resident, day, slot) を **native_skip** として計数し上書きしない。計数式: **源泉 = inserted + updated + skipped(墓標) + native_skip + unmatched** — 不成立ならその期間を rollback。
 - **「記録なし」と「未取込」の区別**: import_days に行あり=「表示（0件=記録なし）」、なし=「未取込」バッジ（取込GAS の ingestedDates 思想を継承。同 L1540-1542: 保持は直近200日のみ）。D以降はネイティブ入力＝0件は記録なし。
