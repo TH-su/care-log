@@ -1328,13 +1328,13 @@ export async function fetchKarte(
 }
 
 /**
- * PostgREST のフィルタ値として安全な ilike パターンを作る。
- * LIKE メタ文字（% _ \）を無効化し、予約文字（, . : ( ) 等）に備えて二重引用符で囲む。
+ * ilike 用のパターンを作る。LIKE メタ文字（% _ \）だけを無効化し、% で挟んで返す。
+ * 二重引用符では包まない: supabase-js は値を丸ごと URL エンコードして単一フィルタ値として
+ * 送るため、引用符を付けるとそれ自体がパターンの一部になり全件不一致になる
+ * （2026-08-28 実機で確認。予約文字の引用が要るのは in.(...) 等のリスト値だけ）。
  */
 function likePattern(q: string): string {
-  const escaped = q.replace(/[\\%_]/g, (c) => `\\${c}`)
-  const quoted = `%${escaped}%`.replace(/[\\"]/g, (c) => `\\${c}`)
-  return `"${quoted}"`
+  return `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`
 }
 
 function normalizeName(s: string): string {
