@@ -1,7 +1,25 @@
 // 日報シート（現行スプレッドシート「申し送り」タブの再現・既定画面）。
 // レイアウトの正本: docs/design/sheet-contracts.md §5 を上から順に実装する。
-//   日付バー → ヘッダ（施設名・日勤/夜勤日報・日付）→ 出勤者 → 外出者 → 外泊者 →
+//   日付バー → ［1日ぶんの枠］ヘッダ（施設名・日勤/夜勤日報・出勤者1行・日付）→ 外出者 → 外泊者 →
 //   発熱者 → 他症状者 → 日勤申し送り → 黒帯「↓16時以降の記録」→ デイサービス → 夜勤申し送り
+//
+// 2026-08-28 の追加指示（実物と見比べた管理者の指示。sheet-contracts.md §5 も更新済み）:
+//   1) 日付はセルを押すと OS のカレンダーが開く（1〜31 の横並びボタンは撤去）
+//   2) 既定は10日ごと表示（1〜10 / 11〜20 / 21〜月末）。1日ごとに太線で囲む
+//   3) 別の日を選ぶと、10日表示のままその日へスクロールする（区切りをまたぐ日はその区切りを出す）
+//   4) 「1日」表示を選んだ時だけ1日ぶんの表示になる（表示単位は端末ごとに記憶する）
+//   5) 文字と余白を詰めてスプシの密度に寄せる（シートの中は --sheet-font で統一）
+//   6) 施設長の右に出勤者が横1行（1行に15枠）
+//   8) 申し送りのタイトル帯を実物の配色にする（sheet.css の --dsheet-c-*）
+//   9) 付帯ブロックは常時表示（折りたたまない）
+//  10) 「保存しました」は出さない。保存失敗・競合・未送信は残す
+//
+// 10日表示の取得（管理者指示「全件ロードしない」）:
+//   fetchDailyReport は1日単位なので、日ごとに取りに行く。
+//   ・同時に走らせるのは MAX_PARALLEL_LOADS 件まで（回線の細い現場で一斉に叩かない）
+//   ・取得済みの日はこの画面が持つキャッシュから返す（区切りを行き来しても取り直さない）
+//   ・自分が書き込んだ日はキャッシュを捨てる（編集前の内容を後から見せない）
+//   ・失敗した日はその日の枠だけがエラー表示＋再試行になる（他の日は読めたまま＝部分表示）
 //
 // この画面の規律（contracts.md §共通規律 / sheet-contracts.md §8）:
 //   - supabase へは触れず db.ts の関数だけを呼ぶ。個人情報を console・localStorage に出さない
@@ -9,22 +27,21 @@
 //   - 入力封鎖中（native_input_enabled=false）は編集不可＋理由文。閲覧・既読は可能
 //   - 破壊的操作（行の削除・値の消去）は確認、出勤者の取り消しは Undo
 //   - 3状態（ローディング／エラー／空）を持つ。読み取り経路から書き込まない（既読は明示操作のみ）
-//   - 「＋追加」は空行を足すだけ。本文（申し送り）や値（発熱者・他症状者）が入るまで保存しない
+//   - 「＋行」は空行を足すだけ。本文（申し送り）や値（発熱者・他症状者）が入るまで保存しない
 //
 // 部品の前提（src/components/sheet.tsx・sheet-contracts.md §4 の署名どおりに呼ぶ）:
 //   SheetFrame({children, className?}) / ZoomBar() /
 //   SheetCell({value, onCommit?, align?, width?, level?, tone?, placeholder?, multiline?, ariaLabel}) /
-//   ColorPicker({value, onChange, ariaLabel}) /
-//   CollapsibleBlock({title, count, children, onAdd, addLabel, defaultOpen?})
+//   ColorPicker({value, onChange, ariaLabel})
+//   ※ CollapsibleBlock（0件で畳む）は 2026-08-28 の指示9で使わなくなった（付帯ブロックは常時表示）。
+//     部品は他画面のために sheet.tsx に残してある（削除しない）。
 //   ※ SheetCell が描画する要素の種類（td/div）に依存しないよう、表は div の行で組み、
 //     各セルは幅を持つ入れ物で包んでから SheetCell を置く。
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import {
-  Chip,
   ConfirmDialog,
-  EmptyBlock,
   ErrorBlock,
   LoadingBlock,
   ResidentPickerModal,
@@ -35,11 +52,12 @@ import {
 // 行の色 → 背景色の対応は sheet.tsx の NOTE_COLOR_CLASS を唯一の正本として使う
 // （見本＝ColorPicker の swatch と行の背景が食い違わないようにするため）
 import {
-  CollapsibleBlock,
   ColorPicker,
   NOTE_COLOR_CLASS,
+  readSheetPref,
   SheetCell,
   SheetFrame,
+  writeSheetPref,
   ZoomBar,
 } from '../components/sheet'
 import {
@@ -61,10 +79,12 @@ import {
   updateNoteFields,
   updateVital,
 } from '../lib/db'
+import type { DailyReport } from '../lib/db'
 import { getActorId, touchActivity } from '../lib/actor'
-import { addDays, fmtDayLabel, fmtTimeHM, normalizeVitalInput, todayIso, toHalfWidth } from '../lib/format'
+import { addDays, fmtTimeHM, normalizeVitalInput, todayIso, toHalfWidth } from '../lib/format'
 import {
   IMPORTANCE_LABEL,
+  LS,
   NOTE_COLOR_LABEL,
   ROLE_TAGS,
   VITAL_RANGE,
@@ -131,7 +151,12 @@ const ERR_NO_ACTOR = '記録する職員が選ばれていません。画面上�
 const MSG_QUEUED = '⚠ 未送信（電波が戻ると自動で送信します）'
 const MSG_NOT_PERSISTED =
   '▲ 送信待ちにしましたが端末に控えを残せませんでした。この画面を閉じずに電波の回復をお待ちください'
-const MSG_SAVED = '✓ 保存しました'
+/**
+ * 保存が成功した行の一言（旧 MSG_SAVED「✓ 保存しました」）は**出さない**（2026-08-28 指示10）。
+ * 1行ごとに出すと行間が空いて実物の密度にならないため。
+ * 代わりに、成功した時点でその行に残っている失敗・競合の一言を消す（saveOk）。
+ * **失敗・競合・未送信は今までどおり出す**（記録が消えたと誤解させないため）。
+ */
 /** 応答を待つ間に日付を送った時。保存はできているが、今開いている日の記録ではない */
 const MSG_SAVED_OTHER_DAY = '保存しました（表示中の日付が変わったため、この画面には出していません）'
 /**
@@ -172,13 +197,33 @@ const W_BP = 'calc(var(--w-sys) + var(--w-dia))'
 /** 発熱者の1セット（時 KT SpO2 BP P）の幅。時と脈は同じ --w-pulse を使う */
 const W_FEVER_SET = `calc(var(--w-pulse) * 2 + var(--w-temp) + var(--w-spo2) + ${W_BP})`
 /**
- * シート（器）の最小幅。いちばん列の多い発熱者ブロック（氏名＋3セット）の固定列の合計に、
- * ブロックの枠（CollapsibleBlock の枠線 1px×2 と内側の余白 --sp-2 ×2）を足した値。
+ * シート（器）の最小幅。いちばん列の多い発熱者ブロック（ブロック名＋氏名＋3セット）の固定列の合計に、
+ * 1日ぶんの太線枠（--sheet-rule-bold × 2）を足した値。
  * **器の幅をこの確定値と画面幅だけで決める**ことで、幅の計算に中身の文字の長さが入らなくなる＝
  * 申し送りの長文でシート全体が横に伸びず、伸びるのは行の高さだけになる
  * （sheet-contracts.md §5「長文は行が伸びる（clamp しない）」）。
  */
-const SHEET_MIN_W = `calc(var(--w-name) + ${W_FEVER_SET} * ${FEVER_SETS} + var(--sp-2) * 2 + var(--sheet-rule) * 2)`
+const SHEET_MIN_W = `calc(var(--w-block) + var(--w-name) + ${W_FEVER_SET} * ${FEVER_SETS} + var(--sheet-rule-bold) * 2)`
+
+/**
+ * ブロックごとに最初から出しておく空の入力行の数（実物のスプシは固定行数）。
+ * 保存済みの行と「＋行」で足した行を合わせてこの数に満たなければ、空行で埋める。
+ * 空行は値が入るまで保存しない（空データを作らない）ので、記録は増えない。
+ */
+const MIN_ROWS = { outing: 4, overnight: 2, fever: 4, symptom: 4, note: 1 } as const
+
+/** 10日表示の区切り（1〜10 / 11〜20 / 21〜月末。月末が31日なら 21〜31） */
+const BLOCK_STARTS = [1, 11, 21] as const
+
+/** 同時に走らせる日報取得の上限（回線の細い現場で10日ぶんを一斉に叩かない） */
+const MAX_PARALLEL_LOADS = 3
+/** 画面が保持する取得済みの日の上限（1か月ぶん。超えたら古い順に捨てる） */
+const MAX_CACHE_DAYS = 31
+
+/** 表示単位（10日ごと / 1日ごと）。既定は10日（2026-08-28 指示2・4） */
+type SheetUnit = '10' | '1'
+const UNIT_VALUES: readonly SheetUnit[] = ['10', '1']
+const DEFAULT_UNIT: SheetUnit = '10'
 
 const VITAL_FIELD_LABEL: Record<'temp' | 'sys_bp' | 'dia_bp' | 'pulse' | 'spo2', string> = {
   temp: '体温',
@@ -362,15 +407,65 @@ function fmtDayTime(on: string | null, at: string | null, baseIso: string): stri
   return `${Number(m)}/${Number(d)} ${time}`.trim()
 }
 
-/** その月の日を並べる（日付リンク用）。壊れた値では空配列を返す */
-function monthDays(iso: string): string[] {
-  if (!ISO_DATE_RE.test(iso)) return []
+const WEEKDAY = ['日', '月', '火', '水', '木', '金', '土'] as const
+
+/**
+ * シート内の日付表記（実物と同じ「26年8月28日(金)」）。
+ * format.ts の fmtDayLabel は「8/28（金）」で、実物の帳票とは書式が違うためここで組み立てる
+ * （format.ts は変更禁止ファイル）。壊れた値はそのまま返す（画面を落とさない）。
+ */
+function fmtSheetDay(iso: string): string {
+  if (!ISO_DATE_RE.test(iso)) return iso
   const y = Number(iso.slice(0, 4))
   const m = Number(iso.slice(5, 7))
+  const d = Number(iso.slice(8, 10))
+  const dt = new Date(y, m - 1, d)
+  return `${pad2(y % 100)}年${m}月${d}日(${WEEKDAY[dt.getDay()]})`
+}
+
+/**
+ * その日が属する10日区切りの日を並べる（1〜10 / 11〜20 / 21〜月末）。
+ * 月末が31日なら3つ目の区切りは 21〜31（11日ぶん）になる＝取得の上限もこの長さ。
+ * 壊れた値では「その日1日だけ」を返す（区切りが作れなくても画面は開ける）。
+ */
+function blockDays(iso: string): string[] {
+  if (!ISO_DATE_RE.test(iso)) return [iso]
+  const y = Number(iso.slice(0, 4))
+  const m = Number(iso.slice(5, 7))
+  const d = Number(iso.slice(8, 10))
   const last = new Date(y, m, 0).getDate()
+  if (!Number.isFinite(last) || last < 28) return [iso]
+  const start = d <= 10 ? BLOCK_STARTS[0] : d <= 20 ? BLOCK_STARTS[1] : BLOCK_STARTS[2]
+  const end = start === BLOCK_STARTS[2] ? last : start + 9
   const out: string[] = []
-  for (let d = 1; d <= last; d++) out.push(`${y}-${pad2(m)}-${pad2(d)}`)
+  for (let i = start; i <= end; i++) out.push(`${y}-${pad2(m)}-${pad2(i)}`)
   return out
+}
+
+/** 保存済みの表示単位を既知値照合で読む（未知値・参照不能は既定の10日へ） */
+function readUnit(): SheetUnit {
+  const raw = readSheetPref(LS.sheetDays, 'daily')
+  return UNIT_VALUES.includes(raw as SheetUnit) ? (raw as SheetUnit) : DEFAULT_UNIT
+}
+
+/**
+ * 同時に走らせる非同期処理の数を絞る（10日ぶんの取得を一斉に投げない）。
+ * 上限に達している間は待ち行列に並べ、1つ終わるごとに次を通す。
+ */
+function makeLimiter(max: number): <T>(job: () => Promise<T>) => Promise<T> {
+  let active = 0
+  const waiting: (() => void)[] = []
+  return async <T,>(job: () => Promise<T>): Promise<T> => {
+    if (active >= max) await new Promise<void>((resolve) => waiting.push(resolve))
+    active += 1
+    try {
+      return await job()
+    } finally {
+      active -= 1
+      const next = waiting.shift()
+      if (next) next()
+    }
+  }
 }
 
 function errText(err: unknown): string {
@@ -477,6 +572,52 @@ interface OutingDraft {
   locked: boolean
 }
 
+// ── 空の入力行を作る（「＋行」と、固定行数の補充から呼ぶ）──────
+
+function emptyOutingDraft(key: string, kind: OutingKind): OutingDraft {
+  return {
+    key,
+    kind,
+    residentId: null,
+    place: '',
+    startAt: '',
+    endText: '',
+    companion: '',
+    locked: false,
+  }
+}
+
+function emptyVitalDraft(key: string, kind: 'observation' | 'symptom'): VitalDraft {
+  return {
+    key,
+    kind,
+    residentId: null,
+    // 発熱者は1行に3枠（時 KT SpO2 BP P）。他症状者は1枠
+    sets: kind === 'observation' ? [emptySet(), emptySet(), emptySet()] : [emptySet()],
+    symptom: '',
+    locked: false,
+  }
+}
+
+function emptyNoteDraft(
+  key: string,
+  shift: Shift,
+  after16: boolean,
+  reporterId: number | null,
+): NoteDraft {
+  return {
+    key,
+    shift,
+    after16,
+    residentId: null,
+    targetPicked: false,
+    body: '',
+    reporterId,
+    color: null,
+    locked: false,
+  }
+}
+
 /** 発熱者ブロックの1行（同じ利用者の観察を最大3枠ずつまとめる） */
 interface FeverRow {
   key: string
@@ -531,10 +672,10 @@ function Row({ children, className = '' }: { children: ReactNode; className?: st
   )
 }
 
-function HeadRow({ children }: { children: ReactNode }) {
+function HeadRow({ children, className = '' }: { children: ReactNode; className?: string }) {
   return (
     <div
-      className="flex items-stretch border-b border-border-strong bg-surface2 font-bold text-ink2"
+      className={`flex items-stretch border-b border-border-strong bg-surface2 font-bold text-ink2 ${className}`}
       style={{ minHeight: 'var(--sheet-head-h)' }}
     >
       {children}
@@ -643,6 +784,108 @@ function PickerCell({
   )
 }
 
+/**
+ * 行を1つ足すボタン（実物のスプシは固定行数だが、足りない時は増やせる＝現状の実装を維持）。
+ * 見出しの中に置くので行の高さに収める（sheet-dense-btn）。読み上げ名にはブロック名を入れる
+ * （同じ「＋行」が画面に何個も並ぶため、どのブロックを足すのか分かるようにする）。
+ */
+function AddRowButton({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      className={`${CELL_HIT} sheet-dense-btn shrink-0 rounded-sm border border-primary px-1 font-bold text-primary`}
+    >
+      ＋行
+    </button>
+  )
+}
+
+/**
+ * 行の左端の件数セル（実物と同じ「0名」の位置）。件数はブロックの1行目だけに出す
+ * ＝スプシの結合セルの見え方に合わせる。2行目以降は空欄。
+ */
+function LeadCell({ text }: { text: string }) {
+  return (
+    <Cell width="var(--w-block)" className="flex items-center">
+      <span className="tabular truncate text-ink2">{text}</span>
+    </Cell>
+  )
+}
+
+/**
+ * 付帯ブロックの枠（外出者・外泊者・発熱者・他症状者）。
+ * 2026-08-28 の指示9で「常時表示・折りたたみなし」になったため CollapsibleBlock は使わない
+ * （0件でも枠と空行を出す＝実物のスプシと同じ）。
+ * 見出し行は［ブロック名＋＋行］＋列見出しで、下罫線を太線にする（指示「見出しは黒枠・太線」）。
+ */
+function SheetBlock({
+  title,
+  head,
+  onAdd,
+  children,
+}: {
+  title: string
+  /** 列見出し（HeadCell を並べる）。左端のブロック名セルはこの部品が描く */
+  head: ReactNode
+  /** 省略＝行を足せない（入力封鎖中） */
+  onAdd?: () => void
+  children: ReactNode
+}) {
+  return (
+    <section aria-label={title}>
+      <HeadRow className="dsheet-head">
+        <Cell width="var(--w-block)" className="flex items-center gap-1">
+          <span className="truncate">{title}</span>
+          {onAdd ? <AddRowButton label={`${title}に1行追加`} onClick={onAdd} /> : null}
+        </Cell>
+        {head}
+      </HeadRow>
+      {children}
+    </section>
+  )
+}
+
+/**
+ * 申し送りのタイトル帯（実物の配色。指示8）。
+ * 色の意味は必ず文字（日勤申し送り／デイサービス／夜勤申し送り）が持ち、
+ * 色は「実物と同じ場所を探せる」ための補助に留める（色だけで意味を伝えない）。
+ */
+type NoteTone = 'note' | 'care' | 'night'
+
+const NOTE_TONE_CLASS: Record<NoteTone, string> = {
+  note: 'dsheet-title-note',
+  care: 'dsheet-title-care',
+  night: 'dsheet-title-night',
+}
+
+function NoteTitleBand({
+  day,
+  title,
+  tone,
+  count,
+  onAdd,
+}: {
+  day: string
+  title: string
+  tone: NoteTone
+  count: number
+  onAdd?: () => void
+}) {
+  return (
+    <div
+      className={`flex flex-wrap items-center gap-1 px-1 font-bold ${NOTE_TONE_CLASS[tone]}`}
+      style={{ minHeight: 'var(--sheet-row-h-note)' }}
+    >
+      <span className="tabular">{fmtSheetDay(day)}</span>
+      <span>{title}</span>
+      <span className="tabular">{count}件</span>
+      {onAdd ? <AddRowButton label={`${title}に1行追加`} onClick={onAdd} /> : null}
+    </div>
+  )
+}
+
 // ══════════════════════════════════════════════════════════════
 // ページ本体
 // ══════════════════════════════════════════════════════════════
@@ -673,6 +916,37 @@ interface ConfirmState {
   onConfirm: () => void
 }
 
+/** 1日ぶんの枠（DaySheet）へ渡すもの。マスタ・取得口・通知は親が1つだけ持つ */
+interface DaySheetProps {
+  day: string
+  residents: Resident[]
+  staff: Staff[]
+  facility: string | null
+  actorId: number | null
+  /** 入力解禁（false＝閲覧のみ。理由文は blockedReason） */
+  enabled: boolean
+  blockedReason: string
+  /** 「最新に更新」で増える。増えるとこの日を取り直す（下書きは消さない） */
+  reloadToken: number
+  /** 1日ぶんの日報を取る（取得済みならキャッシュから返る） */
+  loadDay: (day: string) => Promise<DailyReport>
+  /** 自分がこの日へ書き込んだ（変更通知の抑制＋取り置きの破棄） */
+  onWrite: (day: string) => void
+  /** 未保存の下書きの有無を親へ伝える（日を移る前の確認に使う） */
+  onDirty: (day: string, dirty: boolean) => void
+  /** 取得が終わった（親が選択日の位置合わせをやり直す） */
+  onLoaded: (day: string) => void
+  /** 日付セルのカレンダーで別の日が選ばれた */
+  onPickDay: (iso: string) => void
+  show: (msg: string, undo?: () => void) => void
+}
+
+/**
+ * 日報ページ（外枠）。
+ * 受け持つのは「どの日を出すか」と、全ての日で共通のもの
+ * （利用者・職員・施設名・入力解禁フラグ・変更通知・トースト・取得のキャッシュ）。
+ * 1日ぶんの中身と保存は DaySheet が持つ＝10日表示でも1日表示でも同じ部品を並べるだけになる。
+ */
 export function DailySheetPage({
   residents: propResidents,
   staff: propStaff,
@@ -680,6 +954,8 @@ export function DailySheetPage({
   inputEnabled: propInputEnabled,
 }: DailySheetPageProps = {}) {
   const [day, setDay] = useState(() => todayIso())
+  /** 表示単位。既定は10日（指示2・4）。端末ごとに記憶する（日付は記憶しない） */
+  const [unit, setUnit] = useState<SheetUnit>(readUnit)
   const [phase, setPhase] = useState<Phase>('loading')
   const [reload, setReload] = useState(0)
   const [residents, setResidents] = useState<Resident[]>(propResidents ?? NO_RESIDENTS)
@@ -688,6 +964,375 @@ export function DailySheetPage({
   const [enabled, setEnabled] = useState<boolean>(propInputEnabled ?? false)
   /** 入力できるかどうかを観測できなかった（通信エラー）。封鎖の理由文とは分けて案内する */
   const [gateUnknown, setGateUnknown] = useState(false)
+  const [stale, setStale] = useState(false)
+  const [confirm, setConfirm] = useState<ConfirmState | null>(null)
+  /**
+   * 一度でもマスタを読めたか。読めた後は、取り直しに失敗しても画面を差し替えない
+   * （枠ごと消すと、その中で書きかけの行まで失われるため。失敗は帯で知らせて再試行させる）。
+   */
+  const [everReady, setEverReady] = useState(false)
+
+  const { toast, show } = useToast()
+
+  const actorId = propActorId !== undefined ? propActorId : getActorId()
+
+  const aliveRef = useRef(true)
+  useEffect(() => {
+    aliveRef.current = true
+    return () => {
+      aliveRef.current = false
+    }
+  }, [])
+
+  // ── 共有マスタ（利用者・職員・施設名・入力解禁）────────────
+  useEffect(() => {
+    let alive = true
+    setPhase('loading')
+    void (async () => {
+      try {
+        const [rs, st, gate, fac] = await Promise.all([
+          propResidents ? Promise.resolve(propResidents) : fetchResidents(),
+          propStaff ? Promise.resolve(propStaff) : fetchStaff(),
+          // 入力解禁フラグは「観測できた値」と「観測できなかった」を区別するため、
+          // 親から既知値をもらっていても必ず自分で取り直す（前提情報は毎回取り直す規範）。
+          // 親（App.tsx）は取得失敗時も false を渡してくるので、prop を観測済みとして扱うと
+          // 通信障害を「スプレッドシートで記録する期間です」と誤って案内してしまう
+          getNativeInputGate(),
+          // 施設名は表示だけの補助情報。取れなくても日報は開けるようにする
+          getAppSetting('facility_name').catch(() => null),
+        ])
+        if (!alive || !aliveRef.current) return
+        const list = (Array.isArray(rs) ? rs : []).filter((r) => r != null && r.active !== false)
+        setResidents(list.slice().sort(cmpResident))
+        setStaff((Array.isArray(st) ? st : []).filter((s) => s != null))
+        setEnabled(gate.value === true)
+        setGateUnknown(!gate.observed)
+        setFacility(typeof fac === 'string' && fac.trim() !== '' ? fac : null)
+        setStale(false)
+        setPhase('ready')
+        setEverReady(true)
+      } catch {
+        if (!alive || !aliveRef.current) return
+        setPhase('error')
+      }
+    })()
+    return () => {
+      alive = false
+    }
+    // propInputEnabled は依存に入れない（初期 state 専用）。
+    // 親（App.tsx）の入力解禁フラグは起動直後に false→true へ切り替わるので、依存に入れると
+    // その一瞬で再取得が走り、読み込み済みの画面が「読み込んでいます…」へ戻ってしまう
+  }, [reload, propResidents, propStaff])
+
+  // ── 日ごとの取得（キャッシュ＋同時実行の上限）──────────────
+  const cacheRef = useRef(new Map<string, DailyReport>())
+  const limiterRef = useRef(makeLimiter(MAX_PARALLEL_LOADS))
+
+  // 記録者が変わると既読の見え方（my_read）が変わるので、取り置きは捨てる
+  useEffect(() => {
+    cacheRef.current.clear()
+  }, [actorId])
+
+  const loadDay = useCallback(
+    async (dayIso: string): Promise<DailyReport> => {
+      const cache = cacheRef.current
+      const hit = cache.get(dayIso)
+      if (hit) return hit
+      const report = await limiterRef.current(() => fetchDailyReport(dayIso, actorId))
+      cache.set(dayIso, report)
+      // 古い順に捨てる（Map は挿入順。持ち過ぎて端末のメモリを食わない）
+      while (cache.size > MAX_CACHE_DAYS) {
+        const oldest = cache.keys().next().value
+        if (oldest === undefined) break
+        cache.delete(oldest)
+      }
+      return report
+    },
+    [actorId],
+  )
+
+  /** 自分の書き込みで出た変更通知に反応しないための抑制窓 */
+  const selfWriteRef = useRef(0)
+  const handleWrite = useCallback((dayIso: string) => {
+    selfWriteRef.current = Date.now()
+    touchActivity()
+    // 書き換えた日は取り置きを捨てる（区切りを行き来した時に編集前の内容を見せない）
+    cacheRef.current.delete(dayIso)
+  }, [])
+
+  // 変更通知は自動で取り込まず「最新に更新」の案内だけ出す（編集中の入力を勝手に差し替えない）
+  useEffect(() => {
+    let unsub: (() => void) | null = null
+    try {
+      unsub = subscribeChanges((table) => {
+        if (!aliveRef.current) return
+        // この画面が描画する表の変更だけを合図にする（食事・水分の記録では出さない）
+        if (typeof table !== 'string' || !WATCHED_TABLES.has(table)) return
+        if (Date.now() - selfWriteRef.current < 3000) return
+        setStale(true)
+      })
+    } catch {
+      unsub = null
+    }
+    return () => {
+      if (unsub) {
+        try {
+          unsub()
+        } catch {
+          // 解除できなくても表示に影響しない
+        }
+      }
+    }
+  }, [])
+
+  const visibleDays = useMemo(() => (unit === '1' ? [day] : blockDays(day)), [day, unit])
+
+  // ── 未保存の下書きを持つ日（画面から外れる前に確認する）──────
+  const dirtyRef = useRef(new Map<string, boolean>())
+  const handleDirty = useCallback((dayIso: string, dirty: boolean) => {
+    dirtyRef.current.set(dayIso, dirty)
+  }, [])
+
+  // ── 選んだ日へスクロール（指示3）────────────────────────
+  const dayElsRef = useRef(new Map<string, HTMLElement>())
+  /**
+   * 位置合わせの目的地と期限。日ごとの取得が終わるたびに高さが変わるので、
+   * 期限内は取得完了のたびに位置を取り直す。利用者が自分でスクロールしたら打ち切る
+   * （操作を奪わない）。なめらかスクロールにはしない＝何度も走るため。
+   */
+  const pendingScrollRef = useRef<{ day: string; until: number } | null>(null)
+
+  const scrollToDay = useCallback((iso: string) => {
+    const el = dayElsRef.current.get(iso)
+    if (!el) return
+    try {
+      el.scrollIntoView({ block: 'start', inline: 'nearest' })
+    } catch {
+      // 位置合わせに失敗しても内容は表示されている（画面を落とさない）
+    }
+  }, [])
+
+  // 位置合わせの目的地を決め直す（日・表示単位を変えた時と、シートが最初に出た時）
+  useEffect(() => {
+    pendingScrollRef.current = { day, until: Date.now() + 5000 }
+    const raf = window.requestAnimationFrame(() => {
+      if (pendingScrollRef.current?.day === day) scrollToDay(day)
+    })
+    return () => window.cancelAnimationFrame(raf)
+  }, [day, unit, everReady, scrollToDay])
+
+  useEffect(() => {
+    const cancel = () => {
+      pendingScrollRef.current = null
+    }
+    window.addEventListener('wheel', cancel, { passive: true })
+    window.addEventListener('touchmove', cancel, { passive: true })
+    return () => {
+      window.removeEventListener('wheel', cancel)
+      window.removeEventListener('touchmove', cancel)
+    }
+  }, [])
+
+  const handleLoaded = useCallback(
+    (iso: string) => {
+      const pending = pendingScrollRef.current
+      if (pending === null) return
+      if (Date.now() > pending.until) {
+        pendingScrollRef.current = null
+        return
+      }
+      // 目的の日より上にある日が読み込まれると位置がずれるので取り直す
+      if (iso === pending.day || iso < pending.day) {
+        window.requestAnimationFrame(() => {
+          if (pendingScrollRef.current?.day === pending.day) scrollToDay(pending.day)
+        })
+      }
+    },
+    [scrollToDay],
+  )
+
+  // ── 日付・表示単位の移動（未保存の下書きがあれば確認する）────
+  const askLeave = useCallback((leaving: string[], apply: () => void) => {
+    if (!leaving.some((d) => dirtyRef.current.get(d) === true)) {
+      apply()
+      return
+    }
+    setConfirm({
+      title: '未保存の入力があります',
+      body: '保存していない行があります。表示を切り替えると、その入力は破棄されます。切り替えてよろしいですか。',
+      confirmLabel: '切り替える',
+      onConfirm: () => {
+        setConfirm(null)
+        apply()
+      },
+    })
+  }, [])
+
+  const goDay = useCallback(
+    (next: string) => {
+      if (!ISO_DATE_RE.test(next) || next === day) return
+      const nextDays = unit === '1' ? [next] : blockDays(next)
+      const leaving = visibleDays.filter((d) => !nextDays.includes(d))
+      askLeave(leaving, () => setDay(next))
+    },
+    [askLeave, day, unit, visibleDays],
+  )
+
+  const goUnit = useCallback(
+    (next: SheetUnit) => {
+      if (next === unit) return
+      const nextDays = next === '1' ? [day] : blockDays(day)
+      const leaving = visibleDays.filter((d) => !nextDays.includes(d))
+      askLeave(leaving, () => {
+        setUnit(next)
+        writeSheetPref(LS.sheetDays, 'daily', next)
+      })
+    },
+    [askLeave, day, unit, visibleDays],
+  )
+
+  const blockedReason = gateUnknown ? GATE_UNKNOWN_REASON : BLOCKED_REASON
+
+  // 3状態（初回だけ画面ごと差し替える。2回目以降は下の帯で知らせる＝書きかけを消さない）
+  if (phase === 'loading' && !everReady) {
+    return <LoadingBlock label="日報を読み込んでいます…" />
+  }
+
+  if (phase === 'error' && !everReady) {
+    return <ErrorBlock message={ERR_LOAD} onRetry={() => setReload((n) => n + 1)} />
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* 日付バー（前後日・カレンダー・表示単位・表示倍率） */}
+      <DateBar day={day} unit={unit} onGo={goDay} onUnit={goUnit} />
+
+      {phase === 'error' && everReady && (
+        <div className="flex flex-wrap items-center gap-gap rounded-md border border-danger bg-danger-bg p-3">
+          <p className="flex-1 text-base text-ink">
+            <span aria-hidden="true">▲ </span>
+            {ERR_LOAD}
+          </p>
+          <button
+            type="button"
+            onClick={() => setReload((n) => n + 1)}
+            className="min-h-tap rounded-md border border-primary bg-surface px-4 text-base font-bold text-primary"
+          >
+            再試行
+          </button>
+        </div>
+      )}
+
+      {gateUnknown && (
+        <p className="rounded-md border border-info bg-info-bg p-3 text-base text-ink">
+          <span aria-hidden="true">ⓘ </span>
+          {/* 行に出す一言（blockedReason）と同じ文言を1か所から出す＝画面内で理由が食い違わない */}
+          {GATE_UNKNOWN_REASON}
+        </p>
+      )}
+      {!enabled && !gateUnknown && (
+        <p className="rounded-md border border-warn bg-warn-bg p-3 text-base text-ink">
+          <span aria-hidden="true">▲ </span>
+          {BLOCKED_REASON}
+        </p>
+      )}
+      {stale && (
+        <div className="flex flex-wrap items-center gap-gap rounded-md border border-info bg-info-bg p-3">
+          <p className="flex-1 text-base text-ink">
+            <span aria-hidden="true">ⓘ </span>
+            他の端末で記録が更新されました。最新の内容に切り替えられます（入力中の行は保存してから押してください）。
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              cacheRef.current.clear()
+              setStale(false)
+              setReload((n) => n + 1)
+            }}
+            className="min-h-tap rounded-md border border-primary bg-surface px-4 text-base font-bold text-primary"
+          >
+            最新に更新
+          </button>
+        </div>
+      )}
+
+      <SheetFrame>
+        {/* 器の幅は「画面幅」か「固定列の合計（SHEET_MIN_W）」の広い方で決める。
+            w-max（＝width: max-content）にすると器の幅が中身の最大コンテンツ幅になり、
+            申し送りの長文1件でシート全体が横に伸びて本文が1行のまま折り返さなくなる
+            （sheet-contracts.md §5「長文は行が伸びる（clamp しない）」が成立しない）。
+            狭い画面では固定列の合計まで SheetFrame 側が横スクロールする。
+            sheet-dense＝「行が縦に連続する場所」の印。sheet.css がこの中の
+            当たり判定の拡張量（--sheet-hit-pad）を 0 にする＝隣接行の誤タップを防ぐ */}
+        <div className="sheet-dense" style={{ minWidth: SHEET_MIN_W }}>
+          {visibleDays.map((d) => (
+            <section
+              key={d}
+              ref={(el) => {
+                if (el) dayElsRef.current.set(d, el)
+                else dayElsRef.current.delete(d)
+              }}
+              aria-label={`${fmtSheetDay(d)} の日報`}
+              aria-current={d === day ? 'date' : undefined}
+              className="dsheet-day"
+            >
+              <DaySheet
+                day={d}
+                residents={residents}
+                staff={staff}
+                facility={facility}
+                actorId={actorId}
+                enabled={enabled}
+                blockedReason={blockedReason}
+                reloadToken={reload}
+                loadDay={loadDay}
+                onWrite={handleWrite}
+                onDirty={handleDirty}
+                onLoaded={handleLoaded}
+                onPickDay={goDay}
+                show={show}
+              />
+            </section>
+          ))}
+        </div>
+      </SheetFrame>
+
+      <ConfirmDialog
+        open={confirm !== null}
+        title={confirm?.title ?? ''}
+        body={confirm?.body}
+        confirmLabel={confirm?.confirmLabel}
+        danger
+        onConfirm={() => confirm?.onConfirm()}
+        onCancel={() => setConfirm(null)}
+      />
+      {toast}
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════
+// 1日ぶんの日報（太線で囲まれる単位）
+// ══════════════════════════════════════════════════════════════
+
+function DaySheet({
+  day,
+  residents,
+  staff,
+  facility,
+  actorId,
+  enabled,
+  blockedReason,
+  reloadToken,
+  loadDay,
+  onWrite,
+  onDirty,
+  onLoaded,
+  onPickDay,
+  show,
+}: DaySheetProps) {
+  const [phase, setPhase] = useState<Phase>('loading')
+  const [reload, setReload] = useState(0)
 
   const [notes, setNotes] = useState<Note[]>([])
   const [observations, setObservations] = useState<Vital[]>([])
@@ -701,22 +1346,17 @@ export function DailySheetPage({
 
   const [status, setStatus] = useState<Record<string, RowStatus>>({})
   const [expanded, setExpanded] = useState<string | null>(null)
-  const [stale, setStale] = useState(false)
   const [residentPick, setResidentPick] = useState<PickTarget | null>(null)
   const [staffPick, setStaffPick] = useState<PickTarget | null>(null)
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
 
-  const { toast, show } = useToast()
-
   const aliveRef = useRef(true)
   const seqRef = useRef(0)
   /**
-   * 現在表示している日。登録の応答が返るまでに日付を送られていないかを確かめる
-   * （応答を無条件に今の state へ足すと、別の日の記録が今日のブロックに現れる）。
+   * この枠が受け持つ日。登録の応答が返るまでに枠が別の日へ差し替わっていないかを確かめる
+   * （応答を無条件に今の state へ足すと、別の日の記録がこの枠に現れる）。
    */
   const dayRef = useRef(day)
-  /** 自分の書き込みで出た変更通知に反応しないための抑制窓 */
-  const selfWriteRef = useRef(0)
   /** 登録の応答待ちの行。二重に登録しないための鍵（同じ行から2回 insert しない） */
   const savingRef = useRef(new Set<string>())
   /**
@@ -732,8 +1372,6 @@ export function DailySheetPage({
    * setObservations の反映を待たずに「同じ人の何件目か」を数える。
    */
   const observationsRef = useRef<Vital[]>([])
-
-  const actorId = propActorId !== undefined ? propActorId : getActorId()
 
   useEffect(() => {
     aliveRef.current = true
@@ -787,26 +1425,10 @@ export function DailySheetPage({
     setPhase('loading')
     void (async () => {
       try {
-        const [rs, st, gate, report, fac] = await Promise.all([
-          propResidents ? Promise.resolve(propResidents) : fetchResidents(),
-          propStaff ? Promise.resolve(propStaff) : fetchStaff(),
-          // 入力解禁フラグは「観測できた値」と「観測できなかった」を区別するため、
-          // 親から既知値をもらっていても必ず自分で取り直す（前提情報は毎回取り直す規範）。
-          // 親（App.tsx）は取得失敗時も false を渡してくるので、prop を観測済みとして扱うと
-          // 通信障害を「スプレッドシートで記録する期間です」と誤って案内してしまう
-          getNativeInputGate(),
-          fetchDailyReport(day, actorId),
-          // 施設名は表示だけの補助情報。取れなくても日報は開けるようにする
-          getAppSetting('facility_name').catch(() => null),
-        ])
+        // 1日ぶんだけを取りに行く（10日表示でも全件ロードしない）。
+        // 取得済みの日は親のキャッシュから即返る＝区切りを行き来しても取り直さない
+        const report = await loadDay(day)
         if (!alive || !aliveRef.current) return
-
-        const list = (Array.isArray(rs) ? rs : []).filter((r) => r != null && r.active !== false)
-        setResidents(list.slice().sort(cmpResident))
-        setStaff((Array.isArray(st) ? st : []).filter((s) => s != null))
-        setEnabled(gate.value === true)
-        setGateUnknown(!gate.observed)
-        setFacility(typeof fac === 'string' && fac.trim() !== '' ? fac : null)
 
         const safeNotes = Array.isArray(report?.notes) ? report.notes.filter((n) => n != null) : []
         setNotes(
@@ -822,47 +1444,21 @@ export function DailySheetPage({
         applyAttendance(
           Array.isArray(report?.attendance) ? report.attendance.filter((a) => a != null) : [],
         )
-        setStale(false)
         setPhase('ready')
       } catch {
         if (!alive || !aliveRef.current) return
-        // 失敗しても入力中の下書きは消さない（安全側フォールバック）
+        // 失敗しても入力中の下書きは消さない（安全側フォールバック）。
+        // **この日の枠だけ**がエラー表示になり、他の日は読めたまま残る（部分表示）
         setPhase('error')
+      } finally {
+        // 成否にかかわらず高さが確定したことを親へ伝える（選択日の位置合わせのため）
+        if (alive && aliveRef.current) onLoaded(day)
       }
     })()
     return () => {
       alive = false
     }
-    // propInputEnabled は依存に入れない（初期 state 専用）。
-    // 親（App.tsx）の入力解禁フラグは起動直後に false→true へ切り替わるので、依存に入れると
-    // その一瞬で日報の再取得が走り、読み込み済みの画面が「読み込んでいます…」へ戻ってしまう。
-    // この画面は封鎖フラグを自分で getNativeInputGate() から取り直しているため prop は不要
-  }, [day, reload, actorId, propResidents, propStaff, applyAttendance])
-
-  // 変更通知は自動で取り込まず「最新に更新」の案内だけ出す（編集中の入力を勝手に差し替えない）
-  useEffect(() => {
-    let unsub: (() => void) | null = null
-    try {
-      unsub = subscribeChanges((table) => {
-        if (!aliveRef.current) return
-        // この画面が描画する表の変更だけを合図にする（食事・水分の記録では出さない）
-        if (typeof table !== 'string' || !WATCHED_TABLES.has(table)) return
-        if (Date.now() - selfWriteRef.current < 3000) return
-        setStale(true)
-      })
-    } catch {
-      unsub = null
-    }
-    return () => {
-      if (unsub) {
-        try {
-          unsub()
-        } catch {
-          // 解除できなくても表示に影響しない
-        }
-      }
-    }
-  }, [])
+  }, [day, reload, reloadToken, loadDay, applyAttendance, onLoaded])
 
   const residentById = useMemo(() => {
     const m = new Map<number, Resident>()
@@ -884,17 +1480,23 @@ export function DailySheetPage({
 
   // ── 書き込みの共通処理 ─────────────────────────────────────
 
-  const markSelfWrite = useCallback(() => {
-    selfWriteRef.current = Date.now()
-    touchActivity()
-  }, [])
-
   /**
-   * 入力できない理由。**観測できた false（＝スプシで記録する期間）と、
-   * 観測できなかった（＝通信エラー）を分ける**。上部のバナーもこの値を出すので、
-   * 同じ画面に食い違う2つの理由が並ばない。
+   * 自分の書き込みの印。親へ渡して
+   *   ・変更通知（他の端末で更新）の抑制窓を開く
+   *   ・この日の取り置き（キャッシュ）を捨てる＝区切りを戻った時に編集前の内容を見せない
+   * の2つをまとめて行う。
    */
-  const blockedReason = gateUnknown ? GATE_UNKNOWN_REASON : BLOCKED_REASON
+  const markSelfWrite = useCallback(() => {
+    onWrite(day)
+  }, [day, onWrite])
+
+  /** 保存が通った時に、その行に残っている失敗・競合の一言を消す（成功の一言は出さない＝指示10） */
+  const saveOk = useCallback(
+    (key: string) => {
+      setRowStatus(key, null)
+    },
+    [setRowStatus],
+  )
 
   /** 編集の可否。封鎖中・読み込み中は書かせない（理由は行に出す） */
   const guard = useCallback(
@@ -910,7 +1512,7 @@ export function DailySheetPage({
 
   const askConfirm = useCallback((s: ConfirmState) => setConfirm(s), [])
 
-  // ── 日付の移動（未保存の下書きがあれば確認する）─────────────
+  // ── 未保存の下書き（親が日付・表示単位の切替前に確認する）─────
 
   const hasDraftContent = useMemo(() => {
     const noteDirty = noteDrafts.some((d) => d.body.trim() !== '' || d.targetPicked)
@@ -931,33 +1533,17 @@ export function DailySheetPage({
     return noteDirty || vitalDirty || outingDirty
   }, [noteDrafts, vitalDrafts, outingDrafts])
 
-  const applyDay = useCallback((next: string) => {
-    setDay(next)
-    setNoteDrafts([])
-    setVitalDrafts([])
-    setOutingDrafts([])
-    setStatus({})
-    setExpanded(null)
-  }, [])
+  // 書きかけの有無を親へ伝える。枠から外れる時（別の区切りへ移る・1日表示へ切り替える）は
+  // 親が確認ダイアログを出す。外れた時に「書きかけ無し」へ戻す（後片付け）
+  useEffect(() => {
+    onDirty(day, hasDraftContent)
+  }, [day, hasDraftContent, onDirty])
 
-  const goDay = useCallback(
-    (next: string) => {
-      if (next === day) return
-      if (hasDraftContent) {
-        askConfirm({
-          title: '未保存の入力があります',
-          body: '保存していない行があります。日付を移動すると、その入力は破棄されます。移動してよろしいですか。',
-          confirmLabel: '移動する',
-          onConfirm: () => {
-            setConfirm(null)
-            applyDay(next)
-          },
-        })
-        return
-      }
-      applyDay(next)
+  useEffect(
+    () => () => {
+      onDirty(day, false)
     },
-    [day, hasDraftContent, askConfirm, applyDay],
+    [day, onDirty],
   )
 
   // ── 出勤者 ─────────────────────────────────────────────────
@@ -1087,17 +1673,7 @@ export function DailySheetPage({
       const key = nextKey('nd')
       setNoteDrafts((prev) => [
         ...prev,
-        {
-          key,
-          shift,
-          after16,
-          residentId: null,
-          targetPicked: false,
-          body: '',
-          reporterId: shift === 'night' ? null : actorId,
-          color: null,
-          locked: false,
-        },
+        emptyNoteDraft(key, shift, after16, shift === 'night' ? null : actorId),
       ])
     },
     [actorId, blockedReason, enabled, nextKey, show],
@@ -1149,12 +1725,12 @@ export function DailySheetPage({
           return
         }
         patchNote(note.id, res)
-        setRowStatus(key, { tone: 'ok', text: MSG_SAVED })
+        saveOk(key)
       } catch (err) {
         setRowStatus(key, { tone: 'danger', text: `▲ ${errText(err)}` })
       }
     },
-    [guard, markSelfWrite, patchNote, setRowStatus],
+    [guard, markSelfWrite, patchNote, saveOk, setRowStatus],
   )
 
   /** 下書き行の保存（本文が入った時点で1回だけ insert する） */
@@ -1208,7 +1784,7 @@ export function DailySheetPage({
         setNotes((prev) => [...prev.filter((n) => n.id !== res.id), res])
         // 保存中に開いたままのピッカーを、保存済みの行のキーへ移す（選択を取りこぼさない）
         rebindPick(key, `n${res.id}`)
-        setRowStatus(`n${res.id}`, { tone: 'ok', text: MSG_SAVED })
+        saveOk(`n${res.id}`)
       } catch (err) {
         patchNoteDraft(key, { body })
         setRowStatus(key, { tone: 'danger', text: `▲ ${errText(err)}` })
@@ -1216,7 +1792,7 @@ export function DailySheetPage({
         savingRef.current.delete(key)
       }
     },
-    [day, guard, markSelfWrite, patchNoteDraft, rebindPick, setRowStatus, show, stillOnDay],
+    [day, guard, markSelfWrite, patchNoteDraft, rebindPick, saveOk, setRowStatus, show, stillOnDay],
   )
 
   const commitNoteBody = useCallback(
@@ -1302,13 +1878,16 @@ export function DailySheetPage({
           await markRead(note.id, actorId)
           touchActivity()
           patchNote(note.id, { my_read: true, read_count: (note.read_count ?? 0) + 1 })
-          setRowStatus(key, { tone: 'ok', text: '✓ 既読にしました' })
+          // 行には出さない（指示10・成功の一言は行を空けるため出さない）。
+          // 詳細の表示が「✓ 自分は既読」へ変わるうえ、押した直後は短いトーストで知らせる
+          saveOk(key)
+          show('既読にしました')
         } catch (err) {
           setRowStatus(key, { tone: 'danger', text: `▲ ${errText(err)}` })
         }
       })()
     },
-    [actorId, patchNote, setRowStatus],
+    [actorId, patchNote, saveOk, setRowStatus, show],
   )
 
   // ── 発熱者・他症状者 ───────────────────────────────────────
@@ -1321,17 +1900,7 @@ export function DailySheetPage({
         return
       }
       const key = nextKey('vd')
-      setVitalDrafts((prev) => [
-        ...prev,
-        {
-          key,
-          kind,
-          residentId: null,
-          sets: kind === 'observation' ? [emptySet(), emptySet(), emptySet()] : [emptySet()],
-          symptom: '',
-          locked: false,
-        },
-      ])
+      setVitalDrafts((prev) => [...prev, emptyVitalDraft(key, kind)])
     },
     [blockedReason, enabled, nextKey, show],
   )
@@ -1392,7 +1961,7 @@ export function DailySheetPage({
               return
             }
             replaceVital(res)
-            setRowStatus(rowKey, { tone: 'ok', text: MSG_SAVED })
+            saveOk(rowKey)
           } catch (err) {
             setRowStatus(rowKey, { tone: 'danger', text: `▲ ${errText(err)}` })
           }
@@ -1412,7 +1981,7 @@ export function DailySheetPage({
       }
       run()
     },
-    [askConfirm, guard, markSelfWrite, replaceVital, setRowStatus],
+    [askConfirm, guard, markSelfWrite, replaceVital, saveOk, setRowStatus],
   )
 
   /** 新しいバイタル行（発熱者・他症状者）を1件登録する */
@@ -1476,14 +2045,25 @@ export function DailySheetPage({
               ? `s${res.id}`
               : feverRowKey(res, observationsRef.current)
         replaceVital(res)
-        setRowStatus(savedKey, { tone: 'ok', text: MSG_SAVED })
+        saveOk(savedKey)
       } catch (err) {
         setRowStatus(rowKey, { tone: 'danger', text: `▲ ${errText(err)}` })
       } finally {
         savingRef.current.delete(rowKey)
       }
     },
-    [actorId, day, guard, markSelfWrite, patchVitalDraft, replaceVital, setRowStatus, show, stillOnDay],
+    [
+      actorId,
+      day,
+      guard,
+      markSelfWrite,
+      patchVitalDraft,
+      replaceVital,
+      saveOk,
+      setRowStatus,
+      show,
+      stillOnDay,
+    ],
   )
 
   // ── 外出・外泊 ─────────────────────────────────────────────
@@ -1496,10 +2076,7 @@ export function DailySheetPage({
         return
       }
       const key = nextKey('od')
-      setOutingDrafts((prev) => [
-        ...prev,
-        { key, kind, residentId: null, place: '', startAt: '', endText: '', companion: '', locked: false },
-      ])
+      setOutingDrafts((prev) => [...prev, emptyOutingDraft(key, kind)])
     },
     [blockedReason, enabled, nextKey, show],
   )
@@ -1580,14 +2157,14 @@ export function DailySheetPage({
         }
         // 同じ id が既に入っていれば入れ替える（再読込と行き違っても行が2つにならない）
         setOutings((prev) => [...prev.filter((o) => o.id !== res.id), res])
-        setRowStatus(`o${res.id}`, { tone: 'ok', text: MSG_SAVED })
+        saveOk(`o${res.id}`)
       } catch (err) {
         setRowStatus(key, { tone: 'danger', text: `▲ ${errText(err)}` })
       } finally {
         savingRef.current.delete(key)
       }
     },
-    [actorId, day, guard, markSelfWrite, patchOutingDraft, setRowStatus, show, stillOnDay],
+    [actorId, day, guard, markSelfWrite, patchOutingDraft, saveOk, setRowStatus, show, stillOnDay],
   )
 
   /** 帰着（到着日時）の後追い記入。end_on / end_at だけを送る */
@@ -1619,13 +2196,13 @@ export function DailySheetPage({
             return
           }
           setOutings((prev) => prev.map((x) => (x.id === o.id ? res : x)))
-          setRowStatus(key, { tone: 'ok', text: MSG_SAVED })
+          saveOk(key)
         } catch (err) {
           setRowStatus(key, { tone: 'danger', text: `▲ ${errText(err)}` })
         }
       })()
     },
-    [day, guard, markSelfWrite, setRowStatus],
+    [day, guard, markSelfWrite, saveOk, setRowStatus],
   )
 
   // ── ピッカーの結果を配る ───────────────────────────────────
@@ -1721,15 +2298,61 @@ export function DailySheetPage({
   const manager = attendance.find((a) => a.role === 'manager') ?? null
   const workers = attendance.filter((a) => a.role !== 'manager')
 
-  const totalRows =
-    notes.length +
-    observations.length +
-    symptoms.length +
-    outings.length +
-    attendance.length +
-    noteDrafts.length +
-    vitalDrafts.length +
-    outingDrafts.length
+  /** この日に保存されている記録の数（0 のときは空状態の一言を出す） */
+  const savedRows =
+    notes.length + observations.length + symptoms.length + outings.length + attendance.length
+
+  // ── 空行の補充（実物のスプシは固定行数）───────────────────
+  // 保存済み＋「＋行」で足した行が MIN_ROWS に満たない間だけ、空の入力行を足す。
+  // 空行は値が入るまで保存しない（空データを作らない）ので、記録は増えない。
+  useEffect(() => {
+    if (phase !== 'ready') return
+    const needOuting =
+      MIN_ROWS.outing - outRows.length - outingDrafts.filter((d) => d.kind === 'outing').length
+    const needStay =
+      MIN_ROWS.overnight -
+      stayRows.length -
+      outingDrafts.filter((d) => d.kind === 'overnight').length
+    if (needOuting <= 0 && needStay <= 0) return
+    const add: OutingDraft[] = []
+    for (let i = 0; i < needOuting; i++) add.push(emptyOutingDraft(nextKey('od'), 'outing'))
+    for (let i = 0; i < needStay; i++) add.push(emptyOutingDraft(nextKey('od'), 'overnight'))
+    setOutingDrafts((prev) => [...prev, ...add])
+  }, [phase, outRows.length, stayRows.length, outingDrafts, nextKey])
+
+  useEffect(() => {
+    if (phase !== 'ready') return
+    const needFever =
+      MIN_ROWS.fever - feverRows.length - vitalDrafts.filter((d) => d.kind === 'observation').length
+    const needSymptom =
+      MIN_ROWS.symptom - symptomRows.length - vitalDrafts.filter((d) => d.kind === 'symptom').length
+    if (needFever <= 0 && needSymptom <= 0) return
+    const add: VitalDraft[] = []
+    for (let i = 0; i < needFever; i++) add.push(emptyVitalDraft(nextKey('vd'), 'observation'))
+    for (let i = 0; i < needSymptom; i++) add.push(emptyVitalDraft(nextKey('vd'), 'symptom'))
+    setVitalDrafts((prev) => [...prev, ...add])
+  }, [phase, feverRows.length, symptomRows.length, vitalDrafts, nextKey])
+
+  // 申し送りは「保存済みの行の下に、いつでも空行が1本ある」形にする
+  // （セルに直接書き込む運用なので、記入のたびに「＋行」を押させない）。
+  // 付帯ブロックと違って**保存済みの件数は数に入れない**＝末尾の空行が消えない
+  useEffect(() => {
+    if (phase !== 'ready') return
+    const add: NoteDraft[] = []
+    const fill = (shift: Shift, after16: boolean) => {
+      const have = noteDrafts.filter((d) => d.shift === shift && d.after16 === after16).length
+      for (let i = have; i < MIN_ROWS.note; i++) {
+        // 記入者の既定は操作者（夜勤は現行運用どおり空のまま）
+        add.push(emptyNoteDraft(nextKey('nd'), shift, after16, shift === 'night' ? null : actorId))
+      }
+    }
+    fill('day', false)
+    fill('day', true)
+    fill('daycare', false)
+    fill('night', false)
+    if (add.length === 0) return
+    setNoteDrafts((prev) => [...prev, ...add])
+  }, [phase, actorId, noteDrafts, nextKey])
 
   const ctx: SheetCtx = {
     day,
@@ -1742,83 +2365,42 @@ export function DailySheetPage({
     openStaff: setStaffPick,
   }
 
-  // ── 3状態 ─────────────────────────────────────────────────
-
-  if (phase === 'loading') {
-    return <LoadingBlock label="日報を読み込んでいます…" />
-  }
-
-  if (phase === 'error') {
-    return (
-      <ErrorBlock message={ERR_LOAD} onRetry={() => setReload((n) => n + 1)} />
-    )
-  }
-
   return (
-    <div className="space-y-4">
-      {/* 日付バー（前後日・当月の日・表示倍率） */}
-      <DateBar day={day} onGo={goDay} />
+    <>
+      {/* ヘッダ（施設名・日勤/夜勤日報・出勤者1行・日付）。
+          読み込み中・失敗中も出す＝どの日の枠かが常に分かるようにする */}
+      <DayHeader
+        ctx={ctx}
+        facility={facility}
+        day={day}
+        manager={manager}
+        workers={workers}
+        empty={phase === 'ready' && savedRows === 0}
+        onPickDay={onPickDay}
+        onAddAttendance={(role) => {
+          if (!enabled) {
+            setRowStatus('attendance', { tone: 'warn', text: `▲ ${blockedReason}` })
+            return
+          }
+          setStaffPick({ for: 'attendance', role })
+        }}
+        onRemoveAttendance={(staffId) => {
+          if (!enabled) {
+            setRowStatus('attendance', { tone: 'warn', text: `▲ ${blockedReason}` })
+            return
+          }
+          removeAttendance(staffId)
+        }}
+      />
 
-      {gateUnknown && (
-        <p className="rounded-md border border-info bg-info-bg p-3 text-base text-ink">
-          <span aria-hidden="true">ⓘ </span>
-          {/* 行に出す一言（blockedReason）と同じ文言を1か所から出す＝画面内で理由が食い違わない */}
-          {GATE_UNKNOWN_REASON}
-        </p>
+      {/* 3状態。失敗したのは**この日だけ**で、他の日は読めたまま残る（部分表示） */}
+      {phase === 'loading' && <LoadingBlock label={`${fmtSheetDay(day)}の日報を読み込んでいます…`} />}
+      {phase === 'error' && (
+        <ErrorBlock message={ERR_LOAD} onRetry={() => setReload((n) => n + 1)} />
       )}
-      {!enabled && !gateUnknown && (
-        <p className="rounded-md border border-warn bg-warn-bg p-3 text-base text-ink">
-          <span aria-hidden="true">▲ </span>
-          {BLOCKED_REASON}
-        </p>
-      )}
-      {stale && (
-        <div className="flex flex-wrap items-center gap-gap rounded-md border border-info bg-info-bg p-3">
-          <p className="flex-1 text-base text-ink">
-            <span aria-hidden="true">ⓘ </span>
-            他の端末で記録が更新されました。最新の内容に切り替えられます（入力中の行は保存してから押してください）。
-          </p>
-          <button
-            type="button"
-            onClick={() => setReload((n) => n + 1)}
-            className="min-h-tap rounded-md border border-primary bg-surface px-4 text-base font-bold text-primary"
-          >
-            最新に更新
-          </button>
-        </div>
-      )}
 
-      <SheetFrame>
-        {/* 器の幅は「画面幅」か「固定列の合計（SHEET_MIN_W）」の広い方で決める。
-            w-max（＝width: max-content）にすると器の幅が中身の最大コンテンツ幅になり、
-            申し送りの長文1件でシート全体が横に伸びて本文が1行のまま折り返さなくなる
-            （sheet-contracts.md §5「長文は行が伸びる（clamp しない）」が成立しない）。
-            狭い画面では固定列の合計まで SheetFrame 側が横スクロールする。
-            sheet-dense＝「行が縦に連続する場所」の印。sheet.css がこの中の
-            当たり判定の拡張量（--sheet-hit-pad）を 0 にする＝隣接行の誤タップを防ぐ */}
-        <div className="sheet-dense" style={{ minWidth: SHEET_MIN_W }}>
-          <SheetHeader facility={facility} day={day} />
-
-          <AttendanceBlock
-            ctx={ctx}
-            manager={manager}
-            workers={workers}
-            onAdd={(role) => {
-              if (!enabled) {
-                setRowStatus('attendance', { tone: 'warn', text: `▲ ${blockedReason}` })
-                return
-              }
-              setStaffPick({ for: 'attendance', role })
-            }}
-            onRemove={(staffId) => {
-              if (!enabled) {
-                setRowStatus('attendance', { tone: 'warn', text: `▲ ${blockedReason}` })
-                return
-              }
-              removeAttendance(staffId)
-            }}
-          />
-
+      {phase === 'ready' && (
+        <>
           <OutingBlock
             ctx={ctx}
             kind="outing"
@@ -1868,6 +2450,7 @@ export function DailySheetPage({
           <NoteBlock
             ctx={ctx}
             title="日勤申し送り"
+            tone="note"
             rows={dayNotes}
             drafts={noteDrafts.filter((d) => d.shift === 'day' && !d.after16)}
             showReporter
@@ -1884,7 +2467,7 @@ export function DailySheetPage({
 
           {/* 現行スプシの黒帯。ここから下は after16=true の記録 */}
           <div
-            className="flex items-center bg-ink px-2 font-bold text-bg"
+            className="flex items-center bg-ink px-1 font-bold text-bg"
             style={{ minHeight: 'var(--sheet-row-h-note)' }}
           >
             ↓16時以降の記録
@@ -1893,6 +2476,7 @@ export function DailySheetPage({
           <NoteBlock
             ctx={ctx}
             title="日勤申し送り（16時以降）"
+            tone="note"
             rows={lateNotes}
             drafts={noteDrafts.filter((d) => d.shift === 'day' && d.after16)}
             showReporter
@@ -1910,6 +2494,7 @@ export function DailySheetPage({
           <NoteBlock
             ctx={ctx}
             title="デイサービス"
+            tone="care"
             rows={careNotes}
             drafts={noteDrafts.filter((d) => d.shift === 'daycare')}
             showReporter
@@ -1927,6 +2512,7 @@ export function DailySheetPage({
           <NoteBlock
             ctx={ctx}
             title="夜勤申し送り"
+            tone="night"
             rows={nightNotes}
             drafts={noteDrafts.filter((d) => d.shift === 'night')}
             showReporter={false}
@@ -1940,15 +2526,7 @@ export function DailySheetPage({
             onDelete={deleteNoteRow}
             onMarkRead={markNoteRead}
           />
-        </div>
-      </SheetFrame>
-
-      {totalRows === 0 && (
-        <EmptyBlock
-          message="この日の記録はまだありません。各ブロックの「＋追加」から記入できます。"
-          actionLabel={enabled ? '日勤申し送りに1行追加' : undefined}
-          onAction={enabled ? () => addNoteDraft('day', false) : undefined}
-        />
+        </>
       )}
 
       <ResidentPickerModal
@@ -1974,8 +2552,7 @@ export function DailySheetPage({
         onConfirm={() => confirm?.onConfirm()}
         onCancel={() => setConfirm(null)}
       />
-      {toast}
-    </div>
+    </>
   )
 }
 
@@ -1999,157 +2576,254 @@ interface SheetCtx {
 // 日付バー
 // ══════════════════════════════════════════════════════════════
 
-function DateBar({ day, onGo }: { day: string; onGo: (iso: string) => void }) {
-  const days = useMemo(() => monthDays(day), [day])
+/**
+ * 日付バー（シートの外・44px の操作領域）。
+ * 1〜31 の横並びボタンは撤去した（指示1）。日にちはカレンダー（input[type=date]）で選ぶ。
+ * ここに置く日付欄は「スクロールしなくても日を移せる」ための入口で、
+ * シートの中の日付セル（DayPicker）と同じ働きをする。
+ */
+function DateBar({
+  day,
+  unit,
+  onGo,
+  onUnit,
+}: {
+  day: string
+  unit: SheetUnit
+  onGo: (iso: string) => void
+  onUnit: (unit: SheetUnit) => void
+}) {
   const today = todayIso()
   return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap items-center gap-gap">
+    <div className="flex flex-wrap items-center gap-gap">
+      <button
+        type="button"
+        onClick={() => onGo(addDays(day, -1))}
+        aria-label="前の日を見る"
+        className="min-h-tap min-w-tap rounded-md border border-border-strong px-3 text-base text-ink"
+      >
+        <span aria-hidden="true">‹</span>
+      </button>
+      <label className="flex min-h-tap items-center gap-gap text-base text-ink">
+        <span className="text-ink2">日付</span>
+        <input
+          type="date"
+          value={day}
+          onChange={(e) => onGo(e.target.value)}
+          aria-label={`日報の日付 ${fmtSheetDay(day)}。カレンダーから選べます`}
+          className="min-h-tap rounded-md border border-border-strong bg-surface px-2 text-base text-ink"
+        />
+      </label>
+      <button
+        type="button"
+        onClick={() => onGo(addDays(day, 1))}
+        aria-label="次の日を見る"
+        className="min-h-tap min-w-tap rounded-md border border-border-strong px-3 text-base text-ink"
+      >
+        <span aria-hidden="true">›</span>
+      </button>
+      {day !== today && (
         <button
           type="button"
-          onClick={() => onGo(addDays(day, -1))}
-          aria-label="前の日を見る"
-          className="min-h-tap min-w-tap rounded-md border border-border-strong px-3 text-base text-ink"
+          onClick={() => onGo(today)}
+          className="min-h-tap rounded-md border border-primary px-3 text-base font-bold text-primary"
         >
-          <span aria-hidden="true">‹</span>
+          今日へ
         </button>
-        <span className="text-lg font-bold tabular">{fmtDayLabel(day)}</span>
-        <button
-          type="button"
-          onClick={() => onGo(addDays(day, 1))}
-          aria-label="次の日を見る"
-          className="min-h-tap min-w-tap rounded-md border border-border-strong px-3 text-base text-ink"
-        >
-          <span aria-hidden="true">›</span>
-        </button>
-        {day !== today && (
-          <button
-            type="button"
-            onClick={() => onGo(today)}
-            className="min-h-tap rounded-md border border-primary px-3 text-base font-bold text-primary"
-          >
-            今日へ
-          </button>
-        )}
-        <div className="ml-auto">
-          <ZoomBar />
-        </div>
+      )}
+
+      {/* 表示単位（既定は10日）。選択中は 枠色＋太字＋「✓」で示す（色だけに頼らない） */}
+      <div role="group" aria-label="表示単位" className="flex items-center gap-gap">
+        <span aria-hidden="true" className="text-sm text-ink2">
+          表示
+        </span>
+        {(
+          [
+            { value: '10' as SheetUnit, label: '10日', hint: '10日ごとに表示' },
+            { value: '1' as SheetUnit, label: '1日', hint: '1日だけ表示' },
+          ] as const
+        ).map((o) => {
+          const selected = o.value === unit
+          return (
+            <button
+              key={o.value}
+              type="button"
+              aria-pressed={selected}
+              aria-label={o.hint}
+              onClick={() => onUnit(o.value)}
+              className={
+                selected
+                  ? 'min-h-tap min-w-tap rounded border border-primary bg-primary px-2 text-sm font-bold text-primary-ink'
+                  : 'min-h-tap min-w-tap rounded border border-border bg-surface px-2 text-sm text-ink'
+              }
+            >
+              <span aria-hidden="true" className={selected ? '' : 'invisible'}>
+                ✓
+              </span>
+              {o.label}
+            </button>
+          )
+        })}
       </div>
-      {/* 現行スプシ左端の日付リンクの再現。当月の日を横に並べる */}
-      <div className="overflow-x-auto">
-        <ul className="flex gap-gap" aria-label="この月の日付">
-          {days.map((iso) => {
-            const selected = iso === day
-            return (
-              <li key={iso}>
-                <button
-                  type="button"
-                  onClick={() => onGo(iso)}
-                  aria-current={selected ? 'date' : undefined}
-                  aria-label={`${fmtDayLabel(iso)}の日報を見る`}
-                  className={`min-h-tap min-w-tap rounded-md border px-2 text-base tabular ${
-                    selected
-                      ? 'border-primary bg-primary font-bold text-primary-ink underline'
-                      : 'border-border bg-surface text-ink'
-                  }`}
-                >
-                  {Number(iso.slice(8, 10))}
-                </button>
-              </li>
-            )
-          })}
-        </ul>
+
+      <div className="ml-auto">
+        <ZoomBar />
       </div>
     </div>
   )
 }
 
 // ══════════════════════════════════════════════════════════════
-// ヘッダ（施設名・日報タイトル・日付）
+// 1日ぶんのヘッダ（施設名・日報タイトル・出勤者1行・日付）
 // ══════════════════════════════════════════════════════════════
 
-function SheetHeader({ facility, day }: { facility: string | null; day: string }) {
+/**
+ * 日付セル（指示1）。見えている文字は実物と同じ「26年8月28日(金)」で、
+ * 実際に押されるのは重ねた input[type=date]＝OS のカレンダーがそのまま開く
+ * （showPicker() は対応していない端末があるため使わない）。
+ */
+function DayPicker({ day, onPick }: { day: string; onPick: (iso: string) => void }) {
   return (
-    <div className="border-b border-border-strong bg-surface2 px-2 py-2 text-center">
-      {facility && <p className="text-ink2">{facility}</p>}
-      <h2 className="text-lg font-heavy text-ink">日勤・夜勤日報</h2>
-      <p className="text-xl font-bold text-ink tabular">{fmtDayLabel(day)}</p>
-    </div>
+    <label className="dsheet-date">
+      <span aria-hidden="true" className="text-lg font-bold tabular text-ink">
+        {fmtSheetDay(day)}
+      </span>
+      <input
+        type="date"
+        className="dsheet-date-input"
+        value={day}
+        onChange={(e) => onPick(e.target.value)}
+        aria-label={`日報の日付 ${fmtSheetDay(day)}。押すとカレンダーから日にちを選べます`}
+      />
+    </label>
   )
 }
 
-// ══════════════════════════════════════════════════════════════
-// 出勤者
-// ══════════════════════════════════════════════════════════════
+/** 出勤者の1枠（実物のスプシと同じ固定幅のセル） */
+function AttendCell({
+  label,
+  name,
+  disabled,
+  onClick,
+}: {
+  /** 読み上げ用の説明（「施設長 ○○ を取り消す」「出勤者を追加する」） */
+  label: string
+  /** 空欄なら「＋」を出す */
+  name: string | null
+  disabled: boolean
+  onClick: () => void
+}) {
+  return (
+    <Cell width="var(--w-attend)" pad={false} className="flex items-center">
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        aria-label={label}
+        className={`${CELL_HIT} sheet-dense-btn w-full rounded-sm px-1 text-left ${
+          disabled ? 'text-ink2' : 'text-link'
+        }`}
+      >
+        <span className="block truncate">
+          {name === null ? <span aria-hidden="true">＋</span> : name}
+          {name !== null && !disabled ? (
+            <span aria-hidden="true" className="sheet-mark">
+              {' '}
+              ✕
+            </span>
+          ) : null}
+        </span>
+      </button>
+    </Cell>
+  )
+}
 
-function AttendanceBlock({
+function DayHeader({
   ctx,
+  facility,
+  day,
   manager,
   workers,
-  onAdd,
-  onRemove,
+  empty,
+  onPickDay,
+  onAddAttendance,
+  onRemoveAttendance,
 }: {
   ctx: SheetCtx
+  facility: string | null
+  day: string
   manager: Attendance | null
   workers: Attendance[]
-  onAdd: (role: 'manager' | 'staff') => void
-  onRemove: (staffId: number) => void
+  /** この日にまだ記録が1件も無い（空状態の一言を出す） */
+  empty: boolean
+  onPickDay: (iso: string) => void
+  onAddAttendance: (role: 'manager' | 'staff') => void
+  onRemoveAttendance: (staffId: number) => void
 }) {
-  const status = ctx.status.attendance
+  const managerName =
+    manager === null ? null : staffName(ctx.staffById.get(manager.staff_id), manager.staff_id)
   return (
-    <div className="border-b border-border-strong px-2 py-2">
-      <div className="flex flex-wrap items-center gap-gap">
-        <span className="font-bold text-ink2">施設長</span>
-        {manager ? (
-          <Chip tone="plain">
-            <span>{staffName(ctx.staffById.get(manager.staff_id), manager.staff_id)}</span>
-            <button
-              type="button"
-              onClick={() => onRemove(manager.staff_id)}
-              disabled={ctx.disabled}
-              aria-label={`施設長 ${staffName(ctx.staffById.get(manager.staff_id), manager.staff_id)} を取り消す`}
-              className="min-h-tap min-w-tap text-ink2"
-            >
-              <span aria-hidden="true">✕</span>
-            </button>
-          </Chip>
-        ) : (
-          <button
-            type="button"
-            onClick={() => onAdd('manager')}
+    <div className="border-b border-border-strong">
+      {/* 1段目: 左＝施設名（橙）と日報名、右＝施設長のとなりに出勤者が横1行（指示6）。
+          施設名と日報名は縦に積む＝出勤者の枠を1行に15枠ぶん残すため */}
+      <div className="flex flex-wrap items-stretch">
+        <div
+          className="flex shrink-0 flex-col justify-center border-r border-border bg-accent-bg px-1 font-bold text-ink"
+          // 施設名は途中で切らない（実物は「有料老人ホーム　○○／日勤・夜勤日報」が2行で全部見える）。
+          // 幅は施設名セル専用の --w-facility。出勤者の15枠は残りの幅で足りる（sheet.css の計算参照）
+          style={{ width: 'var(--w-facility)', minHeight: 'var(--sheet-row-h-note)' }}
+        >
+          {facility && <span className="whitespace-nowrap">{facility}</span>}
+          <span className="whitespace-nowrap">日勤・夜勤日報</span>
+        </div>
+        <div className="flex min-w-0 flex-1 flex-wrap items-stretch">
+          <Cell width="var(--w-attend-label)" className="flex items-center bg-surface2 font-bold text-ink2">
+            <span className="truncate">施設長</span>
+          </Cell>
+          <AttendCell
+            label={
+              managerName === null
+                ? '施設長を選ぶ'
+                : `施設長 ${managerName} を取り消す`
+            }
+            name={managerName}
             disabled={ctx.disabled}
-            className="min-h-tap rounded-md border border-border-strong px-3 text-base text-link disabled:text-ink3"
-          >
-            ＋ 選ぶ
-          </button>
+            onClick={() =>
+              manager === null ? onAddAttendance('manager') : onRemoveAttendance(manager.staff_id)
+            }
+          />
+          <Cell width="var(--w-attend-label)" className="flex items-center bg-surface2 font-bold text-ink2">
+            <span className="truncate">出勤者</span>
+          </Cell>
+          {workers.map((a) => (
+            <AttendCell
+              key={a.staff_id}
+              label={`出勤者 ${staffName(ctx.staffById.get(a.staff_id), a.staff_id)} を取り消す`}
+              name={staffName(ctx.staffById.get(a.staff_id), a.staff_id)}
+              disabled={ctx.disabled}
+              onClick={() => onRemoveAttendance(a.staff_id)}
+            />
+          ))}
+          <AttendCell
+            label="出勤者を追加する"
+            name={null}
+            disabled={ctx.disabled}
+            onClick={() => onAddAttendance('staff')}
+          />
+        </div>
+      </div>
+      <StatusText status={ctx.status.attendance} />
+
+      {/* 2段目: 日付（大きめ・押すとカレンダー） */}
+      <div className="flex flex-wrap items-center gap-gap px-1 py-1">
+        <DayPicker day={day} onPick={onPickDay} />
+        {empty && (
+          <span className="text-ink2">
+            <span aria-hidden="true">— </span>
+            この日の記録はまだありません（空いている行にそのまま記入できます）
+          </span>
         )}
       </div>
-      <div className="mt-2 flex flex-wrap items-center gap-gap">
-        <span className="font-bold text-ink2">出勤者</span>
-        {workers.map((a) => (
-          <Chip key={a.staff_id} tone="plain">
-            <span>{staffName(ctx.staffById.get(a.staff_id), a.staff_id)}</span>
-            <button
-              type="button"
-              onClick={() => onRemove(a.staff_id)}
-              disabled={ctx.disabled}
-              aria-label={`出勤者 ${staffName(ctx.staffById.get(a.staff_id), a.staff_id)} を取り消す`}
-              className="min-h-tap min-w-tap text-ink2"
-            >
-              <span aria-hidden="true">✕</span>
-            </button>
-          </Chip>
-        ))}
-        <button
-          type="button"
-          onClick={() => onAdd('staff')}
-          disabled={ctx.disabled}
-          className="min-h-tap rounded-md border border-border-strong px-3 text-base text-link disabled:text-ink3"
-        >
-          ＋ 追加
-        </button>
-      </div>
-      <StatusText status={status} />
     </div>
   )
 }
@@ -2185,34 +2859,34 @@ function OutingBlock({
   const placeLabel = isStay ? '宿泊先' : '外出先'
   const startLabel = isStay ? '出発日時' : '出発時刻'
   const endLabel = isStay ? '到着日時' : '到着時刻'
-  const count = rows.length + drafts.length
+  const count = rows.length
 
-  // key は付けない。件数で key を変えるとブロックごと作り直され、押した「＋追加」ボタンが
-  // DOM から消えてフォーカスが文書先頭へ落ちる（0→1・1→0 の両方）。
-  // 0→1 で開く挙動は CollapsibleBlock 側の useEffect（sheet.tsx）が既に担っている
   return (
-    <CollapsibleBlock
+    <SheetBlock
       title={title}
-      count={count}
       onAdd={onAdd}
-      addLabel="＋追加"
-      defaultOpen={count > 0}
+      head={
+        <>
+          <HeadCell width="var(--w-name)">氏名</HeadCell>
+          <HeadCell grow>{placeLabel}</HeadCell>
+          <HeadCell width="var(--w-datelink)">{startLabel}</HeadCell>
+          {/* 実物の「〜」（出発と到着の間の細い列） */}
+          <HeadCell width="var(--w-tilde)">
+            <span aria-hidden="true">〜</span>
+          </HeadCell>
+          <HeadCell width="var(--w-datelink)">{endLabel}</HeadCell>
+          <HeadCell width="var(--w-target)">付添</HeadCell>
+          <HeadCell width="var(--w-reporter)">登録</HeadCell>
+        </>
+      }
     >
-      <HeadRow>
-        <HeadCell width="var(--w-name)">氏名</HeadCell>
-        <HeadCell grow>{placeLabel}</HeadCell>
-        <HeadCell width="var(--w-datelink)">{startLabel}</HeadCell>
-        <HeadCell width="var(--w-datelink)">{endLabel}</HeadCell>
-        <HeadCell width="var(--w-target)">付添</HeadCell>
-        <HeadCell width="var(--w-reporter)">登録</HeadCell>
-      </HeadRow>
-
-      {rows.map((o) => {
+      {rows.map((o, i) => {
         const key = `o${o.id}`
         const name = residentName(ctx.residentById.get(o.resident_id), o.resident_id)
         return (
           <div key={key}>
             <Row>
+              <LeadCell text={i === 0 ? `${count}名` : ''} />
               <Cell width="var(--w-name)" className="flex items-center">
                 <span className="truncate font-bold">{name}</span>
               </Cell>
@@ -2224,6 +2898,11 @@ function OutingBlock({
                   {o.start_on !== ctx.day
                     ? fmtDayTime(o.start_on, o.start_at, ctx.day)
                     : fmtTimeHM(o.start_at)}
+                </span>
+              </Cell>
+              <Cell width="var(--w-tilde)" className="flex items-center">
+                <span aria-hidden="true" className="text-ink3">
+                  〜
                 </span>
               </Cell>
               {/* 余白は SheetCell 側だけが持つ（入れ物にも取ると列見出しと左端がずれる） */}
@@ -2248,7 +2927,7 @@ function OutingBlock({
               </Cell>
             </Row>
             {o.end_on == null && (
-              <p className="px-2 text-warn">
+              <p className="px-1 text-warn">
                 <span aria-hidden="true">▲ </span>帰着未定（{endLabel}を記入すると確定します）
               </p>
             )}
@@ -2257,18 +2936,26 @@ function OutingBlock({
         )
       })}
 
-      {drafts.map((d) => {
+      {drafts.map((d, di) => {
         const name = d.residentId == null ? '' : residentName(ctx.residentById.get(d.residentId), d.residentId)
         const disabled = ctx.disabled || d.locked
         // 記入は下書きに貯め、行末の「登録」で1件として保存する
         // （外出・外泊は保存後の項目更新APIが無いため、途中保存にすると直せなくなる）
         const trySave = (patch: Partial<OutingDraft>) => onPatchDraft(d.key, patch)
+        const dirty =
+          d.residentId != null ||
+          d.place.trim() !== '' ||
+          d.startAt !== '' ||
+          d.endText !== '' ||
+          d.companion.trim() !== ''
         const ready =
           d.residentId != null &&
           (d.place.trim() !== '' || d.startAt !== '' || d.endText !== '' || d.companion.trim() !== '')
         return (
           <div key={d.key}>
-            <Row className="bg-surface2">
+            {/* 空の行は実物のスプシと同じ「固定の空欄」。書き始めた行だけ背景を変える */}
+            <Row className={dirty ? 'bg-surface2' : ''}>
+              <LeadCell text={rows.length === 0 && di === 0 ? `${count}名` : ''} />
               <PickerCell
                 width="var(--w-name)"
                 text={name}
@@ -2297,6 +2984,11 @@ function OutingBlock({
                   ariaLabel={startLabel}
                   as="div"
                 />
+              </Cell>
+              <Cell width="var(--w-tilde)" className="flex items-center">
+                <span aria-hidden="true" className="text-ink3">
+                  〜
+                </span>
               </Cell>
               <Cell width="var(--w-datelink)" pad={false}>
                 <SheetCell
@@ -2336,38 +3028,36 @@ function OutingBlock({
                 </button>
               </Cell>
             </Row>
-            <p className="flex flex-wrap items-center gap-gap px-2 text-ink2">
-              {d.locked ? (
-                <span className="flex-1 text-warn">
-                  <span aria-hidden="true">▲ </span>
-                  {MSG_LOCKED_DELETE}
-                </span>
-              ) : !ready ? (
-                <span className="flex-1">
-                  <span aria-hidden="true">ⓘ </span>
-                  氏名と、行き先・時刻・付添のいずれかを記入すると「登録」を押せます（押すまで保存しません）
-                </span>
-              ) : null}
-              <button
-                type="button"
-                onClick={() => onRemoveDraft(d.key)}
-                disabled={d.locked}
-                className="min-h-tap rounded-md border border-border-strong px-3 text-link disabled:border-border disabled:text-ink3"
-              >
-                この行を取り消す
-              </button>
-            </p>
+            {/* 空欄のままの行には案内も取り消しも出さない（実物と同じ「ただの空行」にする）。
+                書き始めた行・送信待ちの行にだけ、次にどうすればよいかを1行で添える */}
+            {dirty && (
+              <p className="flex flex-wrap items-center gap-gap px-1 text-ink2">
+                {d.locked ? (
+                  <span className="flex-1 text-warn">
+                    <span aria-hidden="true">▲ </span>
+                    {MSG_LOCKED_DELETE}
+                  </span>
+                ) : !ready ? (
+                  <span className="flex-1">
+                    <span aria-hidden="true">ⓘ </span>
+                    氏名と、行き先・時刻・付添のいずれかを記入すると「登録」を押せます（押すまで保存しません）
+                  </span>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => onRemoveDraft(d.key)}
+                  disabled={d.locked}
+                  className="sheet-dense-btn rounded-sm border border-border-strong px-1 text-link disabled:border-border disabled:text-ink3"
+                >
+                  この行を取り消す
+                </button>
+              </p>
+            )}
             <StatusText status={ctx.status[d.key]} />
           </div>
         )
       })}
-
-      {count === 0 && (
-        <p className="px-2 py-1 text-ink2">
-          <span aria-hidden="true">— </span>この日の{title}はいません
-        </p>
-      )}
-    </CollapsibleBlock>
+    </SheetBlock>
   )
 }
 
@@ -2498,34 +3188,32 @@ function FeverBlock({
   onInsert: InsertVitalFn
   onUpdate: UpdateVitalFn
 }) {
-  const count = rows.length + drafts.length
+  const count = rows.length
   return (
-    // key は付けない（理由は OutingBlock と同じ＝再マウントでフォーカスを失わせない）
-    <CollapsibleBlock
+    <SheetBlock
       title="発熱者"
-      count={count}
       onAdd={onAdd}
-      addLabel="＋追加"
-      defaultOpen={count > 0}
+      head={
+        <>
+          <HeadCell width="var(--w-name)">氏名</HeadCell>
+          {Array.from({ length: FEVER_SETS }, (_, i) => (
+            <Fragment key={i}>
+              <HeadCell width="var(--w-pulse)">{`${i + 1}回目 時`}</HeadCell>
+              <HeadCell width="var(--w-temp)">体温</HeadCell>
+              <HeadCell width="var(--w-spo2)">SpO2</HeadCell>
+              <HeadCell width={W_BP}>血圧</HeadCell>
+              <HeadCell width="var(--w-pulse)">脈</HeadCell>
+            </Fragment>
+          ))}
+        </>
+      }
     >
-      <HeadRow>
-        <HeadCell width="var(--w-name)">氏名</HeadCell>
-        {Array.from({ length: FEVER_SETS }, (_, i) => (
-          <Fragment key={i}>
-            <HeadCell width="var(--w-pulse)">{`${i + 1}回目 時`}</HeadCell>
-            <HeadCell width="var(--w-temp)">体温</HeadCell>
-            <HeadCell width="var(--w-spo2)">SpO2</HeadCell>
-            <HeadCell width={W_BP}>血圧</HeadCell>
-            <HeadCell width="var(--w-pulse)">脈</HeadCell>
-          </Fragment>
-        ))}
-      </HeadRow>
-
-      {rows.map((row) => {
+      {rows.map((row, i) => {
         const name = residentName(ctx.residentById.get(row.residentId), row.residentId)
         return (
           <div key={row.key}>
             <Row>
+              <LeadCell text={i === 0 ? `${count}名` : ''} />
               <Cell width="var(--w-name)" className="flex items-center">
                 <span className="truncate font-bold">{name}</span>
               </Cell>
@@ -2551,12 +3239,16 @@ function FeverBlock({
         )
       })}
 
-      {drafts.map((d) => {
+      {drafts.map((d, di) => {
         const name = d.residentId == null ? '' : residentName(ctx.residentById.get(d.residentId), d.residentId)
         const disabled = ctx.disabled || d.locked
+        const dirty =
+          d.residentId != null || d.sets.some((s) => s.at || s.temp || s.spo2 || s.bp || s.pulse)
         return (
           <div key={d.key}>
-            <Row className="bg-surface2">
+            {/* 空の行は実物と同じ「固定の空欄」。書き始めた行だけ背景を変える */}
+            <Row className={dirty ? 'bg-surface2' : ''}>
+              <LeadCell text={rows.length === 0 && di === 0 ? `${count}名` : ''} />
               <PickerCell
                 width="var(--w-name)"
                 text={name}
@@ -2589,40 +3281,37 @@ function FeverBlock({
                 />
               ))}
             </Row>
-            <p className="flex flex-wrap items-center gap-gap px-2 text-ink2">
-              {d.locked ? (
-                <span className="flex-1 text-warn">
-                  <span aria-hidden="true">▲ </span>
-                  {MSG_LOCKED_DELETE}
-                </span>
-              ) : (
-                <span className="flex-1">
-                  <span aria-hidden="true">ⓘ </span>
-                  {d.residentId == null
-                    ? '氏名を選び、1回目の値を入れると保存します'
-                    : '1回目の値を入れると保存します（2回目以降は保存後に記入できます）'}
-                </span>
-              )}
-              <button
-                type="button"
-                onClick={() => onRemoveDraft(d.key)}
-                disabled={d.locked}
-                className="min-h-tap rounded-md border border-border-strong px-3 text-link disabled:border-border disabled:text-ink3"
-              >
-                この行を取り消す
-              </button>
-            </p>
+            {/* 空欄のままの行には案内も取り消しも出さない（実物と同じ「ただの空行」にする） */}
+            {dirty && (
+              <p className="flex flex-wrap items-center gap-gap px-1 text-ink2">
+                {d.locked ? (
+                  <span className="flex-1 text-warn">
+                    <span aria-hidden="true">▲ </span>
+                    {MSG_LOCKED_DELETE}
+                  </span>
+                ) : (
+                  <span className="flex-1">
+                    <span aria-hidden="true">ⓘ </span>
+                    {d.residentId == null
+                      ? '氏名を選び、1回目の値を入れると保存します'
+                      : '1回目の値を入れると保存します（2回目以降は保存後に記入できます）'}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => onRemoveDraft(d.key)}
+                  disabled={d.locked}
+                  className="sheet-dense-btn rounded-sm border border-border-strong px-1 text-link disabled:border-border disabled:text-ink3"
+                >
+                  この行を取り消す
+                </button>
+              </p>
+            )}
             <StatusText status={ctx.status[d.key]} />
           </div>
         )
       })}
-
-      {count === 0 && (
-        <p className="px-2 py-1 text-ink2">
-          <span aria-hidden="true">— </span>この日の発熱者はいません
-        </p>
-      )}
-    </CollapsibleBlock>
+    </SheetBlock>
   )
 }
 
@@ -2650,32 +3339,30 @@ function SymptomBlock({
   onInsert: InsertVitalFn
   onUpdate: UpdateVitalFn
 }) {
-  const count = rows.length + drafts.length
+  const count = rows.length
   return (
-    // key は付けない（理由は OutingBlock と同じ＝再マウントでフォーカスを失わせない）
-    <CollapsibleBlock
+    <SheetBlock
       title="他症状者"
-      count={count}
       onAdd={onAdd}
-      addLabel="＋追加"
-      defaultOpen={count > 0}
+      head={
+        <>
+          <HeadCell width="var(--w-name)">氏名</HeadCell>
+          <HeadCell width="var(--w-pulse)">時</HeadCell>
+          <HeadCell width="var(--w-temp)">体温</HeadCell>
+          <HeadCell width="var(--w-spo2)">SpO2</HeadCell>
+          <HeadCell width={W_BP}>血圧</HeadCell>
+          <HeadCell width="var(--w-pulse)">脈</HeadCell>
+          <HeadCell grow>症状</HeadCell>
+        </>
+      }
     >
-      <HeadRow>
-        <HeadCell width="var(--w-name)">氏名</HeadCell>
-        <HeadCell width="var(--w-pulse)">時</HeadCell>
-        <HeadCell width="var(--w-temp)">体温</HeadCell>
-        <HeadCell width="var(--w-spo2)">SpO2</HeadCell>
-        <HeadCell width={W_BP}>血圧</HeadCell>
-        <HeadCell width="var(--w-pulse)">脈</HeadCell>
-        <HeadCell grow>症状</HeadCell>
-      </HeadRow>
-
-      {rows.map((v) => {
+      {rows.map((v, i) => {
         const key = `s${v.id}`
         const name = residentName(ctx.residentById.get(v.resident_id), v.resident_id)
         return (
           <div key={key}>
             <Row>
+              <LeadCell text={i === 0 ? `${count}名` : ''} />
               <Cell width="var(--w-name)" className="flex items-center">
                 <span className="truncate font-bold">{name}</span>
               </Cell>
@@ -2716,13 +3403,19 @@ function SymptomBlock({
         )
       })}
 
-      {drafts.map((d) => {
+      {drafts.map((d, di) => {
         const name = d.residentId == null ? '' : residentName(ctx.residentById.get(d.residentId), d.residentId)
         const disabled = ctx.disabled || d.locked
         const set = d.sets[0] ?? emptySet()
+        const dirty =
+          d.residentId != null ||
+          d.symptom.trim() !== '' ||
+          Boolean(set.at || set.temp || set.spo2 || set.bp || set.pulse)
         return (
           <div key={d.key}>
-            <Row className="bg-surface2">
+            {/* 空の行は実物と同じ「固定の空欄」。書き始めた行だけ背景を変える */}
+            <Row className={dirty ? 'bg-surface2' : ''}>
+              <LeadCell text={rows.length === 0 && di === 0 ? `${count}名` : ''} />
               <PickerCell
                 width="var(--w-name)"
                 text={name}
@@ -2772,37 +3465,34 @@ function SymptomBlock({
                 />
               </Cell>
             </Row>
-            <p className="flex flex-wrap items-center gap-gap px-2 text-ink2">
-              {d.locked ? (
-                <span className="flex-1 text-warn">
-                  <span aria-hidden="true">▲ </span>
-                  {MSG_LOCKED_DELETE}
-                </span>
-              ) : d.residentId == null ? (
-                <span className="flex-1">
-                  <span aria-hidden="true">ⓘ </span>氏名を選び、症状か値を入れると保存します
-                </span>
-              ) : null}
-              <button
-                type="button"
-                onClick={() => onRemoveDraft(d.key)}
-                disabled={d.locked}
-                className="min-h-tap rounded-md border border-border-strong px-3 text-link disabled:border-border disabled:text-ink3"
-              >
-                この行を取り消す
-              </button>
-            </p>
+            {/* 空欄のままの行には案内も取り消しも出さない（実物と同じ「ただの空行」にする） */}
+            {dirty && (
+              <p className="flex flex-wrap items-center gap-gap px-1 text-ink2">
+                {d.locked ? (
+                  <span className="flex-1 text-warn">
+                    <span aria-hidden="true">▲ </span>
+                    {MSG_LOCKED_DELETE}
+                  </span>
+                ) : d.residentId == null ? (
+                  <span className="flex-1">
+                    <span aria-hidden="true">ⓘ </span>氏名を選び、症状か値を入れると保存します
+                  </span>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => onRemoveDraft(d.key)}
+                  disabled={d.locked}
+                  className="sheet-dense-btn rounded-sm border border-border-strong px-1 text-link disabled:border-border disabled:text-ink3"
+                >
+                  この行を取り消す
+                </button>
+              </p>
+            )}
             <StatusText status={ctx.status[d.key]} />
           </div>
         )
       })}
-
-      {count === 0 && (
-        <p className="px-2 py-1 text-ink2">
-          <span aria-hidden="true">— </span>この日の他症状者はいません
-        </p>
-      )}
-    </CollapsibleBlock>
+    </SheetBlock>
   )
 }
 
@@ -2813,6 +3503,8 @@ function SymptomBlock({
 interface NoteBlockProps {
   ctx: SheetCtx
   title: string
+  /** タイトル帯の配色（指示8・note=ピンク / care=水色 / night=ネイビー） */
+  tone: NoteTone
   rows: Note[]
   drafts: NoteDraft[]
   showReporter: boolean
@@ -2834,6 +3526,7 @@ interface NoteBlockProps {
 function NoteBlock({
   ctx,
   title,
+  tone,
   rows,
   drafts,
   showReporter,
@@ -2847,17 +3540,13 @@ function NoteBlock({
   onDelete,
   onMarkRead,
 }: NoteBlockProps) {
-  const count = rows.length + drafts.length
+  const count = rows.length
   return (
-    // key は付けない（理由は OutingBlock と同じ＝再マウントでフォーカスを失わせない）
-    <CollapsibleBlock
-      title={title}
-      count={count}
-      onAdd={onAdd}
-      addLabel="＋追加"
-      defaultOpen={count > 0}
-    >
-      <HeadRow>
+    <section aria-label={title}>
+      {/* 実物のタイトル帯（日付＋ブロック名。配色は指示8） */}
+      <NoteTitleBand day={ctx.day} title={title} tone={tone} count={count} onAdd={onAdd} />
+      <HeadRow className="dsheet-head">
+        <HeadCell width="var(--w-block)">件数</HeadCell>
         <HeadCell width="var(--w-reporter)">色</HeadCell>
         <HeadCell width="var(--w-target)">対象</HeadCell>
         <HeadCell grow>内容</HeadCell>
@@ -2865,11 +3554,12 @@ function NoteBlock({
         <HeadCell width="var(--w-reporter)">詳細</HeadCell>
       </HeadRow>
 
-      {rows.map((note) => (
+      {rows.map((note, i) => (
         <NoteRow
           key={`n${note.id}`}
           ctx={ctx}
           rowKey={`n${note.id}`}
+          lead={i === 0 ? `${count}件` : ''}
           note={note}
           draft={null}
           showReporter={showReporter}
@@ -2884,11 +3574,12 @@ function NoteBlock({
         />
       ))}
 
-      {drafts.map((d) => (
+      {drafts.map((d, i) => (
         <NoteRow
           key={d.key}
           ctx={ctx}
           rowKey={d.key}
+          lead={rows.length === 0 && i === 0 ? `${count}件` : ''}
           note={null}
           draft={d}
           showReporter={showReporter}
@@ -2902,19 +3593,15 @@ function NoteBlock({
           onMarkRead={onMarkRead}
         />
       ))}
-
-      {count === 0 && (
-        <p className="px-2 py-1 text-ink2">
-          <span aria-hidden="true">— </span>この日の{title}はまだありません
-        </p>
-      )}
-    </CollapsibleBlock>
+    </section>
   )
 }
 
 interface NoteRowProps
-  extends Omit<NoteBlockProps, 'title' | 'rows' | 'drafts' | 'onAdd' | 'expanded'> {
+  extends Omit<NoteBlockProps, 'title' | 'tone' | 'rows' | 'drafts' | 'onAdd' | 'expanded'> {
   rowKey: string
+  /** 左端の件数セルに出す文字（ブロックの1行目だけ「n件」・他は空） */
+  lead: string
   note: Note | null
   draft: NoteDraft | null
   /** この行の詳細を開いているか（申し送りブロック内で1行だけ開く） */
@@ -2924,6 +3611,7 @@ interface NoteRowProps
 function NoteRow({
   ctx,
   rowKey,
+  lead,
   note,
   draft,
   showReporter,
@@ -2963,6 +3651,7 @@ function NoteRow({
   return (
     <div className={color ? NOTE_COLOR_CLASS[color] : undefined}>
       <Row>
+        <LeadCell text={lead} />
         <Cell width="var(--w-reporter)" className="flex items-center">
           {/* 封鎖中・送信待ちの行は色も変えられない（同じ行の他のセルと可否をそろえる） */}
           <ColorPicker value={color} onChange={setColor} ariaLabel="この行の色" disabled={disabled} />

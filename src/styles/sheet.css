@@ -50,7 +50,11 @@
        ・.sheet-frame-fit（枠の高さ上限＝画面高 − 実測の上下UI。sheet.tsx が実測値を書き戻す）
        ・.sheet-mark（しきい値・低摂取の記号を半角幅で描く）
        ・.sheet-group-end（日付グループの最後の列の右罫線を濃くする＝日の切れ目）
-     の6つ。それ以外の class 規則（.sheet-frame / .sheet-cell / .sheet-row-* / .sheet-fix-* /
+       ・日報の追加分（2026-08-28 の追加指示）:
+         .dsheet-day（1日ごとの太線枠）/ .dsheet-head（ブロック見出しの太線）/
+         .dsheet-title-note・-care・-night（申し送りのタイトル帯の配色）/
+         .dsheet-date（日付セル＝押すとカレンダー）/ .sheet-dense-btn（行内ボタンの高さ）
+     それ以外の class 規則（.sheet-frame / .sheet-cell / .sheet-row-* / .sheet-fix-* /
      .sheet-table-meals / .sheet-swatch 等）は
      **参照用の見本であって適用されていない**。寸法・色を変えるときはページ側の Tailwind を直す。
    ══════════════════════════════════════════════════════════════ */
@@ -82,11 +86,29 @@
   --w-target-base: 8.625rem; /* 138px */
   --w-reporter-base: 3.75rem; /* 60px */
 
+  /* 列幅（日報のブロック・2026-08-28 追加指示）
+     --w-block  : 左端のブロック名／件数セル（「外出者」「0名」）
+     --w-attend : 出勤者1枠。1行に施設長＋出勤者で 15 枠が並ぶ幅
+     --w-tilde  : 出発〜到着の間に挟まる「〜」 */
+  --w-block-base: 6.25rem; /* 100px */
+  /* 施設名の枠。「有料老人ホーム　○○」＋「日勤・夜勤日報」を省略せず2行で収める
+     （実物は施設名がフルで見える。117px だと途中で切れたため 2026-08-28 に拡張） */
+  --w-facility-base: 12.5rem; /* 200px */
+  /* 出勤者1枠 64px・見出し 52px。施設名の枠（117px）と合わせて
+     117 + 52 + 64 + 52 + 64×14 = 1181px ＝ シートの最小幅（約1245px）に
+     「施設長＋出勤者14＝15枠」が1行で収まる（2026-08-28 指示6） */
+  --w-attend-base: 4rem; /* 64px */
+  --w-attend-label-base: 3.25rem; /* 52px 「施設長」「出勤者」の見出しセル */
+  --w-tilde-base: 1.25rem; /* 20px */
+
   /* セル内の左右余白（上下は 0） */
   --sheet-cell-pad-base: 0.125rem; /* 2px */
 
   /* 罫線（実測どおり 1px 固定。倍率を掛けない） */
   --sheet-rule: 1px;
+  /* 太線（2026-08-28 追加指示「1日ごとに太線で囲む」「ブロックの見出しは太線」）。
+     ヘアラインと同じ理由で倍率を掛けない（拡大しても線だけは太らせない）。 */
+  --sheet-rule-bold: 2px;
 
   /* 表示倍率の既定。ZoomBar が documentElement に書き換える */
   --sheet-zoom: 1;
@@ -123,6 +145,12 @@
   --w-datelink: calc(var(--w-datelink-base) * var(--sheet-zoom, 1));
   --w-target: calc(var(--w-target-base) * var(--sheet-zoom, 1));
   --w-reporter: calc(var(--w-reporter-base) * var(--sheet-zoom, 1));
+
+  --w-block: calc(var(--w-block-base) * var(--sheet-zoom, 1));
+  --w-facility: calc(var(--w-facility-base) * var(--sheet-zoom, 1));
+  --w-attend: calc(var(--w-attend-base) * var(--sheet-zoom, 1));
+  --w-attend-label: calc(var(--w-attend-label-base) * var(--sheet-zoom, 1));
+  --w-tilde: calc(var(--w-tilde-base) * var(--sheet-zoom, 1));
 
   /* 別名（このファイルの class 群が使う。上の契約名と同じ値） */
   --sheet-fs: var(--sheet-font);
@@ -214,7 +242,7 @@
   line-height: var(--lh-tight);
   font-variant-numeric: tabular-nums;
   color: var(--c-ink);
-  /* 縦の当たり判定は上の「.sheet-table, .sheet-dense」で 0 に落としている */
+  /* 縦の当たり判定はこの表では従来どおり下方向へ広げる（0 に落とすのは日報の .sheet-dense だけ） */
 }
 
 /* 申し送りのように本文列を伸ばす表（横方向は画面幅いっぱい） */
@@ -605,6 +633,134 @@
   font-weight: var(--fw-bold);
   line-height: var(--lh-tight);
   text-align: center;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   日報（DailySheetPage）専用 — 2026-08-28 の追加指示
+   ・1日ごとに太線で囲む（10日表示でも日の切れ目が分かる）
+   ・申し送りのタイトル帯を実物の配色にする
+     日勤／日勤(16時以降)＝ピンク・デイサービス＝水色に濃い青・夜勤＝ネイビーに赤
+   ・色だけで意味を伝えない: どの帯にも見出しの語（日勤申し送り 等）が必ず入る。
+     配色は「実物と同じ場所を探せる」ための補助であって、意味は文字が持つ。
+
+   配色は tokens.css に無い色（実物のスプシの色）なので、**この節に専用の変数**として置く
+   （tokens.css は変更禁止・生の色コードを TSX に書かないための1か所）。
+   ダークモードの値は
+     ・:root[data-mode='dark']（設定で「ダーク」を選んだ時）
+     ・@media (prefers-color-scheme: dark) の :root:not([data-mode='light'])（OS 追従の時）
+   の両方で必ず定義する（暗所で読めない色を残さない）。
+   コントラスト比（実測・7:1 目標）:
+     ライト ピンク 12.0 / 水色 10.0 / ネイビー 7.7、ダーク 10.5 / 8.8 / 10.1
+   ══════════════════════════════════════════════════════════════ */
+:root {
+  --dsheet-c-note-bg: #f6c9d7; /* ピンク（日勤申し送り・16時以降） */
+  --dsheet-c-note-ink: #14191f;
+  --dsheet-c-care-bg: #c9e3f6; /* 水色（デイサービス） */
+  --dsheet-c-care-ink: #0b2e63; /* 濃い青 */
+  --dsheet-c-night-bg: #1f3864; /* ネイビー（夜勤） */
+  --dsheet-c-night-ink: #ffc4c7; /* 赤（ネイビーの上で読める明度に上げた赤） */
+}
+:root[data-mode='dark'] {
+  --dsheet-c-note-bg: #4a1e2c;
+  --dsheet-c-note-ink: #f9d7df;
+  --dsheet-c-care-bg: #123243;
+  --dsheet-c-care-ink: #a6d9ee; /* 暗い面では「濃い青」を同じ意味の明るい青へ */
+  --dsheet-c-night-bg: #0e1b33;
+  --dsheet-c-night-ink: #ffb3b8;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-mode='light']) {
+    --dsheet-c-note-bg: #4a1e2c;
+    --dsheet-c-note-ink: #f9d7df;
+    --dsheet-c-care-bg: #123243;
+    --dsheet-c-care-ink: #a6d9ee;
+    --dsheet-c-night-bg: #0e1b33;
+    --dsheet-c-night-ink: #ffb3b8;
+  }
+}
+
+/* 1日ぶんの枠（10日表示で日の切れ目を太線で示す） */
+.dsheet-day {
+  border: var(--sheet-rule-bold) solid var(--c-ink2);
+  background: var(--c-surface);
+}
+.dsheet-day + .dsheet-day {
+  margin-top: var(--sp-1);
+}
+
+/* ブロックの見出し行（外出者・外泊者・発熱者・他症状者）＝黒枠・太線 */
+.dsheet-head {
+  border-bottom: var(--sheet-rule-bold) solid var(--c-ink2);
+}
+
+/* 申し送りのタイトル帯（実物の配色） */
+.dsheet-title-note {
+  background: var(--dsheet-c-note-bg);
+  color: var(--dsheet-c-note-ink);
+}
+.dsheet-title-care {
+  background: var(--dsheet-c-care-bg);
+  color: var(--dsheet-c-care-ink);
+}
+.dsheet-title-night {
+  background: var(--dsheet-c-night-bg);
+  color: var(--dsheet-c-night-ink);
+}
+/* 帯の中のボタン（＋追加）は帯の文字色を継ぐ（帯ごとに読める色が変わるため） */
+.dsheet-title-note button,
+.dsheet-title-care button,
+.dsheet-title-night button {
+  color: inherit;
+}
+
+/* 行の中に置く小さなボタン（＋追加・取り消し・登録）。
+   トークンの :where(button){min-height:44px} をシートの行高へ落とす
+   （44px のままだと 23px の行がボタン1つで倍に広がり、実物の密度にならない）。
+   押しやすさは表示倍率 200%（行高 46px）と aria-label で担保する
+   ＝ sheet-contracts §4 の裁定をそのまま踏襲する。 */
+.sheet-dense-btn {
+  min-height: var(--sheet-row-h-note);
+  min-width: 0;
+}
+
+/* 日付セル（クリックでOSのカレンダー）。
+   見えている文字は日本語の日付、実際に押されるのは重ねた input[type=date]。
+   input は透明にするのでフォーカスリングは入れ物側（:focus-within）に出す。 */
+.dsheet-date {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap-min);
+  padding: 0 var(--sp-1);
+  border: var(--sheet-rule) solid var(--c-border-strong);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  cursor: pointer;
+}
+.dsheet-date:focus-within {
+  box-shadow: 0 0 0 2px var(--c-surface), 0 0 0 calc(2px + var(--focus-w)) var(--c-focus);
+}
+.dsheet-date-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  cursor: pointer;
+  font: inherit;
+}
+
+/* 日報（.sheet-dense）の中では縦の当たり判定を広げない（冒頭の裁定3の後半）。
+   日報は行が縦に連続していて、下へ広げるとすぐ下に来る
+   「この行を取り消す」ボタンや次の行に拡張が重なり、押しても反応しない／
+   隣の行が反応する（記録の取り違え）になるため。
+   押しやすさは表示倍率 200%（行高 46px）と aria-label で担保する。
+   **.sheet-table（バイタル一覧・食事一覧）には掛けない**＝あちらの現行の当たり判定を変えない。 */
+.sheet-dense {
+  --sheet-hit-pad: 0px;
 }
 
 /* ── ブロック見出し（外出者・外泊者・発熱者…）──────────── */

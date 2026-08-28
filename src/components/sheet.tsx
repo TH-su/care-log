@@ -53,10 +53,15 @@ function applyZoom(z: Zoom): void {
 // 一覧の表示条件（日数・フロア）の保存 — 画面ごとに別の値を持つ
 // ══════════════════════════════════════════════════════════════
 
-/** 表示条件を持つ一覧（契約 §6 バイタル＝4日/1階・§7 食事＝11日/全と既定が違う） */
-export type SheetScope = 'vitals' | 'meals'
+/**
+ * 表示条件を持つ一覧（契約 §6 バイタル＝4日/1階・§7 食事＝11日/全と既定が違う）。
+ * daily は日報の表示単位（10日 / 1日・2026-08-28 の追加指示）。
+ * 保存するのは**表示単位（UI状態）だけ**で、見ていた日付は保存しない
+ * （日付は業務データに紐づく＝取り違えの危険があるため。dev-principles 原則11）。
+ */
+export type SheetScope = 'vitals' | 'meals' | 'daily'
 
-const SCOPE_TAG: Record<SheetScope, string> = { vitals: 'v', meals: 'm' }
+const SCOPE_TAG: Record<SheetScope, string> = { vitals: 'v', meals: 'm', daily: 'd' }
 /** 値に使えるのは日数（数字）とフロア（数字 / all / other）だけ。区切り文字は入らない */
 const PREF_VALUE_RE = /^[0-9a-z]+$/
 
