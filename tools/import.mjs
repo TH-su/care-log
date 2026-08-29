@@ -167,6 +167,60 @@ function normName(s) {
   return String(s ?? '').replace(/[\s　]/g, '')
 }
 
+/** 編集距離（異体字1文字違い・打ち間違いを拾うため） */
+function editDistance(a, b) {
+  const m = a.length
+  const n = b.length
+  if (m === 0 || n === 0) return Math.max(m, n)
+  let prev = Array.from({ length: n + 1 }, (_, j) => j)
+  for (let i = 1; i <= m; i++) {
+    const cur = [i]
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1))
+    }
+    prev = cur
+  }
+  return prev[n]
+}
+
+/**
+ * 照合できなかった氏名ごとに、マスタの中から対応候補を挙げる。
+ * ★機械が決めるのは候補までで、採用は人が決める（取り違えは記録の意味を壊すため）。
+ * 種別: same_surname=姓だけの記載で1名に確定 / variant=1〜2文字違い（異体字の可能性）
+ *       ambiguous=候補が複数 / none=候補なし
+ */
+function suggestNamemap(unmatchedNames, residents) {
+  const list = residents.map((r) => ({ id: r.source_id, name: r.name, key: normName(r.name) }))
+  const out = []
+  for (const [raw, count] of unmatchedNames) {
+    const k = normName(raw)
+    if (!k) continue
+    const prefix = list.filter((r) => r.key.startsWith(k))
+    const near = list
+      .map((r) => ({ ...r, d: editDistance(k, r.key) }))
+      .filter((r) => r.d > 0 && r.d <= 2)
+      .sort((a, b) => a.d - b.d)
+    let kind = 'none'
+    let candidates = []
+    if (prefix.length === 1 && k.length < prefix[0].key.length) {
+      kind = 'same_surname'
+      candidates = prefix
+    } else if (prefix.length > 1) {
+      kind = 'ambiguous'
+      candidates = prefix
+    } else if (near.length === 1 || (near.length > 1 && near[0].d < near[1].d)) {
+      kind = 'variant'
+      candidates = [near[0]]
+    } else if (near.length > 1) {
+      kind = 'ambiguous'
+      candidates = near.slice(0, 4)
+    }
+    out.push({ raw, count, kind, candidates: candidates.map((c) => ({ id: c.id, name: c.name })) })
+  }
+  // 件数の多い順＝直す効果の大きい順に並べる
+  return out.sort((a, b) => b.count - a.count)
+}
+
 /**
  * 'HH:MM' として妥当なら 'HH:MM:00' を返す。それ以外は null。
  * ★秒まで揃えるのは差分比較のため: DB の time 型は '16:30:00' で返るので、
@@ -742,6 +796,7 @@ async function main() {
   try {
     // --- マスタ ---
     const masters = await loadMasters(db)
+    report.suggestResidents = masters.residents
     console.log(`マスタ: 利用者 ${masters.residentCount} 名 / 職員 ${masters.staffCount} 名`)
     report.namemapConflicts = masters.namemapConflicts
     if (masters.namemapConflicts.length > 0) {
@@ -1019,6 +1074,34 @@ async function main() {
   const stamp = report.startedAt.replace(/[:.]/g, '-')
   const jsonPath = join(args.reportDir, `import-${stamp}.json`)
   const mdPath = join(args.reportDir, `import-${stamp}.md`)
+
+  // ── 名寄せ表の下書き（照合できなかった氏名がある時だけ）──
+  // ★氏名を含むのでリポジトリ外（報告フォルダ）にだけ書く。
+  //   採用は人が決める＝そのままでは使わせず、確認用の一覧も一緒に出す。
+  let namemapPath = null
+  if (report.unmatchedNames.size > 0 && report.suggestResidents) {
+    const sug = suggestNamemap(report.unmatchedNames, report.suggestResidents)
+    report.namemapSuggestions = sug
+    const draft = {}
+    for (const s of sug) {
+      if (s.kind === 'same_surname' || s.kind === 'variant') draft[s.raw] = s.candidates[0].id
+    }
+    namemapPath = join(args.reportDir, `namemap-draft-${stamp}.json`)
+    writeFileSync(
+      namemapPath,
+      JSON.stringify(
+        {
+          _使い方:
+            'この内容を確認し、正しいものだけ残して care-log の tools/import-namemap.json へ ' +
+            '{"residents": { …ここの中身… }} の形で保存してください。値は利用者IDです。',
+          _注意: '候補が複数あった氏名（ambiguous）と候補なし（none）はここに入れていません。報告の一覧を見て手で判断してください。',
+          residents: draft,
+        },
+        null,
+        2,
+      ),
+    )
+  }
   writeFileSync(
     jsonPath,
     JSON.stringify(
@@ -1054,6 +1137,7 @@ async function main() {
   }
   console.log('')
   console.log(`報告: ${mdPath}`)
+  if (namemapPath) console.log(`名寄せ表の下書き: ${namemapPath}`)
   process.exit(report.errors.length > 0 ? 1 : 0)
 }
 
@@ -1074,12 +1158,29 @@ function renderMd(report, totals) {
   }
   L.push('')
   if (report.unmatchedNames.size > 0) {
-    L.push('## 照合できなかった氏名（件数）')
+    L.push('## 照合できなかった氏名（対応候補つき）')
     L.push('')
-    L.push('tools/import-namemap.json に {"residents": {"この氏名": "正しい氏名または利用者ID"}} を書いて再実行すると取り込まれます。')
+    L.push('tools/import-namemap.json に {"residents": {"この氏名": "利用者ID"}} を書いて再実行すると取り込まれます。')
+    L.push('同じフォルダの namemap-draft-*.json が下書きです（確定できたものだけ入っています）。')
     L.push('')
-    for (const [name, n] of [...report.unmatchedNames].sort((a, b) => b[1] - a[1])) {
-      L.push(`- ${name} … ${n} 件`)
+    L.push('| 記録側の氏名 | 件数 | 判定 | 対応候補（マスタ側） |')
+    L.push('|---|---|---|---|')
+    const KIND = {
+      same_surname: '姓のみ→1名に確定',
+      variant: '1〜2文字違い（異体字の可能性）',
+      ambiguous: '候補が複数（要判断）',
+      none: '候補なし（別人・人名でない可能性）',
+    }
+    const sug = report.namemapSuggestions ?? []
+    if (sug.length > 0) {
+      for (const s of sug) {
+        const cands = s.candidates.map((c) => `${c.name}（${c.id}）`).join(' / ') || '—'
+        L.push(`| ${s.raw} | ${s.count} | ${KIND[s.kind]} | ${cands} |`)
+      }
+    } else {
+      for (const [name, n] of [...report.unmatchedNames].sort((a, b) => b[1] - a[1])) {
+        L.push(`| ${name} | ${n} | — | — |`)
+      }
     }
     L.push('')
   }

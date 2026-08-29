@@ -39,6 +39,13 @@ export interface RosterEntry {
   room?: string
   gender?: string
   careLevel?: string
+  /**
+   * 名簿上の在籍状態。false＝退去済み。
+   * 退去された方も**行としては取り込む**（2026-08-29）。過去の記録の帰属先が無いと、
+   * その方の申し送り・バイタルを一切移行できず、カルテが丸ごと欠けるため。
+   * 一覧・入力欄・検索の既定には出ない（画面側が active で絞っている）。
+   */
+  active?: boolean
 }
 
 /** マスタ同期1系列分の増減計数（M-024: 増減を両方向とも数える） */
@@ -185,7 +192,6 @@ function projectRoster(raw: unknown): RosterEntry[] | null {
   for (const item of list) {
     if (!item || typeof item !== 'object') continue
     const rec = item as Record<string, unknown>
-    if (rec.active === false) continue // 退去者は取り込まない（getRosterSafe も返さないが二重に防ぐ）
     const id = pickText(rec.id)
     const name = pickText(rec.name)
     if (!id || !name || seen.has(id)) continue
@@ -197,6 +203,10 @@ function projectRoster(raw: unknown): RosterEntry[] | null {
       room: pickText(rec.room),
       gender: pickText(rec.gender),
       careLevel: pickText(rec.careLevel),
+      // ★退去者も落とさずに持ち帰る（在籍状態だけを写す）。
+      //   落とすと過去の記録の帰属先が作れず、その方のカルテが移行できない。
+      //   名簿が active を返さない場合は「在籍」とみなす（従来どおりの安全側）
+      active: rec.active !== false,
     })
   }
   return out
@@ -343,6 +353,8 @@ async function applyResidents(entries: RosterEntry[]): Promise<SyncResult> {
   let renamed = 0
   let needsReview = 0
   let reactivated = 0
+  /** 名簿に載ったまま「退去」に変わった人数（名簿から消えた人数とは別経路） */
+  let retiredByRoster = 0
 
   for (const e of entries) {
     const cur = bySource.get(e.id)
@@ -366,9 +378,15 @@ async function applyResidents(entries: RosterEntry[]): Promise<SyncResult> {
       if (rosterHas.careLevel && hasText(e.careLevel) && cur.care_level !== e.careLevel) {
         patch.care_level = e.careLevel
       }
-      if (!cur.active) {
-        patch.active = true // 名簿に戻った＝在籍（復活は消失より安全側）
+      // 在籍状態は名簿に従う。名簿が退去者も返すようになったため、
+      // 「名簿に載っている＝在籍」ではなく e.active で判断する（2026-08-29）
+      const wantActive = e.active !== false
+      if (!cur.active && wantActive) {
+        patch.active = true // 名簿で在籍に戻った（復活は消失より安全側）
         reactivated++
+      } else if (cur.active && !wantActive) {
+        patch.active = false // 名簿で退去になった。行は残す＝過去の記録は不変
+        retiredByRoster++
       }
       if (Object.keys(patch).length > 0) await updateResidentRow(cur.id, patch)
       continue
@@ -393,7 +411,8 @@ async function applyResidents(entries: RosterEntry[]): Promise<SyncResult> {
       room: e.room ?? null,
       gender: e.gender ?? null,
       care_level: e.careLevel ?? null,
-      active: true,
+      // 名簿の在籍状態をそのまま入れる（退去者は active=false で行だけ作る）
+      active: e.active !== false,
       needs_review: false,
     })
   }
@@ -402,10 +421,14 @@ async function applyResidents(entries: RosterEntry[]): Promise<SyncResult> {
   if (toInsert.length > 0) {
     const { error: insErr } = await supabase.from('residents').insert(toInsert)
     if (insErr) throw dbError('利用者マスタに新しい方を追加できませんでした')
-    added = toInsert.length
+    // 計数は「在籍として増えた人数」。退去者の行追加は在籍数を動かさないので数えない
+    added = toInsert.filter((r) => r.active === true).length
   }
 
-  let deactivated = 0
+  // 名簿から消えた在籍行を退去扱いにする。
+  // ★名簿が退去者も返すようになったので、通常はここに落ちてこない（名簿側で active=false になる）。
+  //   落ちてくるのは「名簿から行ごと消えた」場合＝従来どおりの安全網として残す。
+  let deactivated = retiredByRoster
   for (const r of rows) {
     if (!r.active || matched.has(r.id)) continue
     await updateResidentRow(r.id, { active: false }) // 退去＝非在籍化のみ。行は残す
