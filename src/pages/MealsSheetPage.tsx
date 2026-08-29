@@ -1128,6 +1128,22 @@ export function MealsSheetPage({
       })
   }, [residents, floor])
 
+  /**
+   * 階が変わる最初の行の id（2026-08-29 指示「1階・2階を太枠で区別」）。
+   * 「全」表示でも階の塊が目で分かるようにする。先頭行は表の上端の罫線があるので含めない。
+   * 居室が未設定の方も1つの塊として扱う（floorOf が FLOOR_OTHER を返す）。
+   */
+  const floorStartIds = useMemo(() => {
+    const ids = new Set<number>()
+    let prev: string | null = null
+    for (const r of visible) {
+      const f = floorOf(r.room)
+      if (prev !== null && f !== prev) ids.add(r.id)
+      prev = f
+    }
+    return ids
+  }, [visible])
+
   /** 1名1日ごとの水分（合計・内訳）。内訳は時刻昇順で並べる */
   const fluidMap = useMemo(() => {
     const map = new Map<string, { ml: number; rows: FluidIntake[] }>()
@@ -1530,12 +1546,24 @@ export function MealsSheetPage({
             </thead>
             <tbody>
               {visible.map((r, rowIndex) => (
-                <tr key={r.id} style={{ height: ROW_H }} className={altClass(rowIndex)}>
+                <tr
+                  key={r.id}
+                  style={{ height: ROW_H }}
+                  // 階が変わる行の上に太線（sheet.css の .msheet-floor-start）
+                  className={`${altClass(rowIndex)} ${floorStartIds.has(r.id) ? 'msheet-floor-start' : ''}`}
+                >
                   <th
                     scope="row"
                     style={{ width: W_ROOM, minWidth: W_ROOM, left: 0 }}
                     className={`${CELL_BASE} sticky z-10 ${altClass(rowIndex) || 'bg-surface'} text-center font-normal text-ink2`}
                   >
+                    {/* 階の切れ目は太線で示すが、線は読み上げに乗らないので
+                        変わり目の行だけ「○階のはじまり」を文字で添える（色・線だけに頼らない） */}
+                    {floorStartIds.has(r.id) ? (
+                      <span className="sr-only">
+                        ここから{floorOf(r.room) === FLOOR_OTHER ? '居室未設定' : `${floorOf(r.room)}階`}
+                      </span>
+                    ) : null}
                     {r.room ?? '—'}
                   </th>
                   <td
