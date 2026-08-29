@@ -484,7 +484,12 @@ async function applyResidents(entries: RosterEntry[]): Promise<SyncResult> {
  * renamed は常に 0、needsReview も常に 0（照合キーが1本しかなく保留概念が無い）。
  */
 async function applyStaff(names: StaffEntry[]): Promise<SyncResult> {
-  const { data, error } = await supabase.from('staff').select('id, name, active').limit(MAX_MASTER_ROWS)
+  // manual=true は人が手で登録した職員（シフト名簿に載らない事務職員など）。
+  // 名簿に居ないからといって退職扱いにしない（2026-08-29 追加）
+  const { data, error } = await supabase
+    .from('staff')
+    .select('id, name, active, manual')
+    .limit(MAX_MASTER_ROWS)
   if (error) throw dbError('職員マスタの現在値を読み取れませんでした')
   const rows = (data ?? []) as Staff[]
   if (rows.length >= MAX_MASTER_ROWS) {
@@ -534,6 +539,9 @@ async function applyStaff(names: StaffEntry[]): Promise<SyncResult> {
   let deactivated = retiredByRoster
   for (const r of rows) {
     if (!r.active || matched.has(r.id)) continue
+    // 手で登録した職員（事務職員など）はシフト名簿に載らないのが正常なので、
+    // 「名簿に居ない」を退職の根拠にしない（2026-08-29）
+    if ((r as Staff & { manual?: boolean }).manual === true) continue
     await updateStaffRow(r.id, { active: false }) // 退職＝非在籍化のみ。過去記録の記入者表示は変わらない
     deactivated++
   }

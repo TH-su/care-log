@@ -222,6 +222,47 @@ function suggestNamemap(unmatchedNames, residents) {
 }
 
 /**
+ * 記入者（職員）の対応候補。移行元の記入者欄は姓だけ・1〜2文字のことが多い。
+ * 名寄せ表の staff 側は「記録側の表記 → 正しい職員氏名」で持つ（利用者IDのような番号は無い）。
+ * ★在籍・退職を問わず全員から探す（過去の記録は退職者が書いていることがある）。
+ */
+function suggestStaffNamemap(unmatchedReporters, staffRows) {
+  const list = staffRows.map((s) => ({ name: s.name, key: normName(s.name), active: s.active !== false }))
+  const out = []
+  for (const [raw, count] of unmatchedReporters) {
+    const k = normName(raw)
+    if (!k) continue
+    const prefix = list.filter((s) => s.key.startsWith(k))
+    const near = list
+      .map((s) => ({ ...s, d: editDistance(k, s.key) }))
+      .filter((s) => s.d > 0 && s.d <= 1)
+      .sort((a, b) => a.d - b.d)
+    let kind = 'none'
+    let candidates = []
+    if (prefix.length === 1) {
+      kind = 'same_surname'
+      candidates = prefix
+    } else if (prefix.length > 1) {
+      kind = 'ambiguous'
+      candidates = prefix
+    } else if (near.length === 1) {
+      kind = 'variant'
+      candidates = near
+    } else if (near.length > 1) {
+      kind = 'ambiguous'
+      candidates = near.slice(0, 4)
+    }
+    out.push({
+      raw,
+      count,
+      kind,
+      candidates: candidates.map((c) => ({ name: c.name, active: c.active })),
+    })
+  }
+  return out.sort((a, b) => b.count - a.count)
+}
+
+/**
  * 'HH:MM' として妥当なら 'HH:MM:00' を返す。それ以外は null。
  * ★秒まで揃えるのは差分比較のため: DB の time 型は '16:30:00' で返るので、
  *   '16:30' のままだと毎回「値が変わった」と誤判定して無意味な update を打ち続ける
@@ -275,7 +316,7 @@ async function gasGet(baseUrl, token, action, params) {
 async function loadMasters(db) {
   // active=false（退居済み）も含めて全員を対象にする＝過去の記録の帰属先が消えないように
   const rs = await db.query('select id, source_id, name from residents')
-  const st = await db.query('select id, name from staff')
+  const st = await db.query('select id, name, active from staff')
 
   let namemap = { residents: {}, staff: {} }
   if (existsSync(NAMEMAP_PATH)) {
@@ -356,6 +397,7 @@ async function loadMasters(db) {
     matchResident,
     matchStaff,
     residents: rs.rows,
+    staff: st.rows,
     namemapConflicts,
   }
 }
@@ -797,6 +839,7 @@ async function main() {
     // --- マスタ ---
     const masters = await loadMasters(db)
     report.suggestResidents = masters.residents
+    report.suggestStaff = masters.staff
     console.log(`マスタ: 利用者 ${masters.residentCount} 名 / 職員 ${masters.staffCount} 名`)
     report.namemapConflicts = masters.namemapConflicts
     if (masters.namemapConflicts.length > 0) {
@@ -1086,6 +1129,9 @@ async function main() {
     for (const s of sug) {
       if (s.kind === 'same_surname' || s.kind === 'variant') draft[s.raw] = s.candidates[0].id
     }
+    if (report.suggestStaff && report.unmatchedReporters.size > 0) {
+      report.staffSuggestions = suggestStaffNamemap(report.unmatchedReporters, report.suggestStaff)
+    }
     namemapPath = join(args.reportDir, `namemap-draft-${stamp}.json`)
     writeFileSync(
       namemapPath,
@@ -1096,6 +1142,13 @@ async function main() {
             '{"residents": { …ここの中身… }} の形で保存してください。値は利用者IDです。',
           _注意: '候補が複数あった氏名（ambiguous）と候補なし（none）はここに入れていません。報告の一覧を見て手で判断してください。',
           residents: draft,
+          // 記入者（職員）は「記録側の表記 → 正しい職員氏名」で持つ。
+          // 姓だけで職員1名に確定できたものだけを入れる（複数該当は人が判断する）
+          staff: Object.fromEntries(
+            (report.staffSuggestions ?? [])
+              .filter((s) => s.kind === 'same_surname' || s.kind === 'variant')
+              .map((s) => [s.raw, s.candidates[0].name]),
+          ),
         },
         null,
         2,
@@ -1187,8 +1240,27 @@ function renderMd(report, totals) {
   if (report.unmatchedReporters.size > 0) {
     L.push('## 照合できなかった記入者（記録は取り込み済み・記入者欄だけ空）')
     L.push('')
-    for (const [name, n] of [...report.unmatchedReporters].sort((a, b) => b[1] - a[1])) {
-      L.push(`- ${name} … ${n} 件`)
+    L.push('移行元の記入者欄は姓だけのことが多く、職員マスタのフルネームと一致しません。')
+    L.push('tools/import-namemap.json の "staff" に {"記録側の表記": "正しい職員氏名"} を書いて再実行すると埋まります。')
+    L.push('')
+    const KINDS = {
+      same_surname: '姓のみ→1名に確定',
+      variant: '1文字違い',
+      ambiguous: '候補が複数（要判断）',
+      none: '候補なし',
+    }
+    const ss = report.staffSuggestions ?? []
+    if (ss.length > 0) {
+      L.push('| 記録側の表記 | 件数 | 判定 | 対応候補（職員マスタ） |')
+      L.push('|---|---|---|---|')
+      for (const s of ss) {
+        const c = s.candidates.map((x) => `${x.name}${x.active ? '' : '（退職）'}`).join(' / ') || '—'
+        L.push(`| ${s.raw} | ${s.count} | ${KINDS[s.kind]} | ${c} |`)
+      }
+    } else {
+      for (const [name, n] of [...report.unmatchedReporters].sort((a, b) => b[1] - a[1])) {
+        L.push(`- ${name} … ${n} 件`)
+      }
     }
     L.push('')
   }
