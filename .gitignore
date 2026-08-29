@@ -13,3 +13,4 @@ supabase/.temp
 
 # 名寄せ表（実在の氏名を含むため公開リポジトリに入れない）
 tools/import-namemap.json
+.claude

@@ -965,25 +965,9 @@ export function VitalsSheetPage({
   return (
     <div className="pb-4">
       {/* ── 操作バー ── */}
-      <div className="border-b border-border bg-surface pb-3">
-        <div className="flex flex-wrap items-center justify-between gap-gap">
-          <h1 className="text-xl font-bold text-ink">バイタル一覧</h1>
-          <p
-            role="status"
-            aria-live="polite"
-            className={
-              loading
-                ? 'text-base text-ink2'
-                : pending > 0
-                  ? 'text-base font-bold text-warn'
-                  : savingCount > 0
-                    ? 'text-base text-ink2'
-                    : 'text-base text-ok'
-            }
-          >
-            {statusText}
-          </p>
-        </div>
+      {/* 見出しと状態は操作バーと同じ行に畳む（2026-08-29 指示）。
+          上に積む高さが減ったぶん、表の高さ上限（.sheet-frame-fit）が自動で広がる */}
+      <div className="border-b border-border bg-surface pb-2">
 
         {/* フロア・日数のボタンは文字ぶんの幅にする（sheet.css の .sheet-pickbar）。
             既定の flex:1 のままだと、同じ行にある期間送り・倍率と幅を取り合って
@@ -991,7 +975,8 @@ export function VitalsSheetPage({
             食事一覧と同じ仕組み。高さ 44px は変えない＝押しやすさは落とさない。
             見出し（フロア／横に並べる日数）はこの行に入れると横幅が足りなくなるため付けない
             （ボタンの文字だけで何の切替か分かる。読み上げ名は ariaLabel が持つ） */}
-        <div className="mt-3 sheet-pickbar">
+        <div className="sheet-pickbar">
+          <h1 className="shrink-0 text-base font-bold text-ink">バイタル</h1>
           {floorOptions.length > 1 ? (
             <div className="sheet-pickbar-group">
               <SegmentPicker
@@ -1056,6 +1041,24 @@ export function VitalsSheetPage({
           </div>
 
           <ZoomBar />
+
+          {/* 保存状況（未送信・保存中・保存済み）。同じ行の末尾に置く＝行を増やさない。
+              画面が狭い時は折り返して2行目に来る（消さない＝保存できたかは必ず見せる） */}
+          <p
+            role="status"
+            aria-live="polite"
+            className={
+              loading
+                ? 'text-base text-ink2'
+                : pending > 0
+                  ? 'text-base font-bold text-warn'
+                  : savingCount > 0
+                    ? 'text-base text-ink2'
+                    : 'text-base text-ok'
+            }
+          >
+            {statusText}
+          </p>
         </div>
 
         {gateUnknown ? (

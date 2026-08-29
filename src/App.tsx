@@ -464,10 +464,23 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
   // ここで /login へ navigate しても、下のルート定義で '/' へ戻されるため画面は変わらない。
   // 失効した session を捨てて Shell の認証ゲート（useAuth）にログイン画面を出させる。
   const handleAuthExpired = useCallback(() => {
-    // 既に無効なトークンなのでサーバーへは投げず、端末側の session だけを破棄する。
-    // 未送信キューは db.ts が保持したまま（再ログイン時に自動再送される）
+    // ★まず更新トークンで復帰を試みる（2026-08-29）。
+    //   以前は 401 を受けた瞬間に session を捨てていたため、更新トークンが生きていても
+    //   ログイン画面へ戻され、現場では「使うたびにログインし直す」状態になっていた。
+    //   端末がスリープから復帰した直後など、自動更新が走る前に要求が出ると必ず起きる。
+    //   復帰できた時は画面も未送信キューもそのまま（何も起きなかったように続く）。
     void import('./lib/supabase')
-      .then(({ supabase }) => supabase.auth.signOut({ scope: 'local' }))
+      .then(async ({ supabase }) => {
+        try {
+          const { data, error } = await supabase.auth.refreshSession()
+          if (!error && data.session) return // 復帰できた＝ログイン画面へ戻さない
+        } catch {
+          // 通信不能・想定外の例外はここでは判断せず、下の破棄へ倒す
+        }
+        // 更新トークンも無効＝本当に切れている。端末側の session だけを破棄する。
+        // 未送信キューは db.ts が保持したまま（再ログイン時に自動再送される）
+        await supabase.auth.signOut({ scope: 'local' }).catch(() => undefined)
+      })
       .catch(() => undefined)
   }, [])
   useEffect(() => {

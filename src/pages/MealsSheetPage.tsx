@@ -1258,32 +1258,18 @@ export function MealsSheetPage({
   // ── 描画 ──
 
   return (
-    <div className="flex flex-col gap-gap p-4">
+    // 外側の余白は詰める（2026-08-29 指示）。表に回る高さを増やすため p-4 → px-3 py-2
+    <div className="flex flex-col gap-2 px-3 py-2">
       <SectionCard>
-        <div className="flex flex-wrap items-center justify-between gap-gap">
-          <h2 className="text-lg font-bold text-ink">食事量（一覧）</h2>
-          <button
-            type="button"
-            onClick={onReload}
-            className="min-h-tap rounded border border-border-strong px-4 text-base text-ink"
-          >
-            最新を読み込む
-          </button>
-        </div>
+        {/* 操作は全部1行に畳む（2026-08-29 指示）。上に積む高さが減ったぶん、
+            表の高さ上限（.sheet-frame-fit）が自動で広がり、縦スクロールが減る。
+            ボタンの高さ 44px は変えない＝手袋・片手でも押せる大きさは保つ。
+            見出し（フロア／日数）は画面が狭い時だけ隠す（sm 未満）＝ボタンの文字で用は足りる */}
+        <div className="sheet-pickbar">
+          <h2 className="shrink-0 text-base font-bold text-ink">食事量</h2>
 
-        {/* 読み込み中の常設案内（表は残したまま知らせる）。
-            期間を送ると取得が終わるまで全セルが空欄になるので、
-            「記録なし」と読み違えないよう理由と状態を出す（この間は入力できない） */}
-        <p role="status" aria-live="polite" className="mt-1 text-base text-ink2">
-          {loading ? '↻ 読み込み中です。表示がそろうまでお待ちください（この間は入力できません）' : ''}
-        </p>
-
-        {/* フロアと日数は横に並べて1行に収める（2026-08-28 指示）。
-            見出しはボタンの左に置き、ボタンは文字ぶんの幅にする（sheet.css の .sheet-pickbar）。
-            高さ 44px は変えない＝手袋・片手でも押せる大きさは保つ */}
-        <div className="mt-3 sheet-pickbar">
           <div className="sheet-pickbar-group">
-            <span className="text-sm text-ink2">フロア</span>
+            <span className="hidden text-sm text-ink2 sm:inline">フロア</span>
             <SegmentPicker
               options={floorOptions}
               value={floor}
@@ -1293,7 +1279,7 @@ export function MealsSheetPage({
           </div>
 
           <div className="sheet-pickbar-group">
-            <span className="text-sm text-ink2">横に並べる日数</span>
+            <span className="hidden text-sm text-ink2 sm:inline">日数</span>
             <SegmentPicker
               options={DAYS_OPTIONS}
               value={String(days)}
@@ -1301,33 +1287,55 @@ export function MealsSheetPage({
               ariaLabel="横に並べる日数を選ぶ"
             />
           </div>
+
+          <div className="sheet-pickbar-group">
+            {/* 読み込み中の連打は、空欄のまま期間だけ進む＝取り違えのもとになるので止める */}
+            <button
+              type="button"
+              aria-label={`前の${days}日分を表示`}
+              disabled={loading}
+              onClick={() => shiftPeriod(-1)}
+              className="min-h-tap min-w-tap rounded border border-border-strong text-base text-ink disabled:opacity-60"
+            >
+              <span aria-hidden="true">‹</span>
+            </button>
+            <span className="tabular text-base text-ink">
+              {fmtDayLabel(fromIso)} 〜 {fmtDayLabel(toIso)}
+            </span>
+            <button
+              type="button"
+              aria-label={`次の${days}日分を表示`}
+              disabled={toIso >= today || loading}
+              onClick={() => shiftPeriod(1)}
+              className="min-h-tap min-w-tap rounded border border-border-strong text-base text-ink disabled:opacity-60"
+            >
+              <span aria-hidden="true">›</span>
+            </button>
+          </div>
+
+          <ZoomBar />
+
+          <button
+            type="button"
+            onClick={onReload}
+            className="min-h-tap shrink-0 rounded border border-border-strong px-3 text-base text-ink"
+          >
+            最新
+          </button>
         </div>
 
-        <div className="mt-3 flex flex-wrap items-center gap-gap">
-          {/* 読み込み中の連打は、空欄のまま期間だけ進む＝取り違えのもとになるので止める */}
-          <button
-            type="button"
-            aria-label={`前の${days}日分を表示`}
-            disabled={loading}
-            onClick={() => shiftPeriod(-1)}
-            className="min-h-tap min-w-tap rounded border border-border-strong text-base text-ink disabled:opacity-60"
-          >
-            <span aria-hidden="true">‹</span>
-          </button>
-          <span className="tabular text-base text-ink">
-            {fmtDayLabel(fromIso)} 〜 {fmtDayLabel(toIso)}
-          </span>
-          <button
-            type="button"
-            aria-label={`次の${days}日分を表示`}
-            disabled={toIso >= today || loading}
-            onClick={() => shiftPeriod(1)}
-            className="min-h-tap min-w-tap rounded border border-border-strong text-base text-ink disabled:opacity-60"
-          >
-            <span aria-hidden="true">›</span>
-          </button>
-          <ZoomBar />
-        </div>
+        {/* 読み込み中だけ出す（表は残したまま知らせる）。
+            期間を送ると取得が終わるまで全セルが空欄になるので、
+            「記録なし」と読み違えないよう理由と状態を出す（この間は入力できない）。
+            ★読み込んでいない時は要素ごと出さない＝空の行で表の高さを削らない */}
+        <p role="status" aria-live="polite" className="sr-only">
+          {loading ? '読み込み中です' : ''}
+        </p>
+        {loading ? (
+          <p className="mt-2 text-base text-ink2">
+            ↻ 読み込み中です。表示がそろうまでお待ちください（この間は入力できません）
+          </p>
+        ) : null}
       </SectionCard>
 
       {flagError ? <ErrorBlock message={flagError} onRetry={() => void loadFlag()} /> : null}
