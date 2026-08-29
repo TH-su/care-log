@@ -48,6 +48,15 @@ export interface RosterEntry {
   active?: boolean
 }
 
+/**
+ * GAS から受け取る職員の最小射影（氏名と在籍状態だけ。労務情報は保持しない）。
+ * 退職者も行として取り込む（active=false）＝過去の申し送りの記入者を氏名で照合するため。
+ */
+export interface StaffEntry {
+  name: string
+  active: boolean
+}
+
 /** マスタ同期1系列分の増減計数（M-024: 増減を両方向とも数える） */
 export interface SyncResult {
   before: number
@@ -75,6 +84,29 @@ function readGasConfig(): GasConfig | 'unconfigured' | 'invalid' {
   } catch {
     return 'unconfigured' // localStorage が使えない環境＝連携オフ扱い（例外を外へ出さない）
   }
+  if (!url || !token) return 'unconfigured'
+  if (!GAS_ENDPOINT_RE.test(url)) return 'invalid'
+  return { url, token }
+}
+
+/**
+ * 職員名簿の接続先を読む（2026-08-29 追加）。
+ * 職員名簿はシフト連携GAS、利用者名簿は入居者マスタGASと**別のGAS**が持つ。
+ * 未設定なら利用者名簿と同じ接続先を返す＝設定していない端末は従来どおりの動きになる。
+ * 形式不一致は 'invalid'（黙って利用者側へ倒すと、間違いに気づけないため）。
+ */
+export function readStaffGasConfig(
+  base: GasConfig | 'unconfigured' | 'invalid',
+): GasConfig | 'unconfigured' | 'invalid' {
+  let url = ''
+  let token = ''
+  try {
+    url = (localStorage.getItem(LS.staffGasUrl) ?? '').trim()
+    token = (localStorage.getItem(LS.staffGasToken) ?? '').trim()
+  } catch {
+    return base
+  }
+  if (!url && !token) return base // 未設定＝利用者名簿と同じ接続先（従来の挙動）
   if (!url || !token) return 'unconfigured'
   if (!GAS_ENDPOINT_RE.test(url)) return 'invalid'
   return { url, token }
@@ -213,7 +245,7 @@ function projectRoster(raw: unknown): RosterEntry[] | null {
 }
 
 /** 統合GAS の staff 応答（配列 or `{staff:[…]}`）から氏名だけを射影する。労務情報は保持しない */
-function projectStaffNames(raw: unknown): string[] | null {
+function projectStaffNames(raw: unknown): StaffEntry[] | null {
   const list = Array.isArray(raw)
     ? raw
     : raw && typeof raw === 'object' && Array.isArray((raw as { staff?: unknown }).staff)
@@ -222,17 +254,25 @@ function projectStaffNames(raw: unknown): string[] | null {
   if (!list) return null
 
   const seen = new Set<string>()
-  const names: string[] = []
+  const names: StaffEntry[] = []
   for (const item of list) {
     if (!item || typeof item !== 'object') continue
     const rec = item as Record<string, unknown>
-    if (rec.active === false) continue // 在籍者のみ
     const name = pickText(rec.name)
     if (!name) continue
     const key = normName(name)
     if (!key || seen.has(key)) continue
     seen.add(key)
-    names.push(name) // 氏名だけを射影（rules/empCode/employment/status 等は取り込まない）
+    /**
+     * 在籍judgment: シフト連携GASは退職者にも active:true を付けたまま status:'退職' で
+     * 区別している（2026-08-29 実データで確認。37名中5名が該当）。
+     * active だけを見ると退職者が記録者の選択肢に出てしまうので status も見る。
+     * ★退職者も**行としては取り込む**（active=false）。過去の申し送りの記入者を
+     *   氏名で照合するため、名前が消えると誰が書いたか分からなくなる。
+     */
+    const retired = rec.active === false || pickText(rec.status) === '退職'
+    // 氏名と在籍状態だけを射影（rules/empCode/employment/qualifications 等は取り込まない）
+    names.push({ name, active: !retired })
   }
   return names
 }
@@ -247,7 +287,7 @@ async function pullRosterOrNull(url: string, token: string): Promise<RosterEntry
 }
 
 /** 取得失敗（null）と「0件」を区別したい内部用。syncMasters はこちらを使う */
-async function pullStaffNamesOrNull(url: string, token: string): Promise<string[] | null> {
+async function pullStaffNamesOrNull(url: string, token: string): Promise<StaffEntry[] | null> {
   const out = await gasPost<{ entries?: { staff?: { data?: unknown } } }>(
     url,
     { action: 'pull', keys: ['staff'] },
@@ -270,7 +310,7 @@ export async function pullRoster(url: string, token: string): Promise<RosterEntr
  * 職員の氏名だけを GAS から取得する（読み取り専用・氏名以外は保持しない）。
  * ★失敗・未接続も空配列。扱いは pullRoster と同じ。
  */
-export async function pullStaffNames(url: string, token: string): Promise<string[]> {
+export async function pullStaffNames(url: string, token: string): Promise<StaffEntry[]> {
   return (await pullStaffNamesOrNull(url, token)) ?? []
 }
 
@@ -443,7 +483,7 @@ async function applyResidents(entries: RosterEntry[]): Promise<SyncResult> {
  * 氏名変更は「新氏名を新規 insert・旧氏名は名簿から消えて active=false」の形で表れるため、
  * renamed は常に 0、needsReview も常に 0（照合キーが1本しかなく保留概念が無い）。
  */
-async function applyStaff(names: string[]): Promise<SyncResult> {
+async function applyStaff(names: StaffEntry[]): Promise<SyncResult> {
   const { data, error } = await supabase.from('staff').select('id, name, active').limit(MAX_MASTER_ROWS)
   if (error) throw dbError('職員マスタの現在値を読み取れませんでした')
   const rows = (data ?? []) as Staff[]
@@ -464,28 +504,34 @@ async function applyStaff(names: string[]): Promise<SyncResult> {
   const matched = new Set<number>()
   const toInsert: Record<string, unknown>[] = []
   let reactivated = 0
+  /** 名簿に載ったまま「退職」に変わった人数（名簿から消えた人数とは別経路） */
+  let retiredByRoster = 0
 
-  for (const name of names) {
-    const cur = byName.get(normName(name))
+  for (const e of names) {
+    const cur = byName.get(normName(e.name))
     if (cur) {
       matched.add(cur.id)
-      if (!cur.active) {
+      if (!cur.active && e.active) {
         await updateStaffRow(cur.id, { active: true })
         reactivated++
+      } else if (cur.active && !e.active) {
+        await updateStaffRow(cur.id, { active: false }) // 退職。行は残す＝過去の記入者表示は不変
+        retiredByRoster++
       }
       continue
     }
-    toInsert.push({ name, active: true })
+    toInsert.push({ name: e.name, active: e.active })
   }
 
   let added = 0
   if (toInsert.length > 0) {
     const { error: insErr } = await supabase.from('staff').insert(toInsert)
     if (insErr) throw dbError('職員マスタに新しい職員を追加できませんでした')
-    added = toInsert.length
+    // 計数は「在籍として増えた人数」。退職者の行追加は在籍数を動かさない
+    added = toInsert.filter((r) => r.active === true).length
   }
 
-  let deactivated = 0
+  let deactivated = retiredByRoster
   for (const r of rows) {
     if (!r.active || matched.has(r.id)) continue
     await updateStaffRow(r.id, { active: false }) // 退職＝非在籍化のみ。過去記録の記入者表示は変わらない
@@ -541,12 +587,26 @@ export async function syncMasters(): Promise<{ residents: SyncResult; staff: Syn
     )
   }
 
+  // 職員名簿は別のGASが持つ。未設定なら利用者名簿と同じ接続先へ問い合わせる（従来の挙動）
+  const staffCfg = readStaffGasConfig(cfg)
+  if (staffCfg === 'invalid') {
+    throw new Error(
+      '職員名簿の接続先URLの形式が正しくありません。設定画面で https://script.google.com/macros/s/.../exec の形式のURLを入力し直してください。',
+    )
+  }
+  if (staffCfg === 'unconfigured') {
+    throw new Error(
+      '職員名簿の接続先が途中までしか入っていません（URLと合言葉の両方が必要です）。設定画面で入力し直すか、両方を空にすると利用者名簿と同じ接続先を使います。',
+    )
+  }
+
   // 先に両方を取得する（DBに触れる前に失敗を確定させ、中途半端な反映を減らす）
   const roster = await pullRosterOrNull(cfg.url, cfg.token)
-  const names = await pullStaffNamesOrNull(cfg.url, cfg.token)
+  const names = await pullStaffNamesOrNull(staffCfg.url, staffCfg.token)
   const rosterOk = roster !== null && roster.length > 0 // 0件＝取得できずと同義に扱う
   const staffOk = names !== null && names.length > 0
 
+  const sameEndpoint = staffCfg.url === cfg.url && staffCfg.token === cfg.token
   if (!rosterOk && !staffOk) {
     throw new Error(
       'マスタを取得できませんでした。通信状態と、設定画面の接続先・合言葉を確認してからもう一度お試しください。安全のため、利用者・職員の一覧は変更していません。',
@@ -555,7 +615,7 @@ export async function syncMasters(): Promise<{ residents: SyncResult; staff: Syn
 
   const residents = rosterOk ? await applyResidents(roster as RosterEntry[]) : null
   if (residents) await logMasterSync('residents', residents)
-  const staff = staffOk ? await applyStaff(names as string[]) : null
+  const staff = staffOk ? await applyStaff(names as StaffEntry[]) : null
   if (staff) await logMasterSync('staff', staff)
 
   if (!residents) {
@@ -564,8 +624,11 @@ export async function syncMasters(): Promise<{ residents: SyncResult; staff: Syn
     )
   }
   if (!staff) {
+    // 職員名簿の接続先を別に設定していない場合は、そこが原因である可能性が高いので明示する
     throw new Error(
-      '職員マスタを取得できませんでした（利用者マスタは同期しました）。設定画面の接続先・合言葉と通信状態を確認して、もう一度お試しください。職員の一覧は変更していません。',
+      sameEndpoint
+        ? '職員マスタを取得できませんでした（利用者マスタは同期しました）。職員名簿は利用者名簿とは別のGASが持っていることがあります。設定画面の「職員名簿の接続先」に、シフト連携のURLと合言葉を入れてからもう一度お試しください。職員の一覧は変更していません。'
+        : '職員マスタを取得できませんでした（利用者マスタは同期しました）。設定画面の「職員名簿の接続先」と通信状態を確認して、もう一度お試しください。職員の一覧は変更していません。',
     )
   }
   return { residents, staff }

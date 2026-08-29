@@ -201,6 +201,13 @@ export function SettingsPage() {
   const [tokenSaved, setTokenSaved] = useState(() => lsGet(LS.gasToken) !== '')
   const [connError, setConnError] = useState<string | null>(null)
 
+  // 職員名簿の接続先（2026-08-29 追加）。利用者名簿とは別のGASが持つため独立して設定する。
+  // 両方空なら利用者名簿と同じ接続先を使う（未設定の端末は従来どおりの動き）
+  const [staffUrlInput, setStaffUrlInput] = useState(() => lsGet(LS.staffGasUrl))
+  const [staffTokenInput, setStaffTokenInput] = useState('')
+  const [staffTokenSaved, setStaffTokenSaved] = useState(() => lsGet(LS.staffGasToken) !== '')
+  const [staffConnError, setStaffConnError] = useState<string | null>(null)
+
   // 記録する職員（操作者）。2026-08-28 の指示で画面ヘッダの常時表示をやめ、切替はここへ移した。
   // 保存するのは staff_id（数値）だけで、氏名は保存しない（dev-principles 原則11）
   const [staffList, setStaffList] = useState<Staff[] | null>(null)
@@ -376,6 +383,45 @@ export function SettingsPage() {
     setTokenSaved(false)
     setTokenInput('')
     show('合言葉を消去しました。')
+  }
+
+  // ── 職員名簿の接続先 ───────────────────────────────────────────────────────
+  // 利用者名簿と同じ作法（合言葉は入力があった時だけ書く＝空欄保存で消さない）
+
+  function handleStaffConnSubmit(ev: FormEvent) {
+    ev.preventDefault()
+    setStaffConnError(null)
+    const url = staffUrlInput.trim()
+    const token = staffTokenInput.trim()
+    if (url !== '' && !GAS_ENDPOINT_RE.test(url)) {
+      setStaffConnError(MSG.urlFormat)
+      return
+    }
+    let ok = true
+    if (url === '') ok = lsRemove(LS.staffGasUrl) && ok
+    else ok = lsSet(LS.staffGasUrl, url) && ok
+    if (token !== '') {
+      ok = lsSet(LS.staffGasToken, token) && ok
+      if (ok) setStaffTokenSaved(true)
+    }
+    if (!ok) {
+      setStaffConnError(MSG.lsWrite)
+      return
+    }
+    setStaffTokenInput('')
+    show(url === '' ? '職員名簿の接続先を消去しました。' : '職員名簿の接続先を保存しました。')
+  }
+
+  function clearStaffConn() {
+    const ok = lsRemove(LS.staffGasUrl) && lsRemove(LS.staffGasToken)
+    if (!ok) {
+      setStaffConnError(MSG.lsWrite)
+      return
+    }
+    setStaffUrlInput('')
+    setStaffTokenInput('')
+    setStaffTokenSaved(false)
+    show('職員名簿の接続先を消去しました。利用者名簿と同じ接続先を使います。')
   }
 
   // ── マスタ同期 ─────────────────────────────────────────────────────────────
@@ -634,6 +680,91 @@ export function SettingsPage() {
                 className="min-h-tap rounded border border-danger px-4 text-base font-bold text-danger"
               >
                 合言葉を消去
+              </button>
+            ) : null}
+            <button
+              type="submit"
+              className="min-h-tap rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink"
+            >
+              保存する
+            </button>
+          </div>
+        </form>
+      </SectionCard>
+
+      {/* ①-2 職員名簿の接続先（2026-08-29 追加）。
+          職員名簿は利用者名簿と別のGASが持つため、独立して設定できるようにした。
+          空欄のままなら上の接続先を使う＝これまでどおりの動きになる。 */}
+      <SectionCard title="職員名簿の接続先">
+        <p className="text-base text-ink2">
+          職員の名簿は、利用者の名簿とは別のシステムが持っていることがあります。その場合だけ、ここに入力してください。
+          <strong className="font-bold text-ink">空欄のままなら、上の接続先をそのまま使います。</strong>
+        </p>
+        <form onSubmit={handleStaffConnSubmit} noValidate className="mt-3 space-y-4">
+          <div>
+            <label htmlFor="cl-staff-gas-url" className={labelClass}>
+              接続先URL（職員名簿）
+            </label>
+            <input
+              id="cl-staff-gas-url"
+              type="url"
+              inputMode="url"
+              value={staffUrlInput}
+              onChange={(e) => setStaffUrlInput(e.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="https://script.google.com/macros/s/.../exec"
+              aria-describedby="cl-staff-gas-url-hint"
+              className={`mt-1 ${inputClass}`}
+            />
+            <p id="cl-staff-gas-url-hint" className="mt-1 text-sm text-ink2">
+              シフト連携のURLを貼り付けてください。空にすると上の接続先を使います。
+            </p>
+          </div>
+
+          <div>
+            <label htmlFor="cl-staff-gas-token" className={labelClass}>
+              合言葉（職員名簿）
+            </label>
+            <p className="mt-1 text-base text-ink">
+              {staffTokenSaved ? (
+                <>
+                  <span aria-hidden="true">✓ </span>
+                  保存済み（安全のため画面には表示しません）
+                </>
+              ) : (
+                <>
+                  <span aria-hidden="true">— </span>
+                  未設定
+                </>
+              )}
+            </p>
+            <input
+              id="cl-staff-gas-token"
+              type="password"
+              value={staffTokenInput}
+              onChange={(e) => setStaffTokenInput(e.target.value)}
+              autoComplete="new-password"
+              spellCheck={false}
+              placeholder={staffTokenSaved ? '変更する場合だけ入力' : '合言葉を入力'}
+              aria-describedby="cl-staff-gas-token-hint"
+              className={`mt-1 ${inputClass}`}
+            />
+            <p id="cl-staff-gas-token-hint" className="mt-1 text-sm text-ink2">
+              入力せずに保存した場合、保存済みの合言葉はそのまま残ります。
+            </p>
+          </div>
+
+          {staffConnError ? <ErrorBlock message={staffConnError} /> : null}
+
+          <div className="flex flex-wrap justify-end gap-gap">
+            {staffTokenSaved || staffUrlInput !== '' ? (
+              <button
+                type="button"
+                onClick={clearStaffConn}
+                className="min-h-tap rounded border border-danger px-4 text-base font-bold text-danger"
+              >
+                職員名簿の設定を消去
               </button>
             ) : null}
             <button

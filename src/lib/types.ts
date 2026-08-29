@@ -244,6 +244,14 @@ export const LS = {
   draftNote: 'cl_draftNote',
   gasUrl: 'cl_gasUrl',
   gasToken: 'cl_gasToken',
+  /**
+   * 職員名簿の接続先（2026-08-29 追加）。
+   * 利用者名簿は入居者マスタGAS、職員名簿はシフト連携GASと**別のGAS**が持っているため、
+   * 1つのURLに両方を問い合わせても職員名簿は永久に取得できなかった。
+   * 未設定なら利用者名簿と同じ接続先へ問い合わせる（従来の挙動のまま＝既存端末を壊さない）。
+   */
+  staffGasUrl: 'cl_staffGasUrl',
+  staffGasToken: 'cl_staffGasToken',
   /** 表示倍率（100/125/150）。スプシと同じ文字サイズを既定にしつつ、端末ごとに拡大できる */
   zoom: 'cl_zoom',
   /** 一覧に横並びする日数（1/4/7/11） */
