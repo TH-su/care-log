@@ -242,7 +242,12 @@ export function SheetFrame({ children, className = '' }: SheetFrameProps) {
  * 選択中は 枠色＋太字＋「✓」の3点で示す（色だけに頼らない・SegmentPicker と同じ作法）。
  * ヘッダの1要素として並ぶため、幅を伸ばさない（flex-1 にしない）。
  */
-export function ZoomBar() {
+/**
+ * compact=true で「倍率」の文字を省く（2026-08-29）。
+ * 一覧の操作バーを1行に収めるため。ボタン自体が「100%」と書いてあるので意味は伝わり、
+ * 読み上げには role=group の aria-label「表示倍率」が残る。
+ */
+export function ZoomBar({ compact = false }: { compact?: boolean } = {}) {
   const [zoom, setZoom] = useState<Zoom>(readZoom)
 
   useEffect(() => {
@@ -256,9 +261,11 @@ export function ZoomBar() {
 
   return (
     <div role="group" aria-label="表示倍率" className="flex items-center gap-gap">
-      <span aria-hidden="true" className="text-sm text-ink2">
-        倍率
-      </span>
+      {compact ? null : (
+        <span aria-hidden="true" className="text-sm text-ink2">
+          倍率
+        </span>
+      )}
       {ZOOM_STEPS.map((z) => {
         const selected = z === zoom
         // 200% は行の高さが 44px になり、詰まった行でも指で押し分けられる（介護現場要件）。

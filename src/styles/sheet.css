@@ -877,7 +877,9 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--sp-2) var(--sp-4);
+  /* 1行に収めるため隙間を詰める（2026-08-29）。折り返すと操作バーが倍の高さになり、
+     その分だけ表の表示領域が削られる */
+  gap: var(--sp-1) var(--sp-2);
 }
 .sheet-pickbar-group {
   display: flex;

@@ -976,7 +976,6 @@ export function VitalsSheetPage({
             見出し（フロア／横に並べる日数）はこの行に入れると横幅が足りなくなるため付けない
             （ボタンの文字だけで何の切替か分かる。読み上げ名は ariaLabel が持つ） */}
         <div className="sheet-pickbar">
-          <h1 className="shrink-0 text-base font-bold text-ink">バイタル</h1>
           {floorOptions.length > 1 ? (
             <div className="sheet-pickbar-group">
               <SegmentPicker
@@ -1040,7 +1039,7 @@ export function VitalsSheetPage({
             </button>
           </div>
 
-          <ZoomBar />
+          <ZoomBar compact />
 
           {/* 保存状況（未送信・保存中・保存済み）。同じ行の末尾に置く＝行を増やさない。
               画面が狭い時は折り返して2行目に来る（消さない＝保存できたかは必ず見せる） */}

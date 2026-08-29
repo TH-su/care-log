@@ -1266,10 +1266,7 @@ export function MealsSheetPage({
             ボタンの高さ 44px は変えない＝手袋・片手でも押せる大きさは保つ。
             見出し（フロア／日数）は画面が狭い時だけ隠す（sm 未満）＝ボタンの文字で用は足りる */}
         <div className="sheet-pickbar">
-          <h2 className="shrink-0 text-base font-bold text-ink">食事量</h2>
-
           <div className="sheet-pickbar-group">
-            <span className="hidden text-sm text-ink2 sm:inline">フロア</span>
             <SegmentPicker
               options={floorOptions}
               value={floor}
@@ -1279,7 +1276,6 @@ export function MealsSheetPage({
           </div>
 
           <div className="sheet-pickbar-group">
-            <span className="hidden text-sm text-ink2 sm:inline">日数</span>
             <SegmentPicker
               options={DAYS_OPTIONS}
               value={String(days)}
@@ -1313,7 +1309,7 @@ export function MealsSheetPage({
             </button>
           </div>
 
-          <ZoomBar />
+          <ZoomBar compact />
 
           <button
             type="button"
