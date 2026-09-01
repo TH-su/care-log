@@ -19,6 +19,7 @@ residents ( id bigint identity PK,
   gender text, care_level text,
   active boolean not null default true,
   needs_review boolean not null default false,   -- id一致・氏名大幅不一致の保留印
+  note_alias text,                               -- 申し送りでの表示名（0007・同姓の取り違え防止）
   synced_at timestamptz not null default now() )
 
 -- 職員スナップショット（正本=統合GAS クラウドキー staff。name 実質キー）
@@ -156,6 +157,16 @@ PII: 実名ゼロ・`VITE_*` に施設情報を置かない（0009 実測知見�
 ## 6. マスタ連携（変更なし・要旨）
 
 クライアント pull 型（wsClient.ts 前例）。起動時＋TTL60分で getRoster（現場トークン・最小射影: id/name/kana/room/gender/careLevel）＋ staff（name のみ）→ スナップショットへ upsert（residents/staff は部分uniqueでなく通常uniqueのため upsert 可・監査#3の対象外）。照合は source_id→氏名正規化比較（M-034 二重照合）、大幅不一致は `needs_review=true` 保留。増減両方向を master_sync_log に計数（M-024）。書込アクションのコードパスを作らない。GAS読取クォータ +72〜150回/日（1%未満・概算未実測）。
+
+**`residents.note_alias`（申し送りでの表示名・2026-09-01 指示・移行 0007）**
+同姓の入居者の取り違えを防ぐための表示専用の別名。`name`（正本＝名簿）は書き換えない
+（書き換えると次の同期で戻り、過去データ取込の名寄せも氏名照合なので壊れる）。
+`applyResidents` は name / kana / room / gender / care_level / active / needs_review しか
+書かないため、**この列はマスタ同期で上書きされない**。書き込み口は
+`db.setResidentNoteAlias`（この列だけを更新する専用関数）1つに限る。
+保存前に `types.validateNoteAlias` を通し、**他の利用者の氏名・表示名と同じ名前は拒否する**
+（退居された方も突き合わせ相手に含める＝過去の記録に氏名が残るため）。
+表示に使うのは申し送りを扱う画面だけ（sheet-contracts.md §5 を参照）。
 
 ## 7. 移行設計
 

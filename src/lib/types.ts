@@ -20,6 +20,86 @@ export interface Resident {
   care_level: string | null
   active: boolean
   needs_review: boolean
+  /**
+   * 申し送りでの表示名（2026-09-01 指示）。同姓の入居者を見分けるための表示専用の別名。
+   * 空（null）＝マスタの氏名（name）をそのまま出す。
+   * ★申し送りを扱う画面**だけ**で使う。バイタル・食事・カルテ・外出外泊はマスタの氏名のまま。
+   * ★マスタ同期（gasClient.applyResidents）はこの列に触れないので、同期で消えない。
+   */
+  note_alias: string | null
+}
+
+/** 申し送りでの表示名の最大文字数（長い別名は行の幅を壊すので上限を置く） */
+export const NOTE_ALIAS_MAX = 30
+
+/**
+ * 氏名を突き合わせる時のキー。空白（半角・全角）を除いて比べる。
+ * 姓と名の間が半角空白か全角空白か、という違いだけで別人と扱わないため。
+ */
+export function nameKey(s: string): string {
+  return s.replace(/[\s\u3000]/g, '')
+}
+
+/**
+ * 申し送りでの表示名。設定が無ければマスタの氏名を返す。
+ * **申し送りを扱う画面だけがこれを呼ぶ**（呼ばない画面はマスタの氏名のまま）。
+ */
+export function noteDisplayName(r: Resident): string {
+  const alias = r.note_alias === null ? '' : r.note_alias.trim()
+  return alias === '' ? r.name : alias
+}
+
+/** 表示名を設定してあるか（マスタの氏名と違う名前で出している行か） */
+export function hasNoteAlias(r: Resident): boolean {
+  return noteDisplayName(r) !== r.name
+}
+
+export type NoteAliasCheck =
+  | { ok: true; value: string | null }
+  | { ok: false; message: string }
+
+/**
+ * 申し送りでの表示名の検証（保存前に必ず通す）。
+ *
+ * 空にした時は null を返す＝マスタの氏名に戻す（空文字を保存しない。null と空の区別・原則12）。
+ *
+ * ★**他の方のマスタ氏名・他の方の表示名と同じ名前は弾く。**
+ *   取り違えを防ぐための機能なのに、別人と同じ表示にできてしまうと逆効果になるため。
+ *   比較は nameKey（空白を除く）で行う。
+ *
+ * @param raw    入力された文字
+ * @param selfId 設定しようとしている利用者のID（自分自身は突き合わせから外す）
+ * @param others 突き合わせ相手（**退居された方も含めた全員**を渡す。過去の記録に残るため）
+ */
+export function validateNoteAlias(
+  raw: string,
+  selfId: number,
+  others: Resident[],
+): NoteAliasCheck {
+  const value = raw.trim()
+  if (value === '') return { ok: true, value: null }
+  if (value.length > NOTE_ALIAS_MAX) {
+    return { ok: false, message: `表示名は${NOTE_ALIAS_MAX}文字までにしてください。` }
+  }
+  const key = nameKey(value)
+  if (key === '') return { ok: false, message: '空白だけの表示名は使えません。' }
+  for (const o of others) {
+    if (o.id === selfId) continue
+    if (nameKey(o.name) === key) {
+      return {
+        ok: false,
+        message: '別の利用者のお名前と同じ表示名は使えません（取り違えのもとになります）。',
+      }
+    }
+    const alias = o.note_alias === null ? '' : o.note_alias.trim()
+    if (alias !== '' && nameKey(alias) === key) {
+      return {
+        ok: false,
+        message: '別の利用者の表示名と同じ表示名は使えません（取り違えのもとになります）。',
+      }
+    }
+  }
+  return { ok: true, value }
 }
 
 export interface Staff {

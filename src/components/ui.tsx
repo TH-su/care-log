@@ -9,7 +9,7 @@
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { ReactNode, RefObject } from 'react'
-import { LEVEL_MARK } from '../lib/types'
+import { hasNoteAlias, LEVEL_MARK, noteDisplayName } from '../lib/types'
 import type { Level, Resident, Staff } from '../lib/types'
 
 // ══════════════════════════════════════════════════════════════
@@ -266,15 +266,22 @@ function useDialog(open: boolean, onClose?: () => void, initialFocus?: RefObject
   return panelRef
 }
 
-interface ModalShellProps {
+export interface ModalShellProps {
   open: boolean
   label: string
   onClose?: () => void
   initialFocus?: RefObject<HTMLElement>
+  /** 幅を1段狭める（申し送りの詳細のように中身が短い窓。既定は max-w-md） */
+  narrow?: boolean
   children: ReactNode
 }
 
-function ModalShell({ open, label, onClose, initialFocus, children }: ModalShellProps) {
+/**
+ * 浮いた窓（フロートウィンドウ）の共通の器。
+ * 背面を覆い、Esc で閉じ、Tab はこの窓の中で循環し、閉じたら元の要素へフォーカスが戻る。
+ * この画面の外（日報の詳細など）からも使えるように公開している。
+ */
+export function ModalShell({ open, label, onClose, initialFocus, narrow = false, children }: ModalShellProps) {
   const panelRef = useDialog(open, onClose, initialFocus)
   if (!open) return null
   return (
@@ -299,7 +306,7 @@ function ModalShell({ open, label, onClose, initialFocus, children }: ModalShell
         aria-modal="true"
         aria-label={label}
         tabIndex={-1}
-        className="relative flex max-h-full w-full max-w-md flex-col rounded-lg border border-border-strong bg-surface"
+        className={`relative flex max-h-full w-full ${narrow ? 'max-w-sm' : 'max-w-md'} flex-col rounded-lg border border-border-strong bg-surface`}
       >
         {children}
       </div>
@@ -618,6 +625,13 @@ export interface ResidentPickerModalProps {
   onPick: (id: number | null) => void
   onClose: () => void
   allowAll?: boolean
+  /**
+   * 申し送りの対象を選ぶ時だけ true。
+   * 「申し送りでの表示名」を大きく出し、マスタの氏名を小さく下に添える
+   * （選ぶ瞬間に本名で確かめられるようにする＝取り違え防止。2026-09-01 指示）。
+   * false の画面（バイタル・食事・外出外泊）は今までどおりマスタの氏名だけを出す。
+   */
+  useNoteAlias?: boolean
 }
 
 export function ResidentPickerModal({
@@ -626,6 +640,7 @@ export function ResidentPickerModal({
   onPick,
   onClose,
   allowAll = false,
+  useNoteAlias = false,
 }: ResidentPickerModalProps) {
   const [q, setQ] = useState('')
   const fieldId = useId()
@@ -638,8 +653,10 @@ export function ResidentPickerModal({
   const list = useMemo(() => {
     const key = kanaKey(q)
     if (!key) return residents
+    // 絞り込みは表示名でもマスタの氏名でも当たるようにする。
+    // 表示名しか知らない人・本名しか知らない人のどちらでも探せるようにするため
     return residents.filter((r) =>
-      [r.name, r.kana ?? '', r.room ?? ''].some((f) => kanaKey(f).includes(key)),
+      [r.name, noteDisplayName(r), r.kana ?? '', r.room ?? ''].some((f) => kanaKey(f).includes(key)),
     )
   }, [residents, q])
 
@@ -685,7 +702,16 @@ export function ResidentPickerModal({
                   <span className="tabular min-w-12 shrink-0 text-sm text-ink3">
                     {r.room ?? '—'}
                   </span>
-                  <span className="flex-1 font-bold">{r.name}</span>
+                  {/* 申し送りでは表示名を主に、マスタの氏名を小さく下に添える。
+                      表示名を設定していない方は今までどおり氏名1行だけ */}
+                  <span className="min-w-0 flex-1">
+                    <span className="block font-bold">
+                      {useNoteAlias ? noteDisplayName(r) : r.name}
+                    </span>
+                    {useNoteAlias && hasNoteAlias(r) ? (
+                      <span className="block text-sm font-normal text-ink2">{r.name}</span>
+                    ) : null}
+                  </span>
                   {r.needs_review ? (
                     <span className="shrink-0 text-sm text-warn">
                       <span aria-hidden="true">▲</span>

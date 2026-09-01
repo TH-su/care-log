@@ -109,7 +109,7 @@ const IMPORTANCES: readonly Importance[] = ['normal', 'important', 'critical']
 const OUTING_KINDS: readonly OutingKind[] = ['outing', 'overnight']
 
 // select する列は types.ts と一致させる（* を使わず、監査列・import_key を端末へ持ち出さない）
-const RESIDENT_COLS = 'id,source_id,name,kana,room,gender,care_level,active,needs_review'
+const RESIDENT_COLS = 'id,source_id,name,kana,room,gender,care_level,active,needs_review,note_alias'
 const STAFF_COLS = 'id,name,active'
 const VITAL_COLS =
   'id,resident_id,measured_on,kind,measured_at,temp,sys_bp,dia_bp,pulse,spo2,note,symptom,recorded_by,rev'
@@ -370,6 +370,9 @@ function normalizeResident(row: unknown): Resident | null {
     care_level: str(r.care_level),
     active: bool(r.active, true),
     needs_review: bool(r.needs_review, false),
+    // 申し送りでの表示名。列がまだ無いDB（0007 未適用）でも undefined → null になり、
+    // マスタの氏名を出す従来どおりの動きに落ちる（画面は壊れない）
+    note_alias: str(r.note_alias),
   }
 }
 
@@ -1272,6 +1275,45 @@ export async function fetchResidents(): Promise<Resident[]> {
     .limit(MAX_ROWS)) as Res<unknown>
   if (res.error !== null) throw readError(res)
   return list(res.data, normalizeResident)
+}
+
+/**
+ * 利用者スナップショット（**退居された方も含む全員**・居室昇順）。
+ * 申し送りでの表示名の重複判定に使う。退居された方の氏名は過去の記録に残り続けるので、
+ * その名前と同じ表示名を付けられてしまうと取り違えのもとになる＝突き合わせ相手に含める。
+ */
+export async function fetchAllResidents(): Promise<Resident[]> {
+  const sb = await getClient()
+  const res = (await sb
+    .from('residents')
+    .select(RESIDENT_COLS)
+    .order('room', { ascending: true, nullsFirst: false })
+    .order('id', { ascending: true })
+    .limit(MAX_ROWS)) as Res<unknown>
+  if (res.error !== null) throw readError(res)
+  return list(res.data, normalizeResident)
+}
+
+/**
+ * 申し送りでの表示名を設定する（null＝設定を外してマスタの氏名に戻す）。
+ *
+ * ・この列**だけ**を書く（他の列に触れない＝マスタ同期と喧嘩しない。原則12の専用書き込み分離）
+ * ・空文字は保存しない。呼ぶ側が types.ts の validateNoteAlias を通してから渡すこと
+ * ・入力解禁フラグでは止めない。記録ではなく表示の設定で、並走中こそ整えておく必要があるため
+ */
+export async function setResidentNoteAlias(id: number, alias: string | null): Promise<Resident> {
+  const sb = await getClient()
+  const value = alias === null ? null : alias.trim()
+  const res = (await sb
+    .from('residents')
+    .update({ note_alias: value === '' ? null : value })
+    .eq('id', id)
+    .select(RESIDENT_COLS)
+    .maybeSingle()) as Res<unknown>
+  if (res.error !== null) throw writeError(res)
+  const row = normalizeResident(res.data)
+  if (row === null) throw new DbError('server', MSG.broken)
+  return row
 }
 
 /** 職員スナップショット（active のみ・氏名昇順） */

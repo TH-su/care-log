@@ -352,7 +352,7 @@ async function updateStaffRow(id: number, patch: Record<string, unknown>): Promi
 async function applyResidents(entries: RosterEntry[]): Promise<SyncResult> {
   const { data, error } = await supabase
     .from('residents')
-    .select('id, source_id, name, kana, room, gender, care_level, active, needs_review')
+    .select('id, source_id, name, kana, room, gender, care_level, active, needs_review, note_alias')
     .limit(MAX_MASTER_ROWS)
   if (error) throw dbError('利用者マスタの現在値を読み取れませんでした')
   const rows = (data ?? []) as Resident[]
@@ -363,6 +363,8 @@ async function applyResidents(entries: RosterEntry[]): Promise<SyncResult> {
     )
   }
 
+  // ★note_alias（申し送りでの表示名）は読むだけで**書かない**。
+  //   下の patch には一切載せないこと＝マスタ同期で人が入れた表示名を消さない（2026-09-01 指示）
   const before = rows.filter((r) => r.active).length
 
   const bySource = new Map<string, Resident>()

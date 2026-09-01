@@ -43,6 +43,7 @@ import {
   SHIFT_LABEL,
   diaBpLevel,
   isLowIntake,
+  noteDisplayName,
   pulseLevel,
   spo2Level,
   sysBpLevel,
@@ -123,6 +124,16 @@ function fmtStampDay(stamp: string | null): string {
 /** 利用者の表示名。マスタ未取得時も氏名を作らず ID 表記に落とす */
 function residentName(r: Resident | undefined, id: number | null): string {
   if (r) return r.name
+  return id == null ? '' : `利用者ID ${id}`
+}
+
+/**
+ * 申し送りの対象の表示名（2026-09-01 指示）。
+ * ★この画面でも**申し送りの行だけ**がこれを使う。バイタル・食事・外出外泊の行は
+ *   residentName（マスタの氏名）のまま＝効かせる範囲を広げない。
+ */
+function noteTargetName(r: Resident | undefined, id: number | null): string {
+  if (r) return noteDisplayName(r)
   return id == null ? '' : `利用者ID ${id}`
 }
 
@@ -783,7 +794,7 @@ const DaySection = memo(function DaySection(props: DaySectionProps) {
                 <span className="text-base font-bold text-ink">
                   {n.resident_id == null
                     ? 'スタッフへ'
-                    : residentName(residentById.get(n.resident_id), n.resident_id)}
+                    : noteTargetName(residentById.get(n.resident_id), n.resident_id)}
                 </span>
                 <span className="min-w-0 grow truncate text-base text-ink">{n.body}</span>
                 <span className="text-sm text-ink2 tabular">
@@ -801,7 +812,7 @@ const DaySection = memo(function DaySection(props: DaySectionProps) {
                     residentLabel={
                       n.resident_id == null
                         ? 'スタッフへ'
-                        : residentName(residentById.get(n.resident_id), n.resident_id)
+                        : noteTargetName(residentById.get(n.resident_id), n.resident_id)
                     }
                     onEndOngoing={onEndOngoing}
                   />
@@ -1042,9 +1053,9 @@ function NoteCard({
             type="button"
             className={`${NAME_HIT} rounded-md px-2 text-base font-bold text-link`}
             onClick={() => onOpenKarte(note.resident_id as number)}
-            aria-label={`${residentName(resident, note.resident_id)}のカルテを開く`}
+            aria-label={`${noteTargetName(resident, note.resident_id)}のカルテを開く`}
           >
-            {residentName(resident, note.resident_id)}
+            {noteTargetName(resident, note.resident_id)}
           </button>
         )}
         {note.role_tags.map((tag) => (

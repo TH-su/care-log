@@ -55,6 +55,7 @@ import {
   ConfirmDialog,
   ErrorBlock,
   LoadingBlock,
+  ModalShell,
   ResidentPickerModal,
   SegmentPicker,
   StaffPickerModal,
@@ -76,7 +77,6 @@ import {
   fetchDailyReport,
   fetchResidents,
   fetchStaff,
-  getAppSetting,
   getNativeInputGate,
   insertNote,
   insertOuting,
@@ -100,6 +100,8 @@ import {
   ROLE_TAGS,
   VITAL_RANGE,
   diaBpLevel,
+  hasNoteAlias,
+  noteDisplayName,
   pulseLevel,
   spo2Level,
   sysBpLevel,
@@ -288,6 +290,17 @@ function nowHM(): string {
 /** 利用者の表示名。マスタ未取得時も氏名を作らず ID 表記に落とす */
 function residentName(r: Resident | undefined, id: number | null): string {
   if (r) return r.name
+  return id == null ? '' : `利用者ID ${id}`
+}
+
+/**
+ * 申し送りの対象の表示名（2026-09-01 指示）。
+ * 「申し送りでの表示名」が設定されていればそれ、無ければマスタの氏名。
+ * ★同じ画面でも申し送り以外（外出者・外泊者・発熱者・他症状者）は residentName のまま
+ *   ＝マスタの氏名を出す。効かせる範囲を広げない。
+ */
+function noteTargetName(r: Resident | undefined, id: number | null): string {
+  if (r) return noteDisplayName(r)
   return id == null ? '' : `利用者ID ${id}`
 }
 
@@ -974,7 +987,6 @@ interface DaySheetProps {
   day: string
   residents: Resident[]
   staff: Staff[]
-  facility: string | null
   actorId: number | null
   /** 入力解禁（false＝閲覧のみ。理由文は blockedReason） */
   enabled: boolean
@@ -1013,7 +1025,6 @@ export function DailySheetPage({
   const [reload, setReload] = useState(0)
   const [residents, setResidents] = useState<Resident[]>(propResidents ?? NO_RESIDENTS)
   const [staff, setStaff] = useState<Staff[]>(propStaff ?? NO_STAFF)
-  const [facility, setFacility] = useState<string | null>(null)
   const [enabled, setEnabled] = useState<boolean>(propInputEnabled ?? false)
   /** 入力できるかどうかを観測できなかった（通信エラー）。封鎖の理由文とは分けて案内する */
   const [gateUnknown, setGateUnknown] = useState(false)
@@ -1043,7 +1054,7 @@ export function DailySheetPage({
     setPhase('loading')
     void (async () => {
       try {
-        const [rs, st, gate, fac] = await Promise.all([
+        const [rs, st, gate] = await Promise.all([
           propResidents ? Promise.resolve(propResidents) : fetchResidents(),
           propStaff ? Promise.resolve(propStaff) : fetchStaff(),
           // 入力解禁フラグは「観測できた値」と「観測できなかった」を区別するため、
@@ -1051,8 +1062,6 @@ export function DailySheetPage({
           // 親（App.tsx）は取得失敗時も false を渡してくるので、prop を観測済みとして扱うと
           // 通信障害を「スプレッドシートで記録する期間です」と誤って案内してしまう
           getNativeInputGate(),
-          // 施設名は表示だけの補助情報。取れなくても日報は開けるようにする
-          getAppSetting('facility_name').catch(() => null),
         ])
         if (!alive || !aliveRef.current) return
         const list = (Array.isArray(rs) ? rs : []).filter((r) => r != null && r.active !== false)
@@ -1060,7 +1069,6 @@ export function DailySheetPage({
         setStaff((Array.isArray(st) ? st : []).filter((s) => s != null))
         setEnabled(gate.value === true)
         setGateUnknown(!gate.observed)
-        setFacility(typeof fac === 'string' && fac.trim() !== '' ? fac : null)
         setStale(false)
         setPhase('ready')
         setEverReady(true)
@@ -1333,7 +1341,6 @@ export function DailySheetPage({
                 day={d}
                 residents={residents}
                 staff={staff}
-                facility={facility}
                 actorId={actorId}
                 enabled={enabled}
                 blockedReason={blockedReason}
@@ -1372,7 +1379,6 @@ function DaySheet({
   day,
   residents,
   staff,
-  facility,
   actorId,
   enabled,
   blockedReason,
@@ -2424,7 +2430,6 @@ function DaySheet({
           読み込み中・失敗中も出す＝どの日の枠かが常に分かるようにする */}
       <DayHeader
         ctx={ctx}
-        facility={facility}
         day={day}
         manager={manager}
         workers={workers}
@@ -2591,6 +2596,9 @@ function DaySheet({
         onPick={onPickResident}
         onClose={() => setResidentPick(null)}
         allowAll={residentPick?.for === 'noteTarget'}
+        // 申し送りの対象を選ぶ時だけ「申し送りでの表示名」を主に出す。
+        // 発熱者・他症状者・外出外泊の対象選びはマスタの氏名のまま（2026-09-01 指示の範囲）
+        useNoteAlias={residentPick?.for === 'noteTarget'}
       />
       <StaffPickerModal
         open={staffPick !== null}
@@ -2751,7 +2759,16 @@ function DateBar({
  *     いま色が乗るのは日付の文字（下の span）まで。枠ごと色を敷くには sheet.css 側に
  *     .dsheet-date.sheet-sat / .dsheet-date.sheet-sun の指定が要る（チーフへ申し送り済み）。
  */
-function DayPicker({ day, onPick }: { day: string; onPick: (iso: string) => void }) {
+function DayPicker({
+  day,
+  onPick,
+  head = false,
+}: {
+  day: string
+  onPick: (iso: string) => void
+  /** 1日ぶんの枠の左上（旧・施設名セル）に置く形。セルいっぱいに広げ、平日は橙を敷く */
+  head?: boolean
+}) {
   const inputRef = useRef<HTMLInputElement>(null)
   const tone = weekendClass(day)
 
@@ -2772,7 +2789,7 @@ function DayPicker({ day, onPick }: { day: string; onPick: (iso: string) => void
   }
 
   return (
-    <label className={`dsheet-date ${tone}`}>
+    <label className={`dsheet-date ${head ? 'dsheet-date-head' : ''} ${tone}`}>
       {/* 平日は今までどおり text-ink。土日は .sheet-sat / .sheet-sun が文字色も持つので重ねない */}
       <span aria-hidden="true" className={`text-lg font-bold tabular ${tone === '' ? 'text-ink' : tone}`}>
         {fmtSheetDay(day)}
@@ -2837,7 +2854,6 @@ function AttendCell({
 
 function DayHeader({
   ctx,
-  facility,
   day,
   manager,
   workers,
@@ -2847,7 +2863,6 @@ function DayHeader({
   onRemoveAttendance,
 }: {
   ctx: SheetCtx
-  facility: string | null
   day: string
   manager: Attendance | null
   workers: Attendance[]
@@ -2861,17 +2876,17 @@ function DayHeader({
     manager === null ? null : staffName(ctx.staffById.get(manager.staff_id), manager.staff_id)
   return (
     <div className="border-b border-border-strong">
-      {/* 1段目: 左＝施設名（橙）と日報名、右＝施設長のとなりに出勤者が横1行（指示6）。
-          施設名と日報名は縦に積む＝出勤者の枠を1行に15枠ぶん残すため */}
+      {/* 1段目: 左＝日付（2026-08-31 指示。旧・施設名セルの位置。平日は橙・土日は水色/赤）、
+          右＝施設長のとなりに出勤者が横1行（指示6）。
+          施設名と「日勤・夜勤日報」はここから外し、施設名は画面最上部の「日報」の右へ移した
+          （各日ごとに繰り返す情報ではなく、日付を置くほうがこの位置の役に立つ） */}
       <div className="flex flex-wrap items-stretch">
         <div
-          className="flex shrink-0 flex-col justify-center border-r border-border bg-accent-bg px-1 font-bold text-ink"
-          // 施設名は途中で切らない（実物は「有料老人ホーム　○○／日勤・夜勤日報」が2行で全部見える）。
-          // 幅は施設名セル専用の --w-facility。出勤者の15枠は残りの幅で足りる（sheet.css の計算参照）
+          className="shrink-0 border-r border-border"
+          // 幅は左上セル専用の --w-facility のまま（出勤者の15枠は残りの幅で足りる。sheet.css の計算参照）
           style={{ width: 'var(--w-facility)', minHeight: 'var(--sheet-row-h-note)' }}
         >
-          {facility && <span className="whitespace-nowrap">{facility}</span>}
-          <span className="whitespace-nowrap">日勤・夜勤日報</span>
+          <DayPicker day={day} onPick={onPickDay} head />
         </div>
         <div className="flex min-w-0 flex-1 flex-wrap items-stretch">
           <Cell width="var(--w-attend-label)" className="flex items-center bg-surface2 font-bold text-ink2">
@@ -2911,16 +2926,14 @@ function DayHeader({
       </div>
       <StatusText status={ctx.status.attendance} />
 
-      {/* 2段目: 日付（大きめ・押すとカレンダー） */}
-      <div className="flex flex-wrap items-center gap-gap px-1 py-1">
-        <DayPicker day={day} onPick={onPickDay} />
-        {empty && (
-          <span className="text-ink2">
-            <span aria-hidden="true">— </span>
-            この日の記録はまだありません（空いている行にそのまま記入できます）
-          </span>
-        )}
-      </div>
+      {/* 2段目: 記録が1件も無い日の一言だけ。日付は1段目へ移したので、
+          記録のある日はこの行ごと出さない（行数を減らす・2026-08-31 指示） */}
+      {empty && (
+        <p className="px-1 py-1 text-ink2">
+          <span aria-hidden="true">— </span>
+          この日の記録はまだありません（空いている行にそのまま記入できます）
+        </p>
+      )}
     </div>
   )
 }
@@ -3664,12 +3677,13 @@ function NoteBlock({
     <section aria-label={title} className={className}>
       {/* 実物のタイトル帯（日付＋ブロック名。配色は指示8） */}
       <NoteTitleBand day={ctx.day} title={title} tone={tone} count={count} onAdd={onAdd} />
+      {/* 2026-08-31 指示: 件数の列は出さない（件数はタイトル帯にある）。
+          対象を最左端に置き、色は記入者の右・詳細の左へ移す */}
       <HeadRow className="dsheet-head">
-        <HeadCell width="var(--w-block)">件数</HeadCell>
-        <HeadCell width="var(--w-reporter)">色</HeadCell>
         <HeadCell width="var(--w-target)">対象</HeadCell>
         <HeadCell grow>内容</HeadCell>
         {showReporter && <HeadCell width="var(--w-reporter)">記入者</HeadCell>}
+        <HeadCell width="var(--w-reporter)">色</HeadCell>
         <HeadCell width="var(--w-reporter)">詳細</HeadCell>
       </HeadRow>
 
@@ -3678,7 +3692,6 @@ function NoteBlock({
           key={`n${note.id}`}
           ctx={ctx}
           rowKey={`n${note.id}`}
-          lead={i === 0 ? `${count}件` : ''}
           note={note}
           draft={null}
           // 夜勤ブロックの記載内容は赤字の太字（指示15）
@@ -3702,7 +3715,6 @@ function NoteBlock({
           key={d.key}
           ctx={ctx}
           rowKey={d.key}
-          lead={rows.length === 0 && i === 0 ? `${count}件` : ''}
           note={null}
           draft={d}
           night={tone === 'night'}
@@ -3725,8 +3737,6 @@ function NoteBlock({
 interface NoteRowProps
   extends Omit<NoteBlockProps, 'title' | 'tone' | 'rows' | 'drafts' | 'onAdd' | 'expanded'> {
   rowKey: string
-  /** 左端の件数セルに出す文字（ブロックの1行目だけ「n件」・他は空） */
-  lead: string
   note: Note | null
   draft: NoteDraft | null
   /** 夜勤申し送りの行（記載内容を赤字の太字にする・指示15） */
@@ -3740,7 +3750,6 @@ interface NoteRowProps
 function NoteRow({
   ctx,
   rowKey,
-  lead,
   note,
   draft,
   night,
@@ -3762,11 +3771,14 @@ function NoteRow({
   const reporterId = note ? note.reporter_id : (draft?.reporterId ?? null)
   const body = note ? note.body : (draft?.body ?? '')
 
+  const target = residentId === null ? undefined : ctx.residentById.get(residentId)
   const targetText = !targetPicked
     ? ''
     : residentId === null
       ? 'スタッフへ（全体）'
-      : residentName(ctx.residentById.get(residentId), residentId)
+      : noteTargetName(target, residentId)
+  /** 表示名を使っている行だけ、詳細の窓にマスタの氏名を添える（本名で確かめられるように） */
+  const targetRealName = target && hasNoteAlias(target) ? target.name : null
   const reporterText = reporterId === null ? '' : staffName(ctx.staffById.get(reporterId), reporterId)
 
   const setColor = (c: NoteColor | null) => {
@@ -3784,11 +3796,6 @@ function NoteRow({
     // 色の無い行だけ1行おきの縞を敷く＝意味のある色が縞に負けない（指示16）
     <div className={color ? NOTE_COLOR_CLASS[color] : alt ? 'sheet-alt' : undefined}>
       <Row>
-        <LeadCell text={lead} />
-        <Cell width="var(--w-reporter)" className="flex items-center">
-          {/* 封鎖中・送信待ちの行は色も変えられない（同じ行の他のセルと可否をそろえる） */}
-          <ColorPicker value={color} onChange={setColor} ariaLabel="この行の色" disabled={disabled} />
-        </Cell>
         <PickerCell
           width="var(--w-target)"
           text={targetText}
@@ -3825,12 +3832,18 @@ function NoteRow({
             onClick={() => ctx.openStaff({ for: 'noteReporter', key: rowKey })}
           />
         )}
+        {/* 色は記入者の右・詳細の左（2026-08-31 指示）。
+            封鎖中・送信待ちの行は色も変えられない（同じ行の他のセルと可否をそろえる） */}
+        <Cell width="var(--w-reporter)" className="flex items-center">
+          <ColorPicker value={color} onChange={setColor} ariaLabel="この行の色" disabled={disabled} />
+        </Cell>
         {/* 余白はボタン（px-1）だけが持つ */}
         <Cell width="var(--w-reporter)" pad={false} className="flex items-center">
           <button
             type="button"
             onClick={() => onToggleExpand(rowKey)}
-            aria-expanded={expanded}
+            // 行の下に開く（aria-expanded）のではなく、窓を開くボタンになった
+            aria-haspopup="dialog"
             aria-label={detailLabel}
             style={ROW_BTN_STYLE}
             className={`${CELL_HIT} w-full rounded-sm px-1 text-left text-link`}
@@ -3845,14 +3858,117 @@ function NoteRow({
 
       <StatusText status={ctx.status[rowKey]} />
 
+      {/* 詳細は行の下に開かず、浮いた窓（フロートウィンドウ）で出す（2026-08-31 指示）。
+          行の下に敷いていた時は下の行と地続きに見え、開いたことが分からなかった */}
       {expanded && (
-        <div className="border-b border-border bg-surface2 px-2 py-2">
-          {note ? (
-            <div className="space-y-2">
-              <div>
-                <p className="text-ink2" id={`${rowKey}-imp`}>
-                  重要度
-                </p>
+        <NoteDetailModal
+          onClose={() => onToggleExpand(rowKey)}
+          ctx={ctx}
+          rowKey={rowKey}
+          note={note}
+          draft={draft}
+          targetText={targetText}
+          targetRealName={targetRealName}
+          actorId={actorId}
+          onUpdateNote={onUpdateNote}
+          onDelete={onDelete}
+          onMarkRead={onMarkRead}
+        />
+      )}
+    </div>
+  )
+}
+
+/**
+ * 申し送りの詳細（フロートウィンドウ・2026-08-31 指示）。
+ *
+ * なぜ窓にしたか:
+ *   行の下に敷いていた頃は、地色が薄いだけで下の行と同じ見た目に見え、
+ *   「開いたのかどうか」が分からなかった。背面を覆う窓にして、開閉をはっきりさせる。
+ *   共通の器（ui.tsx の ModalShell）を使うので、Esc で閉じる・Tab が窓の中で循環する・
+ *   閉じたら元の「詳細」ボタンへフォーカスが戻る、はこの部品で書かなくても効く。
+ *
+ * 「ボタンを小さく・行数を少なく・幅は狭め」の当て方:
+ *   ・幅は narrow（max-w-sm）
+ *   ・見出しと中身を横に並べて 6ブロック → 3行に畳む
+ *   ・ボタンは**横の余白と文字だけ**を詰める（px-3 text-base → px-2 text-sm）。
+ *     ★高さ（min-h-tap＝44px）は縮めない。現場はタブレットの指操作で、
+ *       ここを削ると押し損ねが増える＝記録の取り違えにつながるため。
+ */
+const DETAIL_BTN = 'min-h-tap shrink-0 rounded-md border px-2 text-sm'
+
+function NoteDetailModal({
+  onClose,
+  ctx,
+  rowKey,
+  note,
+  draft,
+  targetText,
+  targetRealName,
+  actorId,
+  onUpdateNote,
+  onDelete,
+  onMarkRead,
+}: {
+  onClose: () => void
+  ctx: SheetCtx
+  rowKey: string
+  note: Note | null
+  draft: NoteDraft | null
+  /** どの行の詳細かを窓の見出しに出す（窓が行を覆うので、取り違えを防ぐ） */
+  targetText: string
+  /**
+   * 「申し送りでの表示名」で出している行の、マスタの氏名（設定が無い行は null）。
+   * 窓の中で本名を確かめられるようにする（2026-09-01 指示の取り違え防止）。
+   */
+  targetRealName: string | null
+  actorId: number | null
+  onUpdateNote: NoteRowProps['onUpdateNote']
+  onDelete: (key: string) => void
+  onMarkRead: (n: Note) => void
+}) {
+  const readCount = note?.read_count ?? 0
+  const who = targetText === '' ? '対象は未選択' : targetText
+
+  // 保存済みの行の削除は確認ダイアログを開く。窓を先に閉じてから渡す
+  // ＝同じ画面に窓が2枚重ならない（重ねると Tab の行き先が2か所に割れる）
+  const requestDelete = () => {
+    onClose()
+    onDelete(rowKey)
+  }
+
+  return (
+    <ModalShell open onClose={onClose} label={`申し送りの詳細（${who}）`} narrow>
+      <div className="flex items-center justify-between gap-gap border-b border-border px-3 py-2">
+        <h2 className="min-w-0 flex-1 text-base font-bold text-ink">
+          <span className="block truncate">
+            申し送りの詳細
+            <span className="ml-2 text-sm font-normal text-ink2">{who}</span>
+          </span>
+          {/* 表示名で出している行は、マスタの氏名も添える（本名で確かめられるように） */}
+          {targetRealName !== null && (
+            <span className="block truncate text-sm font-normal text-ink2">
+              利用者名 {targetRealName}
+            </span>
+          )}
+        </h2>
+        <button
+          type="button"
+          aria-label="閉じる"
+          onClick={onClose}
+          className="min-h-tap min-w-tap shrink-0 rounded text-base text-ink2"
+        >
+          <span aria-hidden="true">✕</span>
+        </button>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto p-3">
+        {note ? (
+          <div className="space-y-2">
+            {/* 1行目: 重要度 */}
+            <div className="flex flex-wrap items-center gap-gap">
+              <span className="shrink-0 text-sm text-ink2">重要度</span>
+              <div className="min-w-0 flex-1">
                 <SegmentPicker
                   ariaLabel="重要度"
                   value={note.importance}
@@ -3866,85 +3982,87 @@ function NoteRow({
                   }}
                 />
               </div>
-              <div>
-                <p className="text-ink2">職種タグ</p>
-                <div className="flex flex-wrap gap-gap">
-                  {ROLE_TAGS.map((tag) => {
-                    const on = note.role_tags.includes(tag)
-                    return (
-                      <button
-                        key={tag}
-                        type="button"
-                        aria-pressed={on}
-                        disabled={ctx.disabled}
-                        onClick={() => {
-                          const next = on
-                            ? note.role_tags.filter((t) => t !== tag)
-                            : [...note.role_tags, tag]
-                          void onUpdateNote(note, { role_tags: next }, { role_tags: next })
-                        }}
-                        className={`min-h-tap rounded-full border px-3 text-base ${
-                          on ? 'border-primary bg-primary text-primary-ink font-bold' : 'border-border text-ink'
-                        }`}
-                      >
-                        <span aria-hidden="true">{on ? '✓ ' : ''}</span>
-                        {tag}
-                      </button>
-                    )
-                  })}
-                </div>
-              </div>
-              <div className="flex flex-wrap items-center gap-gap">
-                <span className="text-ink2 tabular">既読 {readCount}人</span>
-                {note.my_read ? (
-                  <span className="text-ok">
-                    <span aria-hidden="true">✓ </span>自分は既読
-                  </span>
-                ) : (
+            </div>
+
+            {/* 2行目: 職種タグ */}
+            <div className="flex flex-wrap items-center gap-gap">
+              <span className="shrink-0 text-sm text-ink2">職種タグ</span>
+              {ROLE_TAGS.map((tag) => {
+                const on = note.role_tags.includes(tag)
+                return (
                   <button
+                    key={tag}
                     type="button"
-                    onClick={() => onMarkRead(note)}
-                    disabled={actorId == null}
-                    className="min-h-tap rounded-md border border-primary px-3 text-base font-bold text-primary disabled:border-border disabled:text-ink3"
+                    aria-pressed={on}
+                    disabled={ctx.disabled}
+                    onClick={() => {
+                      const next = on
+                        ? note.role_tags.filter((t) => t !== tag)
+                        : [...note.role_tags, tag]
+                      void onUpdateNote(note, { role_tags: next }, { role_tags: next })
+                    }}
+                    className={`min-h-tap shrink-0 rounded-full border px-2 text-sm ${
+                      on ? 'border-primary bg-primary font-bold text-primary-ink' : 'border-border text-ink'
+                    }`}
                   >
-                    既読にする
+                    <span aria-hidden="true">{on ? '✓ ' : ''}</span>
+                    {tag}
                   </button>
-                )}
+                )
+              })}
+            </div>
+
+            {/* 3行目: 既読・削除・この行の色 */}
+            <div className="flex flex-wrap items-center gap-gap border-t border-border pt-2">
+              <span className="tabular text-sm text-ink2">既読 {readCount}人</span>
+              {note.my_read ? (
+                <span className="text-sm text-ok">
+                  <span aria-hidden="true">✓ </span>自分は既読
+                </span>
+              ) : (
                 <button
                   type="button"
-                  onClick={() => onDelete(rowKey)}
-                  disabled={ctx.disabled}
-                  className="min-h-tap rounded-md border border-danger px-3 text-base font-bold text-danger disabled:border-border disabled:text-ink3"
+                  onClick={() => onMarkRead(note)}
+                  disabled={actorId == null}
+                  className={`${DETAIL_BTN} border-primary font-bold text-primary disabled:border-border disabled:text-ink3`}
                 >
-                  <span aria-hidden="true">▲ </span>この行を削除
+                  既読にする
                 </button>
-              </div>
-              {note.color && <p className="text-ink2">この行の色: {NOTE_COLOR_LABEL[note.color]}</p>}
-            </div>
-          ) : (
-            <div className="flex flex-wrap items-center gap-gap">
-              <p className="flex-1 text-ink2">
-                <span aria-hidden="true">ⓘ </span>
-                この行はまだ保存されていません。重要度・職種タグ・既読は保存後に設定できます。
-              </p>
-              {draft?.locked ? (
-                <p className="flex-1 text-warn">
-                  <span aria-hidden="true">▲ </span>
-                  {MSG_LOCKED_DELETE}
-                </p>
-              ) : null}
+              )}
               <button
                 type="button"
-                onClick={() => onDelete(rowKey)}
-                disabled={draft?.locked ?? false}
-                className="min-h-tap rounded-md border border-border-strong px-3 text-base text-ink disabled:border-border disabled:text-ink3"
+                onClick={requestDelete}
+                disabled={ctx.disabled}
+                className={`${DETAIL_BTN} border-danger font-bold text-danger disabled:border-border disabled:text-ink3`}
               >
-                この行を取り消す
+                <span aria-hidden="true">▲ </span>この行を削除
               </button>
+              {note.color && <span className="text-sm text-ink2">色: {NOTE_COLOR_LABEL[note.color]}</span>}
             </div>
-          )}
-        </div>
-      )}
-    </div>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <p className="text-sm text-ink2">
+              <span aria-hidden="true">ⓘ </span>
+              この行はまだ保存されていません。重要度・職種タグ・既読は保存後に設定できます。
+            </p>
+            {draft?.locked ? (
+              <p className="text-sm text-warn">
+                <span aria-hidden="true">▲ </span>
+                {MSG_LOCKED_DELETE}
+              </p>
+            ) : null}
+            <button
+              type="button"
+              onClick={requestDelete}
+              disabled={draft?.locked ?? false}
+              className={`${DETAIL_BTN} border-border-strong text-ink disabled:border-border disabled:text-ink3`}
+            >
+              この行を取り消す
+            </button>
+          </div>
+        )}
+      </div>
+    </ModalShell>
   )
 }

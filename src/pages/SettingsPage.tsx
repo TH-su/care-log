@@ -7,8 +7,8 @@
 //
 // 本画面の構成（上から）:
 //   ①GAS接続設定（cl_gasUrl / cl_gasToken の手入力）②マスタ同期の実行と増減計数
-//   ③要確認（needs_review）の一覧 ④取込状態（import_days の直近10日）
-//   ⑤未送信データ（送信キュー）⑥表示モード ⑦ログアウト
+//   ③要確認（needs_review）の一覧 ③-2 申し送りでの表示名（2026-09-01 指示）
+//   ④取込状態（import_days の直近10日）⑤未送信データ（送信キュー）⑥表示モード ⑦ログアウト
 //
 // 規律:
 // - supabase クライアントのテーブル参照・RPC を直呼びしない（データ取得は db.ts の関数のみ）。
@@ -24,15 +24,17 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
+  fetchAllResidents,
   fetchResidents,
   fetchStaff,
   fetchTimelineChunk,
   flushQueue,
   isQueueBroken,
   queueSubscribe,
+  setResidentNoteAlias,
 } from '../lib/db'
 import { getActorId, setActorId as persistActorId, touchActivity } from '../lib/actor'
-import { LS } from '../lib/types'
+import { hasNoteAlias, LS, NOTE_ALIAS_MAX, validateNoteAlias } from '../lib/types'
 import type { ImportDay, Resident, Staff } from '../lib/types'
 import type { SyncResult } from '../lib/gasClient'
 import { addDays, fmtDayLabel, todayIso } from '../lib/format'
@@ -66,6 +68,8 @@ const MSG = {
     '利用者の一覧を読み込めませんでした（通信エラー）。電波状態を確認して、再試行してください。',
   importFailed:
     '取込状態を読み込めませんでした（通信エラー）。電波状態を確認して、再試行してください。',
+  aliasSaveFailed:
+    '表示名を保存できませんでした。電波状態を確認して、もう一度「保存」を押してください（入力した文字はそのまま残しています）。',
   logoutFailed:
     'ログアウトできませんでした（通信エラー）。電波状態を確認して、もう一度お試しください。記録は消えていません。',
 } as const
@@ -226,6 +230,19 @@ export function SettingsPage() {
   const [residentsReload, setResidentsReload] = useState(0)
   const [reviewOpen, setReviewOpen] = useState(false) // 覗き見配慮: 氏名一覧は明示操作で開く
 
+  // 申し送りでの表示名（2026-09-01 指示）。
+  // 突き合わせ相手には**退居された方も含めた全員**が要る（過去の記録に氏名が残るため）
+  const [aliasAll, setAliasAll] = useState<Resident[] | null>(null)
+  const [aliasError, setAliasError] = useState<string | null>(null)
+  const [aliasReload, setAliasReload] = useState(0)
+  const [aliasOpen, setAliasOpen] = useState(false) // 覗き見配慮: 氏名一覧は明示操作で開く
+  const [aliasFilter, setAliasFilter] = useState('')
+  /** 入力中の文字（利用者ID → 文字）。保存するまでサーバーへは送らない */
+  const [aliasDraft, setAliasDraft] = useState<Record<number, string>>({})
+  const [aliasSaving, setAliasSaving] = useState<number | null>(null)
+  /** 行ごとの結果（保存できた／弾いた理由）。行の中に出す＝どの行の話か迷わせない */
+  const [aliasMsg, setAliasMsg] = useState<Record<number, { tone: 'ok' | 'danger'; text: string }>>({})
+
   // 取込状態（import_days）
   const [today] = useState(() => todayIso())
   const [importRows, setImportRows] = useState<ImportDay[] | null>(null)
@@ -264,6 +281,28 @@ export function SettingsPage() {
       alive = false
     }
   }, [residentsReload])
+
+  // 申し送りでの表示名の一覧（退居された方も含む全員）。
+  // 編集できるのは在籍の方だけだが、重複判定には退居された方の氏名も要る
+  useEffect(() => {
+    let alive = true
+    setAliasError(null)
+    setAliasAll(null)
+    fetchAllResidents()
+      .then((rs) => {
+        if (!alive) return
+        setAliasAll(rs)
+        // 入力欄の初期値はサーバーの値。ここで作り直すので、再取得すると書きかけは消える
+        setAliasDraft(Object.fromEntries(rs.map((r) => [r.id, r.note_alias ?? ''])))
+        setAliasMsg({})
+      })
+      .catch(() => {
+        if (alive) setAliasError(MSG.residentsFailed)
+      })
+    return () => {
+      alive = false
+    }
+  }, [aliasReload])
 
   // 記録する職員の一覧（在籍のみ）。取得に失敗しても他の設定は使えるようにする
   useEffect(() => {
@@ -307,6 +346,50 @@ export function SettingsPage() {
   const reviewList = useMemo(
     () => (residents ?? []).filter((r) => r.needs_review),
     [residents],
+  )
+
+  // ── 申し送りでの表示名 ────────────────────────────────────
+  /** 編集できるのは在籍の方だけ（居室順は fetchAllResidents 側で付いている） */
+  const aliasList = useMemo(() => {
+    const list = (aliasAll ?? []).filter((r) => r.active)
+    const q = aliasFilter.trim()
+    if (q === '') return list
+    return list.filter((r) => r.name.includes(q) || (r.note_alias ?? '').includes(q) || (r.room ?? '').includes(q))
+  }, [aliasAll, aliasFilter])
+
+  /** 表示名を設定してある人数（在籍・退居を問わず数える＝設定の総数） */
+  const aliasCount = useMemo(() => (aliasAll ?? []).filter(hasNoteAlias).length, [aliasAll])
+
+  const saveAlias = useCallback(
+    async (r: Resident) => {
+      const raw = aliasDraft[r.id] ?? ''
+      // 保存の前に必ず検証する（別人と同じ表示名を作らせない＝取り違え防止の要）
+      const check = validateNoteAlias(raw, r.id, aliasAll ?? [])
+      if (!check.ok) {
+        setAliasMsg((m) => ({ ...m, [r.id]: { tone: 'danger', text: check.message } }))
+        return
+      }
+      setAliasSaving(r.id)
+      setAliasMsg((m) => {
+        const next = { ...m }
+        delete next[r.id]
+        return next
+      })
+      try {
+        const saved = await setResidentNoteAlias(r.id, check.value)
+        // サーバーが返した行で置き換える（自分が送った値ではなく、保存された値を正とする）
+        setAliasAll((prev) => (prev ?? []).map((x) => (x.id === saved.id ? saved : x)))
+        setAliasDraft((d) => ({ ...d, [r.id]: saved.note_alias ?? '' }))
+        show(check.value === null ? '表示名を外しました' : '表示名を保存しました')
+      } catch (err) {
+        // 失敗しても入力は消さない（原則4。もう一度「保存」を押せばそのまま送れる）
+        const text = err instanceof Error && err.message !== '' ? err.message : MSG.aliasSaveFailed
+        setAliasMsg((m) => ({ ...m, [r.id]: { tone: 'danger', text } }))
+      } finally {
+        setAliasSaving(null)
+      }
+    },
+    [aliasAll, aliasDraft, show],
   )
 
   const days = useMemo(() => {
@@ -865,6 +948,136 @@ export function SettingsPage() {
               <p className="mt-2 text-sm text-ink2">
                 名簿側のIDまたは氏名を直してから、もう一度「マスタを同期する」を押してください。この画面から保留を解除することはできません。
               </p>
+            </>
+          )}
+        </div>
+      </SectionCard>
+
+      {/* ③-2 申し送りでの表示名（2026-09-01 指示） */}
+      <SectionCard title="申し送りでの表示名">
+        <p className="text-base text-ink2">
+          同じ姓の方などを申し送りで見分けるための表示名です。ここで入れた名前は
+          <span className="font-bold text-ink">申し送りを扱う画面だけ</span>
+          に出ます（バイタル・食事・カルテ・外出外泊はご本人のお名前のままです）。
+          空にすると、お名前の表示に戻ります。
+        </p>
+        <p className="mt-1 text-sm text-ink2">
+          <span aria-hidden="true">ⓘ </span>
+          マスタ同期でこの表示名が消えることはありません。名簿側のお名前は書き換えません。
+        </p>
+
+        <div className="mt-3">
+          {aliasError ? (
+            <ErrorBlock message={aliasError} onRetry={() => setAliasReload((n) => n + 1)} />
+          ) : aliasAll === null ? (
+            <LoadingBlock label="利用者の一覧を読み込んでいます…" />
+          ) : (
+            <>
+              <div className="flex flex-wrap items-center gap-gap">
+                <Chip tone={aliasCount > 0 ? 'accent' : 'plain'}>
+                  {`表示名を設定 ${aliasCount}名`}
+                </Chip>
+                <button
+                  type="button"
+                  onClick={() => setAliasOpen((v) => !v)}
+                  aria-expanded={aliasOpen}
+                  aria-controls="cl-alias-list"
+                  className="min-h-tap rounded border border-primary px-4 text-base font-bold text-primary"
+                >
+                  {aliasOpen ? '一覧を閉じる' : '一覧を開く'}
+                </button>
+              </div>
+
+              {aliasOpen ? (
+                <div id="cl-alias-list" className="mt-2">
+                  <label htmlFor="cl-alias-filter" className="block text-sm text-ink2">
+                    絞り込み
+                  </label>
+                  <input
+                    id="cl-alias-filter"
+                    type="text"
+                    value={aliasFilter}
+                    onChange={(e) => setAliasFilter(e.target.value)}
+                    autoComplete="off"
+                    placeholder="お名前・居室の一部"
+                    className="mt-1 min-h-tap w-full rounded border border-border bg-surface px-3 text-base text-ink"
+                  />
+
+                  {aliasList.length === 0 ? (
+                    <div className="mt-2">
+                      <EmptyBlock
+                        message={
+                          aliasFilter.trim() === ''
+                            ? '在籍中の利用者がいません。設定タブでマスタ同期を実行してください。'
+                            : '該当する利用者がいません。入力した文字を減らしてお試しください。'
+                        }
+                      />
+                    </div>
+                  ) : (
+                    <ul className="mt-2 space-y-2">
+                      {aliasList.map((r) => {
+                        const draft = aliasDraft[r.id] ?? ''
+                        const stored = r.note_alias ?? ''
+                        const dirty = draft.trim() !== stored.trim()
+                        const msg = aliasMsg[r.id]
+                        return (
+                          <li key={r.id} className="rounded border border-border bg-surface px-3 py-2">
+                            <div className="flex flex-wrap items-center gap-gap">
+                              <span className="tabular min-w-12 shrink-0 text-sm text-ink2">
+                                {r.room ?? '—'}
+                              </span>
+                              {/* 左はいつでも「ご本人のお名前」。表示名を入れても消さない
+                                  ＝どなたの設定を触っているか見失わないため */}
+                              <span className="min-w-32 flex-1 text-base font-bold text-ink">
+                                {r.name}
+                              </span>
+                              <input
+                                type="text"
+                                value={draft}
+                                maxLength={NOTE_ALIAS_MAX}
+                                onChange={(e) =>
+                                  setAliasDraft((d) => ({ ...d, [r.id]: e.target.value }))
+                                }
+                                autoComplete="off"
+                                aria-label={`${r.name} の申し送りでの表示名`}
+                                className="min-h-tap w-full rounded border border-border bg-surface px-3 text-base text-ink sm:w-56"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => void saveAlias(r)}
+                                disabled={aliasSaving === r.id || !dirty}
+                                className="min-h-tap shrink-0 rounded border border-primary px-4 text-base font-bold text-primary disabled:border-border disabled:text-ink3"
+                              >
+                                {aliasSaving === r.id ? '保存中…' : '保存'}
+                              </button>
+                            </div>
+                            {/* 書きかけのまま画面を離れると消えるので、その旨を出しておく */}
+                            {dirty && !msg ? (
+                              <p className="mt-1 text-sm text-warn">
+                                <span aria-hidden="true">▲ </span>まだ保存していません
+                              </p>
+                            ) : null}
+                            {msg ? (
+                              <p
+                                role="status"
+                                className={`mt-1 text-sm ${msg.tone === 'danger' ? 'text-danger' : 'text-ok'}`}
+                              >
+                                <span aria-hidden="true">{msg.tone === 'danger' ? '▲ ' : '✓ '}</span>
+                                {msg.text}
+                              </p>
+                            ) : null}
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  )}
+
+                  <p className="mt-2 text-sm text-ink2">
+                    別の利用者のお名前・表示名と同じ表示名は保存できません（取り違えのもとになるため）。
+                    {NOTE_ALIAS_MAX}文字までです。
+                  </p>
+                </div>
+              ) : null}
             </>
           )}
         </div>

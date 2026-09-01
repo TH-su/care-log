@@ -444,6 +444,8 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
   const [picker, setPicker] = useState<PickerMode>('none')
   // 取得できるまでは安全側（封鎖）に倒す。並走期間に誤って入力させない
   const [inputEnabled, setInputEnabled] = useState(false)
+  /** 施設名（日報の見出しの右に出す。2026-08-31 指示で日報の各日の左上から移した） */
+  const [facility, setFacility] = useState<string | null>(null)
   const [pending, setPending] = useState(0)
   const restoredRef = useRef(false)
 
@@ -524,6 +526,21 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
       alive = false
     }
   }, [db, actor, reload])
+
+  // 施設名（表示だけの補助情報）。取れなくても画面は開ける＝失敗しても何も出さない
+  useEffect(() => {
+    let alive = true
+    void db
+      .getAppSetting('facility_name')
+      .then((v) => {
+        if (!alive) return
+        setFacility(typeof v === 'string' && v.trim() !== '' ? v : null)
+      })
+      .catch(() => undefined)
+    return () => {
+      alive = false
+    }
+  }, [db, reload])
 
   // 入力解禁フラグ: 起動時と、入力画面に入るたびに取り直す（前提情報は毎回実測する）。
   // 取得できなかった時も false（封鎖側）を渡すため、この値だけでは
@@ -644,7 +661,15 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
               <span>戻る</span>
             </button>
           )}
-          <h1 className="min-w-tap flex-1 truncate text-lg font-bold">{screenTitle(location.pathname)}</h1>
+          {/* 施設名は日報の見出しの右に出す（2026-08-31 指示）。
+              以前は日報の各日の左上に毎日繰り返し出ていたが、その位置は日付に譲った。
+              日報以外の画面では出さない（見出しの横幅を取るだけになるため） */}
+          <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-2">
+            <h1 className="min-w-tap truncate text-lg font-bold">{screenTitle(location.pathname)}</h1>
+            {location.pathname === '/' && facility !== null && (
+              <span className="truncate text-sm text-ink2">{facility}</span>
+            )}
+          </div>
           {/* 表示倍率（100/125/150%）は各シート画面の操作バー側に1つだけ置く
               （契約 §5〜§7）。ヘッダにも出すと ZoomBar が同一画面に2つ並び、
               片方で切り替えても他方は選択表示が変わらず「現在の倍率」が食い違うため */}

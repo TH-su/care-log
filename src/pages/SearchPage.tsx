@@ -16,7 +16,7 @@ import { Link } from 'react-router-dom'
 import { Chip, EmptyBlock, ErrorBlock, LoadingBlock, SegmentPicker } from '../components/ui'
 import { DbError, fetchResidents, fetchStaff, searchNotes } from '../lib/db'
 import { addDays, fmtDayLabel, fmtTimeHM, isoDate, todayIso } from '../lib/format'
-import { IMPORTANCE_LABEL, SHIFT_LABEL } from '../lib/types'
+import { IMPORTANCE_LABEL, noteDisplayName, SHIFT_LABEL } from '../lib/types'
 import type { Importance, Note, Resident, Shift, Staff } from '../lib/types'
 
 // ══════════════════════════════════════════════════════════════
@@ -253,7 +253,9 @@ function NoteResultCard({
             <span aria-hidden="true">ⓘ </span>スタッフへ
           </span>
         ) : resident ? (
-          <span className="text-base font-bold text-ink">{resident.name}</span>
+          // 申し送りの結果なので「申し送りでの表示名」で出す（2026-09-01 指示。
+          // 下の利用者一覧はカルテへの導線なのでマスタの氏名のまま）
+          <span className="text-base font-bold text-ink">{noteDisplayName(resident)}</span>
         ) : (
           // 利用者マスタを取得できていない場合。IDは出さず「取れていない」ことだけを示す
           <span className="text-base text-ink3">利用者名 未取得</span>

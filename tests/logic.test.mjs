@@ -37,6 +37,7 @@ const TS_READY = T !== null && F !== null
 
 const { tempLevel, sysBpLevel, diaBpLevel, pulseLevel, spo2Level, LEVEL_MARK, vitalHasAlert, isLowIntake } =
   T ?? {}
+const { nameKey, noteDisplayName, hasNoteAlias, validateNoteAlias, NOTE_ALIAS_MAX } = T ?? {}
 const { isoDate, addDays, fmtDayLabel, normalizeVitalInput, toHalfWidth } = F ?? {}
 
 // ── テスト用ダミー（個人情報なし・IDは数値のみ） ──
@@ -221,6 +222,26 @@ function setQueueRaw(raw) {
   else lsStore.set('cl_sendQueue', raw)
 }
 
+/**
+ * Resident の最小形。**氏名は実在しない記号（利用者A 等）にする**
+ * ＝このファイルに実在の氏名を置かない規律を守るため。
+ */
+function resident(id, name, over = {}) {
+  return {
+    id,
+    source_id: `S${id}`,
+    name,
+    kana: null,
+    room: null,
+    gender: null,
+    care_level: null,
+    active: true,
+    needs_review: false,
+    note_alias: null,
+    ...over,
+  }
+}
+
 /** 退避 op の最小形（業務データは持たせない。table/kind/payload だけ整っていればよい） */
 function op(qid, over = {}) {
   return { qid, table: 'notes', kind: 'insert', payload: { note_on: '2026-08-27' }, ...over }
@@ -331,6 +352,116 @@ function registerDbTests() {
 }
 
 function registerTests() {
+  // ══════════════════════════════════════════════════════════════
+  // 申し送りでの表示名（2026-09-01 指示）
+  //
+  // 目的は「同姓の入居者の取り違えを防ぐ」こと。したがって
+  //   ・設定が無ければマスタの氏名に落ちること
+  //   ・**別人と同じ表示名を作らせないこと**（退居された方の氏名も突き合わせ相手）
+  // の2つが崩れたら必ずここで落ちるようにする。
+  // ══════════════════════════════════════════════════════════════
+
+  describe('noteDisplayName / hasNoteAlias（申し送りでの表示名）', () => {
+    it('設定が無ければマスタの氏名を返す', () => {
+      const r = resident(1, '利用者A')
+      assert.equal(noteDisplayName(r), '利用者A')
+      assert.equal(hasNoteAlias(r), false)
+    })
+
+    it('設定があればその名前を返す', () => {
+      const r = resident(1, '利用者A', { note_alias: '【甲】利用者A' })
+      assert.equal(noteDisplayName(r), '【甲】利用者A')
+      assert.equal(hasNoteAlias(r), true)
+    })
+
+    it('空白だけの設定はマスタの氏名に落ちる（空欄と同じ扱い）', () => {
+      const r = resident(1, '利用者A', { note_alias: '  　 ' })
+      assert.equal(noteDisplayName(r), '利用者A')
+      assert.equal(hasNoteAlias(r), false)
+    })
+
+    it('前後の空白は落として表示する', () => {
+      const r = resident(1, '利用者A', { note_alias: '  【甲】利用者A  ' })
+      assert.equal(noteDisplayName(r), '【甲】利用者A')
+    })
+  })
+
+  describe('nameKey（氏名の突き合わせキー）', () => {
+    it('半角・全角の空白を除いて比べられる', () => {
+      assert.equal(nameKey('利用者　A'), nameKey('利用者 A'))
+      assert.equal(nameKey('利用者A'), nameKey('利用者　A'))
+    })
+  })
+
+  describe('validateNoteAlias（保存前の検証）', () => {
+    const others = [
+      resident(1, '利用者A'),
+      resident(2, '利用者B'),
+      resident(3, '利用者C', { note_alias: '【丙】利用者C' }),
+      // 退居された方。過去の記録に氏名が残るので突き合わせ相手に含める
+      resident(4, '利用者D', { active: false }),
+    ]
+
+    it('空欄は null（＝マスタの氏名に戻す）', () => {
+      const r = validateNoteAlias('', 1, others)
+      assert.equal(r.ok, true)
+      assert.equal(r.value, null)
+    })
+
+    it('空白だけも null（空文字は保存しない）', () => {
+      const r = validateNoteAlias('　 ', 1, others)
+      assert.equal(r.ok, true)
+      assert.equal(r.value, null)
+    })
+
+    it('前後の空白を落として保存する', () => {
+      const r = validateNoteAlias('  【甲】利用者A ', 1, others)
+      assert.equal(r.ok, true)
+      assert.equal(r.value, '【甲】利用者A')
+    })
+
+    it('別の利用者の氏名と同じ表示名は弾く', () => {
+      const r = validateNoteAlias('利用者B', 1, others)
+      assert.equal(r.ok, false)
+    })
+
+    it('**退居された方**の氏名と同じ表示名も弾く（過去の記録に残るため）', () => {
+      const r = validateNoteAlias('利用者D', 1, others)
+      assert.equal(r.ok, false)
+    })
+
+    it('別の利用者の表示名と同じ表示名も弾く', () => {
+      const r = validateNoteAlias('【丙】利用者C', 1, others)
+      assert.equal(r.ok, false)
+    })
+
+    it('空白を入れてすり抜けようとしても弾く（空白を除いて比べる）', () => {
+      const r = validateNoteAlias('利用者　B', 1, others)
+      assert.equal(r.ok, false)
+    })
+
+    it('自分自身の氏名はそのまま表示名にできる（重複判定から自分を外す）', () => {
+      const r = validateNoteAlias('利用者A', 1, others)
+      assert.equal(r.ok, true)
+      assert.equal(r.value, '利用者A')
+    })
+
+    it('自分の既存の表示名を保存し直せる（自分と衝突しない）', () => {
+      const r = validateNoteAlias('【丙】利用者C', 3, others)
+      assert.equal(r.ok, true)
+    })
+
+    it('上限を超える長さは弾く（境界の外）', () => {
+      const r = validateNoteAlias('あ'.repeat(NOTE_ALIAS_MAX + 1), 1, others)
+      assert.equal(r.ok, false)
+    })
+
+    it('上限ちょうどは通す（境界）', () => {
+      const r = validateNoteAlias('あ'.repeat(NOTE_ALIAS_MAX), 1, others)
+      assert.equal(r.ok, true)
+    })
+  })
+
   // ══════════════════════════════════════════════════════════════
   // しきい値5関数（現行スプシの条件付き書式の凡例＝凍結仕様）
   // 凡例: 体温 ≤35.5 青 / 37.5-38.0 黄 / ≥38.1 赤

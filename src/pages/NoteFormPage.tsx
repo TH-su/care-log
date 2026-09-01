@@ -35,7 +35,7 @@ import {
   softDeleteNote,
 } from '../lib/db'
 import { addDays, fmtDayLabel, todayIso } from '../lib/format'
-import { IMPORTANCE_LABEL, LS, ROLE_TAGS, SHIFT_LABEL } from '../lib/types'
+import { IMPORTANCE_LABEL, LS, noteDisplayName, ROLE_TAGS, SHIFT_LABEL } from '../lib/types'
 import type { Importance, Note, Resident, Shift, Staff } from '../lib/types'
 
 // ── 定数 ──────────────────────────────────────────────
@@ -578,11 +578,15 @@ export function NoteFormPage() {
     )
   }
 
+  // 対象は「申し送りでの表示名」で出す（2026-09-01 指示。設定が無い方はマスタの氏名）
+  const targetResident = form.residentId === null ? undefined : residentById.get(form.residentId)
   const targetText = !form.targetPicked
     ? '未選択'
     : form.residentId === null
       ? 'スタッフへ（全体）'
-      : (residentById.get(form.residentId)?.name ?? `利用者ID ${form.residentId}`)
+      : targetResident
+        ? noteDisplayName(targetResident)
+        : `利用者ID ${form.residentId}`
   const reporterText =
     form.reporterId === null
       ? '未選択'
@@ -876,6 +880,7 @@ export function NoteFormPage() {
         open={residentPicker}
         residents={residents}
         allowAll
+        useNoteAlias
         onPick={(id) => {
           update({ targetPicked: true, residentId: id }, 'residentId')
           setResidentPicker(false)

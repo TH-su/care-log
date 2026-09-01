@@ -831,6 +831,21 @@
   background: var(--c-surface);
   cursor: pointer;
 }
+/* 1日ぶんの枠の左上（旧・施設名セル）に置く日付（2026-08-31 指示）。
+   セルいっぱいに広げ、平日は実物と同じ橙（--c-accent-bg）を敷く。
+   ★詳細度は1クラスに留める。下の .dsheet-date.sheet-sat / .sheet-sun は2クラスなので、
+     順序に関係なく土日の色が勝つ（橙が土日の色を潰さない）。 */
+.dsheet-date-head {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background: var(--c-accent-bg);
+  color: var(--c-ink);
+}
+
 /* 土日は枠ごと色を変える。.dsheet-date の background より後に置いて後勝ちにする
    （同じ詳細度なので順序で決まる。曜日は日付文字の（土）（日）にも出るので色は補助） */
 .dsheet-date.sheet-sat {
