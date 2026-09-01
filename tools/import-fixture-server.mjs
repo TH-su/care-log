@@ -8,7 +8,10 @@
 //   ・after16 は 31 日で頭打ちにし、実際に返した to を返す
 //   ・墓標の行は**応答に含めない**（実物 apiEvents と同じ＝importer は不在で検知する）
 //
-// 状態: v1（初回取込用）と v2（編集・削除・追加後）を ?action=___state&v=2 で切り替える。
+// 状態: v1（初回取込用）・v2（編集・削除・追加後）・v3（v2 で消えた行が**戻ってきた**後）を
+//       ?action=___state&v=2 / v=3 で切り替える。
+//       v3 は「移行元の行番号がずれて墓標が付き、あとで元に戻る」実運用の形の再現
+//       （2026-08-28 の日勤1件で実際に起きた）。
 // =====================================================================
 
 import { createServer } from 'node:http'
@@ -47,6 +50,16 @@ function eventsV2() {
   return out
 }
 
+/**
+ * v3: v2 で消えた k5 が**そのままのキーで戻ってくる**。
+ * 実運用では、行の挿入や勤務帯の付け替えでキー（日付|勤務帯|行番号）がずれて
+ * 墓標が付き、移行元を直すと元のキーに戻る、という形で起きる。
+ * 取込はこれを復活させなければならない（記録は残っているのに画面から消えるため）。
+ */
+function eventsV3() {
+  return eventsV2().concat(eventsV1().filter((e) => e.key === 'k5'))
+}
+
 function vitalsRows(state) {
   const base = [
     // 居室移動日に同一人が2タブへ載るケース（移行元キーは タブ名 で別行・こちらは同じ枠）。
@@ -72,7 +85,8 @@ function mealsRows(state) {
   return [
     // v1 は朝も昼も値あり。v2 は**昼だけ値を消した**（行は生きている）。
     // 修正前はここで昼の行が「移行元から消えた」と誤認され soft delete されていた
-    state === 2
+    // v3 は v2 の続き（昼の値を消したまま）＝ v2 で入れた安全装置がそのまま効くか見る
+    state >= 2
       ? { date: D1, name: '利用者01', room: '101', bMain: 10, bSide: 10, lMain: null, lSide: null, dMain: null, dSide: null, flags: '' }
       : { date: D1, name: '利用者01', room: '101', bMain: 10, bSide: 10, lMain: 8, lSide: 7, dMain: null, dSide: null, flags: '' },
     { date: D1, name: '利用者02', room: '102', bMain: null, bSide: null, lMain: null, lSide: null, dMain: null, dSide: null, flags: '外泊' },
@@ -121,7 +135,8 @@ export function startFixture(port = 0) {
       res.end(JSON.stringify(obj))
     }
     if (action === '___state') {
-      state = Number(u.searchParams.get('v')) === 2 ? 2 : 1
+      const v = Number(u.searchParams.get('v'))
+      state = v === 2 ? 2 : v === 3 ? 3 : 1
       return json({ ok: true, state })
     }
     if (u.searchParams.get('token') !== TOKEN) return json({ ok: false, error: '認証エラー' })
@@ -132,7 +147,7 @@ export function startFixture(port = 0) {
       return json({ ok: true, role: 'viewer', ver: VER, lastTick: '2026-06-03 12:00', ingestedDays: '3' })
     }
     if (action === 'events') {
-      const evs = inRange(state === 1 ? eventsV1() : eventsV2(), from, to)
+      const evs = inRange(state === 1 ? eventsV1() : state === 3 ? eventsV3() : eventsV2(), from, to)
       const ingested = [D1, D2, D3].filter((d) => d >= from && d <= to)
       return json({ ok: true, from, to, events: evs, ledger: [], ingestedDates: ingested, lastTick: '', lastFails: '' })
     }

@@ -18,6 +18,7 @@
 //    7. アプリ側で編集した列（color）を importer が触らない
 //    8. 移行元の編集・削除・追加への追従（update / soft delete / insert）
 //    9. after16 が後から取れた日の再判定（false 確定でない行だけが直る）
+//   10. 移行元に戻ってきた行の復活（取込が消した行だけ戻す。職員が消した記録は戻さない）
 // =====================================================================
 
 import { spawnSync, spawn } from 'node:child_process'
@@ -105,7 +106,7 @@ async function main() {
   psql(DB_URL, 'create schema if not exists extensions')
   psql(DB_URL, 'create extension if not exists pg_trgm with schema extensions')
   psql(DB_URL, 'create publication supabase_realtime') // 0001 が set table する前提
-  for (const f of ['0001_init.sql', '0002_timeline_rpc.sql', '0003_sheet_ui.sql', '0004_vitals_client_key.sql', '0005_meals_sheet_fluids.sql']) {
+  for (const f of ['0001_init.sql', '0002_timeline_rpc.sql', '0003_sheet_ui.sql', '0004_vitals_client_key.sql', '0005_meals_sheet_fluids.sql', '0006_staff_manual.sql', '0007_resident_note_alias.sql', '0008_import_tombstone_mark.sql']) {
     psql(DB_URL, join(ROOT, 'supabase', 'migrations', f), true)
   }
 
@@ -250,6 +251,37 @@ async function main() {
     {
       const t = parseTotals(r.stdout)
       ok('再実行で追加0・更新0', t.events?.ins === 0 && t.events?.upd === 0 && t.measures?.ins === 0 && t.measures?.upd === 0, r.stdout)
+    }
+
+    console.log('── 8. 移行元に戻ってきた行の復活（v3）──')
+    // 前提の確認: v2 で k5 に墓標が付き、かつ「取込が付けた墓標」の印が残っている
+    {
+      const k5 = await one(`select deleted_at, import_tombstoned_at from notes where import_key = 'ev:k5'`)
+      ok('v2 の墓標に「取込が付けた」印が残る', k5.deleted_at != null && k5.import_tombstoned_at != null, JSON.stringify(k5))
+    }
+    // 職員がアプリで消した記録を用意する（印は付けない＝アプリの削除経路と同じ形）
+    await db.query(`update notes set deleted_at = now() where import_key = 'ev:k4'`)
+
+    await fetch(`${fx.url}?action=___state&v=3`)
+    r = await runImporter(env, [...argsBase, '--execute'])
+    ok('v3 の実行が正常終了する', r.status === 0, r.stdout + r.stderr)
+    {
+      const k5v3 = await one(`select deleted_at, import_tombstoned_at, body from notes where import_key = 'ev:k5'`)
+      ok('取込が消した行は移行元に戻ると復活する', k5v3.deleted_at == null, JSON.stringify(k5v3))
+      ok('復活した行の印は外れる', k5v3.import_tombstoned_at == null, JSON.stringify(k5v3))
+      const k4v3 = await one(`select deleted_at from notes where import_key = 'ev:k4'`)
+      ok('★職員がアプリで消した記録は復活させない', k4v3.deleted_at != null, JSON.stringify(k4v3))
+      ok('復活の件数が報告に出る', /移行元に戻った行の復活: 1 件/.test(r.stdout), r.stdout)
+    }
+
+    console.log('── 9. 復活後の再実行も冪等 ──')
+    r = await runImporter(env, [...argsBase, '--execute'])
+    {
+      const t = parseTotals(r.stdout)
+      ok('復活後の再実行で追加0・更新0', t.events?.ins === 0 && t.events?.upd === 0, r.stdout)
+      ok('2度目は復活の行が出ない', !/移行元に戻った行の復活/.test(r.stdout), r.stdout)
+      const k4 = await one(`select deleted_at from notes where import_key = 'ev:k4'`)
+      ok('職員が消した記録は何度実行しても戻らない', k4.deleted_at != null)
     }
 
     // 報告ファイルが書かれていること（氏名を含むのでリポジトリ外に置く仕様）

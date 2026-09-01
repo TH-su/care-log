@@ -558,7 +558,7 @@ async function selectExisting(db, table, cols, keys) {
   for (let i = 0; i < keys.length; i += BATCH) {
     const chunk = keys.slice(i, i + BATCH)
     const r = await db.query(
-      `select import_key, id, deleted_at, ${cols.join(', ')} from ${table} where import_key = any($1)`,
+      `select import_key, id, deleted_at, import_tombstoned_at, ${cols.join(', ')} from ${table} where import_key = any($1)`,
       [chunk],
     )
     for (const row of r.rows) found.set(row.import_key, row)
@@ -599,7 +599,8 @@ function sameValue(a, b, col) {
  */
 async function applyCandidates(db, opts) {
   const { table, candidates: rawCandidates, compareCols, insertCols, execute, nativeCheck, frameOf } = opts
-  const counts = { inserted: 0, updated: 0, unchanged: 0, tomb_skip: 0, native_skip: 0, dup_skip: 0 }
+  // revived は updated の内訳（恒等式には updated として入る＝式は変わらない）
+  const counts = { inserted: 0, updated: 0, unchanged: 0, tomb_skip: 0, native_skip: 0, dup_skip: 0, revived: 0 }
   const keys = rawCandidates.map((c) => c.row.import_key)
   const existing = await selectExisting(db, table, compareCols, keys)
 
@@ -665,22 +666,43 @@ async function applyCandidates(db, opts) {
       counts.inserted++
       continue
     }
-    if (ex.deleted_at != null) {
-      counts.tomb_skip++ // こちらで消した行は復活させない（原則4の裏返し＝消した判断を尊重）
-      continue
-    }
     // 差分検出。after16 が不明な日（after16_known=false）は after16 を比較から外す
     const colsToCompare = compareCols.filter((col) => {
       if (col === 'after16' && c.row.after16_known === false) return false
       if (col === 'reporter_id' && c.row.reporter_known === false) return false
       return true
     })
+
+    if (ex.deleted_at != null) {
+      /**
+       * 消えている行が戻ってきた時の扱い（2026-09-01 追加）。
+       *
+       * ★職員がアプリで消した記録は**復活させない**（消した判断を尊重する）。
+       *   アプリの削除経路は import_tombstoned_at に触れないので、ここは空になる。
+       *
+       * ★取込自身が「移行元から消えた」として付けた墓標（import_tombstoned_at あり）は
+       *   移行元にキーが戻ってきた時点で消した理由が消えているので**復活させる**。
+       *   移行元のキーは「日付|勤務帯|物理行番号」なので、行の挿入や勤務帯の付け替えで
+       *   簡単にずれて戻る。復活させないと、記録は残っているのに画面から永久に消える
+       *   （2026-08-28 の日勤1件で実際に発生）。
+       */
+      if (ex.import_tombstoned_at == null) {
+        counts.tomb_skip++
+        continue
+      }
+      const revDiff = colsToCompare.filter((col) => !sameValue(ex[col], c.row[col], col))
+      toUpdate.push({ id: ex.id, row: c.row, diff: revDiff, revive: true })
+      counts.updated++
+      counts.revived++
+      continue
+    }
+
     const diff = colsToCompare.filter((col) => !sameValue(ex[col], c.row[col], col))
     if (diff.length === 0) {
       counts.unchanged++
       continue
     }
-    toUpdate.push({ id: ex.id, row: c.row, diff })
+    toUpdate.push({ id: ex.id, row: c.row, diff, revive: false })
     counts.updated++
   }
 
@@ -710,8 +732,16 @@ async function applyCandidates(db, opts) {
         sets.push(`${col} = $${n++}`)
         params.push(col === 'raw_flags' ? (u.row[col] == null ? null : JSON.stringify(u.row[col])) : u.row[col])
       }
+      /**
+       * 復活は「取込が付けた墓標であること」を **UPDATE の条件にも** 書く。
+       * SELECT してから UPDATE するまでの間に職員がアプリで消していた場合、
+       * その削除を無言で取り消してしまわないため（0行更新で素通りする）。
+       * 値に差が無くても sets が空にならないので、この2つは常に入れる。
+       */
+      const guard = u.revive ? 'import_tombstoned_at is not null' : 'deleted_at is null'
+      if (u.revive) sets.push('deleted_at = null', 'import_tombstoned_at = null')
       params.push(u.id)
-      await db.query(`update ${table} set ${sets.join(', ')} where id = $${n} and deleted_at is null`, params)
+      await db.query(`update ${table} set ${sets.join(', ')} where id = $${n} and ${guard}`, params)
     }
   }
   return counts
@@ -775,9 +805,13 @@ async function reconcileTombstones(db, table, dateCol, prefix, day, liveKeys, ex
   )
   const gone = r.rows.filter((row) => !liveKeys.has(row.import_key))
   if (execute && gone.length > 0) {
-    await db.query(`update ${table} set deleted_at = now() where id = any($1) and deleted_at is null`, [
-      gone.map((g) => g.id),
-    ])
+    // ★「取込が付けた墓標」であることを残す。これが無いと、移行元に行が戻った時に
+    //   職員の削除と区別できず復活させられない（2026-09-01 追加）
+    await db.query(
+      `update ${table} set deleted_at = now(), import_tombstoned_at = now()
+        where id = any($1) and deleted_at is null`,
+      [gone.map((g) => g.id)],
+    )
   }
   return gone.length
 }
@@ -1063,7 +1097,7 @@ async function main() {
           const idOk = srcRows === inserted + updated + skipped + nativeSkip + unmatched
           if (!idOk) throw new Error(`恒等式が破れました（measures ${day}: src=${srcRows} ins=${inserted} upd=${updated} skip=${skipped} native=${nativeSkip} unm=${unmatched}）`)
           report.days[day] = report.days[day] ?? {}
-          report.days[day].measures = { srcRows, inserted, updated, skipped, native_skip: nativeSkip, unmatched, vitals: cv, meals: cm }
+          report.days[day].measures = { srcRows, inserted, updated, skipped, native_skip: nativeSkip, unmatched, revived: cv.revived + cm.revived, vitals: cv, meals: cm }
           if (args.execute) {
             await db.query(
               `insert into import_days (source, day, src_rows, inserted, updated, skipped, native_skip, unmatched)
@@ -1102,7 +1136,7 @@ async function main() {
   // --- 報告 ---
   const totals = { events: zero(), measures: zero() }
   function zero() {
-    return { srcRows: 0, inserted: 0, updated: 0, skipped: 0, native_skip: 0, unmatched: 0 }
+    return { srcRows: 0, inserted: 0, updated: 0, skipped: 0, native_skip: 0, unmatched: 0, revived: 0 }
   }
   for (const d of Object.values(report.days)) {
     for (const src of ['events', 'measures']) {
@@ -1185,6 +1219,11 @@ async function main() {
   }
   console.log(`  16時区切りが取れなかった日: ${report.after16Unknown.length} 日`)
   console.log(`  移行元で消えた行への追従: notes ${report.reconciled.notes} / vitals ${report.reconciled.vitals} / meals ${report.reconciled.meals}`)
+  {
+    // 取込が消した行が移行元に戻ってきて復活した件数。0 なら出さない（普段は静かにする）
+    const rev = (totals.events?.revived ?? 0) + (totals.measures?.revived ?? 0)
+    if (rev > 0) console.log(`  移行元に戻った行の復活: ${rev} 件（取込が消した行のみ。職員が消した記録は戻しません）`)
+  }
   if (report.errors.length > 0) {
     console.log(`  ▲ 取り込めなかった窓: ${report.errors.length} 件（報告ファイル参照）`)
   }
