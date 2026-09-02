@@ -25,6 +25,10 @@
 // - 保存は1名1日単位（id 無し=insertVital／id 有り=updateVital(id, rev, 変更列のみ)）。
 //   upsert は使わず、23505 は db.ts 側の既存の作法（既存行を読み直して update）に吸収させる
 // - 記録済みの値を空にする操作は確認ダイアログを挟む（空上書き保護・dev-principles 原則4）
+// - 他の端末の変更は subscribeChanges で受け、表示中の期間に入る vitals の変更だけを合図に
+//   既存の load() を呼び直す（＝入力中・未送信・競合・応答待ちのセルは load() の温存で守られる）。
+//   自分の保存の直後は自分が出した通知なので取り直さない。応答待ちのセルが残っている間は
+//   取り直しを先送りする（保存の応答と読み込みが交差して古い値で描き直すのを避ける）
 // - 入力解禁フラグ（native_input_enabled）が false の間は編集不可＋理由文（閲覧は可能）
 // - UI 状態（フロア・日数）だけを localStorage に保存する。氏名・記録値・日付は保存しない
 // - 個人情報は console にも localStorage にも出さない
@@ -38,6 +42,7 @@ import {
   insertVital,
   queuePending,
   queueSubscribe,
+  subscribeChanges,
   updateVital,
 } from '../lib/db'
 import { addDays, fmtDayLabel, normalizeVitalInput, todayIso, toHalfWidth } from '../lib/format'
@@ -150,6 +155,21 @@ const FLOOR_OTHER = 'other'
 /** 横並びする日数の既定（契約 §6: バイタルは4日） */
 const DEFAULT_DAYS: SheetDays = 4
 
+/**
+ * 他端末の変更通知をまとめる待ち時間（ミリ秒）。連続して届いた通知は最後の1回だけ取り直す
+ * （1名ぶんの保存でも複数行の通知が来るため。同型の実装は useTimeline.ts の REALTIME_DEBOUNCE_MS）。
+ */
+const REALTIME_DEBOUNCE_MS = 1500
+/**
+ * 自分の保存で出た通知を無視する時間（ミリ秒）。自分の書き込みは画面へ反映済みなので、
+ * 取り直すと保存直後に打った値を無駄に描き直す危険だけが残る（日報シートと同じ 3 秒）。
+ */
+const SELF_WRITE_QUIET_MS = 3000
+/** この画面が描画する表（食事・水分・申し送りの変更では取り直さない） */
+const WATCHED_TABLE = 'vitals'
+/** 変更通知の行が持つ日付の列（この画面が横に並べている日と突き合わせる） */
+const WATCHED_DAY_COL = 'measured_on'
+
 const ERR_LOAD =
   'バイタル一覧を読み込めませんでした。通信状況を確認して、「再試行する」を押してください。'
 const ERR_SAVE =
@@ -170,6 +190,20 @@ const MSG_GATE_UNKNOWN =
 function numOrNull(v: unknown): number | null {
   const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : Number.NaN
   return Number.isFinite(n) ? n : null
+}
+
+/**
+ * 変更通知に添えられた行から日付（measured_on）を取る。
+ * 受信データを信じない（型検査して読めない値は null＝「分からない」）。db.ts の契約では
+ * `{ event: string; row: Record<string, unknown> | null }` が来るが、購読側は unknown として
+ * 受け取り、形が変わっても画面が壊れないようにする（旧形式＝第2引数なしも通る）。
+ */
+function changedDay(info: unknown): string | null {
+  if (typeof info !== 'object' || info === null) return null
+  const row = (info as { row?: unknown }).row
+  if (typeof row !== 'object' || row === null) return null
+  const day = (row as Record<string, unknown>)[WATCHED_DAY_COL]
+  return typeof day === 'string' && day !== '' ? day : null
 }
 
 /** 居室文字列から階を取る（'102'→'1'）。数字が無い・未設定は FLOOR_OTHER */
@@ -411,6 +445,10 @@ export function VitalsSheetPage({
   const savingRef = useRef(new Set<string>())
   /** 保存の応答待ち中に重なった保存要求（先行保存の完了後にやり直す＝要求を黙って捨てない） */
   const resaveRef = useRef(new Set<string>())
+  /** 自分の書き込みで出た変更通知に反応しないための抑制窓（日報シートと同じ作法） */
+  const selfWriteRef = useRef(0)
+  /** 取得の世代。応答が返るまでに次の取得が始まっていたら、古い応答は捨てる */
+  const genRef = useRef(0)
   const clearResolveRef = useRef<((ok: boolean) => void) | null>(null)
 
   const actorId = propActorId !== undefined ? propActorId : getActorId()
@@ -455,8 +493,17 @@ export function VitalsSheetPage({
 
   // ── 読み込み ───────────────────────────────────────────────
 
-  const load = useCallback(async () => {
-    setLoading(true)
+  const load = useCallback(async (opts?: { background?: boolean }) => {
+    // 期間送り・読み込み直しが重なった時、後から返った古い期間の応答で表を描き直さないための世代
+    const gen = ++genRef.current
+    // 保存が割り込んだかどうかを見分けるための開始時刻（selfWriteRef は保存のたびに進む）
+    const startedAt = Date.now()
+    // 背景の取り直し（他端末の変更を受けた自動更新）では「読み込み中」にしない。
+    // loading を立てると editable が外れ、編集中のセルが確定を通らずに閉じる＝打った文字が消える
+    // （利用者が押した読み込み直し・期間送りは従来どおり読み込み中にして誤入力を防ぐ）。
+    // 控えの温存（KEEP）は背景でもそのまま効く
+    const background = opts?.background === true
+    if (!background) setLoading(true)
     setError(null)
     try {
       // 入力解禁フラグは「観測できた値」と「観測できなかった」を区別するため、
@@ -468,7 +515,15 @@ export function VitalsSheetPage({
         getNativeInputGate(),
         fetchVitalsSheet(fromIso, anchor),
       ])
-      if (!aliveRef.current) return
+      if (gen !== genRef.current || !aliveRef.current) return
+      // 取得の途中で自分の保存が入った＝この応答は保存前のサーバー値。
+      // そのまま描くと、保存できた値が旧値に戻り rev も古くなる（次の編集が競合になる）。
+      // 背景の取り直しは捨ててやり直す（利用者が押した読み込み直しは待たせずそのまま反映する）
+      if (background && selfWriteRef.current >= startedAt) {
+        const retry = retryRef.current
+        if (retry) retry()
+        return
+      }
 
       const list = (Array.isArray(rs) ? rs : []).filter((r) => r && r.active !== false)
       const sorted = list.slice().sort(cmpResident)
@@ -542,14 +597,15 @@ export function VitalsSheetPage({
       commitRecheckRows(rowCounts)
       setError(null)
     } catch (e) {
-      if (!aliveRef.current) return
+      if (gen !== genRef.current || !aliveRef.current) return
       // 失敗時は既存の表示を消さない（安全側フォールバック）。
       // db.ts の DbError は「何が起きたか＋次にどうすればよいか」を持っている
       // （例: 日数が多すぎて読み切れなかった＝再試行では解決しない）ので、
       // 通信エラーの定型文で塗り潰さない
       setError(e instanceof DbError && e.message ? e.message : ERR_LOAD)
     } finally {
-      if (aliveRef.current) setLoading(false)
+      // 最新の取得だけが「読み込み中」を降ろす（古い応答が先に降ろして表示がちらつかない）
+      if (gen === genRef.current && aliveRef.current) setLoading(false)
     }
   }, [anchor, commitRecheckRows, commitRecs, fromIso, propResidents])
 
@@ -573,6 +629,80 @@ export function VitalsSheetPage({
       unsub = null
     }
     return () => {
+      if (unsub) {
+        try {
+          unsub()
+        } catch {
+          /* 解除失敗は表示に影響しないため無視する */
+        }
+      }
+    }
+  }, [])
+
+  // ── 他端末の変更を自動で取り込む ───────────────────────────
+
+  /**
+   * 購読は画面にいる間ずっと1本にする（期間・日数を変えるたびに張り直さない）。
+   * そのため「取り直す処理」と「表示中の期間」は ref から読む
+   * （購読 effect の依存に入れると、期間を送るたびに解除→再購読が走って通知を取りこぼす）。
+   */
+  const loadRef = useRef(load)
+  /** 背景の取り直しをやり直す（購読 effect の schedule を入れる。購読が無い時は null） */
+  const retryRef = useRef<(() => void) | null>(null)
+  const windowRef = useRef({ from: fromIso, to: anchor })
+  useEffect(() => {
+    loadRef.current = load
+  }, [load])
+  useEffect(() => {
+    windowRef.current = { from: fromIso, to: anchor }
+  }, [fromIso, anchor])
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let stopped = false
+    const schedule = () => {
+      if (stopped) return
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        if (stopped || !aliveRef.current) return
+        // 保存の応答を待っているセルがある間は取り直さない。
+        // 取り直すと、応答が返る前のサーバー値でそのセルを描き直しかねない（＝入力を消す）
+        const busy =
+          savingRef.current.size > 0 ||
+          Array.from(recsRef.current.values()).some((r) => r.state === 'saving')
+        if (busy) {
+          schedule()
+          return
+        }
+        void loadRef.current({ background: true })
+      }, REALTIME_DEBOUNCE_MS)
+    }
+    retryRef.current = schedule
+    let unsub: (() => void) | null = null
+    try {
+      // info は db.ts の契約では `{ event, row }`。ここでは unknown として受け、
+      // 第2引数を渡さない版でも渡す版でも同じコードで動くようにする（changedDay が型検査する）
+      unsub = subscribeChanges((table, info?: unknown) => {
+        if (!aliveRef.current) return
+        // この画面が描画する表だけを合図にする
+        if (typeof table !== 'string' || table !== WATCHED_TABLE) return
+        // 自分の保存で出た通知（画面へ反映済み）は取り直さない
+        if (Date.now() - selfWriteRef.current < SELF_WRITE_QUIET_MS) return
+        // 行が分かる時だけ期間で絞る。分からない時（旧形式・削除など）は取り直す＝安全側
+        const day = changedDay(info)
+        const w = windowRef.current
+        if (day !== null && (day < w.from || day > w.to)) return
+        schedule()
+      })
+    } catch {
+      // 購読できない環境（接続未設定など）でも画面は成立させる（従来どおり手動の読み込み直しで足りる）
+      unsub = null
+    }
+    return () => {
+      stopped = true
+      retryRef.current = null
+      if (timer) clearTimeout(timer)
       if (unsub) {
         try {
           unsub()
@@ -800,6 +930,8 @@ export function VitalsSheetPage({
       }
 
       patchRec(key, { state: 'saving', message: invalidMessage })
+      // 送る前に印を付ける（変更通知が応答より先に届いても、自分の書き込みで取り直さない）
+      selfWriteRef.current = Date.now()
       try {
         if (rec.vitalId == null) {
           const payload = {
@@ -823,6 +955,8 @@ export function VitalsSheetPage({
             patchRec(key, { state: 'queued', message: MSG_QUEUED, sent: sentValues })
             return
           }
+          // サーバーへ書けた＝この行の変更通知は自分が出したもの。取り直しの合図にしない
+          selfWriteRef.current = Date.now()
           patchRec(key, {
             vitalId: res.id,
             rev: numOrNull(res.rev) ?? 1,
@@ -841,6 +975,8 @@ export function VitalsSheetPage({
             patchRec(key, { state: 'conflict', message: ERR_CONFLICT })
             return
           }
+          // サーバーへ書けた＝この行の変更通知は自分が出したもの。取り直しの合図にしない
+          selfWriteRef.current = Date.now()
           patchRec(key, {
             rev: numOrNull(res.rev) ?? rec.rev + 1,
             saved: savedOf(res),

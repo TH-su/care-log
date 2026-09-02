@@ -12,12 +12,20 @@
 //       ?action=___state&v=2 / v=3 で切り替える。
 //       v3 は「移行元の行番号がずれて墓標が付き、あとで元に戻る」実運用の形の再現
 //       （2026-08-28 の日勤1件で実際に起きた）。
+//
+// 制御口（テスト専用・token 不要。___state と同じ用途）:
+//   ?action=___ping&fails=..&skipped=..&lastTick=..&skippedStreak=..
+//     … 以後の ping 応答で指定したキーだけを上書きする（集約GASの失敗情報の差し込み）
+//   ?action=___ping&reset=1  … 上書きを全て解除する
 // =====================================================================
 
 import { createServer } from 'node:http'
 
 const TOKEN = 'fixture-token'
 const VER = '2026-08-28a'
+
+/** 制御口 ___ping で上書きできるキー（集約GASの ping が返す失敗情報だけ・実物と同じく値は文字列） */
+const PING_OVERRIDE_KEYS = ['fails', 'skipped', 'lastTick', 'skippedStreak']
 
 // 日付は3日ぶん。氏名・施設名はすべて合成
 const D1 = '2026-06-01'
@@ -125,6 +133,8 @@ function inRange(rows, from, to) {
 /** テストから起動する。戻り値: { url, close, requests } */
 export function startFixture(port = 0) {
   let state = 1
+  /** ping 応答へ差し込む値（制御口 ___ping で設定・reset で空に戻る） */
+  let pingOverride = {}
   const requests = []
   const server = createServer((req, res) => {
     const u = new URL(req.url, 'http://localhost')
@@ -139,12 +149,25 @@ export function startFixture(port = 0) {
       state = v === 2 ? 2 : v === 3 ? 3 : 1
       return json({ ok: true, state })
     }
+    if (action === '___ping') {
+      // 以後の ping 応答に失敗情報を差し込む。reset があれば全解除（値は問わない）
+      if (u.searchParams.get('reset') != null) {
+        pingOverride = {}
+      } else {
+        for (const k of PING_OVERRIDE_KEYS) {
+          const v = u.searchParams.get(k)
+          if (v != null) pingOverride[k] = v
+        }
+      }
+      return json({ ok: true, override: { ...pingOverride } })
+    }
     if (u.searchParams.get('token') !== TOKEN) return json({ ok: false, error: '認証エラー' })
     const from = u.searchParams.get('from')
     const to = u.searchParams.get('to')
 
     if (action === 'ping') {
-      return json({ ok: true, role: 'viewer', ver: VER, lastTick: '2026-06-03 12:00', ingestedDays: '3' })
+      // lastTick の既定は現在時刻（「台帳の更新が止まっています」の判定に当たらない値）
+      return json({ ok: true, role: 'viewer', ver: VER, lastTick: new Date().toISOString(), ingestedDays: '3', ...pingOverride })
     }
     if (action === 'events') {
       const evs = inRange(state === 1 ? eventsV1() : state === 3 ? eventsV3() : eventsV2(), from, to)

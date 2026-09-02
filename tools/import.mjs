@@ -92,6 +92,10 @@ const FETCH_WAIT_MS = 4000
 const FETCH_TIMEOUT_MS = 180000
 /** 応答サイズの上限（これを超えたら異常とみなす） */
 const MAX_RESPONSE_BYTES = 50 * 1024 * 1024
+/** lastTick がこれ以上前なら「台帳の更新が止まっている」とみなす（分） */
+const GAS_STALE_MIN = 90
+/** ping の fails をそのまま出さずに切る長さ（日付と理由コードだけの文字列だが念のため） */
+const GAS_FAILS_MAX = 120
 
 const REPORT_DIR_DEFAULT = join(
   homedir(),
@@ -307,6 +311,41 @@ async function gasGet(baseUrl, token, action, params) {
     }
   }
   throw new Error(`GAS ${action} の取得に失敗: ${lastErr?.message ?? lastErr}`)
+}
+
+/**
+ * ping 応答から集約GAS側の異常の合図を拾う（該当が無ければ空配列）。
+ * 取込は止めない＝警告するだけ。日時は Date.parse で解釈し、解釈できない値は判定しない。
+ * 氏名・記録本文は出さない（fails は日付と理由コードの文字列だが GAS_FAILS_MAX で切る）。
+ * @param {Record<string, unknown>} ping
+ * @param {number} nowMs
+ * @returns {string[]} 『▲ 集約GAS: …』で始まる行
+ */
+function gasHealthWarnings(ping, nowMs = Date.now()) {
+  const out = []
+  const fails = typeof ping?.fails === 'string' ? ping.fails.trim() : ''
+  if (fails !== '') {
+    out.push(`▲ 集約GAS: 直近の取込で失敗があります: ${fails.slice(0, GAS_FAILS_MAX)}`)
+  }
+
+  const skippedRaw = ping?.skipped == null ? '' : String(ping.skipped)
+  const lastTickRaw = ping?.lastTick == null ? '' : String(ping.lastTick)
+  const skippedMs = Date.parse(skippedRaw)
+  const lastTickMs = Date.parse(lastTickRaw)
+  if (Number.isFinite(skippedMs) && Number.isFinite(lastTickMs) && skippedMs > lastTickMs) {
+    out.push(`▲ 集約GAS: 直近の取込がロック競合で飛びました（${skippedRaw}）`)
+  }
+
+  // 無い版の集約GASもあるので、欠落は 0 回扱い（＝警告しない）
+  const streak = Number.parseInt(String(ping?.skippedStreak ?? ''), 10)
+  if (Number.isFinite(streak) && streak >= 2) {
+    out.push(`▲ 集約GAS: 取込のロック競合が ${streak} 回連続しています（前回の実行が終わらない・ロック残留の疑い）`)
+  }
+
+  if (Number.isFinite(lastTickMs) && nowMs - lastTickMs >= GAS_STALE_MIN * 60 * 1000) {
+    out.push(`▲ 集約GAS: 台帳の更新が止まっています（最終 ${lastTickRaw}）`)
+  }
+  return out
 }
 
 // ---------------------------------------------------------------------
@@ -841,6 +880,9 @@ async function main() {
     process.exit(1)
   }
   console.log(`集約GAS: ver ${ping.ver} / 取込済み ${ping.ingestedDays} 日 / lastTick ${ping.lastTick || '不明'}`)
+  // 集約GAS側の異常（取込失敗・ロック競合・台帳停止）は知らせるだけで取込は続ける（終了コードも変えない）
+  const gasWarnings = gasHealthWarnings(ping)
+  for (const w of gasWarnings) console.log(w)
 
   const db = new Client({ connectionString: DB_URL, application_name: 'care-log-import' })
   try {
@@ -855,6 +897,7 @@ async function main() {
     startedAt: new Date().toISOString(),
     mode: args.execute ? 'execute' : 'dry-run',
     gasVer: ping.ver,
+    gasWarnings,
     windows: [],
     days: {}, // day -> { events: counts, measures: counts }
     unmatchedNames: new Map(),
@@ -1240,6 +1283,13 @@ function renderMd(report, totals) {
   L.push(`- 実行: ${report.startedAt} 〜 ${report.finishedAt}`)
   L.push(`- 集約GAS: ver ${report.gasVer}`)
   L.push('')
+  const gasWarnings = report.gasWarnings ?? []
+  if (gasWarnings.length > 0) {
+    L.push('## 集約GASの状態')
+    L.push('')
+    for (const w of gasWarnings) L.push(`- ${w}`)
+    L.push('')
+  }
   L.push('## 合計')
   L.push('')
   L.push('| 系列 | 対象 | 追加 | 更新 | 変更なし等 | アプリ入力保護 | 照合不能 |')

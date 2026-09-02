@@ -14,8 +14,9 @@
 //   ・更新は rev 照合（.eq('rev', rev)）。0行 = 競合 → 'conflict' を返し、呼び出し側の入力は消さない。
 //   ・通信失敗・認証切れの書込は永続キュー（localStorage cl_sendQueue）へ退避し 'queued' を返す。
 //     キューから消すのは「サーバーに載ったことを観測できた時」だけ（multi-device-sync 原則6・8）。
-//     業務データを置く localStorage は cl_sendQueue / cl_draftNote の2キーだけ。読めなくなった
-//     キューの原文も別キーを作らず cl_sendQueue の中（brokenRaw）へ畳んで保持する。
+//     業務データを置く localStorage は cl_sendQueue / cl_draftNote / cl_dailyDraft:<日付> の
+//     3キーだけ（cl_dailyDraft は日報の書きかけ＝2026-09-02 追加。24時間で失効させる）。読めなく
+//     なったキューの原文も別キーを作らず cl_sendQueue の中（brokenRaw）へ畳んで保持する。
 //   ・console に応答本文・氏名・記録本文を出さない（件数など非個人情報のみ）。
 //
 // 設計根拠: docs/design/db-design.md §2（RPC timeline_chunk・索引）／§5（書込・同期）、
@@ -532,15 +533,19 @@ function normalizeImportDay(row: unknown): ImportDay | null {
 // 保持するのは resident_id・日付・数値・本文だけ（氏名は入れない）。
 // ui-design §6.5「保持必須・成功で即削除」＋ multi-device-sync 原則8「消去は保全ゲートの後ろ」。
 
+/** insert / update をそのまま流す業務表（列の並び・rev 照合の作法が共通） */
 type QueueTable = 'vitals' | 'meals' | 'fluid_intake' | 'notes' | 'outings'
 
-interface QueueOp {
+/**
+ * 上の5表とは書き方が違う退避先（rev を持たない・差分計算が要る・1列だけ書く）。
+ * QueueTable は広げない＝insert/update の経路にこれらの表が紛れ込まないよう型で分ける。
+ */
+type ExtraQueueTable = 'note_reads' | 'attendance' | 'residents'
+
+/** 退避 op に共通の管理項目（表・種別ごとの違いは下の4つの形が持つ） */
+interface QueueOpBase {
   qid: string
-  table: QueueTable
-  kind: 'insert' | 'update'
   payload: Record<string, unknown>
-  rowId?: number
-  rev?: number
   at: number
   tries: number
   nextAt: number
@@ -553,6 +558,36 @@ interface QueueOp {
    */
   sending?: boolean
 }
+
+/** 業務表への insert / update（従来からある形。localStorage の旧データもこれ） */
+interface RowQueueOp extends QueueOpBase {
+  table: QueueTable
+  kind: 'insert' | 'update'
+  rowId?: number
+  rev?: number
+}
+
+/** 上の5表以外への退避（表は ExtraQueueTable のいずれか。kind と1対1で対応させる） */
+interface ExtraQueueOp<T extends ExtraQueueTable> extends QueueOpBase {
+  table: T
+}
+
+/** 既読の付与（note_reads への insert。23505 は「既に既読」＝成功と同じ） */
+interface ReadQueueOp extends ExtraQueueOp<'note_reads'> {
+  kind: 'read'
+}
+
+/** 出勤者の登録（送信時にサーバー現況を読み直して差分を計算する。スナップショットを流し込まない） */
+interface AttendanceQueueOp extends ExtraQueueOp<'attendance'> {
+  kind: 'attendance'
+}
+
+/** 申し送りでの表示名（residents.note_alias の1列だけを書く。rev 照合なし） */
+interface AliasQueueOp extends ExtraQueueOp<'residents'> {
+  kind: 'alias'
+}
+
+type QueueOp = RowQueueOp | ReadQueueOp | AttendanceQueueOp | AliasQueueOp
 
 const QUEUE_TABLES: readonly QueueTable[] = ['vitals', 'meals', 'fluid_intake', 'notes', 'outings']
 
@@ -582,26 +617,36 @@ let flushing = false
 function normalizeQueueOp(row: unknown): QueueOp | null {
   const r = asRecord(row)
   if (!r) return null
-  const table = oneOf(r.table, QUEUE_TABLES)
-  const kind = r.kind === 'insert' || r.kind === 'update' ? r.kind : null
   const payload = asRecord(r.payload)
-  if (table === null || kind === null || payload === null) return null
-  const op: QueueOp = {
+  if (payload === null) return null
+  const base: QueueOpBase = {
     qid: str(r.qid) ?? `q${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    table,
-    kind,
     payload,
     at: num(r.at) ?? Date.now(),
     tries: num(r.tries) ?? 0,
     nextAt: num(r.nextAt) ?? 0,
   }
-  const rowId = idNum(r.rowId)
-  if (rowId !== null) op.rowId = rowId
-  const rev = num(r.rev)
-  if (rev !== null) op.rev = rev
-  if (r.blocked === 'conflict' || r.blocked === 'rejected') op.blocked = r.blocked
-  if (kind === 'update' && (op.rowId === undefined || op.rev === undefined)) return null
-  return op
+  if (r.blocked === 'conflict' || r.blocked === 'rejected') base.blocked = r.blocked
+
+  // 従来からある形（業務表への insert / update）。旧版が書いた値もそのまま読める
+  if (r.kind === 'insert' || r.kind === 'update') {
+    const table = oneOf(r.table, QUEUE_TABLES)
+    if (table === null) return null
+    const op: RowQueueOp = { ...base, table, kind: r.kind }
+    const rowId = idNum(r.rowId)
+    if (rowId !== null) op.rowId = rowId
+    const rev = num(r.rev)
+    if (rev !== null) op.rev = rev
+    if (r.kind === 'update' && (op.rowId === undefined || op.rev === undefined)) return null
+    return op
+  }
+  // 追加した種別は kind と table の組が合っている時だけ受ける（取り違えた op を送らない）
+  if (r.kind === 'read' && r.table === 'note_reads') return { ...base, table: 'note_reads', kind: 'read' }
+  if (r.kind === 'attendance' && r.table === 'attendance') {
+    return { ...base, table: 'attendance', kind: 'attendance' }
+  }
+  if (r.kind === 'alias' && r.table === 'residents') return { ...base, table: 'residents', kind: 'alias' }
+  return null
 }
 
 /** 端末側で作る一意キー。送信キューの qid と、insert の冪等キー client_key に同じ値を使う */
@@ -740,7 +785,7 @@ function persistQueue(): void {
   if (typeof localStorage !== 'undefined') {
     try {
       // 解釈できなかった原文も同じキーの中に持つ（業務データを置く localStorage は
-      // cl_sendQueue / cl_draftNote の2キーだけという契約を守るため）。
+      // cl_sendQueue / cl_draftNote / cl_dailyDraft:<日付> の3キーだけという契約を守るため）。
       // 1回の setItem なので「キューは書けたが原文が消えた」という中途半端な状態を作らない
       const box: QueueFile = { ops: mergeForPersist() }
       if (queueBrokenRaw !== null) box.brokenRaw = queueBrokenRaw
@@ -829,7 +874,17 @@ export function queueSubscribe(cb: (n: number) => void): () => void {
   }
 }
 
-type PendingOp = Omit<QueueOp, 'qid' | 'at' | 'tries' | 'nextAt'>
+/**
+ * 退避を積む時に渡す形（管理項目はここで採番・付与する）。
+ * Omit を union へ直接掛けると共通の項目しか残らない（rowId / rev が落ちる）ので、
+ * 形ごとに掛けてから union にする。
+ */
+type Pending<T> = Omit<T, 'qid' | 'at' | 'tries' | 'nextAt'>
+type PendingOp =
+  | Pending<RowQueueOp>
+  | Pending<ReadQueueOp>
+  | Pending<AttendanceQueueOp>
+  | Pending<AliasQueueOp>
 
 function sameKey(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
   const keys = Object.keys(a)
@@ -844,15 +899,41 @@ function sameKey(a: Record<string, unknown>, b: Record<string, unknown>): boolea
  * 自動再送を止めた op（blocked）は裁定待ちなので統合先にしない。
  * 送信中の op（sending）も統合先にしない。リクエストは差し替え前のペイロードで既に出ており、
  * 応答が 'sent' になると op ごと消えるため、重ねた入力が観測されないまま消える（原則6・8）。
+ *
+ * 追加した種別（既読・出勤者・表示名）も同じ対象を指す op を1件にまとめる
+ * ・既読 … 同じ（申し送り, 職員）は重複させない（何度押しても1件）
+ * ・表示名 … 同じ利用者なら後勝ちで1件
+ * ・出勤者 … 同じ日なら後勝ちで1件（古いスナップショットを積み残さない）
  */
 function findMergeTarget(op: PendingOp): QueueOp | null {
   for (const q of queue) {
     if (q.blocked !== undefined || q.sending === true) continue
     if (q.table !== op.table || q.kind !== op.kind) continue
     if (op.kind === 'update') {
-      if (q.rowId !== undefined && q.rowId === op.rowId) return q
+      if (q.kind === 'update' && q.rowId !== undefined && q.rowId === op.rowId) return q
       continue
     }
+    if (op.kind === 'read') {
+      if (q.kind !== 'read') continue
+      const note = idNum(op.payload.note_id)
+      const staff = idNum(op.payload.staff_id)
+      if (note === null || staff === null) continue
+      if (idNum(q.payload.note_id) === note && idNum(q.payload.staff_id) === staff) return q
+      continue
+    }
+    if (op.kind === 'alias') {
+      if (q.kind !== 'alias') continue
+      const id = idNum(op.payload.id)
+      if (id !== null && idNum(q.payload.id) === id) return q
+      continue
+    }
+    if (op.kind === 'attendance') {
+      if (q.kind !== 'attendance') continue
+      const day = dateStr(op.payload.day)
+      if (day !== null && dateStr(q.payload.day) === day) return q
+      continue
+    }
+    if (q.kind !== 'insert') continue
     // insert は自然キー（部分unique索引）が一致する時だけ同じ行を指す。
     // キーを持たない表（水分・申し送り・外出）は1タップ＝1行なので統合しない
     const a = conflictKeyOf(op.table, op.payload)
@@ -880,11 +961,37 @@ function mergePayload(
   return out
 }
 
+/**
+ * 出勤者の baseline（この端末が観測していた行）を重ねる。
+ * 後勝ちで差し替えると、先に外した職員が baseline から抜けて再送時に非表示にできず、
+ * 「外したはずの人」が次の取り直しで無言のうちに戻る（原則5: 無言消失を作らない）。
+ * baseline は「観測した行の集合」なので、和集合が本来の意味と一致する。
+ */
+function mergeBaseline(a: unknown, b: unknown): number[] {
+  const out: number[] = []
+  const seen = new Set<number>()
+  for (const src of [a, b]) {
+    if (!Array.isArray(src)) continue
+    for (const v of src) {
+      const id = idNum(v)
+      if (id === null || seen.has(id)) continue
+      seen.add(id)
+      out.push(id)
+    }
+  }
+  return out
+}
+
 function enqueue(op: PendingOp): Queued {
   const target = findMergeTarget(op)
   if (target !== null) {
+    const prevPayload = target.payload
     // rev は「最初に観測した値」を保つ（統合先の op はまだ1度もサーバーへ載っていない）
     target.payload = mergePayload(target.payload, op.payload, op.kind)
+    // 出勤者だけは baseline を後勝ちにしない（統合前の取り消しを取りこぼさない）
+    if (op.kind === 'attendance') {
+      target.payload.baseline = mergeBaseline(prevPayload.baseline, op.payload.baseline)
+    }
     target.tries = 0
     target.nextAt = 0 // 新しい入力が乗ったので待ち時間を置かずに次の再送で送る
   } else {
@@ -987,6 +1094,11 @@ async function sendDueOps(force: boolean): Promise<void> {
 type SendResult = 'sent' | 'retry' | 'conflict' | 'rejected'
 
 async function sendQueuedOp(sb: SupabaseClient, op: QueueOp): Promise<SendResult> {
+  // 業務表の insert / update とは書き方が違う種別を先に振り分ける（以降 op は業務表の op）
+  if (op.kind === 'read') return sendQueuedRead(sb, op)
+  if (op.kind === 'attendance') return sendQueuedAttendance(sb, op)
+  if (op.kind === 'alias') return sendQueuedAlias(sb, op)
+
   const cols = colsOf(op.table)
   if (op.kind === 'insert') {
     const res = (await sb.from(op.table).insert(op.payload).select(cols).maybeSingle()) as Res<unknown>
@@ -1046,6 +1158,82 @@ async function sendQueuedOp(sb: SupabaseClient, op: QueueOp): Promise<SendResult
     return isTransient(res) ? 'retry' : 'rejected'
   }
   return res.data === null ? 'conflict' : 'sent'
+}
+
+/**
+ * 退避してあった既読を送る。23505（他の経路で既に既読になっていた）は成功と同じ扱い。
+ * note_reads は rev も deleted_at も持たない表なので、insert 1文だけで完結する。
+ */
+async function sendQueuedRead(sb: SupabaseClient, op: ReadQueueOp): Promise<SendResult> {
+  const noteId = idNum(op.payload.note_id)
+  const staffId = idNum(op.payload.staff_id)
+  if (noteId === null || staffId === null) return 'rejected' // 送り先を特定できない
+  const res = (await sb
+    .from('note_reads')
+    .insert({ note_id: noteId, staff_id: staffId })
+    .select('note_id')
+    .maybeSingle()) as Res<unknown>
+  if (res.error === null) return 'sent'
+  if (isUniqueViolation(res)) return 'sent' // 既に既読＝目的は達している
+  if (isAuthFail(res)) {
+    fireAuthExpired()
+    return 'retry'
+  }
+  return isTransient(res) ? 'retry' : 'rejected'
+}
+
+/**
+ * 退避してあった出勤者の登録を送る。**退避した一覧をそのまま流し込まない**——
+ * 送信時にサーバーの現況を読み直し、saveAttendance と同じ差分計算をやり直す。
+ * そうしないと、オフラインの間に他端末が足した出勤者を古いスナップショットで消してしまう
+ * （multi-device-sync 原則5: 無言消失の禁止）。非表示にしてよいのは baseline の職員だけ。
+ */
+async function sendQueuedAttendance(sb: SupabaseClient, op: AttendanceQueueOp): Promise<SendResult> {
+  const day = dateStr(op.payload.day)
+  // rows が配列として読めない退避は「全員取り消し」に化けうるので送らない（消える側へ倒さない）
+  if (day === null || !Array.isArray(op.payload.rows)) return 'rejected'
+  const rows = op.payload.rows as { staff_id: number; role: Attendance['role']; sort: number }[]
+  const baseline: number[] = []
+  if (Array.isArray(op.payload.baseline)) {
+    for (const id of op.payload.baseline) {
+      const staffId = idNum(id)
+      if (staffId !== null) baseline.push(staffId)
+    }
+  }
+  try {
+    await applyAttendance(sb, day, rows, baseline)
+    return 'sent'
+  } catch (e) {
+    if (e instanceof DbError) return e.kind === 'network' || e.kind === 'auth' ? 'retry' : 'rejected'
+    return 'rejected'
+  }
+}
+
+/**
+ * 退避してあった「申し送りでの表示名」を送る。書くのは note_alias の1列だけ（rev 照合なし）。
+ * 対象の利用者が居なくなっていた場合（0行）も送信自体は受理されているので 'sent' にする
+ * ——再送しても永久に0行のままで、未送信として数え続ける意味が無いため。
+ */
+async function sendQueuedAlias(sb: SupabaseClient, op: AliasQueueOp): Promise<SendResult> {
+  const id = idNum(op.payload.id)
+  if (id === null) return 'rejected'
+  // 文字列（設定する）と null（設定を外す）だけを送る。読めない値を null として送ると
+  // 付けてあった表示名を無言で消してしまうため、その退避は送らない（原則4・5）
+  const raw = op.payload.note_alias
+  if (raw !== null && typeof raw !== 'string') return 'rejected'
+  const alias = str(raw)
+  const res = (await sb
+    .from('residents')
+    .update({ note_alias: alias })
+    .eq('id', id)
+    .select('id')
+    .maybeSingle()) as Res<unknown>
+  if (res.error === null) return 'sent'
+  if (isAuthFail(res)) {
+    fireAuthExpired()
+    return 'retry'
+  }
+  return isTransient(res) ? 'retry' : 'rejected'
 }
 
 function colsOf(table: QueueTable): string {
@@ -1300,17 +1488,28 @@ export async function fetchAllResidents(): Promise<Resident[]> {
  * ・この列**だけ**を書く（他の列に触れない＝マスタ同期と喧嘩しない。原則12の専用書き込み分離）
  * ・空文字は保存しない。呼ぶ側が types.ts の validateNoteAlias を通してから渡すこと
  * ・入力解禁フラグでは止めない。記録ではなく表示の設定で、並走中こそ整えておく必要があるため
+ * ・通信できない・ログインが切れている時は永続キューへ退避して 'queued' を返す
+ *   （同じ利用者の退避は後勝ちで1件にまとまる＝古い名前が後から復活しない）
  */
-export async function setResidentNoteAlias(id: number, alias: string | null): Promise<Resident> {
+export async function setResidentNoteAlias(id: number, alias: string | null): Promise<Resident | Queued> {
   const sb = await getClient()
-  const value = alias === null ? null : alias.trim()
+  const trimmed = alias === null ? null : alias.trim()
+  const value = trimmed === '' ? null : trimmed
   const res = (await sb
     .from('residents')
-    .update({ note_alias: value === '' ? null : value })
+    .update({ note_alias: value })
     .eq('id', id)
     .select(RESIDENT_COLS)
     .maybeSingle()) as Res<unknown>
-  if (res.error !== null) throw writeError(res)
+  if (res.error !== null) {
+    const payload = { id, note_alias: value }
+    if (isAuthFail(res)) {
+      fireAuthExpired()
+      return enqueue({ table: 'residents', kind: 'alias', payload })
+    }
+    if (isTransient(res)) return enqueue({ table: 'residents', kind: 'alias', payload })
+    throw writeError(res)
+  }
   const row = normalizeResident(res.data)
   if (row === null) throw new DbError('server', MSG.broken)
   return row
@@ -1676,14 +1875,19 @@ async function updateRow<T>(
   return row
 }
 
-/** rev 照合つきの部分更新。キューへは載せない（削除・帰着記入など、最新の rev が要る操作） */
+/**
+ * rev 照合つきの部分更新（削除・帰着記入・継続終了など、最新の rev が要る操作）。
+ * 通信できない・ログインが切れている時は永続キューへ退避して 'queued' を返す（電波が戻れば自動で送る）。
+ * 退避しても rev は観測した値のまま送るので、その間に他端末が同じ行を更新していれば競合として
+ * キューに残る＝古い値で無言に上書きしない（multi-device-sync 原則5・6）。
+ */
 async function updateNow<T>(
   table: QueueTable,
   id: number,
   rev: number,
   patch: Record<string, unknown>,
   normalize: (row: unknown) => T | null,
-): Promise<T | Conflict> {
+): Promise<T | Conflict | Queued> {
   await assertWritable()
   const sb = await getClient()
   const res = (await sb
@@ -1694,26 +1898,44 @@ async function updateNow<T>(
     .is('deleted_at', null)
     .select(colsOf(table))
     .maybeSingle()) as Res<unknown>
-  if (res.error !== null) throw writeError(res)
+  if (res.error !== null) {
+    if (isAuthFail(res)) {
+      fireAuthExpired()
+      return enqueue({ table, kind: 'update', payload: patch, rowId: id, rev })
+    }
+    if (isTransient(res)) return enqueue({ table, kind: 'update', payload: patch, rowId: id, rev })
+    throw writeError(res)
+  }
   if (res.data === null) return CONFLICT
   const row = normalize(res.data)
   if (row === null) throw new DbError('server', MSG.broken)
   return row
 }
 
-/** soft delete（物理削除はしない）。rev 照合で 0行 なら competing 更新＝conflict */
-async function softDelete(table: QueueTable, id: number, rev: number): Promise<true | Conflict> {
+/**
+ * soft delete（物理削除はしない）。rev 照合で 0行 なら competing 更新＝conflict。
+ * 通信できない・ログインが切れている時は deleted_at を書く update として退避する（'queued'）。
+ */
+async function softDelete(table: QueueTable, id: number, rev: number): Promise<true | Conflict | Queued> {
   await assertWritable()
   const sb = await getClient()
+  const payload = { deleted_at: new Date().toISOString() }
   const res = (await sb
     .from(table)
-    .update({ deleted_at: new Date().toISOString() })
+    .update(payload)
     .eq('id', id)
     .eq('rev', rev)
     .is('deleted_at', null)
     .select('id')
     .maybeSingle()) as Res<unknown>
-  if (res.error !== null) throw writeError(res)
+  if (res.error !== null) {
+    if (isAuthFail(res)) {
+      fireAuthExpired()
+      return enqueue({ table, kind: 'update', payload, rowId: id, rev })
+    }
+    if (isTransient(res)) return enqueue({ table, kind: 'update', payload, rowId: id, rev })
+    throw writeError(res)
+  }
   return res.data === null ? CONFLICT : true
 }
 
@@ -1765,7 +1987,7 @@ export async function insertFluid(f: Omit<FluidIntake, 'id' | 'rev'>): Promise<F
   return insertRow('fluid_intake', withClientKey(f as unknown as Record<string, unknown>), normalizeFluid)
 }
 
-export async function softDeleteFluid(id: number, rev: number): Promise<true | Conflict> {
+export async function softDeleteFluid(id: number, rev: number): Promise<true | Conflict | Queued> {
   return softDelete('fluid_intake', id, rev)
 }
 
@@ -1790,17 +2012,23 @@ export async function updateNote(
   return updateRow('notes', id, rev, clean, normalizeNote)
 }
 
-export async function softDeleteNote(id: number, rev: number): Promise<true | Conflict> {
+export async function softDeleteNote(id: number, rev: number): Promise<true | Conflict | Queued> {
   return softDelete('notes', id, rev)
 }
 
 /**
- * 継続申し送りを終了する。ended_at だけを書く部分更新。
+ * 継続申し送りを終了する。ended_at と ended_by（終了させた職員）だけを書く部分更新。
  * ongoing フラグは触らない（過去日のピン留めは「その日時点で有効だった継続」＝
  * note_on ≦ 対象日 ≦ ended_at で判定する契約。qa-verification [low/both] の裁定）。
+ * endedBy は操作者が分からない場合 null（列は 0001_init.sql から null 許容）。
  */
-export async function endOngoingNote(id: number, rev: number): Promise<Note | Conflict> {
-  return updateNow('notes', id, rev, { ended_at: new Date().toISOString() }, normalizeNote)
+export async function endOngoingNote(
+  id: number,
+  rev: number,
+  endedBy: number | null,
+): Promise<Note | Conflict | Queued> {
+  const patch = { ended_at: new Date().toISOString(), ended_by: idNum(endedBy) }
+  return updateNow('notes', id, rev, patch, normalizeNote)
 }
 
 // ── 外出・外泊 ───────────────────────────────────────────────────────────────
@@ -1815,7 +2043,7 @@ export async function setOutingEnd(
   rev: number,
   endOn: string,
   endAt: string | null,
-): Promise<Outing | Conflict> {
+): Promise<Outing | Conflict | Queued> {
   return updateNow('outings', id, rev, { end_on: endOn, end_at: endAt }, normalizeOuting)
 }
 
@@ -1825,6 +2053,10 @@ export async function setOutingEnd(
  * 既読を付ける。明示操作（本文展開タップ・既読ボタン）からのみ呼ぶこと
  * （multi-device-sync 原則9: 読み取り経路から書かない）。
  * 閲覧機能なので入力解禁フラグの封鎖対象にしない（並走期間も閲覧は全機能有効）。
+ *
+ * 通信できない・ログインが切れている時は永続キューへ退避して正常終了する（電波が戻れば自動で送る）。
+ * 既読は「読んだ」という取り消しのきかない事実で、同じ（申し送り, 職員）は何度送っても1件に
+ * 収束する（23505 は成功と同じ扱い）ため、退避しても二重登録にならない。
  */
 export async function markRead(noteId: number, staffId: number): Promise<void> {
   const sb = await getClient()
@@ -1835,16 +2067,54 @@ export async function markRead(noteId: number, staffId: number): Promise<void> {
     .maybeSingle()) as Res<unknown>
   if (res.error === null) return
   if (isUniqueViolation(res)) return // 既に既読。成功と同じ
+  const payload = { note_id: noteId, staff_id: staffId }
+  if (isAuthFail(res)) {
+    fireAuthExpired()
+    enqueue({ table: 'note_reads', kind: 'read', payload })
+    return
+  }
+  if (isTransient(res)) {
+    enqueue({ table: 'note_reads', kind: 'read', payload })
+    return
+  }
   throw writeError(res)
 }
 
 // ── Realtime ─────────────────────────────────────────────────────────────────
 
+/** 変更通知の付帯情報（第2引数）。row が無い＝行を特定できない通知＝呼び出し側は安全側に倒す */
+export interface ChangeInfo {
+  /** 'INSERT' | 'UPDATE' | 'DELETE'（取り出せなければ空文字） */
+  event: string
+  /** 変更後の行（DELETE と、行を取り出せなかった時は null） */
+  row: Record<string, unknown> | null
+}
+
+/** 中身の無いレコード（DELETE の new のような {}）は「行が無い」として扱う */
+function payloadRow(v: unknown): Record<string, unknown> | null {
+  const r = asRecord(v)
+  return r === null || Object.keys(r).length === 0 ? null : r
+}
+
 /**
- * 変更通知の購読。どの表が変わったかだけを渡す（表示ウィンドウ内かの判断は呼び出し側）。
+ * Realtime の通知から、呼び出し側が「表示中の期間の行か」を判定するための情報を取り出す。
+ * DELETE は行を渡さない（既定の replica identity では主キーしか届かず、日付列で絞れないため。
+ * 行を特定できないまま期間外と判定して取り直しを飛ばすより、安全側＝取り直す側へ倒す）。
+ */
+function changeInfoOf(payload: unknown): ChangeInfo {
+  const p = asRecord(payload)
+  if (p === null) return { event: '', row: null }
+  const event = str(p.eventType) ?? ''
+  return { event, row: event === 'DELETE' ? null : payloadRow(p.new) ?? payloadRow(p.old) }
+}
+
+/**
+ * 変更通知の購読。どの表が変わったかと、可能なら変更のあった行（info）を渡す。
+ * 表示ウィンドウ内かの判断は呼び出し側（info.row が無い時は「分からない」＝取り直す側に倒すこと）。
+ * 第2引数は任意なので、従来どおり第1引数だけを使う購読はそのまま動く。
  * 接続できない場合は購読しないだけで、画面は手動更新で成立する。
  */
-export function subscribeChanges(cb: (table: string) => void): () => void {
+export function subscribeChanges(cb: (table: string, info?: ChangeInfo) => void): () => void {
   let cancelled = false
   let client: SupabaseClient | null = null
   let channel: ReturnType<SupabaseClient['channel']> | null = null
@@ -1856,8 +2126,8 @@ export function subscribeChanges(cb: (table: string) => void): () => void {
       client = sb
       let ch = sb.channel(`cl_changes_${Math.random().toString(36).slice(2, 10)}`)
       for (const table of REALTIME_TABLES) {
-        ch = ch.on('postgres_changes', { event: '*', schema: 'public', table }, () => {
-          if (!cancelled) cb(table)
+        ch = ch.on('postgres_changes', { event: '*', schema: 'public', table }, (payload: unknown) => {
+          if (!cancelled) cb(table, changeInfoOf(payload))
         })
       }
       channel = ch
@@ -2240,8 +2510,9 @@ export async function insertVitalKind(v: Omit<Vital, 'id' | 'rev'>): Promise<Vit
  *
  * rev 列を持たない表なので rev 照合はできない。競合の粒度は (day, staff_id) の1行単位で、
  * 同じ職員の役割・並び順を2端末が同時に変えた場合だけ後勝ちになる。
- * 通信失敗は永続キューに載せない（退避したスナップショットを後から流すと、その間に他端末が
- * 入れた出勤者を無言で消してしまうため）。失敗は理由を返し、画面の入力はそのまま残す。
+ * **1件も書く前**の通信失敗・認証切れは永続キューへ退避して 'queued' を返す。退避した op は
+ * 送信時にサーバー現況を読み直して差分を計算し直す（スナップショットを流し込まないので、
+ * オフラインの間に他端末が入れた出勤者を無言で消さない）。
  * **1件でも書き込んだ後の失敗は DbError.partial=true** で返す（呼び出し側は画面を
  * 保存前へ巻き戻さず、読み直しを促す＝載った分を「保存されていない」と見せない）。
  *
@@ -2254,10 +2525,37 @@ export async function saveAttendance(
   dayIso: string,
   rows: { staff_id: number; role: 'manager' | 'staff'; sort: number }[],
   options: { baseline: number[] },
-): Promise<void> {
+): Promise<void | Queued> {
   assertDay(dayIso)
   await assertWritable()
+  const sb = await getClient()
+  const baseline = options?.baseline ?? []
+  try {
+    await applyAttendance(sb, dayIso, rows, baseline)
+  } catch (e) {
+    // 1件も書けていない通信失敗・認証切れだけ退避する（書けた後は partial のまま throw）
+    if (e instanceof DbError && !e.partial && (e.kind === 'network' || e.kind === 'auth')) {
+      return enqueue({
+        table: 'attendance',
+        kind: 'attendance',
+        payload: { day: dayIso, rows, baseline },
+      })
+    }
+    throw e
+  }
+}
 
+/**
+ * 出勤者の差分計算と書き込みの本体（画面からの保存と、退避 op の再送の両方がここを通る）。
+ * 入力解禁フラグの確認・日付の検査は呼び出し側（saveAttendance）が済ませている前提。
+ * サーバーの現況をその場で読み直すので、退避した古い一覧をそのまま流し込むことにはならない。
+ */
+async function applyAttendance(
+  sb: SupabaseClient,
+  dayIso: string,
+  rows: { staff_id: number; role: 'manager' | 'staff'; sort: number }[],
+  baselineIds: number[],
+): Promise<void> {
   // 入力の正規化（同じ職員が2回来たら先勝ち＝主キー day+staff_id に合わせる）
   const wanted = new Map<number, { role: Attendance['role']; sort: number }>()
   rows.forEach((row, i) => {
@@ -2268,7 +2566,6 @@ export async function saveAttendance(
     wanted.set(staffId, { role: oneOf(row.role, ATTENDANCE_ROLES) ?? 'staff', sort })
   })
 
-  const sb = await getClient()
   const existing = await fetchAttendanceRows(sb, dayIso)
 
   const toInsert: Attendance[] = []
@@ -2286,7 +2583,7 @@ export async function saveAttendance(
   // baseline は必須引数だが、型検査を通らない経路から呼ばれても落ちないよう実行時は空配列へ倒す
   // （＝1件も取り消さない＝消える側ではなく残る側へ倒す）
   const baseline = new Set<number>()
-  for (const id of options?.baseline ?? []) {
+  for (const id of Array.isArray(baselineIds) ? baselineIds : []) {
     const staffId = idNum(id)
     if (staffId !== null) baseline.add(staffId)
   }

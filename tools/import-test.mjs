@@ -19,6 +19,7 @@
 //    8. 移行元の編集・削除・追加への追従（update / soft delete / insert）
 //    9. after16 が後から取れた日の再判定（false 確定でない行だけが直る）
 //   10. 移行元に戻ってきた行の復活（取込が消した行だけ戻す。職員が消した記録は戻さない）
+//   11. 集約GASの失敗情報（ping）の検査と警告（取込は止めず終了コードも変えない）
 // =====================================================================
 
 import { spawnSync, spawn } from 'node:child_process'
@@ -283,6 +284,33 @@ async function main() {
       const k4 = await one(`select deleted_at from notes where import_key = 'ev:k4'`)
       ok('職員が消した記録は何度実行しても戻らない', k4.deleted_at != null)
     }
+
+    console.log('── 10. 集約GASの失敗情報の警告 ──')
+    // ping 応答へ制御口（___ping）から失敗情報を差し込み、警告が1行出ることを確かめる。
+    // 取込は止めない仕様なので、いずれもドライラン（--execute なし）で終了コード0のまま。
+    await fetch(`${fx.url}?action=___ping&fails=${encodeURIComponent('2026-06-02:source_not_found')}`)
+    r = await runImporter(env, [...argsBase])
+    ok('直近の取込の失敗が警告に出る', r.stdout.includes('▲ 集約GAS: 直近の取込で失敗があります'), r.stdout)
+    ok('警告が出ても終了コードは0のまま', r.status === 0, r.stdout + r.stderr)
+
+    await fetch(`${fx.url}?action=___ping&reset=1`)
+    await fetch(`${fx.url}?action=___ping&skippedStreak=3`)
+    r = await runImporter(env, [...argsBase])
+    ok('ロック競合の連続回数が警告に出る', r.stdout.includes('ロック競合が 3 回連続'), r.stdout)
+
+    await fetch(`${fx.url}?action=___ping&reset=1`)
+    {
+      // skipped > lastTick ＝「前回の実行が終わらず今回が飛んだ」形
+      const lastTickIso = new Date().toISOString()
+      const skippedIso = new Date(Date.now() + 60 * 1000).toISOString()
+      await fetch(`${fx.url}?action=___ping&skipped=${encodeURIComponent(skippedIso)}&lastTick=${encodeURIComponent(lastTickIso)}`)
+    }
+    r = await runImporter(env, [...argsBase])
+    ok('ロック競合で飛んだことが警告に出る', r.stdout.includes('ロック競合で飛びました'), r.stdout)
+
+    await fetch(`${fx.url}?action=___ping&reset=1`)
+    r = await runImporter(env, [...argsBase])
+    ok('異常が無い時は警告を出さない', !r.stdout.includes('▲ 集約GAS'), r.stdout)
 
     // 報告ファイルが書かれていること（氏名を含むのでリポジトリ外に置く仕様）
     const reports = readdirSync(reportDir).filter((f) => f.endsWith('.md'))

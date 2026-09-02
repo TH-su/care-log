@@ -338,6 +338,15 @@ export const LS = {
   sheetDays: 'cl_sheetDays',
   /** 一覧で表示中のフロア（1/2/all） */
   sheetFloor: 'cl_sheetFloor',
+  /**
+   * 日報のインライン下書き（2026-09-02 追加。データ保護レイヤー＝draftNote と同じ例外扱い）。
+   * 実際のキーは `${dailyDraft}:${YYYY-MM-DD}`（日ごと）。
+   * 保持するのは 利用者ID（数値）・記入者ID・色・未送信の文字だけで、**氏名は持たない**。
+   * 24時間で失効し、保存済み・送信待ちに退避した行は持たない（二重登録を作らない）。
+   * 以前は React state だけだったため、対象・記入者・色を選んで本文を打つ前に
+   * リロードすると跡形もなく消えていた（保存経路の監査で判明）。
+   */
+  dailyDraft: 'cl_dailyDraft',
 } as const
 
 /**

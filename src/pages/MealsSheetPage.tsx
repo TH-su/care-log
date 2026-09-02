@@ -7,6 +7,8 @@
 //   update ペイロードは編集した列だけ（部分更新・空上書きをしない）
 // - 競合（conflict）でも入力を消さない。表示中の値は残したまま「最新を読み込む」を促す
 // - 送信できなかった分は db.ts の永続キューに退避され、この画面は「⚠」と表示するだけ（消さない）
+// - 他端末の変更は Realtime（subscribeChanges）で受け取り、表示期間に関わる分だけ取り直す。
+//   自分の保存直後の通知と、保存の応答待ちが残っている間は取り直さない（控えの消し込みと交差させない）
 // - 入力解禁フラグ（native_input_enabled）はこの画面を開くたびに取り直す。取得できるまでは入力させない
 // - 欠食（外出・入院・拒食）を選んでも主食・副食の記録値は消さない（表示だけ状態ラベルに切り替える）
 // - 実名・記録本文をコード・コメント・localStorage・console に書かない（表示は実行時の取得値のみ）
@@ -38,6 +40,7 @@ import {
   insertFluid,
   insertMeal,
   softDeleteFluid,
+  subscribeChanges,
   updateMeal,
 } from '../lib/db'
 import { getActorId, touchActivity } from '../lib/actor'
@@ -74,6 +77,20 @@ const FLOOR_OTHER = 'other'
 const FLOOR_ALL = 'all'
 /** 1日あたりの列数（朝主・朝副・昼主・昼副・夕主・夕副・水分） */
 const COLS_PER_DAY = 7
+
+/** 変更通知の連続受信をまとめる待ち時間（ミリ秒。useTimeline.ts と同値） */
+const REALTIME_DEBOUNCE_MS = 1500
+/** 自分の保存で出た通知を無視する時間（ミリ秒。DailySheetPage と同値） */
+const SELF_WRITE_MS = 3000
+/**
+ * 変更通知を合図にする表と、その日付列（表示期間の内か外かの判定に使う）。
+ * この画面が描くのは食事と水分だけなので、他の表（申し送り・出勤者など）の通知では取り直さない。
+ * db.ts の REALTIME_TABLES は7表を購読するため、表名で絞らないと関係ない更新でも取得が走る。
+ */
+const WATCHED_DAY_COL: Record<string, string | undefined> = {
+  meals: 'meal_on',
+  fluid_intake: 'taken_on',
+}
 
 /**
  * シートの寸法は sheet.css の CSS 変数を参照する（倍率 --sheet-zoom は変数側で解決済み）。
@@ -173,6 +190,9 @@ const HINT_OTHER = '画面上部の案内を確認してから、もう一度お
 
 // ── 型 ───────────────────────────────────────────────────────
 
+/** 変更通知が運ぶ行（db.ts の subscribeChanges が渡す形。渡されない場合もある） */
+type RowInfo = Record<string, unknown> | null
+
 type MealPatch = Partial<Pick<Meal, 'main_amount' | 'side_amount' | 'status'>>
 type AmountField = 'main_amount' | 'side_amount'
 type RowPhase = 'idle' | 'saving' | 'saved' | 'queued' | 'conflict' | 'error'
@@ -234,6 +254,27 @@ function parseAmount(raw: string): number | null | 'invalid' {
   if (!/^\d{1,2}$/.test(s)) return 'invalid'
   const n = Number(s)
   return n >= 0 && n <= AMOUNT_MAX ? n : 'invalid'
+}
+
+/**
+ * 変更通知の行が、いま表示している期間に関わるか。
+ * 行情報が無い（削除イベント・行情報を渡さない旧 db.ts など）ときは判定できないので
+ * 「関わる」に倒す＝取り直す（無言で取りこぼすより、余分に取り直す側へ寄せる）。
+ * 日付は 'YYYY-MM-DD' の辞書順で比較できる（先頭10文字だけを見る）。
+ */
+function inShownRange(
+  table: string,
+  row: RowInfo | undefined,
+  from: string,
+  to: string,
+): boolean {
+  if (!row) return true
+  const col = WATCHED_DAY_COL[table]
+  if (col === undefined) return true
+  const raw = row[col]
+  if (typeof raw !== 'string' || raw === '') return true
+  const day = raw.slice(0, 10)
+  return day >= from && day <= to
 }
 
 /** 'HH:MM'（端末ローカル時刻＝JST運用） */
@@ -670,6 +711,16 @@ export function MealsSheetPage({
   const fluidTargetRef = useRef<FluidTarget | null>(null)
   /** 入力できない理由に応じた「次にどうすればよいか」（保存処理から同期で読む） */
   const blockedHintRef = useRef<string>(HINT_OTHER)
+  /** 自分の書き込みで出た変更通知に反応しないための抑制窓（日報シートと同じ作法） */
+  const selfWriteRef = useRef(0)
+  /**
+   * 変更通知の判定・取り直しは ref 経由で行う（期間や取得関数が変わるたびに購読し直さないため）。
+   * 購読は画面を開いている間ずっと1本。
+   */
+  const rangeRef = useRef({ from: fromIso, to: toIso })
+  const loadRef = useRef<(opts?: { background?: boolean }) => Promise<void>>(async () => undefined)
+  /** 背景の取り直しをやり直す（購読 effect の schedule を入れる。購読が無い時は null） */
+  const retryRef = useRef<(() => void) | null>(null)
 
   useEffect(() => {
     canInputRef.current = canInput
@@ -678,6 +729,8 @@ export function MealsSheetPage({
     residentsPropRef.current = residentsProp
     editRef.current = edit
     fluidTargetRef.current = fluidTarget
+    rangeRef.current = { from: fromIso, to: toIso }
+    loadRef.current = load
     blockedHintRef.current = loading
       ? HINT_LOADING
       : !flagChecked
@@ -777,9 +830,15 @@ export function MealsSheetPage({
   }, [loadFlag])
 
   // ── 期間分の取得（利用者・食事・水分） ──
-  const load = useCallback(async () => {
+  const load = useCallback(async (opts?: { background?: boolean }) => {
     const gen = ++genRef.current
-    setLoading(true)
+    // 保存が割り込んだかどうかを見分けるための開始時刻（selfWriteRef は保存のたびに進む）
+    const startedAt = Date.now()
+    // 背景の取り直し（他端末の変更を受けた自動更新）では「読み込み中」にしない。
+    // loading を立てると canInput が落ち、その間に確定した入力が保存されずに閉じる＝値が消える
+    // （利用者が押した「最新」・期間送りは従来どおり読み込み中にして誤入力を防ぐ）
+    const background = opts?.background === true
+    if (!background) setLoading(true)
     setError(null)
     try {
       const fromProps = residentsPropRef.current
@@ -788,6 +847,14 @@ export function MealsSheetPage({
         fetchMealsSheet(fromIso, toIso),
       ])
       if (gen !== genRef.current || !aliveRef.current) return
+      // 取得の途中で自分の保存が入った＝この応答は保存前のサーバー値。
+      // そのまま描くと保存できた値が旧値に戻り、rev も古くなる（次の編集が競合になる）。
+      // 背景の取り直しは捨ててやり直す（利用者が押した「最新」はそのまま反映する）
+      if (background && selfWriteRef.current >= startedAt) {
+        const retry = retryRef.current
+        if (retry) retry()
+        return
+      }
 
       setResidents(asArray<Resident>(rs).filter((r) => r != null && r.active !== false))
 
@@ -818,7 +885,21 @@ export function MealsSheetPage({
       phasesRef.current = keepPhases
       setPhases(keepPhases)
       commitPending(keepPending)
-      commitUndo({})
+      // Undo（直前の水分追加の取り消し）は利用者が押した読み込み直し・期間変更でだけ捨てる。
+      // 背景の取り直しで消すと、押し間違えた ＋ml を戻す唯一の手段が黙って消える。
+      // 取り直した結果に行が残っているものだけ持ち越す（他端末で消された分は落とす）
+      if (background) {
+        const aliveRev = new Map(nextFluids.map((f) => [f.id, f.rev]))
+        const keptUndo: Record<string, { id: number; rev: number; ml: number }> = {}
+        for (const [k, u] of Object.entries(undoRef.current)) {
+          const rev = aliveRev.get(u.id)
+          // 取り直した rev で持ち越す（古い rev のままだと取り消しが競合で弾かれる）
+          if (rev !== undefined) keptUndo[k] = { ...u, rev }
+        }
+        commitUndo(keptUndo)
+      } else {
+        commitUndo({})
+      }
       if (Object.keys(keepPhases).length === 0) setSaveError(null)
 
       // 退避した水分がサーバーへ載ったかは、取り直した合計で1名1日ずつ確かめる（観測ベース）
@@ -857,6 +938,60 @@ export function MealsSheetPage({
     if (!residentsProp) return
     setResidents(asArray<Resident>(residentsProp).filter((r) => r != null && r.active !== false))
   }, [residentsProp])
+
+  // ── 他端末の変更を自動で取り込む（Realtime） ──
+  // 表示中の期間に関わる食事・水分の変更だけを合図にし、連続通知は最後の1回にまとめてから
+  // 既存の load() を呼ぶ（温存ロジックはそのまま＝入力中・未送信・競合・応答待ちの控えは消えない）。
+  // 購読できない環境（接続未設定・通信不可）では何もしない＝「最新」ボタンの手動更新で成立する。
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let stopped = false
+    const schedule = () => {
+      if (stopped) return
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        if (stopped || !aliveRef.current) return
+        // 保存の応答待ちが残っている間は取り直さない（応答と取得が交差すると
+        // 控えの消し込みが噛み合わず、保存できた値が一瞬もとの値に見える）。あとでやり直す
+        if (Object.values(phasesRef.current).some((p) => p === 'saving')) {
+          schedule()
+          return
+        }
+        void loadRef.current({ background: true })
+      }, REALTIME_DEBOUNCE_MS)
+    }
+    retryRef.current = schedule
+    let unsub: (() => void) | null = null
+    try {
+      // info（変更のあった行）は渡されないこともある＝引数は省略可として受ける
+      // （行情報を渡さない db.ts でも、この画面は「取り直す」側へ倒れて成立する）
+      unsub = subscribeChanges((table: string, info?: { event: string; row: RowInfo }) => {
+        if (stopped || !aliveRef.current) return
+        if (typeof table !== 'string' || WATCHED_DAY_COL[table] === undefined) return
+        // 自分の保存で出た通知には反応しない（保存直後の取り直しは無駄な往復になる）
+        if (Date.now() - selfWriteRef.current < SELF_WRITE_MS) return
+        const { from, to } = rangeRef.current
+        if (!inShownRange(table, info?.row, from, to)) return
+        schedule()
+      })
+    } catch {
+      // 購読できない環境（接続未設定など）でも画面は成立させる
+      unsub = null
+    }
+    return () => {
+      stopped = true
+      retryRef.current = null
+      if (timer) clearTimeout(timer)
+      if (unsub) {
+        try {
+          unsub()
+        } catch {
+          /* 解除失敗は表示に影響しないため無視する */
+        }
+      }
+    }
+  }, [])
 
   /** 保存に成功した列だけ控えから外す（この間に入れた別の値は残す） */
   const clearOverlay = useCallback(
@@ -897,6 +1032,8 @@ export function MealsSheetPage({
       setPhase(key, 'saving')
 
       enqueue(key, async () => {
+        // 送る前に印を付ける（変更通知が応答より先に届いても、自分の書き込みで取り直さない）
+        selfWriteRef.current = Date.now()
         const existing = mealsRef.current[key] ?? null
         // 新規作成のときだけ、控えに溜まっている他の列も一緒に書く
         const written: MealPatch = existing ? patch : { ...(pendingRef.current[key] ?? {}) }
@@ -927,6 +1064,8 @@ export function MealsSheetPage({
             setSaveError(MSG_QUEUED)
             return
           }
+          // サーバーへ書けた＝この直後に届く変更通知は自分のもの（取り直しの合図にしない）
+          selfWriteRef.current = Date.now()
           commitMeals({ ...mealsRef.current, [key]: res })
           clearOverlay(key, written)
           setPhase(key, 'saved')
@@ -961,6 +1100,8 @@ export function MealsSheetPage({
       touchActivity()
       const key = fluidKey(residentId, day)
       enqueue(`fluid:${key}`, async () => {
+        // 送る前に印を付ける（応答より先に届く変更通知で取り直さない）
+        selfWriteRef.current = Date.now()
         try {
           const res = await insertFluid({
             resident_id: residentId,
@@ -982,6 +1123,7 @@ export function MealsSheetPage({
             showRef.current(`水分 ＋${ml}ml：${MSG_QUEUED}`)
             return
           }
+          selfWriteRef.current = Date.now()
           commitFluids([...fluidsRef.current, res])
           commitUndo({ ...undoRef.current, [key]: { id: res.id, rev: res.rev, ml } })
           showRef.current(`水分 ＋${ml}ml を記録しました。`)
@@ -1002,6 +1144,8 @@ export function MealsSheetPage({
       if (!target) return
       touchActivity()
       enqueue(`fluid:${key}`, async () => {
+        // 送る前に印を付ける（応答より先に届く変更通知で取り直さない）
+        selfWriteRef.current = Date.now()
         try {
           const res = await softDeleteFluid(target.id, target.rev)
           if (!aliveRef.current) return
@@ -1009,6 +1153,18 @@ export function MealsSheetPage({
             showRef.current(ERR_FLUID_UNDO_CONFLICT)
             return
           }
+          if (res === 'queued') {
+            // 取り消しはキューへ退避済み（通信が戻れば自動で送られる）。
+            // 画面は取り消した後の姿を先に見せる（同じ行の取り消しを二重に積まないよう控えも外す）。
+            // まだサーバーには載っていないので、取り直すと合計にはこの分が戻る（消失より復活）
+            commitFluids(fluidsRef.current.filter((f) => f.id !== target.id))
+            const queuedUndo = { ...undoRef.current }
+            delete queuedUndo[key]
+            commitUndo(queuedUndo)
+            showRef.current(`水分 ＋${target.ml}ml の取り消し：${MSG_QUEUED}`)
+            return
+          }
+          selfWriteRef.current = Date.now()
           commitFluids(fluidsRef.current.filter((f) => f.id !== target.id))
           const nextUndo = { ...undoRef.current }
           delete nextUndo[key]

@@ -70,6 +70,7 @@ const MSG = {
     '取込状態を読み込めませんでした（通信エラー）。電波状態を確認して、再試行してください。',
   aliasSaveFailed:
     '表示名を保存できませんでした。電波状態を確認して、もう一度「保存」を押してください（入力した文字はそのまま残しています）。',
+  aliasQueued: '通信できないため送信待ちにしました。電波が戻ると自動で送信します。',
   logoutFailed:
     'ログアウトできませんでした（通信エラー）。電波状態を確認して、もう一度お試しください。記録は消えていません。',
 } as const
@@ -240,8 +241,10 @@ export function SettingsPage() {
   /** 入力中の文字（利用者ID → 文字）。保存するまでサーバーへは送らない */
   const [aliasDraft, setAliasDraft] = useState<Record<number, string>>({})
   const [aliasSaving, setAliasSaving] = useState<number | null>(null)
-  /** 行ごとの結果（保存できた／弾いた理由）。行の中に出す＝どの行の話か迷わせない */
-  const [aliasMsg, setAliasMsg] = useState<Record<number, { tone: 'ok' | 'danger'; text: string }>>({})
+  /** 行ごとの結果（保存できた／送信待ちにした／弾いた理由）。行の中に出す＝どの行の話か迷わせない */
+  const [aliasMsg, setAliasMsg] = useState<
+    Record<number, { tone: 'ok' | 'warn' | 'danger'; text: string }>
+  >({})
 
   // 取込状態（import_days）
   const [today] = useState(() => todayIso())
@@ -376,7 +379,18 @@ export function SettingsPage() {
         return next
       })
       try {
+        // 通信できないときは db.ts が送信待ちキューへ退避して 'queued' を返す（例外にしない）
         const saved = await setResidentNoteAlias(r.id, check.value)
+        if (saved === 'queued') {
+          // 入力は消さず、この端末には反映しておく（電波が戻ればキューが同じ値を送る）。
+          // サーバーの行はまだ書き換わっていないので、置き換えるのは note_alias だけにする
+          setAliasAll((prev) =>
+            (prev ?? []).map((x) => (x.id === r.id ? { ...x, note_alias: check.value } : x)),
+          )
+          setAliasDraft((d) => ({ ...d, [r.id]: check.value ?? '' }))
+          setAliasMsg((m) => ({ ...m, [r.id]: { tone: 'warn', text: MSG.aliasQueued } }))
+          return
+        }
         // サーバーが返した行で置き換える（自分が送った値ではなく、保存された値を正とする）
         setAliasAll((prev) => (prev ?? []).map((x) => (x.id === saved.id ? saved : x)))
         setAliasDraft((d) => ({ ...d, [r.id]: saved.note_alias ?? '' }))
@@ -1060,9 +1074,17 @@ export function SettingsPage() {
                             {msg ? (
                               <p
                                 role="status"
-                                className={`mt-1 text-sm ${msg.tone === 'danger' ? 'text-danger' : 'text-ok'}`}
+                                className={`mt-1 text-sm ${
+                                  msg.tone === 'danger'
+                                    ? 'text-danger'
+                                    : msg.tone === 'warn'
+                                      ? 'text-warn'
+                                      : 'text-ok'
+                                }`}
                               >
-                                <span aria-hidden="true">{msg.tone === 'danger' ? '▲ ' : '✓ '}</span>
+                                <span aria-hidden="true">
+                                  {msg.tone === 'danger' ? '▲ ' : msg.tone === 'warn' ? '⚠ ' : '✓ '}
+                                </span>
                                 {msg.text}
                               </p>
                             ) : null}

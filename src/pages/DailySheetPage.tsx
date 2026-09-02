@@ -97,7 +97,9 @@ import {
   IMPORTANCE_LABEL,
   LS,
   NOTE_COLOR_LABEL,
+  OUTING_KIND_LABEL,
   ROLE_TAGS,
+  SHIFT_LABEL,
   VITAL_RANGE,
   diaBpLevel,
   hasNoteAlias,
@@ -143,8 +145,66 @@ const GATE_UNKNOWN_REASON =
  * 表名で絞らないと他端末の食事・水分の記録（1日に数百件入る）のたびに案内が出て、
  * 申し送り・出勤者が本当に変わった時の合図として機能しなくなる。
  * 同型の実装は useTimeline.ts の WATCHED_TABLES。
+ *
+ * note_reads は 2026-09-02 に外した。既読は1件の申し送りに何人も付き、
+ * 1日に何十件も流れてくるうえ、増えるのは既読の人数だけで記録の内容は変わらない。
+ * 案内を出し続けると、本当に記録が変わった時の合図がその中に埋もれる。
  */
-const WATCHED_TABLES = new Set(['notes', 'outings', 'vitals', 'attendance', 'note_reads'])
+const WATCHED_TABLES = new Set(['notes', 'outings', 'vitals', 'attendance'])
+
+/**
+ * 表ごとの日付列。変更のあった行のこの列が「いま出している日」に入っている時だけ合図にする。
+ * 購読は表ごと（日付では絞れない）なので、ここで絞らないと1か月前の記録を他端末で直しただけでも
+ * 「最新に更新」の案内が出る＝画面に出ていない変更で職員の手を止めることになる。
+ */
+const DAY_COLUMNS: Record<string, readonly string[]> = {
+  notes: ['note_on'],
+  // 外出・外泊は開始日と帰着日のどちらかが表示中なら関係する（日をまたぐ行を落とさない）
+  outings: ['start_on', 'end_on'],
+  vitals: ['measured_on'],
+  attendance: ['day'],
+}
+
+/**
+ * 変更通知に添えられる行情報（db.ts の subscribeChanges の第2引数）。
+ * 第2引数を渡さない版でも動くよう、受け取り側は省略可として扱う。
+ */
+interface ChangeInfo {
+  event: string
+  row: Record<string, unknown> | null
+}
+
+/**
+ * 変更のあった行が、いま画面に出している日のものか。
+ * 行情報が無い時（行を渡さない版・行が取れない削除イベント）と、日付列が1つも入っていない時は
+ * **合図にする**＝判定できない変更は取り直す側（安全側）へ倒す。
+ */
+function touchesVisibleDay(
+  table: string,
+  info: ChangeInfo | undefined,
+  days: readonly string[],
+): boolean {
+  const row = info?.row
+  if (row == null) return true
+  const cols = DAY_COLUMNS[table]
+  if (cols === undefined) return true
+  // 外出・外泊は「期間」で各日に出る（fetchDailyReport: start_on ≦ 日 ≦ end_on。帰着日が無ければ
+  // 始まった日以降ずっと）。表示中の区切りをまたぐ外泊（例: 8/9〜8/22 を 11〜20 で表示中）も
+  // 画面に出ているので、**期間が表示範囲と重なるか**で判定する（開始日・帰着日が範囲内かどうかでは
+  // 取りこぼす。2026-09-03 レビュー指摘）
+  if (table === 'outings') {
+    const start = typeof row['start_on'] === 'string' ? row['start_on'].slice(0, 10) : null
+    if (start === null) return true
+    const end = typeof row['end_on'] === 'string' ? row['end_on'].slice(0, 10) : null
+    const first = days.reduce((a, b) => (a === '' || b < a ? b : a), '')
+    const last = days.reduce((a, b) => (b > a ? b : a), '')
+    if (first === '' || last === '') return true
+    return start <= last && (end === null || end >= first)
+  }
+  const known = cols.filter((c) => typeof row[c] === 'string')
+  if (known.length === 0) return true
+  return known.some((c) => days.includes(String(row[c]).slice(0, 10)))
+}
 
 const ERR_LOAD =
   '日報を読み込めませんでした（通信エラー）。電波状態を確認してから、再試行してください。記録は消えていません'
@@ -684,6 +744,268 @@ function emptyNoteDraft(
   }
 }
 
+// ══════════════════════════════════════════════════════════════
+// 書きかけの行を端末へ一時保存する（LS.dailyDraft・2026-09-02 追加）
+// ══════════════════════════════════════════════════════════════
+//
+// なぜ要るか: 下書き（noteDrafts / vitalDrafts / outingDrafts）は React state だけだったので、
+//   対象・記入者・色を選んで本文を打つ前に画面を再読み込みすると跡形もなく消えていた。
+//
+// 規律（types.ts の LS.dailyDraft の注記どおり）:
+//   ・持つのは 利用者ID・記入者ID・色・打った文字だけ。**氏名は持たない**
+//   ・送信待ちに退避済み（locked）の行と、登録の応答待ちの行は控えを残さない
+//     ＝復元しても二重登録にならない
+//   ・24時間で失効。壊れた値・未知の値・別の形式は消して既定（空の行）から始める
+//   ・端末の保存が使えない（容量超過・プライベートモード）時も入力は続けられる＝失敗は無視する
+
+/** 控えの形式の版。読めない版は復元せずに消す */
+const DAILY_DRAFT_VERSION = 1
+/** 控えを残す期限（24時間）。古い日の書きかけを後から現在の日に見せない */
+const DAILY_DRAFT_TTL_MS = 24 * 60 * 60 * 1000
+
+interface DailyDraftFile {
+  v: number
+  savedAt: number
+  notes: NoteDraft[]
+  vitals: VitalDraft[]
+  outings: OutingDraft[]
+}
+
+/** 控えは日ごとに分ける（`cl_dailyDraft:YYYY-MM-DD`） */
+function dailyDraftKey(day: string): string {
+  return `${LS.dailyDraft}:${day}`
+}
+
+function removeDailyDraft(day: string): void {
+  try {
+    window.localStorage.removeItem(dailyDraftKey(day))
+  } catch {
+    // 端末の保存が使えなくても入力は続けられる
+  }
+}
+
+/**
+ * 送信待ちに退避済み（locked）の行だけは保存しない（送信キューに既に載っており、
+ * 復元すると二重登録になる）。
+ * ★登録の**応答待ち**の行は保存する（2026-09-03 レビュー裁定）。応答待ちの行は
+ *   送信キューにも無い唯一の状態なので、電波が悪く insert が固まっている最中に
+ *   再読み込みされると、控えから外していた場合は本文が無言で消える。
+ *   サーバーに届いていた場合は復元した下書きが保存済みの行と**並んで見える**ので、
+ *   職員が目で気づいて取り消せる（重複 ＞ 無言消失。multi-device-sync 原則5）。
+ */
+function writeDailyDraft(
+  day: string,
+  notes: NoteDraft[],
+  vitals: VitalDraft[],
+  outings: OutingDraft[],
+): void {
+  const keep = (d: { locked: boolean }): boolean => !d.locked
+  const file: DailyDraftFile = {
+    v: DAILY_DRAFT_VERSION,
+    savedAt: Date.now(),
+    notes: notes.filter(keep),
+    vitals: vitals.filter(keep),
+    outings: outings.filter(keep),
+  }
+  try {
+    window.localStorage.setItem(dailyDraftKey(day), JSON.stringify(file))
+  } catch {
+    // 容量超過・保存が使えない端末。控えが残らなくても画面の入力はそのまま続けられる
+  }
+}
+
+// ── 控えの検査（受け取った値を信じない。既知の形の行だけを戻す）──
+
+function asRecord(v: unknown): Record<string, unknown> | null {
+  return typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null
+}
+
+function asStr(v: unknown): string | null {
+  return typeof v === 'string' ? v : null
+}
+
+/** ID は number か null。それ以外（文字列・NaN・欠落）は undefined＝壊れている */
+function asIdOrNull(v: unknown): number | null | undefined {
+  if (v === null) return null
+  if (typeof v === 'number' && Number.isFinite(v)) return v
+  return undefined
+}
+
+function readNoteDraft(v: unknown): NoteDraft | null {
+  const o = asRecord(v)
+  if (o === null) return null
+  const shift = asStr(o.shift)
+  if (shift === null || !(shift in SHIFT_LABEL)) return null
+  const body = asStr(o.body)
+  if (body === null) return null
+  if (typeof o.after16 !== 'boolean' || typeof o.targetPicked !== 'boolean') return null
+  const residentId = asIdOrNull(o.residentId)
+  const reporterId = asIdOrNull(o.reporterId)
+  if (residentId === undefined || reporterId === undefined) return null
+  const rawColor = o.color
+  const color: NoteColor | null | undefined =
+    rawColor === null
+      ? null
+      : typeof rawColor === 'string' && rawColor in NOTE_COLOR_LABEL
+        ? (rawColor as NoteColor)
+        : undefined
+  if (color === undefined) return null
+  return {
+    // キーは復元する画面で採り直す（控えのキーは、その画面が新しく採るキーと衝突しうる）
+    key: '',
+    shift: shift as Shift,
+    after16: o.after16,
+    residentId,
+    targetPicked: o.targetPicked,
+    body,
+    reporterId,
+    color,
+    // 控えに残るのは未送信の行だけ（locked の行は書き出していない）
+    locked: false,
+  }
+}
+
+function readVitalSet(v: unknown): VitalSetInput | null {
+  const o = asRecord(v)
+  if (o === null) return null
+  const at = asStr(o.at)
+  const temp = asStr(o.temp)
+  const spo2 = asStr(o.spo2)
+  const bp = asStr(o.bp)
+  const pulse = asStr(o.pulse)
+  if (at === null || temp === null || spo2 === null || bp === null || pulse === null) return null
+  return { at, temp, spo2, bp, pulse }
+}
+
+function readVitalDraft(v: unknown): VitalDraft | null {
+  const o = asRecord(v)
+  if (o === null) return null
+  const kind = asStr(o.kind)
+  if (kind !== 'observation' && kind !== 'symptom') return null
+  const residentId = asIdOrNull(o.residentId)
+  if (residentId === undefined) return null
+  const symptom = asStr(o.symptom)
+  if (symptom === null) return null
+  if (!Array.isArray(o.sets)) return null
+  // 枠の数は新しく作る行（emptyVitalDraft）と同じにそろえる＝控えの数がずれても表の列が崩れない
+  const want = kind === 'observation' ? FEVER_SETS : 1
+  const sets: VitalSetInput[] = []
+  for (let i = 0; i < want; i++) {
+    const s = i < o.sets.length ? readVitalSet(o.sets[i]) : emptySet()
+    if (s === null) return null
+    sets.push(s)
+  }
+  return { key: '', kind, residentId, sets, symptom, locked: false }
+}
+
+function readOutingDraft(v: unknown): OutingDraft | null {
+  const o = asRecord(v)
+  if (o === null) return null
+  const kind = asStr(o.kind)
+  if (kind === null || !(kind in OUTING_KIND_LABEL)) return null
+  const residentId = asIdOrNull(o.residentId)
+  if (residentId === undefined) return null
+  const place = asStr(o.place)
+  const startAt = asStr(o.startAt)
+  const endText = asStr(o.endText)
+  const companion = asStr(o.companion)
+  if (place === null || startAt === null || endText === null || companion === null) return null
+  return {
+    key: '',
+    kind: kind as OutingKind,
+    residentId,
+    place,
+    startAt,
+    endText,
+    companion,
+    locked: false,
+  }
+}
+
+/**
+ * 端末に残した控えを読む。
+ * 壊れた値・期限切れ・別の形式は**消して null を返す**（壊れた控えで画面が開けなくなるのを防ぐ）。
+ * 行ごとに形が違うものは、その行だけ落として残りを戻す（読めるものは戻す）。
+ */
+function readDailyDraft(
+  day: string,
+): { notes: NoteDraft[]; vitals: VitalDraft[]; outings: OutingDraft[] } | null {
+  let raw: string | null = null
+  try {
+    raw = window.localStorage.getItem(dailyDraftKey(day))
+  } catch {
+    return null
+  }
+  if (raw === null || raw === '') return null
+
+  let parsed: unknown = null
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    removeDailyDraft(day)
+    return null
+  }
+  const o = asRecord(parsed)
+  if (o === null || o.v !== DAILY_DRAFT_VERSION) {
+    removeDailyDraft(day)
+    return null
+  }
+  const savedAt = typeof o.savedAt === 'number' && Number.isFinite(o.savedAt) ? o.savedAt : null
+  // 端末の時計が大きくずれた控え（未来の日時）も期限切れと同じに扱う
+  if (savedAt === null || Math.abs(Date.now() - savedAt) > DAILY_DRAFT_TTL_MS) {
+    removeDailyDraft(day)
+    return null
+  }
+
+  const list = <T,>(v: unknown, read: (x: unknown) => T | null): T[] =>
+    Array.isArray(v) ? v.map(read).filter((x): x is T => x !== null) : []
+  const notes = list(o.notes, readNoteDraft)
+  const vitals = list(o.vitals, readVitalDraft)
+  const outings = list(o.outings, readOutingDraft)
+  if (notes.length === 0 && vitals.length === 0 && outings.length === 0) {
+    removeDailyDraft(day)
+    return null
+  }
+  return { notes, vitals, outings }
+}
+
+/**
+ * 端末に残っている控えのうち、期限切れ・読めない・別の形式のものを消す（画面を開いた時に1度）。
+ * 控えは日ごとのキーなので、readDailyDraft（その日を開いた時）だけでは、
+ * 別の日へ移って二度と開かない日の書きかけが期限を過ぎても端末に残り続ける。
+ * 共有端末に打ちかけの文字を残さないため、表示中の日に関わらず走査して消す。
+ */
+function sweepDailyDrafts(): void {
+  try {
+    const prefix = `${LS.dailyDraft}:`
+    const stale: string[] = []
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const key = window.localStorage.key(i)
+      if (key === null || !key.startsWith(prefix)) continue
+      let parsed: unknown = null
+      try {
+        parsed = JSON.parse(window.localStorage.getItem(key) ?? '')
+      } catch {
+        stale.push(key) // 読めない控えは復元にも使えない
+        continue
+      }
+      const o = asRecord(parsed)
+      if (o === null || o.v !== DAILY_DRAFT_VERSION) {
+        stale.push(key)
+        continue
+      }
+      const savedAt = typeof o.savedAt === 'number' && Number.isFinite(o.savedAt) ? o.savedAt : null
+      // 端末の時計が大きくずれた控え（未来の日時）も期限切れと同じに扱う（readDailyDraft と同じ判定）
+      if (savedAt === null || Math.abs(Date.now() - savedAt) > DAILY_DRAFT_TTL_MS) stale.push(key)
+    }
+    for (const key of stale) {
+      window.localStorage.removeItem(key)
+    }
+  } catch {
+    // 端末の保存が使えない（プライベートモード等）。掃除できなくても画面は成立する
+  }
+}
+
 /** 発熱者ブロックの1行（同じ利用者の観察を最大3枠ずつまとめる） */
 interface FeverRow {
   key: string
@@ -1048,6 +1370,11 @@ export function DailySheetPage({
     }
   }, [])
 
+  // 端末に残った期限切れの控えを掃除する（開いている日だけでなく、全ての日ぶんを1度だけ見る）
+  useEffect(() => {
+    sweepDailyDrafts()
+  }, [])
+
   // ── 共有マスタ（利用者・職員・施設名・入力解禁）────────────
   useEffect(() => {
     let alive = true
@@ -1121,15 +1448,29 @@ export function DailySheetPage({
     cacheRef.current.delete(dayIso)
   }, [])
 
+  const visibleDays = useMemo(() => (unit === '1' ? [day] : blockDays(day)), [day, unit])
+
+  /**
+   * 変更通知の絞り込みに使う「いま出している日」。
+   * 購読の effect の依存に入れると、日を送るたびに購読を張り直すことになる
+   * （張り直しの間に届いた変更を取りこぼす）ので ref で参照する。
+   */
+  const visibleDaysRef = useRef<string[]>(visibleDays)
+  useEffect(() => {
+    visibleDaysRef.current = visibleDays
+  }, [visibleDays])
+
   // 変更通知は自動で取り込まず「最新に更新」の案内だけ出す（編集中の入力を勝手に差し替えない）
   useEffect(() => {
     let unsub: (() => void) | null = null
     try {
-      unsub = subscribeChanges((table) => {
+      unsub = subscribeChanges((table, info?: ChangeInfo) => {
         if (!aliveRef.current) return
-        // この画面が描画する表の変更だけを合図にする（食事・水分の記録では出さない）
+        // この画面が描画する表の変更だけを合図にする（食事・水分・既読の記録では出さない）
         if (typeof table !== 'string' || !WATCHED_TABLES.has(table)) return
         if (Date.now() - selfWriteRef.current < 3000) return
+        // 画面に出していない日の変更では案内を出さない（判定できない時は出す＝安全側）
+        if (!touchesVisibleDay(table, info, visibleDaysRef.current)) return
         setStale(true)
       })
     } catch {
@@ -1145,8 +1486,6 @@ export function DailySheetPage({
       }
     }
   }, [])
-
-  const visibleDays = useMemo(() => (unit === '1' ? [day] : blockDays(day)), [day, unit])
 
   // ── 未保存の下書きを持つ日（画面から外れる前に確認する）──────
   const dirtyRef = useRef(new Map<string, boolean>())
@@ -1419,6 +1758,10 @@ function DaySheet({
   /** 登録の応答待ちの行。二重に登録しないための鍵（同じ行から2回 insert しない） */
   const savingRef = useRef(new Set<string>())
   /**
+   * 応答待ちの行が増減した合図。ref の出入りだけでは再描画も端末の控えの置き直しも起きないので、
+   * 控え（cl_dailyDraft）から応答待ちの行を外す・戻すためにこの数を進める。
+   */
+  /**
    * 出勤者の最新の一覧。保存は応答が返ってから画面へ反映するので、
    * 連続操作（✕を続けて押す等）の2件目は state ではなくこの ref を基準に組み直す
    * （render 時の値を prev にすると、1件目の結果を知らないまま送って取り消しが巻き戻る）。
@@ -1431,6 +1774,11 @@ function DaySheet({
    * setObservations の反映を待たずに「同じ人の何件目か」を数える。
    */
   const observationsRef = useRef<Vital[]>([])
+  /**
+   * 端末に残した書きかけの控え（LS.dailyDraft）を戻した日。
+   * 戻す前に控えを消さないための鍵でもある＝取得が終わる前は端末の控えに触らない。
+   */
+  const restoredDayRef = useRef<string | null>(null)
 
   useEffect(() => {
     aliveRef.current = true
@@ -1477,6 +1825,25 @@ function DaySheet({
     })
   }, [])
 
+  /**
+   * 端末に残した書きかけの控えを戻す（この日について1度だけ）。
+   * 下書きが1つも無い時だけ入れる＝「最新に更新」で取り直した時に、
+   * いま打っている行を控えで上書きしない。戻した行は送信待ちではない（locked=false）。
+   */
+  const restoreDrafts = useCallback(() => {
+    if (restoredDayRef.current === day) return
+    restoredDayRef.current = day
+    const saved = readDailyDraft(day)
+    if (saved === null) return
+    // キーはこの画面で採り直す（控えのキーは、この後に採るキーと衝突しうる）
+    const notes = saved.notes.map((d) => ({ ...d, key: nextKey('nd') }))
+    const vitals = saved.vitals.map((d) => ({ ...d, key: nextKey('vd') }))
+    const outings = saved.outings.map((d) => ({ ...d, key: nextKey('od') }))
+    setNoteDrafts((prev) => (prev.length === 0 ? notes : prev))
+    setVitalDrafts((prev) => (prev.length === 0 ? vitals : prev))
+    setOutingDrafts((prev) => (prev.length === 0 ? outings : prev))
+  }, [day, nextKey])
+
   // ── 読み込み ───────────────────────────────────────────────
 
   useEffect(() => {
@@ -1503,6 +1870,10 @@ function DaySheet({
         applyAttendance(
           Array.isArray(report?.attendance) ? report.attendance.filter((a) => a != null) : [],
         )
+        // 端末に残した書きかけの控えを戻す（この日を初めて読めた時だけ）。
+        // setPhase('ready') と同じ更新にまとめる＝空行の補充より先に下書きが入り、
+        // 復元した行のぶんまで空行が増えない（補充は「保存済み＋下書き」の数で決まる）
+        restoreDrafts()
         setPhase('ready')
       } catch {
         if (!alive || !aliveRef.current) return
@@ -1517,7 +1888,7 @@ function DaySheet({
     return () => {
       alive = false
     }
-  }, [day, reload, reloadToken, loadDay, applyAttendance, onLoaded])
+  }, [day, reload, reloadToken, loadDay, applyAttendance, onLoaded, restoreDrafts])
 
   const residentById = useMemo(() => {
     const m = new Map<number, Resident>()
@@ -1598,6 +1969,22 @@ function DaySheet({
     onDirty(day, hasDraftContent)
   }, [day, hasDraftContent, onDirty])
 
+  /**
+   * 書きかけの行を端末へ一時保存する（2026-09-02 追加）。
+   * ・書きかけがある間は、行が変わるたびに控えを置き直す（再読み込みで消えない）
+   * ・書きかけが無くなったら控えを消す（保存し終えた内容を端末に残さない）
+   * ・**復元を済ませるまでは端末の控えに触らない**（restoredDayRef）。
+   *   触ると、取得が終わる前の「下書きが空」の状態で控えを消してしまい、復元できなくなる
+   */
+  useEffect(() => {
+    if (restoredDayRef.current !== day) return
+    if (!hasDraftContent) {
+      removeDailyDraft(day)
+      return
+    }
+    writeDailyDraft(day, noteDrafts, vitalDrafts, outingDrafts)
+  }, [day, hasDraftContent, noteDrafts, vitalDrafts, outingDrafts])
+
   useEffect(
     () => () => {
       onDirty(day, false)
@@ -1627,7 +2014,7 @@ function DaySheet({
         // 順に実行するので、応答を待ってから付けると自分の書き込み由来の変更通知に反応して
         // 「他の端末で記録が更新されました」と誤って案内してしまう）
         markSelfWrite()
-        await saveAttendance(
+        const res = await saveAttendance(
           dayIso,
           next.map((a) => ({ staff_id: a.staff_id, role: a.role, sort: a.sort })),
           // 取り消してよいのは「この端末が画面に持っていた人」だけ。
@@ -1636,7 +2023,10 @@ function DaySheet({
         )
         // 応答を待つ間に日付を送られていたら、別の日の一覧を今の画面へ入れない
         if (!aliveRef.current || dayRef.current !== dayIso) return
+        // 送信待ちに退避した時も画面は操作したとおりにする（巻き戻すと「選んだのに消えた」になる）。
+        // 電波が戻れば同じ内容が自動で送られる＝この行に未送信の一言を残しておく
         applyAttendance(next)
+        if (res === 'queued') setRowStatus('attendance', { tone: 'warn', text: MSG_QUEUED })
         if (undoLabel !== null) {
           show(undoLabel, () => {
             // 戻す操作も同じ列に並べる（戻した内容が、後から届いた保存で上書きされないように）。
@@ -1851,7 +2241,17 @@ function DaySheet({
         savingRef.current.delete(key)
       }
     },
-    [day, guard, markSelfWrite, patchNoteDraft, rebindPick, saveOk, setRowStatus, show, stillOnDay],
+    [
+      day,
+      guard,
+      markSelfWrite,
+      patchNoteDraft,
+      rebindPick,
+      saveOk,
+      setRowStatus,
+      show,
+      stillOnDay,
+    ],
   )
 
   const commitNoteBody = useCallback(
@@ -1914,7 +2314,9 @@ function DaySheet({
               }
               setNotes((prev) => prev.filter((n) => n.id !== note.id))
               setExpanded(null)
-              show('削除しました')
+              // 送信待ちに退避した削除も一覧からは外す（押した操作のとおりに見せる）。
+              // 行が無くなるので一言は行ではなくトーストで出す（電波が戻れば自動で送られる）
+              show(res === 'queued' ? MSG_QUEUED : '削除しました')
             } catch (err) {
               setRowStatus(key, { tone: 'danger', text: `▲ ${errText(err)}` })
             }
@@ -2223,7 +2625,17 @@ function DaySheet({
         savingRef.current.delete(key)
       }
     },
-    [actorId, day, guard, markSelfWrite, patchOutingDraft, saveOk, setRowStatus, show, stillOnDay],
+    [
+      actorId,
+      day,
+      guard,
+      markSelfWrite,
+      patchOutingDraft,
+      saveOk,
+      setRowStatus,
+      show,
+      stillOnDay,
+    ],
   )
 
   /** 帰着（到着日時）の後追い記入。end_on / end_at だけを送る */
@@ -2252,6 +2664,14 @@ function DaySheet({
           const res = await setOutingEnd(o.id, o.rev, endOn, endAt)
           if (res === 'conflict') {
             setRowStatus(key, { tone: 'danger', text: `▲ ${ERR_CONFLICT}` })
+            return
+          }
+          if (res === 'queued') {
+            // 記入したとおりに帰着を出したまま送信待ちにする（値を巻き戻さない）
+            setOutings((prev) =>
+              prev.map((x) => (x.id === o.id ? { ...x, end_on: endOn, end_at: endAt } : x)),
+            )
+            setRowStatus(key, { tone: 'warn', text: MSG_QUEUED })
             return
           }
           setOutings((prev) => prev.map((x) => (x.id === o.id ? res : x)))
@@ -2754,10 +3174,10 @@ function DateBar({
  *
  * 指示12「土曜＝濃い水色・日曜＝赤」:
  *   sheet.css の .sheet-sat / .sheet-sun を日付セルに付ける。
- *   ※ 枠（.dsheet-date）は sheet.css で .sheet-sat / .sheet-sun より後に
- *     background: var(--c-surface) を宣言しているため、**枠の地色は上書きできない**。
- *     いま色が乗るのは日付の文字（下の span）まで。枠ごと色を敷くには sheet.css 側に
- *     .dsheet-date.sheet-sat / .dsheet-date.sheet-sun の指定が要る（チーフへ申し送り済み）。
+ *   ※ 枠ごと色が付く。sheet.css に .dsheet-date.sheet-sat / .dsheet-date.sheet-sun（2クラス）が
+ *     .dsheet-date の background より後に置いてあるので、枠の地色も土日の色になる。
+ *     平日の橙（.dsheet-date-head）は1クラスなので土日の指定が勝つ＝橙が土日の色を潰さない。
+ *     日付の文字（下の span）にも同じクラスを当てて、枠と文字の色をそろえている。
  */
 function DayPicker({
   day,
@@ -3805,9 +4225,10 @@ function NoteRow({
         />
         {/* 余白は SheetCell 側だけが持つ（対象・記入者と本文の左端をそろえる）。
             夜勤の記載内容は赤字の太字（指示15・sheet.css の .dsheet-night-body）。
-            ※ いまの .dsheet-night-body は自分自身にだけ色を当てる書き方なので、
-              本文を描く SheetCell が自前で持つ文字色（tone='row' → text-ink）が勝ち、
-              **本文の文字までは赤くならない**。子孫にも当たる書き方が要る（チーフへ申し送り済み） */}
+            ※ sheet.css は `.dsheet-night-body, .dsheet-night-body *` と**子孫にも当てて**あるので、
+              本文を描く SheetCell が自前で持つ文字色（tone='row' → .text-ink）にも届く。
+              詳細度は同じ（クラス1つぶん）で、sheet.css は Tailwind の utilities より後に
+              読み込まれる（main.tsx: index.css → App.tsx: sheet.css）＝後勝ちで赤太字になる */}
         <Cell grow pad={false} className={night ? 'dsheet-night-body' : ''}>
           <SheetCell
             value={body}

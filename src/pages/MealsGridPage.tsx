@@ -872,6 +872,17 @@ export function MealsGridPage({
             showRef.current(ERR_FLUID_UNDO_CONFLICT)
             return
           }
+          if (res === 'queued') {
+            // 取り消しはキューへ退避済み（通信が戻れば自動で送られる）。
+            // 画面は取り消した後の姿を先に見せる（同じ行の取り消しを二重に積まないよう控えも外す）。
+            // まだサーバーには載っていないので、取り直すと合計にはこの分が戻る（消失より復活）
+            commitFluids(fluidsRef.current.filter((f) => f.id !== target.id))
+            const queuedUndo = { ...undoRef.current }
+            delete queuedUndo[residentId]
+            commitUndo(queuedUndo)
+            showRef.current(`水分 ＋${target.ml}ml の取り消し：${MSG_QUEUED}`)
+            return
+          }
           commitFluids(fluidsRef.current.filter((f) => f.id !== target.id))
           const nextUndo = { ...undoRef.current }
           delete nextUndo[residentId]

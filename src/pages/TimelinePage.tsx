@@ -85,6 +85,8 @@ const ERR_NOTE_CONFLICT =
 const ERR_NOTE_ACTION =
   '操作できませんでした（通信エラー）。電波状態を確認して、もう一度お試しください。記録は変わっていません'
 const ERR_NOTE_EMPTY = '本文が空です。内容を入力してから保存してください'
+/** 通信できずに db.ts の送信キューへ退避した時の一言（入力・表示は消さない） */
+const MSG_QUEUED = '通信できないため送信待ちにしました。電波が戻ると自動で送信します'
 const NO_ACTOR_REASON = '記録する職員が選ばれていません。設定タブの「記録する職員」から選んでください'
 
 /** 参照の同一性を保つための空配列（React.memo の無効化を防ぐ） */
@@ -321,14 +323,20 @@ export function TimelinePage({
   }, [])
 
   /**
-   * 継続申し送りの終了（ended_at だけを書く部分更新）。
+   * 継続申し送りの終了（ended_at と ended_by だけを書く部分更新。誰が終了したかを残す）。
    * これを実行するまで、期限を空にした継続はピン留めに再掲され続ける。
+   * 操作者が未選択なら ended_by は null（終了そのものは記録する）。
    */
   const handleEndOngoing = useCallback(
     async (note: Note): Promise<NoteActionResult> => {
       try {
-        const res = await endOngoingNote(note.id, note.rev)
+        const res = await endOngoingNote(note.id, note.rev, actorId)
         if (res === 'conflict') return { ok: false, message: ERR_NOTE_CONFLICT }
+        if (res === 'queued') {
+          // 送信待ちへ退避。サーバーはまだ変わっていないので取り直さない（行は次の送信成功で終了表示になる）
+          showRef.current(MSG_QUEUED)
+          return { ok: true }
+        }
         touchActivity()
         showRef.current('継続を終了しました。翌日からの再掲を止めます')
         refreshRef.current()
@@ -337,7 +345,7 @@ export function TimelinePage({
         return failure(e)
       }
     },
-    [failure],
+    [actorId, failure],
   )
 
   /** 申し送りの削除（論理削除。記録は消さずに非表示へ）。確認ダイアログの後ろでのみ呼ぶ */
@@ -346,6 +354,10 @@ export function TimelinePage({
       try {
         const res = await softDeleteNote(note.id, note.rev)
         if (res === 'conflict') return { ok: false, message: ERR_NOTE_CONFLICT }
+        if (res === 'queued') {
+          showRef.current(MSG_QUEUED)
+          return { ok: true }
+        }
         touchActivity()
         showRef.current('申し送りを削除しました')
         refreshRef.current()
@@ -365,7 +377,7 @@ export function TimelinePage({
         const res = await updateNote(note.id, note.rev, { body })
         if (res === 'conflict') return { ok: false, message: ERR_NOTE_CONFLICT }
         if (res === 'queued') {
-          showRef.current('通信できないため送信待ちにしました。電波が戻ると自動で送信します')
+          showRef.current(MSG_QUEUED)
           return { ok: true }
         }
         touchActivity()
@@ -381,10 +393,19 @@ export function TimelinePage({
 
   /** 帰着の後追い記入。end 以外のフィールドを送らない（部分更新・multi-device-sync 原則3） */
   const handleSaveOutingEnd = useCallback(
-    async (outing: Outing, endOn: string, endAt: string | null): Promise<'ok' | 'conflict' | 'error'> => {
+    async (
+      outing: Outing,
+      endOn: string,
+      endAt: string | null,
+    ): Promise<'ok' | 'conflict' | 'error' | 'queued'> => {
       try {
         const res = await setOutingEnd(outing.id, outing.rev, endOn, endAt)
         if (res === 'conflict') return 'conflict'
+        if (res === 'queued') {
+          // 入力欄の値は残したまま送信待ちへ。電波が戻れば db.ts が同じ内容を送る
+          showRef.current(MSG_QUEUED)
+          return 'queued'
+        }
         touchActivity()
         showRef.current('帰着を記録しました')
         refreshRef.current()
@@ -579,7 +600,11 @@ interface DaySectionProps {
   stickyTop: string
   onOpenKarte: (residentId: number) => void
   onNewNote: () => void
-  onSaveOutingEnd: (o: Outing, endOn: string, endAt: string | null) => Promise<'ok' | 'conflict' | 'error'>
+  onSaveOutingEnd: (
+    o: Outing,
+    endOn: string,
+    endAt: string | null,
+  ) => Promise<'ok' | 'conflict' | 'error' | 'queued'>
   onEndOngoing: (note: Note) => Promise<NoteActionResult>
   onDeleteNote: (note: Note) => Promise<NoteActionResult>
   onUpdateNoteBody: (note: Note, body: string) => Promise<NoteActionResult>
@@ -1348,7 +1373,11 @@ interface OutingRowProps {
   resident: Resident | undefined
   inputEnabled: boolean
   onOpenKarte: (residentId: number) => void
-  onSaveEnd: (o: Outing, endOn: string, endAt: string | null) => Promise<'ok' | 'conflict' | 'error'>
+  onSaveEnd: (
+    o: Outing,
+    endOn: string,
+    endAt: string | null,
+  ) => Promise<'ok' | 'conflict' | 'error' | 'queued'>
 }
 
 function OutingRow({ outing, dayIso, resident, inputEnabled, onOpenKarte, onSaveEnd }: OutingRowProps) {
@@ -1376,7 +1405,8 @@ function OutingRow({ outing, dayIso, resident, inputEnabled, onOpenKarte, onSave
     setRowError(null)
     const res = await onSaveEnd(outing, endOn, endAt === '' ? null : endAt)
     setSaving(false)
-    if (res === 'ok') {
+    if (res === 'ok' || res === 'queued') {
+      // queued は送信待ちへ退避できた状態。入力値は state に残るので、閉じても書き直しにならない
       setOpen(false)
       return
     }
