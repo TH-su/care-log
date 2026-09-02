@@ -40,22 +40,23 @@ updateVital(id: number, rev: number, patch: Partial<Omit<Vital, 'id' | 'rev'>>):
 insertMeal(m: Omit<Meal, 'id' | 'rev'>): Promise<Meal | Queued>
 updateMeal(id: number, rev: number, patch: Partial<Omit<Meal, 'id' | 'rev'>>): Promise<Meal | Conflict | Queued>
 insertFluid(f: Omit<FluidIntake, 'id' | 'rev'>): Promise<FluidIntake | Queued>
-softDeleteFluid(id: number, rev: number): Promise<true | Conflict>
+softDeleteFluid(id: number, rev: number): Promise<true | Conflict | Queued>   // 通信断はキューへ退避（2026-09-02）
 insertNote(n: Omit<Note, 'id' | 'rev' | 'read_count' | 'my_read'>): Promise<Note | Queued>
 updateNote(id: number, rev: number, patch: Partial<Omit<Note, 'id' | 'rev'>>): Promise<Note | Conflict | Queued>
-softDeleteNote(id: number, rev: number): Promise<true | Conflict>
-endOngoingNote(id: number, rev: number): Promise<Note | Conflict>
+softDeleteNote(id: number, rev: number): Promise<true | Conflict | Queued>
+endOngoingNote(id: number, rev: number, endedBy: number | null): Promise<Note | Conflict | Queued>  // ended_by に操作者を書く
 insertOuting(o: Omit<Outing, 'id' | 'rev'>): Promise<Outing | Queued>
-setOutingEnd(id: number, rev: number, endOn: string, endAt: string | null): Promise<Outing | Conflict>  // 部分更新・他項目を送らない
+setOutingEnd(id: number, rev: number, endOn: string, endAt: string | null): Promise<Outing | Conflict | Queued>  // 部分更新・他項目を送らない
 
-markRead(noteId: number, staffId: number): Promise<void>       // 明示操作からのみ呼ぶ
+markRead(noteId: number, staffId: number): Promise<void>       // 明示操作からのみ呼ぶ。通信断はキュー（kind:'read'）へ退避し例外を投げない
 fetchNoteReaders(noteId: number): Promise<Staff[]>             // note_reads×staff・read_at昇順・limit100・氏名表示のみ
 fetchUnreadCount(staffId: number, sinceIso: string): Promise<number>
 getNativeInputGate(): Promise<{ value: boolean; observed: boolean }>  // observed=サーバー値を一度でも観測できたか
 getNativeInputEnabled(): Promise<boolean>                      // 互換用。gate.value を返す（既定 false）
 getAppSetting(key: string): Promise<string | null>
 
-subscribeChanges(cb: (table: string) => void): () => void      // Realtime。受信値は型検査・表示ウィンドウ外は無視
+subscribeChanges(cb: (table: string, info?: { event: string; row: Record<string, unknown> | null }) => void): () => void
+                                                               // Realtime。第2引数は変更行（DELETE は row=null）。受信値は型検査・表示ウィンドウ外は無視
 queuePending(): number
 queueSubscribe(cb: (n: number) => void): () => void
 flushQueue(): Promise<void>                                    // 成功観測後にのみキューから消す（保全ゲート）

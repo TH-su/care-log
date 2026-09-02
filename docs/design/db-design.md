@@ -6,7 +6,7 @@
 
 ## 結論（確信度: 高）
 
-監査指摘13件を **12件受諾・1件部分受諾**（#10: UI動線はSubagent 2管轄、DB側責務のみ本設計に反映）。骨格（Supabase 新規プロジェクト・日付チャンク取得・pg_trgm 基線・rev トリガ楽観ロック）は維持しつつ、**①夜間 pg_dump バックアップ（§9新設）②操作職員ピッカーによる既読主体の確定（§4）③upsert 全廃＝insert/update 明示分岐（§5）④切替日Dまでの入力封鎖と importer skip 規則（§7）⑤RPC `timeline_chunk` による1往復取得（§2）**を構造に組み込んだ。テーブルは計11（業務8＋設定1＋運用2）。
+監査指摘13件を **12件受諾・1件部分受諾**（#10: UI動線はSubagent 2管轄、DB側責務のみ本設計に反映）。骨格（Supabase 新規プロジェクト・日付チャンク取得・pg_trgm 基線・rev トリガ楽観ロック）は維持しつつ、**①夜間 pg_dump バックアップ（§9新設）②操作職員ピッカーによる既読主体の確定（§4）③upsert 全廃＝insert/update 明示分岐（§5）④切替日Dまでの入力封鎖と importer skip 規則（§7）⑤RPC `timeline_chunk` による1往復取得（§2）**を構造に組み込んだ。テーブルは計12（業務9＋設定1＋運用2。0003 で attendance を追加）。
 
 ## 1. テーブル設計（DDLスケッチ）
 
@@ -24,23 +24,30 @@ residents ( id bigint identity PK,
 
 -- 職員スナップショット（正本=統合GAS クラウドキー staff。name 実質キー）
 staff ( id bigint identity PK, name text unique not null,
-  active boolean not null default true, synced_at timestamptz default now() )
+  active boolean not null default true,
+  manual boolean not null default false,   -- 手で登録した職員の印（0006）。true はマスタ同期の退職判定から除外
+  synced_at timestamptz default now() )
 -- 氏名変更=新行・旧行 inactive（過去記録の表示が遡って変わらない）
 -- 将来の個別アカウント移行用に auth_uid uuid null を最初から定義（列だけ。運用は§4）
+-- manual=true: シフト連携GASの名簿に載らない事務職員など、人が手で登録した職員。
+--   次のマスタ同期で「名簿に居ない在籍者」として退職扱いにしない（0006・実データで2名770件の記入者が判明）
 
 -- バイタル（1行=1測定）
 vitals ( id bigint identity PK,
   resident_id bigint not null references residents(id),
   measured_on date not null,          -- 業務日付（JST・クライアント明示指定）
-  kind text not null check (kind in ('routine','recheck','observation')),
+  kind text not null check (kind in ('routine','recheck','observation','symptom')),  -- symptom=他症状者（0003追加）
   measured_at time,
   temp numeric(3,1) check (temp between 30 and 45),
   sys_bp smallint check (sys_bp between 40 and 300),
   dia_bp smallint check (dia_bp between 20 and 200),
   pulse smallint check (pulse between 20 and 250),
   spo2 smallint check (spo2 between 50 and 100),
-  note text, raw_flags jsonb,          -- 数値化不能原文の保持（0にしない）
+  note text, symptom text,             -- symptom=他症状者ブロックの症状欄（0003）
+  raw_flags jsonb,                     -- 数値化不能原文の保持（0にしない）
   import_key text unique,              -- 蓄積スプシ由来の冪等キー（ネイティブ入力=null）
+  client_key text,                     -- 端末生成の冪等キー（unique索引uq_vitals_client_key・0004。kind='routine' には付けない＝§5）
+  import_tombstoned_at timestamptz,    -- 取込が付けた墓標の印（0008。職員の削除と区別し、移行元に戻れば復活）
   recorded_by bigint references staff(id), rev int not null default 1,
   created_at/updated_at timestamptz, deleted_at timestamptz, deleted_by bigint )
 -- 部分unique: (resident_id, measured_on) where kind='routine' and deleted_at is null
@@ -54,13 +61,17 @@ meals ( id bigint identity PK, resident_id bigint not null references residents(
   side_amount smallint check (side_amount between 0 and 10),
   status text check (status in ('eaten','out','hospital','refused')),
   note text, raw_flags jsonb, import_key text unique,
+  import_tombstoned_at timestamptz,    -- 取込が付けた墓標の印（0008。notes/vitals と同義）
   recorded_by/rev/監査列/soft delete列 同上 )
 -- 部分unique: (resident_id, meal_on, meal_slot) where deleted_at is null（同上・防波堤のみ）
+-- client_key は持たない: (resident_id, meal_on, meal_slot) の自然キーで二重登録を防げるため（0001の判断のまま）
 
 -- 水分（1行=1回。日合計はクエリ算出）
 fluid_intake ( id bigint identity PK, resident_id bigint not null references residents(id),
   taken_on date not null, taken_at time, amount_ml int check (amount_ml between 0 and 2000),
-  kind text, recorded_by/rev/監査列/soft delete列 同上 )
+  kind text,
+  client_key text,                     -- 端末生成の冪等キー（unique索引uq_fluid_client_key・0001）
+  recorded_by/rev/監査列/soft delete列 同上 )
 
 -- 申し送り（1行=1件）
 notes ( id bigint identity PK,
@@ -68,6 +79,8 @@ notes ( id bigint identity PK,
   shift text not null check (shift in ('day','daycare','night')),
   facility text,                       -- ★監査#9: 移行元 events.facility の受け皿
   category text,                       -- ★監査#9: 移行元 events.kind（種別）の受け皿
+  color text check (color is null or color in ('pink','yellow','blue','green','orange')),  -- 行の色（0003）
+  after16 boolean not null default false,   -- 日勤の「↓16時以降の記録」区切りより後の行（0003）
   resident_id bigint references residents(id),   -- null=全体連絡
   role_tags text[] not null default '{}',
   importance text not null default 'normal' check (importance in ('normal','important','critical')),
@@ -75,6 +88,8 @@ notes ( id bigint identity PK,
   occurred_at time,
   ongoing boolean not null default false, ended_at timestamptz, ended_by bigint,
   import_key text unique,              -- events.key 格納（冪等）
+  client_key text,                     -- 端末生成の冪等キー（unique索引uq_notes_client_key・0001）
+  import_tombstoned_at timestamptz,    -- 取込が付けた墓標の印（0008。職員の削除と区別し、移行元に戻れば復活）
   reporter_id bigint references staff(id),   -- 移行分の夜勤は null 許容
   rev/監査列/soft delete列 同上 )
 
@@ -86,7 +101,20 @@ note_reads ( note_id bigint references notes(id), staff_id bigint references sta
 outings ( id bigint identity PK, resident_id bigint not null references residents(id),
   kind text not null check (kind in ('outing','overnight')),
   start_on date not null, start_at time, end_on date, end_at time,  -- 帰着未定=null
-  companion text, note text, recorded_by/rev/監査列/soft delete列 同上 )
+  companion text, note text,
+  client_key text,                     -- 端末生成の冪等キー（unique索引uq_outings_client_key・0001）
+  recorded_by/rev/監査列/soft delete列 同上 )
+
+-- 出勤者・施設長（1行=1日×1職員。0003で追加。現行スプシ上部の出勤者欄の写し）
+attendance ( day date not null, staff_id bigint not null references staff(id),
+  role text not null default 'staff' check (role in ('manager','staff')),
+  sort int not null default 0,          -- 現行スプシの左からの並び
+  created_at timestamptz not null default now(),
+  PK (day, staff_id) )
+-- rev・deleted_at を持たない＝「その日の記録」として再登録で上書きする後勝ち設計（0003のコメントより）。
+--   取り消しは delete でなく再登録で表現する。誤登録の削除だけは service_role（管理者）に限り、
+--   authenticated には delete ポリシーを作らない（他表と同じ「物理削除の構造的不可」の考え方）。
+-- realtime publication にも追加（notes/vitals/meals/fluid_intake/outings/note_reads と合わせて計7表）
 
 -- app_settings … 0009 流用。★追加キー: 'native_input_enabled'（切替日Dの機能フラグ・監査#4）
 -- import_days ( source, day, imported_at, src_rows, inserted, updated, skipped,
@@ -94,13 +122,23 @@ outings ( id bigint identity PK, resident_id bigint not null references resident
 -- master_sync_log ( id, synced_at, source, before_count, after_count, added, deactivated, renamed )
 ```
 
-**索引一覧**（すべて `where deleted_at is null` 部分索引、note_reads除く）:
+**索引一覧**（原則 `where deleted_at is null` 部分索引。note_reads・client_key系unique・下記の例外を除く）:
 - 各業務表: `(note_on desc, id desc)` / `(measured_on desc, id desc)` / `(meal_on desc, id desc)` / `(taken_on desc, id desc)` / outings `(start_on desc, id desc)` — タイムライン用
 - 各業務表: `(resident_id, 日付列 desc)` — 個人カルテ用。**notes にも `(resident_id, note_on desc)` を追加**（監査#12受諾。関連申し送り・記入者絞込の全域スキャン防止）
 - notes: `gin (body gin_trgm_ops)` — 検索用
+- `idx_notes_ongoing_open`（0002）: notes `(note_on desc, id desc) where deleted_at is null and ongoing and ended_at is null`。timeline_chunk の pinned が「終了していない継続」を遡り上限（60日）なしで拾うための専用索引
+- `idx_vitals_day_kind`（0003）: vitals `(measured_on desc, kind) where deleted_at is null` ／ `idx_notes_day_after16`（0003）: notes `(note_on desc, after16) where deleted_at is null` — スプシ模倣UI（日報・バイタル一覧）が1日分をまとめて引くための索引
+- `idx_attendance_day`（0003）: attendance `(day desc)`
+- client_key の二重登録の防止策（**deleted_at で絞らない全体unique**。削除済み行も同じキーを押さえたままにし、退避していた再送を23505で「もう届いている」と判定するため）: `uq_notes_client_key`（0001）／`uq_fluid_client_key`（0001）／`uq_outings_client_key`（0001）／`uq_vitals_client_key`（0004・kind='routine' には付けない）
 - **db.ts 規約: 全読取クエリに `.is('deleted_at', null)` を機械付与**（部分索引の使用条件。監査#12）。ラッパー関数で強制し、素の `supabase.from()` を db.ts 外から呼ばない
 
 updated_at トリガ（0001 の `set_updated_at()` 踏襲）で `new.rev = old.rev + 1` も実行。
+
+**未使用列**（実装時点でアプリからは書かれていない。仕様の逃がし・将来予約であり削除しない）:
+- `vitals.deleted_by` / `meals.deleted_by` / `outings.deleted_by` … アプリからの削除経路が無いため未使用（db.ts の soft delete は fluid_intake / notes の2表のみで、`deleted_at` だけを書く。`deleted_by` はどちらも書かない）
+- `staff.auth_uid` … 将来の職員個別アカウント移行用の予約列（現運用は施設共有アカウント・§4）
+
+`notes.ended_by` は 2026-09-02 の改修から使用中: `endOngoingNote(id, rev, endedBy)` が `ended_at` と `ended_by`（操作者ID・不明なときは null）を書く部分更新になった。
 
 ## 2. データ量とクエリ計画
 
@@ -120,6 +158,7 @@ updated_at トリガ（0001 の `set_updated_at()` 踏襲）で `new.rev = old.r
 - **①タイムライン**: RPC **`timeline_chunk(p_from date, p_to date, p_staff_id bigint)`** 1発で notes（`read_count`・`my_read` 畳み込み済み）＋vitals＋meals＋fluid＋outings＋import_days を返す（監査#5受諾。素朴実装の note_reads 素通し≈3,400行/チャンクを排除）。`security invoker`・`revoke execute from anon` ＋ `grant execute to authenticated`。全表 index scan、サーバー実行 <20ms、E2E 目標 **初期表示 p95 500ms・追加チャンク p95 400ms**（実測前の目標値。Subagent 3 の検収基準）。無限スクロールは日付境界 keyset（`p_to = 最古取得日 - 1`）。offset 不使用。
 - **②個人カルテ**: `(resident_id, 日付列 desc)` 索引。折れ線は期間指定必須（既定90日・`.limit(1000)` ガード）。E2E 目標 p95 300ms。
 - **③検索**: §3。目標 p95 500ms。
+- **④食事一覧（スプシ模倣UI）の水分（0005追加）**: RPC **`meals_sheet_fluids(p_from date, p_to date)`** が水分を「1名1日=1行」（内訳はjsonbへ畳み込み）で返す。11日表示・利用者33名の規模だと水分の生行数（135〜165件/日）だけで1リクエスト上限2,000行の74〜91%を占めるため、1名1日集約で181名分まで上限に達しないようにする。権限・期間ガードは timeline_chunk と同方針（`security invoker`・anon revoke／authenticated grant・最大100日）。
 - **未読バッジ**: `notes where not exists(note_reads…) and note_on >= 直近30日` の count（`(note_on desc)` 索引で足りる。全域走査しない）。
 - **全件ロード禁止の担保**: 全クエリを `src/lib/db.ts` に集約。「日付レンジ or resident_id＋limit の無いクエリを書かない」規約＋既定 `.limit(2000)` 上限。
 - 性能実測は M-026 準拠・**合成データ10年相当規模（notes 13万・note_reads 130万以上）**で①②③を計測。
@@ -167,6 +206,11 @@ PII: 実名ゼロ・`VITE_*` に施設情報を置かない（0009 実測知見�
 保存前に `types.validateNoteAlias` を通し、**他の利用者の氏名・表示名と同じ名前は拒否する**
 （退居された方も突き合わせ相手に含める＝過去の記録に氏名が残るため）。
 表示に使うのは申し送りを扱う画面だけ（sheet-contracts.md §5 を参照）。
+
+**`staff.manual`（手で登録した職員の印・2026-08-29 実測・移行 0006）**
+シフト連携GASの名簿はシフトを組む職種しか載らず、シフトに載らない事務職員（実データで2名・770件の記入者）が
+次のマスタ同期のたびに「名簿に居ない在籍者」として退職扱いになっていた。`manual=true` の行は
+この退職判定から除外する（`manual=false` は従来どおり名簿が正）。
 
 ## 7. 移行設計
 
@@ -238,3 +282,7 @@ Supabase 無料枠に自動バックアップは無い（確信度: 高）。介
 - 蓄積スプシの遡及範囲（ingestedDates は直近200日保持。それ以前は10日ファイル実物の残存に依存・未検証）
 - 承認時の確定4点: 認証方式（A案推奨）＋actor 自己申告の許容／下書き24h保持の可否／出勤者ブロックのスコープ外裁定／切替日Dの運用
 - pg_dump のバージョン整合・バックアップ保存先 `~/Claude/Backups/care-log/` の可否（README.md のフォルダ規律との整合は本人確認・未検証）
+
+## 変更履歴
+
+- 2026-09-02 移行 0003〜0008 を反映

@@ -165,7 +165,7 @@ saveAttendance(
   dayIso: string,
   rows: { staff_id: number; role: 'manager' | 'staff'; sort: number }[],
   options: { baseline: number[] },
-): Promise<void>
+): Promise<void | Queued>   // 1件も書く前の通信断はキュー（kind:'attendance'）へ退避して 'queued'。再送時はサーバー現況と差分を取り直す
 ```
 
 **規律（既存のまま）**: `.is('deleted_at', null)` と limit を機械付与。upsert は使わない。更新は rev 照合。
