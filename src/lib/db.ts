@@ -2260,6 +2260,97 @@ export function subscribeChanges(cb: (table: string, info?: ChangeInfo) => void)
   }
 }
 
+/**
+ * いま誰がどこを書いているか（Presence）。
+ *
+ * ★現場の実態（2026-09-05 聞き取り）: 申し送り欄は「他者がいつ記載しているかを把握できない」ため、
+ *   同じ入居者・同じ出来事を二人が同時に書いてしまうことがある。実測でも、同じ日・同じ入居者・
+ *   同じ勤務帯を別の記入者が書いた組が1日あたり5.6組あった。
+ *   打鍵中の文字そのものを配る必要はなく（書きかけの文は誤読のもとになる）、
+ *   **「いま誰がどこを開いているか」**が分かれば、書く前に気づいて声をかけられる。
+ *
+ * ★DBには一切書かない（Realtime の Presence はサーバー上の一時状態）。
+ *   行数・転送量・バックアップ対象のどれも増えない。接続できない環境では
+ *   「誰も居ない」として静かに成立する（画面はこれが無くても使える）。
+ * ★配るのは職員IDと居場所（日付・対象の利用者ID）だけ。**氏名も本文も配らない**
+ *   （受け取った側が自分の持つ職員名簿で引いて表示する）。
+ */
+export interface PresenceHere {
+  /** 職員ID。名簿と照合して氏名を出すのは受け取る側 */
+  staffId: number
+  /** 開いている日（YYYY-MM-DD） */
+  day: string
+  /** 対象の利用者ID。null＝対象を選んでいない／全体宛 */
+  residentId: number | null
+}
+
+function normalizePresence(row: unknown): PresenceHere | null {
+  const r = asRecord(row)
+  if (r === null) return null
+  const staffId = idNum(r.staffId)
+  const day = dateStr(r.day)
+  if (staffId === null || day === null) return null
+  return { staffId, day, residentId: idNum(r.residentId) }
+}
+
+/**
+ * 申し送りを書いている人の居場所を配り、他の人の居場所を受け取る。
+ * room は用途ごとに分ける（いまは申し送りだけ）。戻り値の update で自分の居場所を更新し、
+ * 戻り値の stop で抜ける（画面を離れる時に必ず呼ぶ）。
+ */
+export function joinNotePresence(
+  self: PresenceHere,
+  onChange: (others: PresenceHere[]) => void,
+): { update: (next: PresenceHere) => void; stop: () => void } {
+  let cancelled = false
+  let client: SupabaseClient | null = null
+  let channel: ReturnType<SupabaseClient['channel']> | null = null
+  let current = self
+  const key = `s${self.staffId}-${Math.random().toString(36).slice(2, 8)}`
+
+  void (async () => {
+    try {
+      const sb = await getClient()
+      if (cancelled) return
+      client = sb
+      const ch = sb.channel('cl_note_presence', { config: { presence: { key } } })
+      ch.on('presence', { event: 'sync' }, () => {
+        if (cancelled) return
+        const state = ch.presenceState() as Record<string, unknown[]>
+        const others: PresenceHere[] = []
+        for (const [k, metas] of Object.entries(state)) {
+          if (k === key) continue // 自分は出さない
+          const first = Array.isArray(metas) ? metas[0] : null
+          const p = normalizePresence(first)
+          if (p !== null) others.push(p)
+        }
+        onChange(others)
+      })
+      channel = ch
+      ch.subscribe((status: string) => {
+        if (!cancelled && status === 'SUBSCRIBED') void ch.track(current)
+      })
+    } catch {
+      // 接続できない。誰も居ない扱いで画面は成立する
+    }
+  })()
+
+  return {
+    update: (next: PresenceHere) => {
+      current = next
+      if (channel !== null && !cancelled) void channel.track(next)
+    },
+    stop: () => {
+      cancelled = true
+      if (client !== null && channel !== null) {
+        void channel.untrack()
+        void client.removeChannel(channel)
+      }
+      channel = null
+    },
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // スプレッドシート模倣UI（日報シート・バイタル一覧・食事一覧）の追加API
 //

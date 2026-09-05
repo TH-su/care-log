@@ -31,12 +31,14 @@ import {
   fetchStaff,
   getNativeInputGate,
   fetchNotesForTargetDay,
+  joinNotePresence,
   insertNote,
   isQueuePersisted,
   softDeleteNote,
 } from '../lib/db'
 import { addDays, fmtDayLabel, fmtTimeHM, todayIso } from '../lib/format'
 import { IMPORTANCE_LABEL, LS, noteDisplayName, ROLE_TAGS, SHIFT_LABEL } from '../lib/types'
+import type { PresenceHere } from '../lib/db'
 import type { Importance, Note, Resident, Shift, Staff } from '../lib/types'
 
 // ── 定数 ──────────────────────────────────────────────
@@ -250,6 +252,8 @@ export function NoteFormPage() {
    */
   const [sameDayNotes, setSameDayNotes] = useState<Note[] | null>(null)
   const [sameDayLoading, setSameDayLoading] = useState(false)
+  /** いま同じ日の申し送りを開いている他の職員（Presence。DBには書かない） */
+  const [othersHere, setOthersHere] = useState<PresenceHere[]>([])
   const [saving, setSaving] = useState(false)
 
   const [residentPicker, setResidentPicker] = useState(false)
@@ -598,6 +602,40 @@ export function NoteFormPage() {
     }
   }, [form.targetPicked, form.residentId, form.noteOn])
 
+  /**
+   * いまどこを書いているかを配り、他の人の居場所を受け取る（Presence）。
+   * 参加は画面にいる間ずっと1本。居場所（日付・対象）が変わるたびに更新する。
+   * 記録者が未選択の間は参加しない（誰が書いているかを名乗れないため）。
+   */
+  const presenceRef = useRef<ReturnType<typeof joinNotePresence> | null>(null)
+  useEffect(() => {
+    const staffId = form.reporterId
+    if (staffId === null) return
+    const here: PresenceHere = {
+      staffId,
+      day: form.noteOn,
+      residentId: form.targetPicked ? form.residentId : null,
+    }
+    const p = joinNotePresence(here, setOthersHere)
+    presenceRef.current = p
+    return () => {
+      presenceRef.current = null
+      setOthersHere([])
+      p.stop()
+    }
+    // 参加は記録者が決まった時に1回。居場所の変化は下の effect が update で伝える
+  }, [form.reporterId])
+
+  useEffect(() => {
+    const p = presenceRef.current
+    if (p === null || form.reporterId === null) return
+    p.update({
+      staffId: form.reporterId,
+      day: form.noteOn,
+      residentId: form.targetPicked ? form.residentId : null,
+    })
+  }, [form.reporterId, form.noteOn, form.targetPicked, form.residentId])
+
   // ★ここから下は早期 return がある。Hook はすべてこの上に置くこと（規則違反で画面が落ちる）
   if (phase === 'loading') {
     return <LoadingBlock label="申し送りフォームを準備しています…" />
@@ -751,6 +789,31 @@ export function NoteFormPage() {
                   </span>
                 </button>
                 {fieldError('residentId')}
+
+                {/* いま同じところを書いている人（Presence・2026-09-05 追加）。
+                    現場では「他者がいつ記載しているか把握できない」ために同じ出来事を
+                    二人が書いてしまう。打鍵中の文字は配らず、居場所だけを知らせる */}
+                {othersHere.length > 0 && (
+                  <p aria-live="polite" className="mt-2 rounded-md border border-warn bg-warn-bg p-3 text-sm text-ink">
+                    <span aria-hidden="true" className="mr-1">▲</span>
+                    {(() => {
+                      const sameTarget = othersHere.filter(
+                        (o) => form.targetPicked && o.residentId === form.residentId,
+                      )
+                      const names = (list: PresenceHere[]) =>
+                        list
+                          .map((o) => staffById.get(o.staffId)?.name)
+                          .filter((n): n is string => typeof n === 'string' && n !== '')
+                          .join('・')
+                      if (sameTarget.length > 0) {
+                        const n = names(sameTarget)
+                        return `${n === '' ? `他 ${sameTarget.length} 名` : n}が、いま${targetText}の申し送りを書いています。同じ内容にならないか確かめてください。`
+                      }
+                      const n = names(othersHere)
+                      return `${n === '' ? `他 ${othersHere.length} 名` : n}が、いま${dayLabel}の申し送りを書いています。`
+                    })()}
+                  </p>
+                )}
 
                 {/* 本日この方の記録（二重記入を書く前に気づくための参考表示・2026-09-05 追加）。
                     読むだけで、ここから編集・削除はできない（このフォームの役目は新規登録） */}
