@@ -91,6 +91,12 @@ export function resolveActor(staff: Staff[]): Staff | null {
  * 日付が変わった／最終操作から4時間経過／記録が無い・壊れている場合は true。
  * 判定不能は true（＝確認を出す）に倒す。誤帰属の記録・既読を作らないため。
  */
+/**
+ * ★2026-09-05 時点で呼び出し元は無い。
+ *   起動時・復帰時に「記録する職員」を確認させるモーダルは廃止した（1台を複数人で使うため、
+ *   端末に1人を紐づける前提が実務に合わず、選ぶまで閲覧すらできなかった）。
+ *   記入者は記録ごとに選ぶ。判定そのものは残す（個人端末向けに戻す判断が出た時のため）。
+ */
 export function shouldReconfirm(): boolean {
   const seen = parseNumericId(readRaw(SEEN_AT_KEY))
   if (seen == null) return true

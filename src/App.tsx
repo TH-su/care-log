@@ -9,7 +9,7 @@
  *     ここで渡せるのは値だけで「観測できたか」は渡せない＝取得に失敗した時も false を渡す。
  *     そのため**セル直接編集を持つ一覧（日報・バイタル・食事）は自前で getNativeInputGate を呼び直し**、
  *     「封鎖」と「観測できなかった（通信エラー）」を自分で区別する。この prop は初期値として使う）
- *   ④操作者ゲート（resolveActor 失敗 or shouldReconfirm で StaffPickerModal）
+ *   ④記録者の既定（設定タブから明示的に切り替える時だけ StaffPickerModal。起動時は出さない）
  *   ⑤シェル（スティッキーヘッダ＝画面名・未送信n件・操作者チップ／
  *     タブ＝<1024px下部5つ・≥1024px左レール8つ。sheet-contracts.md §2）
  *     ※表示倍率（ZoomBar）は各シート画面の操作バーが1つだけ持つ（二重表示にしない）
@@ -428,7 +428,13 @@ function hookAuthExpired(db: Deps['db']): void {
   db.onAuthExpired(() => authExpiredHandler?.())
 }
 
-type PickerMode = 'none' | 'required' | 'reconfirm' | 'switch'
+/**
+ * 記録する職員の選択モード。
+ * 2026-09-05 に 'required'（閉じられない初回選択）と 'reconfirm'（日をまたいだ再確認）を廃止した。
+ * 1台の端末を複数人が使うため、端末に1人を紐づけて選ばせる前提が実務に合わず、
+ * しかも選ぶまで閲覧すらできなかった。いまは設定タブから明示的に切り替える 'switch' だけ。
+ */
+type PickerMode = 'none' | 'switch'
 
 // ── ログイン後のシェル（封鎖フラグ → 操作者ゲート → タブ／ルート）──
 function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
@@ -510,14 +516,15 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
         const safe = Array.isArray(list) ? list.filter((s) => s && typeof s.id === 'number') : []
         setStaff(safe)
         const current = actor.resolveActor(safe)
-        if (!current) {
-          setActorId(null)
-          setPicker('required') // 照合失敗（不在・退職・不正値）は選び直し
-          return
-        }
-        setActorId(current.id)
-        if (actor.shouldReconfirm()) setPicker('reconfirm')
-        else actor.touchActivity()
+        // ★起動時に「記録する職員」を選ばせない（2026-09-05 指示）。
+        //   以前は未選択・要再確認の時に**閉じられないモーダル**を出しており、
+        //   選ぶまで日報すら見られなかった（iPhone で「名前を選ばないと何も見えない」）。
+        //   記録は1台の端末を複数人が使うので、端末に1人を紐づける前提自体が実務に合わない。
+        //   記入者は**記録ごとに選ぶ**（日報・バイタル・食事は行ごとの記入者欄、
+        //   申し送りフォームは記入者の必須入力）ので、ここでの選択は既定値にすぎない。
+        //   閲覧は誰であっても妨げない＝未選択のまま全画面を見られる。
+        setActorId(current?.id ?? null)
+        if (current) actor.touchActivity()
       } catch {
         if (alive) setStaffError(true)
       }
@@ -589,17 +596,6 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
     navigate(returnTo && returnTo !== '/login' ? returnTo : '/', { replace: true })
   }, [location.pathname])
 
-  // 共有端末で開きっぱなしの場合に備え、復帰時にも再確認条件を見る
-  useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState !== 'visible') return
-      if (actorId == null) return
-      if (actor.shouldReconfirm()) setPicker((p) => (p === 'none' ? 'reconfirm' : p))
-    }
-    document.addEventListener('visibilitychange', onVisible)
-    return () => document.removeEventListener('visibilitychange', onVisible)
-  }, [actor, actorId])
-
   const pickActor = useCallback(
     (id: number) => {
       actor.setActorId(id)
@@ -611,9 +607,8 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
   )
 
   const closePicker = useCallback(() => {
-    if (picker === 'reconfirm') actor.touchActivity() // 「このまま続ける」
     setPicker('none')
-  }, [picker, actor])
+  }, [])
 
   if (staffError) {
     return (
@@ -637,14 +632,9 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
   const actorName = staff.find((s) => s.id === actorId)?.name ?? null
   const back = backTarget(location.pathname)
   const currentView = viewOf(location.pathname)
-  const pickerTitle =
-    picker === 'required'
-      ? '記録する職員を選んでください'
-      : picker === 'reconfirm'
-        ? actorName
-          ? `「${actorName}」として記録します。交代した場合は選び直してください`
-          : '記録する職員を確認してください'
-        : '記録する職員を切り替える'
+  const pickerTitle = actorName
+    ? `記録者の既定を切り替える（いまは「${actorName}」）`
+    : '記録者の既定を選ぶ'
 
   return (
     <div className="min-h-screen bg-bg text-ink lg:pl-24">
@@ -681,14 +671,15 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
             日報・バイタル・食事は行ごとに記入者を選ぶため、画面全体の記録者表示は場所を取るだけになる。
             操作者の仕組み自体は残す（各行の記入者の既定値・既読の主体）。
             切り替えの導線は設定タブ（記録する職員）へ移した。
-            未選択のときだけは、記録できない理由が分かるよう案内を出す。
+            2026-09-05: 未選択は**異常ではなく通常の状態**になった（1台を複数人で使うため）。
+            警告色をやめ、既定値を決めたい人のための入口としてだけ残す。閲覧は妨げない。
           */}
           {actorId == null && (
             <Link
               to="/settings"
-              className="inline-flex min-h-tap items-center gap-1 rounded-md border border-warn bg-warn-bg px-3 text-sm text-ink"
+              className="inline-flex min-h-tap shrink-0 items-center gap-1 rounded-md px-2 text-sm text-link"
             >
-              <span aria-hidden="true">▲ </span>記録する職員が未選択
+              記録者の既定を設定
             </Link>
           )}
         </div>
@@ -699,9 +690,10 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
           入力封鎖の見せ方（理由文＋ディセーブル）は各記録画面が自前で持つため、ここでは重ねない。
           シェルの担当は「起動時と記録画面に入るたびフラグを取り直し、既知値として渡す」ところまで。
         */}
-        {/* 職員マスタが空＝操作者を選べない。モーダルで塞がず、案内バーで設定タブへ誘導する
-            （picker が none でない＝名簿の取得は完了していて空、の状態だけで出す） */}
-        {picker !== 'none' && staff.length === 0 && (
+        {/* 職員マスタが空＝どの記録にも記入者を付けられない。モーダルで塞がず案内バーで誘導する。
+            staff が null の間（取得中）は出さない＝空だと確かめられた時だけ出す
+            （2026-09-05: 起動時に選択モーダルを出さなくなったので picker には依存させない） */}
+        {staff !== null && staff.length === 0 && (
           <div className="mb-4 flex flex-wrap items-center gap-gap rounded-md border border-info bg-info-bg p-3">
             <p className="flex-1 text-base text-ink">
               <span aria-hidden="true">ⓘ </span>
@@ -832,7 +824,8 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
         staff={staff}
         onPick={pickActor}
         // 初回選択（required）は閉じられない＝誤帰属を防ぐ
-        onClose={picker === 'required' ? undefined : closePicker}
+        // 閉じられない選択は廃止した（閲覧を妨げない）
+        onClose={closePicker}
         title={pickerTitle}
       />
     </div>
