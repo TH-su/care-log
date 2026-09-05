@@ -35,6 +35,7 @@ import type {
 import {
   DbError,
   fetchMealsSheet,
+  isSelfWrite,
   fetchResidents,
   getNativeInputGate,
   insertFluid,
@@ -81,7 +82,11 @@ const COLS_PER_DAY = 7
 /** 変更通知の連続受信をまとめる待ち時間（ミリ秒。useTimeline.ts と同値） */
 const REALTIME_DEBOUNCE_MS = 1500
 /** 自分の保存で出た通知を無視する時間（ミリ秒。DailySheetPage と同値） */
-const SELF_WRITE_MS = 3000
+/**
+ * 画面を離れていた時間がこれを超えたら、戻った時に取り直す。
+ * 短い切替（別アプリを一瞬見る）で毎回取りに行くと、軽さを損なうだけで得るものが無い。
+ */
+const AWAY_REFETCH_MS = 30_000
 /**
  * 変更通知を合図にする表と、その日付列（表示期間の内か外かの判定に使う）。
  * この画面が描くのは食事と水分だけなので、他の表（申し送り・出勤者など）の通知では取り直さない。
@@ -962,6 +967,27 @@ export function MealsSheetPage({
       }, REALTIME_DEBOUNCE_MS)
     }
     retryRef.current = schedule
+
+    /**
+     * 画面復帰・通信復帰で取り直す（2026-09-05 追加）。
+     * Realtime は配信保証が無く、iPad を伏せている間などに通知が落ちる。
+     * 落ちたことは検知できないので、戻ってきた時に1回取り直して埋める。
+     */
+    let hiddenAt = 0
+    const onVisible = () => {
+      if (typeof document === 'undefined') return
+      if (document.visibilityState === 'hidden') {
+        if (hiddenAt === 0) hiddenAt = Date.now()
+        return
+      }
+      const away = hiddenAt === 0 ? 0 : Date.now() - hiddenAt
+      hiddenAt = 0
+      if (away >= AWAY_REFETCH_MS) schedule()
+    }
+    const onOnline = () => schedule() // 切れていた間の通知は必ず落ちている
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisible)
+    if (typeof window !== 'undefined') window.addEventListener('online', onOnline)
+
     let unsub: (() => void) | null = null
     try {
       // info（変更のあった行）は渡されないこともある＝引数は省略可として受ける
@@ -969,8 +995,11 @@ export function MealsSheetPage({
       unsub = subscribeChanges((table: string, info?: { event: string; row: RowInfo }) => {
         if (stopped || !aliveRef.current) return
         if (typeof table !== 'string' || WATCHED_DAY_COL[table] === undefined) return
-        // 自分の保存で出た通知には反応しない（保存直後の取り直しは無駄な往復になる）
-        if (Date.now() - selfWriteRef.current < SELF_WRITE_MS) return
+        // 自分の保存で出た通知には反応しない（保存直後の取り直しは無駄な往復になる）。
+        // ★行で見分ける（2026-09-05 修正）。以前は「自分の保存から3秒間の通知を捨てる」
+        //   時刻だけの判定で、同じ3秒に届いた**他端末の変更まで捨てて**いた。
+        //   捨てた通知は再生されないので、次の通知か手動更新まで無期限に古いままだった
+        if (isSelfWrite(table, info?.row)) return
         const { from, to } = rangeRef.current
         if (!inShownRange(table, info?.row, from, to)) return
         schedule()
@@ -983,6 +1012,8 @@ export function MealsSheetPage({
       stopped = true
       retryRef.current = null
       if (timer) clearTimeout(timer)
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisible)
+      if (typeof window !== 'undefined') window.removeEventListener('online', onOnline)
       if (unsub) {
         try {
           unsub()

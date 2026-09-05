@@ -86,6 +86,7 @@ import {
   saveAttendance,
   setOutingEnd,
   softDeleteNote,
+  isSelfWrite,
   subscribeChanges,
   updateNoteFields,
   updateVital,
@@ -150,6 +151,12 @@ const GATE_UNKNOWN_REASON =
  * 1日に何十件も流れてくるうえ、増えるのは既読の人数だけで記録の内容は変わらない。
  * 案内を出し続けると、本当に記録が変わった時の合図がその中に埋もれる。
  */
+/**
+ * 画面を離れていた時間がこれを超えたら、戻った時に「最新に更新」の案内を出す。
+ * 短い切替（別アプリを一瞬見る）で毎回出すと、案内そのものが軽んじられる。
+ */
+const AWAY_STALE_MS = 30_000
+
 const WATCHED_TABLES = new Set(['notes', 'outings', 'vitals', 'attendance'])
 
 /**
@@ -1439,10 +1446,8 @@ export function DailySheetPage({
     [actorId],
   )
 
-  /** 自分の書き込みで出た変更通知に反応しないための抑制窓 */
-  const selfWriteRef = useRef(0)
   const handleWrite = useCallback((dayIso: string) => {
-    selfWriteRef.current = Date.now()
+    // 自分の書込かどうかは db.ts の isSelfWrite が**行単位**で見分ける（時刻の抑制窓は廃止）
     touchActivity()
     // 書き換えた日は取り置きを捨てる（区切りを行き来した時に編集前の内容を見せない）
     cacheRef.current.delete(dayIso)
@@ -1468,7 +1473,11 @@ export function DailySheetPage({
         if (!aliveRef.current) return
         // この画面が描画する表の変更だけを合図にする（食事・水分・既読の記録では出さない）
         if (typeof table !== 'string' || !WATCHED_TABLES.has(table)) return
-        if (Date.now() - selfWriteRef.current < 3000) return
+        // 自分の書込は案内を出さない（画面へ反映済み）。
+        // ★行で見分ける（2026-09-05 修正）。以前は「自分の書込から3秒間の通知を捨てる」
+        //   時刻だけの判定で、同じ3秒に届いた**他端末の変更まで捨てて**いた。
+        //   捨てた通知は再生されないので、次の通知か手動更新まで案内が出なかった
+        if (isSelfWrite(table, info?.row)) return
         // 画面に出していない日の変更では案内を出さない（判定できない時は出す＝安全側）
         if (!touchesVisibleDay(table, info, visibleDaysRef.current)) return
         setStale(true)
@@ -1476,7 +1485,34 @@ export function DailySheetPage({
     } catch {
       unsub = null
     }
+
+    /**
+     * 画面復帰・通信復帰では案内を出す（2026-09-05 追加）。
+     * Realtime は配信保証が無く、離席中・圏外の間に届いた変更は落ちる。
+     * 落ちたことは検知できないので、戻ってきたら「最新に更新」を促す。
+     * この画面は自動で差し替えない（入力中の表を勝手に入れ替えない）ので、案内までに留める。
+     * 短い切替で毎回出さないよう、離れていた時間がしきい値を超えた時だけにする。
+     */
+    let hiddenAt = 0
+    const onVisible = () => {
+      if (typeof document === 'undefined') return
+      if (document.visibilityState === 'hidden') {
+        if (hiddenAt === 0) hiddenAt = Date.now()
+        return
+      }
+      const away = hiddenAt === 0 ? 0 : Date.now() - hiddenAt
+      hiddenAt = 0
+      if (away >= AWAY_STALE_MS && aliveRef.current) setStale(true)
+    }
+    const onOnline = () => {
+      if (aliveRef.current) setStale(true)
+    }
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisible)
+    if (typeof window !== 'undefined') window.addEventListener('online', onOnline)
+
     return () => {
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisible)
+      if (typeof window !== 'undefined') window.removeEventListener('online', onOnline)
       if (unsub) {
         try {
           unsub()

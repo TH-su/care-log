@@ -1094,6 +1094,11 @@ async function sendDueOps(force: boolean): Promise<void> {
 type SendResult = 'sent' | 'retry' | 'conflict' | 'rejected'
 
 async function sendQueuedOp(sb: SupabaseClient, op: QueueOp): Promise<SendResult> {
+  // 退避ぶんの再送も「自分の書込」。更新は rev + 1 になることが分かっている
+  if (op.kind === 'update' && op.rowId !== undefined && op.rev !== undefined) {
+    markSelfRow(op.table, { id: op.rowId }, op.rev + 1)
+  }
+
   // 業務表の insert / update とは書き方が違う種別を先に振り分ける（以降 op は業務表の op）
   if (op.kind === 'read') return sendQueuedRead(sb, op)
   if (op.kind === 'attendance') return sendQueuedAttendance(sb, op)
@@ -1102,7 +1107,10 @@ async function sendQueuedOp(sb: SupabaseClient, op: QueueOp): Promise<SendResult
   const cols = colsOf(op.table)
   if (op.kind === 'insert') {
     const res = (await sb.from(op.table).insert(op.payload).select(cols).maybeSingle()) as Res<unknown>
-    if (res.error === null) return 'sent'
+    if (res.error === null) {
+      markSelfRow(op.table, res.data, num(asRecord(res.data)?.rev)) // 版が確定した
+      return 'sent'
+    }
     if (isAuthFail(res)) {
       fireAuthExpired()
       return 'retry'
@@ -1796,6 +1804,7 @@ async function insertRow<T>(
     }
     throw new DbError('server', serverMsg('保存でき', errCode(res)))
   }
+  markSelfRow(table, res.data, num(asRecord(res.data)?.rev)) // 版が確定した
   const row = normalize(res.data)
   if (row === null) throw new DbError('server', MSG.broken)
   return row
@@ -1852,6 +1861,8 @@ async function updateRow<T>(
   await assertWritable()
   if (Object.keys(patch).length === 0) throw new DbError('server', MSG.emptyPatch)
   const sb = await getClient()
+  // 自分の更新は rev + 1 になる。応答を待たずに覚えてよい（版で限定するので他端末の変更は落ちない）
+  markSelfRow(table, { id }, rev + 1)
   const res = (await sb
     .from(table)
     .update(patch)
@@ -1890,6 +1901,8 @@ async function updateNow<T>(
 ): Promise<T | Conflict | Queued> {
   await assertWritable()
   const sb = await getClient()
+  // 自分の更新は rev + 1 になる。応答を待たずに覚えてよい（版で限定するので他端末の変更は落ちない）
+  markSelfRow(table, { id }, rev + 1)
   const res = (await sb
     .from(table)
     .update(patch)
@@ -1920,6 +1933,7 @@ async function softDelete(table: QueueTable, id: number, rev: number): Promise<t
   await assertWritable()
   const sb = await getClient()
   const payload = { deleted_at: new Date().toISOString() }
+  markSelfRow(table, { id }, rev + 1)
   const res = (await sb
     .from(table)
     .update(payload)
@@ -2060,6 +2074,7 @@ export async function setOutingEnd(
  */
 export async function markRead(noteId: number, staffId: number): Promise<void> {
   const sb = await getClient()
+  markSelfRow('note_reads', { note_id: noteId, staff_id: staffId }, null) // 既読は追加のみ（版を持たない）
   const res = (await sb
     .from('note_reads')
     .insert({ note_id: noteId, staff_id: staffId })
@@ -2078,6 +2093,91 @@ export async function markRead(noteId: number, staffId: number): Promise<void> {
     return
   }
   throw writeError(res)
+}
+
+// ── 自分がこの端末から書いた版（Realtime の通知を自分の書込と見分ける）──────
+//
+// ★以前は「自分の保存から3秒間の通知は捨てる」という時刻だけの作りだった。
+//   これは**同じ3秒に届いた他端末の変更まで捨てて**おり、捨てた通知は再生されないため、
+//   次の通知が来るか人が手で更新するまで、その変更は無期限に画面へ出なかった
+//   （2026-09-05 の監査で発見。バイタル一覧・食事一覧・日報の3画面が該当）。
+//
+// 行を特定するだけでも足りない。同じ行を**他端末が直後に書き換えた**通知まで
+// 自分のものとして落としてしまうため、「どの行の、どの版まで書いたか」で見分ける。
+//   ・自分が書いて確定した版（rev）以下の通知 … 画面へ反映済み＝無視してよい
+//   ・それより新しい版の通知 … 他端末が後から書いた＝必ず拾う
+// 判定できない時（行が無い・版が無い・覚えのない行）は**他端末の変更として扱う**。
+// 迷ったら「取り直す・知らせる」側へ倒す＝変更を見落とさない。
+//
+// 覚えるのは応答が返って版が確定した後だけにする。応答より先に通知が届いた場合は
+// 「自分のものと分からない」＝取り直す側に倒れるだけで、記録は失われない。
+const SELF_ROW_TTL_MS = 20_000
+/** 版を持たない表（出勤者）の猶予。自分の書込の通知だけを拾える最小限に留める */
+const SELF_ROW_NOREV_TTL_MS = 3_000
+
+interface SelfRow {
+  /** この端末が書いて確定した版。null＝版を持たない表（この鍵は猶予いっぱい一致させる） */
+  rev: number | null
+  exp: number
+}
+/** 鍵 → 自分が書いた版。件数は1端末の直近の書込ぶんだけなので上限管理は要らない */
+const selfRows = new Map<string, SelfRow>()
+
+/** 行を一意に指す鍵。書く側の応答と、受け取る側の Realtime の行から同じ文字列が出るようにする */
+function selfRowKey(table: string, row: Record<string, unknown>): string | null {
+  const id = idNum(row.id)
+  if (id !== null) return `${table}#${id}`
+  // id を持たない表: 出勤者（日×職員）・既読（申し送り×職員）
+  const staffId = idNum(row.staff_id)
+  if (staffId === null) return null
+  const day = dateStr(row.day)
+  if (day !== null) return `${table}@${day}|${staffId}`
+  const noteId = idNum(row.note_id)
+  if (noteId !== null) return `${table}@${noteId}|${staffId}`
+  return null
+}
+
+/**
+ * この端末が書いた版として覚える。
+ * rev は「書き込みが終わった後の版」を渡す（更新なら送った rev + 1、応答があるならその値）。
+ */
+function markSelfRow(table: string, row: unknown, rev: number | null): void {
+  const rec = asRecord(row)
+  if (rec === null) return
+  const key = selfRowKey(table, rec)
+  if (key === null) return
+  const now = Date.now()
+  for (const [k, v] of selfRows) if (v.exp <= now) selfRows.delete(k)
+  const ttl = rev === null ? SELF_ROW_NOREV_TTL_MS : SELF_ROW_TTL_MS
+  const prev = selfRows.get(key)
+  // 同じ行を続けて書いた時は新しい版を採る（古い版で上書きしない）
+  const next = rev === null || prev === undefined || prev.rev === null ? rev : Math.max(prev.rev, rev)
+  selfRows.set(key, { rev: next, exp: now + ttl })
+}
+
+/**
+ * 届いた行の版が「この端末が書いた版まで」に収まるか（isSelfWrite の判定の核・純関数）。
+ * seenRev=null は版を持たない表（出勤者・既読）で、猶予の間だけ自分のものとみなす。
+ * **版が読めない通知は false**＝他端末の変更として扱う（見落とさない側へ倒す）。
+ */
+export function isSeenRev(seenRev: number | null, row: unknown): boolean {
+  if (seenRev === null) return true
+  const rev = num(asRecord(row)?.rev)
+  return rev !== null && rev <= seenRev
+}
+
+/**
+ * Realtime で届いた変更が、この端末が既に画面へ反映済みの書込か。
+ * **覚えのない行・版が新しい行・行を特定できない通知は false**（＝他端末の変更として扱う）。
+ */
+export function isSelfWrite(table: string, row: unknown): boolean {
+  const rec = asRecord(row)
+  if (rec === null) return false
+  const key = selfRowKey(table, rec)
+  if (key === null) return false
+  const hit = selfRows.get(key)
+  if (hit === undefined || hit.exp <= Date.now()) return false
+  return isSeenRev(hit.rev, rec)
 }
 
 // ── Realtime ─────────────────────────────────────────────────────────────────
@@ -2597,6 +2697,11 @@ async function applyAttendance(
   // 途中失敗を素の writeError（「記録は変わっていません」）で返すと、
   // 既に載った追加・更新まで「保存されていない」と案内することになるため
   let wrote = false
+
+  // この差分で触る行を、送る前にまとめて覚える（自分の書込で「他の端末で更新」を出さない）
+  for (const row of toInsert) markSelfRow('attendance', { day: dayIso, staff_id: row.staff_id }, null)
+  for (const row of toUpdate) markSelfRow('attendance', { day: dayIso, staff_id: row.staff_id }, null)
+  for (const staffId of toHide) markSelfRow('attendance', { day: dayIso, staff_id: staffId }, null)
 
   // 1. 追加（不足分だけ）
   if (toInsert.length > 0) {

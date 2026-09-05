@@ -38,6 +38,7 @@ import {
   DbError,
   fetchResidents,
   fetchVitalsSheet,
+  isSelfWrite,
   getNativeInputGate,
   insertVital,
   queuePending,
@@ -164,7 +165,11 @@ const REALTIME_DEBOUNCE_MS = 1500
  * 自分の保存で出た通知を無視する時間（ミリ秒）。自分の書き込みは画面へ反映済みなので、
  * 取り直すと保存直後に打った値を無駄に描き直す危険だけが残る（日報シートと同じ 3 秒）。
  */
-const SELF_WRITE_QUIET_MS = 3000
+/**
+ * 画面を離れていた時間がこれを超えたら、戻った時に取り直す。
+ * 短い切替（別アプリを一瞬見る）で毎回取りに行くと、軽さを損なうだけで得るものが無い。
+ */
+const AWAY_REFETCH_MS = 30_000
 /** この画面が描画する表（食事・水分・申し送りの変更では取り直さない） */
 const WATCHED_TABLE = 'vitals'
 /** 変更通知の行が持つ日付の列（この画面が横に並べている日と突き合わせる） */
@@ -679,6 +684,28 @@ export function VitalsSheetPage({
       }, REALTIME_DEBOUNCE_MS)
     }
     retryRef.current = schedule
+
+    /**
+     * 画面復帰・通信復帰で取り直す（2026-09-05 追加）。
+     * Realtime は配信保証が無く、iPad を伏せている間などに通知が落ちる。
+     * 落ちたことは検知できないので、戻ってきた時に1回取り直して埋める。
+     * 短い離席で毎回取りに行かないよう、離れていた時間がしきい値を超えた時だけにする。
+     */
+    let hiddenAt = 0
+    const onVisible = () => {
+      if (typeof document === 'undefined') return
+      if (document.visibilityState === 'hidden') {
+        if (hiddenAt === 0) hiddenAt = Date.now()
+        return
+      }
+      const away = hiddenAt === 0 ? 0 : Date.now() - hiddenAt
+      hiddenAt = 0
+      if (away >= AWAY_REFETCH_MS) schedule()
+    }
+    const onOnline = () => schedule() // 切れていた間の通知は必ず落ちている
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisible)
+    if (typeof window !== 'undefined') window.addEventListener('online', onOnline)
+
     let unsub: (() => void) | null = null
     try {
       // info は db.ts の契約では `{ event, row }`。ここでは unknown として受け、
@@ -687,8 +714,11 @@ export function VitalsSheetPage({
         if (!aliveRef.current) return
         // この画面が描画する表だけを合図にする
         if (typeof table !== 'string' || table !== WATCHED_TABLE) return
-        // 自分の保存で出た通知（画面へ反映済み）は取り直さない
-        if (Date.now() - selfWriteRef.current < SELF_WRITE_QUIET_MS) return
+        // 自分の保存で出た通知（画面へ反映済み）は取り直さない。
+        // ★行で見分ける（2026-09-05 修正）。以前は「自分の保存から3秒間の通知を捨てる」
+        //   時刻だけの判定で、同じ3秒に届いた**他端末の変更まで捨てて**いた。
+        //   捨てた通知は再生されないので、次の通知か手動更新まで無期限に古いままだった
+        if (isSelfWrite(table, (info as { row?: unknown } | undefined)?.row)) return
         // 行が分かる時だけ期間で絞る。分からない時（旧形式・削除など）は取り直す＝安全側
         const day = changedDay(info)
         const w = windowRef.current
@@ -703,6 +733,8 @@ export function VitalsSheetPage({
       stopped = true
       retryRef.current = null
       if (timer) clearTimeout(timer)
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisible)
+      if (typeof window !== 'undefined') window.removeEventListener('online', onOnline)
       if (unsub) {
         try {
           unsub()

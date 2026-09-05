@@ -338,6 +338,47 @@ function registerDbTests() {
     })
   })
 
+  describe('isSelfWrite（自分の書込と他端末の変更の見分け）', () => {
+    // ★2026-09-05 の修正の回帰テスト。
+    //   以前は「自分の保存から3秒間の通知を捨てる」時刻だけの判定で、同じ3秒に届いた
+    //   他端末の変更まで落としていた（捨てた通知は再生されないので無期限に古いまま）。
+    //   いまは「どの行の、どの版まで自分が書いたか」で見分ける。
+    it('覚えのない行は自分の書込ではない（＝他端末の変更として拾う）', () => {
+      assert.equal(DB.isSelfWrite('notes', { id: 999_001, rev: 1 }), false)
+    })
+    it('行を特定できない通知（row なし）は自分の書込ではない', () => {
+      assert.equal(DB.isSelfWrite('notes', null), false)
+      assert.equal(DB.isSelfWrite('notes', undefined), false)
+      assert.equal(DB.isSelfWrite('notes', 'こわれた値'), false)
+    })
+    it('版が読めない通知は自分の書込ではない（安全側）', () => {
+      assert.equal(DB.isSelfWrite('notes', { id: 999_002 }), false)
+    })
+    it('表が違えば別の行として扱う', () => {
+      assert.equal(DB.isSelfWrite('vitals', { id: 999_001, rev: 1 }), false)
+    })
+
+    // 判定の核（版の比較）。ここが「同じ行を他端末が直後に書き換えた通知」を守っている
+    it('自分が書いた版の通知は反映済み（＝取り直さない）', () => {
+      assert.equal(DB.isSeenRev(5, { rev: 5 }), true)
+    })
+    it('★自分が書いた版より新しい通知は他端末の変更（＝必ず拾う）', () => {
+      assert.equal(DB.isSeenRev(5, { rev: 6 }), false)
+      assert.equal(DB.isSeenRev(1, { rev: 2 }), false)
+    })
+    it('自分が書いた版より古い通知は反映済み（行き違いで遅れて届いた分）', () => {
+      assert.equal(DB.isSeenRev(5, { rev: 4 }), true)
+    })
+    it('版が読めない通知は他端末の変更として扱う（安全側）', () => {
+      assert.equal(DB.isSeenRev(5, {}), false)
+      assert.equal(DB.isSeenRev(5, null), false)
+      assert.equal(DB.isSeenRev(5, { rev: 'こわれた値' }), false)
+    })
+    it('版を持たない表（出勤者・既読）は猶予の間だけ自分のものとみなす', () => {
+      assert.equal(DB.isSeenRev(null, { day: '2026-09-05', staff_id: 1 }), true)
+    })
+  })
+
   describe('getNativeInputGate（入力解禁フラグ）', () => {
     it('サーバー値を観測できない時は observed:false・value:false（封鎖と区別できる）', async () => {
       const gate = await DB.getNativeInputGate()
