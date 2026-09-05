@@ -75,6 +75,7 @@ import {
 import {
   DbError,
   fetchDailyReport,
+  fetchDailyReports,
   fetchResidents,
   fetchStaff,
   getNativeInputGate,
@@ -116,6 +117,7 @@ import type {
   Level,
   Note,
   NoteColor,
+  ImportDay,
   Outing,
   OutingKind,
   Resident,
@@ -524,6 +526,17 @@ function fmtSheetDay(iso: string): string {
  * どの日かはヘッダの日付欄と枠（.dsheet-day）が示すので、帯は月日と曜日で足りる。
  * 壊れた値はそのまま返す（画面を落とさない）。
  */
+/**
+ * 取込台帳の時刻（ISO）を「M/D HH:MM」に。読めない値は空文字（表示しない）。
+ * 鮮度の目安なので秒は出さない。端末の時間帯で出す（施設内の端末はすべて同じ地域）。
+ */
+function fmtStamp(iso: string | null | undefined): string {
+  if (typeof iso !== 'string' || iso === '') return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return `${d.getMonth() + 1}/${d.getDate()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+}
+
 function fmtSheetDayShort(iso: string): string {
   if (!ISO_DATE_RE.test(iso)) return iso
   const m = Number(iso.slice(5, 7))
@@ -1422,28 +1435,65 @@ export function DailySheetPage({
   // ── 日ごとの取得（キャッシュ＋同時実行の上限）──────────────
   const cacheRef = useRef(new Map<string, DailyReport>())
   const limiterRef = useRef(makeLimiter(MAX_PARALLEL_LOADS))
+  /** 進行中のまとめ取り（同じ区切りを二重に取りに行かない） */
+  const inFlightRef = useRef(new Map<string, Promise<void>>())
 
   // 記録者が変わると既読の見え方（my_read）が変わるので、取り置きは捨てる
   useEffect(() => {
     cacheRef.current.clear()
+    inFlightRef.current.clear()
   }, [actorId])
+
+  /**
+   * いま表示している区切りぶんを**まとめて**取りに行く（1回だけ・重複起動はまとめる）。
+   * 以前は日ごとに 5要求 × 10日 = 50要求を投げていた（2026-09-05 実測）。
+   * まとめると 5要求で済み、区切りの行き来・画面の出入りが目に見えて軽くなる。
+   */
+  const loadBlock = useCallback(
+    async (days: readonly string[]): Promise<void> => {
+      const want = days.filter((d) => !cacheRef.current.has(d))
+      if (want.length === 0) return
+      const key = want.join(',')
+      const running = inFlightRef.current.get(key)
+      if (running) return running
+      const p = (async () => {
+        try {
+          const reports = await limiterRef.current(() => fetchDailyReports(want, actorId))
+          const cache = cacheRef.current
+          for (const d of want) {
+            const report = reports.get(d)
+            if (report) cache.set(d, report)
+          }
+          // 古い順に捨てる（Map は挿入順。持ち過ぎて端末のメモリを食わない）
+          while (cache.size > MAX_CACHE_DAYS) {
+            const oldest = cache.keys().next().value
+            if (oldest === undefined) break
+            cache.delete(oldest)
+          }
+        } finally {
+          inFlightRef.current.delete(key)
+        }
+      })()
+      inFlightRef.current.set(key, p)
+      return p
+    },
+    [actorId],
+  )
 
   const loadDay = useCallback(
     async (dayIso: string): Promise<DailyReport> => {
-      const cache = cacheRef.current
-      const hit = cache.get(dayIso)
+      const hit = cacheRef.current.get(dayIso)
       if (hit) return hit
+      // 表示中の区切りをまとめて取る（1日だけ欠けている時もこの1回で埋まる）
+      await loadBlock(visibleDaysRef.current.includes(dayIso) ? visibleDaysRef.current : [dayIso])
+      const after = cacheRef.current.get(dayIso)
+      if (after) return after
+      // まとめ取りで埋まらなかった日だけ、従来どおり1日で取り直す（安全側の後詰め）
       const report = await limiterRef.current(() => fetchDailyReport(dayIso, actorId))
-      cache.set(dayIso, report)
-      // 古い順に捨てる（Map は挿入順。持ち過ぎて端末のメモリを食わない）
-      while (cache.size > MAX_CACHE_DAYS) {
-        const oldest = cache.keys().next().value
-        if (oldest === undefined) break
-        cache.delete(oldest)
-      }
+      cacheRef.current.set(dayIso, report)
       return report
     },
-    [actorId],
+    [actorId, loadBlock],
   )
 
   const handleWrite = useCallback((dayIso: string) => {
@@ -1772,6 +1822,8 @@ function DaySheet({
   const [observations, setObservations] = useState<Vital[]>([])
   const [symptoms, setSymptoms] = useState<Vital[]>([])
   const [outings, setOutings] = useState<Outing[]>([])
+  /** この日の取込台帳（null＝まだ取り込まれていない）。鮮度の表示に使う */
+  const [importDay, setImportDay] = useState<ImportDay | null>(null)
   const [attendance, setAttendance] = useState<Attendance[]>([])
 
   const [noteDrafts, setNoteDrafts] = useState<NoteDraft[]>([])
@@ -1903,6 +1955,7 @@ function DaySheet({
         )
         setSymptoms(Array.isArray(report?.symptoms) ? report.symptoms.filter((v) => v != null) : [])
         setOutings(Array.isArray(report?.outings) ? report.outings.filter((o) => o != null) : [])
+        setImportDay(report?.importDay ?? null)
         applyAttendance(
           Array.isArray(report?.attendance) ? report.attendance.filter((a) => a != null) : [],
         )
@@ -2890,6 +2943,7 @@ function DaySheet({
         manager={manager}
         workers={workers}
         empty={phase === 'ready' && savedRows === 0}
+        importDay={phase === 'ready' ? importDay : undefined}
         onPickDay={onPickDay}
         onAddAttendance={(role) => {
           if (!enabled) {
@@ -3314,6 +3368,7 @@ function DayHeader({
   manager,
   workers,
   empty,
+  importDay,
   onPickDay,
   onAddAttendance,
   onRemoveAttendance,
@@ -3324,6 +3379,13 @@ function DayHeader({
   workers: Attendance[]
   /** この日にまだ記録が1件も無い（空状態の一言を出す） */
   empty: boolean
+  /**
+   * この日の取込台帳。null＝**まだ取り込まれていない**、undefined＝読み込み中で分からない。
+   * 並走の間、この画面の中身はスプレッドシートからの取込で埋まる。取込が止まっていても
+   * 画面はただの空欄に見えるため、「記録が無い」と「まだ取り込まれていない」を書き分ける
+   * （2026-09-05 追加。監査で「空欄が『記録なし』と読める」と指摘された）。
+   */
+  importDay?: ImportDay | null
   onPickDay: (iso: string) => void
   onAddAttendance: (role: 'manager' | 'staff') => void
   onRemoveAttendance: (staffId: number) => void
@@ -3384,11 +3446,16 @@ function DayHeader({
 
       {/* 2段目: 記録が1件も無い日の一言だけ。日付は1段目へ移したので、
           記録のある日はこの行ごと出さない（行数を減らす・2026-08-31 指示） */}
-      {empty && (
-        <p className="px-1 py-1 text-ink2">
-          <span aria-hidden="true">— </span>
-          この日の記録はまだありません（空いている行にそのまま記入できます）
+      {(empty || importDay === null) && importDay !== undefined && (
+        <p className={`px-1 py-1 ${importDay === null ? 'text-warn' : 'text-ink2'}`}>
+          <span aria-hidden="true">{importDay === null ? '▲ ' : '— '}</span>
+          {importDay === null
+            ? 'この日はまだ取り込まれていません（スプレッドシートに記録があっても、ここにはまだ出ていません）'
+            : `この日の記録はまだありません（空いている行にそのまま記入できます）／最終取込 ${fmtStamp(importDay.imported_at)}`}
         </p>
+      )}
+      {!empty && importDay != null && (
+        <p className="px-1 py-1 text-ink2">最終取込 {fmtStamp(importDay.imported_at)}</p>
       )}
     </div>
   )

@@ -2333,6 +2333,108 @@ export interface DailyReport {
  * 日報1日分をまとめて取る（申し送り・付帯ブロック・出勤者・取込状態を並列で）。
  * staffId は既読の表示にだけ使う。ここから既読を書かない（multi-device-sync 原則9）。
  */
+/**
+ * 日報を**まとめて**取る（表示している区切りの全日を1回で）。
+ *
+ * ★1日ずつ取ると、10日の区切りで 5要求 × 10日 = 50要求になっていた（2026-09-05 実測）。
+ *   表ごとに範囲で1回ずつ引き、日ごとに振り分ければ **5要求**で足りる。
+ *   件数・中身は1日ずつ取るのと同じで、取りこぼしも増えない
+ *   （将来日も同じ1回に含まれるので、先の日付で入れた外出予定も従来どおり出る）。
+ *
+ * 上限は「日数 × 1日ぶんの上限」。超えた時は assertLoadedAll と同じ考えで、
+ * 黙って切り詰めず**その旨を投げる**（欠けた表を「記録なし」と見せない）。
+ */
+export async function fetchDailyReports(
+  days: readonly string[],
+  staffId: number | null,
+): Promise<Map<string, DailyReport>> {
+  const list0 = [...new Set(days)].sort()
+  const out = new Map<string, DailyReport>()
+  if (list0.length === 0) return out
+  for (const d of list0) assertDay(d)
+  const from = list0[0]
+  const to = list0[list0.length - 1]
+  const cap = Math.min(MAX_ROWS, DAY_ROWS * list0.length)
+  const sb = await getClient()
+
+  const [notesRes, outingsRes, vitalsRes, attendanceRes, importRes] = await Promise.all([
+    sb
+      .from('notes')
+      .select(NOTE_COLS)
+      .gte('note_on', from)
+      .lte('note_on', to)
+      .is('deleted_at', null)
+      .order('id', { ascending: true }) // 記入順＝スプシの行順
+      .limit(cap) as unknown as Promise<Res<unknown>>,
+    // 外出・外泊は「期間が範囲に重なるもの」を採り、日ごとの割り当ては下で行う
+    sb
+      .from('outings')
+      .select(OUTING_COLS)
+      .lte('start_on', to)
+      .or(`end_on.is.null,end_on.gte.${from}`)
+      .is('deleted_at', null)
+      .order('start_on', { ascending: true })
+      .order('id', { ascending: true })
+      .limit(cap) as unknown as Promise<Res<unknown>>,
+    sb
+      .from('vitals')
+      .select(VITAL_COLS)
+      .gte('measured_on', from)
+      .lte('measured_on', to)
+      .in('kind', ['observation', 'symptom'])
+      .is('deleted_at', null)
+      .order('id', { ascending: true })
+      .limit(cap) as unknown as Promise<Res<unknown>>,
+    sb
+      .from('attendance')
+      .select(ATTENDANCE_COLS)
+      .gte('day', from)
+      .lte('day', to)
+      .gte('sort', 0)
+      .order('sort', { ascending: true })
+      .order('staff_id', { ascending: true })
+      .limit(cap) as unknown as Promise<Res<unknown>>,
+    sb
+      .from('import_days')
+      .select(IMPORT_DAY_COLS)
+      .gte('day', from)
+      .lte('day', to)
+      .order('imported_at', { ascending: false })
+      .limit(Math.min(MAX_ROWS, IMPORT_DAY_ROWS * list0.length)) as unknown as Promise<Res<unknown>>,
+  ])
+
+  for (const res of [notesRes, outingsRes, vitalsRes, attendanceRes, importRes]) {
+    if (res.error !== null) throw readError(res)
+  }
+  // 上限に届いた＝この範囲を読み切れていない。欠けたまま「記録なし」と見せない
+  for (const res of [notesRes, outingsRes, vitalsRes, attendanceRes]) assertLoadedAll(res, cap)
+
+  const notes = list(notesRes.data, normalizeNote, cap)
+  const outings = list(outingsRes.data, normalizeOuting, cap)
+  const vitals = list(vitalsRes.data, normalizeVital, cap)
+  const attendance = list(attendanceRes.data, normalizeAttendance, cap)
+  const importDays = list(importRes.data, normalizeImportDay, cap)
+
+  // 既読は範囲ぶんまとめて1回（1日ずつだと申し送りのある日の数だけ往復していた）
+  await attachReadState(sb, notes, staffId)
+
+  for (const day of list0) {
+    const dayVitals = vitals.filter((v) => v.measured_on === day)
+    out.set(day, {
+      day,
+      notes: notes.filter((n) => n.note_on === day),
+      // 開始が当日以前で、帰着が無いか当日以降＝その日の外出者（1日ずつ取る時と同じ条件）
+      outings: outings.filter((o) => o.start_on <= day && (o.end_on === null || o.end_on >= day)),
+      observations: dayVitals.filter((v) => v.kind === 'observation'),
+      symptoms: dayVitals.filter((v) => v.kind === 'symptom'),
+      attendance: attendance.filter((a) => a.day === day),
+      // その日の台帳は直近1件（imported_at 降順で引いているので先頭が最新）
+      importDay: importDays.find((i) => i.day === day) ?? null,
+    })
+  }
+  return out
+}
+
 export async function fetchDailyReport(dayIso: string, staffId: number | null): Promise<DailyReport> {
   assertDay(dayIso)
   const sb = await getClient()
