@@ -58,8 +58,6 @@ const FLOOR_OTHER = 'other'
 /** 入力封鎖中の理由文（ui-design §0.5 の定型文。文言を変えない） */
 const BLOCKED_TEXT =
   '現在はスプレッドシートで記録する期間です（アプリ入力の開始日は施設で決定します）'
-const NO_ACTOR_TEXT =
-  '記録する職員が選ばれていないため入力できません。画面上部の職員チップから記録する職員を選んでください。'
 const ERR_LOAD =
   '食事・水分の記録を読み込めませんでした。通信状況を確認して、「再試行する」を押してください。'
 const ERR_FLAG =
@@ -533,7 +531,12 @@ export function MealsGridPage({
   const { toast, show } = useToast()
 
   const actorId = actorIdProp !== undefined ? actorIdProp : getActorId()
-  const canInput = inputEnabled && flagChecked && actorId != null
+  /**
+   * ★記録者（操作者）の選択は入力の条件にしない（2026-09-05 指示）。
+   *   1台の端末を複数人が使うため、端末に1人を紐づける前提が実務に合わない。
+   *   recorded_by は NULL 可の列で、未設定なら「誰が入れたか記録しない」だけになる。
+   */
+  const canInput = inputEnabled && flagChecked
 
   // 保存処理から読む最新値（setState の反映を待たずに直列処理で使う）
   const aliveRef = useRef(true)
@@ -1009,14 +1012,6 @@ export function MealsGridPage({
         </div>
       ) : null}
 
-      {!flagError && flagChecked && inputEnabled && actorId == null ? (
-        <div role="status" className="rounded-lg border border-warn bg-warn-bg p-4">
-          <p className="text-base text-ink">
-            <span aria-hidden="true">▲ </span>
-            {NO_ACTOR_TEXT}
-          </p>
-        </div>
-      ) : null}
 
       {error && residents.length > 0 ? <ErrorBlock message={error} onRetry={onReload} /> : null}
 

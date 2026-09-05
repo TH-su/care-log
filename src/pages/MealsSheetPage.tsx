@@ -164,8 +164,6 @@ function altClass(rowIndex: number): string {
 /** 入力封鎖中の理由文（ui-design §0.5 の定型文。文言を変えない） */
 const BLOCKED_TEXT =
   '現在はスプレッドシートで記録する期間です（アプリ入力の開始日は施設で決定します）'
-const NO_ACTOR_TEXT =
-  '記録する職員が選ばれていないため入力できません。画面上部の職員チップから記録する職員を選んでください。'
 const ERR_LOAD =
   '食事・水分の記録を読み込めませんでした。通信状況を確認して、「再試行する」を押してください。'
 const ERR_FLAG =
@@ -190,7 +188,6 @@ const HINT_LOADING = '読み込みが終わるのを待ってから、もう一�
 const HINT_FLAG_CHECKING =
   'アプリで入力してよい期間かの確認が終わるのを待ってから、もう一度お試しください。'
 const HINT_BLOCKED = 'いまはスプレッドシートで記録する期間です（画面上部の案内をご確認ください）。'
-const HINT_NO_ACTOR = '画面上部の職員チップから記録する職員を選んでから、もう一度お試しください。'
 const HINT_OTHER = '画面上部の案内を確認してから、もう一度お試しください。'
 
 // ── 型 ───────────────────────────────────────────────────────
@@ -676,7 +673,14 @@ export function MealsSheetPage({
   const actorId = actorIdProp !== undefined ? actorIdProp : getActorId()
   // 読み込み中は入力させない。期間を送ると表の中身は総入れ替えになり、取得が終わるまで
   // 全セルが空欄で描かれる＝「この期間は記録なし」と読み違えたうえでの再入力を招くため
-  const canInput = inputEnabled && flagChecked && actorId != null && !loading
+  /**
+   * ★記録者（操作者）の選択は入力の条件にしない（2026-09-05 指示）。
+   *   1台の端末を複数人が使うため、端末に1人を紐づける前提が実務に合わない。
+   *   バイタル一覧・日報は元から記録者なしで入力できたが、この画面だけが
+   *   actorId != null を条件にしており、記録者を選ばないと食事量を入れられなかった。
+   *   recorded_by は NULL 可の列で、未設定なら「誰が入れたか記録しない」だけになる。
+   */
+  const canInput = inputEnabled && flagChecked && !loading
 
   const today = todayIso()
   /** 表示する日（新しい日が左。バイタル一覧と並びを揃える） */
@@ -742,9 +746,7 @@ export function MealsSheetPage({
         ? HINT_FLAG_CHECKING
         : !inputEnabled
           ? HINT_BLOCKED
-          : actorId == null
-            ? HINT_NO_ACTOR
-            : HINT_OTHER
+          : HINT_OTHER
   })
 
   /** キーごとに同じ関数を返す ref コールバック（SheetCell の btnRef と同じ役割） */
@@ -1560,14 +1562,6 @@ export function MealsSheetPage({
         </div>
       ) : null}
 
-      {!flagError && flagChecked && inputEnabled && actorId == null ? (
-        <div role="status" className="rounded-lg border border-warn bg-warn-bg p-4">
-          <p className="text-base text-ink">
-            <span aria-hidden="true">▲ </span>
-            {NO_ACTOR_TEXT}
-          </p>
-        </div>
-      ) : null}
 
       {saveError ? (
         <div role="alert" className="rounded-lg border border-warn bg-warn-bg p-4">

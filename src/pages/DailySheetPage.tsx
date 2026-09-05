@@ -78,6 +78,7 @@ import {
   fetchDailyReports,
   fetchResidents,
   fetchStaff,
+  getAppSetting,
   getNativeInputGate,
   insertNote,
   insertOuting,
@@ -1161,6 +1162,8 @@ function PickerCell({
   label,
   disabled,
   onClick,
+  onDelete,
+  deleteLabel,
 }: {
   width?: string
   grow?: boolean
@@ -1168,6 +1171,14 @@ function PickerCell({
   label: string
   disabled: boolean
   onClick: () => void
+  /**
+   * この行ごと消す（省略＝消せない）。渡すとセルの右端に「✕」が出る。
+   * 2026-09-05 指示: 申し送りの行を消すのに、詳細の窓まで開くのは手間が多すぎる。
+   * 出勤者の枠（AttendCell）と同じ作法に揃える。
+   * ★保存済みの行では確認ダイアログを挟む（呼び出し側の onDelete が受け持つ）。
+   */
+  onDelete?: () => void
+  deleteLabel?: string
 }) {
   return (
     // 余白はこの中のボタン（px-1）だけが持つ。入れ物にも取ると中身が 8px ずれて
@@ -1179,7 +1190,7 @@ function PickerCell({
         disabled={disabled}
         aria-label={label}
         style={ROW_BTN_STYLE}
-        className={`${CELL_HIT} w-full rounded-sm px-1 text-left ${
+        className={`${CELL_HIT} min-w-0 flex-1 rounded-sm px-1 text-left ${
           disabled ? 'text-ink2' : 'text-link'
         }`}
       >
@@ -1189,6 +1200,17 @@ function PickerCell({
           {text === '' ? <span aria-hidden="true">—</span> : text}
         </span>
       </button>
+      {onDelete && !disabled ? (
+        <button
+          type="button"
+          onClick={onDelete}
+          aria-label={deleteLabel ?? 'この行を削除'}
+          style={ROW_BTN_STYLE}
+          className={`${CELL_HIT} shrink-0 rounded-sm px-1 text-ink2`}
+        >
+          <span aria-hidden="true">✕</span>
+        </button>
+      ) : null}
     </Cell>
   )
 }
@@ -1350,6 +1372,8 @@ interface DaySheetProps {
   onComposing: (day: string, composing: boolean, residentId: number | null) => void
   /** いまこの日の申し送りを書いている**他の**職員（Presence。この端末の分は含まない） */
   othersHere: PresenceHere[]
+  /** 施設長として選べる職員のID。null＝絞らない（全員から選べる） */
+  managerStaffId: number | null
   /** 取得が終わった（親が選択日の位置合わせをやり直す） */
   onLoaded: (day: string) => void
   /** 日付セルのカレンダーで別の日が選ばれた */
@@ -1377,6 +1401,13 @@ export function DailySheetPage({
   const [residents, setResidents] = useState<Resident[]>(propResidents ?? NO_RESIDENTS)
   const [staff, setStaff] = useState<Staff[]>(propStaff ?? NO_STAFF)
   const [enabled, setEnabled] = useState<boolean>(propInputEnabled ?? false)
+  /**
+   * 施設長として選べる職員のID（app_settings.manager_staff_id）。
+   * 施設長は1名なので、その1名だけを選べるようにする（誤って別の職員を登録しないため）。
+   * ★氏名はコードに持たない。設定が無い・その職員が名簿に居ない時は**全員から選べる**
+   *   （固定に失敗して誰も選べなくなる、という状態を作らない）。
+   */
+  const [managerStaffId, setManagerStaffId] = useState<number | null>(null)
   /** 入力できるかどうかを観測できなかった（通信エラー）。封鎖の理由文とは分けて案内する */
   const [gateUnknown, setGateUnknown] = useState(false)
   const [stale, setStale] = useState(false)
@@ -1410,7 +1441,7 @@ export function DailySheetPage({
     setPhase('loading')
     void (async () => {
       try {
-        const [rs, st, gate] = await Promise.all([
+        const [rs, st, gate, mgr] = await Promise.all([
           propResidents ? Promise.resolve(propResidents) : fetchResidents(),
           propStaff ? Promise.resolve(propStaff) : fetchStaff(),
           // 入力解禁フラグは「観測できた値」と「観測できなかった」を区別するため、
@@ -1418,6 +1449,7 @@ export function DailySheetPage({
           // 親（App.tsx）は取得失敗時も false を渡してくるので、prop を観測済みとして扱うと
           // 通信障害を「スプレッドシートで記録する期間です」と誤って案内してしまう
           getNativeInputGate(),
+          getAppSetting('manager_staff_id').catch(() => null),
         ])
         if (!alive || !aliveRef.current) return
         const list = (Array.isArray(rs) ? rs : []).filter((r) => r != null && r.active !== false)
@@ -1425,6 +1457,8 @@ export function DailySheetPage({
         setStaff((Array.isArray(st) ? st : []).filter((s) => s != null))
         setEnabled(gate.value === true)
         setGateUnknown(!gate.observed)
+        const mgrId = Number(mgr)
+        setManagerStaffId(Number.isInteger(mgrId) && mgrId > 0 ? mgrId : null)
         setStale(false)
         setPhase('ready')
         setEverReady(true)
@@ -1831,6 +1865,7 @@ export function DailySheetPage({
                 onDirty={handleDirty}
                 onComposing={handleComposing}
                 othersHere={othersHere.filter((o) => o.day === d)}
+                managerStaffId={managerStaffId}
                 onLoaded={handleLoaded}
                 onPickDay={goDay}
                 show={show}
@@ -1871,6 +1906,7 @@ function DaySheet({
   onDirty,
   onComposing,
   othersHere,
+  managerStaffId,
   onLoaded,
   onPickDay,
   show,
@@ -3191,10 +3227,25 @@ function DaySheet({
       />
       <StaffPickerModal
         open={staffPick !== null}
-        staff={staff}
+        // 施設長の欄は1名だけを候補にする（2026-09-05 指示）。
+        // 設定が無い・その職員が名簿に居ない時は従来どおり全員を出す（選べなくしない）
+        staff={
+          staffPick?.for === 'attendance' &&
+          staffPick.role === 'manager' &&
+          managerStaffId !== null &&
+          staff.some((s) => s.id === managerStaffId)
+            ? staff.filter((s) => s.id === managerStaffId)
+            : staff
+        }
         onPick={onPickStaff}
         onClose={() => setStaffPick(null)}
-        title={staffPick?.for === 'attendance' ? '出勤者を選ぶ' : '記入者を選ぶ'}
+        title={
+          staffPick?.for === 'attendance'
+            ? staffPick.role === 'manager'
+              ? '施設長を選ぶ'
+              : '出勤者を選ぶ'
+            : '記入者を選ぶ'
+        }
       />
       <ConfirmDialog
         open={confirm !== null}
@@ -4426,6 +4477,12 @@ function NoteRow({
           label={targetText === '' ? '対象を選ぶ' : `対象 ${targetText}。押すと選び直します`}
           disabled={disabled}
           onClick={() => ctx.openResident({ for: 'noteTarget', key: rowKey })}
+          // 対象欄からそのまま行を消せるようにする（詳細の窓まで開かずに済む）。
+          // 保存済みの行は onDelete 側で確認ダイアログを挟む
+          onDelete={() => onDelete(rowKey)}
+          deleteLabel={
+            targetText === '' ? 'この行を削除' : `${targetText}のこの申し送りを削除`
+          }
         />
         {/* 余白は SheetCell 側だけが持つ（対象・記入者と本文の左端をそろえる）。
             夜勤の記載内容は赤字の太字（指示15・sheet.css の .dsheet-night-body）。
