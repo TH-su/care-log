@@ -88,11 +88,12 @@ import {
   setOutingEnd,
   softDeleteNote,
   isSelfWrite,
+  joinNotePresence,
   subscribeChanges,
   updateNoteFields,
   updateVital,
 } from '../lib/db'
-import type { DailyReport } from '../lib/db'
+import type { DailyReport, PresenceHere } from '../lib/db'
 import { getActorId, touchActivity } from '../lib/actor'
 import { addDays, fmtTimeHM, normalizeVitalInput, todayIso, toHalfWidth } from '../lib/format'
 import {
@@ -1341,6 +1342,14 @@ interface DaySheetProps {
   onWrite: (day: string) => void
   /** 未保存の下書きの有無を親へ伝える（日を移る前の確認に使う） */
   onDirty: (day: string, dirty: boolean) => void
+  /**
+   * この日で申し送りを書きかけている（対象を選んだ・本文を打ち始めた）ことを親へ伝える。
+   * 親はこれを Presence として配り、他の端末の「いま書いている場所」を受け取る。
+   * residentId=null は「対象未選択のまま書きかけ」。書きかけが無くなったら composing=false。
+   */
+  onComposing: (day: string, composing: boolean, residentId: number | null) => void
+  /** いまこの日の申し送りを書いている**他の**職員（Presence。この端末の分は含まない） */
+  othersHere: PresenceHere[]
   /** 取得が終わった（親が選択日の位置合わせをやり直す） */
   onLoaded: (day: string) => void
   /** 日付セルのカレンダーで別の日が選ばれた */
@@ -1504,6 +1513,53 @@ export function DailySheetPage({
   }, [])
 
   const visibleDays = useMemo(() => (unit === '1' ? [day] : blockDays(day)), [day, unit])
+
+  // ── いま誰がどの日の申し送りを書いているか（Presence・DBには書かない）──────
+  //
+  // 現場では「他者がいつ記載しているか把握できない」ために、同じ入居者・同じ出来事を
+  // 二人がそれぞれ書き進めてしまう（2026-09-05 聞き取り）。打鍵中の文字は配らず、
+  // 「どの日の・誰について書いているか」だけを配って、書く前に気づけるようにする。
+  const [othersHere, setOthersHere] = useState<PresenceHere[]>([])
+  /** 各日の「書きかけ」。DaySheet から届く */
+  const composingRef = useRef(new Map<string, number | null>())
+  const [composingTick, setComposingTick] = useState(0)
+  const handleComposing = useCallback(
+    (dayIso: string, composing: boolean, residentId: number | null) => {
+      const cur = composingRef.current
+      const had = cur.has(dayIso)
+      if (composing) cur.set(dayIso, residentId)
+      else cur.delete(dayIso)
+      // 変わった時だけ配り直す（打鍵のたびに Presence を更新しない）
+      if (had !== composing || (composing && cur.get(dayIso) !== residentId)) {
+        setComposingTick((n) => n + 1)
+      }
+    },
+    [],
+  )
+
+  const presenceRef = useRef<ReturnType<typeof joinNotePresence> | null>(null)
+  useEffect(() => {
+    if (actorId === null) return
+    const p = joinNotePresence({ staffId: actorId, day, residentId: null }, setOthersHere)
+    presenceRef.current = p
+    return () => {
+      presenceRef.current = null
+      setOthersHere([])
+      p.stop()
+    }
+  }, [actorId])
+
+  useEffect(() => {
+    const p = presenceRef.current
+    if (p === null || actorId === null) return
+    // 書きかけがあればその日を、無ければ見ている日を居場所として配る
+    const first = [...composingRef.current.entries()][0]
+    p.update({
+      staffId: actorId,
+      day: first ? first[0] : day,
+      residentId: first ? first[1] : null,
+    })
+  }, [actorId, day, composingTick])
 
   /**
    * 変更通知の絞り込みに使う「いま出している日」。
@@ -1773,6 +1829,8 @@ export function DailySheetPage({
                 loadDay={loadDay}
                 onWrite={handleWrite}
                 onDirty={handleDirty}
+                onComposing={handleComposing}
+                othersHere={othersHere.filter((o) => o.day === d)}
                 onLoaded={handleLoaded}
                 onPickDay={goDay}
                 show={show}
@@ -1811,6 +1869,8 @@ function DaySheet({
   loadDay,
   onWrite,
   onDirty,
+  onComposing,
+  othersHere,
   onLoaded,
   onPickDay,
   show,
@@ -2059,6 +2119,23 @@ function DaySheet({
   }, [day, hasDraftContent, onDirty])
 
   /**
+   * いまこの日で書いている対象を親へ伝える（Presence の中身）。
+   * 対象を選んでいる下書きがあればその利用者、無ければ null。
+   * 打っている文字そのものは伝えない（居場所だけ）。
+   */
+  const composingResidentId = useMemo(() => {
+    const withTarget = noteDrafts.find((d) => d.targetPicked && d.residentId !== null)
+    return withTarget?.residentId ?? null
+  }, [noteDrafts])
+  const noteComposing = useMemo(
+    () => noteDrafts.some((d) => d.targetPicked || d.body.trim() !== ''),
+    [noteDrafts],
+  )
+  useEffect(() => {
+    onComposing(day, noteComposing, composingResidentId)
+  }, [day, noteComposing, composingResidentId, onComposing])
+
+  /**
    * 書きかけの行を端末へ一時保存する（2026-09-02 追加）。
    * ・書きかけがある間は、行が変わるたびに控えを置き直す（再読み込みで消えない）
    * ・書きかけが無くなったら控えを消す（保存し終えた内容を端末に残さない）
@@ -2077,8 +2154,9 @@ function DaySheet({
   useEffect(
     () => () => {
       onDirty(day, false)
+      onComposing(day, false, null)
     },
-    [day, onDirty],
+    [day, onDirty, onComposing],
   )
 
   // ── 出勤者 ─────────────────────────────────────────────────
@@ -2944,6 +3022,7 @@ function DaySheet({
         workers={workers}
         empty={phase === 'ready' && savedRows === 0}
         importDay={phase === 'ready' ? importDay : undefined}
+        othersHere={othersHere}
         onPickDay={onPickDay}
         onAddAttendance={(role) => {
           if (!enabled) {
@@ -3369,6 +3448,7 @@ function DayHeader({
   workers,
   empty,
   importDay,
+  othersHere,
   onPickDay,
   onAddAttendance,
   onRemoveAttendance,
@@ -3386,6 +3466,8 @@ function DayHeader({
    * （2026-09-05 追加。監査で「空欄が『記録なし』と読める」と指摘された）。
    */
   importDay?: ImportDay | null
+  /** いまこの日の申し送りを書いている他の職員（Presence） */
+  othersHere: PresenceHere[]
   onPickDay: (iso: string) => void
   onAddAttendance: (role: 'manager' | 'staff') => void
   onRemoveAttendance: (staffId: number) => void
@@ -3446,6 +3528,25 @@ function DayHeader({
 
       {/* 2段目: 記録が1件も無い日の一言だけ。日付は1段目へ移したので、
           記録のある日はこの行ごと出さない（行数を減らす・2026-08-31 指示） */}
+      {othersHere.length > 0 && (
+        <p aria-live="polite" className="px-1 py-1 text-warn">
+          <span aria-hidden="true">▲ </span>
+          {(() => {
+            const names = othersHere
+              .map((o) => staffName(ctx.staffById.get(o.staffId), o.staffId))
+              .filter((n) => n !== '')
+              .join('・')
+            const who = names === '' ? `他 ${othersHere.length} 名` : names
+            const targets = othersHere
+              .map((o) => (o.residentId === null ? null : ctx.residentById.get(o.residentId)))
+              .filter((r): r is Resident => r != null)
+              .map((r) => noteDisplayName(r))
+            return targets.length > 0
+              ? `${who}が、いま${targets.join('・')}の申し送りを書いています`
+              : `${who}が、いまこの日の申し送りを書いています`
+          })()}
+        </p>
+      )}
       {(empty || importDay === null) && importDay !== undefined && (
         <p className={`px-1 py-1 ${importDay === null ? 'text-warn' : 'text-ink2'}`}>
           <span aria-hidden="true">{importDay === null ? '▲ ' : '— '}</span>
