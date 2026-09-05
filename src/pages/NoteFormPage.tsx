@@ -30,11 +30,12 @@ import {
   fetchResidents,
   fetchStaff,
   getNativeInputGate,
+  fetchNotesForTargetDay,
   insertNote,
   isQueuePersisted,
   softDeleteNote,
 } from '../lib/db'
-import { addDays, fmtDayLabel, todayIso } from '../lib/format'
+import { addDays, fmtDayLabel, fmtTimeHM, todayIso } from '../lib/format'
 import { IMPORTANCE_LABEL, LS, noteDisplayName, ROLE_TAGS, SHIFT_LABEL } from '../lib/types'
 import type { Importance, Note, Resident, Shift, Staff } from '../lib/types'
 
@@ -243,6 +244,12 @@ export function NoteFormPage() {
   const [form, setForm] = useState<FormState>(() => defaultForm(null, new Date()))
   const [errors, setErrors] = useState<Errors>({})
   const [formError, setFormError] = useState<string | null>(null)
+  /**
+   * 選んだ対象の「その日の記録」。null＝まだ引いていない／引けなかった。
+   * 二重に書くのを防ぐための参考表示なので、引けなくてもフォームは使える（安全側）。
+   */
+  const [sameDayNotes, setSameDayNotes] = useState<Note[] | null>(null)
+  const [sameDayLoading, setSameDayLoading] = useState(false)
   const [saving, setSaving] = useState(false)
 
   const [residentPicker, setResidentPicker] = useState(false)
@@ -564,6 +571,34 @@ export function NoteFormPage() {
 
   // ── 3状態 ───────────────────────────────────────────
 
+  /**
+   * 対象と記録日が決まったら、その日その方の記録を引いて出す。
+   * 同じ出来事を別の職員が二重に書くのを、書く前に気づけるようにするため。
+   * 引けなくてもフォームは使える（参考表示なので、失敗しても入力を止めない）。
+   */
+  useEffect(() => {
+    if (!form.targetPicked || !ISO_DATE_RE.test(form.noteOn)) {
+      setSameDayNotes(null)
+      return
+    }
+    let alive = true
+    setSameDayLoading(true)
+    void (async () => {
+      try {
+        const rows = await fetchNotesForTargetDay(form.residentId, form.noteOn)
+        if (alive) setSameDayNotes(rows)
+      } catch {
+        if (alive) setSameDayNotes(null) // 参考表示なので、失敗しても何も出さないだけ
+      } finally {
+        if (alive) setSameDayLoading(false)
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [form.targetPicked, form.residentId, form.noteOn])
+
+  // ★ここから下は早期 return がある。Hook はすべてこの上に置くこと（規則違反で画面が落ちる）
   if (phase === 'loading') {
     return <LoadingBlock label="申し送りフォームを準備しています…" />
   }
@@ -716,6 +751,46 @@ export function NoteFormPage() {
                   </span>
                 </button>
                 {fieldError('residentId')}
+
+                {/* 本日この方の記録（二重記入を書く前に気づくための参考表示・2026-09-05 追加）。
+                    読むだけで、ここから編集・削除はできない（このフォームの役目は新規登録） */}
+                {form.targetPicked && (
+                  <div
+                    aria-live="polite"
+                    className="mt-2 rounded-md border border-border bg-surface2 p-3"
+                  >
+                    <p className="text-sm font-bold text-ink2">
+                      {dayLabel}の{targetText}の記録
+                      {sameDayNotes !== null ? `（${sameDayNotes.length}件）` : ''}
+                    </p>
+                    {sameDayLoading && sameDayNotes === null ? (
+                      <p className="mt-1 text-sm text-ink3">読み込んでいます…</p>
+                    ) : sameDayNotes === null ? (
+                      <p className="mt-1 text-sm text-ink3">
+                        既存の記録を読み込めませんでした（通信エラー）。このまま登録できます。
+                      </p>
+                    ) : sameDayNotes.length === 0 ? (
+                      <p className="mt-1 text-sm text-ink3">まだ記録はありません。</p>
+                    ) : (
+                      <ul className="mt-1 space-y-1">
+                        {sameDayNotes.map((n) => (
+                          <li key={n.id} className="text-sm text-ink">
+                            <span className="text-ink2">
+                              {SHIFT_LABEL[n.shift] ?? ''}
+                              {fmtTimeHM(n.occurred_at) ? ` ${fmtTimeHM(n.occurred_at)}` : ''}
+                            </span>
+                            <span className="ml-2">{n.body}</span>
+                            {n.reporter_id !== null && (
+                              <span className="ml-2 text-ink2">
+                                {staffById.get(n.reporter_id)?.name ?? ''}
+                              </span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           </SectionCard>

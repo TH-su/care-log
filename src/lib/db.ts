@@ -1407,16 +1407,32 @@ let gateFetchedAt = 0
 
 const TRUE_WORDS = new Set(['true', '1', 'on', 'yes', 'enabled'])
 
+/**
+ * 走っている取得（同時に呼ばれた分をまとめる）。
+ * 画面を開くと App と画面自身が同じ瞬間にこのフラグを取りに行き、同じ値を2回引いていた
+ * （2026-09-05 実測。入力画面の出入りごとに app_settings が2要求）。
+ * **古い値を配るのではなく、走っている1回の結果を共有する**だけなので、
+ * 「前提情報は参照するその時点で実測する」規範はそのまま守られる。
+ */
+let gateInFlight: Promise<boolean | null> | null = null
+
 async function refreshGate(): Promise<boolean | null> {
-  try {
-    const raw = await getAppSetting('native_input_enabled')
-    const v = raw !== null && TRUE_WORDS.has(raw.trim().toLowerCase())
-    gateValue = v
-    gateFetchedAt = Date.now()
-    return v
-  } catch {
-    return null // 直近の観測値（gateValue）は消さない
-  }
+  if (gateInFlight !== null) return gateInFlight
+  const run = (async (): Promise<boolean | null> => {
+    try {
+      const raw = await getAppSetting('native_input_enabled')
+      const v = raw !== null && TRUE_WORDS.has(raw.trim().toLowerCase())
+      gateValue = v
+      gateFetchedAt = Date.now()
+      return v
+    } catch {
+      return null // 直近の観測値（gateValue）は消さない
+    } finally {
+      gateInFlight = null
+    }
+  })()
+  gateInFlight = run
+  return run
 }
 
 /**
@@ -2344,6 +2360,28 @@ export interface DailyReport {
  * 上限は「日数 × 1日ぶんの上限」。超えた時は assertLoadedAll と同じ考えで、
  * 黙って切り詰めず**その旨を投げる**（欠けた表を「記録なし」と見せない）。
  */
+/**
+ * その日・その対象の申し送りを引く（申し送りフォームの「本日この方の記録」用）。
+ *
+ * ★同じ出来事を別の職員が二重に書く組が **1日あたり5.6組** あった（2026-09-05 実測）。
+ *   フォームは対象を選んでも既存の記録を一切読み込んでおらず、書き手には
+ *   「いま誰かが打っている内容」どころか「もう保存されている記録」すら見えていなかった。
+ *   対象を選んだ時点で、その日その方の記録を出して気づけるようにする。
+ * residentId=null は「スタッフへ（全体）」宛の記録を指す（未選択とは呼び出し側が区別する）。
+ */
+export async function fetchNotesForTargetDay(
+  residentId: number | null,
+  dayIso: string,
+): Promise<Note[]> {
+  assertDay(dayIso)
+  const sb = await getClient()
+  let q = sb.from('notes').select(NOTE_COLS).eq('note_on', dayIso).is('deleted_at', null)
+  q = residentId === null ? q.is('resident_id', null) : q.eq('resident_id', residentId)
+  const res = (await q.order('id', { ascending: true }).limit(DAY_ROWS)) as Res<unknown>
+  if (res.error !== null) throw readError(res)
+  return list(res.data, normalizeNote, DAY_ROWS)
+}
+
 export async function fetchDailyReports(
   days: readonly string[],
   staffId: number | null,
