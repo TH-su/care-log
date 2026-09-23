@@ -925,6 +925,32 @@
   padding-right: var(--sp-2);
 }
 
+/* ── 操作バーが画面より広い時の折り返し（2026-09-23・文字200%×幅375px で右へはみ出していた）──
+   折り返しの単位は「まとまり」（階・日数・期間・倍率・日報の日付など）。バーは元から flex-wrap なので、
+   まとまりが1行に入る限りは今までどおり「まとまりごと次の行へ」送られ、ここの指定は何も変えない
+   （flex の行分けは各まとまりの本来の幅で決まる＝広い画面の配置は同じ）。
+   まとまり1つだけで1行より広い時に限り、そのまとまりを行の幅まで縮め、中のボタンを並びの順のまま
+   次の行へ送る（ボタンの大きさ 44px は変えない）。
+   .sheet-bar-fit は .sheet-pickbar と隙間の違うバー（日報の日付バー）に同じ扱いだけを足す印 */
+/* ボタンそのものは対象にしない（min-width を 0 にすると 44px の下限＝min-w-tap が外れて縮むため） */
+.sheet-pickbar > :not(button),
+.sheet-bar-fit > :not(button) {
+  min-width: 0;
+  max-width: 100%;
+}
+.sheet-pickbar-group,
+.sheet-pickbar [role='group'],
+.sheet-pickbar-group [role='group'],
+.sheet-bar-fit [role='group'],
+.sheet-bar-fit > label {
+  flex-wrap: wrap;
+}
+/* まとまりの中の文字（期間の表示など）は、1行より広い時だけ折り返せるようにする */
+.sheet-pickbar-group > span {
+  flex-shrink: 1;
+  min-width: 0;
+}
+
 /* ── ブロック見出し（外出者・外泊者・発熱者…）──────────── */
 .sheet-block-head {
   box-sizing: border-box;

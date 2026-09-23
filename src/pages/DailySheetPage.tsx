@@ -4165,7 +4165,8 @@ function DateBar({
 }) {
   const today = todayIso()
   return (
-    <div className="flex flex-wrap items-center gap-gap">
+    // sheet-bar-fit: まとまり（日付・表示単位・倍率）が1行より広い時だけ中で折り返す（sheet.css）
+    <div className="sheet-bar-fit flex flex-wrap items-center gap-gap">
       <button
         type="button"
         onClick={() => onGo(addDays(day, -1))}
