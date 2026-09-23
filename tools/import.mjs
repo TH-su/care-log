@@ -285,15 +285,27 @@ function validTime(s) {
 // GAS 呼び出し
 // ---------------------------------------------------------------------
 
+/**
+ * 集約GAS（申送ビューアAPI）の読み取り。2026-09-23 から POST 本文で送る（合言葉を URL に載せない）。
+ * GAS の doPost は読み取り action を doGet と同じ _readAction_ で受ける（テーマ gas/README.md §2）。
+ * text/plain＝CORS の事前確認なし。/exec の 302 は fetch が POST→GET に切り替えて本文を捨てて追う
+ * （WHATWG fetch の決まり）＝応答はこれまでどおり取れる。値は String() に寄せる（GET のクエリと同じ意味）。
+ */
 async function gasGet(baseUrl, token, action, params) {
   const u = new URL(baseUrl)
-  u.searchParams.set('action', action)
-  u.searchParams.set('token', token)
-  for (const [k, v] of Object.entries(params ?? {})) u.searchParams.set(k, v)
+  const body = { action }
+  for (const [k, v] of Object.entries(params ?? {})) body[k] = String(v)
+  body.token = token
   let lastErr = null
   for (let i = 1; i <= FETCH_RETRY; i++) {
     try {
-      const res = await fetch(u, { redirect: 'follow', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })
+      const res = await fetch(u, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(body),
+        redirect: 'follow',
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      })
       const text = await res.text()
       if (text.length > MAX_RESPONSE_BYTES) throw new Error(`応答が大きすぎます（${text.length}バイト）`)
       let json
