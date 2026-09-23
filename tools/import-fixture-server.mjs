@@ -130,16 +130,31 @@ function inRange(rows, from, to) {
   return rows.filter((r) => r.date >= from && r.date <= to)
 }
 
-/** テストから起動する。戻り値: { url, close, requests } */
+/** テストから起動する。戻り値: { url, close, requests, tokenInQuery } */
 export function startFixture(port = 0) {
   let state = 1
   /** ping 応答へ差し込む値（制御口 ___ping で設定・reset で空に戻る） */
   let pingOverride = {}
   const requests = []
+  /** 合言葉が URL のクエリに載っていた要求の action（2026-09-23 から取込ツールは POST 本文で送る＝空のはず） */
+  const tokenInQuery = []
   const server = createServer((req, res) => {
+    let raw = ''
+    req.on('data', (c) => { raw += c })
+    req.on('end', () => handle(req, res, raw))
+  })
+  /* 本物の集約GASと同じく、読み取りは text/plain の POST 本文 {action, token, from, to}（2026-09-23〜）でも
+     URL のクエリでも受ける。両方にある時は本文を採る。制御口（___state・___ping）はクエリだけ。 */
+  const handle = (req, res, raw) => {
     const u = new URL(req.url, 'http://localhost')
-    const action = u.searchParams.get('action')
+    let body = {}
+    if (req.method === 'POST') {
+      try { const b = JSON.parse(raw); if (b && typeof b === 'object') body = b } catch { body = {} }
+    }
+    const param = (k) => (body[k] !== undefined && body[k] !== null ? String(body[k]) : u.searchParams.get(k))
+    const action = param('action')
     requests.push(action)
+    if (u.searchParams.has('token')) tokenInQuery.push(action)
     const json = (obj) => {
       res.setHeader('content-type', 'application/json')
       res.end(JSON.stringify(obj))
@@ -161,9 +176,9 @@ export function startFixture(port = 0) {
       }
       return json({ ok: true, override: { ...pingOverride } })
     }
-    if (u.searchParams.get('token') !== TOKEN) return json({ ok: false, error: '認証エラー' })
-    const from = u.searchParams.get('from')
-    const to = u.searchParams.get('to')
+    if (param('token') !== TOKEN) return json({ ok: false, error: '認証エラー' })
+    const from = param('from')
+    const to = param('to')
 
     if (action === 'ping') {
       // lastTick の既定は現在時刻（「台帳の更新が止まっています」の判定に当たらない値）
@@ -187,7 +202,7 @@ export function startFixture(port = 0) {
       return json({ ok: true, from, to: capTo, requestedTo: to, maxDays: 31, days: after16Days(state, from, capTo) })
     }
     return json({ ok: false, error: '不明なaction' })
-  })
+  }
   return new Promise((resolve) => {
     server.listen(port, '127.0.0.1', () => {
       const p = server.address().port
@@ -196,6 +211,7 @@ export function startFixture(port = 0) {
         token: TOKEN,
         close: () => new Promise((r) => server.close(r)),
         requests,
+        tokenInQuery,
       })
     })
   })

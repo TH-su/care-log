@@ -137,6 +137,8 @@ async function main() {
     console.log('── 1. ドライラン ──')
     let r = await runImporter(env, [...argsBase])
     ok('ドライランが正常終了する', r.status === 0, r.stdout + r.stderr)
+    // 2026-09-23: 集約GASの読み取りは POST 本文で送る（合言葉を URL に載せない）
+    ok('合言葉を URL のクエリに載せていない', fx.tokenInQuery.length === 0, fx.tokenInQuery.join(','))
     ok('notes に1行も書いていない', (await num('select count(*)::int as n from notes')) === 0)
     ok('vitals はアプリ入力の1行だけ', (await num('select count(*)::int as n from vitals')) === 1)
     ok('import_days に1行も書いていない', (await num('select count(*)::int as n from import_days')) === 0)
