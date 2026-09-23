@@ -37,6 +37,16 @@ import {
 } from 'react-router-dom'
 import { LS } from './lib/types'
 import type { Staff } from './lib/types'
+import {
+  attachBeforeUnload,
+  cancelBlocked,
+  hasUnsavedInput,
+  LEAVE_BODY,
+  LEAVE_TITLE,
+  markAccepted,
+  onBlockedNavigation,
+  proceedBlocked,
+} from './lib/leaveGuard'
 
 // ── 接続設定（VITE_ 変数）──────────────────────────────────────────
 // 型は src/vite-env.d.ts（vite/client）で付くが、未設定・非 Vite 実行でも落ちないようキャスト経由で読む。
@@ -534,6 +544,12 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
     }
   }, [db, actor, reload])
 
+  // 更新・削除の「最後にこの行を書き換えた職員」（edited_by）として、名簿と照合済みの操作者を渡す。
+  // 新規記録の記入者（recorded_by）と同じ操作者。未選択の間は null＝送らない
+  useEffect(() => {
+    db.setEditor(actorId)
+  }, [db, actorId])
+
   // 施設名（表示だけの補助情報）。取れなくても画面は開ける＝失敗しても何も出さない
   useEffect(() => {
     let alive = true
@@ -610,6 +626,63 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
     setPicker('none')
   }, [])
 
+  // ── 止まっている入力を黙って捨てない（競合・未保存の入力がある時の画面移動の確認） ──
+  // 各記録画面が leaveGuard に「止まっている入力があるか」を登録している。
+  //   ・メニュー・リンクでの画面移動 … ここで止めて確認ダイアログを出す（日報の askLeave と同じ文言の形）
+  //   ・再読み込み・タブを閉じる   … beforeunload でブラウザの警告を出す
+  // くらべて選ぶ画面の中のリンク（変更の記録を見る）は、その画面に「離れると残らない」と書いてあるので止めない
+  const [leaveTo, setLeaveTo] = useState<string | null>(null)
+  /** 止めた移動が「戻る・進む・アドレスの書き換え」だったか（〔移動する〕のやり直し方が違う） */
+  const leaveFromHistoryRef = useRef(false)
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
+      const target = e.target instanceof Element ? e.target : null
+      const a = target?.closest('a[href]') ?? null
+      if (a === null || a.closest('[role="dialog"]') !== null) return
+      const href = a.getAttribute('href') ?? ''
+      if (!href.startsWith('#/')) return
+      const to = href.slice(1)
+      if (to === window.location.hash.slice(1)) return
+      if (!hasUnsavedInput()) return
+      // リンクの既定の動き（画面移動）を止め、確認してから移る
+      e.preventDefault()
+      e.stopPropagation()
+      leaveFromHistoryRef.current = false
+      setLeaveTo(to)
+    }
+    window.addEventListener('click', onClick, true)
+    const detach = attachBeforeUnload()
+    return () => {
+      window.removeEventListener('click', onClick, true)
+      detach()
+    }
+  }, [])
+  // ブラウザの戻る・進む・スワイプで戻る・アドレスの書き換えも、止まっている入力がある時は
+  // leaveGuard が元の画面へ戻してから知らせてくる。同じ確認ダイアログを出す
+  useEffect(
+    () =>
+      onBlockedNavigation((to) => {
+        leaveFromHistoryRef.current = true
+        setLeaveTo(to)
+      }),
+    [],
+  )
+  // 画面の移動が確定するたびに「止めた時に戻す先」を控える
+  useEffect(() => {
+    markAccepted()
+  }, [location])
+  /** ボタンからの画面移動（戻る・設定を開く）も同じ確認を通す */
+  const guardedNavigate = useCallback(
+    (to: string) => {
+      if (hasUnsavedInput()) {
+        leaveFromHistoryRef.current = false
+        setLeaveTo(to)
+      } else navigate(to)
+    },
+    [navigate],
+  )
+
   if (staffError) {
     return (
       <FullScreen>
@@ -644,7 +717,7 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
           {back && (
             <button
               type="button"
-              onClick={() => navigate(back)}
+              onClick={() => guardedNavigate(back)}
               className="inline-flex min-h-tap min-w-tap items-center gap-1 rounded-md px-2 text-sm text-link"
             >
               <span aria-hidden="true">←</span>
@@ -701,7 +774,7 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
             </p>
             <button
               type="button"
-              onClick={() => navigate('/settings')}
+              onClick={() => guardedNavigate('/settings')}
               className="min-h-tap rounded-md border border-primary bg-surface px-4 text-base font-bold text-primary"
             >
               設定を開く
@@ -827,6 +900,26 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
         // 閉じられない選択は廃止した（閲覧を妨げない）
         onClose={closePicker}
         title={pickerTitle}
+      />
+
+      <ui.ConfirmDialog
+        open={leaveTo !== null}
+        title={LEAVE_TITLE}
+        body={LEAVE_BODY}
+        confirmLabel="移動する"
+        danger
+        onConfirm={() => {
+          const to = leaveTo
+          setLeaveTo(null)
+          if (to === null) return
+          // 戻る・進むを止めた時は同じ幅だけ動かし直す（履歴を積み増さない）。それ以外は画面を移す
+          if (leaveFromHistoryRef.current) proceedBlocked(() => navigate(to))
+          else navigate(to)
+        }}
+        onCancel={() => {
+          if (leaveFromHistoryRef.current) cancelBlocked()
+          setLeaveTo(null)
+        }}
       />
     </div>
   )

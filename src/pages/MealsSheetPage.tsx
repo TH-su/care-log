@@ -3,10 +3,11 @@
 //
 // この画面が守る規律:
 // - 取得は日付レンジ指定の fetchMealsSheet のみ（全件ロード経路を作らない）
-// - 保存は upsert を使わない。既存行があれば updateMeal(id, rev)、無ければ insertMeal。
-//   update ペイロードは編集した列だけ（部分更新・空上書きをしない）
+// - 保存は saveMealEdits（送信待ち → RPC apply_cell_edits の1本・2026-09-23 フェーズ2'）。送るのは編集した欄と
+//   その基準だけで、書くかどうかはサーバーが欄ごとに決める（部分更新・空上書きをしない）
 // - 競合（conflict）でも入力を消さない。表示中の値は残したまま「最新を読み込む」を促す
-// - 送信できなかった分は db.ts の永続キューに退避され、この画面は「⚠」と表示するだけ（消さない）
+// - 送信できなかった分は db.ts の送信待ちに残り、この画面は「⚠」と表示するだけ（消さない）。
+//   送信待ち・止まっている食事は pendingRow から読み、再読み込み・再マウントの後も同じ見え方にする
 // - 他端末の変更は Realtime（subscribeChanges）で受け取り、表示期間に関わる分だけ取り直す。
 //   自分の保存直後の通知と、保存の応答待ちが残っている間は取り直さない（控えの消し込みと交差させない）
 // - 入力解禁フラグ（native_input_enabled）はこの画面を開くたびに取り直す。取得できるまでは入力させない
@@ -39,10 +40,8 @@ import {
   fetchResidents,
   getNativeInputGate,
   insertFluid,
-  insertMeal,
   softDeleteFluid,
   subscribeChanges,
-  updateMeal,
 } from '../lib/db'
 import { getActorId, touchActivity } from '../lib/actor'
 import { addDays, fmtDayLabel, fmtTimeHM, todayIso, toHalfWidth } from '../lib/format'
@@ -57,6 +56,35 @@ import {
   useToast,
 } from '../components/ui'
 import { readSheetPref, SheetFrame, writeSheetPref, ZoomBar } from '../components/sheet'
+import { discardPendingRow, fetchLatestMeal, pendingRow, saveMealEdits } from '../lib/db'
+import type { PendingCellRow } from '../lib/db'
+import { ConflictResolver } from '../components/ConflictResolver'
+import type { ConflictResolution, ConflictTarget } from '../components/ConflictResolver'
+import {
+  CELLS_PENDING_REASON,
+  fmtMealValue,
+  holdsNormalSave,
+  MEAL_FIELD_NAME,
+  MEAL_FIELDS,
+  mealHeldText,
+  missingRowText,
+  valuesForBoth,
+} from '../lib/conflict'
+import {
+  editBases,
+  editValues,
+  adoptPendingEdits,
+  hasEdits,
+  isOlderRow,
+  judgeFields,
+  reconcileOnLoad,
+  recordFieldEdit,
+  seenVers,
+  settleSent,
+} from '../lib/rowSync'
+import type { Edits } from '../lib/rowSync'
+import { registerUnsaved } from '../lib/leaveGuard'
+import type { MealField } from '../lib/conflict'
 
 // ── 定数 ─────────────────────────────────────────────────────
 
@@ -168,8 +196,6 @@ const ERR_LOAD =
   '食事・水分の記録を読み込めませんでした。通信状況を確認して、「再試行する」を押してください。'
 const ERR_FLAG =
   'アプリで入力してよい期間かどうかを確認できませんでした。通信状況を確認して、「再試行する」を押してください。確認できるまで入力はできません。'
-const ERR_CONFLICT =
-  'ほかの端末で先に更新されました。入力は消えていません。「最新を読み込む」で最新の値を確認してから、もう一度入力してください。'
 const ERR_SAVE =
   '保存できませんでした。入力は消えていません。通信状況を確認して、もう一度入力してください。'
 const ERR_AMOUNT = `主食・副食は 0〜${AMOUNT_MAX} の数字で入力してください。入力はそのまま残しています。`
@@ -178,6 +204,21 @@ const ERR_FLUID_UNDO =
   '水分の追加を取り消せませんでした。通信状況を確認して、もう一度お試しください。'
 const ERR_FLUID_UNDO_CONFLICT =
   '水分の追加を取り消せませんでした（ほかの端末で更新されています）。「最新を読み込む」で最新の値を確認してください。'
+/** 競合中のセルに入力が確定された時（くらべて選ぶまで保存しない＝5画面共通の規約） */
+const ERR_CONFLICT_HOLD =
+  'ほかの端末の値と食い違っているため、この食事の入力はまだ保存していません。入力は消えていません。「くらべて選ぶ」でどちらを残すか選んでください。'
+/** 保存が、ほかの端末の値と食い違って止まっている食事にまとめられた時（送らない。くらべて選ぶへ誘導する） */
+const ERR_BLOCKED_WRITE =
+  'ほかの端末の値と食い違って止まっている保存がある食事です。いまの入力もそこにまとめました（まだ送っていません・入力は消えていません）。「くらべて選ぶ」でどちらを残すか選んでください。'
+/** 最新を読み込んでも食い違いが残っている時（競合のまま） */
+const ERR_CONFLICT_STILL =
+  '最新を読み込みましたが、ほかの端末で先に入った値と食い違っている食事があります。入力は消えていません。「くらべて選ぶ」でどちらを残すか選んでください。'
+/** サーバーに受け付けられなかった保存（型・範囲の拒否）が送信待ちに残っている時 */
+const ERR_REJECTED =
+  'サーバーに受け付けられなかった保存がある食事があります（入力は消えていません）。値を確かめて「保存し直す」を押してください。'
+/** 読み直したら食い違いは無くなったが、まだ保存していない入力が残っている時 */
+const MSG_UNSAVED_AFTER_RELOAD =
+  'ほかの端末の更新を読み込みました（食い違いはありません）。まだ保存していない入力が残っています（▲未保存のセル）。セルに入力し直すと保存します。'
 /**
  * 入力できない状態で Undo が押された時の案内。
  * 「何が起きたか」（前半）＋「次にどうすればよいか」（理由ごとの後半）で1文にする。
@@ -196,6 +237,17 @@ const HINT_OTHER = '画面上部の案内を確認してから、もう一度お
 type RowInfo = Record<string, unknown> | null
 
 type MealPatch = Partial<Pick<Meal, 'main_amount' | 'side_amount' | 'status'>>
+/** 1食の値（競合の判定に使う3列。空は null） */
+type MealCells = Record<MealField, unknown>
+
+/** 1食の3列を取り出す（行が無ければ全部 空） */
+function mealCells(m: Meal | null | undefined): MealCells {
+  return {
+    main_amount: m?.main_amount ?? null,
+    side_amount: m?.side_amount ?? null,
+    status: m?.status ?? null,
+  }
+}
 type AmountField = 'main_amount' | 'side_amount'
 type RowPhase = 'idle' | 'saving' | 'saved' | 'queued' | 'conflict' | 'error'
 
@@ -292,6 +344,28 @@ function mealKey(residentId: number, day: string, slot: MealSlot): string {
 
 function fluidKey(residentId: number, day: string): string {
   return `${residentId}|${day}`
+}
+
+/** 編集の値を「主食 8割・副食 6割」の形に（取り消された食事の控えの一言） */
+function describeMealEdits(edits: Edits<MealField> | undefined): string {
+  const mine = editValues(edits ?? {}) as Partial<Record<MealField, unknown>>
+  return MEAL_FIELDS.filter((f) => f in mine)
+    .map((f) => `${MEAL_FIELD_NAME[f]} ${fmtMealValue(f, mine[f])}`)
+    .join('・')
+}
+
+/**
+ * 送信待ちで止まっている食事（競合・拒否）の値を、その食事の「あなたの入力」として編集に取り込む。
+ * 画面に既に編集のある欄は画面の値（止まった後に入れた、より新しい入力）を残す。基準は送信待ちの基準
+ */
+function adoptPending(edits: Edits<MealField>, p: PendingCellRow): Edits<MealField> {
+  // 送信待ちにある全ての欄（〔両方残す〕のメモを含む）を取り込む（第3段 #4。画面の3欄に固定しない）
+  return adoptPendingEdits(judgeFields(MEAL_FIELDS, p), edits as Edits<string>, p) as Edits<MealField>
+}
+
+/** 読み直しで突き合わせるいまの値（画面の3欄＋メモ。メモも送信待ちにあれば突き合わせる＝第3段 #4） */
+function mealJudgeCells(m: Meal | null | undefined): Record<string, unknown> {
+  return { ...mealCells(m), note: m?.note ?? null }
 }
 
 /** 表示用に「サーバー値＋未保存の控え」を重ねた1食分（判定は types.ts の isLowIntake に委ねる） */
@@ -660,6 +734,14 @@ export function MealsSheetPage({
   const [editText, setEditText] = useState('')
   const [editInvalid, setEditInvalid] = useState(false)
   const [fluidTarget, setFluidTarget] = useState<FluidTarget | null>(null)
+  /** くらべて選ぶ画面に渡す内容（開いた時点で固定する） */
+  const [compare, setCompare] = useState<{
+    key: string
+    target: ConflictTarget
+    name: string
+    base: Record<string, unknown>
+    mine: Record<string, unknown>
+  } | null>(null)
 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -667,6 +749,8 @@ export function MealsSheetPage({
   const [inputEnabled, setInputEnabled] = useState<boolean>(inputEnabledProp === true)
   const [flagChecked, setFlagChecked] = useState(false)
   const [flagError, setFlagError] = useState<string | null>(null)
+  /** サーバーに欄ごとの保存の仕組み（0011）がまだ無い＝サーバー側の更新待ち（入力を止める） */
+  const [cellsMissing, setCellsMissing] = useState(false)
 
   const { toast, show } = useToast()
 
@@ -680,7 +764,7 @@ export function MealsSheetPage({
    *   actorId != null を条件にしており、記録者を選ばないと食事量を入れられなかった。
    *   recorded_by は NULL 可の列で、未設定なら「誰が入れたか記録しない」だけになる。
    */
-  const canInput = inputEnabled && flagChecked && !loading
+  const canInput = inputEnabled && flagChecked && !cellsMissing && !loading
 
   const today = todayIso()
   /** 表示する日（新しい日が左。バイタル一覧と並びを揃える） */
@@ -701,12 +785,34 @@ export function MealsSheetPage({
   const fluidsRef = useRef<FluidIntake[]>([])
   const undoRef = useRef<Record<string, { id: number; rev: number; ml: number }>>({})
   const phasesRef = useRef<Record<string, RowPhase>>({})
+  /**
+   * 利用者の編集（キー → 欄ごとの値と、編集を始めた時に画面に出ていた値＝基準）。構造規約 R-E〜R-G の
+   * 共通の仕組み（src/lib/rowSync.ts）で扱う。画面の控え（pending）はこの値を映したもの。
+   * 背景の読み込みは基準を書き換えない。保存に成功した欄だけ欄単位で消える
+   */
+  const editsRef = useRef<Record<string, Edits<MealField>>>({})
+  /** 入力の吹き出しを開いた時に画面に出ていた値（構造規約 R-E の基準） */
+  const editStartRef = useRef<{ key: string; cells: MealCells } | null>(null)
+  /**
+   * 送信待ちにした値（キー → 欄）。送信が済んだと読み込みで観測できるまで表示に重ね、その欄をさらに直す時の
+   * 基準にする（指摘 M1。消すと、送信待ちの値が表示から消え、後の入力が自分の値と食い違う扱いになる）
+   */
+  const queuedRef = useRef<Record<string, MealPatch>>({})
+  /** 相手の行が他の端末で取り消されていた食事（〔新しい行として保存〕〔取り下げる〕を出す） */
+  const missingRef = useRef<Record<string, true>>({})
+  /**
+   * サーバーの値が古いかもしれない食事（保存が競合したのに最新を取り直せなかった）。
+   * この間は「先の値」を出さない（古い値を先の値として見せない＝指摘 U1）。次の読み込みで外す
+   */
+  const staleRef = useRef<Record<string, true>>({})
+  /** くらべて選ぶの送信が動いている数（その間は背景の取り直しを先送りする＝指摘 L2） */
+  const resolverBusyRef = useRef(0)
   const canInputRef = useRef(canInput)
   const actorRef = useRef<number | null>(actorId)
   const showRef = useRef(show)
   // 親が毎レンダー新しい配列を渡しても取得が繰り返されないよう、取得処理からは ref 経由で読む
   const residentsPropRef = useRef<Resident[] | undefined>(residentsProp)
-  const saveMealRef = useRef<(t: SaveTarget, patch: MealPatch, isUndo?: boolean) => void>(
+  const saveMealRef = useRef<(t: SaveTarget, patch: MealPatch, isUndo?: boolean, baseCells?: MealCells) => void>(
     () => undefined,
   )
   const editInputRef = useRef<HTMLInputElement>(null)
@@ -746,7 +852,9 @@ export function MealsSheetPage({
         ? HINT_FLAG_CHECKING
         : !inputEnabled
           ? HINT_BLOCKED
-          : HINT_OTHER
+          : cellsMissing
+            ? CELLS_PENDING_REASON
+            : HINT_OTHER
   })
 
   /** キーごとに同じ関数を返す ref コールバック（SheetCell の btnRef と同じ役割） */
@@ -777,6 +885,27 @@ export function MealsSheetPage({
     pendingRef.current = next
     setPending(next)
   }, [])
+  /**
+   * 画面に重ねる控え（pending）を作り直す（edits が正本。pending はその映し）。
+   * 送信待ちにした値（queuedRef）も、送信が済むまで下に重ねる（指摘 M1）
+   */
+  const syncPendingAll = useCallback(() => {
+    const next: Record<string, MealPatch> = {}
+    for (const [k, q] of Object.entries(queuedRef.current)) next[k] = { ...q }
+    for (const [k, e] of Object.entries(editsRef.current)) {
+      if (hasEdits(e)) next[k] = { ...(next[k] ?? {}), ...(editValues(e) as MealPatch) }
+    }
+    commitPending(next)
+  }, [commitPending])
+  /** 1食の edits を書き換え、控えを映し直す（空になった食事は控えから外す） */
+  const writeEdits = useCallback(
+    (key: string, edits: Edits<MealField>) => {
+      if (hasEdits(edits)) editsRef.current[key] = edits
+      else delete editsRef.current[key]
+      syncPendingAll()
+    },
+    [syncPendingAll],
+  )
   const commitFluids = useCallback((next: FluidIntake[]) => {
     fluidsRef.current = next
     setFluids(next)
@@ -823,6 +952,7 @@ export function MealsSheetPage({
       if (!aliveRef.current) return
       setInputEnabled(gate.value === true)
       setFlagChecked(gate.observed)
+      setCellsMissing(gate.cells === 'missing')
       if (!gate.observed) setFlagError(ERR_FLAG)
     } catch {
       if (!aliveRef.current) return
@@ -835,6 +965,70 @@ export function MealsSheetPage({
   useEffect(() => {
     void loadFlag()
   }, [loadFlag])
+
+  /**
+   * 送信待ち（db.ts の pending store）を表示中の食事へ重ねる（再マウント・再読み込みの後も同じ見え方にする）。
+   * ・送る状態（pending）の値は「送信待ち」の重ね表示（キー → 欄）として返す
+   * ・止まっている食事（conflict）は「あなたの入力」として取り込み、最新の値と突き合わせて競合・未保存を出し直す
+   *   （もう同じ値が載っていれば送信待ちから外す）。相手の行が取り消されていたら「行が無い控え」にする
+   * ・拒否された食事（rejected）は値を取り込み、〔保存し直す〕を出す
+   * 表示中の利用者・期間の分だけ。phases は書き換える
+   */
+  const adoptStoreMeals = useCallback(
+    (
+      nextMeals: Record<string, Meal>,
+      phases: Record<string, RowPhase>,
+      residentIds: number[],
+    ): { queued: Record<string, MealPatch>; conflict: boolean; unsaved: boolean; rejected: boolean } => {
+      const out = { queued: {} as Record<string, MealPatch>, conflict: false, unsaved: false, rejected: false }
+      for (const rid of residentIds) {
+        for (let day = fromIso; day <= toIso; day = addDays(day, 1)) {
+          for (const slot of SLOTS) {
+            const k = mealKey(rid, day, slot)
+            if (phasesRef.current[k] === 'saving') continue
+            const target = { residentId: rid, day, slot }
+            const p = pendingRow('meals', target)
+            if (p === null) continue
+            if (p.state === 'pending') {
+              const vals: MealPatch = {}
+              for (const f of MEAL_FIELDS) if (f in p.values) (vals as Record<string, unknown>)[f] = p.values[f]
+              if (Object.keys(vals).length > 0) out.queued[k] = vals
+              continue
+            }
+            const edits = adoptPending(editsRef.current[k] ?? {}, p)
+            if (p.state === 'rejected') {
+              editsRef.current[k] = edits
+              phases[k] = 'error'
+              out.rejected = true
+              continue
+            }
+            const fresh = nextMeals[k]
+            if (!fresh && p.conflicts.length > 0 && p.conflicts.every((c) => c.reason === 'missing')) {
+              editsRef.current[k] = edits
+              missingRef.current[k] = true
+              phases[k] = 'conflict'
+              out.conflict = true
+              continue
+            }
+            const judged = judgeFields(MEAL_FIELDS, p)
+            const r = reconcileOnLoad(judged, edits as Edits<string>, fresh ? mealJudgeCells(fresh) : null)
+            if (r.status === 'clean') {
+              // もう同じ値がサーバーに載っている（止まっていた分は届いたのと同じ）。突き合わせた欄の見た版だけ外す
+              void discardPendingRow('meals', target, judged, p.vers)
+              delete editsRef.current[k]
+              continue
+            }
+            editsRef.current[k] = r.edits as Edits<MealField>
+            phases[k] = r.status === 'conflict' ? 'conflict' : 'error'
+            if (r.status === 'conflict') out.conflict = true
+            else out.unsaved = true
+          }
+        }
+      }
+      return out
+    },
+    [fromIso, toIso],
+  )
 
   // ── 期間分の取得（利用者・食事・水分） ──
   const load = useCallback(async (opts?: { background?: boolean }) => {
@@ -869,7 +1063,11 @@ export function MealsSheetPage({
       for (const m of asArray<Meal>(sheet?.meals)) {
         if (!m || typeof m.meal_on !== 'string') continue
         if (!SLOTS.includes(m.meal_slot)) continue
-        nextMeals[mealKey(m.resident_id, m.meal_on, m.meal_slot)] = m
+        const k = mealKey(m.resident_id, m.meal_on, m.meal_slot)
+        // 画面が持っている同じ行より古い応答（くらべて選ぶ・保存の直後に、それより前に出た読み込みが返った）では
+        // 置き換えない（指摘 L2・全画面共通の防御）
+        const shown = mealsRef.current[k]
+        nextMeals[k] = shown && isOlderRow(shown, m) ? shown : m
       }
       commitMeals(nextMeals)
 
@@ -878,20 +1076,82 @@ export function MealsSheetPage({
       )
       commitFluids(nextFluids)
 
-      // 未送信・競合・失敗・**保存の応答待ち**のセルは控えを残す（原則4: 入力を消さない）。
-      // 応答待ちを外すと、読み込み直後に競合・失敗で返ってきた時に「入力は消えていません」と
-      // 案内しているのに控えが無い＝実際には入力が消える。応答が返れば clearOverlay が消し込む
+      // 編集が残る食事・送信待ち・応答待ちは控えを残す（原則4: 入力を消さない）。
+      // 残っている編集は、最新の値と突き合わせて状態を決め直す（構造規約 R-E・共通の裁き reconcileOnLoad）。
+      // 基準（編集を始めた時の値）は書き換えない＝背景の読み込みで基準が動かない
       const keepPhases: Record<string, RowPhase> = {}
-      const keepPending: Record<string, MealPatch> = {}
-      for (const [k, p] of Object.entries(phasesRef.current)) {
-        if (p !== 'conflict' && p !== 'error' && p !== 'queued' && p !== 'saving') continue
-        keepPhases[k] = p
-        const ov = pendingRef.current[k]
-        if (ov) keepPending[k] = ov
+      /** 送信待ちから取り込んだ状態（止まっている・拒否された食事）。下の突き合わせの後に重ねる */
+      const keepPhasesFromStore: Record<string, RowPhase> = {}
+      let stillConflict = false
+      let unsavedLeft = false
+      // 表示中の期間の食事は、取り消された行の控えの印を読み直す（送信待ちから取り込み直す）
+      for (const k of Object.keys(missingRef.current)) {
+        const d = k.split('|')[1] ?? ''
+        if (d >= fromIso && d <= toIso) delete missingRef.current[k]
       }
+      // 送信待ちの値は db.ts から読み直す（画面が持っていた分ではなく、送信待ちにある分が正）。
+      // 止まっている食事は「あなたの入力」として取り込む（下の突き合わせより先に編集へ載せる）
+      const store = adoptStoreMeals(
+        nextMeals,
+        keepPhasesFromStore,
+        asArray<Resident>(rs)
+          .filter((r) => r != null && r.active !== false)
+          .map((r) => r.id),
+      )
+      const pendingNow = store.queued
+      const keys = new Set([...Object.keys(phasesRef.current), ...Object.keys(editsRef.current)])
+      for (const k of keys) {
+        const p = phasesRef.current[k]
+        const edits = editsRef.current[k] ?? {}
+        // 今回取り直した期間の外の食事は、最新の値が分からないのでそのまま持ち越す
+        const keyDay = k.split('|')[1] ?? ''
+        const inRange = keyDay >= fromIso && keyDay <= toIso
+        if (!inRange || p === 'saving') {
+          if (p !== undefined && p !== 'idle' && p !== 'saved') keepPhases[k] = p
+          continue
+        }
+        const fresh = nextMeals[k]
+        delete staleRef.current[k] // 最新を読み込んだ（先の値を出してよい）
+        if (keepPhasesFromStore[k] !== undefined) continue // 止まっている・拒否された食事（送信待ちから取り込んだ）
+        if (p === 'queued' && pendingNow[k] !== undefined) {
+          keepPhases[k] = 'queued'
+          continue
+        }
+        // 送信待ちでない（送信が済んだ＝送信待ちが解除されない不具合の修正）。送信待ちの後に入れた値が残っていれば下で裁く
+        if (!hasEdits(edits)) continue
+        // 控えにある全ての欄（メモを含む）で突き合わせる（第3段 #4）
+        const r = reconcileOnLoad(judgeFields(MEAL_FIELDS, { values: edits }), edits as Edits<string>, fresh ? mealJudgeCells(fresh) : null)
+        editsRef.current[k] = r.edits as Edits<MealField>
+        if (r.status === 'conflict') {
+          keepPhases[k] = 'conflict'
+          stillConflict = true
+        } else if (r.status === 'unsaved') {
+          // 食い違いは無いが、まだ保存していない編集がある＝「未保存」（〔保存し直す〕で送る）
+          keepPhases[k] = 'error'
+          unsavedLeft = true
+        } else {
+          delete editsRef.current[k]
+        }
+      }
+      // 送信待ちの重ね表示を db.ts の値で作り直す。表示中の期間の外は持ち越す。
+      // 送信待ちの食事は「送信待ち」の印を付ける（競合・未保存・応答待ちの食事はそちらを優先）
+      const keptQueued: Record<string, MealPatch> = {}
+      for (const [k, v] of Object.entries(queuedRef.current)) {
+        const d = k.split('|')[1] ?? ''
+        if (d < fromIso || d > toIso) keptQueued[k] = v
+      }
+      queuedRef.current = { ...keptQueued, ...pendingNow }
+      for (const k of Object.keys(pendingNow)) if (keepPhases[k] === undefined) keepPhases[k] = 'queued'
+      // 送信待ちで止まっている・拒否された食事を重ねる（送信待ちが正）
+      Object.assign(keepPhases, keepPhasesFromStore)
+      if (store.conflict) stillConflict = true
+      if (store.unsaved) unsavedLeft = true
       phasesRef.current = keepPhases
       setPhases(keepPhases)
-      commitPending(keepPending)
+      syncPendingAll()
+      if (stillConflict) setSaveError(ERR_CONFLICT_STILL)
+      else if (store.rejected) setSaveError(ERR_REJECTED)
+      else if (unsavedLeft) setSaveError(MSG_UNSAVED_AFTER_RELOAD)
       // Undo（直前の水分追加の取り消し）は利用者が押した読み込み直し・期間変更でだけ捨てる。
       // 背景の取り直しで消すと、押し間違えた ＋ml を戻す唯一の手段が黙って消える。
       // 取り直した結果に行が残っているものだけ持ち越す（他端末で消された分は落とす）
@@ -934,7 +1194,7 @@ export function MealsSheetPage({
     } finally {
       if (gen === genRef.current && aliveRef.current) setLoading(false)
     }
-  }, [commitFluids, commitMeals, commitPending, commitUndo, fromIso, toIso])
+  }, [adoptStoreMeals, commitFluids, commitMeals, commitPending, commitUndo, fromIso, syncPendingAll, toIso])
 
   useEffect(() => {
     void load()
@@ -961,7 +1221,8 @@ export function MealsSheetPage({
         if (stopped || !aliveRef.current) return
         // 保存の応答待ちが残っている間は取り直さない（応答と取得が交差すると
         // 控えの消し込みが噛み合わず、保存できた値が一瞬もとの値に見える）。あとでやり直す
-        if (Object.values(phasesRef.current).some((p) => p === 'saving')) {
+        // くらべて選ぶの送信中も同じ（選び直した後の行を古い値で描き直さない＝指摘 L2）
+        if (Object.values(phasesRef.current).some((p) => p === 'saving') || resolverBusyRef.current > 0) {
           schedule()
           return
         }
@@ -1026,99 +1287,226 @@ export function MealsSheetPage({
     }
   }, [])
 
-  /** 保存に成功した列だけ控えから外す（この間に入れた別の値は残す） */
-  const clearOverlay = useCallback(
-    (key: string, written: MealPatch) => {
-      const cur: MealPatch = { ...(pendingRef.current[key] ?? {}) }
-      let changed = false
-      for (const k of Object.keys(written) as (keyof MealPatch)[]) {
-        if (k in cur && cur[k] === written[k]) {
-          delete cur[k]
-          changed = true
-        }
-      }
-      if (!changed) return
-      const next = { ...pendingRef.current }
-      if (Object.keys(cur).length === 0) delete next[key]
-      else next[key] = cur
-      commitPending(next)
+  /**
+   * 保存が、ほかの端末の値と食い違って止まっている食事にまとめられた（held＝送っていない）。その食事を競合として見せる。
+   * 止まっている値を「あなたの入力」として載せる（先の値は、続けて1食だけ取り直して並べる）
+   */
+  const holdAsHeld = useCallback(
+    (t: SaveTarget) => {
+      const key = mealKey(t.residentId, t.day, t.slot)
+      const p = pendingRow('meals', t)
+      writeEdits(key, p ? adoptPending(editsRef.current[key] ?? {}, p) : (editsRef.current[key] ?? {}))
+      staleRef.current[key] = true
+      setPhase(key, 'conflict')
+      setSaveError(ERR_BLOCKED_WRITE)
     },
-    [commitPending],
+    [setPhase, writeEdits],
   )
 
   /**
-   * 1食分の保存。既存行があれば部分更新、無ければ新規作成（upsert は使わない）。
+   * 保存が競合になった食事だけを取り直し、最新の値で状態と一言（先の値／あなたの入力）を出し直す（指摘 U1）。
+   * 取り直せない時は staleRef を残し、値を出さない固定の文言のまま（古い値を先の値として見せない）
+   */
+  const refreshAfterConflict = useCallback(
+    async (t: SaveTarget) => {
+      const key = mealKey(t.residentId, t.day, t.slot)
+      let latest: Meal | null
+      try {
+        const got = await fetchLatestMeal(t.residentId, t.day, t.slot)
+        latest = got?.row ?? null
+      } catch {
+        return
+      }
+      if (!aliveRef.current || phasesRef.current[key] !== 'conflict') return
+      const nextMeals = { ...mealsRef.current }
+      if (latest) nextMeals[key] = latest
+      else delete nextMeals[key]
+      commitMeals(nextMeals)
+      delete staleRef.current[key]
+      const r = reconcileOnLoad(
+        judgeFields(MEAL_FIELDS, { values: editsRef.current[key] ?? {} }),
+        (editsRef.current[key] ?? {}) as Edits<string>,
+        latest ? mealJudgeCells(latest) : null,
+      )
+      writeEdits(key, r.edits as Edits<MealField>)
+      if (r.status === 'conflict') {
+        setPhase(key, 'conflict')
+        setSaveError(ERR_CONFLICT_STILL)
+      } else if (r.status === 'unsaved') {
+        setPhase(key, 'error')
+        setSaveError(MSG_UNSAVED_AFTER_RELOAD)
+      } else {
+        setPhase(key, 'idle')
+        clearSaveErrorIfSettled()
+      }
+    },
+    [clearSaveErrorIfSettled, commitMeals, setPhase, writeEdits],
+  )
+
+  /**
+   * 1食分を保存する仕事（構造規約 R-E〜R-F・共通の仕組み src/lib/rowSync.ts）。
+   * 行ごとの順番待ち（enqueue）で動き、動き出した時点の最新の状態（edits・サーバーの値・rev）から計算し直す。
+   * ・送るのは edits の欄だけ。送る前に編集を始めた時の基準と最新のサーバー値を突き合わせ、動いていれば競合
+   * ・成功したら送って成功した欄だけを消す（送った後に入れた欄は残る＝保存中に押した別の欄を落とさない・再審 A）
+   * isUndo は Undo トーストから呼ばれた保存（結果の知らせ方だけが違う）
+   */
+  const runSave = useCallback(
+    async (t: SaveTarget, isUndo: boolean) => {
+      const key = mealKey(t.residentId, t.day, t.slot)
+      const phase = phasesRef.current[key]
+      // 競合中は、くらべて選ぶで選ぶまで送らない（5画面共通の規約）
+      if (holdsNormalSave(phase)) {
+        setSaveError(ERR_CONFLICT_HOLD)
+        return
+      }
+      const existing = mealsRef.current[key] ?? null
+      const edits = editsRef.current[key] ?? {}
+      if (!hasEdits(edits)) {
+        // 送るものが無い（R-C）。送信待ちの食事は送信待ちのまま。控えが残っていなければ通常へ戻す
+        if (phase !== 'queued') setPhase(key, 'idle')
+        clearSaveErrorIfSettled()
+        return
+      }
+      // 表示中の値（サーバーの値に送信待ちの値を重ねたもの＝指摘 M1）。送信待ちへ渡した後の表示に使う
+      const shown = { ...mealCells(existing), ...(phase === 'queued' ? (queuedRef.current[key] ?? {}) : {}) } as MealCells
+      const send = editValues(edits) as MealPatch
+      // 記録済みの値を消してしまう操作かどうか（＝Undo を出す対象か）を保存前に控える
+      const before = overwrittenFrom(existing, send)
+      // 送信待ちで止まっている食事を、読み直しで食い違いが無くなったのを確かめてから送り直す時は画面の基準で送る（rebase）
+      const heldRow = pendingRow('meals', t)
+      const rebase = heldRow !== null && heldRow.state === 'conflict'
+      // 送る前に印を付ける（変更通知が応答より先に届いても、自分の書き込みで取り直さない）
+      selfWriteRef.current = Date.now()
+      try {
+        const res = await saveMealEdits(t, edits, {
+          // 記入者は新しい行の時だけ「空いていれば埋める」（更新では編集列以外を送らない＝部分更新）
+          ...(existing ? {} : { fill: { recorded_by: actorRef.current } }),
+          rebase,
+        })
+        if (!aliveRef.current) return
+        if (res === 'queued') {
+          // 送信待ちにした値は、送信が済むまで表示に重ねて残す（指摘 M1）。送信待ちへ渡し終えた欄だけ
+          // 編集から消す（R-D・欄単位）。送信待ちの後に入れる値は送った内容が基準
+          queuedRef.current[key] = { ...(queuedRef.current[key] ?? {}), ...send }
+          writeEdits(key, settleSent(editsRef.current[key] ?? {}, edits, { ...shown, ...send }))
+          setPhase(key, 'queued')
+          setSaveError(MSG_QUEUED)
+          return
+        }
+        // サーバーへ届いた＝この直後に届く変更通知は自分のもの（取り直しの合図にしない）
+        selfWriteRef.current = Date.now()
+        if (res.held === true) {
+          // ほかの端末の値と食い違って止まっている食事へまとめた（送っていない）。競合として見せる
+          holdAsHeld(t)
+          await refreshAfterConflict(t)
+          return
+        }
+        const missing = res.conflicts.length > 0 && res.conflicts.every((c) => c.reason === 'missing')
+        const nextMeals = { ...mealsRef.current }
+        if (res.row) nextMeals[key] = res.row
+        else if (missing) delete nextMeals[key]
+        commitMeals(nextMeals)
+        // 送信待ちにまだ残っている分だけ重ね表示を持ち続ける（送れた分は外す）
+        const still = pendingRow('meals', t)
+        if (still !== null && still.state === 'pending') {
+          const vals: MealPatch = {}
+          for (const f of MEAL_FIELDS) if (f in still.values) (vals as Record<string, unknown>)[f] = still.values[f]
+          queuedRef.current[key] = vals
+        } else delete queuedRef.current[key]
+        // 書けた欄・もう載っていた欄だけ消す（R-F）。保存中に入れた欄は残り、その時に積まれた仕事が続けて送る
+        const done = new Set<string>([...res.applied, ...res.settled])
+        const doneEdits: Edits<MealField> = {}
+        for (const f of Object.keys(edits) as MealField[]) {
+          const e = edits[f]
+          if (done.has(f) && e) doneEdits[f] = e
+        }
+        const afterSave = res.row ? mealCells(res.row) : mealCells(null)
+        // 控えにある全ての欄（〔両方残す〕のメモを含む＝第3段 #4）を、応答に載ったいまの値で消し込む
+        const remain = settleSent(editsRef.current[key] ?? {}, doneEdits, mealJudgeCells(res.row) as MealCells)
+        writeEdits(key, remain)
+        delete staleRef.current[key] // 応答にいまの行が載っている（先の値を出してよい）
+        if (res.conflicts.length > 0) {
+          // 書かなかった欄がある: 編集は残す（R-D）。先の値（いまのサーバーの値）とあなたの入力を並べる
+          if (missing) missingRef.current[key] = true
+          else delete missingRef.current[key]
+          setPhase(key, 'conflict')
+          setSaveError(missing ? missingRowText(describeMealEdits(remain)) : ERR_CONFLICT_STILL)
+          return
+        }
+        delete missingRef.current[key]
+        setPhase(key, hasEdits(remain) ? 'saving' : 'saved')
+        clearSaveErrorIfSettled()
+        if (isUndo) {
+          showRef.current('元に戻しました。')
+        } else if (Object.keys(before).length > 0 && res.applied.length > 0) {
+          // 元の値へ戻す保存を Undo に載せる（8秒）。取り消し自体は同じ保存経路を通す
+          // 元に戻す時の基準は「自分が保存した後の値」。その間に他の端末が書き換えていれば競合にする
+          // （他の端末の値を黙って上書きしない＝指摘 M2）
+          showRef.current(overwriteText(before, send), () => {
+            saveMealRef.current(t, before, true, afterSave)
+          })
+        }
+      } catch (e) {
+        if (!aliveRef.current) return
+        // 保存失敗: 編集は残す（R-D）。〔保存し直す〕で送り直せる
+        setPhase(key, 'error')
+        setSaveError(msgOf(e, ERR_SAVE))
+      }
+    },
+    [clearSaveErrorIfSettled, commitMeals, holdAsHeld, refreshAfterConflict, setPhase, writeEdits],
+  )
+
+  /** 1食の保存を行ごとの順番待ちに積む（構造規約 R-F。積んだ時点の値は持ち越さない） */
+  const enqueueSave = useCallback(
+    (t: SaveTarget, isUndo = false) => {
+      const key = mealKey(t.residentId, t.day, t.slot)
+      const p = phasesRef.current[key]
+      if (p !== 'conflict' && p !== 'queued') setPhase(key, 'saving')
+      enqueue(key, () => runSave(t, isUndo))
+    },
+    [enqueue, runSave, setPhase],
+  )
+
+  /**
+   * 1食分の入力を確定する。既存行があれば部分更新、無ければ新規作成（upsert は使わない）。
+   * baseCells は入力を始めた時に画面に出ていた値（構造規約 R-E の基準。吹き出しを開いた時に控える）。
    * 記録済みの値を上書きした時は Undo 付きトーストを出す（1タップ不可逆を作らない）。
    */
   const saveMeal = useCallback(
-    (t: SaveTarget, patch: MealPatch, isUndo = false) => {
+    (t: SaveTarget, rawPatch: MealPatch, isUndo = false, baseCells?: MealCells) => {
       if (!canInputRef.current) {
         if (isUndo) showRef.current(`${ERR_UNDO_BLOCKED}${blockedHintRef.current}`)
         return
       }
       touchActivity()
       const key = mealKey(t.residentId, t.day, t.slot)
-      commitPending({
-        ...pendingRef.current,
-        [key]: { ...(pendingRef.current[key] ?? {}), ...patch },
-      })
-      setPhase(key, 'saving')
-
-      enqueue(key, async () => {
-        // 送る前に印を付ける（変更通知が応答より先に届いても、自分の書き込みで取り直さない）
-        selfWriteRef.current = Date.now()
-        const existing = mealsRef.current[key] ?? null
-        // 新規作成のときだけ、控えに溜まっている他の列も一緒に書く
-        const written: MealPatch = existing ? patch : { ...(pendingRef.current[key] ?? {}) }
-        // 記録済みの値を消してしまう操作かどうか（＝Undo を出す対象か）を保存前に控える
-        const before = overwrittenFrom(existing, patch)
-        try {
-          const res = existing
-            ? await updateMeal(existing.id, existing.rev, patch)
-            : await insertMeal({
-                resident_id: t.residentId,
-                meal_on: t.day,
-                meal_slot: t.slot,
-                main_amount: written.main_amount ?? null,
-                side_amount: written.side_amount ?? null,
-                status: written.status ?? null,
-                note: null,
-                // 記入者は新規作成時のみ記録する（更新では編集列以外を送らない＝部分更新）
-                recorded_by: actorRef.current,
-              })
-          if (!aliveRef.current) return
-          if (res === 'conflict') {
-            setPhase(key, 'conflict')
-            setSaveError(ERR_CONFLICT)
-            return
-          }
-          if (res === 'queued') {
-            setPhase(key, 'queued')
-            setSaveError(MSG_QUEUED)
-            return
-          }
-          // サーバーへ書けた＝この直後に届く変更通知は自分のもの（取り直しの合図にしない）
-          selfWriteRef.current = Date.now()
-          commitMeals({ ...mealsRef.current, [key]: res })
-          clearOverlay(key, written)
-          setPhase(key, 'saved')
-          clearSaveErrorIfSettled()
-          if (isUndo) {
-            showRef.current('元に戻しました。')
-          } else if (Object.keys(before).length > 0) {
-            // 元の値へ戻す保存を Undo に載せる（8秒）。取り消し自体は同じ保存経路を通す
-            showRef.current(overwriteText(before, patch), () => {
-              saveMealRef.current(t, before, true)
-            })
-          }
-        } catch (e) {
-          if (!aliveRef.current) return
-          setPhase(key, 'error')
-          setSaveError(msgOf(e, ERR_SAVE))
-        }
-      })
+      const phaseNow = phasesRef.current[key]
+      // いま画面に出ている値（サーバー値＋控え）。基準が渡されていない欄はこれを基準にする
+      const shown = mealCells(
+        effectiveMeal(mealsRef.current[key] ?? null, pendingRef.current[key] ?? {}, t.residentId, t.day, t.slot),
+      )
+      const prev = editsRef.current[key] ?? {}
+      let edits = prev
+      for (const f of MEAL_FIELDS) {
+        if (rawPatch[f] === undefined) continue
+        // 構造規約 R-E・R-B: 基準から実際に変わった時だけ記録。既に編集のある欄は基準を変えない
+        edits = recordFieldEdit(edits, f, rawPatch[f], baseCells ? baseCells[f] : shown[f])
+      }
+      if (edits === prev) {
+        // 変わっていない（開いて閉じただけ・同じ値の入れ直し）。未保存・保存失敗なら控えを送り直す
+        if (holdsNormalSave(phaseNow)) setSaveError(ERR_CONFLICT_HOLD)
+        else if (phaseNow === 'error' && hasEdits(prev)) enqueueSave(t, isUndo)
+        return
+      }
+      writeEdits(key, edits)
+      // 競合中のセルは、くらべて選ぶで選ぶまで保存しない。入力は控えに重ねて残し、理由と次の行動を出す
+      if (holdsNormalSave(phaseNow)) {
+        setSaveError(ERR_CONFLICT_HOLD)
+        return
+      }
+      enqueueSave(t, isUndo)
     },
-    [clearOverlay, clearSaveErrorIfSettled, commitMeals, commitPending, enqueue, setPhase],
+    [enqueueSave, writeEdits],
   )
 
   // Undo から自分自身を呼ぶための参照（保存経路を1本に保つ）
@@ -1239,6 +1627,218 @@ export function MealsSheetPage({
     void load()
   }, [closeEdit, load])
 
+  /**
+   * 相手の行が取り消されていた食事の控えを、新しい行として保存する（〔新しい行として保存〕。行ごとの順番待ちを通す）。
+   * 同じ利用者・日・食事枠の新しい行を作る（先の値が無いもの＝基準は空で送る）
+   */
+  const saveMissingAsNew = useCallback(
+    (t: SaveTarget) => {
+      const key = mealKey(t.residentId, t.day, t.slot)
+      if (!missingRef.current[key]) return
+      enqueue(key, async () => {
+        const cur = editsRef.current[key] ?? {}
+        // 控えにある全ての欄（メモを含む）の値を新しい行へ（基準 null）。送信待ちにしか無い欄も db.ts が基準 null にそろえる（F4）
+        const vals = valuesForBoth(judgeFields(MEAL_FIELDS, { values: cur }), editValues(cur))
+        const edits: Edits<MealField> = {}
+        for (const f of Object.keys(vals) as MealField[]) {
+          const e = cur[f]
+          if (e) edits[f] = { ...e, base: null }
+        }
+        if (!hasEdits(edits)) return
+        selfWriteRef.current = Date.now()
+        try {
+          const res = await saveMealEdits(t, edits, { rebase: true, asNew: true, fill: { recorded_by: actorRef.current } })
+          if (!aliveRef.current) return
+          delete missingRef.current[key]
+          if (res === 'queued') {
+            queuedRef.current[key] = { ...(queuedRef.current[key] ?? {}), ...(editValues(edits) as MealPatch) }
+            writeEdits(key, {})
+            setPhase(key, 'queued')
+            setSaveError(MSG_QUEUED)
+            return
+          }
+          selfWriteRef.current = Date.now()
+          if (res.row) commitMeals({ ...mealsRef.current, [key]: res.row })
+          if (res.conflicts.length > 0) {
+            setPhase(key, 'conflict')
+            setSaveError(ERR_CONFLICT_STILL)
+            return
+          }
+          writeEdits(key, {})
+          setPhase(key, 'saved')
+          clearSaveErrorIfSettled()
+        } catch (e) {
+          if (!aliveRef.current) return
+          setSaveError(msgOf(e, ERR_SAVE))
+        }
+      })
+    },
+    [clearSaveErrorIfSettled, commitMeals, enqueue, setPhase, writeEdits],
+  )
+
+  /** 相手の行が取り消されていた食事の控えを取り下げる（〔取り下げる〕。送信待ちからも外す） */
+  const dropMissing = useCallback(
+    (t: SaveTarget) => {
+      const key = mealKey(t.residentId, t.day, t.slot)
+      enqueue(key, async () => {
+        // 画面が見せていた版だけ外す（第3段 #9。見た後に他のタブが入れた値は外さない）
+        await discardPendingRow('meals', t, undefined, seenVers(pendingRow('meals', t), editValues(editsRef.current[key] ?? {})))
+        if (!aliveRef.current) return
+        delete missingRef.current[key]
+        writeEdits(key, {})
+        setPhase(key, 'idle')
+        clearSaveErrorIfSettled()
+      })
+    },
+    [clearSaveErrorIfSettled, enqueue, setPhase, writeEdits],
+  )
+
+  // ── 食い違いをくらべて選ぶ ──
+
+  /** 競合中の1食を「くらべて選ぶ」画面で開く（開いた時点の入力で固定する） */
+  const openCompare = useCallback(
+    (key: string, residentId: number, day: string, slot: MealSlot, name: string) => {
+      if (phasesRef.current[key] !== 'conflict') return
+      closeEdit()
+      setFluidTarget(null)
+      const edits = editsRef.current[key] ?? {}
+      setCompare({
+        key,
+        target: { table: 'meals', residentId, day, slot },
+        name,
+        // 見ていた値＝欄ごとの基準（入力を始めた時の値）／あなたの入力＝実際に入れた欄の値
+        base: { ...editBases(edits, mealCells(mealsRef.current[key])) },
+        mine: { ...editValues(edits) },
+      })
+    },
+    [closeEdit],
+  )
+
+  /**
+   * くらべて選ぶの送信（〔先の値を残す〕〔自分の値で直す〕〔両方残す〕）。通常の保存と同じ順番待ちに通し、送る前と後に
+   * 自分の書込の印を付け、送信中は背景の取り直しを先送りする（選び直した後の行を古い値で描き直さない＝指摘 L2）
+   */
+  const runResolverJob = useCallback(
+    (key: string, job: () => Promise<void>) =>
+      new Promise<void>((resolve) => {
+        resolverBusyRef.current += 1
+        enqueue(key, async () => {
+          selfWriteRef.current = Date.now()
+          try {
+            // 送信待ちで止まっている値の取り下げ・送り直しは ConflictResolver が db.ts へ頼む
+            await job()
+          } finally {
+            selfWriteRef.current = Date.now()
+            resolverBusyRef.current -= 1
+            resolve()
+          }
+        })
+      }),
+    [enqueue],
+  )
+
+  /** 選んだ結果でそのセルを最新に描き直し、競合の表示を消す */
+  const onResolved = useCallback(
+    (r: ConflictResolution) => {
+      const cur = compare
+      setCompare(null)
+      if (!cur) return
+      const key = cur.key
+      // 〔くらべて選ぶ〕が消えるので、フォーカスをその食事のセルへ移す（body へ落とさない）。
+      // 〔最新を読み込む〕の経路も同じ（再審 指摘8）。ダイアログが閉じた後に動かすため、2フレーム待つ
+      if (typeof window !== 'undefined') {
+        window.requestAnimationFrame(() =>
+          window.requestAnimationFrame(() => cellBtnRef.current.get(`${key}|main_amount`)?.focus()),
+        )
+      }
+      if (r.choice === 'reload') {
+        // 食い違いが無かった／先の記録が見つからない: 最新を読み込む（競合のセルは load が裁く）
+        onReload()
+        return
+      }
+      const latest = r.latest as Meal | null
+      const nextMeals = { ...mealsRef.current }
+      if (latest) nextMeals[key] = latest
+      commitMeals(nextMeals)
+      // 送信待ちで止まっていた値の取り下げ・送り直しは ConflictResolver が済ませている
+      delete missingRef.current[key]
+      delete staleRef.current[key]
+      if (r.choice === 'mine' && r.queued && latest) {
+        // 自分の値で直す更新を送信待ちにした。送信が済むまで、その値を表示に重ねて残す（指摘 M1）
+        queuedRef.current[key] = { main_amount: latest.main_amount, side_amount: latest.side_amount, status: latest.status }
+      } else {
+        delete queuedRef.current[key]
+      }
+      // 3択のどれかを選んだ＝この食事の編集は解決した（くらべて選ぶで送った・取り下げた）
+      writeEdits(key, {})
+      if (r.choice === 'mine' && r.queued) {
+        // 自分の値で直す更新を送信待ちにした
+        setPhase(key, 'queued')
+        setSaveError(MSG_QUEUED)
+        return
+      }
+      const nextPending = { ...pendingRef.current }
+      delete nextPending[key]
+      commitPending(nextPending)
+      if (r.queued) {
+        // 両方残す（メモへの書き足し）を送信待ちにした
+        setPhase(key, 'queued')
+        setSaveError(MSG_QUEUED)
+        return
+      }
+      setPhase(key, r.choice === 'theirs' ? 'idle' : 'saved')
+      clearSaveErrorIfSettled()
+    },
+    [clearSaveErrorIfSettled, commitMeals, commitPending, compare, onReload, setPhase],
+  )
+
+  // アプリ内の画面移動・再読み込み・タブを閉じる時に確認を出すための登録（App・beforeunload が参照する）
+  useEffect(
+    () =>
+      // 構造規約 R-G: 編集が1欄でも残る食事（送信待ちの後・保存中に入れた値を含む）と競合中の食事を数える
+      registerUnsaved(
+        () =>
+          Object.values(editsRef.current).some((e) => hasEdits(e)) ||
+          Object.values(phasesRef.current).some((p) => p === 'conflict'),
+      ),
+    [],
+  )
+
+  /** 競合中の食事（くらべて選ぶボタンを並べる）。表示中の利用者の分だけ */
+  const conflictList = useMemo(() => {
+    const out: {
+      key: string
+      residentId: number
+      day: string
+      slot: MealSlot
+      name: string
+      phase: 'conflict' | 'error'
+      /** 止まっている間もサーバーの最新値を「先の値」として見せる（再審 指摘2） */
+      text: string
+      /** 相手の行が取り消されていた（〔新しい行として保存〕〔取り下げる〕を出す） */
+      missing: boolean
+    }[] = []
+    for (const [key, p] of Object.entries(phases)) {
+      if (p !== 'conflict' && p !== 'error') continue
+      if (p === 'error' && !hasEdits(editsRef.current[key])) continue
+      const [ridRaw, day, slotRaw] = key.split('|')
+      const rid = Number(ridRaw)
+      const slot = slotRaw as MealSlot
+      if (!Number.isFinite(rid) || !day || !SLOTS.includes(slot)) continue
+      const r = residents.find((x) => x.id === rid)
+      if (!r) continue
+      // 先の値が古いかもしれない間（保存が競合したのに最新を取り直せなかった）は値を出さない（指摘 U1）
+      const missing = missingRef.current[key] === true
+      const text = missing
+        ? describeMealEdits(editsRef.current[key])
+        : staleRef.current[key] === true
+          ? ''
+          : mealHeldText(editValues(editsRef.current[key] ?? {}), mealCells(meals[key]))
+      out.push({ key, residentId: rid, day, slot, name: r.name, phase: p, text, missing })
+    }
+    return out
+  }, [meals, pending, phases, residents])
+
   // ── 表示条件の操作 ──
 
   const onChangeDays = useCallback(
@@ -1357,6 +1957,14 @@ export function MealsSheetPage({
       setFluidTarget(null)
       setEditInvalid(false)
       setEditText(value == null ? '' : String(value))
+      // 吹き出しを開いた時に画面に出ている値を、この食事の基準として控える（構造規約 R-E）
+      const key = mealKey(t.residentId, t.day, t.slot)
+      editStartRef.current = {
+        key,
+        cells: mealCells(
+          effectiveMeal(mealsRef.current[key] ?? null, pendingRef.current[key] ?? {}, t.residentId, t.day, t.slot),
+        ),
+      }
       setEdit({
         key: mealKey(t.residentId, t.day, t.slot),
         residentId: t.residentId,
@@ -1377,22 +1985,14 @@ export function MealsSheetPage({
       showRef.current(ERR_AMOUNT)
       return false
     }
-    const cur = mealsRef.current[edit.key] ?? null
-    const ov = pendingRef.current[edit.key] ?? {}
-    const phase = phasesRef.current[edit.key] ?? 'idle'
-    // 保存が終わっていないセル（競合・失敗）は、同じ値を入れ直した時も必ず保存し直す。
-    // 画面に出ている値は「まだ保存できていない控え」なので、これを比較の相手にすると
-    // 案内どおり入力し直しても「変化なし」と見なされ、保存が呼ばれないまま無言で残る
-    // （VitalsSheetPage.saveOne が差分の基準をサーバー観測値 rec.saved に取り直しているのと同じ考え方）。
-    // 送信待ち（queued）はキューが自動で送るため対象外（同じ内容の二重送信を作らない）
-    const retry = phase === 'conflict' || phase === 'error'
-    const shown = ov[edit.field] !== undefined ? ov[edit.field] : (cur?.[edit.field] ?? null)
-    if (retry || shown !== parsed) {
-      saveMeal(
-        { residentId: edit.residentId, day: edit.day, slot: edit.slot },
-        { [edit.field]: parsed } as MealPatch,
-      )
-    }
+    // 変わったかどうか・基準は saveMeal が決める（構造規約 R-E・R-B。基準は吹き出しを開いた時の値）。
+    // 変わっていない時も、未保存・保存失敗の食事なら控えを送り直す（saveMeal の中で判定）
+    saveMeal(
+      { residentId: edit.residentId, day: edit.day, slot: edit.slot },
+      { [edit.field]: parsed } as MealPatch,
+      false,
+      editStartRef.current?.key === edit.key ? editStartRef.current.cells : undefined,
+    )
     return true
   }, [edit, editText, saveMeal])
 
@@ -1560,6 +2160,13 @@ export function MealsSheetPage({
             {BLOCKED_TEXT}
           </p>
         </div>
+      ) : !flagError && flagChecked && cellsMissing ? (
+        <div role="status" className="rounded-lg border border-info bg-info-bg p-4">
+          <p className="text-base text-ink">
+            <span aria-hidden="true">ⓘ </span>
+            {CELLS_PENDING_REASON}
+          </p>
+        </div>
       ) : null}
 
 
@@ -1576,6 +2183,62 @@ export function MealsSheetPage({
           >
             最新を読み込む
           </button>
+          {/* 食い違っている食事ごとに、並べて選ぶ入口を出す（既存の「最新を読み込む」はそのまま残す） */}
+          {conflictList.length > 0 ? (
+            <ul className="mt-2 flex flex-col gap-gap">
+              {conflictList.map((c) => (
+                <li key={c.key}>
+                  <p className="text-base text-ink">
+                    {c.name} {fmtDayLabel(c.day)} {MEAL_SLOT_LABEL[c.slot]}：
+                    {c.missing
+                      ? missingRowText(c.text)
+                      : `${c.phase === 'conflict' ? '食い違っています' : 'まだ保存していません'}${c.text !== '' ? `（${c.text}）` : ''}`}
+                  </p>
+                  {c.missing ? (
+                    // 相手の行が取り消されていた: 新しい行として保存するか、取り下げる（日報の「行が無い控え」と同じ）
+                    <div className="mt-1 flex flex-wrap gap-gap">
+                      <button
+                        type="button"
+                        disabled={!canInput}
+                        onClick={() => saveMissingAsNew({ residentId: c.residentId, day: c.day, slot: c.slot })}
+                        aria-label={`${c.name} ${fmtDayLabel(c.day)} ${MEAL_SLOT_LABEL[c.slot]}のまだ保存していない入力を新しい行として保存する`}
+                        className="min-h-tap rounded border border-primary bg-surface px-4 text-base font-bold text-primary disabled:border-border disabled:text-ink3"
+                      >
+                        新しい行として保存
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => dropMissing({ residentId: c.residentId, day: c.day, slot: c.slot })}
+                        aria-label={`${c.name} ${fmtDayLabel(c.day)} ${MEAL_SLOT_LABEL[c.slot]}のまだ保存していない入力を取り下げる`}
+                        className="min-h-tap rounded border border-border-strong bg-surface px-4 text-base text-ink"
+                      >
+                        取り下げる
+                      </button>
+                    </div>
+                  ) : c.phase === 'conflict' ? (
+                    <button
+                      type="button"
+                      onClick={() => openCompare(c.key, c.residentId, c.day, c.slot, c.name)}
+                      aria-label={`${c.name} ${fmtDayLabel(c.day)} ${MEAL_SLOT_LABEL[c.slot]}の食い違いをくらべて選ぶ`}
+                      className="mt-1 min-h-tap rounded border border-primary bg-surface px-4 text-base font-bold text-primary"
+                    >
+                      くらべて選ぶ（{c.name} {fmtDayLabel(c.day)} {MEAL_SLOT_LABEL[c.slot]}）
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={!canInput}
+                      onClick={() => enqueueSave({ residentId: c.residentId, day: c.day, slot: c.slot })}
+                      aria-label={`${c.name} ${fmtDayLabel(c.day)} ${MEAL_SLOT_LABEL[c.slot]}のまだ保存していない入力を保存し直す`}
+                      className="mt-1 min-h-tap rounded border border-primary bg-surface px-4 text-base font-bold text-primary disabled:border-border disabled:text-ink3"
+                    >
+                      保存し直す（{c.name} {fmtDayLabel(c.day)} {MEAL_SLOT_LABEL[c.slot]}）
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : null}
         </div>
       ) : null}
 
@@ -1865,7 +2528,12 @@ export function MealsSheetPage({
                                         // （吹き出しは onMouseDown を止めていて onBlur が走らないため）。
                                         // 解釈できない値のときは閉じずに ERR_AMOUNT を出す
                                         if (!commitAmount()) return
-                                        saveMeal(target, { status: v as MealStatus })
+                                        saveMeal(
+                                          target,
+                                          { status: v as MealStatus },
+                                          false,
+                                          editStartRef.current?.key === key ? editStartRef.current.cells : undefined,
+                                        )
                                         closeEdit(true)
                                       }}
                                       ariaLabel="食事の状態を選ぶ"
@@ -1978,6 +2646,18 @@ export function MealsSheetPage({
         朝は赤系・昼は緑系・夕は通常色の文字です。<span aria-hidden="true">▲</span>
         は低摂取、<span aria-hidden="true">⚠</span>は未送信を表します。文字を大きくするときは上の倍率で切り替えてください。
       </p>
+
+      <ConflictResolver
+        target={compare?.target ?? null}
+        residentName={compare?.name ?? ''}
+        base={compare?.base ?? {}}
+        mine={compare?.mine ?? {}}
+        actorId={actorId ?? null}
+        // 〔自分の値で直す〕〔両方残す〕の送信も、この食事の保存の順番待ちに通す（構造規約 R-F）
+        serialize={compare ? (job) => runResolverJob(compare.key, job) : undefined}
+        onClose={() => setCompare(null)}
+        onResolved={onResolved}
+      />
 
       {toast}
     </div>

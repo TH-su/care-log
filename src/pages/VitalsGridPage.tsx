@@ -9,7 +9,8 @@
 // - 入力は normalizeVitalInput で正規化（「365」→36.5）。VITAL_RANGE 外はインライン警告を出し
 //   自動送りを止める（DB の check 制約と同じ範囲。範囲外のまま保存もしない）
 // - 1名分ずつ自動保存（別の利用者のセルへ移った時・キーパッドを閉じた時）。
-//   upsert は使わず「id 無し=insertVital／id 有り=updateVital(id, rev, 変更列のみ)」（db-design §5）
+//   保存は saveVitalEdits（送信待ち → RPC apply_cell_edits の1本・2026-09-23 フェーズ2'）。送るのは編集した欄と
+//   その基準だけで、書くかどうかはサーバーが欄ごとに決める。送信待ち・止まっている行は pendingRow から読む
 // - 記録済みの値を空にする操作は確認ダイアログを挟む（空上書き保護・dev-principles 原則4）
 // - 保存できなかった入力は画面から消さない（キュー退避・競合・範囲外のいずれも入力を保持）
 // - 入力解禁フラグ（native_input_enabled）が false の間は全入力をディセーブル＋理由文
@@ -18,14 +19,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   DbError,
+  discardPendingRow,
+  fetchLatestVital,
   fetchResidents,
   fetchTimelineChunk,
   getNativeInputGate,
-  insertVital,
+  newClientKey,
+  pendingRow,
   queuePending,
   queueSubscribe,
-  updateVital,
+  saveVitalEdits,
 } from '../lib/db'
+import type { CellSaveResult, PendingCellRow, VitalTarget } from '../lib/db'
 import { addDays, fmtDayLabel, normalizeVitalInput, todayIso } from '../lib/format'
 import {
   diaBpLevel,
@@ -46,6 +51,34 @@ import {
   LoadingBlock,
   SegmentPicker,
 } from '../components/ui'
+import { ConflictResolver, focusAfterResolve } from '../components/ConflictResolver'
+import type { ConflictResolution, ConflictTarget } from '../components/ConflictResolver'
+import {
+  CELLS_PENDING_REASON,
+  fmtVitalValue,
+  holdsNormalSave,
+  missingRowText,
+  pairOf,
+  valuesForBoth,
+  vitalConflictDetail,
+} from '../lib/conflict'
+import {
+  createRowQueue,
+  editBases,
+  reconcileOnLoad,
+  editValues,
+  adoptPendingEdits,
+  hasEdits,
+  isOlderRow,
+  planEdits,
+  recordFieldEdit,
+  seenVers,
+  settleSent,
+  withoutFields,
+} from '../lib/rowSync'
+import type { Edits } from '../lib/rowSync'
+import type { ConflictColumn } from '../lib/conflict'
+import { registerUnsaved } from '../lib/leaveGuard'
 
 // ── 定数 ─────────────────────────────────────────────────────
 
@@ -107,15 +140,45 @@ const ERR_LOAD =
   'バイタルの一覧を読み込めませんでした。通信状況を確認して、「再試行する」を押してください。'
 const ERR_SAVE =
   '保存できませんでした。入力は消えていません。通信状況を確認して、もう一度入力を確定してください。'
-const ERR_CONFLICT =
-  '他の端末で先に更新されました。入力は消えていません。「読み込み直す」を押して最新の値を確認してください。'
 const MSG_QUEUED = '通信できないため送信待ちにしました。電波が戻ると自動で送信します。'
-const MSG_QUEUED_EDIT =
-  'この行には送信待ちの保存があります。あとから入力した値はまだ保存されていません。電波が戻って送信が終わってから「読み込み直す」を押して、入力し直してください。'
+/** サーバーに受け付けられなかった保存（型・範囲の拒否）が送信待ちに残っている時 */
+const ERR_REJECTED =
+  'サーバーに受け付けられなかった保存があります（入力は消えていません）。値を確かめて「保存し直す」を押してください。'
 const MSG_BLOCKED =
   '現在はスプレッドシートで記録する期間です（アプリ入力の開始日は施設で決定します）'
 const MSG_GATE_UNKNOWN =
   '入力できるかどうかを確認できませんでした（通信エラー）。電波状態を確認して、「もう一度確認する」を押してください。入力は消えていません。'
+/** 保存が、他の端末の値と食い違って止まっている行にまとめられた時（送らない。くらべて選ぶへ誘導する） */
+const MSG_BLOCKED_WRITE =
+  'この方には、他の端末の値と食い違って止まっている保存があります。いまの入力もそこにまとめました（まだ送っていません・入力は消えていません）。「くらべて選ぶ」でどちらを残すか選んでください。'
+/** 両方残すで作った再検の行が送信待ちになった時 */
+const MSG_BOTH_QUEUED =
+  'あなたの値を再検の行として送信待ちにしました。電波が戻ると自動で送信します。'
+
+/**
+ * 読み直しても食い違う列が残っている時（競合のまま）。セルにはあなたの入力が出ているので、
+ * 先に入っている値をこの一言に併記する（どちらの値なのかを取り違えないように）
+ */
+function conflictStillText(columns: ConflictColumn<Field>[]): string {
+  return `最新を読み込みましたが、${vitalConflictDetail(columns)}が食い違っています。まだ保存していません（入力は消えていません）。「くらべて選ぶ」でどちらを残すか選んでください。`
+}
+
+/**
+ * 競合中の行に入力が確定された時（くらべて選ぶまで保存しない＝5画面共通の規約）。
+ * 止めた旨と、分かっている食い違い（先の値／あなたの入力）を両方出す（併記を消さない）
+ */
+function conflictHoldText(columns: ConflictColumn<Field>[]): string {
+  const detail =
+    columns.length > 0
+      ? `${vitalConflictDetail(columns)}が食い違っています。`
+      : '他の端末の値と食い違っています。'
+  return `この行の入力はまだ保存していません（入力は消えていません）。${detail}「くらべて選ぶ」でどちらを残すか選んでください。`
+}
+
+/** 読み直したら食い違いは無くなったが、まだ保存していない入力が残っている時 */
+function unsavedText(fields: Field[]): string {
+  return `他の端末の更新を読み込みました（食い違いはありません）。${fields.map((f) => FIELD_LABEL[f]).join('・')}の入力はまだ保存していません。「保存し直す」を押すと保存します。`
+}
 
 // ── 純ロジック（副作用なし） ─────────────────────────────────
 
@@ -228,7 +291,7 @@ interface GridRow {
   rev: number
   /** 直近にサーバーで観測できた値（差分＝送る列の判定に使う） */
   saved: Record<Field, number | null>
-  /** 送信キューへ渡した内容（未観測）。送信待ちの行で「そのあと入力された値」を見分けるために持つ */
+  /** 送信待ちへ渡した内容（未観測）。送信待ちの行で「そのあと入力された値」を見分けるために持つ */
   sent?: Record<Field, number | null>
   /** 入力バッファ（文字列のまま保持し、保存時に正規化する） */
   buf: Record<Field, string>
@@ -236,6 +299,211 @@ interface GridRow {
   prev: Record<Field, number | null>
   state: RowState
   message: string
+  /**
+   * 利用者の編集（欄ごとの値と、キーパッドを出した時に画面に出ていた値＝基準）。構造規約 R-E〜R-G の
+   * 共通の仕組み（src/lib/rowSync.ts）で扱う。保存で送るのはこの欄だけで、入力欄と saved の差分は使わない
+   */
+  edits?: Edits<Field>
+  /**
+   * まだ行の無い再検の、この行に固有の冪等キー（最初に送る時に決める）。送信待ちの間に続けて入力しても
+   * 同じ送信待ちへまとまり、何度送っても1行に収まる。行ができた後は行 id で指す
+   */
+  clientKey?: string
+  /** 競合の理由が「先の行が他の端末で取り消された」（〔新しい行として保存〕〔取り下げる〕を出す） */
+  missing?: boolean
+  /** saved が古いかもしれない（競合の後に最新を取り直せなかった）。この間は「先の値」を出さない（指摘 U1） */
+  stale?: boolean
+}
+
+/** 行の氏名のセルの id（食い違いを解決した後のフォーカスの戻り先） */
+function nameCellId(rowId: string): string {
+  return `vg-name-${rowId}`
+}
+
+/** 入力として読める列だけの値（空欄は null＝消す意思）。範囲外の入力は比べない */
+function inputCells(buf: Record<Field, string>): Partial<Record<Field, number | null>> {
+  const out: Partial<Record<Field, number | null>> = {}
+  for (const f of FIELDS) {
+    const raw = buf[f].trim()
+    const p = normalizeVitalInput(buf[f], f)
+    if (raw !== '' && p == null) continue
+    if (p != null && outOfRange(f, p)) continue
+    out[f] = p
+  }
+  return out
+}
+
+/** あなたの入力（実際に編集した欄の値） */
+function mineOf(row: GridRow): Partial<Record<Field, number | null>> {
+  return editValues(row.edits ?? {}) as Partial<Record<Field, number | null>>
+}
+
+/**
+ * いまのサーバーの値（saved）に対する食い違い（編集を始めた時の基準からサーバーの値が動いた欄）。
+ * saved が古いかもしれない間（stale）は出さない（古い値を「先の値」として見せない＝指摘 U1）
+ */
+function knownColumns(row: GridRow): ConflictColumn<Field>[] {
+  if (row.stale === true) return []
+  return planEdits(FIELDS, row.edits ?? {}, row.saved).conflicts
+}
+
+/** 範囲外の入力の列（保存しない。打った文字はセルに残す） */
+function badCells(buf: Record<Field, string>): Field[] {
+  const readable = inputCells(buf)
+  return FIELDS.filter((f) => !(f in readable))
+}
+
+function badText(bad: Field[]): string {
+  return bad.length > 0
+    ? `入力値を確認してください（${bad.map(rangeText).join('・')}）。範囲外の値は保存していません。`
+    : ''
+}
+
+/** 画面を離れると消える入力が残っている行か（構造規約 R-G）。送信待ちの内容そのものは数えない */
+function holdsInput(r: GridRow): boolean {
+  return hasEdits(r.edits) || badCells(r.buf).length > 0 || r.state === 'conflict'
+}
+
+/** 読み込みで作り直さずに載せ替える行か（止まっている入力・送信待ち・競合がある） */
+function isHeldRow(r: GridRow): boolean {
+  return holdsInput(r) || r.state === 'queued'
+}
+
+/**
+ * 読み込んだサーバーの値（fresh）に行を載せ替える（構造規約 R-E・VitalsSheetPage.mergeOnLoad と同じ裁き）。
+ * saved / rev / id は最新に、edits（編集と基準）はそのまま。セルは最新の値で描き直し、編集のある欄と
+ * 範囲外の入力の欄だけ打った文字を残す。状態は edits と最新の値の突き合わせで決め直す。
+ * fresh=null は行が見当たらない（先の値が無いもの＝新しい行として裁く）
+ */
+function mergeOnLoad(cur: GridRow, fresh: GridRow | null): GridRow {
+  const latest: GridRow = fresh ?? { ...cur, vitalId: null, rev: 0, saved: savedOf(null) }
+  let edits = cur.edits ?? {}
+  const buf = bufOf(latest.saved)
+  const readable = inputCells(cur.buf)
+  for (const f of FIELDS) {
+    if (edits[f] !== undefined || !(f in readable)) buf[f] = cur.buf[f]
+  }
+  // 突き合わせは共通の裁き（rowSync.reconcileOnLoad）。行が見当たらない時は先の値が無いものとして扱う
+  const r = reconcileOnLoad(FIELDS, edits, fresh ? latest.saved : null)
+  edits = r.edits
+  const next: GridRow = {
+    ...latest,
+    rowId: cur.rowId,
+    buf,
+    sent: undefined,
+    edits,
+    stale: undefined,
+    missing: undefined,
+    ...(latest.vitalId == null && cur.clientKey ? { clientKey: cur.clientKey } : {}),
+  }
+  if (r.status === 'conflict') return { ...next, state: 'conflict', message: conflictStillText(r.conflicts) }
+  if (r.status === 'unsaved') return { ...next, state: 'error', message: unsavedText(r.unsaved) }
+  const bad = badCells(buf)
+  if (bad.length > 0) return { ...next, state: 'invalid', message: badText(bad) }
+  return { ...next, state: 'idle', message: '' }
+}
+
+/** その行の送り先（定時は利用者×当日・保存済みの行は行 id・まだ行の無い再検はこの行の冪等キー） */
+function targetOf(row: GridRow, day: string): VitalTarget | null {
+  if (row.kind === 'routine') return { routine: true, residentId: row.residentId, day }
+  if (row.vitalId != null) return { routine: false, id: row.vitalId }
+  if (row.clientKey) {
+    return { routine: false, clientKey: row.clientKey, residentId: row.residentId, day, kind: row.kind }
+  }
+  return null
+}
+
+/** その行の送信待ちがまだ送る状態で残っているか（送信が済めば、サーバーの値で作り直してよい） */
+function stillPending(row: GridRow, day: string): boolean {
+  const target = targetOf(row, day)
+  return target !== null && pendingRow('vitals', target)?.state === 'pending'
+}
+
+/**
+ * 送信待ちで止まっている行（競合・拒否）の値を、その行の「あなたの入力」として編集に取り込む
+ * （VitalsSheetPage.adoptPending と同じ）。画面に既に編集のある欄は画面の値を残す。基準は送信待ちの基準
+ */
+function adoptPending(edits: Edits<Field>, p: PendingCellRow): Edits<Field> {
+  // 血圧は組で取り込む（相方を「値＝基準」で送っていても落とさない＝第3段 #3）
+  return adoptPendingEdits(FIELDS, edits, p, (_f, v) => numOrNull(v))
+}
+
+/** 編集の値を「体温 37.2℃・脈拍 70回/分」の形に（取り消された行の控えの一言） */
+function describeEdits(edits: Edits<Field> | undefined): string {
+  const mine = editValues(edits ?? {}) as Partial<Record<Field, number | null>>
+  return FIELDS.filter((f) => f in mine)
+    .map((f) => `${FIELD_LABEL[f]} ${fmtVitalValue(f, mine[f])}`)
+    .join('・')
+}
+
+/** 編集の欄の文字を表示に出す（編集のある欄は編集の値・それ以外は元の文字） */
+function bufWithEdits(buf: Record<Field, string>, edits: Edits<Field>): Record<Field, string> {
+  const out = { ...buf }
+  for (const f of FIELDS) {
+    const e = edits[f]
+    if (e) out[f] = typeof e.value === 'number' ? fmtNum(f, e.value) : ''
+  }
+  return out
+}
+
+/**
+ * 送信待ち（db.ts の pending store）を一覧の行へ重ねる（VitalsSheetPage.adoptStoreRecs と同じ裁き）。
+ * 送る状態は「送信待ち」の印つきで値を重ね、止まっている行は「あなたの入力」として取り込んで競合・未保存を
+ * 出し直す（もう同じ値が載っていれば送信待ちから外す）。拒否された行は〔保存し直す〕を出す
+ */
+function adoptStoreRows(next: GridRow[], day: string): void {
+  for (let i = 0; i < next.length; i++) {
+    const cur = next[i]
+    const target = targetOf(cur, day)
+    if (target === null || cur.state === 'saving') continue
+    const p = pendingRow('vitals', target)
+    if (p === null) continue
+    if (p.state === 'pending') {
+      if (cur.state === 'conflict') continue
+      const q: Partial<Record<Field, number | null>> = {}
+      for (const f of FIELDS) if (f in p.values) q[f] = numOrNull(p.values[f])
+      if (Object.keys(q).length === 0) continue
+      const buf = { ...cur.buf }
+      for (const f of Object.keys(q) as Field[]) {
+        if (cur.edits?.[f] !== undefined) continue // 送信待ちの後に打った値はそのまま
+        const v = q[f]
+        buf[f] = v == null ? '' : fmtNum(f, v)
+      }
+      const quiet = cur.state === 'idle' || cur.state === 'saved' || cur.state === 'queued'
+      next[i] = {
+        ...cur,
+        buf,
+        sent: { ...cur.saved, ...q } as Record<Field, number | null>,
+        ...(quiet ? { state: 'queued' as const, message: cur.state === 'queued' && cur.message ? cur.message : MSG_QUEUED } : {}),
+      }
+      continue
+    }
+    const edits = adoptPending(cur.edits ?? {}, p)
+    if (p.state === 'rejected') {
+      next[i] = { ...cur, edits, buf: bufWithEdits(cur.buf, edits), state: 'error', message: ERR_REJECTED }
+      continue
+    }
+    const missing = cur.vitalId == null && p.conflicts.length > 0 && p.conflicts.every((c) => c.reason === 'missing')
+    if (missing) {
+      next[i] = { ...cur, edits, buf: bufWithEdits(cur.buf, edits), state: 'conflict', missing: true, message: missingRowText(describeEdits(edits)) }
+      continue
+    }
+    const r = reconcileOnLoad(FIELDS, edits, cur.vitalId != null ? cur.saved : null)
+    if (r.status === 'clean') {
+      // もう同じ値がサーバーに載っている（止まっていた分は届いたのと同じ）。送信待ちから外す
+      // 突き合わせた欄の、見た版だけを外す（第3段 #9。画面に出していない欄・見た後の新しい版は外さない）
+      void discardPendingRow('vitals', target, FIELDS.filter((f) => f in p.values), p.vers)
+      next[i] = { ...cur, edits: r.edits }
+      continue
+    }
+    next[i] = {
+      ...cur,
+      edits: r.edits,
+      buf: bufWithEdits(cur.buf, r.edits),
+      state: r.status === 'conflict' ? 'conflict' : 'error',
+      message: r.status === 'conflict' ? conflictStillText(r.conflicts) : unsavedText(r.unsaved),
+    }
+  }
 }
 
 function rowFromVital(v: Vital, prev: Record<Field, number | null>, rowId: string): GridRow {
@@ -292,6 +560,8 @@ export function VitalsGridPage({
   const [inputEnabled, setInputEnabled] = useState<boolean>(propInputEnabled ?? false)
   /** 入力できるかどうかを観測できなかった（通信エラー）。封鎖の理由文とは分けて案内する */
   const [gateUnknown, setGateUnknown] = useState(false)
+  /** サーバーに欄ごとの保存の仕組み（0011）がまだ無い＝サーバー側の更新待ち（入力を止める） */
+  const [cellsMissing, setCellsMissing] = useState(false)
   const [rows, setRows] = useState<GridRow[]>([])
   const [floor, setFloor] = useState<string>(() => readFloor() ?? '1')
   const [sel, setSel] = useState<{ rowId: string; field: Field } | null>(null)
@@ -299,13 +569,20 @@ export function VitalsGridPage({
   const [pending, setPending] = useState(0)
   const [draftSeq, setDraftSeq] = useState(0)
   const [clearAsk, setClearAsk] = useState<{ labels: string } | null>(null)
+  /** くらべて選ぶ画面に渡す内容（開いた時点で固定する） */
+  const [compare, setCompare] = useState<{
+    rowId: string
+    target: ConflictTarget
+    name: string
+    base: Record<string, unknown>
+    mine: Record<string, unknown>
+  } | null>(null)
 
   const aliveRef = useRef(true)
   const rowsRef = useRef<GridRow[]>([])
   const selRef = useRef<{ rowId: string; field: Field } | null>(null)
-  const savingRef = useRef(new Set<number>())
-  /** 保存の応答待ち中に重なった保存要求（先行保存の完了後にやり直す＝要求を黙って捨てない） */
-  const resaveRef = useRef(new Set<number>())
+  /** キーパッドを出した時に画面に出ていた値（構造規約 R-E の基準） */
+  const editBaseRef = useRef<{ rowId: string; field: Field; text: string } | null>(null)
   const clearResolveRef = useRef<((ok: boolean) => void) | null>(null)
 
   const actorId = propActorId !== undefined ? propActorId : getActorId()
@@ -335,14 +612,14 @@ export function VitalsGridPage({
       const from = addDays(day, -PREV_LOOKBACK_DAYS)
       // 日付レンジ付きの1往復で「当日の測定」と「前回値ゴースト」の両方をまかなう。
       // 入力解禁フラグは「観測できた値」と「観測できなかった」を区別して受け取る
-      // （親から渡された既知値は観測済みとして扱う）
-      const [rs, gate, chunk] = await Promise.all([
+      // （親から渡された既知値は観測済みとして扱う）。サーバー側の更新待ち（0011 の有無）は毎回確かめる
+      const [rs, gateNow, chunk] = await Promise.all([
         propResidents ? Promise.resolve(propResidents) : fetchResidents(),
-        propInputEnabled === undefined
-          ? getNativeInputGate()
-          : Promise.resolve({ value: propInputEnabled, observed: true }),
+        getNativeInputGate(),
         fetchTimelineChunk(from, day, null),
       ])
+      const gate =
+        propInputEnabled === undefined ? gateNow : { value: propInputEnabled, observed: true, cells: gateNow.cells }
       if (!aliveRef.current) return
 
       const list = (Array.isArray(rs) ? rs : []).filter((r) => r && r.active !== false)
@@ -392,9 +669,94 @@ export function VitalsGridPage({
         }
       }
 
+      // 未送信・競合・失敗・応答待ち・範囲外警告中の行は入力を引き継ぐ（原則4: 入力を消さない）。
+      // 以前は読み込み直すたびに全行を作り直しており、「入力は消えていません」と案内した競合の行でも
+      // 「読み込み直す」を押すと入力が消えていた（2026-09-23 レビュー指摘。VitalsSheetPage の KEEP と同じ作法）
+      /** 送信待ちの追加行が「実は届いていた」と分かった一覧の行（同じ行を2つの追加行へ当てない） */
+      const landedTaken = new Set<string>()
+      /** 送った内容と一致する、まだ誰にも当てていない一覧の行（応答だけが失われて届いていた追加行） */
+      const findLanded = (cur: GridRow): number =>
+        next.findIndex(
+          (r) =>
+            r.residentId === cur.residentId &&
+            r.kind === cur.kind &&
+            r.vitalId != null &&
+            !landedTaken.has(r.rowId) &&
+            cur.sent !== undefined &&
+            FIELDS.every((f) => r.saved[f] === cur.sent?.[f]),
+        )
+      for (const cur of rowsRef.current) {
+        const i = next.findIndex((r) => r.rowId === cur.rowId)
+        const fresh = i >= 0 ? next[i] : null
+        if (fresh && isOlderRow({ id: cur.vitalId, rev: cur.rev }, { id: fresh.vitalId, rev: fresh.rev })) {
+          // 画面が持っている行より古い応答（くらべて選ぶ・保存の直後に、それより前に出た読み込みが返った）。
+          // 古い値で描き直さず、画面の行をそのまま残す（指摘 L2・全画面共通の防御）
+          next[i] = { ...cur, prev: fresh.prev }
+          continue
+        }
+        // 編集・範囲外の入力・送信待ち・応答待ち・競合のどれも無い行は、サーバーの値で作り直す
+        if (!isHeldRow(cur) && cur.state !== 'saving') continue
+        let kept: GridRow | null
+        const pending = cur.state === 'queued' && stillPending(cur, day)
+        if (cur.state === 'saving') {
+          // 保存の応答待ち。入力と編集を温存する（順番待ちが応答の後に計算し直す）
+          kept = fresh ? { ...fresh, buf: cur.buf, state: cur.state, message: cur.message, sent: cur.sent, edits: cur.edits } : cur
+        } else if (pending) {
+          if (fresh) {
+            kept = { ...fresh, buf: cur.buf, state: 'queued', message: cur.message, sent: cur.sent, edits: cur.edits }
+          } else {
+            // まだ id の無い追加行（送信待ち）。応答だけが失われて実は届いていた場合、一覧にも同じ記録が
+            // 出るので、送った内容と一致する行があれば届いたとみなして持ち込まない（同じ記録を2行に見せない・
+            // 再審 指摘11。client_key は一覧に出していないので内容の一致で見分ける）
+            const j = findLanded(cur)
+            if (j >= 0) {
+              landedTaken.add(next[j].rowId)
+              if (hasEdits(cur.edits) || badCells(cur.buf).length > 0) next[j] = mergeOnLoad({ ...cur, rowId: next[j].rowId }, next[j])
+              continue
+            }
+            kept = cur
+          }
+        } else {
+          if (!fresh && cur.vitalId == null && cur.state === 'queued') {
+            // 画面で足した行の送信が済んだ。一覧に別の行（v{id}）として出ているので、その行へ編集を載せ替える
+            const j = findLanded(cur)
+            if (j >= 0) {
+              landedTaken.add(next[j].rowId)
+              if (hasEdits(cur.edits) || badCells(cur.buf).length > 0) next[j] = mergeOnLoad({ ...cur, rowId: next[j].rowId }, next[j])
+              continue
+            }
+          }
+          if (cur.state === 'queued' && !hasEdits(cur.edits) && badCells(cur.buf).length === 0) {
+            // 送信が済み、送信待ちの後に打った値も無い＝サーバーの値で作り直す（送信待ちが解除されない不具合の修正）
+            if (fresh) continue
+            if (cur.vitalId == null) continue
+          }
+          // 送信が済んだ送信待ち・競合・未保存・保存失敗・範囲外の警告中。edits（編集と基準）と範囲外の入力
+          // だけを残して最新の値に載せ替え、状態を決め直す（共通の仕組み mergeOnLoad）
+          kept = mergeOnLoad(cur, fresh)
+        }
+        if (i >= 0) {
+          next[i] = kept
+          continue
+        }
+        // 取り直した一覧に無い行（画面で足した再検の行・他端末で取り消された行など）は、その方の行の後ろへ
+        let at = -1
+        for (let j = next.length - 1; j >= 0; j--) {
+          if (next[j].residentId === cur.residentId) {
+            at = j + 1
+            break
+          }
+        }
+        if (at >= 0 && kept) next.splice(at, 0, kept) // 一覧に居ない利用者（退居など）の行は出さない
+      }
+
+      // 送信待ち・止まっている行を db.ts（pending store）から読んで重ねる（再マウント・再読み込みの後も同じ見え方）
+      adoptStoreRows(next, day)
+
       setResidents(sorted)
       setInputEnabled(gate.value === true)
       setGateUnknown(!gate.observed)
+      setCellsMissing(gate.cells === 'missing')
       commitRows(next)
       setSel(null)
       setEdit('')
@@ -412,6 +774,37 @@ export function VitalsGridPage({
     void load()
   }, [load])
 
+  /**
+   * 送信待ちの行の印を見直す（R6。未送信件数の通知を受けた時。読み込み直しはしない）。
+   * 裏で送信が済んだ行（pendingRow が無い）は「⚠ 未送信」を外し、送った値をいまの値として出す（行 id・版は次の読み込みで
+   * 取り直す）。送って止まった行（競合・拒否）は送信待ちの裁き（adoptStoreRows）で出し直す。まだ送信待ちの行はそのまま
+   */
+  const settleQueuedRows = useCallback(() => {
+    const cur = rowsRef.current
+    if (!cur.some((r) => r.state === 'queued')) return
+    const next = cur.slice()
+    let changed = false
+    for (let i = 0; i < next.length; i++) {
+      const row = next[i]
+      if (row.state !== 'queued' || stillPending(row, day)) continue
+      const target = targetOf(row, day)
+      const p = target === null ? null : pendingRow('vitals', target)
+      changed = true
+      if (p !== null) {
+        // 止まった（競合・拒否）: 送信待ちの裁きへ回す（下の adoptStoreRows）
+        next[i] = { ...row, state: 'idle', message: '' }
+        continue
+      }
+      const saved = { ...row.saved, ...(row.sent ?? {}) } as Record<Field, number | null>
+      const buf = bufOf(saved)
+      for (const f of FIELDS) if (row.edits?.[f] !== undefined) buf[f] = row.buf[f] // 送信待ちの後に打った値はそのまま
+      next[i] = { ...row, saved, buf, sent: undefined, state: hasEdits(row.edits) ? 'idle' : 'saved', message: '' }
+    }
+    if (!changed) return
+    adoptStoreRows(next, day)
+    commitRows(next)
+  }, [commitRows, day])
+
   // 未送信件数（送信失敗キュー）の可視化
   useEffect(() => {
     try {
@@ -422,7 +815,10 @@ export function VitalsGridPage({
     let unsub: (() => void) | null = null
     try {
       unsub = queueSubscribe((n) => {
-        if (aliveRef.current) setPending(typeof n === 'number' && n >= 0 ? n : 0)
+        if (!aliveRef.current) return
+        setPending(typeof n === 'number' && n >= 0 ? n : 0)
+        // 裏で送信が済んだ・止まった行の「⚠ 未送信」を見直す（R6）
+        settleQueuedRows()
       })
     } catch {
       unsub = null
@@ -436,7 +832,7 @@ export function VitalsGridPage({
         }
       }
     }
-  }, [])
+  }, [settleQueuedRows])
 
   // ── フロア ─────────────────────────────────────────────────
 
@@ -490,184 +886,316 @@ export function VitalsGridPage({
     [commitRows],
   )
 
-  /** 1行を保存する。upsert は使わず insert / update(id, rev) に分岐する（db-design §5） */
+  /**
+   * 保存が競合になった行だけを取り直し、最新の値で状態と一言（先の値／あなたの入力）を出し直す（指摘 U1）。
+   * 取り直せない時・まだ行の無い再検は、値を出さない固定の文言のまま（stale の印を残す＝古い値を先の値にしない）
+   */
+  const refreshAfterConflict = useCallback(
+    async (rowId: string) => {
+      const row = rowsRef.current.find((r) => r.rowId === rowId)
+      if (!row || (row.kind !== 'routine' && row.vitalId == null)) return
+      let latest: Vital | null
+      try {
+        const got = await fetchLatestVital(
+          row.kind === 'routine' || row.vitalId == null
+            ? { routine: true, residentId: row.residentId, day }
+            : { routine: false, id: row.vitalId },
+        )
+        latest = got?.row ?? null
+      } catch {
+        return
+      }
+      if (!aliveRef.current) return
+      const cur = rowsRef.current.find((r) => r.rowId === rowId)
+      if (!cur || cur.state !== 'conflict') return
+      patchRow(rowId, mergeOnLoad(cur, latest ? rowFromVital(latest, cur.prev, cur.rowId) : null))
+    },
+    [day, patchRow],
+  )
+
+  /**
+   * 保存が、他の端末の値と食い違って止まっている行にまとめられた（held＝送っていない）。その行を競合として見せる。
+   * 止まっている値を「あなたの入力」として載せ、1行だけ取り直して先の値と並べる
+   */
+  const holdAsHeld = useCallback(
+    async (rowId: string) => {
+      const cur = rowsRef.current.find((r) => r.rowId === rowId)
+      if (!cur) return
+      const target = targetOf(cur, day)
+      const p = target ? pendingRow('vitals', target) : null
+      const edits = p ? adoptPending(cur.edits ?? {}, p) : (cur.edits ?? {})
+      patchRow(rowId, { edits, buf: bufWithEdits(cur.buf, edits), state: 'conflict', message: MSG_BLOCKED_WRITE, stale: true })
+      await refreshAfterConflict(rowId)
+    },
+    [day, patchRow, refreshAfterConflict],
+  )
+
+  /**
+   * 保存の応答をその行へ当てる（通常の保存・〔新しい行として保存〕で共通。VitalsSheetPage.applySaveResult と同じ）。
+   * 書けた欄・もう載っていた欄は、送った後に打ち直していなければ編集から消す。書かなかった欄は残して先の値と並べ、
+   * 行が取り消されていたら「行が無い控え」にする。応答待ちの間に打った欄があれば続けて送る
+   */
+  const applySaveResult = useCallback(
+    (rowId: string, row: GridRow, sendEdits: Edits<Field>, res: CellSaveResult<Vital>) => {
+      const cur = rowsRef.current.find((r) => r.rowId === rowId)
+      const missing = res.conflicts.length > 0 && res.conflicts.every((c) => c.reason === 'missing')
+      const saved = res.row ? savedOf(res.row) : missing ? savedOf(null) : (cur?.saved ?? row.saved)
+      const done = new Set<string>([...res.applied, ...res.settled])
+      const doneEdits: Edits<Field> = {}
+      for (const f of FIELDS) {
+        const e = sendEdits[f]
+        if (done.has(f) && e) doneEdits[f] = e
+      }
+      const remain = settleSent(cur?.edits ?? {}, doneEdits, saved)
+      const nowBad = cur ? badCells(cur.buf) : []
+      const buf = bufOf(saved)
+      if (cur) for (const f of FIELDS) if (remain[f] !== undefined || nowBad.includes(f)) buf[f] = cur.buf[f]
+      const common: Partial<GridRow> = {
+        vitalId: res.row?.id ?? (missing && row.kind === 'routine' ? null : row.vitalId),
+        rev: numOrNull(res.row?.rev) ?? (missing && row.kind === 'routine' ? 0 : row.rev),
+        saved,
+        buf,
+        edits: remain,
+        sent: undefined,
+        stale: undefined,
+      }
+      if (res.conflicts.length > 0) {
+        // 書かなかった欄がある。先の値（いまのサーバーの値）とあなたの入力を並べる（指摘 U1）
+        const columns: ConflictColumn<Field>[] = res.conflicts
+          .filter((c) => (FIELDS as string[]).includes(c.field))
+          .map((c) => ({ field: c.field as Field, theirs: numOrNull(c.server), mine: numOrNull(c.mine) }))
+        patchRow(rowId, {
+          ...common,
+          state: 'conflict',
+          missing: missing ? true : undefined,
+          message: missing ? missingRowText(describeEdits(remain)) : conflictStillText(columns),
+        })
+        return
+      }
+      patchRow(rowId, {
+        ...common,
+        missing: undefined,
+        ...(res.row ? { clientKey: undefined } : {}),
+        state: hasEdits(remain) ? 'idle' : nowBad.length > 0 ? 'invalid' : 'saved',
+        message: badText(nowBad),
+      })
+      // 応答待ちの間に打った欄があれば続けて送る（積んでおく）
+      if (hasEdits(remain)) enqueueSaveRef.current(rowId)
+    },
+    [patchRow],
+  )
+
+  /**
+   * 1行を保存する（構造規約 R-E〜R-F・共通の仕組み src/lib/rowSync.ts。VitalsSheetPage.saveOne と同じ手順）。
+   * 行ごとの順番待ちから呼ばれ、動き出した時点の最新の状態（edits・saved・rev）から計算し直す。
+   * 送るのは edits の欄と基準だけ（入力欄と saved の差分は使わない）。書くかどうかはサーバーが欄ごとに決め、
+   * 基準からサーバーの値が動いていれば書かずに競合を返す。成功したら送った欄だけを消し、触っていない欄は
+   * サーバーの値で描き直す（空き欄を埋めた後も相手の体温が空欄に見えない・触っていない欄を「消す」と判定しない＝再審 E）
+   */
   const saveRow = useCallback(
     async (rowId: string) => {
       const row = rowsRef.current.find((r) => r.rowId === rowId)
       if (!row) return
-      if (row.state === 'saving') return
-
-      // 差分の基準。送信待ちの行は「キューへ渡した内容」と比べる
-      // （サーバー観測値と比べると、送信済みの値まで毎回「新しい入力」に見えてしまう）
-      const baseline = row.state === 'queued' && row.sent ? row.sent : row.saved
-
-      const changes: Partial<Record<Field, number | null>> = {}
-      const invalid: Field[] = []
-      const cleared: Field[] = []
-      for (const f of FIELDS) {
-        const p = normalizeVitalInput(row.buf[f], f)
-        if (p != null && outOfRange(f, p)) {
-          invalid.push(f)
-          continue
-        }
-        if (p === baseline[f]) continue
-        if (p == null) cleared.push(f)
-        else changes[f] = p
-      }
-
-      // 送信待ちに退避済みの行は再送をキューに任せる（同じ内容の二重送信を作らない）。
-      // そのあとに入力した値はまだ送られていないので、黙って捨てずに理由と次の行動を出す
-      if (row.state === 'queued') {
-        if (Object.keys(changes).length > 0 || cleared.length > 0 || invalid.length > 0) {
-          patchRow(rowId, { state: 'queued', message: MSG_QUEUED_EDIT })
-        }
+      // 競合中の行は、くらべて選ぶで選ぶまで保存しない（5画面共通の規約）。止めた旨と食い違いの併記を出す
+      if (holdsNormalSave(row.state)) {
+        patchRow(rowId, { message: conflictHoldText(knownColumns(row)) })
         return
       }
-
-      // 範囲外のセルが混ざっていた時の警告。保存が成功しても消さずに残す
-      // （「✓保存済」で覆い隠すと、範囲外の値まで保存されたと誤解させるため）
-      const invalidMessage =
-        invalid.length > 0
-          ? `入力値を確認してください（${invalid.map(rangeText).join('・')}）。範囲外の値は保存していません。`
-          : ''
-      if (invalid.length > 0) {
-        patchRow(rowId, { state: 'invalid', message: invalidMessage })
-      }
-
-      // 記録済みの値を空にするのは取り消しにくい操作なので確認を挟む（空上書き保護）
+      const bad = badCells(row.buf)
+      // 送信待ちの行は、送信待ちの内容が載った後の値を表示の基準にする（空にする確認・描き直しに使う）
+      const server = row.state === 'queued' ? (row.sent ?? row.saved) : row.saved
+      let edits = row.edits ?? {}
+      const sendEdits: Edits<Field> = { ...edits }
+      // 記録済みの値を空にする欄は確認を挟む（何の値を消すかを明記）。取りやめた欄は edits から外す
+      const cleared = (Object.keys(sendEdits) as Field[]).filter((f) => sendEdits[f]?.value === null && server[f] != null)
       if (cleared.length > 0) {
-        const ok = await askClear(cleared.map((f) => FIELD_LABEL[f]).join('・'))
+        const ok = await askClear(cleared.map((f) => `${FIELD_LABEL[f]}（${fmtVitalValue(f, server[f])}）`).join('・'))
         if (!aliveRef.current) return
-        if (ok) {
-          for (const f of cleared) changes[f] = null
-        } else {
-          // 取り消したら入力欄をサーバーの値へ戻す（入力は失わせない＝画面と保存内容を一致させる）
+        if (!ok) {
           const cur = rowsRef.current.find((r) => r.rowId === rowId)
-          if (cur) {
-            const buf = { ...cur.buf }
-            for (const f of cleared) {
-              const v = cur.saved[f]
-              buf[f] = v == null ? '' : fmtNum(f, v)
-            }
-            patchRow(rowId, { buf })
+          if (!cur) return
+          const buf = { ...cur.buf }
+          const shownNow = cur.state === 'queued' ? (cur.sent ?? cur.saved) : cur.saved
+          for (const f of cleared) {
+            const v = shownNow[f]
+            buf[f] = v == null ? '' : fmtNum(f, v)
+            delete sendEdits[f]
           }
+          edits = withoutFields(cur.edits ?? {}, cleared)
+          patchRow(rowId, { buf, edits })
         }
       }
-
-      const fields = Object.keys(changes) as Field[]
-      if (fields.length === 0) return
-
-      // この保存でサーバーへ渡す内容（応答後に「新しい入力が乗ったか」を見分ける基準）
-      const sentValues: Record<Field, number | null> = { ...baseline, ...changes }
-
-      // 保存できた行の状態。範囲外の入力が残っていれば警告のまま据え置く。
-      // 応答を待つ間に入力された値が残っている行は「✓保存済」にしない（未送信を保存済みに見せない）。
-      // 残った入力は saveResident のやり直しで次に送られる
-      const done = (): Partial<GridRow> => {
-        if (invalid.length > 0) return { state: 'invalid', message: invalidMessage }
-        const cur = rowsRef.current.find((r) => r.rowId === rowId)
-        const stillDirty =
-          cur != null && FIELDS.some((f) => normalizeVitalInput(cur.buf[f], f) !== sentValues[f])
-        return stillDirty ? { state: 'idle', message: '' } : { state: 'saved', message: '' }
+      if (Object.keys(sendEdits).length === 0) {
+        // 送るものが無い（R-C）。送信待ちの行は送信待ちのまま。範囲外の入力が残っていれば警告のまま、無ければ通常へ戻す
+        patchRow(
+          rowId,
+          row.state === 'queued'
+            ? { edits }
+            : bad.length > 0
+              ? { edits, state: 'invalid', message: badText(bad) }
+              : { edits, state: row.state === 'saved' ? 'saved' : 'idle', message: '' },
+        )
+        return
       }
-
-      patchRow(rowId, { state: 'saving', message: invalidMessage })
+      // 送り先。まだ行の無い再検は、この行に固有の冪等キーで指す（送信待ちの間に続けて入力してもまとまる）
+      const clientKey = row.kind !== 'routine' && row.vitalId == null ? (row.clientKey ?? newClientKey()) : row.clientKey
+      const target = targetOf({ ...row, clientKey }, day)
+      if (target === null) return
+      // 止まっている行を、読み直しで食い違いが無くなったのを確かめてから送り直す時は画面の基準で送る（rebase）
+      const heldRow = pendingRow('vitals', target)
+      const rebase = heldRow !== null && heldRow.state === 'conflict'
+      const wasQueued = row.state === 'queued'
+      patchRow(rowId, { edits, clientKey, state: 'saving', message: badText(bad) })
       try {
-        if (row.vitalId == null) {
-          const rec = {
-            resident_id: row.residentId,
-            measured_on: day,
-            kind: row.kind,
-            measured_at: nowHM(),
-            temp: changes.temp ?? null,
-            sys_bp: changes.sys_bp ?? null,
-            dia_bp: changes.dia_bp ?? null,
-            pulse: changes.pulse ?? null,
-            spo2: changes.spo2 ?? null,
-            note: null,
-            // 新規行は定時・再検のみなので症状欄は使わない（他症状者ブロックは申し送りシート側で扱う）
-            symptom: null,
-            recorded_by: actorId ?? null,
+        const res = await saveVitalEdits(target, sendEdits, {
+          // 新しい行の測定時刻・記入者は「空いていれば埋める」（既にある行では何も埋めない）
+          ...(row.vitalId == null ? { fill: { measured_at: nowHM(), recorded_by: actorId ?? null } } : {}),
+          rebase,
+        })
+        if (!aliveRef.current) return
+        const cur = rowsRef.current.find((r) => r.rowId === rowId)
+        if (res === 'queued') {
+          // 送信待ちへ渡し終えた欄だけ消す。送信待ちの後に打つ値は、送った内容を基準に比べる（再審 low-2）
+          const sentValues: Partial<Record<Field, number | null>> = {}
+          for (const f of FIELDS) {
+            const e = sendEdits[f]
+            if (e) sentValues[f] = numOrNull(e.value)
           }
-          const res = await insertVital(rec)
-          if (!aliveRef.current) return
-          if (res === 'queued') {
-            patchRow(rowId, {
-              state: 'queued',
-              message: MSG_QUEUED,
-              sent: sentValues,
-            })
-            return
-          }
+          const sent = { ...server, ...sentValues } as Record<Field, number | null>
           patchRow(rowId, {
-            vitalId: res.id,
-            rev: numOrNull(res.rev) ?? 1,
-            saved: savedOf(res),
-            ...done(),
+            state: 'queued',
+            message: wasQueued ? (cur?.message ?? MSG_QUEUED) : MSG_QUEUED,
+            sent,
+            edits: settleSent(cur?.edits ?? {}, sendEdits, sent),
           })
-        } else {
-          // 変更した列だけを送る（他端末が書いた列を巻き戻さない＝部分更新）
-          const res = await updateVital(row.vitalId, row.rev, changes)
-          if (!aliveRef.current) return
-          if (res === 'queued') {
-            patchRow(rowId, {
-              state: 'queued',
-              message: MSG_QUEUED,
-              sent: sentValues,
-            })
-            return
-          }
-          if (res === 'conflict') {
-            patchRow(rowId, { state: 'conflict', message: ERR_CONFLICT })
-            return
-          }
-          patchRow(rowId, {
-            rev: numOrNull(res.rev) ?? row.rev + 1,
-            saved: savedOf(res),
-            ...done(),
-          })
+          return
         }
+        if (res.held === true) {
+          // 他の端末の値と食い違って止まっている行へまとめた（送っていない）。競合として見せる
+          await holdAsHeld(rowId)
+          return
+        }
+        applySaveResult(rowId, row, sendEdits, res)
       } catch (e) {
         if (!aliveRef.current) return
-        // db.ts の DbError は「何が起きたか＋次にどうすればよいか」を持っているので、
-        // 一律の定型文で上書きせずそのまま行に出す（MealsGridPage と同型）
-        patchRow(rowId, {
-          state: 'error',
-          message: e instanceof DbError && e.message ? e.message : ERR_SAVE,
-        })
+        // 保存失敗: edits は残す（R-D）。〔保存し直す〕で送り直せる
+        patchRow(rowId, { state: 'error', message: e instanceof DbError && e.message ? e.message : ERR_SAVE })
       }
     },
-    [actorId, askClear, day, patchRow],
+    [actorId, applySaveResult, askClear, day, holdAsHeld, patchRow],
   )
 
-  /** 1名分（定時＋再検）をまとめて保存する */
-  const saveResident = useCallback(
-    async (residentId: number) => {
-      if (savingRef.current.has(residentId)) {
-        // 先行保存の応答待ち。この要求を捨てると、待っている間に入力した値が保存されないまま
-        // 再送の合図も無くなる（silent fail）。印を残し、先行保存の完了後にやり直す
-        resaveRef.current.add(residentId)
-        return
-      }
-      savingRef.current.add(residentId)
-      try {
-        do {
-          // やり直しの印はここで下ろす（この周回の保存に、それまでの入力が含まれる）
-          resaveRef.current.delete(residentId)
-          const ids = rowsRef.current
-            .filter((r) => r.residentId === residentId)
-            .map((r) => r.rowId)
-          for (const id of ids) {
-            await saveRow(id)
-            if (!aliveRef.current) return
-          }
-        } while (resaveRef.current.has(residentId) && aliveRef.current)
-      } finally {
-        savingRef.current.delete(residentId)
-        resaveRef.current.delete(residentId)
-      }
+  /** 行ごとの1本の順番待ち（構造規約 R-F）。保存・保存し直し・くらべて選ぶの3択はすべてここを通す */
+  const rowQueue = useMemo(() => createRowQueue(), [])
+
+  /**
+   * くらべて選ぶの送信（〔先の値を残す〕〔自分の値で直す〕〔両方残す〕）。通常の保存と同じ順番待ちに通す。
+   * 送信待ちで止まっている値の取り下げ・送り直しは ConflictResolver が db.ts へ頼む
+   */
+  const runResolverJob = useCallback(
+    (rowId: string, job: () => Promise<void>) => rowQueue(rowId, job),
+    [rowQueue],
+  )
+  /** 1行の保存を順番待ちに積む（積んだ時点の値は持ち越さず、動き出した時に最新から計算し直す） */
+  const enqueueSave = useCallback(
+    (rowId: string) => {
+      void rowQueue(rowId, () => saveRow(rowId))
     },
-    [saveRow],
+    [rowQueue, saveRow],
+  )
+  const enqueueSaveRef = useRef<(rowId: string) => void>(() => undefined)
+  useEffect(() => {
+    enqueueSaveRef.current = enqueueSave
+  }, [enqueueSave])
+
+  /** 1名分（定時＋再検）をまとめて保存する（行ごとに順番待ちへ積む） */
+  const saveResident = useCallback(
+    (residentId: number) => {
+      for (const r of rowsRef.current) if (r.residentId === residentId) enqueueSave(r.rowId)
+    },
+    [enqueueSave],
+  )
+
+  /**
+   * 行が取り消されていた控えを、新しい行として保存する（〔新しい行として保存〕。行ごとの順番待ちを通す）。
+   * 定時はその利用者・当日の新しい定時の行、それ以外は同じ種別の新しい行（冪等キー）。取り消された行の控えは外す
+   */
+  const saveAsNew = useCallback(
+    (rowId: string) => {
+      void rowQueue(rowId, async () => {
+        const row = rowsRef.current.find((r) => r.rowId === rowId)
+        if (!row || !row.missing) return
+        const vals = valuesForBoth(FIELDS, editValues(row.edits ?? {}))
+        const sendEdits: Edits<Field> = {}
+        for (const f of Object.keys(vals) as Field[]) {
+          const e = row.edits?.[f]
+          if (e) sendEdits[f] = { ...e, base: null }
+        }
+        if (Object.keys(sendEdits).length === 0) return
+        let target: VitalTarget
+        let clientKey: string | undefined
+        const newRow = row.kind !== 'routine'
+        const old = newRow ? targetOf(row, day) : null
+        // 取り消された行へ向けた送信待ち。定時以外は、新しい行が書けた・送信待ちに確保できた後で外す（F5）
+        const oldPending = old ? pendingRow('vitals', old) : null
+        if (!newRow) {
+          target = { routine: true, residentId: row.residentId, day }
+        } else {
+          // その行の送信待ちにある値のある欄も、新しい行へ（基準 null＝F4）
+          for (const f of FIELDS) {
+            const v = oldPending?.values[f]
+            if (sendEdits[f] === undefined && v !== null && v !== undefined) sendEdits[f] = { value: numOrNull(v), base: null, ver: 0 }
+          }
+          clientKey = newClientKey()
+          target = { routine: false, clientKey, residentId: row.residentId, day, kind: row.kind as Exclude<VitalKind, 'routine'> }
+        }
+        patchRow(rowId, { state: 'saving', message: '', vitalId: row.kind === 'routine' ? row.vitalId : null, clientKey })
+        try {
+          // 同じ行の送信待ちの全ての欄を「空欄を見て書いた」（基準 null）にそろえて送る（F4）
+          const res = await saveVitalEdits(target, sendEdits, {
+            rebase: true,
+            asNew: true,
+            fill: { measured_at: nowHM(), recorded_by: actorId ?? null },
+          })
+          if (old && (res === 'queued' || (res.conflicts.length === 0 && res.held !== true))) {
+            // 新しい行が書けた・送信待ちに確保できた後で、元の送信待ち（新しい行へ移した値の版）を外す（F5）
+            await discardPendingRow('vitals', old, undefined, seenVers(oldPending, editValues(sendEdits)))
+          }
+          if (!aliveRef.current) return
+          if (res === 'queued') {
+            patchRow(rowId, { state: 'queued', message: MSG_QUEUED, missing: undefined, edits: undefined })
+            return
+          }
+          applySaveResult(rowId, { ...row, vitalId: null, clientKey }, sendEdits, res)
+        } catch (e) {
+          // 拒否（例外）: 元の送信待ちは残す（F5）。新しい行の送信待ちは外し、画面は元の行の控えのまま
+          if (newRow) void discardPendingRow('vitals', target)
+          if (!aliveRef.current) return
+          patchRow(rowId, {
+            state: 'conflict',
+            message: e instanceof DbError && e.message ? e.message : ERR_SAVE,
+            ...(newRow ? { vitalId: row.vitalId, clientKey: row.clientKey } : {}),
+          })
+        }
+      })
+    },
+    [actorId, applySaveResult, day, patchRow, rowQueue],
+  )
+
+  /** 行が取り消されていた控えを取り下げる（〔取り下げる〕。送信待ちからも外す） */
+  const dropMissing = useCallback(
+    (rowId: string) => {
+      void rowQueue(rowId, async () => {
+        const row = rowsRef.current.find((r) => r.rowId === rowId)
+        if (!row) return
+        const target = targetOf(row, day)
+        // 画面が見せていた版だけ外す（第3段 #9。見た後に他のタブが入れた値は外さない）
+        if (target) await discardPendingRow('vitals', target, undefined, seenVers(pendingRow('vitals', target), editValues(row.edits ?? {})))
+        if (!aliveRef.current) return
+        patchRow(rowId, { edits: undefined, missing: undefined, clientKey: undefined, state: 'idle', message: '', buf: bufOf(row.saved) })
+      })
+    },
+    [day, patchRow, rowQueue],
   )
 
   // ── セル操作 ───────────────────────────────────────────────
@@ -678,17 +1206,35 @@ export function VitalsGridPage({
       const s = selRef.current
       const cur = rowsRef.current
       if (!s) return cur
-      const next: GridRow[] = cur.map((r) =>
-        r.rowId === s.rowId
-          ? {
-              ...r,
-              buf: { ...r.buf, [s.field]: value },
-              // 値を触ったら「保存済み」表示は下ろす（未保存を保存済みに見せない）
-              state: r.state === 'saved' ? 'idle' : r.state,
-              message: r.state === 'saved' ? '' : r.message,
-            }
-          : r,
-      )
+      // 構造規約 R-E: この欄の基準は「キーパッドを出した時に画面に出ていた値」
+      const startText = editBaseRef.current?.rowId === s.rowId && editBaseRef.current.field === s.field
+        ? editBaseRef.current.text
+        : null
+      const next: GridRow[] = cur.map((r) => {
+        if (r.rowId !== s.rowId) return r
+        const buf = { ...r.buf, [s.field]: value }
+        let edits = r.edits ?? {}
+        const after = inputCells(buf)
+        if (s.field in after) {
+          const startCells = startText === null ? {} : inputCells({ ...r.buf, [s.field]: startText })
+          const shown = r.state === 'queued' ? (r.sent ?? r.saved) : r.saved
+          const base = s.field in startCells ? (startCells[s.field] ?? null) : shown[s.field]
+          // 血圧の上と下は1つの組（F4）: 片側を直したら、相方も「いまの値のまま」として一緒に送る
+          const other = pairOf(s.field) as Field | null
+          edits = recordFieldEdit(edits, s.field, after[s.field] ?? null, base, other ? { base: shown[other] } : undefined)
+        } else {
+          edits = withoutFields(edits, [s.field]) // 範囲外に書き換えた＝前の編集はもう意図ではない
+        }
+        const touched = edits !== r.edits
+        return {
+          ...r,
+          buf,
+          edits,
+          // 値を触ったら「保存済み」表示は下ろす（未保存を保存済みに見せない）
+          state: touched && r.state === 'saved' ? 'idle' : r.state,
+          message: touched && r.state === 'saved' ? '' : r.message,
+        }
+      })
       commitRows(next)
       return next
     },
@@ -708,7 +1254,10 @@ export function VitalsGridPage({
       }
       setSel({ rowId, field })
       selRef.current = { rowId, field }
-      setEdit(next.find((r) => r.rowId === rowId)?.buf[field] ?? '')
+      const shown = next.find((r) => r.rowId === rowId)?.buf[field] ?? ''
+      // 編集を始めた時に画面に出ていた値を、この欄の基準として控える（構造規約 R-E）
+      editBaseRef.current = { rowId, field, text: shown }
+      setEdit(shown)
     },
     [commitEditWith, saveResident],
   )
@@ -805,8 +1354,88 @@ export function VitalsGridPage({
     [commitRows],
   )
 
+  // ── 食い違いをくらべて選ぶ ─────────────────────────────────
+
+  /** 競合中の行を「くらべて選ぶ」画面で開く（開いた時点の入力で固定する） */
+  const openCompare = useCallback(
+    (rowId: string, name: string) => {
+      const row = rowsRef.current.find((r) => r.rowId === rowId)
+      if (!row || row.state !== 'conflict') return
+      setCompare({
+        rowId,
+        target: {
+          table: 'vitals',
+          residentId: row.residentId,
+          day,
+          kind: row.kind,
+          vitalId: row.vitalId,
+        },
+        name,
+        // 見ていた値＝欄ごとの基準（キーパッドを出した時の値）。編集の無い欄はサーバーの値
+        base: { ...editBases(row.edits ?? {}, row.saved) },
+        mine: { ...mineOf(row) },
+      })
+    },
+    [day],
+  )
+
+  // アプリ内の画面移動・再読み込み・タブを閉じる時に確認を出すための登録（App・beforeunload が参照する）
+  useEffect(
+    // 構造規約 R-G: 編集が1欄でも残る行（送信待ちの後・保存中に打った値、範囲外の警告中を含む）を数える
+    () => registerUnsaved(() => rowsRef.current.some(holdsInput)),
+    [],
+  )
+
+  /** 選んだ結果でその行を最新に描き直し、競合の表示を消す */
+  const onResolved = useCallback(
+    (r: ConflictResolution) => {
+      const cur = compare
+      setCompare(null)
+      if (!cur) return
+      if (r.choice === 'reload') {
+        // 食い違いが無かった／先の記録が見つからない: 最新を読み込む（競合の行は mergeOnLoad が裁く）。
+        // この経路でもフォーカスをその行の氏名のセルへ移す（再審 指摘8）
+        focusAfterResolve(nameCellId(cur.rowId))
+        void load()
+        return
+      }
+      const row = rowsRef.current.find((x) => x.rowId === cur.rowId)
+      if (!row) return
+      // 送信待ちで止まっていた値の取り下げ・送り直しは ConflictResolver が済ませている
+      const v = r.latest as Vital | null
+      const saved = savedOf(v)
+      const base: Partial<GridRow> = {
+        vitalId: v ? v.id : row.vitalId,
+        rev: v ? (numOrNull(v.rev) ?? row.rev) : row.rev,
+        saved,
+        buf: bufOf(saved),
+        sent: undefined,
+        edits: undefined,
+        stale: undefined,
+        missing: undefined,
+      }
+      if (r.choice === 'mine' && r.queued) {
+        patchRow(cur.rowId, { ...base, state: 'queued', message: MSG_QUEUED, sent: saved })
+        focusAfterResolve(nameCellId(cur.rowId))
+        return
+      }
+      patchRow(cur.rowId, {
+        ...base,
+        state: r.choice === 'theirs' || (r.choice === 'both' && r.queued) ? 'idle' : 'saved',
+        message: r.choice === 'both' && r.queued ? MSG_BOTH_QUEUED : '',
+      })
+      // 〔くらべて選ぶ〕が消えるので、フォーカスをその行の氏名のセルへ移す（body へ落とさない）
+      focusAfterResolve(nameCellId(cur.rowId))
+      // 両方残す: 新しい再検の行を出すため取り直す（未送信・失敗の行の入力は KEEP で引き継がれる）
+      if (r.choice === 'both' && !r.queued) void load()
+    },
+    [compare, load, patchRow],
+  )
+
   // ── 表示用の値 ─────────────────────────────────────────────
 
+  /** 入力できるか（入力解禁・サーバー側の更新待ちでない） */
+  const canInput = inputEnabled && !cellsMissing
   const selRow = sel ? rows.find((r) => r.rowId === sel.rowId) ?? null : null
   const selResident = selRow ? residentById.get(selRow.residentId) ?? null : null
   const editParsed = sel ? normalizeVitalInput(edit, sel.field) : null
@@ -881,6 +1510,14 @@ export function VitalsGridPage({
           >
             <span aria-hidden="true">▲ </span>
             {MSG_BLOCKED}
+          </p>
+        ) : cellsMissing ? (
+          <p
+            role="status"
+            className="mt-3 rounded border border-warn bg-warn-bg p-3 text-base text-ink"
+          >
+            <span aria-hidden="true">▲ </span>
+            {CELLS_PENDING_REASON}
           </p>
         ) : null}
 
@@ -959,13 +1596,17 @@ export function VitalsGridPage({
                     row={row}
                     residentName={resident?.name ?? ''}
                     room={resident?.room ?? null}
-                    inputEnabled={inputEnabled}
+                    inputEnabled={canInput}
                     sel={sel}
                     edit={edit}
                     onOpenCell={(field) => openCell(row.rowId, field, edit)}
                     onAddRecheck={() => addRecheck(row.residentId)}
                     onRemoveDraft={isEmptyDraft ? () => removeDraftRow(row.rowId) : null}
                     onReload={() => void load()}
+                    onCompare={() => openCompare(row.rowId, resident?.name ?? '')}
+                    onResave={() => enqueueSave(row.rowId)}
+                    onSaveNew={() => saveAsNew(row.rowId)}
+                    onDrop={() => dropMissing(row.rowId)}
                   />
                 )
               })}
@@ -974,7 +1615,7 @@ export function VitalsGridPage({
         </div>
       )}
 
-      {sel && selRow && inputEnabled ? (
+      {sel && selRow && canInput ? (
         <div className="fixed inset-x-0 bottom-14 z-40 border-t border-border-strong bg-surface p-3 lg:bottom-0">
           <div className="mx-auto max-w-md">
             <div className="mb-2 flex items-baseline justify-between gap-gap">
@@ -1053,6 +1694,17 @@ export function VitalsGridPage({
         </div>
       ) : null}
 
+      <ConflictResolver
+        target={compare?.target ?? null}
+        residentName={compare?.name ?? ''}
+        base={compare?.base ?? {}}
+        mine={compare?.mine ?? {}}
+        actorId={actorId ?? null}
+        serialize={compare ? (job) => runResolverJob(compare.rowId, job) : undefined}
+        onClose={() => setCompare(null)}
+        onResolved={onResolved}
+      />
+
       <ConfirmDialog
         open={clearAsk != null}
         title="記録済みの値を空にしますか"
@@ -1093,6 +1745,14 @@ interface FragmentRowProps {
   onAddRecheck: () => void
   onRemoveDraft: (() => void) | null
   onReload: () => void
+  /** 競合中の行を「くらべて選ぶ」画面で開く */
+  onCompare: () => void
+  /** 未保存・保存失敗の行の編集を送り直す */
+  onResave: () => void
+  /** 行が取り消されていた控えを新しい行として保存する */
+  onSaveNew: () => void
+  /** 行が取り消されていた控えを取り下げる */
+  onDrop: () => void
 }
 
 const STATE_MARK: Record<RowState, string> = {
@@ -1126,13 +1786,18 @@ function FragmentRow({
   onAddRecheck,
   onRemoveDraft,
   onReload,
+  onCompare,
+  onResave,
+  onSaveNew,
+  onDrop,
 }: FragmentRowProps) {
   const isRoutine = row.kind === 'routine'
   return (
     <>
       <tr className="border-b border-border align-middle">
         <td className="tabular px-2 text-sm text-ink2">{isRoutine ? (room ?? '—') : ''}</td>
-        <td className="px-2">
+        {/* 食い違いを解決した後のフォーカスの戻り先（タブ順には入れない） */}
+        <td className="px-2" id={nameCellId(row.rowId)} tabIndex={-1}>
           <span className="block truncate text-base font-bold text-ink">
             {isRoutine ? residentName : ''}
           </span>
@@ -1229,15 +1894,58 @@ function FragmentRow({
             >
               <span aria-hidden="true">▲ </span>
               {row.message}
-              {/* 送信待ちの行に追記した時（MSG_QUEUED_EDIT）も再読込の導線を出す。
-                  退避直後の MSG_QUEUED は自動送信を待つだけなので出さない */}
-              {row.state === 'conflict' || row.message === MSG_QUEUED_EDIT ? (
+              {/* 送信待ちの MSG_QUEUED は自動送信を待つだけなので出さない */}
+              {row.state === 'conflict' ? (
                 <button
                   type="button"
                   onClick={onReload}
                   className="ml-2 min-h-tap rounded border border-danger px-3 text-base font-bold text-danger"
                 >
                   読み込み直す
+                </button>
+              ) : null}
+              {/* 未保存・保存失敗の編集を送り直す（同じ値を入れ直しても送られないため、ボタンで送る） */}
+              {row.state === 'error' && hasEdits(row.edits) && inputEnabled ? (
+                <button
+                  type="button"
+                  onClick={onResave}
+                  aria-label={`${residentName} ${KIND_LABEL[row.kind]}のまだ保存していない入力を保存し直す`}
+                  className="ml-2 min-h-tap rounded border border-primary px-3 text-base font-bold text-primary"
+                >
+                  保存し直す
+                </button>
+              ) : null}
+              {/* 行が取り消されていた控え: 新しい行として保存するか、取り下げる（日報の「行が無い控え」と同じ） */}
+              {row.state === 'conflict' && row.missing ? (
+                <>
+                  <button
+                    type="button"
+                    disabled={!inputEnabled}
+                    onClick={onSaveNew}
+                    aria-label={`${residentName} ${KIND_LABEL[row.kind]}のまだ保存していない入力を新しい行として保存する`}
+                    className="ml-2 min-h-tap rounded border border-primary px-3 text-base font-bold text-primary disabled:border-border disabled:text-ink3"
+                  >
+                    新しい行として保存
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onDrop}
+                    aria-label={`${residentName} ${KIND_LABEL[row.kind]}のまだ保存していない入力を取り下げる`}
+                    className="ml-2 min-h-tap rounded border border-border-strong px-3 text-base text-ink"
+                  >
+                    取り下げる
+                  </button>
+                </>
+              ) : null}
+              {/* 食い違いを並べて、どちらを残すか選ぶ（既存の「読み込み直す」はそのまま残す） */}
+              {row.state === 'conflict' && !row.missing ? (
+                <button
+                  type="button"
+                  onClick={onCompare}
+                  aria-label={`${residentName} ${KIND_LABEL[row.kind]}の食い違いをくらべて選ぶ`}
+                  className="ml-2 min-h-tap rounded border border-primary px-3 text-base font-bold text-primary"
+                >
+                  くらべて選ぶ
                 </button>
               ) : null}
             </p>

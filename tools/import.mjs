@@ -791,6 +791,9 @@ async function applyCandidates(db, opts) {
        */
       const guard = u.revive ? 'import_tombstoned_at is not null' : 'deleted_at is null'
       if (u.revive) sets.push('deleted_at = null', 'import_tombstoned_at = null')
+      // 変更の記録（0010）: 取込の更新は「変えた職員」が空（null）。前にアプリで触った職員の
+      // edited_by を残すと、取込の変更がその職員の操作として記録されるため明示的に空にする
+      if (await hasEditedBy(db, table)) sets.push('edited_by = null')
       params.push(u.id)
       await db.query(`update ${table} set ${sets.join(', ')} where id = $${n} and ${guard}`, params)
     }
@@ -845,6 +848,23 @@ async function nativeCheckMeals(db, candidates) {
 }
 
 /**
+ * その表に edited_by 列があるか（0010_record_history.sql を当てた DB か）。表ごとに1回だけ調べる。
+ * 列が無い DB（0010 未適用）では edited_by を書かない＝取込を失敗させない（後方互換）
+ */
+const editedByCache = new Map()
+async function hasEditedBy(db, table) {
+  if (editedByCache.has(table)) return editedByCache.get(table)
+  const r = await db.query(
+    `select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = $1 and column_name = 'edited_by' limit 1`,
+    [table],
+  )
+  const has = r.rows.length > 0
+  editedByCache.set(table, has)
+  return has
+}
+
+/**
  * 移行元の削除への追従: 取込済みの日の取込行のうち、今回の応答に key が無いものへ
  * soft delete を付ける。恒等式の外。返り値は消した件数。
  */
@@ -858,8 +878,10 @@ async function reconcileTombstones(db, table, dateCol, prefix, day, liveKeys, ex
   if (execute && gone.length > 0) {
     // ★「取込が付けた墓標」であることを残す。これが無いと、移行元に行が戻った時に
     //   職員の削除と区別できず復活させられない（2026-09-01 追加）
+    // 変更の記録（0010）: 取込が付けた取り消しは「変えた職員」を空（null）にする（上の update と同じ理由）
+    const editedBy = (await hasEditedBy(db, table)) ? ', edited_by = null' : ''
     await db.query(
-      `update ${table} set deleted_at = now(), import_tombstoned_at = now()
+      `update ${table} set deleted_at = now(), import_tombstoned_at = now()${editedBy}
         where id = any($1) and deleted_at is null`,
       [gone.map((g) => g.id)],
     )

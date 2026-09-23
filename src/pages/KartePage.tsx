@@ -3,14 +3,23 @@
 //
 // この画面は読み取り専用（書き込み経路を持たない＝multi-device-sync 原則9「読み取りで書かない」。
 // 既読付与も行わない＝表示だけで note_reads を作らない）。
-// - 取得は db.ts の fetchResidents / fetchStaff / fetchKarte のみ（supabase 直呼びなし・期間指定必須）
+// - 取得は db.ts の fetchResidents / fetchStaff / fetchKarte / fetchRecordHistory のみ
+//   （supabase 直呼びなし・期間指定必須。変更の記録は14日ずつ遡る＝全件ロードしない）
 // - localStorage に保存するのは期間セグメント（cl_karteRange）だけ。氏名・記録本文は保存しない
 // - Tailwind はトークン由来クラスのみ。色・px の直書きと arbitrary value は書かない
 // - console 出力を持たない（個人情報の漏出経路を作らない）
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { fetchKarte, fetchResidents, fetchStaff } from '../lib/db'
+import { diffHistoryRow, fetchKarte, fetchRecordHistory, fetchResidents, fetchStaff } from '../lib/db'
+import type { RecordHistoryEntry } from '../lib/db'
+import {
+  clampLines,
+  fmtChangedAt,
+  fmtHistoryValue,
+  HISTORY_TABLE_LABEL,
+  historyColumnLabel,
+} from '../lib/historyView'
 import { addDays, fmtDayLabel, fmtTimeHM, isoDate, todayIso } from '../lib/format'
 import {
   Chip,
@@ -1271,6 +1280,213 @@ function NotesSection({ notes, staffById }: NotesSectionProps) {
 }
 
 // ══════════════════════════════════════════════════════════════
+// 変更の記録（record_history・0010_record_history.sql）
+// ══════════════════════════════════════════════════════════════
+
+/** 1回に遡る日数（既定は直近14日。〔さらに前の14日〕で同じ幅ずつ遡る） */
+const HISTORY_SPAN_DAYS = 14
+/** 1回の取得件数の上限（14日で超える運用は無い想定。超えた時は画面で知らせる） */
+const HISTORY_LIMIT = 200
+
+const MSG_HISTORY_UNAVAILABLE = '変更の記録はまだ使えません（サーバー側の設定待ち）。'
+const ERR_HISTORY =
+  '変更の記録を読み込めませんでした。通信状況を確認して、「再試行する」を押してください。'
+
+/** 長くなりうる値（申し送りの本文）を3行まで出し、〔全文〕で展開する */
+function HistoryValue({ text }: { text: string }) {
+  const [open, setOpen] = useState(false)
+  const { head, truncated } = clampLines(text)
+  return (
+    <span className="whitespace-pre-wrap break-words">
+      {open || !truncated ? text : head}
+      {truncated ? (
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => setOpen((v) => !v)}
+          className="ml-2 min-h-tap rounded border border-border-strong px-2 text-sm text-link"
+        >
+          {open ? '閉じる' : '全文'}
+        </button>
+      ) : null}
+    </span>
+  )
+}
+
+function HistoryItem({ entry, staffById }: { entry: RecordHistoryEntry; staffById: Map<number, string> }) {
+  const staffName = (id: number): string | null => staffById.get(id) ?? null
+  const changes = diffHistoryRow(entry.old_row, entry.new_row).filter((c) => {
+    // 取り消し（deleted_at が入った）は見出しの「取り消し」で示すので、列の差分には重ねない
+    if (entry.op === 'delete' && (c.column === 'deleted_at' || c.column === 'deleted_by')) return false
+    return historyColumnLabel(entry.table_name, c.column) !== null
+  })
+  const who =
+    entry.changed_by_staff === null ? null : (staffById.get(entry.changed_by_staff) ?? null)
+  return (
+    <li className="rounded-md border border-border bg-surface p-3">
+      <p className="flex flex-wrap items-center gap-gap text-sm text-ink2">
+        <span className="tabular">{fmtChangedAt(entry.changed_at)}</span>
+        <span className="font-bold text-ink">{HISTORY_TABLE_LABEL[entry.table_name] ?? entry.table_name}</span>
+        {entry.record_day ? <span>対象日 {fmtDayLabel(entry.record_day)}</span> : null}
+        {entry.op === 'delete' ? (
+          <span className="font-bold text-danger">
+            <span aria-hidden="true">▲ </span>取り消し
+          </span>
+        ) : null}
+      </p>
+      {changes.length > 0 ? (
+        <ul className="mt-2 space-y-1">
+          {changes.map((c) => {
+            const label = historyColumnLabel(entry.table_name, c.column) ?? c.column
+            const before = fmtHistoryValue(entry.table_name, c.column, c.before, staffName)
+            const after = fmtHistoryValue(entry.table_name, c.column, c.after, staffName)
+            return (
+              <li key={c.column} className="text-base text-ink">
+                <span className="font-bold">{label}</span>：<HistoryValue text={before} />
+                <span aria-hidden="true"> → </span>
+                <span className="sr-only">から</span>
+                <HistoryValue text={after} />
+                <span className="sr-only">へ</span>
+              </li>
+            )
+          })}
+        </ul>
+      ) : entry.op === 'delete' ? null : (
+        <p className="mt-2 text-sm text-ink3">画面に出す項目の変更はありません。</p>
+      )}
+      <p className="mt-1 text-sm text-ink2">操作者 {who ?? '不明'}</p>
+    </li>
+  )
+}
+
+interface HistorySectionProps {
+  residentId: number
+  staffById: Map<number, string>
+}
+
+/**
+ * 変更の記録（直近14日から、〔さらに前の14日〕で遡る）。
+ * 表が無い（0010 未適用）時は「まだ使えません」とだけ出し、カルテの他の欄はそのまま動く。
+ */
+function HistorySection({ residentId, staffById }: HistorySectionProps) {
+  const [entries, setEntries] = useState<RecordHistoryEntry[]>([])
+  /** 読み込み済みの最も古い日（次に遡る時はこの前日から14日） */
+  const [oldest, setOldest] = useState<string | null>(null)
+  const [state, setState] = useState<'loading' | 'ready' | 'error' | 'unavailable'>('loading')
+  const [more, setMore] = useState(false)
+  const [capped, setCapped] = useState(false)
+  const [tick, setTick] = useState(0)
+  const aliveRef = useRef(true)
+
+  useEffect(() => {
+    aliveRef.current = true
+    return () => {
+      aliveRef.current = false
+    }
+  }, [])
+
+  // 最初の14日（利用者・再試行が変わるたびに取り直す）
+  useEffect(() => {
+    let cancelled = false
+    const toIso = todayIso()
+    const fromIso = addDays(toIso, -(HISTORY_SPAN_DAYS - 1))
+    setState('loading')
+    setEntries([])
+    setOldest(null)
+    setCapped(false)
+    fetchRecordHistory({ residentId, fromIso, toIso, limit: HISTORY_LIMIT })
+      .then((res) => {
+        if (cancelled || !aliveRef.current) return
+        if (!res.available) {
+          setState('unavailable')
+          return
+        }
+        setEntries(res.entries)
+        setOldest(fromIso)
+        setCapped(res.entries.length >= HISTORY_LIMIT)
+        setState('ready')
+      })
+      .catch(() => {
+        if (cancelled || !aliveRef.current) return
+        setState('error')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [residentId, tick])
+
+  const loadOlder = useCallback(() => {
+    if (oldest === null || more) return
+    const toIso = addDays(oldest, -1)
+    const fromIso = addDays(toIso, -(HISTORY_SPAN_DAYS - 1))
+    setMore(true)
+    fetchRecordHistory({ residentId, fromIso, toIso, limit: HISTORY_LIMIT })
+      .then((res) => {
+        if (!aliveRef.current) return
+        if (!res.available) {
+          setState('unavailable')
+          return
+        }
+        setEntries((prev) => [...prev, ...res.entries])
+        setOldest(fromIso)
+        if (res.entries.length >= HISTORY_LIMIT) setCapped(true)
+      })
+      .catch(() => {
+        // 遡れなかっただけ。読めている分はそのまま出し、ボタンでもう一度押せる
+      })
+      .finally(() => {
+        if (aliveRef.current) setMore(false)
+      })
+  }, [more, oldest, residentId])
+
+  return (
+    <SectionCard title="変更の記録" className="mt-4">
+      {state === 'loading' ? (
+        <LoadingBlock label="変更の記録を読み込み中です…" />
+      ) : state === 'error' ? (
+        <ErrorBlock message={ERR_HISTORY} onRetry={() => setTick((n) => n + 1)} />
+      ) : state === 'unavailable' ? (
+        <p className="text-base text-ink2">
+          <span aria-hidden="true">ⓘ </span>
+          {MSG_HISTORY_UNAVAILABLE}
+        </p>
+      ) : (
+        <>
+          {oldest !== null ? (
+            <p className="tabular text-sm text-ink3">
+              {fmtDayLabel(oldest)} 〜 {fmtDayLabel(todayIso())} の記録の変更（{entries.length}件）
+            </p>
+          ) : null}
+          {capped ? (
+            <p className="mt-1 text-sm text-warn">
+              <span aria-hidden="true">▲ </span>
+              変更が多いため、14日ごとに新しい方から{HISTORY_LIMIT}件までを表示しています。
+            </p>
+          ) : null}
+          {entries.length === 0 ? (
+            <p className="mt-2 text-base text-ink2">この期間に変更された記録はありません。</p>
+          ) : (
+            <ul className="mt-2 space-y-2">
+              {entries.map((e) => (
+                <HistoryItem key={e.id} entry={e} staffById={staffById} />
+              ))}
+            </ul>
+          )}
+          <button
+            type="button"
+            onClick={loadOlder}
+            disabled={more || oldest === null}
+            className="mt-3 min-h-tap rounded border border-border-strong px-4 text-base text-ink disabled:text-ink3"
+          >
+            {more ? '読み込み中…' : 'さらに前の14日'}
+          </button>
+        </>
+      )}
+    </SectionCard>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════
 // 個人カルテ（/karte/:id）
 // ══════════════════════════════════════════════════════════════
 
@@ -1466,6 +1682,9 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
           <NotesSection notes={data.notes} staffById={staffById} />
         </>
       )}
+
+      {/* 変更の記録は別の取得。カルテ本体の読み込み・失敗に関係なく出す（表が無い時も他の欄は動く） */}
+      <HistorySection residentId={residentId} staffById={staffById} />
     </div>
   )
 }

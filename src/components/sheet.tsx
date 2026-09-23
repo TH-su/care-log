@@ -363,8 +363,12 @@ const CELL_HIT = 'sheet-hit'
 export interface SheetCellProps {
   /** 表示する文字列。null / '' は未入力 */
   value: string | null
-  /** 渡すと編集可能になる（省略＝読み取り専用。入力封鎖中は渡さない） */
-  onCommit?: (value: string) => void
+  /**
+   * 渡すと編集可能になる（省略＝読み取り専用。入力封鎖中は渡さない）。
+   * 第2引数の base は「編集を始めた時にセルに出ていた文字」（欄ごとの基準＝構造規約 R-E）。
+   * 編集中に背景の読み込みでセルの値が変わっても、比べる相手は編集を始めた時の値のまま。
+   */
+  onCommit?: (value: string, meta: { base: string }) => void
   align?: SheetAlign
   /** 列幅。sheet.css の変数を渡す（例: 'var(--w-room)'） */
   width?: string
@@ -417,6 +421,8 @@ export function SheetCell({
   const areaRef = useRef<HTMLTextAreaElement | null>(null)
   const refocusRef = useRef(false)
   const skipBlurRef = useRef(false)
+  /** 編集を始めた時にセルに出ていた文字（構造規約 R-E の基準） */
+  const startRef = useRef('')
 
   /** textarea を内容の高さに合わせる（長文は行が伸びる） */
   const autoGrow = useCallback(() => {
@@ -457,6 +463,7 @@ export function SheetCell({
   const start = useCallback(() => {
     if (!editable) return
     skipBlurRef.current = false
+    startRef.current = text
     setDraft(text)
     setEditing(true)
   }, [editable, text])
@@ -466,9 +473,12 @@ export function SheetCell({
       skipBlurRef.current = true
       refocusRef.current = refocus
       setEditing(false)
-      if (commit && draft !== text) onCommit?.(draft)
+      // 変わったかどうかは「編集を始めた時の文字」と比べる（構造規約 R-E）。
+      // 以前はいまの表示（text）と比べていたため、編集中に背景の読み込みで値が変わると、
+      // 何も打っていないのに古い値を確定したり、相手の新しい値を知らないまま上書きしたりした
+      if (commit && draft !== startRef.current) onCommit?.(draft, { base: startRef.current })
     },
-    [draft, text, onCommit],
+    [draft, onCommit],
   )
 
   const onKeyDown = useCallback(

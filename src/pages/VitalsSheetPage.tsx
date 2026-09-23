@@ -22,8 +22,11 @@
 //   読めない入力（打ち間違い）はインライン警告を出して保存せず、打った文字はセルに残す
 //   （normalizeVitalInput はどちらも null を返すので、空欄かどうかは buf の生値で判定する）
 // - しきい値超過は SheetCell の level（背景色＋記号 ↑↑ ↑ ↓ ↓↓）で示す（色だけで意味を伝えない）
-// - 保存は1名1日単位（id 無し=insertVital／id 有り=updateVital(id, rev, 変更列のみ)）。
-//   upsert は使わず、23505 は db.ts 側の既存の作法（既存行を読み直して update）に吸収させる
+// - 保存は1名1日単位で saveVitalEdits（送信待ち → RPC apply_cell_edits の1本・2026-09-23 フェーズ2'）。
+//   送るのは利用者が編集した欄と、その欄を直し始めた時に出ていた値（基準）だけ。書くかどうかは
+//   サーバーが行ロックの下で欄ごとに決める（いまの値＝あなたの値なら済み／基準のままなら書く／それ以外は競合）。
+//   rowSync の planEdits・reconcileOnLoad は画面の事前の見せ方（読み直しの裁き）にだけ使う
+// - 送信待ち・止まっている行（競合・拒否）は db.ts の pendingRow から読み、再読み込み・再マウントの後も出す
 // - 記録済みの値を空にする操作は確認ダイアログを挟む（空上書き保護・dev-principles 原則4）
 // - 他の端末の変更は subscribeChanges で受け、表示中の期間に入る vitals の変更だけを合図に
 //   既存の load() を呼び直す（＝入力中・未送信・競合・応答待ちのセルは load() の温存で守られる）。
@@ -36,16 +39,20 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   DbError,
+  discardPendingRow,
+  fetchLatestVital,
   fetchResidents,
   fetchVitalsSheet,
   isSelfWrite,
   getNativeInputGate,
-  insertVital,
+  newClientKey,
+  pendingRow,
   queuePending,
   queueSubscribe,
+  saveVitalEdits,
   subscribeChanges,
-  updateVital,
 } from '../lib/db'
+import type { CellSaveResult, PendingCellRow, VitalTarget } from '../lib/db'
 import { addDays, fmtDayLabel, normalizeVitalInput, todayIso, toHalfWidth } from '../lib/format'
 import {
   diaBpLevel,
@@ -67,6 +74,34 @@ import {
   SegmentPicker,
 } from '../components/ui'
 import { readSheetPref, SheetCell, SheetFrame, writeSheetPref, ZoomBar } from '../components/sheet'
+import { ConflictResolver, focusAfterResolve } from '../components/ConflictResolver'
+import type { ConflictResolution, ConflictTarget } from '../components/ConflictResolver'
+import {
+  CELLS_PENDING_REASON,
+  fmtVitalValue,
+  holdsNormalSave,
+  missingRowText,
+  pairOf,
+  valuesForBoth,
+  vitalConflictDetail,
+} from '../lib/conflict'
+import {
+  createRowQueue,
+  editBases,
+  reconcileOnLoad,
+  editValues,
+  adoptPendingEdits,
+  hasEdits,
+  isOlderRow,
+  planEdits,
+  recordFieldEdit,
+  seenVers,
+  settleSent,
+  withoutFields,
+} from '../lib/rowSync'
+import type { Edits } from '../lib/rowSync'
+import type { ConflictColumn } from '../lib/conflict'
+import { LEAVE_TITLE, registerUnsaved } from '../lib/leaveGuard'
 import '../styles/sheet.css'
 
 // ── 定数 ─────────────────────────────────────────────────────
@@ -179,15 +214,45 @@ const ERR_LOAD =
   'バイタル一覧を読み込めませんでした。通信状況を確認して、「再試行する」を押してください。'
 const ERR_SAVE =
   '保存できませんでした。入力は消えていません。通信状況を確認して、もう一度入力を確定してください。'
-const ERR_CONFLICT =
-  '他の端末で先に更新されました。入力は消えていません。「読み込み直す」を押して最新の値を確認してください。'
 const MSG_QUEUED = '通信できないため送信待ちにしました。電波が戻ると自動で送信します。'
-const MSG_QUEUED_EDIT =
-  'この日には送信待ちの保存があります。あとから入力した値はまだ保存されていません。電波が戻って送信が終わってから「読み込み直す」を押して、入力し直してください。'
+/** サーバーに受け付けられなかった保存（型・範囲の拒否）が送信待ちに残っている時 */
+const ERR_REJECTED =
+  'サーバーに受け付けられなかった保存があります（入力は消えていません）。値を確かめて「保存し直す」を押してください。'
 const MSG_BLOCKED =
   '現在はスプレッドシートで記録する期間です（アプリ入力の開始日は施設で決定します）'
 const MSG_GATE_UNKNOWN =
   '入力できるかどうかを確認できませんでした（通信エラー）。電波状態を確認して、「もう一度確認する」を押してください。入力は消えていません。'
+/** 保存が、他の端末の値と食い違って止まっている行にまとめられた時（送らない。くらべて選ぶへ誘導する） */
+const MSG_BLOCKED_WRITE =
+  'この日には、他の端末の値と食い違って止まっている保存があります。いまの入力もそこにまとめました（まだ送っていません・入力は消えていません）。「くらべて選ぶ」でどちらを残すか選んでください。'
+/** 両方残すで作った再検の行が送信待ちになった時 */
+const MSG_BOTH_QUEUED =
+  'あなたの値を再検の行として送信待ちにしました。電波が戻ると自動で送信します。'
+
+/**
+ * 読み直しても食い違う列が残っている時（競合のまま）。セルにはあなたの入力が出ているので、
+ * 先に入っている値をこの一言に併記する（どちらの値なのかを取り違えないように）
+ */
+function conflictStillText(columns: ConflictColumn<Field>[]): string {
+  return `最新を読み込みましたが、${vitalConflictDetail(columns)}が食い違っています。まだ保存していません（入力は消えていません）。「くらべて選ぶ」でどちらを残すか選んでください。`
+}
+
+/**
+ * 競合中の行に入力が確定された時（くらべて選ぶまで保存しない＝5画面共通の規約）。
+ * 止めた旨と、分かっている食い違い（先の値／あなたの入力）を両方出す（併記を消さない）
+ */
+function conflictHoldText(columns: ConflictColumn<Field>[]): string {
+  const detail =
+    columns.length > 0
+      ? `${vitalConflictDetail(columns)}が食い違っています。`
+      : '他の端末の値と食い違っています。'
+  return `この日の入力はまだ保存していません（入力は消えていません）。${detail}「くらべて選ぶ」でどちらを残すか選んでください。`
+}
+
+/** 読み直したら食い違いは無くなったが、まだ保存していない入力が残っている時 */
+function unsavedText(fields: Field[]): string {
+  return `他の端末の更新を読み込みました（食い違いはありません）。${fields.map((f) => FIELD_LABEL[f]).join('・')}の入力はまだ保存していません。「保存し直す」を押すと保存します。`
+}
 
 // ── 純ロジック（副作用なし） ─────────────────────────────────
 
@@ -307,6 +372,220 @@ function bufOf(saved: Record<Field, number | null>): Record<Field, string> {
   return out
 }
 
+/**
+ * 入力として読める列だけの値（空欄は null＝消す意思）。
+ * 読めない入力・範囲外の入力は比べない（保存もしないので「あなたの値」に数えない）
+ */
+function inputCells(buf: Record<Field, string>): Partial<Record<Field, number | null>> {
+  const out: Partial<Record<Field, number | null>> = {}
+  for (const f of FIELDS) {
+    const raw = toHalfWidth(buf[f])
+    const p = normalizeVitalInput(buf[f], f)
+    if (raw !== '' && p == null) continue
+    if (p != null && outOfRange(f, p)) continue
+    out[f] = p
+  }
+  return out
+}
+
+/** あなたの入力（実際に編集した欄の値）。くらべて選ぶ画面の「あなたの入力」 */
+function mineOf(rec: Rec): Partial<Record<Field, number | null>> {
+  return editValues(rec.edits ?? {}) as Partial<Record<Field, number | null>>
+}
+
+/**
+ * いまのサーバーの値（saved）に対する食い違い（編集を始めた時の基準からサーバーの値が動いた欄）。
+ * saved が古いかもしれない間（stale）は出さない（古い値を「先の値」として見せない＝指摘 U1）
+ */
+function knownColumns(rec: Rec): ConflictColumn<Field>[] {
+  if (rec.stale === true) return []
+  return planEdits(FIELDS, rec.edits ?? {}, rec.saved).conflicts
+}
+
+/** 読めない入力・範囲外の入力の列（保存しない。打った文字はセルに残す） */
+function badCells(buf: Record<Field, string>): { unreadable: Field[]; outside: Field[] } {
+  const readable = inputCells(buf)
+  const bad = FIELDS.filter((f) => !(f in readable))
+  return {
+    unreadable: bad.filter((f) => normalizeVitalInput(buf[f], f) == null),
+    outside: bad.filter((f) => normalizeVitalInput(buf[f], f) != null),
+  }
+}
+
+/**
+ * 画面を離れると消える入力が残っている行か（構造規約 R-G）。編集が1欄でも残る
+ * （送信待ちの後に打った値・保存中に打った値を含む）・読めない入力がある（範囲外の警告中）・競合中。
+ * 送信待ちの内容そのものは送信キュー（端末に残る）が持っているので数えない
+ */
+function holdsInput(r: Rec): boolean {
+  const bad = badCells(r.buf)
+  return hasEdits(r.edits) || bad.unreadable.length + bad.outside.length > 0 || r.state === 'conflict'
+}
+
+/** 読み込みで作り直さずに載せ替える行か（止まっている入力・送信待ち・競合がある） */
+function isHeldRec(r: Rec): boolean {
+  const bad = badCells(r.buf)
+  return (
+    hasEdits(r.edits) ||
+    bad.unreadable.length + bad.outside.length > 0 ||
+    r.state === 'conflict' ||
+    r.state === 'queued'
+  )
+}
+
+/**
+ * 読み込んだサーバーの値（fresh）に行を載せ替える（構造規約 R-E・共通の仕組み）。
+ * ・saved / rev / id は最新にする。edits（編集と基準）は書き換えない
+ * ・セルは最新の値で描き直し、編集のある欄と読めない入力の欄だけ打った文字を残す
+ *   （以前は止まった行の入力欄を丸ごと残し、次の確定で他端末の値を巻き戻した＝再審 指摘1・E）
+ * ・状態は edits と最新の値の突き合わせで決め直す: 食い違い→競合／送る差分あり→未保存／何も無い→通常
+ * fresh が無い（行が見当たらない）時は、先の値が無いもの（新しい行）として裁く
+ */
+function mergeOnLoad(cur: Rec, fresh: Rec | undefined): Rec {
+  const latest: Rec = fresh ?? { ...cur, vitalId: null, rev: 0, saved: savedOf(null) }
+  let edits = cur.edits ?? {}
+  const buf = bufOf(latest.saved)
+  const readable = inputCells(cur.buf)
+  for (const f of FIELDS) {
+    if (edits[f] !== undefined || !(f in readable)) buf[f] = cur.buf[f]
+  }
+  // 突き合わせは共通の裁き（rowSync.reconcileOnLoad）。行が見当たらない時は先の値が無いものとして扱う
+  const r = reconcileOnLoad(FIELDS, edits, fresh ? latest.saved : null)
+  edits = r.edits
+  const next: Rec = {
+    ...latest,
+    buf,
+    sent: undefined,
+    edits,
+    stale: undefined,
+    missing: undefined,
+    ...(latest.vitalId == null && cur.clientKey ? { clientKey: cur.clientKey } : {}),
+  }
+  if (r.status === 'conflict') return { ...next, state: 'conflict', message: conflictStillText(r.conflicts) }
+  if (r.status === 'unsaved') return { ...next, state: 'error', message: unsavedText(r.unsaved) }
+  const { unreadable, outside } = badCells(buf)
+  if (unreadable.length + outside.length > 0) {
+    return { ...next, state: 'invalid', message: invalidText(unreadable, outside) }
+  }
+  return { ...next, state: 'idle', message: '' }
+}
+
+/** その行の送り先（定時は利用者×日付・保存済みの再検は行 id・まだ行の無い再検はこの枠の冪等キー） */
+function targetOf(rec: Rec): VitalTarget | null {
+  if (rec.kind === 'routine') return { routine: true, residentId: rec.residentId, day: rec.day }
+  if (rec.vitalId != null) return { routine: false, id: rec.vitalId }
+  if (rec.clientKey) {
+    return { routine: false, clientKey: rec.clientKey, residentId: rec.residentId, day: rec.day, kind: 'recheck' }
+  }
+  return null
+}
+
+/**
+ * 送信待ちで止まっている行（競合・拒否）の値を、その行の「あなたの入力」として編集に取り込む。
+ * 画面に既に編集のある欄は画面の値（止まった後に入れた、より新しい入力）を残す。基準は送信待ちの基準
+ */
+function adoptPending(edits: Edits<Field>, p: PendingCellRow): Edits<Field> {
+  // 血圧は組で取り込む（相方を「値＝基準」で送っていても落とさない＝第3段 #3）
+  return adoptPendingEdits(FIELDS, edits, p, (_f, v) => numOrNull(v))
+}
+
+/** 編集の値を「体温 37.2℃・脈拍 70回/分」の形に（取り消された行の控えの一言） */
+function describeEdits(edits: Edits<Field> | undefined): string {
+  const mine = editValues(edits ?? {}) as Partial<Record<Field, number | null>>
+  return FIELDS.filter((f) => f in mine)
+    .map((f) => `${FIELD_LABEL[f]} ${fmtVitalValue(f, mine[f])}`)
+    .join('・')
+}
+
+/** 編集の欄の文字を表示に出す（編集のある欄は編集の値・それ以外は元の文字） */
+function bufWithEdits(buf: Record<Field, string>, edits: Edits<Field>): Record<Field, string> {
+  const out = { ...buf }
+  for (const f of FIELDS) {
+    const e = edits[f]
+    if (e) out[f] = typeof e.value === 'number' ? fmtNum(f, e.value) : ''
+  }
+  return out
+}
+
+/**
+ * 送信待ち（db.ts の pending store）を表示中の行へ重ねる。再マウント・再読み込みの後も同じ見え方にする。
+ * ・送る状態（pending）… 値を「送信待ち」の印つきで重ねる（その欄をさらに直す時の比べる相手＝sent）
+ * ・止まっている（conflict）… 値を「あなたの入力」として取り込み、最新の値と突き合わせて競合・未保存を出し直す。
+ *   もう同じ値が載っていれば、送信待ちから外す（届いたのと同じ）
+ * ・拒否された（rejected）… 値を取り込み、〔保存し直す〕を出す
+ * 表示中の期間の外の行・まだ行の無い再検（冪等キーが分からない）は重ねない（設定画面の未送信件数には数え続ける）
+ */
+function adoptStoreRecs(next: Map<string, Rec>, residentIds: number[], days: string[]): void {
+  const keys = new Set<string>()
+  for (const rid of residentIds) for (const d of days) keys.add(recKey(rid, d, 'routine', 0))
+  for (const [k, r] of next) if (r.kind === 'recheck' && days.includes(r.day)) keys.add(k)
+  for (const k of keys) {
+    const [ridRaw, day, kind, slotRaw] = k.split('|')
+    const cur = next.get(k) ?? newRec(Number(ridRaw), day, kind as RowKind, Number(slotRaw))
+    const target = targetOf(cur)
+    if (target === null || cur.state === 'saving') continue
+    const p = pendingRow('vitals', target)
+    if (p === null) continue
+    if (p.state === 'pending') {
+      if (cur.state === 'conflict') continue
+      const q: Partial<Record<Field, number | null>> = {}
+      for (const f of FIELDS) if (f in p.values) q[f] = numOrNull(p.values[f])
+      if (Object.keys(q).length === 0) continue
+      const buf = { ...cur.buf }
+      for (const f of Object.keys(q) as Field[]) {
+        if (cur.edits?.[f] !== undefined) continue // 送信待ちの後に打った値はそのまま
+        const v = q[f]
+        buf[f] = v == null ? '' : fmtNum(f, v)
+      }
+      const quiet = cur.state === 'idle' || cur.state === 'saved' || cur.state === 'queued'
+      next.set(k, {
+        ...cur,
+        buf,
+        sent: { ...cur.saved, ...q } as Record<Field, number | null>,
+        ...(quiet ? { state: 'queued' as const, message: cur.state === 'queued' && cur.message ? cur.message : MSG_QUEUED } : {}),
+      })
+      continue
+    }
+    const edits = adoptPending(cur.edits ?? {}, p)
+    if (p.state === 'rejected') {
+      next.set(k, { ...cur, edits, buf: bufWithEdits(cur.buf, edits), state: 'error', message: ERR_REJECTED })
+      continue
+    }
+    // 止まっている行。行が無くなっていて理由が「取り消された」なら、行が無い控えとして出す
+    const missing = cur.vitalId == null && p.conflicts.length > 0 && p.conflicts.every((c) => c.reason === 'missing')
+    if (missing) {
+      next.set(k, { ...cur, edits, buf: bufWithEdits(cur.buf, edits), state: 'conflict', missing: true, message: missingRowText(describeEdits(edits)) })
+      continue
+    }
+    const r = reconcileOnLoad(FIELDS, edits, cur.vitalId != null ? cur.saved : null)
+    if (r.status === 'clean') {
+      // もう同じ値がサーバーに載っている（止まっていた分は届いたのと同じ）。送信待ちから外す
+      // 突き合わせた欄の、見た版だけを外す（第3段 #9。画面に出していない欄・見た後の新しい版は外さない）
+      void discardPendingRow('vitals', target, FIELDS.filter((f) => f in p.values), p.vers)
+      next.set(k, { ...cur, edits: r.edits })
+      continue
+    }
+    next.set(k, {
+      ...cur,
+      edits: r.edits,
+      buf: bufWithEdits(cur.buf, r.edits),
+      state: r.status === 'conflict' ? 'conflict' : 'error',
+      message: r.status === 'conflict' ? conflictStillText(r.conflicts) : unsavedText(r.unsaved),
+    })
+  }
+}
+
+/** その行の送信待ちがまだ送る状態で残っているか（送信が済めば、サーバーの値で作り直してよい） */
+function stillPending(rec: Rec): boolean {
+  const target = targetOf(rec)
+  return target !== null && pendingRow('vitals', target)?.state === 'pending'
+}
+
+/** 行の氏名のセルの id（食い違いを解決した後のフォーカスの戻り先） */
+function nameCellId(rowId: string): string {
+  return `vs-name-${rowId}`
+}
+
 /** 端末ローカルの現在時刻 HH:MM（measured_at 用） */
 function nowHM(): string {
   const d = new Date()
@@ -356,6 +635,24 @@ interface Rec {
   buf: Record<Field, string>
   state: RecState
   message: string
+  /**
+   * 利用者の編集（欄ごとの値と、編集を始めた時に画面に出ていた値＝基準）。構造規約 R-E〜R-G の共通の仕組み
+   * （src/lib/rowSync.ts）で扱う。保存で送るのはこの欄だけで、入力欄と saved の差分は使わない。
+   * 背景の読み込みはこれを書き換えない（基準が動かない）。保存に成功した欄だけ欄単位で消える
+   */
+  edits?: Edits<Field>
+  /**
+   * まだ行の無い再検の、この枠に固有の冪等キー（最初に送る時に決める）。送信待ちの間に続けて入力しても
+   * 同じ送信待ちへまとまり、何度送っても1行に収まる。行ができた後は行 id で指す
+   */
+  clientKey?: string
+  /** 競合の理由が「先の行が他の端末で取り消された」（〔新しい行として保存〕〔取り下げる〕を出す） */
+  missing?: boolean
+  /**
+   * saved が古いかもしれない（保存が競合になったのに最新を取り直せなかった）。この間は「先の値」を出さない
+   * （古い値を先の値として見せない＝指摘 U1）。次の読み込みで消える
+   */
+  stale?: boolean
 }
 
 function recKey(residentId: number, day: string, kind: RowKind, slot: number): string {
@@ -428,6 +725,8 @@ export function VitalsSheetPage({
   const [inputEnabled, setInputEnabled] = useState<boolean>(propInputEnabled ?? false)
   /** 入力できるかどうかを観測できなかった（通信エラー）。封鎖の理由文とは分けて案内する */
   const [gateUnknown, setGateUnknown] = useState(false)
+  /** サーバーに欄ごとの保存の仕組み（0011）がまだ無い＝サーバー側の更新待ち（入力を止める） */
+  const [cellsMissing, setCellsMissing] = useState(false)
   const [recs, setRecs] = useState<Map<string, Rec>>(() => new Map())
   /**
    * 入居者ごとに**画面に出している**再検の行数（0＝出さない）。
@@ -436,6 +735,18 @@ export function VitalsSheetPage({
   const [recheckRows, setRecheckRows] = useState<Map<number, number>>(() => new Map())
   const [pending, setPending] = useState(0)
   const [clearAsk, setClearAsk] = useState<{ labels: string; day: string } | null>(null)
+  /** くらべて選ぶ画面に渡す内容（開いた時点で固定する＝開いている間に入力が変わっても揺れない） */
+  const [compare, setCompare] = useState<{
+    key: string
+    target: ConflictTarget
+    name: string
+    base: Record<string, unknown>
+    mine: Record<string, unknown>
+    /** 解決した後にフォーカスを移す先（その行の氏名のセル） */
+    focusId: string
+  } | null>(null)
+  /** 期間を切り替えると外に出てしまう「止まっている入力」がある時の確認（はいで実行する処理） */
+  const [leaveAsk, setLeaveAsk] = useState<(() => void) | null>(null)
 
   const aliveRef = useRef(true)
   const recsRef = useRef<Map<string, Rec>>(new Map())
@@ -447,9 +758,8 @@ export function VitalsSheetPage({
    * （入力途中の空行が黙って消えると、打とうとしていた値を落とす）。
    */
   const recheckOpenRef = useRef<Map<number, number>>(new Map())
+  /** 保存の順番待ち・応答待ちがある行（背景の取り直しを先送りする判定に使う） */
   const savingRef = useRef(new Set<string>())
-  /** 保存の応答待ち中に重なった保存要求（先行保存の完了後にやり直す＝要求を黙って捨てない） */
-  const resaveRef = useRef(new Set<string>())
   /** 自分の書き込みで出た変更通知に反応しないための抑制窓（日報シートと同じ作法） */
   const selfWriteRef = useRef(0)
   /** 取得の世代。応答が返るまでに次の取得が始まっていたら、古い応答は捨てる */
@@ -566,23 +876,54 @@ export function VitalsSheetPage({
       // 未送信・競合・失敗・応答待ち・範囲外警告中のセルは入力の控えを引き継ぐ
       // （原則4: 入力を消さない。「読み込み直す」を押した時に打った値が黙って消えるのを防ぐ）。
       // サーバー側の値（id・rev・saved）は新しいものを採り、入力バッファだけ温存する
-      const KEEP: RecState[] = ['queued', 'conflict', 'error', 'invalid', 'saving']
       for (const [k, cur] of recsRef.current) {
-        if (!KEEP.includes(cur.state)) continue
         // 表示中の期間の外（別の期間で入力したまま残っている控え）は持ち込まない
+        // （期間を切り替える前に、止まっている入力があれば guardWindow で確認している）
         if (cur.day < fromIso || cur.day > anchor) continue
         const fresh = next.get(k)
-        next.set(
-          k,
-          fresh
-            ? { ...fresh, buf: cur.buf, state: cur.state, message: cur.message, sent: cur.sent }
-            : cur,
-        )
+        if (fresh && isOlderRow({ id: cur.vitalId, rev: cur.rev }, { id: fresh.vitalId, rev: fresh.rev })) {
+          // 画面が持っている行より古い応答（くらべて選ぶ・保存の直後に、それより前に出た読み込みが返った）。
+          // 古い値で描き直さず、画面の行をそのまま残す（指摘 L2・全画面共通の防御）
+          next.set(k, cur)
+        } else if (!isHeldRec(cur) && cur.state !== 'saving') {
+          // 編集・読めない入力・送信待ち・応答待ち・競合のどれも無い行は、サーバーの値で作り直す
+          continue
+        } else if (cur.state === 'saving') {
+          // 保存の応答待ち。応答で描き直すので、入力と編集をそのまま温存する（順番待ちが後で計算し直す）
+          next.set(
+            k,
+            fresh
+              ? { ...fresh, buf: cur.buf, state: cur.state, message: cur.message, sent: cur.sent, edits: cur.edits }
+              : cur,
+          )
+        } else if (cur.state === 'queued' && stillPending(cur)) {
+          // まだ送信キューにある間は、送信待ちのまま持ち続ける（送信待ちの後に打った値は edits に残る）
+          next.set(
+            k,
+            fresh
+              ? { ...fresh, buf: cur.buf, state: 'queued', message: cur.message, sent: cur.sent, edits: cur.edits }
+              : cur,
+          )
+        } else {
+          // 送信が済んだ送信待ち・競合・未保存・保存失敗・範囲外の警告中。edits（編集と基準）と
+          // 読めない入力だけを残して最新の値に載せ替え、状態を決め直す（共通の仕組み mergeOnLoad）。
+          // 送信待ちの間に打った値は edits に残っているので、案内なしに消えない（再審 指摘7）
+          next.set(k, mergeOnLoad(cur, fresh))
+        }
         // 控えのある再検枠が消えないよう、行数もその枠まで確保する
         if (cur.kind === 'recheck') {
           counts.set(cur.residentId, Math.max(counts.get(cur.residentId) ?? 0, cur.slot + 1))
         }
       }
+
+      // 送信待ち・止まっている行を db.ts（pending store）から読んで重ねる（再マウント・再読み込みの後も同じ見え方）
+      const shownDays: string[] = []
+      for (let d = fromIso; d <= anchor; d = addDays(d, 1)) shownDays.push(d)
+      adoptStoreRecs(
+        next,
+        sorted.map((r) => r.id),
+        shownDays,
+      )
 
       // 再検枠は「記録がある人だけ」出す（2026-08-28 追加指示1）。
       // ・保存済み（または送信待ちの控え）がある人 … その最大本数 ＋ 空行1本
@@ -598,6 +939,7 @@ export function VitalsSheetPage({
       setResidents(sorted)
       setInputEnabled(gate.value === true)
       setGateUnknown(!gate.observed)
+      setCellsMissing(gate.cells === 'missing')
       commitRecs(next)
       commitRecheckRows(rowCounts)
       setError(null)
@@ -857,213 +1199,393 @@ export function VitalsSheetPage({
     })
   }, [])
 
-  /** 1名1日分（＝vitals の1行）を保存する。upsert は使わず insert / update(id, rev) に分岐する */
+  /**
+   * 保存が競合になった行だけを取り直し、最新の値で状態と一言（先の値／あなたの入力）を出し直す（指摘 U1）。
+   * 取り直せない時・まだ行の無い再検は、値を出さない固定の文言のまま（stale の印を残す＝古い値を先の値にしない）
+   */
+  const refreshAfterConflict = useCallback(
+    async (key: string) => {
+      const rec = recsRef.current.get(key)
+      if (!rec || (rec.kind === 'recheck' && rec.vitalId == null)) return
+      let latest: Vital | null
+      try {
+        const got = await fetchLatestVital(
+          rec.kind === 'routine' || rec.vitalId == null
+            ? { routine: true, residentId: rec.residentId, day: rec.day }
+            : { routine: false, id: rec.vitalId },
+        )
+        latest = got?.row ?? null
+      } catch {
+        return
+      }
+      if (!aliveRef.current) return
+      const cur = recsRef.current.get(key)
+      if (!cur || cur.state !== 'conflict') return
+      patchRec(key, mergeOnLoad(cur, latest ? recFromVital(latest, cur.kind, cur.slot) : undefined))
+    },
+    [patchRec],
+  )
+
+  /**
+   * 保存が、他の端末の値と食い違って止まっている行にまとめられた（held＝送っていない）。その行を競合として見せる。
+   * 止まっている値を「あなたの入力」として載せ、1行だけ取り直して先の値と並べる
+   */
+  const holdAsHeld = useCallback(
+    async (key: string) => {
+      const cur = recsRef.current.get(key)
+      if (!cur) return
+      const target = targetOf(cur)
+      const p = target ? pendingRow('vitals', target) : null
+      const edits = p ? adoptPending(cur.edits ?? {}, p) : (cur.edits ?? {})
+      patchRec(key, { edits, buf: bufWithEdits(cur.buf, edits), state: 'conflict', message: MSG_BLOCKED_WRITE, stale: true })
+      await refreshAfterConflict(key)
+    },
+    [patchRec, refreshAfterConflict],
+  )
+
+  /**
+   * 保存の応答をその行へ当てる（通常の保存・〔新しい行として保存〕で共通）。
+   * ・書けた欄・もう載っていた欄は、送った後に打ち直していなければ編集から消す（R-F）
+   * ・書かなかった欄（競合）は編集に残し、先の値と並べる。行が取り消されていたら「行が無い控え」にする
+   * ・触っていない欄はサーバーの値で描き直す（E）。編集が残る欄と読めない入力の欄だけ打った文字を残す
+   */
+  const applySaveResult = useCallback(
+    (key: string, rec: Rec, sendEdits: Edits<Field>, res: CellSaveResult<Vital>) => {
+      const cur = recsRef.current.get(key)
+      const missing = res.conflicts.length > 0 && res.conflicts.every((c) => c.reason === 'missing')
+      const saved = res.row ? savedOf(res.row) : missing ? savedOf(null) : (cur?.saved ?? rec.saved)
+      const done = new Set<string>([...res.applied, ...res.settled])
+      const doneEdits: Edits<Field> = {}
+      for (const f of FIELDS) {
+        const e = sendEdits[f]
+        if (done.has(f) && e) doneEdits[f] = e
+      }
+      const remain = settleSent(cur?.edits ?? {}, doneEdits, saved)
+      const bad = cur ? badCells(cur.buf) : { unreadable: [] as Field[], outside: [] as Field[] }
+      const buf = bufOf(saved)
+      if (cur) {
+        for (const f of FIELDS) {
+          if (remain[f] !== undefined || bad.unreadable.includes(f) || bad.outside.includes(f)) buf[f] = cur.buf[f]
+        }
+      }
+      const common: Partial<Rec> = {
+        vitalId: res.row?.id ?? (missing && rec.kind === 'routine' ? null : rec.vitalId),
+        rev: numOrNull(res.row?.rev) ?? (missing && rec.kind === 'routine' ? 0 : rec.rev),
+        saved,
+        buf,
+        edits: remain,
+        sent: undefined,
+        stale: undefined,
+      }
+      if (res.conflicts.length > 0) {
+        // 書かなかった欄がある。先の値（いまのサーバーの値）とあなたの入力を並べる（指摘 U1）
+        const columns: ConflictColumn<Field>[] = res.conflicts
+          .filter((c) => (FIELDS as string[]).includes(c.field))
+          .map((c) => ({ field: c.field as Field, theirs: numOrNull(c.server), mine: numOrNull(c.mine) }))
+        patchRec(key, {
+          ...common,
+          state: 'conflict',
+          missing: missing ? true : undefined,
+          message: missing ? missingRowText(describeEdits(remain)) : conflictStillText(columns),
+        })
+        return
+      }
+      const nowBad = bad.unreadable.length + bad.outside.length > 0
+      patchRec(key, {
+        ...common,
+        missing: undefined,
+        ...(res.row ? { clientKey: undefined } : {}),
+        state: hasEdits(remain) ? 'idle' : nowBad ? 'invalid' : 'saved',
+        message: nowBad ? invalidText(bad.unreadable, bad.outside) : '',
+      })
+    },
+    [patchRec],
+  )
+
+  /**
+   * 1名1日分（＝vitals の1行）を保存する（構造規約 R-E〜R-F・共通の仕組み src/lib/rowSync.ts）。
+   * 行ごとの順番待ち（enqueueSave）から呼ばれ、動き出した時点の最新の状態（edits・saved・rev）から計算し直す。
+   * ・送るのは edits の欄と基準だけ。入力欄と saved の差分は使わない（止まった行でも通常の行でも同じ）
+   * ・書くかどうかはサーバーが欄ごとに決める（基準からサーバーの値が動いていれば、書かずに競合を返す
+   *   ＝編集中に背景の読み込みが走っても、相手の新しい値を黙って上書きしない＝再審 D）
+   * ・成功したら送った欄だけを消し（送った後に打った欄は残す）、触っていない欄はサーバーの値で描き直す（E）
+   */
   const saveOne = useCallback(
     async (key: string) => {
       const rec = recsRef.current.get(key)
       if (!rec) return
-      if (rec.state === 'saving') return
-
-      // 差分の基準。送信待ちの行は「キューへ渡した内容」と比べる
-      // （サーバー観測値と比べると、送信済みの値まで毎回「新しい入力」に見えてしまう）
-      const baseline = rec.state === 'queued' && rec.sent ? rec.sent : rec.saved
-
-      const changes: Partial<Record<Field, number | null>> = {}
-      /** 数字として読めない入力（打ち間違い）。空欄＝消す意思とは別物として扱う */
-      const unreadable: Field[] = []
-      /** 数値にはなったが VITAL_RANGE の外 */
-      const outside: Field[] = []
-      const cleared: Field[] = []
-      for (const f of FIELDS) {
-        // 空欄かどうかは buf の生値で判定する。normalizeVitalInput は空欄でも解釈不能でも
-        // null を返すため、戻り値だけで見ると打ち間違いを「消す意思」と取り違える
-        // （空セルなら差分なしで黙って捨て、記録済みセルなら値を消してしまう）
-        const raw = toHalfWidth(rec.buf[f])
-        const p = normalizeVitalInput(rec.buf[f], f)
-        if (raw !== '' && p == null) {
-          unreadable.push(f)
-          continue
-        }
-        if (p != null && outOfRange(f, p)) {
-          outside.push(f)
-          continue
-        }
-        if (p === baseline[f]) continue
-        // ここへ来る p == null は「空欄を確定した」＝消す意思のときだけ
-        if (p == null) cleared.push(f)
-        else changes[f] = p
-      }
-      const invalid = [...unreadable, ...outside]
-
-      // 送信待ちに退避済みの行は再送をキューに任せる（同じ内容の二重送信を作らない）。
-      // そのあとに入力した値はまだ送られていないので、黙って捨てずに理由と次の行動を出す
-      if (rec.state === 'queued') {
-        if (Object.keys(changes).length > 0 || cleared.length > 0 || invalid.length > 0) {
-          patchRec(key, { state: 'queued', message: MSG_QUEUED_EDIT })
-        }
+      // 競合中の行は、くらべて選ぶで選ぶまで保存しない（5画面共通の規約）。止めた旨と食い違いの併記を出す
+      if (holdsNormalSave(rec.state)) {
+        patchRec(key, { message: conflictHoldText(knownColumns(rec)) })
         return
       }
-
-      // 読めない入力・範囲外のセルが混ざっていた時の警告。保存が成功しても消さずに残す
-      // （「✓保存済」で覆い隠すと、保存していない値まで保存されたと誤解させるため）
+      const { unreadable, outside } = badCells(rec.buf)
       const invalidMessage = invalidText(unreadable, outside)
-      if (invalid.length > 0) {
-        patchRec(key, { state: 'invalid', message: invalidMessage })
-      } else if (rec.state === 'invalid') {
-        // 打ち直して警告が解消された時は、保存する差分が無くても古い警告を残さない
-        patchRec(key, { state: 'idle', message: '' })
-      }
-
-      // 記録済みの値を空にするのは取り消しにくい操作なので確認を挟む（空上書き保護）
+      const stillBad = unreadable.length + outside.length > 0
+      // 送信待ちの行は、送信待ちの内容が載った後の値を表示の基準にする（空にする確認・描き直しに使う）
+      const server = rec.state === 'queued' ? (rec.sent ?? rec.saved) : rec.saved
+      let edits = rec.edits ?? {}
+      const sendEdits: Edits<Field> = { ...edits }
+      // 記録済みの値を空にする欄は確認を挟む（空上書き保護）。何の値を消すかを明記する。
+      // 取りやめた欄は edits から外し、セルを表示中の値へ戻す（利用者の明示的な取り下げ）
+      const cleared = (Object.keys(sendEdits) as Field[]).filter((f) => sendEdits[f]?.value === null && server[f] != null)
       if (cleared.length > 0) {
-        const ok = await askClear(cleared.map((f) => FIELD_LABEL[f]).join('・'), rec.day)
+        const ok = await askClear(
+          cleared.map((f) => `${FIELD_LABEL[f]}（${fmtVitalValue(f, server[f])}）`).join('・'),
+          rec.day,
+        )
         if (!aliveRef.current) return
-        if (ok) {
-          for (const f of cleared) changes[f] = null
-        } else {
-          // 取り消したら入力欄をサーバーの値へ戻す（画面と保存内容を一致させる）
+        if (!ok) {
           const cur = recsRef.current.get(key)
-          if (cur) {
-            const buf = { ...cur.buf }
-            for (const f of cleared) {
-              const v = cur.saved[f]
-              buf[f] = v == null ? '' : fmtNum(f, v)
-            }
-            patchRec(key, { buf })
+          if (!cur) return
+          const buf = { ...cur.buf }
+          const shownNow = cur.state === 'queued' ? (cur.sent ?? cur.saved) : cur.saved
+          for (const f of cleared) {
+            const v = shownNow[f]
+            buf[f] = v == null ? '' : fmtNum(f, v)
+            delete sendEdits[f]
           }
+          edits = withoutFields(cur.edits ?? {}, cleared)
+          patchRec(key, { buf, edits })
         }
       }
-
-      const fields = Object.keys(changes) as Field[]
-      if (fields.length === 0) return
-
-      // この保存でサーバーへ渡す内容（応答後に「新しい入力が乗ったか」を見分ける基準）
-      const sentValues: Record<Field, number | null> = { ...baseline, ...changes }
-
-      // 保存できた行の状態。保存しなかった入力（読めない入力・範囲外）が残っていれば警告のまま据え置く。
-      // 応答を待つ間に入力された値が残っている行は「保存済」にしない（未送信を保存済みに見せない）。
-      // 送った内容がそのまま残っている行は、保存された値で入力欄を描き直す
-      // （短縮入力「365」→36.5・全角「３６．５」→36.5 を画面と記録で一致させる。
-      //   範囲外・応答待ちの間に入力された値は書き換えない＝入力を消さない）
-      const done = (res: Vital): Partial<Rec> => {
-        const cur = recsRef.current.get(key)
-        const stillDirty =
-          cur != null && FIELDS.some((f) => normalizeVitalInput(cur.buf[f], f) !== sentValues[f])
-        // 保存された値で描き直す時も、保存しなかったセル（読めない入力・範囲外）は打った文字を残す。
-        // 警告文の「入力は消えていません」と画面を一致させるため（原則4: 入力を消さない）
-        const redrawn = (): { buf: Record<Field, string> } => {
-          const buf = bufOf(savedOf(res))
-          if (cur) for (const f of invalid) buf[f] = cur.buf[f]
-          return { buf }
-        }
-        const shown = stillDirty ? {} : redrawn()
-        if (invalid.length > 0) return { state: 'invalid', message: invalidMessage, ...shown }
-        return stillDirty ? { state: 'idle', message: '' } : { state: 'saved', message: '', ...shown }
+      if (Object.keys(sendEdits).length === 0) {
+        // 送るものが無い（R-C）。送信待ちの行は送信待ちのまま。読めない入力が残っていれば警告のまま、無ければ通常へ戻す
+        patchRec(
+          key,
+          rec.state === 'queued'
+            ? { edits }
+            : stillBad
+              ? { edits, state: 'invalid', message: invalidMessage }
+              : { edits, state: rec.state === 'saved' ? 'saved' : 'idle', message: '' },
+        )
+        return
       }
-
-      patchRec(key, { state: 'saving', message: invalidMessage })
+      // 送り先。まだ行の無い再検は、この枠に固有の冪等キーで指す（送信待ちの間に続けて入力してもまとまる）
+      const clientKey = rec.kind === 'recheck' && rec.vitalId == null ? (rec.clientKey ?? newClientKey()) : rec.clientKey
+      const target = targetOf({ ...rec, clientKey })
+      if (target === null) return
+      // 送信待ちで止まっている行を、読み直しで食い違いが無くなったのを確かめてから送り直す時は、画面の基準で送る
+      // （rebase。止まっていない行は、送信待ちの基準＝最初に直し始めた時の値のまま）
+      const heldRow = pendingRow('vitals', target)
+      const rebase = heldRow !== null && heldRow.state === 'conflict'
+      const wasQueued = rec.state === 'queued'
+      patchRec(key, { edits, clientKey, state: 'saving', message: stillBad ? invalidMessage : '' })
       // 送る前に印を付ける（変更通知が応答より先に届いても、自分の書き込みで取り直さない）
       selfWriteRef.current = Date.now()
       try {
-        if (rec.vitalId == null) {
-          const payload = {
-            resident_id: rec.residentId,
-            measured_on: rec.day,
-            kind: rec.kind,
-            // 過去日をあとから埋める場合、端末の現在時刻は測定時刻ではないので入れない
-            measured_at: rec.day === today ? nowHM() : null,
-            temp: changes.temp ?? null,
-            sys_bp: changes.sys_bp ?? null,
-            dia_bp: changes.dia_bp ?? null,
-            pulse: changes.pulse ?? null,
-            spo2: changes.spo2 ?? null,
-            note: null,
-            symptom: null,
-            recorded_by: actorId ?? null,
+        const res = await saveVitalEdits(target, sendEdits, {
+          // 新しい行の測定時刻・記入者は「空いていれば埋める」（過去日をあとから埋める場合、端末の現在時刻は
+          // 測定時刻ではないので入れない）。既にある行では何も埋めない
+          ...(rec.vitalId == null
+            ? { fill: { measured_at: rec.day === today ? nowHM() : null, recorded_by: actorId ?? null } }
+            : {}),
+          rebase,
+        })
+        if (!aliveRef.current) return
+        const cur = recsRef.current.get(key)
+        if (res === 'queued') {
+          // 送信待ちへ渡し終えた欄だけ消す（R-D・欄単位）。送信待ちの値は重ねて表示し、その後に打つ値と見分ける
+          const sentValues: Partial<Record<Field, number | null>> = {}
+          for (const f of FIELDS) {
+            const e = sendEdits[f]
+            if (e) sentValues[f] = numOrNull(e.value)
           }
-          const res = await insertVital(payload)
-          if (!aliveRef.current) return
-          if (res === 'queued') {
-            patchRec(key, { state: 'queued', message: MSG_QUEUED, sent: sentValues })
-            return
-          }
-          // サーバーへ書けた＝この行の変更通知は自分が出したもの。取り直しの合図にしない
-          selfWriteRef.current = Date.now()
+          const sent = { ...server, ...sentValues } as Record<Field, number | null>
           patchRec(key, {
-            vitalId: res.id,
-            rev: numOrNull(res.rev) ?? 1,
-            saved: savedOf(res),
-            ...done(res),
+            state: 'queued',
+            message: wasQueued ? (cur?.message ?? MSG_QUEUED) : MSG_QUEUED,
+            sent,
+            edits: settleSent(cur?.edits ?? {}, sendEdits, sent),
           })
-        } else {
-          // 変更した列だけを送る（他端末が書いた列を巻き戻さない＝部分更新）
-          const res = await updateVital(rec.vitalId, rec.rev, changes)
-          if (!aliveRef.current) return
-          if (res === 'queued') {
-            patchRec(key, { state: 'queued', message: MSG_QUEUED, sent: sentValues })
-            return
-          }
-          if (res === 'conflict') {
-            patchRec(key, { state: 'conflict', message: ERR_CONFLICT })
-            return
-          }
-          // サーバーへ書けた＝この行の変更通知は自分が出したもの。取り直しの合図にしない
-          selfWriteRef.current = Date.now()
-          patchRec(key, {
-            rev: numOrNull(res.rev) ?? rec.rev + 1,
-            saved: savedOf(res),
-            ...done(res),
-          })
+          return
         }
+        // サーバーへ届いた＝この行の変更通知は自分が出したもの。取り直しの合図にしない
+        selfWriteRef.current = Date.now()
+        if (res.held === true) {
+          // 他の端末の値と食い違って止まっている行へまとめた（送っていない）。競合として見せる
+          await holdAsHeld(key)
+          return
+        }
+        applySaveResult(key, rec, sendEdits, res)
       } catch (e) {
         if (!aliveRef.current) return
-        // db.ts の DbError は「何が起きたか＋次にどうすればよいか」を持っているので、
-        // 一律の定型文で上書きせずそのまま出す（VitalsGridPage と同型）
-        patchRec(key, {
-          state: 'error',
-          message: e instanceof DbError && e.message ? e.message : ERR_SAVE,
-        })
+        // 保存失敗: edits は残す（R-D）。〔保存し直す〕で送り直せる。
+        // db.ts の DbError は「何が起きたか＋次にどうすればよいか」を持っているので、そのまま出す
+        patchRec(key, { state: 'error', message: e instanceof DbError && e.message ? e.message : ERR_SAVE })
       }
     },
-    [actorId, askClear, patchRec, today],
+    [actorId, applySaveResult, askClear, holdAsHeld, patchRec, today],
+  )
+
+  /** 行ごとの1本の順番待ち（構造規約 R-F）。通常の保存・保存し直し・くらべて選ぶの3択はすべてここを通す */
+  const rowQueue = useMemo(() => createRowQueue(), [])
+  /** 順番待ちに積まれている仕事の数（行ごと）。0 になるまで「保存の応答待ちがある」として扱う */
+  const jobCountRef = useRef(new Map<string, number>())
+
+  /**
+   * 行の仕事を順番待ちに積む。積んでいる間は「保存の応答待ち」として数え（背景の取り直しを先送りする）、
+   * 動き出す時と終わった時に自分の書込の印を付ける（その間に始まった読み込みの応答で描き直さない）。
+   * 通常の保存も、くらべて選ぶの送信も、ここを通す（指摘 L2）
+   */
+  const runRowJob = useCallback(
+    (key: string, job: () => Promise<void>): Promise<void> => {
+      jobCountRef.current.set(key, (jobCountRef.current.get(key) ?? 0) + 1)
+      savingRef.current.add(key)
+      return rowQueue(key, async () => {
+        selfWriteRef.current = Date.now()
+        try {
+          await job()
+        } finally {
+          selfWriteRef.current = Date.now()
+        }
+      }).finally(() => {
+        const n = (jobCountRef.current.get(key) ?? 1) - 1
+        if (n <= 0) {
+          jobCountRef.current.delete(key)
+          savingRef.current.delete(key)
+        } else jobCountRef.current.set(key, n)
+      })
+    },
+    [rowQueue],
+  )
+
+  /** 1行の保存を順番待ちに積む（積んだ時点の値は持ち越さず、動き出した時に最新から計算し直す） */
+  const enqueueSave = useCallback(
+    (key: string) => {
+      void runRowJob(key, () => saveOne(key))
+    },
+    [runRowJob, saveOne],
   )
 
   /**
-   * 同じセル組（1名1日1枠）の保存を直列化する。
-   * 再検には部分unique索引が無く、応答前に2回目の insert を出すと行が二重にできるため、
-   * 先行保存の完了（vitalId 確定）まで待ってからやり直す。
+   * くらべて選ぶの送信（〔先の値を残す〕〔自分の値で直す〕〔両方残す〕）。通常の保存と同じ順番待ち・印・数えを通す
+   * （指摘 L2）。送信待ちで止まっている値の取り下げ・送り直しは ConflictResolver が db.ts へ頼む
    */
-  const saveSerialized = useCallback(
-    async (key: string) => {
-      if (savingRef.current.has(key)) {
-        resaveRef.current.add(key)
-        return
-      }
-      savingRef.current.add(key)
-      try {
-        do {
-          resaveRef.current.delete(key)
-          await saveOne(key)
+  const runResolverJob = useCallback(
+    (key: string, job: () => Promise<void>) => runRowJob(key, job),
+    [runRowJob],
+  )
+
+  /**
+   * 行が取り消されていた控えを、新しい行として保存する（〔新しい行として保存〕。行ごとの順番待ちを通す）。
+   * 定時はその利用者・日の新しい定時の行、再検は新しい再検の行（冪等キー）。取り消された行の控えは外す
+   */
+  const saveAsNew = useCallback(
+    (key: string) => {
+      void runRowJob(key, async () => {
+        const rec = recsRef.current.get(key)
+        if (!rec || !rec.missing) return
+        const vals = valuesForBoth(FIELDS, editValues(rec.edits ?? {})) as Partial<Record<Field, number>>
+        const sendEdits: Edits<Field> = {}
+        for (const f of Object.keys(vals) as Field[]) {
+          const e = rec.edits?.[f]
+          if (e) sendEdits[f] = { ...e, base: null }
+        }
+        if (Object.keys(sendEdits).length === 0) return
+        const oldTarget = targetOf(rec)
+        let target: VitalTarget
+        let clientKey: string | undefined
+        const newRow = rec.kind !== 'routine'
+        // 取り消された行へ向けた送信待ち。定時以外は、新しい行が書けた・送信待ちに確保できた後で外す（F5）
+        const oldPending = newRow && oldTarget ? pendingRow('vitals', oldTarget) : null
+        if (!newRow) {
+          target = { routine: true, residentId: rec.residentId, day: rec.day }
+        } else {
+          // その行の送信待ちにある値のある欄も、新しい行へ（基準 null＝F4）
+          for (const f of FIELDS) {
+            const v = oldPending?.values[f]
+            if (sendEdits[f] === undefined && v !== null && v !== undefined) sendEdits[f] = { value: numOrNull(v), base: null, ver: 0 }
+          }
+          clientKey = newClientKey()
+          target = { routine: false, clientKey, residentId: rec.residentId, day: rec.day, kind: 'recheck' }
+        }
+        patchRec(key, { state: 'saving', message: '', vitalId: rec.kind === 'routine' ? rec.vitalId : null, clientKey })
+        selfWriteRef.current = Date.now()
+        try {
+          // 同じ行の送信待ちの全ての欄を「空欄を見て書いた」（基準 null）にそろえて送る（F4）
+          const res = await saveVitalEdits(target, sendEdits, {
+            rebase: true,
+            asNew: true,
+            fill: { measured_at: rec.day === today ? nowHM() : null, recorded_by: actorId ?? null },
+          })
+          if (newRow && oldTarget && (res === 'queued' || (res.conflicts.length === 0 && res.held !== true))) {
+            // 新しい行が書けた・送信待ちに確保できた後で、元の送信待ち（新しい行へ移した値の版）を外す（F5）
+            await discardPendingRow('vitals', oldTarget, undefined, seenVers(oldPending, editValues(sendEdits)))
+          }
           if (!aliveRef.current) return
-        } while (resaveRef.current.has(key) && aliveRef.current)
-      } finally {
-        savingRef.current.delete(key)
-        resaveRef.current.delete(key)
-      }
+          if (res === 'queued') {
+            patchRec(key, { state: 'queued', message: MSG_QUEUED, missing: undefined, edits: undefined })
+            return
+          }
+          selfWriteRef.current = Date.now()
+          applySaveResult(key, { ...rec, vitalId: null, clientKey }, sendEdits, res)
+        } catch (e) {
+          // 拒否（例外）: 元の送信待ちは残す（F5）。新しい行の送信待ちは外し、画面は元の行の控えのまま
+          if (newRow) void discardPendingRow('vitals', target)
+          if (!aliveRef.current) return
+          patchRec(key, {
+            state: 'conflict',
+            message: e instanceof DbError && e.message ? e.message : ERR_SAVE,
+            ...(newRow ? { vitalId: rec.vitalId, clientKey: rec.clientKey } : {}),
+          })
+        }
+      })
     },
-    [saveOne],
+    [actorId, applySaveResult, patchRec, runRowJob, today],
+  )
+
+  /** 行が取り消されていた控えを取り下げる（〔取り下げる〕。送信待ちからも外す） */
+  const dropMissing = useCallback(
+    (key: string) => {
+      void runRowJob(key, async () => {
+        const rec = recsRef.current.get(key)
+        if (!rec) return
+        const target = targetOf(rec)
+        // 画面が見せていた版だけ外す（第3段 #9。見た後に他のタブが入れた値は外さない）
+        if (target) await discardPendingRow('vitals', target, undefined, seenVers(pendingRow('vitals', target), editValues(rec.edits ?? {})))
+        if (!aliveRef.current) return
+        patchRec(key, {
+          edits: undefined,
+          missing: undefined,
+          clientKey: undefined,
+          state: 'idle',
+          message: '',
+          buf: bufOf(rec.saved),
+        })
+      })
+    },
+    [patchRec, runRowJob],
   )
 
   // ── セル編集 ───────────────────────────────────────────────
 
   const onCommitCell = useCallback(
-    (row: TableRow, day: string, field: Field, raw: string) => {
+    (row: TableRow, day: string, field: Field, raw: string, meta?: { base: string }) => {
       const key = recKey(row.residentId, day, row.kind, row.slot)
       const cur = recsRef.current.get(key) ?? newRec(row.residentId, day, row.kind, row.slot)
+      const buf = { ...cur.buf, [field]: raw }
+      // 構造規約 R-E: この欄の基準は「編集を始めた時にセルに出ていた値」。読めない文字だった時は
+      // サーバーの値を基準にする。既に編集のある欄は基準を変えない（recordFieldEdit）
+      let edits = cur.edits ?? {}
+      const after = inputCells(buf)
+      if (field in after) {
+        const startCells = meta ? inputCells({ ...cur.buf, [field]: meta.base }) : {}
+        const shown = cur.state === 'queued' ? (cur.sent ?? cur.saved) : cur.saved
+        const base = field in startCells ? (startCells[field] ?? null) : shown[field]
+        // 血圧の上と下は1つの組（F4）: 片側を直したら、相方も「いまの値のまま」として一緒に送り、
+        // サーバーに組で確かめさせる（相方を他の端末が変えていたら、組ごと書かない）
+        const other = pairOf(field) as Field | null
+        edits = recordFieldEdit(edits, field, after[field] ?? null, base, other ? { base: shown[other] } : undefined)
+      } else {
+        // 読めない・範囲外の入力に書き換えた。前の編集の値はもう利用者の意図ではないので外す（セルには文字を残す）
+        edits = withoutFields(edits, [field])
+      }
       const next = new Map(recsRef.current)
       next.set(key, {
         ...cur,
-        buf: { ...cur.buf, [field]: raw },
+        buf,
+        edits,
         // 値を触ったら「保存済み」表示は下ろす（未保存を保存済みに見せない）
         state: cur.state === 'saved' ? 'idle' : cur.state,
         message: cur.state === 'saved' ? '' : cur.message,
@@ -1080,20 +1602,118 @@ export function VitalsSheetPage({
         }
       }
 
-      void saveSerialized(key)
+      enqueueSave(key)
     },
-    [commitRecheckRows, commitRecs, saveSerialized],
+    [commitRecheckRows, commitRecs, enqueueSave],
   )
+
+  // ── 食い違いをくらべて選ぶ ─────────────────────────────────
+
+  /** 競合中の1名1日を「くらべて選ぶ」画面で開く（開いた時点の入力で固定する） */
+  const openCompare = useCallback(
+    (row: TableRow, day: string, name: string) => {
+      const key = recKey(row.residentId, day, row.kind, row.slot)
+      const rec = recsRef.current.get(key)
+      if (!rec || rec.state !== 'conflict') return
+      setCompare({
+        key,
+        target: { table: 'vitals', residentId: row.residentId, day, kind: row.kind, vitalId: rec.vitalId },
+        name,
+        // 見ていた値＝欄ごとの基準（編集を始めた時の値）。編集の無い欄はサーバーの値
+        base: { ...editBases(rec.edits ?? {}, rec.saved) },
+        mine: { ...mineOf(rec) },
+        focusId: nameCellId(row.rowId),
+      })
+    },
+    [],
+  )
+
+  /** 選んだ結果でその行を最新に描き直し、競合の表示を消す */
+  const onResolved = useCallback(
+    (r: ConflictResolution) => {
+      const cur = compare
+      setCompare(null)
+      if (!cur) return
+      if (r.choice === 'reload') {
+        // 食い違いが無かった／先の記録が見つからない: 最新を読み込む（競合の行は mergeOnLoad が裁く）。
+        // この経路でもフォーカスをその行の氏名のセルへ移す（2026-09-23 再審 指摘8）
+        focusAfterResolve(cur.focusId)
+        void load()
+        return
+      }
+      const rec = recsRef.current.get(cur.key)
+      if (!rec) return
+      // 送信待ちで止まっていた値の取り下げ・送り直しは ConflictResolver が済ませている
+      const v = r.latest as Vital | null
+      const fresh = v ? recFromVital(v, rec.kind, rec.slot) : newRec(rec.residentId, rec.day, rec.kind, rec.slot)
+      if (r.choice === 'mine' && r.queued) {
+        // 自分の値で直す更新を送信待ちにした。送った内容を控え、送信の後に入れた値と見分ける
+        patchRec(cur.key, {
+          ...fresh,
+          buf: bufOf(fresh.saved),
+          state: 'queued',
+          message: MSG_QUEUED,
+          sent: fresh.saved,
+          edits: undefined,
+          stale: undefined,
+          missing: undefined,
+        })
+        focusAfterResolve(cur.focusId)
+        return
+      }
+      patchRec(cur.key, {
+        ...fresh,
+        state: r.choice === 'theirs' ? 'idle' : r.choice === 'both' && r.queued ? 'idle' : 'saved',
+        message: r.choice === 'both' && r.queued ? MSG_BOTH_QUEUED : '',
+        sent: undefined,
+        edits: undefined,
+        stale: undefined,
+        missing: undefined,
+      })
+      // 〔くらべて選ぶ〕が消えるので、フォーカスをその行の氏名のセルへ移す（body へ落とさない）
+      focusAfterResolve(cur.focusId)
+      // 両方残す: 新しい再検の行を出すため取り直す（自分の書込なので変更通知では取り直されない）
+      if (r.choice === 'both' && !r.queued) void load({ background: true })
+    },
+    [compare, load, patchRec],
+  )
+
+  // ── 止まっている入力を黙って捨てない（5画面共通） ──────────
+
+  // アプリ内の画面移動・再読み込み・タブを閉じる時に確認を出すための登録（App・beforeunload が参照する）
+  useEffect(
+    () =>
+      registerUnsaved(() => Array.from(recsRef.current.values()).some(holdsInput)),
+    [],
+  )
+
+  /**
+   * 表示する期間を切り替える前の確認。切り替えると期間の外になる行の控えは読み込みで捨てられるので、
+   * 競合・未保存で止まっている入力がその中にあれば確かめてから切り替える（日報の askLeave と同じ形）
+   */
+  const guardWindow = useCallback((nextFrom: string, nextTo: string, apply: () => void) => {
+    // 構造規約 R-G: 編集が1欄でも残る行（送信待ちの後・保存中に打った値、範囲外の警告中を含む）を数える
+    const dropped = Array.from(recsRef.current.values()).some(
+      (r) => holdsInput(r) && (r.day < nextFrom || r.day > nextTo),
+    )
+    if (!dropped) {
+      apply()
+      return
+    }
+    setLeaveAsk(() => apply)
+  }, [])
 
   // ── 期間送り ───────────────────────────────────────────────
 
-  const goOlder = useCallback(() => setAnchor((a) => addDays(a, -days)), [days])
+  const goOlder = useCallback(() => {
+    const next = addDays(anchor, -days)
+    guardWindow(addDays(next, -(days - 1)), next, () => setAnchor(next))
+  }, [anchor, days, guardWindow])
   const goNewer = useCallback(() => {
-    setAnchor((a) => {
-      const next = addDays(a, days)
-      return next > today ? today : next
-    })
-  }, [days, today])
+    const raw = addDays(anchor, days)
+    const next = raw > today ? today : raw
+    guardWindow(addDays(next, -(days - 1)), next, () => setAnchor(next))
+  }, [anchor, days, guardWindow, today])
   const atNewest = anchor >= today
 
   const periodLabel =
@@ -1118,7 +1738,7 @@ export function VitalsSheetPage({
           : '未保存の変更はありません'
 
   // 読み込み中は編集させない（空欄に見えているだけのセルへ上書き入力させない）
-  const editable = inputEnabled && !gateUnknown && !loading
+  const editable = inputEnabled && !gateUnknown && !cellsMissing && !loading
 
   // ── 描画 ───────────────────────────────────────────────────
 
@@ -1165,8 +1785,10 @@ export function VitalsSheetPage({
               onChange={(v) => {
                 const n = Number(v)
                 if (!(SHEET_DAYS as readonly number[]).includes(n)) return
-                setDays(n as SheetDays)
-                writeDays(n as SheetDays)
+                guardWindow(addDays(anchor, -(n - 1)), anchor, () => {
+                  setDays(n as SheetDays)
+                  writeDays(n as SheetDays)
+                })
               }}
               ariaLabel="横に並べる日数を選ぶ"
             />
@@ -1250,6 +1872,14 @@ export function VitalsSheetPage({
           >
             <span aria-hidden="true">▲ </span>
             {MSG_BLOCKED}
+          </p>
+        ) : cellsMissing ? (
+          <p
+            role="status"
+            className="mt-3 rounded border border-warn bg-warn-bg p-3 text-base text-ink"
+          >
+            <span aria-hidden="true">▲ </span>
+            {CELLS_PENDING_REASON}
           </p>
         ) : null}
 
@@ -1400,6 +2030,10 @@ export function VitalsSheetPage({
                     onAddRecheck={addRecheckRow}
                     onRemoveRecheck={removeRecheckRow}
                     onReload={() => void load()}
+                    onCompare={(day) => openCompare(row, day, name)}
+                    onResave={(day) => enqueueSave(recKey(row.residentId, day, row.kind, row.slot))}
+                    onSaveNew={(day) => saveAsNew(recKey(row.residentId, day, row.kind, row.slot))}
+                    onDrop={(day) => dropMissing(recKey(row.residentId, day, row.kind, row.slot))}
                   />
                 )
               })}
@@ -1407,6 +2041,31 @@ export function VitalsSheetPage({
           </table>
         </SheetFrame>
       )}
+
+      <ConfirmDialog
+        open={leaveAsk !== null}
+        title={LEAVE_TITLE}
+        body="食い違って止まっている入力、またはまだ保存していない入力が、切り替えた後の期間の外になります。切り替えると、その入力は破棄されます。切り替えてよろしいですか。"
+        confirmLabel="切り替える"
+        danger
+        onConfirm={() => {
+          const apply = leaveAsk
+          setLeaveAsk(null)
+          apply?.()
+        }}
+        onCancel={() => setLeaveAsk(null)}
+      />
+
+      <ConflictResolver
+        target={compare?.target ?? null}
+        residentName={compare?.name ?? ''}
+        base={compare?.base ?? {}}
+        mine={compare?.mine ?? {}}
+        actorId={actorId ?? null}
+        serialize={compare ? (job) => runResolverJob(compare.key, job) : undefined}
+        onClose={() => setCompare(null)}
+        onResolved={onResolved}
+      />
 
       <ConfirmDialog
         open={clearAsk != null}
@@ -1450,10 +2109,18 @@ interface FragmentRowProps {
   /** この再検行に「✕」を出すか（一番下の空の再検行だけ true） */
   removable?: boolean
   notices: { day: string; rec: Rec | undefined }[]
-  onCommitCell: (row: TableRow, day: string, field: Field, raw: string) => void
+  onCommitCell: (row: TableRow, day: string, field: Field, raw: string, meta?: { base: string }) => void
   onAddRecheck: (residentId: number) => void
   onRemoveRecheck: (residentId: number) => void
   onReload: () => void
+  /** 競合中の日を「くらべて選ぶ」画面で開く */
+  onCompare: (day: string) => void
+  /** 未保存・保存失敗の日の編集を送り直す */
+  onResave: (day: string) => void
+  /** 行が取り消されていた控えを新しい行として保存する */
+  onSaveNew: (day: string) => void
+  /** 行が取り消されていた控えを取り下げる */
+  onDrop: (day: string) => void
 }
 
 function FragmentRow({
@@ -1471,6 +2138,10 @@ function FragmentRow({
   onAddRecheck,
   onRemoveRecheck,
   onReload,
+  onCompare,
+  onResave,
+  onSaveNew,
+  onDrop,
 }: FragmentRowProps) {
   // 縞は行が持つ。左固定の2列は他の列の上に重なるので、透けないよう同じ色を自分でも持つ
   const rowBg = alt ? ROW_ALT : ROW_PLAIN
@@ -1485,6 +2156,9 @@ function FragmentRow({
           {isRoutine ? (room ?? '—') : ''}
         </th>
         <td
+          // 食い違いを解決した後のフォーカスの戻り先（タブ順には入れない）
+          id={nameCellId(row.rowId)}
+          tabIndex={-1}
           style={{ width: W_NAME, minWidth: W_NAME, maxWidth: W_NAME, left: W_ROOM }}
           className={`${CELL_BASE} sticky z-10 ${rowBg} text-left text-ink`}
         >
@@ -1548,7 +2222,9 @@ function FragmentRow({
                 <SheetCell
                   key={f}
                   value={raw}
-                  onCommit={editable ? (v: string) => onCommitCell(row, day, f, v) : undefined}
+                  onCommit={
+                    editable ? (v: string, meta: { base: string }) => onCommitCell(row, day, f, v, meta) : undefined
+                  }
                   align="center"
                   width={FIELD_WIDTH[f]}
                   level={level}
@@ -1588,15 +2264,58 @@ function FragmentRow({
                   <span className="tabular font-bold">{fmtDayLabel(day)}</span>
                   {'：'}
                   {rec.message}
-                  {/* 送信待ちの行に追記した時（MSG_QUEUED_EDIT）も再読込の導線を出す。
-                      退避直後の MSG_QUEUED は自動送信を待つだけなので出さない */}
-                  {rec.state === 'conflict' || rec.message === MSG_QUEUED_EDIT ? (
+                  {/* 送信待ちの MSG_QUEUED は自動送信を待つだけなので出さない */}
+                  {rec.state === 'conflict' ? (
                     <button
                       type="button"
                       onClick={onReload}
                       className="ml-2 min-h-tap rounded border border-danger px-3 text-base font-bold text-danger"
                     >
                       読み込み直す
+                    </button>
+                  ) : null}
+                  {/* 未保存・保存失敗の編集を送り直す（同じ値を確定し直しても送られないため、ボタンで送る） */}
+                  {rec.state === 'error' && hasEdits(rec.edits) && editable ? (
+                    <button
+                      type="button"
+                      onClick={() => onResave(day)}
+                      aria-label={`${name} ${fmtDayLabel(day)} ${KIND_LABEL[row.kind]}のまだ保存していない入力を保存し直す`}
+                      className="ml-2 min-h-tap rounded border border-primary px-3 text-base font-bold text-primary"
+                    >
+                      保存し直す
+                    </button>
+                  ) : null}
+                  {/* 行が取り消されていた控え: 新しい行として保存するか、取り下げる（日報の「行が無い控え」と同じ） */}
+                  {rec.state === 'conflict' && rec.missing ? (
+                    <>
+                      <button
+                        type="button"
+                        disabled={!editable}
+                        onClick={() => onSaveNew(day)}
+                        aria-label={`${name} ${fmtDayLabel(day)} ${KIND_LABEL[row.kind]}のまだ保存していない入力を新しい行として保存する`}
+                        className="ml-2 min-h-tap rounded border border-primary px-3 text-base font-bold text-primary disabled:border-border disabled:text-ink3"
+                      >
+                        新しい行として保存
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onDrop(day)}
+                        aria-label={`${name} ${fmtDayLabel(day)} ${KIND_LABEL[row.kind]}のまだ保存していない入力を取り下げる`}
+                        className="ml-2 min-h-tap rounded border border-border-strong px-3 text-base text-ink"
+                      >
+                        取り下げる
+                      </button>
+                    </>
+                  ) : null}
+                  {/* 食い違いを並べて、どちらを残すか選ぶ（既存の「読み込み直す」はそのまま残す） */}
+                  {rec.state === 'conflict' && !rec.missing ? (
+                    <button
+                      type="button"
+                      onClick={() => onCompare(day)}
+                      aria-label={`${name} ${fmtDayLabel(day)} ${KIND_LABEL[row.kind]}の食い違いをくらべて選ぶ`}
+                      className="ml-2 min-h-tap rounded border border-primary px-3 text-base font-bold text-primary"
+                    >
+                      くらべて選ぶ
                     </button>
                   ) : null}
                 </p>

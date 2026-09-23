@@ -311,7 +311,7 @@ export const VITAL_RANGE: Record<'temp' | 'sys_bp' | 'dia_bp' | 'pulse' | 'spo2'
 }
 
 // ── localStorage キー（dev-principles 原則11: UI状態のみ。氏名・記録本文を保存しない。
-//    例外は sendQueue / draftNote（データ保護レイヤー・保持規則は docs/design/ui-design.md §6.5）と
+//    例外は sendQueue / sendQueue2 / draftNote（データ保護レイヤー・保持規則は docs/design/ui-design.md §6.5）と
 //    staffId（数値のみ・staff スナップショットと照合して復元） ──
 export const LS = {
   view: 'cl_view',
@@ -321,6 +321,11 @@ export const LS = {
   mode: 'cl_mode',
   staffId: 'cl_staffId',
   sendQueue: 'cl_sendQueue',
+  /**
+   * バイタル・食事の送信待ち（2026-09-23 フェーズ2' 第3段 #1）。cl_sendQueue は HEAD の形（{ ops }）のまま退避 op だけを持ち、
+   * バイタル・食事はこちらへ分ける（旧ビルドへ戻しても、旧ビルドはこのキーに触れないので消えない）
+   */
+  sendQueue2: 'cl_sendQueue2',
   draftNote: 'cl_draftNote',
   gasUrl: 'cl_gasUrl',
   gasToken: 'cl_gasToken',

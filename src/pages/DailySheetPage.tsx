@@ -36,6 +36,9 @@
 //   - supabase へは触れず db.ts の関数だけを呼ぶ。個人情報を console・localStorage に出さない
 //   - Tailwind は トークン由来クラスのみ。シートの寸法は sheet.css の CSS 変数を style で参照する
 //   - 入力封鎖中（native_input_enabled=false）は編集不可＋理由文。閲覧・既読は可能
+//   - 発熱者・他症状者のバイタルは saveVitalEdits（送信待ち → RPC apply_cell_edits の1本・2026-09-23 フェーズ2'）
+//     で保存する。書くかどうかはサーバーが欄ごとに決め、送信待ち・止まっている行は pendingRow から読む。
+//     サーバーに 0011 が無い間（cells:missing）はバイタルの入力だけを止める（申し送り・外出・出勤者は止めない）
 //   - 破壊的操作（行の削除・値の消去）は確認、出勤者の取り消しは Undo
 //   - 3状態（ローディング／エラー／空）を持つ。読み取り経路から書き込まない（既読は明示操作のみ）
 //   - 「＋行」は空行を足すだけ。本文（申し送り）や値（発熱者・他症状者）が入るまで保存しない
@@ -74,27 +77,57 @@ import {
 } from '../components/sheet'
 import {
   DbError,
+  discardPendingRow,
   fetchDailyReport,
   fetchDailyReports,
+  fetchLatestVital,
   fetchResidents,
   fetchStaff,
   getAppSetting,
   getNativeInputGate,
   insertNote,
   insertOuting,
-  insertVitalKind,
   isQueuePersisted,
   markRead,
+  newClientKey,
+  pendingRow,
   saveAttendance,
+  saveVitalEdits,
   setOutingEnd,
   softDeleteNote,
   isSelfWrite,
   joinNotePresence,
   subscribeChanges,
   updateNoteFields,
-  updateVital,
 } from '../lib/db'
-import type { DailyReport, PresenceHere } from '../lib/db'
+import type { CellEditInput, DailyReport, PendingCellRow, PresenceHere, VitalCellField } from '../lib/db'
+import { ConflictResolver, focusAfterResolve } from '../components/ConflictResolver'
+import type { ConflictResolution, ConflictTarget } from '../components/ConflictResolver'
+import {
+  CELLS_PENDING_REASON,
+  fmtTimeValue,
+  fmtVitalValue,
+  pairOf,
+  valuesForBoth,
+  VITAL_FIELDS,
+  VITAL_FIELD_NAME,
+} from '../lib/conflict'
+import {
+  adoptPendingEdits,
+  createRowQueue,
+  editBases,
+  editValues,
+  hasEdits,
+  isOlderRow,
+  newlyClearedFields,
+  reconcileOnLoad,
+  recordFieldEdit,
+  seenVers,
+  settleSent,
+} from '../lib/rowSync'
+import type { Edits } from '../lib/rowSync'
+import type { ConflictColumn, VitalField } from '../lib/conflict'
+import { registerUnsaved } from '../lib/leaveGuard'
 import { getActorId, touchActivity } from '../lib/actor'
 import { addDays, fmtTimeHM, normalizeVitalInput, todayIso, toHalfWidth } from '../lib/format'
 import {
@@ -230,6 +263,18 @@ const ERR_SAVE_ATTENDANCE =
   '出勤者を保存できませんでした（通信エラー）。画面は保存前の状態に戻しました。電波状態を確認してから、もう一度選び直してください'
 const ERR_CONFLICT =
   '他の端末で先に更新されました。入力は消えていません。「最新に更新」を押して内容を確認してから、もう一度お試しください'
+/** 競合中のバイタルに入力が確定された時（くらべて選ぶまで保存しない＝5画面共通の規約） */
+/** 保存が、ほかの端末の値と食い違って止まっている行にまとめられた時（送らない。くらべて選ぶへ誘導する） */
+const ERR_BLOCKED_WRITE =
+  '他の端末の値と食い違って止まっている保存があります。いまの入力もそこにまとめました（まだ送っていません・入力は消えていません）。「くらべて選ぶ」でどちらを残すか選んでください'
+const ERR_CONFLICT_HOLD =
+  '他の端末の値と食い違っているため、この入力はまだ保存していません。入力した値は「くらべて選ぶ」の画面に出ます。どちらを残すか選んでください'
+/** 最新に更新しても食い違いが残っている時（競合のまま） */
+const ERR_CONFLICT_STILL =
+  '最新の内容を読み込みましたが、他の端末で先に入った値と食い違っています。入力した値は「くらべて選ぶ」の画面に出ます。どちらを残すか選んでください'
+/** サーバーに受け付けられなかった保存（型・範囲の拒否）が送信待ちに残っている時 */
+const ERR_REJECTED =
+  'サーバーに受け付けられなかった保存があります（入力は消えていません）。値を確かめて「保存し直す」を押してください'
 const ERR_EMPTY_BODY = '本文は空にできません。行ごと消す場合は「詳細」から削除してください'
 const ERR_NO_ACTOR = '記録する職員が選ばれていません。設定タブの「記録する職員」から選んでください'
 const MSG_QUEUED = '⚠ 未送信（電波が戻ると自動で送信します）'
@@ -638,6 +683,105 @@ function bpLevel(sys: number | null, dia: number | null): Level {
 interface RowStatus {
   tone: 'ok' | 'warn' | 'danger'
   text: string
+}
+
+/**
+ * バイタルの入力の控え（この画面のセルはサーバーの値を描くので、入力はここに残す）。
+ * 構造規約 R-E〜R-G の共通の仕組み（src/lib/rowSync.ts）で扱う。edits は欄ごとの値と、
+ * 編集を始めた時にセルに出ていた値（基準）。保存に成功した欄だけ欄単位で消える。
+ * mode=pending  … 保存の順番待ち・応答待ち（止まっていない）
+ * mode=conflict … 他の端末の値と食い違っている（くらべて選ぶまで保存しない）
+ * mode=unsaved  … 食い違いは無いが、まだ保存していない（〔保存し直す〕で送る）
+ * mode=orphan   … 行そのものが見当たらない（他の端末で取り消された）。値と〔新しい行として保存〕〔取り下げる〕を出す
+ */
+interface HeldVital {
+  rowKey: string
+  mode: 'pending' | 'conflict' | 'unsaved' | 'orphan'
+  /** 最後に見えていた行（種別・利用者・日付と、くらべる画面の既定の値） */
+  base: Vital
+  edits: Edits<string>
+}
+
+/** 送信待ち（止まっている行・送信待ちの重ね表示）から「あなたの入力」として載せる欄（5項目・時刻・症状） */
+const HELD_ADOPT_FIELDS: readonly string[] = [...VITAL_FIELDS, 'measured_at', 'symptom']
+
+/** 保存済みのバイタル（発熱者・他症状者）の行の指し方。日報の行は行 id で指す */
+function vitalTargetOf(id: number): { routine: false; id: number } {
+  return { routine: false, id }
+}
+
+/**
+ * 送信待ちで止まっている行（競合・拒否）の値を、その行の控えの「あなたの入力」として取り込む。
+ * 控えに既に編集のある欄は控えの値を残す。基準は送信待ちの基準
+ */
+function adoptPendingVital(edits: Edits<string>, p: PendingCellRow): Edits<string> {
+  // 血圧は組で取り込む（相方を「値＝基準」で送っていても落とさない＝第3段 #3）
+  return adoptPendingEdits(HELD_ADOPT_FIELDS, edits, p)
+}
+
+/**
+ * 保存済みバイタルの行のキー（画面の行 → 一言・くらべて選ぶボタンの出し先）。
+ * 他症状者は1件1行、発熱者は同じ利用者の観察を id 順に最大3枠ずつ1行にまとめる（buildFeverRows と同じ）
+ */
+function vitalRowKey(v: Vital, observations: Vital[]): string {
+  if (v.kind === 'symptom') return `s${v.id}`
+  const mine = observations.filter((x) => x.resident_id === v.resident_id).sort((a, b) => a.id - b.id)
+  const i = Math.max(0, mine.findIndex((x) => x.id === v.id))
+  return `f${v.resident_id}-${Math.floor(i / FEVER_SETS)}`
+}
+
+/** 控えの値（利用者が実際に編集した欄だけ。時刻の欄を編集した時は measured_at も入る） */
+function heldMine(c: HeldVital): Partial<Omit<Vital, 'id' | 'rev'>> {
+  return editValues(c.edits) as Partial<Omit<Vital, 'id' | 'rev'>>
+}
+
+/** 控えの比べる列: 5項目＋利用者が編集した時刻（自動の時刻は比べない）＋症状 */
+function heldFields(c: HeldVital): string[] {
+  const out: string[] = [...VITAL_FIELDS]
+  if (c.edits.measured_at !== undefined) out.push('measured_at')
+  if (c.base.kind === 'symptom' || c.edits.symptom !== undefined) out.push('symptom')
+  return out
+}
+
+/** 控えの値を「体温 37.2℃・測定時刻 9:05」の形にする */
+function describeHeldValues(mine: Partial<Omit<Vital, 'id' | 'rev'>>, fields: string[]): string {
+  const m = mine as Record<string, unknown>
+  return fields
+    .map((f) =>
+      f === 'symptom'
+        ? `症状「${String(m.symptom ?? '')}」`
+        : f === 'measured_at'
+          ? `測定時刻 ${fmtTimeValue(m.measured_at)}`
+          : `${VITAL_FIELD_NAME[f as VitalField]} ${fmtVitalValue(f as VitalField, m[f])}`,
+    )
+    .join('・')
+}
+
+/** 食い違いの併記（「体温（先の値 37.0℃／あなたの入力 37.2℃）」） */
+function describeHeldCols(columns: ConflictColumn<string>[]): string {
+  const fmt = (f: string, v: unknown): string =>
+    f === 'symptom'
+      ? typeof v === 'string' && v !== ''
+        ? `「${v}」`
+        : '未入力'
+      : f === 'measured_at'
+        ? fmtTimeValue(v)
+        : fmtVitalValue(f as VitalField, v)
+  const name = (f: string): string =>
+    f === 'symptom' ? '症状' : f === 'measured_at' ? '測定時刻' : VITAL_FIELD_NAME[f as VitalField]
+  return columns
+    .map((c) => `${name(c.field)}（先の値 ${fmt(c.field, c.theirs)}／あなたの入力 ${fmt(c.field, c.mine)}）`)
+    .join('・')
+}
+
+/** 行が見当たらない控えの見出しの id（フォーカスの戻り先） */
+function orphanId(day: string, vitalId: number): string {
+  return `ds-orphan-${day}-${vitalId}`
+}
+
+/** バイタルの行の氏名の id（食い違いを解決した後のフォーカスの戻り先） */
+function vitalNameId(day: string, rowKey: string): string {
+  return `ds-vname-${day}-${rowKey}`
 }
 
 interface NoteDraft {
@@ -1356,6 +1500,8 @@ interface DaySheetProps {
   /** 入力解禁（false＝閲覧のみ。理由文は blockedReason） */
   enabled: boolean
   blockedReason: string
+  /** サーバーに欄ごとの保存の仕組み（0011）がまだ無い＝サーバー側の更新待ち（バイタルの入力だけを止める） */
+  cellsMissing: boolean
   /** 「最新に更新」で増える。増えるとこの日を取り直す（下書きは消さない） */
   reloadToken: number
   /** 1日ぶんの日報を取る（取得済みならキャッシュから返る） */
@@ -1410,6 +1556,8 @@ export function DailySheetPage({
   const [managerStaffId, setManagerStaffId] = useState<number | null>(null)
   /** 入力できるかどうかを観測できなかった（通信エラー）。封鎖の理由文とは分けて案内する */
   const [gateUnknown, setGateUnknown] = useState(false)
+  /** サーバーに欄ごとの保存の仕組み（0011）がまだ無い＝サーバー側の更新待ち（バイタルの入力だけを止める） */
+  const [cellsMissing, setCellsMissing] = useState(false)
   const [stale, setStale] = useState(false)
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
   /**
@@ -1457,6 +1605,7 @@ export function DailySheetPage({
         setStaff((Array.isArray(st) ? st : []).filter((s) => s != null))
         setEnabled(gate.value === true)
         setGateUnknown(!gate.observed)
+        setCellsMissing(gate.cells === 'missing')
         const mgrId = Number(mgr)
         setManagerStaffId(Number.isInteger(mgrId) && mgrId > 0 ? mgrId : null)
         setStale(false)
@@ -1812,6 +1961,12 @@ export function DailySheetPage({
           {BLOCKED_REASON}
         </p>
       )}
+      {enabled && !gateUnknown && cellsMissing && (
+        <p className="rounded-md border border-warn bg-warn-bg p-3 text-base text-ink">
+          <span aria-hidden="true">▲ </span>
+          {CELLS_PENDING_REASON}
+        </p>
+      )}
       {stale && (
         <div className="flex flex-wrap items-center gap-gap rounded-md border border-info bg-info-bg p-3">
           <p className="flex-1 text-base text-ink">
@@ -1859,6 +2014,7 @@ export function DailySheetPage({
                 actorId={actorId}
                 enabled={enabled}
                 blockedReason={blockedReason}
+                cellsMissing={cellsMissing}
                 reloadToken={reload}
                 loadDay={loadDay}
                 onWrite={handleWrite}
@@ -1900,6 +2056,7 @@ function DaySheet({
   actorId,
   enabled,
   blockedReason,
+  cellsMissing,
   reloadToken,
   loadDay,
   onWrite,
@@ -1927,6 +2084,25 @@ function DaySheet({
   const [outingDrafts, setOutingDrafts] = useState<OutingDraft[]>([])
 
   const [status, setStatus] = useState<Record<string, RowStatus>>({})
+  /**
+   * 競合したバイタル（行の id → 行のキー・競合した時に見ていた行・あなたの入力）。
+   * この画面のセルはサーバーの値を描くので、入力はここに控え、くらべて選ぶ画面で見せる
+   */
+  const [vitalConflicts, setVitalConflicts] = useState<Record<number, HeldVital>>({})
+  const vitalConflictsRef = useRef(vitalConflicts)
+  /**
+   * 保存に成功した行（id → 行）。順番待ちの次の仕事が、再描画を待たずに最新の rev で計算し直すため
+   * （画面の一覧は再描画の後でしか変わらないので、続けて送ると古い rev で競合になっていた＝再審 B）。
+   * 読み込みの結果がこれより古い rev の時は、こちらを残す（指摘 L2）
+   */
+  const savedVitalRef = useRef(new Map<number, Vital>())
+  /** 控えを ref と state の両方へ同時に書く（保存処理は再描画を待たずに ref を読む） */
+  const writeHeld = useCallback((next: Record<number, HeldVital>) => {
+    vitalConflictsRef.current = next
+    setVitalConflicts(next)
+  }, [])
+  /** くらべて選ぶ画面で開いているバイタルの id（null＝閉じている） */
+  const [compareVitalId, setCompareVitalId] = useState<number | null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
   const [residentPick, setResidentPick] = useState<PickTarget | null>(null)
   const [staffPick, setStaffPick] = useState<PickTarget | null>(null)
@@ -1958,6 +2134,8 @@ function DaySheet({
    * setObservations の反映を待たずに「同じ人の何件目か」を数える。
    */
   const observationsRef = useRef<Vital[]>([])
+  /** 他症状者の最新の一覧（止まったバイタルの保存し直しで、画面に出ている最新の行を引くため） */
+  const symptomsRef = useRef<Vital[]>([])
   /**
    * 端末に残した書きかけの控え（LS.dailyDraft）を戻した日。
    * 戻す前に控えを消さないための鍵でもある＝取得が終わる前は端末の控えに触らない。
@@ -1978,7 +2156,8 @@ function DaySheet({
   // 保存処理から読む最新値（setState の反映を待たずに使う）
   useEffect(() => {
     observationsRef.current = observations
-  }, [observations])
+    symptomsRef.current = symptoms
+  }, [observations, symptoms])
 
   /**
    * 出勤者の一覧を差し替える。**ref と state を必ず同時に**書く
@@ -2046,10 +2225,40 @@ function DaySheet({
             .slice()
             .sort((a, b) => (a.occurred_at ?? '').localeCompare(b.occurred_at ?? '') || a.id - b.id),
         )
-        setObservations(
-          Array.isArray(report?.observations) ? report.observations.filter((v) => v != null) : [],
-        )
-        setSymptoms(Array.isArray(report?.symptoms) ? report.symptoms.filter((v) => v != null) : [])
+        // 保存・くらべて選ぶの直後に、それより前の取り置き（古い rev）で描き直さない（指摘 L2・全画面共通の防御）
+        const newer = (v: Vital): Vital => {
+          const saved = savedVitalRef.current.get(v.id)
+          return saved && isOlderRow(saved, v) ? saved : v
+        }
+        // 送信待ちの値を db.ts（pendingRow）から読んで行に重ねる（〔最新に更新〕・再マウントの後も送信待ちの値を出し、
+        // その欄を直す時の基準にする）。止まっている行（競合・拒否）は重ねず、下の裁きで控えに取り込む
+        const queuedIds = new Set<number>()
+        const withPending = (v: Vital): Vital => {
+          const p = pendingRow('vitals', vitalTargetOf(v.id))
+          if (p === null || p.state !== 'pending') return v
+          queuedIds.add(v.id)
+          const pick: Record<string, unknown> = {}
+          for (const f of HELD_ADOPT_FIELDS) if (f in p.values) pick[f] = p.values[f]
+          return Object.keys(pick).length > 0 ? ({ ...v, ...pick } as Vital) : v
+        }
+        const obs = Array.isArray(report?.observations)
+          ? report.observations.filter((v) => v != null).map(newer).map(withPending)
+          : []
+        const sym = Array.isArray(report?.symptoms)
+          ? report.symptoms.filter((v) => v != null).map(newer).map(withPending)
+          : []
+        setObservations(obs)
+        setSymptoms(sym)
+        // 送信待ちの行に「送信待ち」の印（一言）を付け、送信が済んだ行からは外す。
+        // 競合・失敗など、ほかの一言が出ている行はそちらを優先する
+        const queuedKeys = new Set<string>()
+        for (const v of [...obs, ...sym]) if (queuedIds.has(v.id)) queuedKeys.add(vitalRowKey(v, obs))
+        setStatus((prev) => {
+          const next = { ...prev }
+          for (const [k, st] of Object.entries(prev)) if (st?.text === MSG_QUEUED && !queuedKeys.has(k)) delete next[k]
+          for (const k of queuedKeys) if (next[k] === undefined) next[k] = { tone: 'warn', text: MSG_QUEUED }
+          return next
+        })
         setOutings(Array.isArray(report?.outings) ? report.outings.filter((o) => o != null) : [])
         setImportDay(report?.importDay ?? null)
         applyAttendance(
@@ -2125,6 +2334,19 @@ function DaySheet({
     [blockedReason, enabled, setRowStatus],
   )
 
+  /** バイタルの編集の可否。封鎖中に加え、サーバー側の更新待ち（0011 が無い）の間も書かせない（理由は行に出す） */
+  const guardVital = useCallback(
+    (key: string): boolean => {
+      if (!guard(key)) return false
+      if (cellsMissing) {
+        setRowStatus(key, { tone: 'warn', text: `▲ ${CELLS_PENDING_REASON}` })
+        return false
+      }
+      return true
+    },
+    [cellsMissing, guard, setRowStatus],
+  )
+
   const askConfirm = useCallback((s: ConfirmState) => setConfirm(s), [])
 
   // ── 未保存の下書き（親が日付・表示単位の切替前に確認する）─────
@@ -2150,9 +2372,13 @@ function DaySheet({
 
   // 書きかけの有無を親へ伝える。枠から外れる時（別の区切りへ移る・1日表示へ切り替える）は
   // 親が確認ダイアログを出す。外れた時に「書きかけ無し」へ戻す（後片付け）
+  // 競合・未保存で止まっているバイタルの入力も「書きかけ」として数える（端末には残らないので、
+  // 日付・表示単位を切り替える前の確認＝askLeave の対象にする。端末の控え（cl_dailyDraft）の
+  // 置き直しは従来どおり hasDraftContent だけで決める）
+  const hasHeldVitals = Object.keys(vitalConflicts).length > 0
   useEffect(() => {
-    onDirty(day, hasDraftContent)
-  }, [day, hasDraftContent, onDirty])
+    onDirty(day, hasDraftContent || hasHeldVitals)
+  }, [day, hasDraftContent, hasHeldVitals, onDirty])
 
   /**
    * いまこの日で書いている対象を親へ伝える（Presence の中身）。
@@ -2563,10 +2789,15 @@ function DaySheet({
         show(blockedReason)
         return
       }
+      // サーバー側の更新待ち（0011 が無い）の間はバイタルの行を足させない
+      if (cellsMissing) {
+        show(CELLS_PENDING_REASON)
+        return
+      }
       const key = nextKey('vd')
       setVitalDrafts((prev) => [...prev, emptyVitalDraft(key, kind)])
     },
-    [blockedReason, enabled, nextKey, show],
+    [blockedReason, cellsMissing, enabled, nextKey, show],
   )
 
   const patchVitalDraft = useCallback((key: string, patch: Partial<VitalDraft>) => {
@@ -2606,47 +2837,493 @@ function DaySheet({
   }, [])
 
   /** 保存済みバイタルの1セル更新。空文字での消去は確認を挟む */
-  const updateVitalCell = useCallback(
-    (v: Vital, patch: Partial<Omit<Vital, 'id' | 'rev'>>, rowKey: string, clearing: boolean, label: string) => {
-      if (!guard(rowKey)) return
-      const run = () => {
-        setRowStatus(rowKey, null)
-        void (async () => {
-          try {
-            markSelfWrite() // 送る前に印を付ける（自分の書き込みで「他の端末で更新」を出さない）
-            const res = await updateVital(v.id, v.rev, patch)
-            if (res === 'conflict') {
-              setRowStatus(rowKey, { tone: 'danger', text: `▲ ${ERR_CONFLICT}` })
-              return
-            }
-            if (res === 'queued') {
-              replaceVital({ ...v, ...patch })
-              setRowStatus(rowKey, { tone: 'warn', text: MSG_QUEUED })
-              return
-            }
-            replaceVital(res)
-            saveOk(rowKey)
-          } catch (err) {
-            setRowStatus(rowKey, { tone: 'danger', text: `▲ ${errText(err)}` })
-          }
-        })()
+  /** 行ごとの1本の順番待ち（構造規約 R-F）。セルの確定・保存し直し・3択・新しい行として保存はここを通す */
+  const vitalQueue = useMemo(() => createRowQueue(), [])
+  /** その行の、いま分かっている最新（保存の応答と読み込みのうち版の新しい方） */
+  const latestVital = useCallback((id: number, fallback: Vital): Vital => {
+    const a = [...observationsRef.current, ...symptomsRef.current].find((x) => x.id === id)
+    const b = savedVitalRef.current.get(id)
+    const best = a && b ? (b.rev > a.rev ? b : a) : (a ?? b)
+    return best ?? fallback
+  }, [])
+
+  /**
+   * 保存が競合になった行だけを取り直し、最新の値で状態と一言（先の値／あなたの入力）を出し直す（指摘 U1d）。
+   * 取り直せない時は、値を出さない固定の文言のまま（古い値を先の値として見せない）。
+   * 行が見当たらなければ「行が無い控え」にする（最新に更新した後の裁きと同じ）
+   */
+  const refreshVitalAfterConflict = useCallback(
+    async (id: number) => {
+      let latest: Vital | null
+      try {
+        const got = await fetchLatestVital({ routine: false, id })
+        latest = got?.row ?? null
+      } catch {
+        return
       }
-      if (clearing) {
+      if (!aliveRef.current) return
+      const c = vitalConflictsRef.current[id]
+      if (!c || c.mode !== 'conflict') return
+      if (latest === null) {
+        writeHeld({ ...vitalConflictsRef.current, [id]: { ...c, mode: 'orphan' } })
+        setRowStatus(c.rowKey, null)
+        return
+      }
+      savedVitalRef.current.set(latest.id, latest)
+      replaceVital(latest)
+      const r = reconcileOnLoad(heldFields(c), c.edits, latest as unknown as Record<string, unknown>)
+      const rest = { ...vitalConflictsRef.current }
+      if (r.status === 'conflict') {
+        rest[id] = { ...c, mode: 'conflict', base: latest, edits: r.edits }
+        setRowStatus(c.rowKey, { tone: 'danger', text: `▲ ${ERR_CONFLICT_STILL}（${describeHeldCols(r.conflicts)}）` })
+      } else if (r.status === 'unsaved') {
+        rest[id] = { ...c, mode: 'unsaved', base: latest, edits: r.edits }
+        setRowStatus(c.rowKey, {
+          tone: 'warn',
+          text: `▲ 他の端末の更新を読み込みました（食い違いはありません）。${describeHeldValues(editValues(r.edits) as Partial<Omit<Vital, 'id' | 'rev'>>, r.unsaved)} はまだ保存していません。「保存し直す」を押すと保存します`,
+        })
+      } else {
+        delete rest[id]
+        setRowStatus(c.rowKey, null)
+      }
+      writeHeld(rest)
+    },
+    [replaceVital, setRowStatus, writeHeld],
+  )
+
+  /**
+   * 1行のバイタルの控えを保存する仕事（構造規約 R-E〜R-F・共通の仕組み src/lib/rowSync.ts）。
+   * 行ごとの順番待ちで動き、動き出した時点の控えを saveVitalEdits で送る（送信待ち → RPC apply_cell_edits の1本）。
+   * ・送るのは控えの欄と、その基準（編集を始めた時にセルに出ていた値）だけ。書くかどうかはサーバーが欄ごとに決める
+   * ・書けた欄・もう載っていた欄だけを消す（保存中に確定した後の値は残り、続けて送られる＝再審 B）
+   * ・書かなかった欄（他の端末が先に変えていた）は控えに残して競合に、行が取り消されていたら「行が無い控え」にする
+   * ・控えを消すのは保存成功・送信待ちへ渡した時だけ。競合・例外では残す（R-D）
+   */
+  const saveVitalJob = useCallback(
+    async (id: number) => {
+      const c = vitalConflictsRef.current[id]
+      if (!c || c.mode === 'conflict' || c.mode === 'orphan') return
+      const edits = c.edits
+      if (!hasEdits(edits)) {
+        // 送るものが無い（R-C）
+        const rest = { ...vitalConflictsRef.current }
+        delete rest[id]
+        writeHeld(rest)
+        setRowStatus(c.rowKey, null)
+        return
+      }
+      const target = vitalTargetOf(id)
+      // 送信待ちで止まっている行を、読み直しで食い違いが無くなったのを確かめてから送り直す時は、控えの基準で送る（rebase）
+      const heldRow = pendingRow('vitals', target)
+      const rebase = heldRow !== null && heldRow.state === 'conflict'
+      writeHeld({ ...vitalConflictsRef.current, [id]: { ...c, mode: 'pending' } })
+      setRowStatus(c.rowKey, null)
+      try {
+        markSelfWrite() // 送る前に印を付ける（自分の書き込みで「他の端末で更新」を出さない）
+        const res = await saveVitalEdits(target, edits as CellEditInput<VitalCellField>, { rebase })
+        const cur = vitalConflictsRef.current[id]
+        if (res === 'queued') {
+          // 送信待ちへ渡し終えた。送信が済むまで、その値を行に重ねて出す（送信待ちの後に確定する値は送った内容が基準）
+          const after = { ...latestVital(id, c.base), ...editValues(edits) } as Vital
+          replaceVital(after)
+          const remain = settleSent(cur?.edits ?? {}, edits, after as unknown as Record<string, unknown>)
+          const rest = { ...vitalConflictsRef.current }
+          if (cur && hasEdits(remain)) rest[id] = { ...cur, base: after, edits: remain }
+          else delete rest[id]
+          writeHeld(rest)
+          setRowStatus(c.rowKey, { tone: 'warn', text: MSG_QUEUED })
+          return
+        }
+        if (res.held === true) {
+          // ほかの端末の値と食い違って止まっている行へまとめた（送っていない）。競合として見せる。
+          // 止まっている値を控えに載せ、その1行だけ取り直して先の値と並べる
+          if (cur) {
+            const p = pendingRow('vitals', target)
+            writeHeld({
+              ...vitalConflictsRef.current,
+              [id]: { ...cur, mode: 'conflict', edits: p ? adoptPendingVital(cur.edits, p) : cur.edits },
+            })
+          }
+          setRowStatus(c.rowKey, { tone: 'danger', text: `▲ ${ERR_BLOCKED_WRITE}` })
+          await refreshVitalAfterConflict(id)
+          return
+        }
+        const row = res.row
+        if (row) {
+          savedVitalRef.current.set(id, row)
+          replaceVital(row)
+        }
+        // 書けた欄・もう載っていた欄だけ消す（R-F）。送った後に確定した欄は残り、その時に積まれた仕事が続けて送る
+        const done = new Set<string>([...res.applied, ...res.settled])
+        const doneEdits: Edits<string> = {}
+        for (const [f, e] of Object.entries(edits)) if (e && done.has(f)) doneEdits[f] = e
+        const after = (row ?? latestVital(id, c.base)) as unknown as Record<string, unknown>
+        const held = cur ?? c
+        const remain = settleSent(held.edits, doneEdits, after)
+        const rest = { ...vitalConflictsRef.current }
+        if (res.conflicts.length > 0 && res.conflicts.every((x) => x.reason === 'missing')) {
+          // 行が他の端末で取り消されていた: 「行が無い控え」として欄の下に値とボタンを出す（最新に更新した後と同じ）
+          rest[id] = { ...held, mode: 'orphan', edits: remain }
+          writeHeld(rest)
+          setRowStatus(c.rowKey, null)
+          return
+        }
+        if (res.conflicts.length > 0) {
+          // 書かなかった欄がある: 控えは残して競合へ（R-D。「入力は消えていません」が本当になる）。
+          // 応答に載ったいまのサーバーの値と、あなたの入力を並べる
+          const columns: ConflictColumn<string>[] = res.conflicts.map((x) => ({
+            field: x.field,
+            theirs: x.server ?? null,
+            mine: x.mine,
+          }))
+          rest[id] = { ...held, mode: 'conflict', base: row ?? held.base, edits: remain }
+          writeHeld(rest)
+          setRowStatus(c.rowKey, { tone: 'danger', text: `▲ ${ERR_CONFLICT_STILL}（${describeHeldCols(columns)}）` })
+          return
+        }
+        if (cur && hasEdits(remain)) rest[id] = { ...cur, base: row ?? cur.base, edits: remain }
+        else delete rest[id]
+        writeHeld(rest)
+        saveOk(c.rowKey)
+      } catch (err) {
+        // 例外: 控えは残す（R-D）。〔保存し直す〕でもう一度送れる
+        const cur = vitalConflictsRef.current[id]
+        if (cur) writeHeld({ ...vitalConflictsRef.current, [id]: { ...cur, mode: 'unsaved' } })
+        setRowStatus(c.rowKey, { tone: 'danger', text: `▲ ${errText(err)}` })
+      }
+    },
+    [latestVital, markSelfWrite, refreshVitalAfterConflict, replaceVital, saveOk, setRowStatus, writeHeld],
+  )
+
+  /** 1行の保存を順番待ちに積む（積んだ時点の値は持ち越さず、動き出した時に最新から計算し直す） */
+  const enqueueVitalSave = useCallback(
+    (id: number) => {
+      void vitalQueue(String(id), () => saveVitalJob(id))
+    },
+    [saveVitalJob, vitalQueue],
+  )
+
+  /** 未保存で控えている入力を、最新の行に対して保存し直す（〔保存し直す〕） */
+  const saveHeldVital = useCallback(
+    (id: number) => {
+      const c = vitalConflictsRef.current[id]
+      if (!c || c.mode !== 'unsaved') return
+      if (!guardVital(c.rowKey)) return
+      writeHeld({ ...vitalConflictsRef.current, [id]: { ...c, mode: 'pending' } })
+      enqueueVitalSave(id)
+    },
+    [enqueueVitalSave, guardVital, writeHeld],
+  )
+
+  /**
+   * 保存済みバイタルのセルの確定（構造規約 R-E・R-B）。basePatch は「編集を始めた時にセルに出ていた値」
+   * （SheetCell が渡す）。変わった欄だけを控えに入れ、行ごとの順番待ちで送る。
+   * 記録済みの値を空にする時は、控えに入れる**前に**確認を出す（何の値を消すかを明記）。
+   * 取りやめたら控えに入れない（〔保存し直す〕のたびに同じ確認が出ない＝再審 T6）
+   */
+  const updateVitalCell = useCallback(
+    (
+      v: Vital,
+      patch: Partial<Omit<Vital, 'id' | 'rev'>>,
+      rowKey: string,
+      _clearing: boolean,
+      label: string,
+      basePatch?: Partial<Omit<Vital, 'id' | 'rev'>>,
+    ) => {
+      if (!guardVital(rowKey)) return
+      const held = vitalConflictsRef.current[v.id]
+      const prev = held?.edits ?? {}
+      const shown = v as unknown as Record<string, unknown>
+      const basePart = (basePatch ?? {}) as Record<string, unknown>
+      const baseOf = (f: string): unknown => (f in basePart ? basePart[f] : shown[f])
+      let edits = prev
+      for (const [f, value] of Object.entries(patch)) {
+        if (value === undefined) continue
+        // 血圧の上と下は組で送る（F4。片側だけ直しても、相方の「いまの値のまま」を一緒に送って組で確かめさせる）
+        const other = pairOf(f)
+        edits = recordFieldEdit(edits, f, value, baseOf(f), other ? { base: baseOf(other) } : undefined)
+      }
+      if (edits === prev) return // 何も変わっていない（開いて閉じただけ・同じ値。血圧は変わった側だけ）
+      // 表示中の値を空にする欄は、控えに入れる前に確認する（共通の判定 newlyClearedFields）
+      const newlyCleared = newlyClearedFields(prev, edits, shown)
+      const apply = () => {
+        const cur = vitalConflictsRef.current[v.id]
+        const mode = cur?.mode === 'conflict' ? 'conflict' : cur?.mode === 'unsaved' ? 'unsaved' : 'pending'
+        // 確定の後に他の編集が重なっていても、今回の欄だけを重ねる（控えの基準は recordFieldEdit が保つ）
+        let merged = cur?.edits ?? {}
+        for (const f of Object.keys(edits)) {
+          const e = edits[f]
+          if (e && (prev[f] === undefined || prev[f]?.ver !== e.ver)) merged = { ...merged, [f]: e }
+        }
+        writeHeld({
+          ...vitalConflictsRef.current,
+          [v.id]: { rowKey, mode, base: cur?.base ?? v, edits: merged },
+        })
+        if (mode === 'conflict') {
+          // 競合中は、くらべて選ぶで選ぶまで保存しない（5画面共通の規約）
+          setRowStatus(rowKey, { tone: 'danger', text: `▲ ${ERR_CONFLICT_HOLD}` })
+          return
+        }
+        if (mode === 'unsaved') {
+          writeHeld({ ...vitalConflictsRef.current, [v.id]: { ...vitalConflictsRef.current[v.id], mode: 'pending' } })
+        }
+        enqueueVitalSave(v.id)
+      }
+      if (newlyCleared.length > 0) {
+        const what = describeHeldValues(v as unknown as Partial<Omit<Vital, 'id' | 'rev'>>, newlyCleared)
         askConfirm({
-          title: `${label}を消しますか`,
-          body: '保存済みの値を空にします。よろしければ「消す」を押してください。',
+          title: `${label}の値を消しますか`,
+          body: `保存済みの ${what} を空にします。よろしければ「消す」を押してください。取りやめると、この欄は元の値のままです。`,
           confirmLabel: '消す',
           onConfirm: () => {
             setConfirm(null)
-            run()
+            apply()
           },
         })
         return
       }
-      run()
+      apply()
     },
-    [askConfirm, guard, markSelfWrite, replaceVital, saveOk, setRowStatus],
+    [askConfirm, enqueueVitalSave, guardVital, setRowStatus, writeHeld],
   )
+
+  // 最新に更新した後の裁き（構造規約 R-E・共通の裁き reconcileOnLoad）:
+  // ・食い違う欄が残れば競合のまま（控えの基準は書き換えない）
+  // ・食い違いが無く未保存の欄が残れば「未保存」として控えを残し、〔保存し直す〕を出す
+  // ・全部載っていれば控えを外す
+  // ・行そのものが見当たらない時は「行が無い控え」として欄の下に値とボタンを出す（再審 指摘10）
+  useEffect(() => {
+    const cur = vitalConflictsRef.current
+    const ids = Object.keys(cur).map(Number)
+    const all = [...observations, ...symptoms]
+    let changed = false
+    const next = { ...cur }
+    // 送信待ちで止まっている行（競合・拒否）を、その行の「あなたの入力」として控えに載せる（db.ts の送信待ちが正）。
+    // 止まっている値は送信待ちに残したまま（〔くらべて選ぶ〕の3択・〔保存し直す〕で解決する）。
+    // もう同じ値が載っていれば、観測できたのでここで送信待ちから外す。この日に見えている行の分だけ
+    const adoptIds = new Set<number>()
+    for (const fresh of all) {
+      const id = fresh.id
+      // 保存の順番待ちの控えは順番待ちが裁く。行が無い控えはそのまま（取り消された行が画面に残っている間も）
+      if (next[id]?.mode === 'pending' || next[id]?.mode === 'orphan') continue
+      const p = pendingRow('vitals', vitalTargetOf(id))
+      if (p === null || p.state === 'pending') continue
+      const base: HeldVital = next[id] ?? { rowKey: vitalRowKey(fresh, observations), mode: 'conflict', base: fresh, edits: {} }
+      const c: HeldVital = { ...base, edits: adoptPendingVital(base.edits, p) }
+      adoptIds.add(id)
+      changed = true
+      if (p.state === 'rejected') {
+        // サーバーに受け付けられなかった保存: 値を控えに取り込み、〔保存し直す〕で送り直せるようにする
+        next[id] = { ...c, mode: 'unsaved' }
+        setRowStatus(c.rowKey, { tone: 'danger', text: `▲ ${ERR_REJECTED}` })
+        continue
+      }
+      if (p.conflicts.length > 0 && p.conflicts.every((x) => x.reason === 'missing')) {
+        // 行が他の端末で取り消されていた（取り置きの古い行がまだ画面にある）: 「行が無い控え」にする
+        next[id] = { ...c, mode: 'orphan' }
+        setRowStatus(c.rowKey, null)
+        continue
+      }
+      const r = reconcileOnLoad(heldFields(c), c.edits, fresh as unknown as Record<string, unknown>)
+      if (r.status === 'clean') {
+        // もう同じ値がサーバーに載っている（止まっていた分は届いたのと同じ）。送信待ちから外す
+        // 突き合わせた欄の、見た版だけを外す（第3段 #9）
+        void discardPendingRow('vitals', vitalTargetOf(id), heldFields(c).filter((f) => f in p.values), p.vers)
+        delete next[id]
+        setRowStatus(c.rowKey, null)
+      } else if (r.status === 'conflict') {
+        next[id] = { ...c, mode: 'conflict', base: fresh, edits: r.edits }
+        setRowStatus(c.rowKey, {
+          tone: 'danger',
+          text: `▲ ${ERR_CONFLICT_STILL}（${describeHeldCols(r.conflicts)}）`,
+        })
+      } else {
+        next[id] = { ...c, mode: 'unsaved', base: fresh, edits: r.edits }
+        setRowStatus(c.rowKey, {
+          tone: 'warn',
+          text: `▲ 他の端末の更新を読み込みました（食い違いはありません）。${describeHeldValues(editValues(r.edits) as Partial<Omit<Vital, 'id' | 'rev'>>, r.unsaved)} はまだ保存していません。「保存し直す」を押すと保存します`,
+        })
+      }
+    }
+    for (const id of ids) {
+      if (adoptIds.has(id)) continue
+      const c = cur[id]
+      // 行が無い控え・保存の順番待ちの控えは、ここでは裁かない（順番待ちが最新から計算し直す）
+      if (c.mode === 'orphan' || c.mode === 'pending') continue
+      const fresh = all.find((v) => v.id === id)
+      if (!fresh) {
+        next[id] = { ...c, mode: 'orphan' }
+        changed = true
+        continue
+      }
+      // まだ取り直していない（版が同じ）間は判定しない
+      if (fresh.rev === c.base.rev) continue
+      const r = reconcileOnLoad(heldFields(c), c.edits, fresh as unknown as Record<string, unknown>)
+      changed = true
+      if (r.status === 'conflict') {
+        next[id] = { ...c, mode: 'conflict', base: fresh, edits: r.edits }
+        setRowStatus(c.rowKey, {
+          tone: 'danger',
+          text: `▲ ${ERR_CONFLICT_STILL}（${describeHeldCols(r.conflicts)}）`,
+        })
+      } else if (r.status === 'unsaved') {
+        next[id] = { ...c, mode: 'unsaved', base: fresh, edits: r.edits }
+        setRowStatus(c.rowKey, {
+          tone: 'warn',
+          text: `▲ 他の端末の更新を読み込みました（食い違いはありません）。${describeHeldValues(editValues(r.edits) as Partial<Omit<Vital, 'id' | 'rev'>>, r.unsaved)} はまだ保存していません。「保存し直す」を押すと保存します`,
+        })
+      } else {
+        delete next[id]
+        setRowStatus(c.rowKey, null)
+      }
+    }
+    if (changed) writeHeld(next)
+  }, [observations, symptoms, setRowStatus, writeHeld])
+
+  /** 未保存で控えている入力を、最新の行に対して保存し直す（〔保存し直す〕） */
+  const resaveHeldVital = useCallback((id: number) => saveHeldVital(id), [saveHeldVital])
+
+  /** 行が見当たらない控えを、新しい行として保存する（〔新しい行として保存〕。行ごとの順番待ちを通す） */
+  const saveOrphanAsNew = useCallback(
+    (id: number) => {
+      void vitalQueue(String(id), async () => {
+        const c = vitalConflictsRef.current[id]
+        if (!c || c.mode !== 'orphan') return
+        const kind = c.base.kind
+        if (kind === 'routine') return // 日報に定時の行は出ない（発熱者・他症状者だけ）
+        const fields = heldFields(c)
+        const vals = valuesForBoth(fields, editValues(c.edits)) as Record<string, unknown>
+        if (Object.keys(vals).length === 0) return
+        // 時刻は利用者が入れた時刻があればそれを使う。無ければ今日の分は今の時刻・過去日は空（両方残すと同じ）
+        const at =
+          typeof vals.measured_at === 'string'
+            ? vals.measured_at
+            : c.base.measured_on === todayIso()
+              ? nowHM()
+              : null
+        const edits: CellEditInput<VitalCellField> = {}
+        for (const f of VITAL_FIELDS) if (typeof vals[f] === 'number') edits[f] = { value: vals[f], base: null }
+        if (at !== null) edits.measured_at = { value: at, base: null }
+        if (kind === 'symptom' && typeof vals.symptom === 'string') edits.symptom = { value: vals.symptom, base: null }
+        const target = { routine: false as const, clientKey: newClientKey(), residentId: c.base.resident_id, day: c.base.measured_on, kind }
+        try {
+          markSelfWrite()
+          const old = vitalTargetOf(id)
+          // 取り消された行へ向けて止まっている送信待ち。新しい行が書けた・送信待ちに確保できた後で外す（F5）
+          const oldPending = pendingRow('vitals', old)
+          // その行の送信待ちにある値のある欄も、新しい行へ（基準 null＝F4）
+          for (const [f, v] of Object.entries(oldPending?.values ?? {})) {
+            if (!HELD_ADOPT_FIELDS.includes(f) || (f === 'symptom' && kind !== 'symptom')) continue
+            if (edits[f as VitalCellField] === undefined && v !== null && v !== undefined) edits[f as VitalCellField] = { value: v, base: null }
+          }
+          const res = await saveVitalEdits(target, edits, { asNew: true, fill: { recorded_by: actorId } })
+          if (res !== 'queued' && (res.conflicts.length > 0 || res.held === true)) {
+            show(`▲ ${ERR_CONFLICT}`)
+            return
+          }
+          const sent: Record<string, unknown> = {}
+          for (const [f, e] of Object.entries(edits)) if (e) sent[f] = e.value
+          await discardPendingRow('vitals', old, undefined, seenVers(oldPending, sent))
+          const rest = { ...vitalConflictsRef.current }
+          delete rest[id]
+          writeHeld(rest) // 保存成功・送信待ちへ渡し終えた（R-D）
+          if (res === 'queued') {
+            show(MSG_QUEUED)
+            return
+          }
+          setReload((n) => n + 1)
+        } catch (err) {
+          // 拒否された（例外）: 控えは画面に残し、元の送信待ちも残す（R-D・F5）。この冪等キーの送信待ちは外す
+          // （日報に出せない行を残さない）
+          void discardPendingRow('vitals', target)
+          show(`▲ ${errText(err)}`)
+        }
+      })
+    },
+    [actorId, markSelfWrite, show, vitalQueue, writeHeld],
+  )
+
+  /** 行が見当たらない控えを取り下げる（〔取り下げる〕＝利用者の明示的な取り下げ・R-D） */
+  const dropOrphan = useCallback(
+    (id: number) => {
+      // 利用者の明示的な取り下げ。送信待ちで止まっていた値も、画面が見せていた版だけ外す（第3段 #9）
+      const c = vitalConflictsRef.current[id]
+      const target = vitalTargetOf(id)
+      void discardPendingRow('vitals', target, undefined, seenVers(pendingRow('vitals', target), editValues(c?.edits ?? {})))
+      const rest = { ...vitalConflictsRef.current }
+      delete rest[id]
+      writeHeld(rest)
+    },
+    [writeHeld],
+  )
+
+  /**
+   * くらべて選ぶの送信（〔先の値を残す〕〔自分の値で直す〕〔両方残す〕）。通常の保存と同じ行ごとの順番待ちに通し、
+   * 送る前と後に自分の書込の印を付ける（その間の変更通知・取り置きで、選び直した後の行を古い値で描き直さない＝指摘 L2）。
+   * 送信待ちで止まっている値の取り下げ・送り直しは ConflictResolver が db.ts へ頼む
+   */
+  const runResolverJob = useCallback(
+    (id: number, job: () => Promise<void>) =>
+      vitalQueue(String(id), async () => {
+        markSelfWrite()
+        try {
+          await job()
+        } finally {
+          markSelfWrite()
+        }
+      }),
+    [markSelfWrite, vitalQueue],
+  )
+
+  /** くらべて選ぶ画面で選んだ結果: その行を最新で描き直し、競合の控えと一言を消す */
+  const onVitalResolved = useCallback(
+    (r: ConflictResolution) => {
+      const id = compareVitalId
+      setCompareVitalId(null)
+      if (id === null) return
+      const c = vitalConflictsRef.current[id]
+      if (!c) return
+      if (r.choice === 'reload') {
+        if (r.latest === null) {
+          // 先の記録が見つからない（取り消された等）。控えは消さず「行が無い控え」として欄の下に出す
+          writeHeld({ ...vitalConflictsRef.current, [id]: { ...c, mode: 'orphan' } })
+          focusAfterResolve(orphanId(day, id))
+        } else {
+          // 〔最新を読み込む〕の経路でもフォーカスをその行の氏名へ移す（再審 指摘8）
+          focusAfterResolve(vitalNameId(day, c.rowKey))
+        }
+        // 控えは残したまま最新に取り直す（取り直した後の裁きで「未保存」なら〔保存し直す〕で送れる）
+        markSelfWrite()
+        setReload((n) => n + 1)
+        return
+      }
+      // 送信待ちで止まっていた値の取り下げ・送り直しは ConflictResolver が済ませている
+      const rest = { ...vitalConflictsRef.current }
+      delete rest[id]
+      writeHeld(rest)
+      if (r.choice === 'both') {
+        // 両方残すで足した行を出すため、この日の取り置きを捨ててから読み直す
+        markSelfWrite()
+        setReload((n) => n + 1)
+      }
+      const latest = r.latest as Vital | null
+      if (latest) {
+        replaceVital(latest)
+        savedVitalRef.current.set(latest.id, latest)
+      }
+      // 〔くらべて選ぶ〕が消えるので、フォーカスをその行の氏名へ移す（body へ落とさない）
+      focusAfterResolve(vitalNameId(day, c.rowKey))
+      if (r.queued) {
+        setRowStatus(c.rowKey, { tone: 'warn', text: MSG_QUEUED })
+        return
+      }
+      setRowStatus(c.rowKey, null)
+    },
+    [compareVitalId, day, markSelfWrite, replaceVital, setRowStatus, writeHeld],
+  )
+
+  // 止まっている入力（競合・未保存・行が無い控え）を、アプリ内の画面移動・再読み込み・タブを閉じる時の確認に登録する
+  useEffect(() => registerUnsaved(() => Object.keys(vitalConflictsRef.current).length > 0), [])
 
   /** 新しいバイタル行（発熱者・他症状者）を1件登録する */
   const insertVitalRow = useCallback(
@@ -2657,7 +3334,7 @@ function DaySheet({
       fields: Partial<Omit<Vital, 'id' | 'rev' | 'resident_id' | 'measured_on' | 'kind'>>,
       draftKey: string | null,
     ) => {
-      if (!guard(rowKey)) return
+      if (!guardVital(rowKey)) return
       // 値が1つも無い行は作らない（空欄の確定＝null だけの patch で空行ができるのを防ぐ）
       if (!hasVitalValue(fields)) {
         setRowStatus(rowKey, { tone: 'warn', text: MSG_EMPTY_VITAL })
@@ -2671,25 +3348,28 @@ function DaySheet({
       }
       savingRef.current.add(rowKey)
       setRowStatus(rowKey, null)
+      // 新しい行は冪等キー（client_key）で指す（同じ入力を何度送っても1行に収まる）
+      const target = { routine: false as const, clientKey: newClientKey(), residentId, day, kind }
       try {
         markSelfWrite() // 送る前に印を付ける（自分の書き込みで「他の端末で更新」を出さない）
-        const res = await insertVitalKind({
-          resident_id: residentId,
-          measured_on: day,
-          kind,
-          measured_at: fields.measured_at ?? null,
-          temp: fields.temp ?? null,
-          sys_bp: fields.sys_bp ?? null,
-          dia_bp: fields.dia_bp ?? null,
-          pulse: fields.pulse ?? null,
-          spo2: fields.spo2 ?? null,
-          note: null,
-          symptom: fields.symptom ?? null,
-          recorded_by: actorId,
-        })
+        // 入っている欄だけを送る
+        const edits: CellEditInput<VitalCellField> = {}
+        const src = fields as Record<string, unknown>
+        for (const f of ['measured_at', 'temp', 'sys_bp', 'dia_bp', 'pulse', 'spo2', 'symptom'] as const) {
+          const val = src[f]
+          if (val !== null && val !== undefined && val !== '') edits[f] = { value: val, base: null }
+        }
+        const res = await saveVitalEdits(target, edits, { fill: { recorded_by: actorId } })
         if (res === 'queued') {
           if (draftKey !== null) patchVitalDraft(draftKey, { locked: true })
           setRowStatus(rowKey, { tone: 'warn', text: isQueuePersisted() ? MSG_QUEUED : MSG_NOT_PERSISTED })
+          return
+        }
+        // 書かずに止めた（新しい冪等キーなので通常は来ない。止まっている行へまとめた時も同じ）。
+        // 更新の競合と同じ扱い＝下書きを残す
+        const saved = res.row
+        if (res.conflicts.length > 0 || res.held === true || saved === null) {
+          setRowStatus(rowKey, { tone: 'danger', text: `▲ ${ERR_CONFLICT}` })
           return
         }
         if (draftKey !== null) setVitalDrafts((prev) => prev.filter((d) => d.key !== draftKey))
@@ -2706,11 +3386,14 @@ function DaySheet({
           draftKey === null
             ? rowKey
             : kind === 'symptom'
-              ? `s${res.id}`
-              : feverRowKey(res, observationsRef.current)
-        replaceVital(res)
+              ? `s${saved.id}`
+              : feverRowKey(saved, observationsRef.current)
+        replaceVital(saved)
         saveOk(savedKey)
       } catch (err) {
+        // 拒否された（例外）: 入力は下書きの行に残っている（ロックしていない）ので、この冪等キーの送信待ちは外す
+        // （まだ行の無い新しい行は日報に出せず、送信待ちに残すと見えないまま「未送信」に数え続けるため）
+        void discardPendingRow('vitals', target)
         setRowStatus(rowKey, { tone: 'danger', text: `▲ ${errText(err)}` })
       } finally {
         savingRef.current.delete(rowKey)
@@ -2719,7 +3402,7 @@ function DaySheet({
     [
       actorId,
       day,
-      guard,
+      guardVital,
       markSelfWrite,
       patchVitalDraft,
       replaceVital,
@@ -3036,6 +3719,18 @@ function DaySheet({
     setNoteDrafts((prev) => [...prev, ...add])
   }, [phase, actorId, noteDrafts, nextKey])
 
+  const vitalConflictIds = useMemo(() => {
+    const out: Record<string, { id: number; mode: HeldVital['mode'] }[]> = {}
+    for (const [id, c] of Object.entries(vitalConflicts)) {
+      // 行が無い控えは欄の下にまとめて出す（OrphanVitals）。保存の順番待ちの控えにはボタンを出さない
+      if (c.mode === 'orphan' || c.mode === 'pending') continue
+      const list = out[c.rowKey] ?? []
+      list.push({ id: Number(id), mode: c.mode })
+      out[c.rowKey] = list
+    }
+    return out
+  }, [vitalConflicts])
+
   const ctx: SheetCtx = {
     day,
     residentById,
@@ -3045,7 +3740,32 @@ function DaySheet({
     setStatus: setRowStatus,
     openResident: setResidentPick,
     openStaff: setStaffPick,
+    vitalConflictIds,
+    onCompareVital: setCompareVitalId,
+    onResaveVital: resaveHeldVital,
+    orphans: Object.entries(vitalConflicts)
+      .filter(([, c]) => c.mode === 'orphan')
+      .map(([id, held]) => ({ id: Number(id), held })),
+    onSaveOrphan: saveOrphanAsNew,
+    onDropOrphan: dropOrphan,
   }
+
+  /** バイタル欄（発熱者・他症状者）の受け渡し。サーバー側の更新待ちの間はバイタルのセルだけ読み取り専用にする */
+  const vitalCtx: SheetCtx = cellsMissing ? { ...ctx, disabled: true } : ctx
+
+  /** くらべて選ぶ画面に渡す内容（開いている行の控えから作る） */
+  const compareHeld = compareVitalId === null ? null : (vitalConflicts[compareVitalId] ?? null)
+  const compareConflict = compareHeld !== null && compareHeld.mode === 'conflict' ? compareHeld : null
+  const compareTarget: ConflictTarget | null =
+    compareConflict === null || compareVitalId === null
+      ? null
+      : {
+          table: 'vitals',
+          residentId: compareConflict.base.resident_id,
+          day: compareConflict.base.measured_on,
+          kind: compareConflict.base.kind,
+          vitalId: compareVitalId,
+        }
 
   return (
     <>
@@ -3109,7 +3829,7 @@ function DaySheet({
           />
 
           <FeverBlock
-            ctx={ctx}
+            ctx={vitalCtx}
             rows={feverRows}
             drafts={vitalDrafts.filter((d) => d.kind === 'observation')}
             onAdd={() => addVitalDraft('observation')}
@@ -3120,7 +3840,7 @@ function DaySheet({
           />
 
           <SymptomBlock
-            ctx={ctx}
+            ctx={vitalCtx}
             rows={symptomRows}
             drafts={vitalDrafts.filter((d) => d.kind === 'symptom')}
             onAdd={() => addVitalDraft('symptom')}
@@ -3256,6 +3976,33 @@ function DaySheet({
         onConfirm={() => confirm?.onConfirm()}
         onCancel={() => setConfirm(null)}
       />
+      <ConflictResolver
+        target={compareTarget}
+        residentName={
+          compareConflict === null
+            ? ''
+            : residentName(residentById.get(compareConflict.base.resident_id), compareConflict.base.resident_id)
+        }
+        // 見ていた値＝欄ごとの基準（編集を始めた時の値）／あなたの入力＝実際に編集した欄の値
+        base={
+          compareConflict === null
+            ? {}
+            : editBases(compareConflict.edits, compareConflict.base as unknown as Record<string, unknown>)
+        }
+        mine={compareConflict === null ? {} : editValues(compareConflict.edits)}
+        actorId={actorId}
+        staff={staff}
+        // 〔自分の値で直す〕〔両方残す〕の送信も、この行の保存の順番待ちに通す（構造規約 R-F）
+        serialize={compareVitalId === null ? undefined : (job) => runResolverJob(compareVitalId, job)}
+        // 両方残す: 発熱者・他症状者はその欄に並ぶよう同じ種別の行として残す
+        bothKind={
+          compareConflict === null || compareConflict.base.kind === 'routine'
+            ? 'recheck'
+            : compareConflict.base.kind
+        }
+        onClose={() => setCompareVitalId(null)}
+        onResolved={onVitalResolved}
+      />
     </>
   )
 }
@@ -3274,6 +4021,102 @@ interface SheetCtx {
   setStatus: (key: string, s: RowStatus | null) => void
   openResident: (t: PickTarget) => void
   openStaff: (t: PickTarget) => void
+  /** 止まっているバイタル（行のキー → 行の id と状態の並び）。くらべて選ぶ・保存し直すのボタンを出す */
+  vitalConflictIds: Record<string, { id: number; mode: HeldVital['mode'] }[]>
+  /** 競合中のバイタルを「くらべて選ぶ」画面で開く */
+  onCompareVital: (vitalId: number) => void
+  /** 未保存で控えているバイタルの入力を保存し直す */
+  onResaveVital: (vitalId: number) => void
+  /** 行が見当たらない控え（欄の下に値とボタンを出す） */
+  orphans: { id: number; held: HeldVital }[]
+  onSaveOrphan: (vitalId: number) => void
+  onDropOrphan: (vitalId: number) => void
+}
+
+/**
+ * 行が見当たらない控え（他の端末で行が取り消された）。控えが見えないまま確認だけが出続けないよう、
+ * 欄の下に値と〔新しい行として保存〕〔取り下げる〕を出す（再審 指摘10）
+ */
+function OrphanVitals({ ctx, kind }: { ctx: SheetCtx; kind: 'observation' | 'symptom' }) {
+  const list = ctx.orphans.filter((o) => (o.held.base.kind === 'symptom') === (kind === 'symptom'))
+  if (list.length === 0) return null
+  return (
+    <div className="px-1 py-1">
+      {list.map(({ id, held }) => {
+        const name = residentName(ctx.residentById.get(held.base.resident_id), held.base.resident_id)
+        const mine = heldMine(held)
+        const fields = heldFields(held).filter((f) => Object.prototype.hasOwnProperty.call(mine, f))
+        const values = describeHeldValues(mine, fields)
+        const canSave = Object.keys(valuesForBoth(heldFields(held), mine as Record<string, unknown>)).length > 0
+        return (
+          <div key={id} className="mt-1 rounded border border-warn bg-warn-bg p-2">
+            <p id={orphanId(ctx.day, id)} tabIndex={-1} className="text-base text-ink">
+              <span aria-hidden="true">▲ </span>
+              {name} の記録は他の端末で取り消されました。あなたの入力（{values || '値なし'}）はまだ保存していません。
+            </p>
+            <div className="mt-1 flex flex-wrap gap-gap">
+              <button
+                type="button"
+                disabled={ctx.disabled || !canSave}
+                onClick={() => ctx.onSaveOrphan(id)}
+                aria-label={`${name} のまだ保存していない入力を新しい行として保存する`}
+                className="min-h-tap rounded border border-primary bg-surface px-3 text-base font-bold text-primary disabled:border-border disabled:text-ink3"
+              >
+                新しい行として保存
+              </button>
+              <button
+                type="button"
+                onClick={() => ctx.onDropOrphan(id)}
+                aria-label={`${name} のまだ保存していない入力を取り下げる`}
+                className="min-h-tap rounded border border-border-strong bg-surface px-3 text-base text-ink"
+              >
+                取り下げる
+              </button>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/**
+ * 止まっているバイタルの行に出すボタン（既存の一言・「最新に更新」はそのまま残す）。
+ * 競合中は〔くらべて選ぶ〕、食い違いが無くなって未保存の時は〔保存し直す〕
+ */
+function CompareVitalButtons({ ctx, rowKey, name }: { ctx: SheetCtx; rowKey: string; name: string }) {
+  const items = ctx.vitalConflictIds[rowKey] ?? []
+  if (items.length === 0) return null
+  const nth = (i: number): string => (items.length > 1 ? `（${i + 1}件目）` : '')
+  return (
+    <p className="flex flex-wrap gap-gap px-1">
+      {items.map((it, i) =>
+        it.mode === 'conflict' ? (
+          <button
+            key={it.id}
+            type="button"
+            disabled={ctx.disabled}
+            onClick={() => ctx.onCompareVital(it.id)}
+            aria-label={`${name} のバイタルの食い違いをくらべて選ぶ${nth(i)}`}
+            className="min-h-tap rounded border border-primary bg-surface px-3 text-base font-bold text-primary disabled:border-border disabled:text-ink3"
+          >
+            くらべて選ぶ{items.length > 1 ? `（${i + 1}）` : ''}
+          </button>
+        ) : (
+          <button
+            key={it.id}
+            type="button"
+            disabled={ctx.disabled}
+            onClick={() => ctx.onResaveVital(it.id)}
+            aria-label={`${name} のまだ保存していないバイタルの入力を保存し直す${nth(i)}`}
+            className="min-h-tap rounded border border-primary bg-surface px-3 text-base font-bold text-primary disabled:border-border disabled:text-ink3"
+          >
+            保存し直す{items.length > 1 ? `（${i + 1}）` : ''}
+          </button>
+        ),
+      )}
+    </p>
+  )
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -3874,6 +4717,8 @@ type UpdateVitalFn = (
   rowKey: string,
   clearing: boolean,
   label: string,
+  /** 編集を始めた時にセルに出ていた値（構造規約 R-E の基準）。読めなければ省略 */
+  basePatch?: Partial<Omit<Vital, 'id' | 'rev'>>,
 ) => void
 
 /** 1枠（時 KT SpO2 BP P）の描画。保存済みなら update、空き枠なら insert を呼ぶ */
@@ -3891,7 +4736,12 @@ function VitalSetCells({
   input: VitalSetInput | null
   disabled: boolean
   onInput?: (patch: Partial<VitalSetInput>) => void
-  onCommit: (patch: Partial<Omit<Vital, 'id' | 'rev'>>, clearing: boolean, label: string) => void
+  onCommit: (
+    patch: Partial<Omit<Vital, 'id' | 'rev'>>,
+    clearing: boolean,
+    label: string,
+    basePatch?: Partial<Omit<Vital, 'id' | 'rev'>>,
+  ) => void
   /** 入力の書式・範囲エラー（保存はしない） */
   onError: (message: string) => void
 }) {
@@ -3905,12 +4755,27 @@ function VitalSetCells({
     return fmtBp(vital.sys_bp, vital.dia_bp)
   }
 
-  const commit = (f: keyof VitalSetInput, raw: string) => {
+  const commit = (f: keyof VitalSetInput, raw: string, baseText?: string) => {
     if (onInput) onInput({ [f]: raw } as Partial<VitalSetInput>)
+    // 編集を始めた時にセルに出ていた文字を、同じ読み方で値にする（構造規約 R-E の基準。読めなければ省略）
+    const baseOf = (): Partial<Omit<Vital, 'id' | 'rev'>> | undefined => {
+      if (baseText === undefined) return undefined
+      if (f === 'at') {
+        const t = parseHM(baseText)
+        return t.ok ? { measured_at: t.value } : undefined
+      }
+      if (f === 'bp') {
+        const bp = parseBp(baseText)
+        return bp.ok ? { sys_bp: bp.sys, dia_bp: bp.dia } : undefined
+      }
+      const fld = f === 'temp' ? 'temp' : f === 'spo2' ? 'spo2' : 'pulse'
+      const r = parseNum(baseText, fld)
+      return r.ok ? ({ [fld]: r.value } as Partial<Vital>) : undefined
+    }
     if (f === 'at') {
       const t = parseHM(raw)
       if (!t.ok) return onError(t.message)
-      return onCommit({ measured_at: t.value }, t.value === null, '時刻')
+      return onCommit({ measured_at: t.value }, t.value === null, '時刻', baseOf())
     }
     if (f === 'bp') {
       const bp = parseBp(raw)
@@ -3924,12 +4789,18 @@ function VitalSetCells({
         { sys_bp: bp.sys, dia_bp: bp.dia },
         cleared.length > 0,
         cleared.length > 0 ? cleared.join('・') : VITAL_FIELD_LABEL.sys_bp,
+        baseOf(),
       )
     }
     const field = f === 'temp' ? 'temp' : f === 'spo2' ? 'spo2' : 'pulse'
     const res = parseNum(raw, field)
     if (!res.ok) return onError(res.message)
-    return onCommit({ [field]: res.value } as Partial<Vital>, res.value === null, VITAL_FIELD_LABEL[field])
+    return onCommit(
+      { [field]: res.value } as Partial<Vital>,
+      res.value === null,
+      VITAL_FIELD_LABEL[field],
+      baseOf(),
+    )
   }
 
   const cell = (
@@ -3942,7 +4813,7 @@ function VitalSetCells({
     <Cell width={width} pad={false}>
       <SheetCell
         value={val(f)}
-        onCommit={disabled ? undefined : (v) => commit(f, v)}
+        onCommit={disabled ? undefined : (v, meta) => commit(f, v, meta?.base)}
         width="100%"
         align="right"
         level={level}
@@ -4014,7 +4885,10 @@ function FeverBlock({
             <Row className={altClass(i)}>
               <LeadCell text={i === 0 ? `${count}名` : ''} />
               <Cell width="var(--w-name)" className="flex items-center">
-                <span className="truncate font-bold">{name}</span>
+                {/* 食い違いを解決した後のフォーカスの戻り先（タブ順には入れない） */}
+                <span id={vitalNameId(ctx.day, row.key)} tabIndex={-1} className="truncate font-bold">
+                  {name}
+                </span>
               </Cell>
               {row.slots.map((v, i) => (
                 <VitalSetCells
@@ -4024,8 +4898,8 @@ function FeverBlock({
                   input={null}
                   disabled={ctx.disabled}
                   onError={(m) => ctx.setStatus(row.key, { tone: 'danger', text: m })}
-                  onCommit={(patch, clearing, label) => {
-                    if (v) onUpdate(v, patch, row.key, clearing, label)
+                  onCommit={(patch, clearing, label, basePatch) => {
+                    if (v) onUpdate(v, patch, row.key, clearing, label, basePatch)
                     // 空き枠は「値が入った時」だけ行を作る（空欄の確定で空行を作らない）
                     else if (hasVitalValue(patch))
                       void onInsert(row.key, row.residentId, 'observation', patch, null)
@@ -4034,6 +4908,7 @@ function FeverBlock({
               ))}
             </Row>
             <StatusText status={ctx.status[row.key]} />
+            <CompareVitalButtons ctx={ctx} rowKey={row.key} name={name} />
           </div>
         )
       })}
@@ -4111,6 +4986,7 @@ function FeverBlock({
           </div>
         )
       })}
+      <OrphanVitals ctx={ctx} kind="observation" />
     </SheetBlock>
   )
 }
@@ -4165,7 +5041,10 @@ function SymptomBlock({
             <Row className={altClass(i)}>
               <LeadCell text={i === 0 ? `${count}名` : ''} />
               <Cell width="var(--w-name)" className="flex items-center">
-                <span className="truncate font-bold">{name}</span>
+                {/* 食い違いを解決した後のフォーカスの戻り先（タブ順には入れない） */}
+                <span id={vitalNameId(ctx.day, key)} tabIndex={-1} className="truncate font-bold">
+                  {name}
+                </span>
               </Cell>
               <VitalSetCells
                 name={name}
@@ -4173,7 +5052,9 @@ function SymptomBlock({
                 input={null}
                 disabled={ctx.disabled}
                 onError={(m) => ctx.setStatus(key, { tone: 'danger', text: m })}
-                onCommit={(patch, clearing, label) => onUpdate(v, patch, key, clearing, label)}
+                onCommit={(patch, clearing, label, basePatch) =>
+                  onUpdate(v, patch, key, clearing, label, basePatch)
+                }
               />
               <Cell grow pad={false}>
                 <SheetCell
@@ -4181,13 +5062,15 @@ function SymptomBlock({
                   onCommit={
                     ctx.disabled
                       ? undefined
-                      : (raw) =>
+                      : (raw, meta) =>
                           onUpdate(
                             v,
                             { symptom: raw.trim() === '' ? null : raw.trim() },
                             key,
                             raw.trim() === '' && (v.symptom ?? '') !== '',
                             '症状',
+                            // 編集を始めた時にセルに出ていた文字（構造規約 R-E の基準）
+                            { symptom: meta.base.trim() === '' ? null : meta.base.trim() },
                           )
                   }
                   width="100%"
@@ -4201,6 +5084,7 @@ function SymptomBlock({
               </Cell>
             </Row>
             <StatusText status={ctx.status[key]} />
+            <CompareVitalButtons ctx={ctx} rowKey={key} name={name} />
           </div>
         )
       })}
@@ -4296,6 +5180,7 @@ function SymptomBlock({
           </div>
         )
       })}
+      <OrphanVitals ctx={ctx} kind="symptom" />
     </SheetBlock>
   )
 }

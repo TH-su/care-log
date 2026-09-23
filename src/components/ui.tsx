@@ -8,7 +8,7 @@
 // - console 出力を持たない
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import type { ReactNode, RefObject } from 'react'
+import type { CSSProperties, ReactNode, RefObject } from 'react'
 import { hasNoteAlias, LEVEL_MARK, noteDisplayName } from '../lib/types'
 import type { Level, Resident, Staff } from '../lib/types'
 
@@ -273,7 +273,41 @@ export interface ModalShellProps {
   initialFocus?: RefObject<HTMLElement>
   /** 幅を1段狭める（申し送りの詳細のように中身が短い窓。既定は max-w-md） */
   narrow?: boolean
+  /**
+   * 窓を「いま見えている範囲」（visualViewport）に合わせて置く（既定 false＝従来どおり）。
+   * 背後の画面が横にはみ出していると、固定配置の基準（レイアウト上の画面）が見えている範囲より
+   * 広くなり、窓の右側が切れる。指定した窓だけ、見えている範囲の位置・大きさに合わせる防御
+   */
+  fitVisualViewport?: boolean
   children: ReactNode
+}
+
+/** 見えている範囲（visualViewport）の位置と大きさ。対応していない環境・無効時は undefined（従来どおり） */
+function useVisualViewportBox(enabled: boolean): CSSProperties | undefined {
+  const [box, setBox] = useState<CSSProperties | undefined>(undefined)
+  useEffect(() => {
+    if (!enabled || typeof window === 'undefined') return
+    const vv = window.visualViewport
+    if (!vv) return
+    const update = () =>
+      setBox({
+        left: vv.offsetLeft,
+        top: vv.offsetTop,
+        width: vv.width,
+        height: vv.height,
+        right: 'auto',
+        bottom: 'auto',
+      })
+    update()
+    vv.addEventListener('resize', update)
+    vv.addEventListener('scroll', update)
+    return () => {
+      vv.removeEventListener('resize', update)
+      vv.removeEventListener('scroll', update)
+      setBox(undefined)
+    }
+  }, [enabled])
+  return box
 }
 
 /**
@@ -281,11 +315,20 @@ export interface ModalShellProps {
  * 背面を覆い、Esc で閉じ、Tab はこの窓の中で循環し、閉じたら元の要素へフォーカスが戻る。
  * この画面の外（日報の詳細など）からも使えるように公開している。
  */
-export function ModalShell({ open, label, onClose, initialFocus, narrow = false, children }: ModalShellProps) {
+export function ModalShell({
+  open,
+  label,
+  onClose,
+  initialFocus,
+  narrow = false,
+  fitVisualViewport = false,
+  children,
+}: ModalShellProps) {
   const panelRef = useDialog(open, onClose, initialFocus)
+  const box = useVisualViewportBox(open && fitVisualViewport)
   if (!open) return null
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={box}>
       {/* 背景の覆い。トークン色に不透明度を掛けるため、独立要素に opacity を当てる。
           閉じられるダイアログでは覆い自体を native button にする（div+onClick を作らない）。
           tabIndex=-1 でタブ順には入れず、キーボードは Esc と各ボタンで閉じる。 */}

@@ -25,7 +25,7 @@ L0承認済み。詳細設計の正本: `docs/PLAN.md`・`docs/design/db-design.
 
 ```ts
 export type Conflict = 'conflict'
-export type Queued = 'queued'   // 通信失敗→永続キュー(cl_sendQueue)に退避済み
+export type Queued = 'queued'   // 通信失敗→永続キュー(cl_sendQueue／バイタル・食事は cl_sendQueue2)に退避済み
 
 fetchResidents(): Promise<Resident[]>            // active・room昇順
 fetchStaff(): Promise<Staff[]>                   // active・name昇順
@@ -71,6 +71,12 @@ onAuthExpired(cb: () => void): void                            // 401検知→�
   client_key になり、他端末が先に作った定時行へ update で合流できなくなる）
 - 送信キューの flush は Web Locks（`cl_sendQueue_flush` / `ifAvailable`）で1タブに絞る。取れなければ送らない
   （navigator.locks が無い環境は従来どおり送る＝冪等キー側で二重登録を防ぐ）
+- 送信キューの localStorage は2つのキーに分ける（2026-09-23）。設計の正本は `docs/design/concurrent-entry.md`
+  - `cl_sendQueue` … 水分・申し送り・外出・既読・出勤者・表示名の退避 op。形は `{ ops: [op…], brokenRaw? }`（旧ビルドと同じ形）
+  - `cl_sendQueue2` … バイタル・食事の送信待ち。形は `{ ver: 2, rows: {行キー: 欄ごとの値・基準・版}, done: [送信済み・取り下げた版の記録], brokenRaw? }`。
+    旧ビルドはこのキーに触れない（旧ビルドへ戻しても消えない。戻している間は送られず、新しいビルドへ戻すと送られる）。
+    `cl_sendQueue` にあるバイタル・食事の op は、`cl_sendQueue2` に書けたと読み直して確かめてから移す
+  - 書き戻しは両方とも Web Locks（`cl_sendQueue_write`）の中で「読み直し → 和集合 → 書き戻し」
 - `queuePending()` / `queueSubscribe` は localStorage 上の qid 付き未送信 op とメモリキューの和集合を数える（他タブ由来も含む）
 - 全読取に `.is('deleted_at', null)` と limit（既定上限2000）。日付レンジ or resident_id の無いクエリを書かない
 - `fetchKarte` の outings は「start_on ≤ to かつ（end_on is null または end_on ≥ from）」＝期間に重なる行を採る

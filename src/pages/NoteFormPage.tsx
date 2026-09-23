@@ -454,7 +454,9 @@ export function NoteFormPage() {
   const undoInsert = useCallback(
     async (note: Note, snapshot: FormState) => {
       try {
-        const res = await softDeleteNote(note.id, note.rev)
+        // 取り消したのは登録した本人（この画面で選んだ記入者）。端末の既定の操作者ではなく
+        // その記入者を「最後に書き換えた職員」として変更の記録に残す
+        const res = await softDeleteNote(note.id, note.rev, { editedBy: note.reporter_id })
         if (res === 'conflict') {
           setFormError(
             '取り消せませんでした（ほかの端末が同じ記録を更新しています）。タイムラインで内容を確認してから削除してください。',
