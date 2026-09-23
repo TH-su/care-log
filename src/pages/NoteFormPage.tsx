@@ -724,7 +724,9 @@ export function NoteFormPage() {
       )}
 
       <form onSubmit={handleSubmit} noValidate>
-        <fieldset disabled={inputsDisabled} className="space-y-4">
+        {/* min-w-0: fieldset は既定で中身の最小幅より狭くならない（文字200%・狭い画面で画面の外へはみ出していた）。
+            form-fit: 選択ボタンが入らない時だけ折り返し、スマホの幅では日付の欄の余白を詰める（sheet.css） */}
+        <fieldset disabled={inputsDisabled} className="form-fit min-w-0 space-y-4">
           {/* ── いつ・どの勤務帯・だれに ── */}
           <SectionCard title="いつ・だれに">
             <div className="space-y-4">
@@ -732,7 +734,9 @@ export function NoteFormPage() {
                 <label htmlFor={ids.date} className={labelClass}>
                   記録日
                 </label>
-                <div className="mt-1 flex items-center gap-gap">
+                {/* 幅が足りない時だけ曜日つきの日付を次の行へ送る（広い画面では今までどおり1行・同じ幅）。
+                    入力欄は基準の幅 0 から残りいっぱいに伸び、日付が読める最小の幅（9文字ぶん・画面より広くはしない）を持つ */}
+                <div className="mt-1 flex flex-wrap items-center gap-gap">
                   <input
                     id={ids.date}
                     ref={dateRef}
@@ -742,6 +746,7 @@ export function NoteFormPage() {
                     onChange={(e) => update({ noteOn: e.target.value }, 'noteOn')}
                     aria-invalid={errors.noteOn ? true : undefined}
                     aria-describedby={errors.noteOn ? ids.err('noteOn') : undefined}
+                    style={{ flex: '1 1 0%', minWidth: 'min(100%, 9em)' }}
                     className={`tabular ${boxClass}`}
                   />
                   <span className="shrink-0 text-base text-ink2">{dayLabel}</span>

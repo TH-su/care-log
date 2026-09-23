@@ -68,6 +68,13 @@ export interface OutingFormPageProps {
   onSaved?: () => void
 }
 
+/**
+ * 日付・時刻を横に2つ並べる列（開始・帰着）。広い画面では今までどおり等分（基準の幅 0 から伸びる）。
+ * 日付が読める幅（9.5文字ぶん）を下限にし、2つ並ばない時だけ次の行へ折り返す（文字200%・スマホの幅で欠けていた）。
+ * 下限は画面より広くしない（min(100%, …)）
+ */
+const DATE_TIME_COL = { flex: '1 1 0%', minWidth: 'min(100%, 9.5em)' } as const
+
 export function OutingFormPage({
   residents: residentsProp,
   actorId: actorIdProp,
@@ -282,7 +289,9 @@ export function OutingFormPage({
 
       <SectionCard title="外出・外泊の記録">
         <form onSubmit={handleSubmit} noValidate>
-          <fieldset disabled={locked || saving} className="space-y-4">
+          {/* min-w-0: fieldset は既定で中身の最小幅より狭くならない（文字200%・狭い画面で画面の外へはみ出していた）。
+              form-fit: 選択ボタンが入らない時だけ折り返し、スマホの幅では日付・時刻の欄の余白を詰める（sheet.css） */}
+          <fieldset disabled={locked || saving} className="form-fit min-w-0 space-y-4">
             {/* 利用者 */}
             <div>
               <span id={residentLabelId} className={labelClass}>
@@ -339,7 +348,7 @@ export function OutingFormPage({
 
             {/* 開始 */}
             <div className="flex flex-wrap gap-gap">
-              <div className="min-w-0 flex-1">
+              <div className="min-w-0 flex-1" style={DATE_TIME_COL}>
                 <label htmlFor={startOnId} className={labelClass}>
                   開始日
                 </label>
@@ -353,7 +362,7 @@ export function OutingFormPage({
                   className={`tabular mt-1 ${inputClass}`}
                 />
               </div>
-              <div className="min-w-0 flex-1">
+              <div className="min-w-0 flex-1" style={DATE_TIME_COL}>
                 <label htmlFor={startAtId} className={labelClass}>
                   開始時刻（任意）
                 </label>
@@ -392,7 +401,7 @@ export function OutingFormPage({
 
             {/* 帰着（帰着未定のときは入力させない＝空と null を混同させない） */}
             <div className="flex flex-wrap gap-gap">
-              <div className="min-w-0 flex-1">
+              <div className="min-w-0 flex-1" style={DATE_TIME_COL}>
                 <label htmlFor={endOnId} className={labelClass}>
                   帰着日
                 </label>
@@ -407,7 +416,7 @@ export function OutingFormPage({
                   className={`tabular mt-1 ${inputClass}`}
                 />
               </div>
-              <div className="min-w-0 flex-1">
+              <div className="min-w-0 flex-1" style={DATE_TIME_COL}>
                 <label htmlFor={endAtId} className={labelClass}>
                   帰着時刻（任意）
                 </label>

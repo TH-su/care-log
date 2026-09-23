@@ -595,6 +595,25 @@ export function VitalsGridPage({
   // この画面は、キーパッドを出している欄を配り、閉じたら少し待って取り消す
   const presence = useCellPresence({ actorId: actorId ?? null })
 
+  /** 表の横スクロールの枠。表が枠より広い（横にスクロールできる）時だけ手がかりを出す */
+  const [tableBox, setTableBox] = useState<HTMLDivElement | null>(null)
+  const [tableScrolls, setTableScrolls] = useState(false)
+  useEffect(() => {
+    const el = tableBox
+    if (!el) return
+    const check = () => setTableScrolls(el.scrollWidth > el.clientWidth + 1)
+    check()
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', check)
+      return () => window.removeEventListener('resize', check)
+    }
+    // 枠（画面幅・文字の大きさ）と表（行の増減）の両方の大きさの変化で測り直す
+    const ro = new ResizeObserver(check)
+    ro.observe(el)
+    if (el.firstElementChild) ro.observe(el.firstElementChild)
+    return () => ro.disconnect()
+  }, [tableBox])
+
   const commitRows = useCallback((next: GridRow[]) => {
     rowsRef.current = next
     setRows(next)
@@ -1592,7 +1611,25 @@ export function VitalsGridPage({
           <EmptyBlock message="このフロアに対象の利用者がいません。上のボタンでフロアを切り替えてください。" />
         </div>
       ) : (
-        <div className="overflow-x-auto">
+        <>
+        {/* 表が画面より広い時だけ出す手がかり（広い画面では出ない＝配置を変えない） */}
+        {tableScrolls ? (
+          <p className="px-4 pt-1 text-sm text-ink2">
+            <span aria-hidden="true">⇆ </span>
+            表は横にスクロールできます（氏名の列は左に残ります）
+          </p>
+        ) : null}
+        {/* 横スクロールはこの枠の中だけ（ページ全体を広げない・2026-09-23）。
+            relative: 表の中の読み上げ用の文字（sr-only＝position:absolute）の基準をこの枠にする。
+            基準が枠の外（ページ）だと、枠で切り取られずにページの幅を広げていた。
+            枠が横にスクロールする時だけタブで止まる（キーボードでも横に送れる） */}
+        <div
+          ref={setTableBox}
+          role="region"
+          aria-label={`${fmtDayLabel(day)}の定時バイタル入力表${tableScrolls ? '（横にスクロールできます）' : ''}`}
+          tabIndex={tableScrolls ? 0 : undefined}
+          className="relative overflow-x-auto"
+        >
           <table className="w-full min-w-max border-collapse text-base">
             <caption className="sr-only">
               {fmtDayLabel(day)}の定時バイタル入力表（居室昇順）
@@ -1602,7 +1639,8 @@ export function VitalsGridPage({
                 <th scope="col" className="w-14 px-2 py-2 text-sm font-bold text-ink2">
                   居室
                 </th>
-                <th scope="col" className="min-w-24 px-2 py-2 text-sm font-bold text-ink2">
+                {/* 氏名の列は横スクロールしても左に残す（sticky）。背景は見出し行と同じ色 */}
+                <th scope="col" className="sticky left-0 z-20 min-w-24 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
                   氏名
                 </th>
                 {FIELDS.map((f) => (
@@ -1650,6 +1688,7 @@ export function VitalsGridPage({
             </tbody>
           </table>
         </div>
+        </>
       )}
 
       {sel && selRow && canInput ? (
@@ -1854,7 +1893,8 @@ function FragmentRow({
       <tr className="border-b border-border align-middle">
         <td className="tabular px-2 text-sm text-ink2">{isRoutine ? (room ?? '—') : ''}</td>
         {/* 食い違いを解決した後のフォーカスの戻り先（タブ順には入れない） */}
-        <td className="px-2" id={nameCellId(row.rowId)} tabIndex={-1}>
+        {/* 氏名の列は横スクロールしても左に残す（sticky）。背景はページの地の色（下を流れる欄を透かさない） */}
+        <td className="sticky left-0 z-20 bg-bg px-2" id={nameCellId(row.rowId)} tabIndex={-1}>
           <span className="block truncate text-base font-bold text-ink">
             {isRoutine ? residentName : ''}
             {/* 他の端末がこの方の欄を入力中（「✎」・読み上げは「入力中: 職員B」） */}
