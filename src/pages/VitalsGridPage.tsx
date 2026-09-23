@@ -79,6 +79,11 @@ import {
 import type { Edits } from '../lib/rowSync'
 import type { ConflictColumn } from '../lib/conflict'
 import { registerUnsaved } from '../lib/leaveGuard'
+import { focusOf, useCellPresence } from '../hooks/useCellPresence'
+import type { CellPresence } from '../hooks/useCellPresence'
+import { cellKey } from '../lib/presence'
+import type { CellTarget } from '../lib/presence'
+import { BUSY_RING, BusyMark, PresenceSummary, RowBusyMark } from '../components/presence'
 
 // ── 定数 ─────────────────────────────────────────────────────
 
@@ -586,6 +591,9 @@ export function VitalsGridPage({
   const clearResolveRef = useRef<((ok: boolean) => void) | null>(null)
 
   const actorId = propActorId !== undefined ? propActorId : getActorId()
+  // 他の端末が今まさに入力している欄（Presence・表示だけ。保存は妨げない）。
+  // この画面は、キーパッドを出している欄を配り、閉じたら少し待って取り消す
+  const presence = useCellPresence({ actorId: actorId ?? null })
 
   const commitRows = useCallback((next: GridRow[]) => {
     rowsRef.current = next
@@ -1438,6 +1446,20 @@ export function VitalsGridPage({
   const canInput = inputEnabled && !cellsMissing
   const selRow = sel ? rows.find((r) => r.rowId === sel.rowId) ?? null : null
   const selResident = selRow ? residentById.get(selRow.residentId) ?? null : null
+
+  // キーパッドを出している欄を Presence へ伝える（欄が変わった時だけ。打鍵では配らない）
+  const selTarget: CellTarget | null =
+    sel && selRow && canInput ? vitalTarget(day, selRow, sel.field) : null
+  const selTargetRef = useRef(selTarget)
+  selTargetRef.current = selTarget
+  const selTargetKey = selTarget ? cellKey(selTarget) : null
+  const { enter: presenceEnter } = presence
+  useEffect(() => {
+    const t = selTargetRef.current
+    if (!t) return
+    // 欄が変わる・キーパッドを閉じる時に、入った時に配った欄そのものを取り消す
+    return presenceEnter(focusOf(t))
+  }, [selTargetKey, presenceEnter])
   const editParsed = sel ? normalizeVitalInput(edit, sel.field) : null
   const editInvalid = sel != null && editParsed != null && outOfRange(sel.field, editParsed)
 
@@ -1544,6 +1566,19 @@ export function VitalsGridPage({
         ) : null}
       </div>
 
+      {/* 他の端末が入力中の欄の要約（誰が・どこを）。無い時も1行の高さを取る＝出ても表を押し下げない */}
+      <div className="px-4 pt-1">
+        <PresenceSummary
+          text={presence.summary((p) => {
+            if (p.cell.table !== 'vitals' || p.day !== day || !(FIELDS as string[]).includes(p.cell.field)) return null
+            if (!visibleRows.some((r) => r.residentId === p.residentId)) return null
+            const kind = p.cell.kind ?? 'routine'
+            const name = residentById.get(p.residentId)?.name ?? ''
+            return `${name}${kind === 'routine' ? '' : ` ${KIND_LABEL[kind]}`} ${FIELD_LABEL[p.cell.field as Field]}`
+          })}
+        />
+      </div>
+
       {residents.length === 0 ? (
         <div className="p-4">
           <EmptyBlock
@@ -1599,6 +1634,8 @@ export function VitalsGridPage({
                     inputEnabled={canInput}
                     sel={sel}
                     edit={edit}
+                    day={day}
+                    presence={presence}
                     onOpenCell={(field) => openCell(row.rowId, field, edit)}
                     onAddRecheck={() => addRecheck(row.residentId)}
                     onRemoveDraft={isEmptyDraft ? () => removeDraftRow(row.rowId) : null}
@@ -1741,6 +1778,10 @@ interface FragmentRowProps {
   inputEnabled: boolean
   sel: { rowId: string; field: Field } | null
   edit: string
+  /** この画面の日（今日） */
+  day: string
+  /** 他の端末が入力中の欄・行の表示（Presence） */
+  presence: CellPresence
   onOpenCell: (field: Field) => void
   onAddRecheck: () => void
   onRemoveDraft: (() => void) | null
@@ -1753,6 +1794,18 @@ interface FragmentRowProps {
   onSaveNew: () => void
   /** 行が取り消されていた控えを取り下げる */
   onDrop: () => void
+}
+
+/** Presence の照合に使う欄（定時は自然キー、定時以外は行 id。まだ行が無い枠は id なし） */
+function vitalTarget(day: string, row: GridRow, field: Field): CellTarget {
+  return {
+    table: 'vitals',
+    day,
+    residentId: row.residentId,
+    field,
+    kind: row.kind,
+    id: row.kind === 'routine' ? null : row.vitalId,
+  }
 }
 
 const STATE_MARK: Record<RowState, string> = {
@@ -1782,6 +1835,8 @@ function FragmentRow({
   inputEnabled,
   sel,
   edit,
+  day,
+  presence,
   onOpenCell,
   onAddRecheck,
   onRemoveDraft,
@@ -1792,6 +1847,8 @@ function FragmentRow({
   onDrop,
 }: FragmentRowProps) {
   const isRoutine = row.kind === 'routine'
+  // 他の端末がこの利用者のどこかの欄を入力中（氏名の行に出す＝欄が画面外でも気づける）
+  const rowBusy = isRoutine ? presence.rowBusy('vitals', day, row.residentId) : null
   return (
     <>
       <tr className="border-b border-border align-middle">
@@ -1800,6 +1857,8 @@ function FragmentRow({
         <td className="px-2" id={nameCellId(row.rowId)} tabIndex={-1}>
           <span className="block truncate text-base font-bold text-ink">
             {isRoutine ? residentName : ''}
+            {/* 他の端末がこの方の欄を入力中（「✎」・読み上げは「入力中: 職員B」） */}
+            {rowBusy !== null ? <RowBusyMark text={rowBusy} /> : null}
           </span>
           {!isRoutine ? (
             <span className="text-sm text-ink2">
@@ -1815,6 +1874,9 @@ function FragmentRow({
           const parsed = normalizeVitalInput(raw, f)
           const bad = parsed != null && outOfRange(f, parsed)
           const prev = row.prev[f]
+          // 他の端末がこの欄を入力中（枠＋文字。読み上げは aria-describedby）
+          const busy = presence.cellBusy(vitalTarget(day, row, f))
+          const busyId = `vg-busy-${row.rowId}-${f}`
           return (
             <td key={f} className="px-1 py-1">
               <button
@@ -1824,7 +1886,9 @@ function FragmentRow({
                 aria-label={`${room ?? '居室未設定'} ${residentName} ${KIND_LABEL[row.kind]} ${FIELD_LABEL[f]}${
                   raw === '' ? '　未入力' : `　${raw}`
                 }`}
+                aria-describedby={busy ? busyId : undefined}
                 className={[
+                  busy ? `relative ${BUSY_RING}` : '',
                   'min-h-14 w-full rounded px-1 text-center text-base',
                   selected
                     ? 'border-2 border-primary bg-accent-bg text-ink'
@@ -1851,6 +1915,7 @@ function FragmentRow({
                 ) : (
                   <LevelCell value={parsed} level={LEVEL_FN[f](parsed)} digits={FIELD_DIGITS[f]} />
                 )}
+                {busy ? <BusyMark busy={busy} id={busyId} /> : null}
               </button>
             </td>
           )

@@ -58,6 +58,10 @@ import {
 import { readSheetPref, SheetFrame, writeSheetPref, ZoomBar } from '../components/sheet'
 import { discardPendingRow, fetchLatestMeal, pendingRow, saveMealEdits } from '../lib/db'
 import type { PendingCellRow } from '../lib/db'
+import { focusOf, useCellPresence } from '../hooks/useCellPresence'
+import { cellKey } from '../lib/presence'
+import type { CellTarget } from '../lib/presence'
+import { BUSY_RING, BusyMark, PresenceSummary, RowBusyMark } from '../components/presence'
 import { ConflictResolver } from '../components/ConflictResolver'
 import type { ConflictResolution, ConflictTarget } from '../components/ConflictResolver'
 import {
@@ -252,6 +256,14 @@ type AmountField = 'main_amount' | 'side_amount'
 type RowPhase = 'idle' | 'saving' | 'saved' | 'queued' | 'conflict' | 'error'
 
 /** 保存先（利用者×日×食事枠）。Undo からも同じ経路で保存できるよう1つにまとめる */
+/** 要約の行で欄を言う言葉（他の端末が入力中の欄。Presence） */
+const MEAL_FIELD_WORD: Record<string, string> = {
+  main_amount: '主食',
+  side_amount: '副食',
+  status: '状態',
+  note: 'メモ',
+}
+
 interface SaveTarget {
   residentId: number
   day: string
@@ -597,6 +609,8 @@ interface AmountHalfProps {
   /** 保存できていない状態の記号 */
   phaseMark?: { mark: string; label: string; cls: string }
   ariaLabel: string
+  /** 他の端末がこの食事を入力中の時の読み上げ文の id（Presence） */
+  describedBy?: string
   onOpen: () => void
   onText: (v: string) => void
   onKeyDown: (e: ReactKeyboardEvent<HTMLInputElement>) => void
@@ -623,6 +637,7 @@ function AmountHalf({
   lowMark = false,
   phaseMark,
   ariaLabel,
+  describedBy,
   onOpen,
   onText,
   onKeyDown,
@@ -638,6 +653,7 @@ function AmountHalf({
         autoComplete="off"
         value={editText}
         aria-label={ariaLabel}
+        aria-describedby={describedBy}
         aria-invalid={editInvalid}
         onChange={(e) => onText(e.target.value)}
         onKeyDown={onKeyDown}
@@ -653,6 +669,7 @@ function AmountHalf({
       type="button"
       disabled={disabled}
       aria-label={ariaLabel}
+      aria-describedby={describedBy}
       onClick={onOpen}
       // minHeight は tokens.css の既定（44px）を打ち消すために必ず当てる。
       // 当てないと 22px 行が 44px に広がり、スプシの密度（--sheet-row-h）が再現できない
@@ -765,6 +782,24 @@ export function MealsSheetPage({
    *   recorded_by は NULL 可の列で、未設定なら「誰が入れたか記録しない」だけになる。
    */
   const canInput = inputEnabled && flagChecked && !cellsMissing && !loading
+
+  // 他の端末が今まさに入力している欄（Presence・表示だけ。保存は妨げない）。
+  // この画面は、入力欄（吹き出し）を開いている食事を配り、閉じたら少し待って取り消す
+  const presence = useCellPresence({ actorId: actorId ?? null })
+  const editTarget: CellTarget | null =
+    edit && canInput
+      ? { table: 'meals', day: edit.day, residentId: edit.residentId, field: edit.field, slot: edit.slot }
+      : null
+  const editTargetRef = useRef(editTarget)
+  editTargetRef.current = editTarget
+  const editTargetKey = editTarget ? cellKey(editTarget) : null
+  const { enter: presenceEnter } = presence
+  useEffect(() => {
+    const t = editTargetRef.current
+    if (!t) return
+    // 吹き出しを閉じる・別の食事へ移る時に、入った時に配った欄そのものを取り消す
+    return presenceEnter(focusOf(t))
+  }, [editTargetKey, presenceEnter])
 
   const today = todayIso()
   /** 表示する日（新しい日が左。バイタル一覧と並びを揃える） */
@@ -2244,6 +2279,17 @@ export function MealsSheetPage({
 
       {error && residents.length > 0 ? <ErrorBlock message={error} onRetry={onReload} /> : null}
 
+      {/* 他の端末が入力中の欄の要約（誰が・どこを）。無い時も1行の高さを取る＝出ても表を押し下げない */}
+      <PresenceSummary
+        text={presence.summary((p) => {
+          if (p.cell.table !== 'meals' || !dayList.includes(p.day) || !p.cell.slot) return null
+          const r = visible.find((x) => x.id === p.residentId)
+          if (!r) return null
+          const when = p.day === today ? '' : ` ${fmtDayLabel(p.day)}`
+          return `${r.name}${when} ${MEAL_SLOT_LABEL[p.cell.slot]} ${MEAL_FIELD_WORD[p.cell.field] ?? ''}`.trim()
+        })}
+      />
+
       {showLoading ? (
         <LoadingBlock label="食事・水分の記録を読み込んでいます…" />
       ) : error && residents.length === 0 ? (
@@ -2415,6 +2461,11 @@ export function MealsSheetPage({
                     className={`${CELL_BASE} sticky z-10 truncate ${altClass(rowIndex) || 'bg-surface'} px-1 text-ink`}
                   >
                     {r.name}
+                    {/* 他の端末がこの方の食事を入力中（「✎」・読み上げは「入力中: 職員B」）。欄が画面外でも気づけるように */}
+                    {(() => {
+                      const text = presence.rowBusy('meals', dayList, r.id)
+                      return text === null ? null : <RowBusyMark text={text} />
+                    })()}
                   </td>
 
                   {dayList.map((d) => {
@@ -2441,14 +2492,26 @@ export function MealsSheetPage({
                           const slotLabel = MEAL_SLOT_LABEL[slot]
                           const target: SaveTarget = { residentId: r.id, day: d, slot }
                           const editing = edit != null && edit.key === key ? edit : null
+                          // 他の端末がこの食事（主食・副食・状態のどれか）を入力中（Presence）
+                          const busy = presence.cellBusy(
+                            (['main_amount', 'side_amount', 'status', 'note'] as const).map((field) => ({
+                              table: 'meals' as const,
+                              day: d,
+                              residentId: r.id,
+                              field,
+                              slot,
+                            })),
+                          )
+                          const busyId = busy ? `ms-busy-${key}` : undefined
 
                           return (
                             <td
                               key={slot}
                               colSpan={2}
                               style={{ width: W_MEAL2, minWidth: W_MEAL2, height: ROW_H }}
-                              className={`${CELL_BASE} relative ${low ? 'bg-warn-bg' : ''}`}
+                              className={`${CELL_BASE} relative ${low ? 'bg-warn-bg' : ''} ${busy ? BUSY_RING : ''}`}
                             >
+                              {busy && busyId ? <BusyMark busy={busy} id={busyId} /> : null}
                               {absentStatus ? (
                                 // 欠食は主食・副食の2セルにまたがって状態を表示する（スプシと同じ見せ方）
                                 <button
@@ -2456,6 +2519,7 @@ export function MealsSheetPage({
                                   type="button"
                                   disabled={!canInput}
                                   aria-label={`${r.name} ${dayLabel} ${slotLabel} ${MEAL_STATUS_LABEL[absentStatus]}。食事の状態を変える`}
+                                  aria-describedby={busyId}
                                   onClick={() => openAmount(target, 'main_amount', eff.main_amount)}
                                   // tokens.css の 44px 下限を打ち消す（22px 行の密度を保つ）
                                   style={{ minHeight: ROW_H }}
@@ -2482,6 +2546,7 @@ export function MealsSheetPage({
                                     inputRef={editInputRef}
                                     buttonRef={btnRefFor(`${key}|main_amount`)}
                                     ariaLabel={`${r.name} ${dayLabel} ${slotLabel} 主食 ${eff.main_amount ?? '未入力'}${low ? '。低摂取' : ''}`}
+                                    describedBy={busyId}
                                     onOpen={() => openAmount(target, 'main_amount', eff.main_amount)}
                                     onText={setEditText}
                                     onKeyDown={onEditKeyDown}
@@ -2500,6 +2565,7 @@ export function MealsSheetPage({
                                     lowMark={low}
                                     phaseMark={mark}
                                     ariaLabel={`${r.name} ${dayLabel} ${slotLabel} 副食 ${eff.side_amount ?? '未入力'}${low ? '。低摂取' : ''}${mark ? `。${mark.label}` : ''}`}
+                                    describedBy={busyId}
                                     onOpen={() => openAmount(target, 'side_amount', eff.side_amount)}
                                     onText={setEditText}
                                     onKeyDown={onEditKeyDown}

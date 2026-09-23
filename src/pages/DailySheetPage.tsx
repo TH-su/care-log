@@ -96,11 +96,15 @@ import {
   setOutingEnd,
   softDeleteNote,
   isSelfWrite,
-  joinNotePresence,
   subscribeChanges,
   updateNoteFields,
 } from '../lib/db'
 import type { CellEditInput, DailyReport, PendingCellRow, PresenceHere, VitalCellField } from '../lib/db'
+import { focusOf, useCellPresence } from '../hooks/useCellPresence'
+import type { CellPresence } from '../hooks/useCellPresence'
+import { notePresence, presenceWhoNames } from '../lib/presence'
+import type { CellTarget } from '../lib/presence'
+import { PresenceSummary, RowBusyMark } from '../components/presence'
 import { ConflictResolver, focusAfterResolve } from '../components/ConflictResolver'
 import type { ConflictResolution, ConflictTarget } from '../components/ConflictResolver'
 import {
@@ -551,6 +555,17 @@ function fmtDayTime(on: string | null, at: string | null, baseIso: string): stri
 }
 
 const WEEKDAY = ['日', '月', '火', '水', '木', '金', '土'] as const
+
+/** 要約の行で日報のバイタルの欄を言う言葉（他の端末が入力中の欄。Presence） */
+const DAILY_VITAL_WORD: Record<string, string> = {
+  measured_at: '時刻',
+  temp: '体温',
+  spo2: 'SpO2',
+  sys_bp: '血圧',
+  dia_bp: '血圧',
+  pulse: '脈',
+  symptom: '症状',
+}
 
 /**
  * シート内の日付表記（実物と同じ「26年8月28日(金)」）。
@@ -1518,6 +1533,8 @@ interface DaySheetProps {
   onComposing: (day: string, composing: boolean, residentId: number | null) => void
   /** いまこの日の申し送りを書いている**他の**職員（Presence。この端末の分は含まない） */
   othersHere: PresenceHere[]
+  /** バイタルの欄を他の端末が入力中かの表示と、この端末が欄に入った／離れたの通知（Presence） */
+  presence: CellPresence
   /** 施設長として選べる職員のID。null＝絞らない（全員から選べる） */
   managerStaffId: number | null
   /** 取得が終わった（親が選択日の位置合わせをやり直す） */
@@ -1702,7 +1719,6 @@ export function DailySheetPage({
   // 現場では「他者がいつ記載しているか把握できない」ために、同じ入居者・同じ出来事を
   // 二人がそれぞれ書き進めてしまう（2026-09-05 聞き取り）。打鍵中の文字は配らず、
   // 「どの日の・誰について書いているか」だけを配って、書く前に気づけるようにする。
-  const [othersHere, setOthersHere] = useState<PresenceHere[]>([])
   /** 各日の「書きかけ」。DaySheet から届く */
   const composingRef = useRef(new Map<string, number | null>())
   const [composingTick, setComposingTick] = useState(0)
@@ -1720,29 +1736,18 @@ export function DailySheetPage({
     [],
   )
 
-  const presenceRef = useRef<ReturnType<typeof joinNotePresence> | null>(null)
-  useEffect(() => {
-    if (actorId === null) return
-    const p = joinNotePresence({ staffId: actorId, day, residentId: null }, setOthersHere)
-    presenceRef.current = p
-    return () => {
-      presenceRef.current = null
-      setOthersHere([])
-      p.stop()
-    }
-  }, [actorId])
-
-  useEffect(() => {
-    const p = presenceRef.current
-    if (p === null || actorId === null) return
-    // 書きかけがあればその日を、無ければ見ている日を居場所として配る
+  // 申し送りを書いている（書きかけがある）間だけ、その日・その対象を居場所として配る。
+  // 見ているだけの端末は配らない（相手の画面に「書いています」を出し続けない・2026-09-23 修正）。
+  // バイタルの欄に入っている間は、その欄を配る（欄単位の「入力中」表示）。
+  // 受け取り（参加）は全端末で行い、記録する職員を選んでいない端末も参加する（相手の画面には「別の端末」）
+  const presenceIdle = useMemo(() => {
     const first = [...composingRef.current.entries()][0]
-    p.update({
-      staffId: actorId,
-      day: first ? first[0] : day,
-      residentId: first ? first[1] : null,
-    })
-  }, [actorId, day, composingTick])
+    return first ? { day: first[0], residentId: first[1] } : null
+    // composingRef は ref。書きかけの変化は composingTick で受ける
+  }, [composingTick])
+  const presence = useCellPresence({ actorId, idle: presenceIdle, staff })
+  /** 申し送りを書いている他の端末（バイタルの欄を入力中の端末は除く＝申し送りの表示は従来どおり） */
+  const othersHere: PresenceHere[] = useMemo(() => notePresence(presence.others), [presence.others])
 
   /**
    * 変更通知の絞り込みに使う「いま出している日」。
@@ -1987,6 +1992,19 @@ export function DailySheetPage({
         </div>
       )}
 
+      {/* 他の端末が入力中のバイタルの欄の要約（誰が・どこを）。無い時も1行の高さを取る＝出ても表を押し下げない */}
+      <PresenceSummary
+        text={presence.summary((p) => {
+          if (p.cell.table !== 'vitals' || !visibleDays.includes(p.day)) return null
+          const kind = p.cell.kind
+          if (kind !== 'observation' && kind !== 'symptom') return null
+          const r = residents.find((x) => x.id === p.residentId)
+          const when = p.day === day ? '' : ` ${fmtSheetDay(p.day)}`
+          const word = DAILY_VITAL_WORD[p.cell.field] ?? ''
+          return `${residentName(r, p.residentId)}${when} ${kind === 'observation' ? '発熱者' : '他症状者'} ${word}`.trim()
+        })}
+      />
+
       <SheetFrame>
         {/* 器の幅は「画面幅」か「固定列の合計（SHEET_MIN_W）」の広い方で決める。
             w-max（＝width: max-content）にすると器の幅が中身の最大コンテンツ幅になり、
@@ -2021,6 +2039,7 @@ export function DailySheetPage({
                 onDirty={handleDirty}
                 onComposing={handleComposing}
                 othersHere={othersHere.filter((o) => o.day === d)}
+                presence={presence}
                 managerStaffId={managerStaffId}
                 onLoaded={handleLoaded}
                 onPickDay={goDay}
@@ -2063,6 +2082,7 @@ function DaySheet({
   onDirty,
   onComposing,
   othersHere,
+  presence,
   managerStaffId,
   onLoaded,
   onPickDay,
@@ -3748,6 +3768,7 @@ function DaySheet({
       .map(([id, held]) => ({ id: Number(id), held })),
     onSaveOrphan: saveOrphanAsNew,
     onDropOrphan: dropOrphan,
+    presence,
   }
 
   /** バイタル欄（発熱者・他症状者）の受け渡し。サーバー側の更新待ちの間はバイタルのセルだけ読み取り専用にする */
@@ -4031,6 +4052,8 @@ interface SheetCtx {
   orphans: { id: number; held: HeldVital }[]
   onSaveOrphan: (vitalId: number) => void
   onDropOrphan: (vitalId: number) => void
+  /** 他の端末がバイタルの欄を入力中かの表示と、この端末が欄に入った／離れたの通知（Presence） */
+  presence: CellPresence
 }
 
 /**
@@ -4426,15 +4449,14 @@ function DayHeader({
         <p aria-live="polite" className="px-1 py-1 text-warn">
           <span aria-hidden="true">▲ </span>
           {(() => {
-            const names = othersHere
-              .map((o) => staffName(ctx.staffById.get(o.staffId), o.staffId))
-              .filter((n) => n !== '')
-              .join('・')
+            // 同じ職員は1つにまとめ、記録する職員を選んでいない端末は「別の端末（2台）」のように台数でまとめる（2026-09-23）
+            const names = presenceWhoNames(othersHere, (id) => staffName(ctx.staffById.get(id), id)).join('・')
             const who = names === '' ? `他 ${othersHere.length} 名` : names
             const targets = othersHere
               .map((o) => (o.residentId === null ? null : ctx.residentById.get(o.residentId)))
               .filter((r): r is Resident => r != null)
               .map((r) => noteDisplayName(r))
+              .filter((n, i, all) => all.indexOf(n) === i)
             return targets.length > 0
               ? `${who}が、いま${targets.join('・')}の申し送りを書いています`
               : `${who}が、いまこの日の申し送りを書いています`
@@ -4721,12 +4743,58 @@ type UpdateVitalFn = (
   basePatch?: Partial<Omit<Vital, 'id' | 'rev'>>,
 ) => void
 
+/**
+ * Presence の照合に使う、この枠の居場所（日・利用者・種別・行 id）。
+ * 利用者を選んでいない書きかけの行は渡さない（どの欄か相手に伝えられない）
+ */
+interface VitalSetPlace {
+  presence: CellPresence
+  day: string
+  residentId: number
+  kind: 'observation' | 'symptom'
+  /** 既にある行の id（まだ行が無い枠は null） */
+  id: number | null
+}
+
+/** 日報の枠の列 → 保存の列（血圧は上下を1つの欄に描くので2列） */
+const SET_FIELD_COLUMNS: Record<keyof VitalSetInput, VitalCellField[]> = {
+  at: ['measured_at'],
+  temp: ['temp'],
+  spo2: ['spo2'],
+  bp: ['sys_bp', 'dia_bp'],
+  pulse: ['pulse'],
+}
+
+/** 枠の中の1欄の、Presence の照合に使う形（血圧は上下の2列） */
+function setCellTargets(place: VitalSetPlace, columns: VitalCellField[]): CellTarget[] {
+  return columns.map((field) => ({
+    table: 'vitals',
+    day: place.day,
+    residentId: place.residentId,
+    field,
+    kind: place.kind,
+    id: place.id,
+  }))
+}
+
+/** SheetCell に渡す Presence の2つ（他の端末の印・この欄に入った／離れた）。place が無ければ何も渡さない */
+function setCellPresence(place: VitalSetPlace | undefined, columns: VitalCellField[]) {
+  if (!place) return {}
+  const targets = setCellTargets(place, columns)
+  const mine = focusOf(targets[0])
+  return {
+    busy: place.presence.cellBusy(targets),
+    onEditStart: () => place.presence.enter(mine),
+  }
+}
+
 /** 1枠（時 KT SpO2 BP P）の描画。保存済みなら update、空き枠なら insert を呼ぶ */
 function VitalSetCells({
   name,
   vital,
   input,
   disabled,
+  place,
   onInput,
   onCommit,
   onError,
@@ -4735,6 +4803,8 @@ function VitalSetCells({
   vital: Vital | null
   input: VitalSetInput | null
   disabled: boolean
+  /** 他の端末が入力中かの表示と通知に使う居場所（利用者を選んでいない書きかけの行は省略） */
+  place?: VitalSetPlace
   onInput?: (patch: Partial<VitalSetInput>) => void
   onCommit: (
     patch: Partial<Omit<Vital, 'id' | 'rev'>>,
@@ -4822,6 +4892,7 @@ function VitalSetCells({
         // 行の地色（縞・書きかけの行）を透かす。しきい値がある時は SheetCell 側で
         // level の色が優先されるので、意味のある色は縞に負けない（指示16）
         tone="row"
+        {...setCellPresence(place, SET_FIELD_COLUMNS[f])}
       />
     </Cell>
   )
@@ -4888,6 +4959,12 @@ function FeverBlock({
                 {/* 食い違いを解決した後のフォーカスの戻り先（タブ順には入れない） */}
                 <span id={vitalNameId(ctx.day, row.key)} tabIndex={-1} className="truncate font-bold">
                   {name}
+                  {/* 他の端末がこの方の発熱者の欄を入力中（「✎」・読み上げは「入力中: 職員B」）。
+                      日報に出ない種別（定時など）の入力中は数えない */}
+                  {(() => {
+                    const busy = ctx.presence.rowBusy('vitals', ctx.day, row.residentId, ['observation'])
+                    return busy === null ? null : <RowBusyMark text={busy} />
+                  })()}
                 </span>
               </Cell>
               {row.slots.map((v, i) => (
@@ -4897,6 +4974,7 @@ function FeverBlock({
                   vital={v}
                   input={null}
                   disabled={ctx.disabled}
+                  place={{ presence: ctx.presence, day: ctx.day, residentId: row.residentId, kind: 'observation', id: v?.id ?? null }}
                   onError={(m) => ctx.setStatus(row.key, { tone: 'danger', text: m })}
                   onCommit={(patch, clearing, label, basePatch) => {
                     if (v) onUpdate(v, patch, row.key, clearing, label, basePatch)
@@ -4939,6 +5017,11 @@ function FeverBlock({
                   input={s}
                   // 2回目以降は1回目を保存してから記入する（保存前に消えてしまう入力を作らない）
                   disabled={disabled || i > 0}
+                  place={
+                    d.residentId == null
+                      ? undefined
+                      : { presence: ctx.presence, day: ctx.day, residentId: d.residentId, kind: 'observation', id: null }
+                  }
                   onError={(m) => ctx.setStatus(d.key, { tone: 'danger', text: m })}
                   onInput={(patch) =>
                     onPatchDraft(d.key, {
@@ -5044,6 +5127,12 @@ function SymptomBlock({
                 {/* 食い違いを解決した後のフォーカスの戻り先（タブ順には入れない） */}
                 <span id={vitalNameId(ctx.day, key)} tabIndex={-1} className="truncate font-bold">
                   {name}
+                  {/* 他の端末がこの方の他症状者の欄を入力中（「✎」・読み上げは「入力中: 職員B」）。
+                      日報に出ない種別（定時など）の入力中は数えない */}
+                  {(() => {
+                    const busy = ctx.presence.rowBusy('vitals', ctx.day, v.resident_id, ['symptom'])
+                    return busy === null ? null : <RowBusyMark text={busy} />
+                  })()}
                 </span>
               </Cell>
               <VitalSetCells
@@ -5051,6 +5140,7 @@ function SymptomBlock({
                 vital={v}
                 input={null}
                 disabled={ctx.disabled}
+                place={{ presence: ctx.presence, day: ctx.day, residentId: v.resident_id, kind: 'symptom', id: v.id }}
                 onError={(m) => ctx.setStatus(key, { tone: 'danger', text: m })}
                 onCommit={(patch, clearing, label, basePatch) =>
                   onUpdate(v, patch, key, clearing, label, basePatch)
@@ -5080,6 +5170,10 @@ function SymptomBlock({
                   ariaLabel={`${name} の症状`}
                   as="div"
                   tone="row"
+                  {...setCellPresence(
+                    { presence: ctx.presence, day: ctx.day, residentId: v.resident_id, kind: 'symptom', id: v.id },
+                    ['symptom'],
+                  )}
                 />
               </Cell>
             </Row>
@@ -5115,6 +5209,11 @@ function SymptomBlock({
                 vital={null}
                 input={set}
                 disabled={disabled}
+                place={
+                  d.residentId == null
+                    ? undefined
+                    : { presence: ctx.presence, day: ctx.day, residentId: d.residentId, kind: 'symptom', id: null }
+                }
                 onError={(m) => ctx.setStatus(d.key, { tone: 'danger', text: m })}
                 onInput={(patch) => onPatchDraft(d.key, { sets: [{ ...set, ...patch }] })}
                 onCommit={(patch) => {
@@ -5150,6 +5249,12 @@ function SymptomBlock({
                   ariaLabel="症状"
                   as="div"
                   tone="row"
+                  {...setCellPresence(
+                    d.residentId == null
+                      ? undefined
+                      : { presence: ctx.presence, day: ctx.day, residentId: d.residentId, kind: 'symptom', id: null },
+                    ['symptom'],
+                  )}
                 />
               </Cell>
             </Row>

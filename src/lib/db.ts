@@ -49,6 +49,15 @@ import type {
   VitalKind,
 } from './types'
 import { LS } from './types'
+import {
+  notePresence,
+  othersFromState,
+  PRESENCE_HEARTBEAT_MS,
+  PRESENCE_TOPIC,
+  presenceMeta,
+  samePresence,
+} from './presence'
+import type { PresenceHere } from './presence'
 
 // ── 契約で定義された戻り値 ───────────────────────────────────────────────────
 export type Conflict = 'conflict'
@@ -4097,81 +4106,137 @@ export function subscribeChanges(cb: (table: string, info?: ChangeInfo) => void)
  *   「誰も居ない」として静かに成立する（画面はこれが無くても使える）。
  * ★配るのは職員IDと居場所（日付・対象の利用者ID）だけ。**氏名も本文も配らない**
  *   （受け取った側が自分の持つ職員名簿で引いて表示する）。
+ * ★2026-09-23 拡張（欄単位の「入力中」表示・docs/design/concurrent-entry.md §8）: 同じチャンネルで、
+ *   バイタル・食事のどの欄を入力中か（表と列名・区分・種別・行 id）と、最後に配り直した時刻 at を足して配る。
+ *   職員を選んでいない端末も staffId=null で参加する（旧版は staffId が数値でない要素を捨てるので、
+ *   旧版の画面には出ないだけで壊れない）。入力中の値は配らない。
  */
-export interface PresenceHere {
-  /** 職員ID。名簿と照合して氏名を出すのは受け取る側 */
-  staffId: number
-  /** 開いている日（YYYY-MM-DD） */
-  day: string
-  /** 対象の利用者ID。null＝対象を選んでいない／全体宛 */
-  residentId: number | null
-}
-
-function normalizePresence(row: unknown): PresenceHere | null {
-  const r = asRecord(row)
-  if (r === null) return null
-  const staffId = idNum(r.staffId)
-  const day = dateStr(r.day)
-  if (staffId === null || day === null) return null
-  return { staffId, day, residentId: idNum(r.residentId) }
-}
+// 型と受け取った値の正規化は src/lib/presence.ts（純関数・テスト対象）。画面はここから import する
+export type { PresenceCell, PresenceHere } from './presence'
 
 /**
- * 申し送りを書いている人の居場所を配り、他の人の居場所を受け取る。
- * room は用途ごとに分ける（いまは申し送りだけ）。戻り値の update で自分の居場所を更新し、
+ * 受け取った要素の at を見直す間隔（sync が来なくても、古くなった要素を消すため）。
+ * 自分の at の配り直し（PRESENCE_HEARTBEAT_MS）もこの刻みで確かめる＝配り直しは 60〜75 秒ごと
+ */
+const PRESENCE_TICK_MS = 15_000
+/** 同じ名前のチャンネルが閉じ終わるのを待つ上限（画面の切替直後。realtime-js は閉じるまで同じ実体を返す） */
+const PRESENCE_WAIT_CLOSE_MS = 5_000
+
+/**
+ * 居場所を配り、他の端末の居場所を受け取る（Presence・チャンネル PRESENCE_TOPIC）。
+ * - self が null の間は配らずに受け取るだけ（バイタル・食事の画面で、どの欄にも入っていない時）。
+ *   update(null) で配るのをやめる（untrack）
+ * - 配っている間は PRESENCE_HEARTBEAT_MS ごとに at を付け直して配り直す（打鍵ごとには配らない）
+ * - 受け取った要素は正規化し、古い at（PRESENCE_STALE_MS 超）と自分の鍵を除いて onChange へ渡す。
+ *   sync が来なくても PRESENCE_TICK_MS ごとに見直す（切断を検知できなかった端末の残骸を消す）
+ * - 接続できない・Realtime が使えない時は、何も渡さず（誰も居ない扱い）例外も出さない
  * 戻り値の stop で抜ける（画面を離れる時に必ず呼ぶ）。
  */
-export function joinNotePresence(
-  self: PresenceHere,
+export function joinPresence(
+  self: PresenceHere | null,
   onChange: (others: PresenceHere[]) => void,
-): { update: (next: PresenceHere) => void; stop: () => void } {
+): { update: (next: PresenceHere | null) => void; stop: () => void } {
   let cancelled = false
   let client: SupabaseClient | null = null
   let channel: ReturnType<SupabaseClient['channel']> | null = null
-  let current = self
-  const key = `s${self.staffId}-${Math.random().toString(36).slice(2, 8)}`
+  let joined = false
+  let current: PresenceHere | null = self
+  let trackedAt = 0
+  let last: PresenceHere[] = []
+  let tick: ReturnType<typeof setInterval> | null = null
+  // 鍵は参加ごとに別（同じ職員が別の端末・別のタブで開いていても、自分の分だけを除ける）
+  const key = `s${self?.staffId ?? 'x'}-${Math.random().toString(36).slice(2, 8)}`
+
+  const emit = (ch: ReturnType<SupabaseClient['channel']>) => {
+    if (cancelled) return
+    try {
+      const next = othersFromState(ch.presenceState(), key, Date.now())
+      if (samePresence(next, last)) return
+      last = next
+      onChange(next)
+    } catch {
+      // 受け取った値が読めない。表示しないだけで画面は続ける
+    }
+  }
+
+  const push = () => {
+    const ch = channel
+    if (ch === null || cancelled || !joined) return
+    if (current === null) {
+      trackedAt = 0
+      void ch.untrack().catch(() => {})
+      return
+    }
+    trackedAt = Date.now()
+    void ch.track(presenceMeta(current, trackedAt)).catch(() => {})
+  }
 
   void (async () => {
     try {
       const sb = await getClient()
       if (cancelled) return
-      client = sb
-      const ch = sb.channel('cl_note_presence', { config: { presence: { key } } })
-      ch.on('presence', { event: 'sync' }, () => {
+      // 直前の画面が同じチャンネルを閉じている最中なら、閉じ終わるまで待つ
+      // （閉じる前に channel() を呼ぶと閉じかけの実体が返り、受け口を足せずに参加できない）
+      const topic = `realtime:${PRESENCE_TOPIC}`
+      const waitUntil = Date.now() + PRESENCE_WAIT_CLOSE_MS
+      const open = () => (typeof sb.getChannels === 'function' ? sb.getChannels() : [])
+      while (open().some((c) => c.topic === topic)) {
+        if (Date.now() > waitUntil) return // 閉じない。誰も居ない扱いで画面は成立する
+        await new Promise((r) => setTimeout(r, 100))
         if (cancelled) return
-        const state = ch.presenceState() as Record<string, unknown[]>
-        const others: PresenceHere[] = []
-        for (const [k, metas] of Object.entries(state)) {
-          if (k === key) continue // 自分は出さない
-          const first = Array.isArray(metas) ? metas[0] : null
-          const p = normalizePresence(first)
-          if (p !== null) others.push(p)
-        }
-        onChange(others)
-      })
+      }
+      client = sb
+      const ch = sb.channel(PRESENCE_TOPIC, { config: { presence: { key } } })
+      ch.on('presence', { event: 'sync' }, () => emit(ch))
       channel = ch
       ch.subscribe((status: string) => {
-        if (!cancelled && status === 'SUBSCRIBED') void ch.track(current)
+        if (cancelled || status !== 'SUBSCRIBED') return
+        joined = true
+        push()
       })
+      tick = setInterval(() => {
+        if (cancelled || !joined) return
+        emit(ch)
+        if (current !== null && Date.now() - trackedAt >= PRESENCE_HEARTBEAT_MS) push()
+      }, PRESENCE_TICK_MS)
     } catch {
       // 接続できない。誰も居ない扱いで画面は成立する
     }
   })()
 
   return {
-    update: (next: PresenceHere) => {
+    update: (next: PresenceHere | null) => {
       current = next
-      if (channel !== null && !cancelled) void channel.track(next)
+      push()
     },
     stop: () => {
       cancelled = true
+      if (tick !== null) clearInterval(tick)
+      tick = null
       if (client !== null && channel !== null) {
-        void channel.untrack()
-        void client.removeChannel(channel)
+        const ch = channel
+        void ch.untrack().catch(() => {})
+        void client.removeChannel(ch).catch(() => {})
       }
       channel = null
     },
   }
+}
+
+/**
+ * 申し送りを書いている人の居場所を配り、他の人の居場所を受け取る。
+ * 受け取るのは申し送りの居場所だけ（バイタル・食事の欄を入力中の要素は除く）。
+ * 実体は joinPresence（同じチャンネル）。戻り値の update で自分の居場所を更新し、
+ * 戻り値の stop で抜ける（画面を離れる時に必ず呼ぶ）。
+ * self・update に null を渡している間は配らない（受け取るだけ）。書いていない端末が
+ * 「書いています」と出続けないよう、書き始めるまでは null にする（2026-09-23）
+ */
+export function joinNotePresence(
+  self: PresenceHere | null,
+  onChange: (others: PresenceHere[]) => void,
+): { update: (next: PresenceHere | null) => void; stop: () => void } {
+  const p = joinPresence(self, (others) => onChange(notePresence(others)))
+  return { update: (next: PresenceHere | null) => p.update(next), stop: p.stop }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

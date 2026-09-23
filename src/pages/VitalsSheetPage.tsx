@@ -102,6 +102,10 @@ import {
 import type { Edits } from '../lib/rowSync'
 import type { ConflictColumn } from '../lib/conflict'
 import { LEAVE_TITLE, registerUnsaved } from '../lib/leaveGuard'
+import { focusOf, useCellPresence } from '../hooks/useCellPresence'
+import type { CellPresence } from '../hooks/useCellPresence'
+import type { CellTarget } from '../lib/presence'
+import { PresenceSummary, RowBusyMark } from '../components/presence'
 import '../styles/sheet.css'
 
 // ── 定数 ─────────────────────────────────────────────────────
@@ -182,6 +186,8 @@ const LEVEL_FN: Record<Field, (v: number | null) => Level> = {
 /** この画面が扱う行の種別（発熱者=observation・他症状者=symptom は日報シートの担当） */
 type RowKind = 'routine' | 'recheck'
 const KIND_LABEL: Record<RowKind, string> = { routine: '定時', recheck: '再検' }
+/** この画面に出す種別（行見出しの「入力中」はこの種別の欄だけを数える） */
+const SHEET_KINDS: readonly RowKind[] = ['routine', 'recheck']
 
 /** フロア絞り込みの「全」 */
 const FLOOR_ALL = 'all'
@@ -767,6 +773,9 @@ export function VitalsSheetPage({
   const clearResolveRef = useRef<((ok: boolean) => void) | null>(null)
 
   const actorId = propActorId !== undefined ? propActorId : getActorId()
+  // 他の端末が今まさに入力している欄（Presence・表示だけ。保存は妨げない）。
+  // この画面は欄に入っている間だけ配り、それ以外は受け取るだけ
+  const presence = useCellPresence({ actorId: actorId ?? null })
   const today = todayIso()
 
   useEffect(() => {
@@ -1898,6 +1907,19 @@ export function VitalsSheetPage({
         ) : null}
       </div>
 
+      {/* 他の端末が入力中の欄の要約（誰が・どこを）。無い時も1行の高さを取る＝出ても表を押し下げない */}
+      <PresenceSummary
+        text={presence.summary((p) => {
+          if (p.cell.table !== 'vitals' || !dayList.includes(p.day)) return null
+          const kind = p.cell.kind ?? 'routine'
+          if (!(SHEET_KINDS as readonly string[]).includes(kind) || !(FIELDS as string[]).includes(p.cell.field)) return null
+          const r = visibleResidents.find((x) => x.id === p.residentId)
+          if (!r) return null
+          const when = p.day === today ? '' : ` ${fmtDayLabel(p.day)}`
+          return `${r.name}${when}${kind === 'recheck' ? ' 再検' : ''} ${FIELD_LABEL[p.cell.field as Field]}`
+        })}
+      />
+
       {/* ── 表（3状態: 空はここで出し分ける） ── */}
       {residents.length === 0 ? (
         <div className="pt-4">
@@ -2027,6 +2049,7 @@ export function VitalsSheetPage({
                     removable={removable}
                     notices={notices}
                     onCommitCell={onCommitCell}
+                    presence={presence}
                     onAddRecheck={addRecheckRow}
                     onRemoveRecheck={removeRecheckRow}
                     onReload={() => void load()}
@@ -2110,6 +2133,8 @@ interface FragmentRowProps {
   removable?: boolean
   notices: { day: string; rec: Rec | undefined }[]
   onCommitCell: (row: TableRow, day: string, field: Field, raw: string, meta?: { base: string }) => void
+  /** 他の端末が入力中の欄・行の表示と、この端末が欄に入った／離れたの通知（Presence） */
+  presence: CellPresence
   onAddRecheck: (residentId: number) => void
   onRemoveRecheck: (residentId: number) => void
   onReload: () => void
@@ -2135,6 +2160,7 @@ function FragmentRow({
   removable = false,
   notices,
   onCommitCell,
+  presence,
   onAddRecheck,
   onRemoveRecheck,
   onReload,
@@ -2145,6 +2171,9 @@ function FragmentRow({
 }: FragmentRowProps) {
   // 縞は行が持つ。左固定の2列は他の列の上に重なるので、透けないよう同じ色を自分でも持つ
   const rowBg = alt ? ROW_ALT : ROW_PLAIN
+  // 他の端末がこの入居者のどこかの欄を入力中（表示している日のどれか）。欄が画面外でも気づけるよう
+  // 氏名の行（定時の行）に出す
+  const rowBusy = isRoutine ? presence.rowBusy('vitals', dayList, row.residentId, SHEET_KINDS) : null
   return (
     <>
       <tr style={{ height: ROW_H }} className={rowBg}>
@@ -2167,7 +2196,11 @@ function FragmentRow({
             // 切り詰め（truncate）はセルではなく氏名の span に持たせる
             // ＝ボタンのフォーカスリングがセルに切り取られない
             <div className="flex items-center gap-1">
-              <span className="min-w-0 flex-1 truncate">{name}</span>
+              {/* 他の端末が入力中の時は氏名の後ろに「✎」（読み上げは「入力中: 職員B」）。1文字なので並びは崩さない */}
+              <span className="min-w-0 flex-1 truncate">
+                {name}
+                {rowBusy !== null ? <RowBusyMark text={rowBusy} /> : null}
+              </span>
               <button
                 type="button"
                 disabled={!editable}
@@ -2218,6 +2251,15 @@ function FragmentRow({
               const bad = parsed != null && outOfRange(f, parsed)
               // 範囲外・未確定の入力にはしきい値の色を付けない（誤った意味づけを避ける）
               const level = parsed != null && !bad ? LEVEL_FN[f](parsed) : null
+              // この欄（Presence の照合）。再検は行 id で指す（まだ行が無い枠は id なし）
+              const target: CellTarget = {
+                table: 'vitals',
+                day,
+                residentId: row.residentId,
+                field: f,
+                kind: row.kind,
+                id: isRoutine ? null : (rec?.vitalId ?? null),
+              }
               return (
                 <SheetCell
                   key={f}
@@ -2225,6 +2267,8 @@ function FragmentRow({
                   onCommit={
                     editable ? (v: string, meta: { base: string }) => onCommitCell(row, day, f, v, meta) : undefined
                   }
+                  busy={presence.cellBusy(target)}
+                  onEditStart={() => presence.enter(focusOf(target))}
                   align="center"
                   width={FIELD_WIDTH[f]}
                   level={level}

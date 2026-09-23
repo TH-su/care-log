@@ -39,6 +39,7 @@ import {
 import { addDays, fmtDayLabel, fmtTimeHM, todayIso } from '../lib/format'
 import { IMPORTANCE_LABEL, LS, noteDisplayName, ROLE_TAGS, SHIFT_LABEL } from '../lib/types'
 import type { PresenceHere } from '../lib/db'
+import { presenceOnDay, presenceWhoNames } from '../lib/presence'
 import type { Importance, Note, Resident, Shift, Staff } from '../lib/types'
 
 // ── 定数 ──────────────────────────────────────────────
@@ -606,37 +607,34 @@ export function NoteFormPage() {
 
   /**
    * いまどこを書いているかを配り、他の人の居場所を受け取る（Presence）。
-   * 参加は画面にいる間ずっと1本。居場所（日付・対象）が変わるたびに更新する。
-   * 記録者が未選択の間は参加しない（誰が書いているかを名乗れないため）。
+   * 参加（受け取り）は画面にいる間ずっと1本。記録者を選んでいなくても受け取る。
+   * 配るのは書いている間（対象を選んだ・本文を打ち始めた）だけで、開いただけでは配らない
+   * （相手の画面に「書いています」を出し続けない・2026-09-23）。記録者が未選択なら staffId=null（相手には「別の端末」）。
    */
+  const composing = form.targetPicked || form.body.trim() !== ''
+  const hereNow = (): PresenceHere | null =>
+    composing
+      ? { staffId: form.reporterId, day: form.noteOn, residentId: form.targetPicked ? form.residentId : null }
+      : null
   const presenceRef = useRef<ReturnType<typeof joinNotePresence> | null>(null)
   useEffect(() => {
-    const staffId = form.reporterId
-    if (staffId === null) return
-    const here: PresenceHere = {
-      staffId,
-      day: form.noteOn,
-      residentId: form.targetPicked ? form.residentId : null,
-    }
-    const p = joinNotePresence(here, setOthersHere)
+    const p = joinNotePresence(null, setOthersHere)
     presenceRef.current = p
     return () => {
       presenceRef.current = null
       setOthersHere([])
       p.stop()
     }
-    // 参加は記録者が決まった時に1回。居場所の変化は下の effect が update で伝える
-  }, [form.reporterId])
+    // 参加は画面にいる間に1回。居場所の変化は下の effect が update で伝える
+  }, [])
 
   useEffect(() => {
-    const p = presenceRef.current
-    if (p === null || form.reporterId === null) return
-    p.update({
-      staffId: form.reporterId,
-      day: form.noteOn,
-      residentId: form.targetPicked ? form.residentId : null,
-    })
-  }, [form.reporterId, form.noteOn, form.targetPicked, form.residentId])
+    presenceRef.current?.update(hereNow())
+    // hereNow は下の値だけから作る（打鍵のたびには配らない＝本文は「空かどうか」だけを見る）
+  }, [composing, form.reporterId, form.noteOn, form.targetPicked, form.residentId])
+
+  /** この画面で開いている日の申し送りを書いている他の端末だけ（別の日を書いている人は出さない） */
+  const othersOnDay = presenceOnDay(othersHere, form.noteOn)
 
   // ★ここから下は早期 return がある。Hook はすべてこの上に置くこと（規則違反で画面が落ちる）
   if (phase === 'loading') {
@@ -795,24 +793,22 @@ export function NoteFormPage() {
                 {/* いま同じところを書いている人（Presence・2026-09-05 追加）。
                     現場では「他者がいつ記載しているか把握できない」ために同じ出来事を
                     二人が書いてしまう。打鍵中の文字は配らず、居場所だけを知らせる */}
-                {othersHere.length > 0 && (
+                {othersOnDay.length > 0 && (
                   <p aria-live="polite" className="mt-2 rounded-md border border-warn bg-warn-bg p-3 text-sm text-ink">
                     <span aria-hidden="true" className="mr-1">▲</span>
                     {(() => {
-                      const sameTarget = othersHere.filter(
+                      const sameTarget = othersOnDay.filter(
                         (o) => form.targetPicked && o.residentId === form.residentId,
                       )
+                      // 同じ職員は1つにまとめ、記録する職員を選んでいない端末は「別の端末（2台）」のように台数でまとめる（2026-09-23）
                       const names = (list: PresenceHere[]) =>
-                        list
-                          .map((o) => staffById.get(o.staffId)?.name)
-                          .filter((n): n is string => typeof n === 'string' && n !== '')
-                          .join('・')
+                        presenceWhoNames(list, (id) => staffById.get(id)?.name ?? null, null).join('・')
                       if (sameTarget.length > 0) {
                         const n = names(sameTarget)
                         return `${n === '' ? `他 ${sameTarget.length} 名` : n}が、いま${targetText}の申し送りを書いています。同じ内容にならないか確かめてください。`
                       }
-                      const n = names(othersHere)
-                      return `${n === '' ? `他 ${othersHere.length} 名` : n}が、いま${dayLabel}の申し送りを書いています。`
+                      const n = names(othersOnDay)
+                      return `${n === '' ? `他 ${othersOnDay.length} 名` : n}が、いま${dayLabel}の申し送りを書いています。`
                     })()}
                   </p>
                 )}

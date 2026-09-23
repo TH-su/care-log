@@ -440,7 +440,14 @@ let LG = null
 let RS = null
 // 0011 apply_cell_edits の JS の写しと契約の表（素の Postgres でも同じ表を流して一致を実測する）
 let CC = null
+// 欄単位の「入力中」表示（Presence）の純関数
+let PR = null
 if (process.env[PROBE_ENV] !== '1') {
+  try {
+    PR = await import('../src/lib/presence.ts')
+  } catch {
+    PR = null
+  }
   try {
     CF = await import('../src/lib/conflict.ts')
     HV = await import('../src/lib/historyView.ts')
@@ -468,6 +475,8 @@ if (process.env[PROBE_ENV] === '1') {
   else it('行の入力と保存の共通の仕組みの検証', { skip: TS_UNSUPPORTED }, () => {})
   if (CC) registerCellContractTests()
   else it('欄ごとの compare-and-set の契約の検証', { skip: TS_UNSUPPORTED }, () => {})
+  if (PR) registerPresenceTests()
+  else it('欄単位の「入力中」表示（Presence）の検証', { skip: TS_UNSUPPORTED }, () => {})
   if (DB && CC && RS) registerDbTests()
   else it('送信キュー・入力解禁ゲートの検証', { skip: DB_UNSUPPORTED }, () => {})
 } else {
@@ -3703,4 +3712,306 @@ function registerRowSyncTests() {
       })
     })
   }
+}
+
+// ══════════════════════════════════════════════════════════════
+// 欄単位の「入力中」表示（Presence・docs/design/concurrent-entry.md §8）
+//
+// - 受け取った要素の正規化（旧形式・新形式・壊れた値・古い at の除外）
+// - 欄との照合キー（食事・定時・定時以外の行 id・血圧の上下）
+// - 表示の文字（「職員B 入力中」「別の端末で入力中」「入力中: 職員B」・読み上げ文）
+// 職員・利用者は数値IDだけ。名前は検証用の仮名（職員B 等）を関数で引かせる
+// ══════════════════════════════════════════════════════════════
+
+function registerPresenceTests() {
+  const NOW = Date.parse('2026-09-23T03:00:00.000Z')
+  const iso = (msAgo) => new Date(NOW - msAgo).toISOString()
+  const D = '2026-09-23'
+  const names = new Map([
+    [2, '職員B'],
+    [3, '職員C'],
+  ])
+  const nameOf = (id) => names.get(id) ?? null
+
+  describe('Presence: 受け取った要素の正規化（normalizePresence）', () => {
+    it('旧形式（cell・at なし）はそのまま申し送りの居場所として受ける', () => {
+      assert.deepEqual(PR.normalizePresence({ staffId: 2, day: D, residentId: 1 }, NOW), {
+        staffId: 2,
+        day: D,
+        residentId: 1,
+      })
+    })
+    it('新形式（cell・at あり）を受ける。定時のバイタルは種別を補い、行 id は持たない', () => {
+      const p = PR.normalizePresence(
+        { staffId: 2, day: D, residentId: 1, cell: { table: 'vitals', field: 'temp', id: 9 }, at: iso(1000) },
+        NOW,
+      )
+      assert.deepEqual(p.cell, { table: 'vitals', field: 'temp', kind: 'routine' })
+      assert.equal(p.at, iso(1000))
+    })
+    it('定時以外のバイタルは行 id を持てる（まだ行が無い枠は id なし）', () => {
+      const a = PR.normalizePresence({ staffId: 2, day: D, residentId: 1, cell: { table: 'vitals', field: 'pulse', kind: 'recheck', id: '12' } }, NOW)
+      assert.deepEqual(a.cell, { table: 'vitals', field: 'pulse', kind: 'recheck', id: 12 })
+      const b = PR.normalizePresence({ staffId: 2, day: D, residentId: 1, cell: { table: 'vitals', field: 'pulse', kind: 'observation' } }, NOW)
+      assert.deepEqual(b.cell, { table: 'vitals', field: 'pulse', kind: 'observation' })
+    })
+    it('食事は区分つきで受ける', () => {
+      const p = PR.normalizePresence({ staffId: null, day: D, residentId: 4, cell: { table: 'meals', field: 'main_amount', slot: 'lunch' } }, NOW)
+      assert.deepEqual(p, { staffId: null, day: D, residentId: 4, cell: { table: 'meals', field: 'main_amount', slot: 'lunch' } })
+    })
+    it('staffId が無い・null は「職員を選んでいない端末」（null）。数字の文字列は数値にする', () => {
+      assert.equal(PR.normalizePresence({ day: D, residentId: null }, NOW).staffId, null)
+      assert.equal(PR.normalizePresence({ staffId: null, day: D }, NOW).staffId, null)
+      assert.equal(PR.normalizePresence({ staffId: '3', day: D }, NOW).staffId, 3)
+    })
+    it('壊れた値は捨てる（表示しない）', () => {
+      const bad = [
+        null,
+        'x',
+        [],
+        { staffId: 'abc', day: D },
+        { staffId: 0, day: D },
+        { staffId: 1.5, day: D },
+        { staffId: 2 },
+        { staffId: 2, day: '9/23' },
+        { staffId: 2, day: D, residentId: 1, cell: 'temp' },
+        { staffId: 2, day: D, residentId: 1, cell: { table: 'fluid_intake', field: 'amount_ml' } },
+        { staffId: 2, day: D, residentId: 1, cell: { table: 'vitals', field: 'body' } },
+        { staffId: 2, day: D, residentId: 1, cell: { table: 'vitals', field: 'temp', kind: 'daily' } },
+        { staffId: 2, day: D, residentId: 1, cell: { table: 'vitals', field: 'temp', kind: 'recheck', id: -1 } },
+        { staffId: 2, day: D, residentId: 1, cell: { table: 'meals', field: 'main_amount' } },
+        { staffId: 2, day: D, residentId: 1, cell: { table: 'meals', field: 'main_amount', slot: 'brunch' } },
+        { staffId: 2, day: D, residentId: null, cell: { table: 'vitals', field: 'temp' } },
+        { staffId: 2, day: D, residentId: 1, at: 12345 },
+        { staffId: 2, day: D, residentId: 1, at: 'きのう' },
+      ]
+      for (const b of bad) assert.equal(PR.normalizePresence(b, NOW), null, JSON.stringify(b))
+    })
+    it('at が3分より古い要素は捨てる（ちょうど3分は受ける）。未来の時刻は時計のずれとして受ける', () => {
+      const base = { staffId: 2, day: D, residentId: 1, cell: { table: 'vitals', field: 'temp' } }
+      assert.equal(PR.normalizePresence({ ...base, at: iso(PR.PRESENCE_STALE_MS + 1) }, NOW), null)
+      assert.notEqual(PR.normalizePresence({ ...base, at: iso(PR.PRESENCE_STALE_MS) }, NOW), null)
+      assert.notEqual(PR.normalizePresence({ ...base, at: iso(-60_000) }, NOW), null)
+    })
+    it('入力中の値・氏名など余計な項目は受け取っても持ち込まない', () => {
+      const p = PR.normalizePresence(
+        { staffId: 2, day: D, residentId: 1, name: '仮名', value: '36.8', cell: { table: 'vitals', field: 'temp', value: '36.8' } },
+        NOW,
+      )
+      assert.deepEqual(Object.keys(p).sort(), ['cell', 'day', 'residentId', 'staffId'])
+      assert.deepEqual(Object.keys(p.cell).sort(), ['field', 'kind', 'table'])
+    })
+  })
+
+  describe('Presence: presenceState から自分以外を取り出す（othersFromState）', () => {
+    it('自分の鍵だけを除く（同じ職員の別の端末は出す）。旧形式と新形式が混ざっても読める', () => {
+      const state = {
+        'me-1': [{ staffId: 2, day: D, residentId: 1, cell: { table: 'vitals', field: 'temp' }, at: iso(0) }],
+        's2-aaa': [{ staffId: 2, day: D, residentId: 1, cell: { table: 'vitals', field: 'temp' }, at: iso(0) }],
+        's3-old': [{ staffId: 3, day: D, residentId: null, presence_ref: 'x' }],
+        'sx-bbb': [{ staffId: null, day: D, residentId: 2, cell: { table: 'meals', field: 'status', slot: 'breakfast' }, at: iso(0) }],
+        broken: [{ staffId: 'x', day: D }],
+        stale: [{ staffId: 3, day: D, residentId: 1, cell: { table: 'vitals', field: 'pulse' }, at: iso(10 * 60_000) }],
+        notArray: { staffId: 3, day: D },
+      }
+      const out = PR.othersFromState(state, 'me-1', NOW)
+      assert.deepEqual(out.map((p) => p.staffId), [2, 3, null])
+      assert.deepEqual(PR.notePresence(out).map((p) => p.staffId), [3])
+    })
+    it('読めない state は空', () => {
+      assert.deepEqual(PR.othersFromState(null, 'k', NOW), [])
+      assert.deepEqual(PR.othersFromState([], 'k', NOW), [])
+    })
+  })
+
+  describe('Presence: 配る中身（presenceMeta）', () => {
+    it('配るのは職員ID・日付・利用者ID・欄・時刻だけ。欄が無ければ cell を載せない（旧版と同じ形）', () => {
+      const a = PR.presenceMeta({ staffId: null, day: D, residentId: null }, NOW)
+      assert.deepEqual(a, { staffId: null, day: D, residentId: null, at: new Date(NOW).toISOString() })
+      const b = PR.presenceMeta({ staffId: 2, day: D, residentId: 1, cell: { table: 'meals', field: 'side_amount', slot: 'dinner' } }, NOW)
+      assert.deepEqual(Object.keys(b).sort(), ['at', 'cell', 'day', 'residentId', 'staffId'])
+      // 受け取る側の正規化を通しても同じ中身になる（往復）
+      assert.deepEqual(PR.normalizePresence(b, NOW), b)
+    })
+  })
+
+  describe('Presence: 欄との照合キー（cellKey・indexPresence）', () => {
+    it('食事は区分、定時は自然キー、定時以外は行 id（まだ無い枠は new）で分ける', () => {
+      assert.equal(PR.cellKey({ table: 'meals', day: D, residentId: 1, field: 'main_amount', slot: 'lunch' }), `meals|${D}|1|main_amount|lunch`)
+      assert.equal(PR.cellKey({ table: 'vitals', day: D, residentId: 1, field: 'temp' }), `vitals|${D}|1|temp|routine`)
+      assert.equal(PR.cellKey({ table: 'vitals', day: D, residentId: 1, field: 'temp', kind: 'routine', id: 5 }), `vitals|${D}|1|temp|routine`)
+      assert.equal(PR.cellKey({ table: 'vitals', day: D, residentId: 1, field: 'temp', kind: 'recheck', id: 5 }), `vitals|${D}|1|temp|recheck#5`)
+      assert.equal(PR.cellKey({ table: 'vitals', day: D, residentId: 1, field: 'temp', kind: 'observation', id: null }), `vitals|${D}|1|temp|observation#new`)
+    })
+    const list = [
+      PR.normalizePresence({ staffId: 2, day: D, residentId: 1, cell: { table: 'vitals', field: 'sys_bp', kind: 'observation', id: 7 } }, NOW),
+      PR.normalizePresence({ staffId: 3, day: D, residentId: 1, cell: { table: 'vitals', field: 'temp' } }, NOW),
+      PR.normalizePresence({ staffId: null, day: '2026-09-22', residentId: 1, cell: { table: 'vitals', field: 'temp' } }, NOW),
+      PR.normalizePresence({ staffId: 2, day: D, residentId: 2, cell: { table: 'meals', field: 'status', slot: 'lunch' } }, NOW),
+      PR.normalizePresence({ staffId: 3, day: D, residentId: 1 }, NOW), // 申し送りの居場所（欄なし）は欄・行に数えない
+    ]
+    const ix = PR.indexPresence(list)
+    it('欄に当たる要素だけを引く（日・利用者・種別・行 id が違えば当たらない）', () => {
+      const t = (over) => ({ table: 'vitals', day: D, residentId: 1, field: 'temp', ...over })
+      assert.deepEqual(PR.presenceForCell(ix, [t({})]).map((p) => p.staffId), [3])
+      assert.deepEqual(PR.presenceForCell(ix, [t({ day: '2026-09-22' })]).map((p) => p.staffId), [null])
+      assert.deepEqual(PR.presenceForCell(ix, [t({ residentId: 2 })]), [])
+      // 日報の血圧は上下を1つの欄に描く＝2列を並べて渡すと、どちらの列でも当たる
+      const bp = ['sys_bp', 'dia_bp'].map((field) => t({ field, kind: 'observation', id: 7 }))
+      assert.deepEqual(PR.presenceForCell(ix, bp).map((p) => p.staffId), [2])
+      assert.deepEqual(PR.presenceForCell(ix, [t({ field: 'sys_bp', kind: 'observation', id: 8 })]), [])
+      assert.deepEqual(PR.presenceForCell(ix, [t({ field: 'sys_bp', kind: 'observation', id: null })]), [])
+    })
+    it('行（利用者）単位は表示している日に絞り、種別を渡すとその種別だけを数える', () => {
+      assert.deepEqual(PR.presenceForRow(ix, 'vitals', [D], 1).map((p) => p.staffId), [2, 3])
+      assert.deepEqual(PR.presenceForRow(ix, 'vitals', [D, '2026-09-22'], 1).map((p) => p.staffId), [2, 3, null])
+      assert.deepEqual(PR.presenceForRow(ix, 'vitals', [D], 1, ['observation']).map((p) => p.staffId), [2])
+      assert.deepEqual(PR.presenceForRow(ix, 'vitals', [D], 1, ['routine', 'recheck']).map((p) => p.staffId), [3])
+      assert.deepEqual(PR.presenceForRow(ix, 'meals', [D], 2).map((p) => p.staffId), [2])
+      assert.deepEqual(PR.presenceForRow(ix, 'meals', [D], 1), [])
+    })
+  })
+
+  describe('Presence: 表示の文字（cellBusyText・rowBusyText）', () => {
+    const p = (staffId) => ({ staffId, day: D, residentId: 1, cell: { table: 'vitals', field: 'temp', kind: 'routine' } })
+    it('当たる要素が無ければ何も出さない', () => {
+      assert.equal(PR.cellBusyText([], nameOf), null)
+      assert.equal(PR.rowBusyText([], nameOf), null)
+    })
+    it('名前を引ける職員は「職員B 入力中」、読み上げは「職員Bが入力中です」', () => {
+      assert.deepEqual(PR.cellBusyText([p(2)], nameOf), { label: '職員B 入力中', speech: '職員Bが入力中です' })
+      assert.equal(PR.rowBusyText([p(2)], nameOf), '入力中: 職員B')
+    })
+    it('職員を選んでいない端末だけなら「別の端末で入力中」', () => {
+      assert.deepEqual(PR.cellBusyText([p(null)], nameOf), { label: '別の端末で入力中', speech: '別の端末で入力中です' })
+      assert.equal(PR.rowBusyText([p(null)], nameOf), '入力中: 別の端末')
+    })
+    it('名簿に無い職員は「他の職員」。同じ人は1回だけ・複数は「・」でつなぐ', () => {
+      assert.equal(PR.cellBusyText([p(99)], nameOf).label, '他の職員 入力中')
+      assert.equal(PR.cellBusyText([p(2), p(2), p(null), p(3)], nameOf).label, '職員B・別の端末・職員C 入力中')
+      assert.equal(PR.rowBusyText([p(2), p(3)], nameOf), '入力中: 職員B・職員C')
+    })
+    it('配り直しで at だけが変わった一覧は「変わっていない」とみなす（描き直さない）', () => {
+      const a = [{ ...p(2), at: iso(0) }]
+      const b = [{ ...p(2), at: iso(30_000) }]
+      assert.equal(PR.samePresence(a, b), true)
+      assert.equal(PR.samePresence(a, [p(3)]), false)
+      assert.equal(PR.samePresence(a, []), false)
+    })
+  })
+
+  describe('Presence: 名前の並び（同じ職員を1つに・別の端末は台数で）', () => {
+    const p = (staffId, over = {}) => ({ staffId, day: D, residentId: 1, ...over })
+    it('同じ職員は1回、職員を選んでいない端末は1台なら「別の端末」、2台以上は「別の端末（n台）」', () => {
+      assert.deepEqual(PR.presenceWhoNames([p(2), p(null), p(2), p(3), p(null)], nameOf), ['職員B', '別の端末（2台）', '職員C'])
+      assert.deepEqual(PR.presenceWhoNames([p(null)], nameOf), ['別の端末'])
+      assert.deepEqual(PR.presenceWhoNames([], nameOf), [])
+    })
+    it('名簿に無い職員は既定で「他の職員」（1回）。unknown=null なら並びに入れない', () => {
+      assert.deepEqual(PR.presenceWhoNames([p(98), p(99), p(2)], nameOf), ['他の職員', '職員B'])
+      assert.deepEqual(PR.presenceWhoNames([p(98), p(2)], nameOf, null), ['職員B'])
+    })
+    it('欄の読み上げも台数でまとめる', () => {
+      assert.deepEqual(PR.cellBusyText([p(null), p(null)], nameOf), { label: '別の端末（2台）で入力中', speech: '別の端末（2台）で入力中です' })
+      assert.equal(PR.rowBusyText([p(2), p(2), p(null), p(null), p(null)], nameOf), '入力中: 職員B・別の端末（3台）')
+    })
+  })
+
+  describe('Presence: 表の上の要約（presenceSummaryText）', () => {
+    const e = (staffId, what) => ({ p: { staffId, day: D, residentId: 1 }, what })
+    it('1件も無ければ null', () => {
+      assert.equal(PR.presenceSummaryText([], nameOf), null)
+    })
+    it('職員ごとに括弧でまとめる（同じ職員が2台で同じ欄は1件に）', () => {
+      assert.equal(
+        PR.presenceSummaryText([e(2, '利用者01 体温'), e(2, '利用者01 体温'), e(2, '利用者02 脈拍')], nameOf),
+        '入力中: 職員B（利用者01 体温、利用者02 脈拍）',
+      )
+    })
+    it('職員を選んでいない端末は1つにまとめ、2台以上は台数を添える', () => {
+      assert.equal(
+        PR.presenceSummaryText([e(2, '利用者01 体温'), e(null, '利用者03 昼 主食')], nameOf),
+        '入力中: 職員B（利用者01 体温）・別の端末（利用者03 昼 主食）',
+      )
+      assert.equal(
+        PR.presenceSummaryText([e(null, '利用者03 昼 主食'), e(null, '利用者04 昼 副食')], nameOf),
+        '入力中: 別の端末（2台・利用者03 昼 主食、利用者04 昼 副食）',
+      )
+    })
+    it('最大3件まで出し、残りは「ほか n 件」。名簿に無い職員は「他の職員」', () => {
+      const t = PR.presenceSummaryText(
+        [e(2, 'A 体温'), e(3, 'B 体温'), e(99, 'C 体温'), e(null, 'D 体温'), e(2, 'E 脈拍')],
+        nameOf,
+      )
+      assert.equal(t, '入力中: 職員B（A 体温、E 脈拍）・職員C（B 体温） ほか 2 件')
+      assert.equal(PR.presenceSummaryText([e(99, 'C 体温')], nameOf), '入力中: 他の職員（C 体温）')
+    })
+  })
+
+  describe('Presence: 日付の絞り込み・取り消しのキー', () => {
+    it('presenceOnDay: その日を開いている要素だけ', () => {
+      const list = [
+        { staffId: 2, day: D, residentId: 1 },
+        { staffId: 3, day: '2026-09-22', residentId: 1 },
+      ]
+      assert.deepEqual(PR.presenceOnDay(list, D).map((p) => p.staffId), [2])
+      assert.deepEqual(PR.presenceOnDay(list, '2026-09-21'), [])
+    })
+    it('createFocusSlot: 入った時の印で外す（入った後に欄の形が変わっても＝再検に行 id が付いても外せる）', () => {
+      const slot = PR.createFocusSlot()
+      const cell = { table: 'vitals', field: 'temp', kind: 'recheck' }
+      const t1 = slot.enter({ day: D, residentId: 1, cell })
+      cell.id = 55 // 入っている間に行ができて id が付いた
+      assert.equal(slot.leave(t1), true)
+      assert.equal(slot.current(), null)
+    })
+    it('createFocusSlot: 別の欄へ移った後に古い欄の「離れた」が届いても、新しい欄は外さない', () => {
+      const slot = PR.createFocusSlot()
+      const t1 = slot.enter('A')
+      const t2 = slot.enter('B')
+      assert.equal(slot.leave(t1), false)
+      assert.equal(slot.current(), 'B')
+      assert.equal(slot.isCurrent(t2), true)
+      assert.equal(slot.leave(t2), true)
+      assert.equal(slot.leave(t2), false)
+    })
+  })
+
+  describe('Presence: 画面の配線（静的検査）', () => {
+    const src = (path) => readFileSync(new URL(`../src/${path}`, import.meta.url), 'utf8')
+    it('5画面が共通のフック useCellPresence を使う（画面ごとに作り分けない）', () => {
+      for (const p of ['VitalsSheetPage.tsx', 'VitalsGridPage.tsx', 'MealsSheetPage.tsx', 'MealsGridPage.tsx', 'DailySheetPage.tsx']) {
+        assert.match(src(`pages/${p}`), /useCellPresence\(\{ actorId/, p)
+      }
+    })
+    it('日報は記録する職員を選んでいなくても参加し、配るのは書きかけがある時だけ（見ているだけの端末は配らない）', () => {
+      const s = src('pages/DailySheetPage.tsx')
+      assert.doesNotMatch(s, /if \(actorId === null\) return\s*\n\s*const p = joinNotePresence/)
+      assert.match(s, /return first \? \{ day: first\[0\], residentId: first\[1\] \} : null/)
+      assert.match(s, /presenceWhoNames\(othersHere,/)
+    })
+    it('申し送りフォームは開いただけでは配らず（受け取りだけ）、開いている日の要素だけを出す', () => {
+      const s = src('pages/NoteFormPage.tsx')
+      assert.match(s, /joinNotePresence\(null, setOthersHere\)/)
+      assert.match(s, /const composing = form\.targetPicked \|\| form\.body\.trim\(\) !== ''/)
+      assert.match(s, /presenceOnDay\(othersHere, form\.noteOn\)/)
+    })
+    it('食事一括は触れただけ（pointerdown）では配らず、押す操作の確定（click）とフォーカスで配る', () => {
+      const s = src('pages/MealsGridPage.tsx')
+      assert.doesNotMatch(s, /onPointerDown/)
+      assert.match(s, /onClick: touch/)
+      assert.match(s, /onFocus: touch/)
+    })
+    it('欄に名前の文字を出さない（「✎」印と読み上げだけ）。行見出しも「✎」だけ', () => {
+      const s = src('components/presence.tsx')
+      assert.doesNotMatch(s, /busy\.label/)
+      assert.match(s, /role="img" aria-label=\{text\}/)
+    })
+    it('チャンネルは申し送りと同じ1本（joinNotePresence は joinPresence の上に載る）', () => {
+      const s = src('lib/db.ts')
+      assert.match(s, /sb\.channel\(PRESENCE_TOPIC/)
+      assert.equal((s.match(/\.channel\('cl_note_presence'/g) ?? []).length, 0)
+      assert.match(s, /const p = joinPresence\(self, \(others\) => onChange\(notePresence\(others\)\)\)/)
+    })
+  })
 }

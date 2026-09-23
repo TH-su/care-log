@@ -14,6 +14,7 @@
 // - Tailwind はトークン由来クラスのみ（色・px の直書き・arbitrary value を書かない）
 
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import type { FocusEvent as ReactFocusEvent } from 'react'
 import {
   DbError,
   discardPendingRow,
@@ -67,6 +68,10 @@ import {
 import type { Edits } from '../lib/rowSync'
 import { registerUnsaved } from '../lib/leaveGuard'
 import type { MealField } from '../lib/conflict'
+import { focusOf, useCellPresence } from '../hooks/useCellPresence'
+import type { BusyText, CellTarget } from '../lib/presence'
+import { BUSY_RING_OUTSIDE, BusyMark, PresenceSummary, RowBusyMark } from '../components/presence'
+import type { LeaveCell } from '../hooks/useCellPresence'
 
 // ── 定数 ─────────────────────────────────────────────────────
 
@@ -299,6 +304,14 @@ function PhaseBadge({ phase }: { phase: RowPhase }) {
   )
 }
 
+/** 要約の行で欄を言う言葉（他の端末が入力中の欄。Presence） */
+const MEAL_FIELD_WORD: Record<string, string> = {
+  main_amount: '主食',
+  side_amount: '副食',
+  status: '状態',
+  note: 'メモ',
+}
+
 // ── 摂取量（0〜10）の11セグメント ─────────────────────────────
 
 interface AmountRowProps {
@@ -306,22 +319,42 @@ interface AmountRowProps {
   groupLabel: string
   value: number | null
   onPick: (value: number) => void
+  /** 他の端末がこの欄を入力中（Presence）。枠と「職員B 入力中」を出す */
+  busy?: BusyText | null
+  /** 読み上げ文の id（aria-describedby） */
+  busyId?: string
+  /** この欄に入った・離れた・押しただけ（Presence へ伝える） */
+  presence?: PresenceHandlers
+}
+
+/** まとまり（主食・副食・状態）に入った／離れたを Presence へ伝える受け口 */
+interface PresenceHandlers {
+  onFocus: () => void
+  onClick: () => void
+  onBlur: (e: ReactFocusEvent<HTMLElement>) => void
 }
 
 /**
  * 44×44 のボタン11個。選択中は「色＋太字」だけに頼らず、
  * ラベル横に選択値を文字で出す（未選択は「未入力」）＋ aria-pressed を付ける。
  */
-function AmountRow({ label, groupLabel, value, onPick }: AmountRowProps) {
+function AmountRow({ label, groupLabel, value, onPick, busy = null, busyId, presence }: AmountRowProps) {
   return (
-    <div className="mt-3">
+    // relative: 他の端末が入力中の「✎」をまとまりの角に置く（高さ・位置を変えない）
+    <div className={`relative mt-3 ${busy ? BUSY_RING_OUTSIDE : ''}`} {...presence}>
+      {busy && busyId ? <BusyMark busy={busy} id={busyId} corner="right" /> : null}
       <div className="flex items-baseline gap-gap">
         <span className="text-sm text-ink2">{label}</span>
         <span className="tabular text-base font-bold text-ink">
           {value == null ? '未入力' : value}
         </span>
       </div>
-      <div role="group" aria-label={groupLabel} className="mt-1 flex flex-wrap gap-gap">
+      <div
+        role="group"
+        aria-label={groupLabel}
+        aria-describedby={busy ? busyId : undefined}
+        className="mt-1 flex flex-wrap gap-gap"
+      >
         {AMOUNTS.map((n) => {
           const on = value === n
           return (
@@ -377,6 +410,14 @@ interface MealRowProps {
   missing: boolean
   onSaveNew: (residentId: number) => void
   onDrop: (residentId: number) => void
+  /** 他の端末が入力中の欄（Presence）。無ければ null */
+  busyMain: BusyText | null
+  busySide: BusyText | null
+  busyStatus: BusyText | null
+  /** 行見出しの「入力中: 職員B」。無ければ null */
+  rowBusy: string | null
+  /** この端末がまとまりに入った（'focus'）・離れた（'blur'）・押しただけ（'touch'）を Presence へ伝える */
+  onPresence: (residentId: number, field: 'main_amount' | 'side_amount' | 'status') => LeaveCell | null
 }
 
 const MealRow = memo(function MealRow({
@@ -401,6 +442,11 @@ const MealRow = memo(function MealRow({
   missing,
   onSaveNew,
   onDrop,
+  busyMain,
+  busySide,
+  busyStatus,
+  rowBusy,
+  onPresence,
 }: MealRowProps) {
   // 加算チップに無い量（80ml・500ml など）を1回で記録するための任意量入力（ui-design §6）
   const [extra, setExtra] = useState('')
@@ -408,6 +454,30 @@ const MealRow = memo(function MealRow({
   const uid = useId()
   const extraId = `${uid}-fluid`
   const extraErrId = `${uid}-fluid-err`
+
+  /**
+   * まとまりに入った／離れたを Presence へ伝える受け口。
+   * - 配るのは押す操作が確定した時（click）とフォーカスした時。触れただけ（スクロールを始めた指）では配らない
+   * - 押すたび・フォーカスするたびに「最後の操作から PRESENCE_TOUCH_HOLD_MS」の取り消しを延ばす
+   *   （タッチ端末ではボタンに触れた後 blur が起きないことがあるため）
+   * - まとまりの外へフォーカスが移ったら（blur）早めに取り消す。どちらか早い方
+   */
+  const leaveRef = useRef<LeaveCell | null>(null)
+  const handlers = (field: 'main_amount' | 'side_amount' | 'status'): PresenceHandlers => {
+    const touch = () => {
+      leaveRef.current = onPresence(resident.id, field)
+    }
+    return {
+      onFocus: touch,
+      onClick: touch,
+      onBlur: (e) => {
+        const to = e.relatedTarget
+        if (to instanceof Node && e.currentTarget.contains(to)) return
+        leaveRef.current?.()
+        leaveRef.current = null
+      },
+    }
+  }
 
   const addExtra = () => {
     const ml = parseFluidMl(extra)
@@ -431,6 +501,8 @@ const MealRow = memo(function MealRow({
           className="min-w-0 flex-1 truncate text-base font-bold text-ink"
         >
           {resident.name}
+          {/* 他の端末がこの方の食事を入力中（「✎」・読み上げは「入力中: 職員B」） */}
+          {rowBusy !== null ? <RowBusyMark text={rowBusy} /> : null}
         </span>
         {outingLabel ? (
           <Chip tone="info">
@@ -449,15 +521,30 @@ const MealRow = memo(function MealRow({
         groupLabel={`${resident.name} の主食の量（0〜10）`}
         value={main}
         onPick={(v) => onAmount(resident.id, 'main_amount', v, main)}
+        busy={busyMain}
+        busyId={`${uid}-busy-main`}
+        presence={handlers('main_amount')}
       />
       <AmountRow
         label="副食"
         groupLabel={`${resident.name} の副食の量（0〜10）`}
         value={side}
         onPick={(v) => onAmount(resident.id, 'side_amount', v, side)}
+        busy={busySide}
+        busyId={`${uid}-busy-side`}
+        presence={handlers('side_amount')}
       />
 
-      <div className="mt-3">
+      <div
+        className={`relative mt-3 ${busyStatus ? BUSY_RING_OUTSIDE : ''}`}
+        {...handlers('status')}
+        // 状態の選択肢（SegmentPicker・ui.tsx は変更しない）に説明を付けられないので、
+        // 他の端末が入力中の間だけこのまとまりを group にして読み上げの説明を付ける
+        role={busyStatus ? 'group' : undefined}
+        aria-label={busyStatus ? '食事の状態' : undefined}
+        aria-describedby={busyStatus ? `${uid}-busy-status` : undefined}
+      >
+        {busyStatus ? <BusyMark busy={busyStatus} id={`${uid}-busy-status`} corner="right" /> : null}
         <span className="text-sm text-ink2">食事の状態</span>
         <div className="mt-1">
           <SegmentPicker
@@ -672,6 +759,9 @@ export function MealsGridPage({
   const { toast, show } = useToast()
 
   const actorId = actorIdProp !== undefined ? actorIdProp : getActorId()
+  // 他の端末が今まさに入力している欄（Presence・表示だけ。保存は妨げない）。
+  // この画面は、主食・副食・状態のまとまりに入っている間だけ配る
+  const presence = useCellPresence({ actorId: actorId ?? null })
   /**
    * ★記録者（操作者）の選択は入力の条件にしない（2026-09-05 指示）。
    *   1台の端末を複数人が使うため、端末に1人を紐づける前提が実務に合わない。
@@ -1235,6 +1325,19 @@ export function MealsGridPage({
     [saveMeal],
   )
 
+  /**
+   * まとまりを操作した（押した・フォーカスした）ことを Presence へ伝える（今日・いま選んでいる食事の区分）。
+   * 最後の操作から PRESENCE_TOUCH_HOLD_MS で取り消す。戻り値は blur で早めに取り消す関数
+   */
+  const { touch: presenceTouch } = presence
+  const onPresence = useCallback(
+    (residentId: number, field: 'main_amount' | 'side_amount' | 'status'): LeaveCell | null => {
+      if (!canInputRef.current) return null
+      return presenceTouch(focusOf({ table: 'meals', day: dayRef.current, residentId, field, slot: slotRef.current }))
+    },
+    [presenceTouch],
+  )
+
   /** 水分の加算（1タップ＝1件の記録）。取り消しはサーバー行を観測できた分だけ受け付ける */
   const onFluid = useCallback(
     (residentId: number, ml: number) => {
@@ -1595,6 +1698,16 @@ export function MealsGridPage({
 
       {error && residents.length > 0 ? <ErrorBlock message={error} onRetry={onReload} /> : null}
 
+      {/* 他の端末が入力中の欄の要約（誰が・どこを）。無い時も1行の高さを取る＝出ても一覧を押し下げない */}
+      <PresenceSummary
+        text={presence.summary((p) => {
+          if (p.cell.table !== 'meals' || p.day !== day || !p.cell.slot) return null
+          const r = visible.find((x) => x.id === p.residentId)
+          if (!r) return null
+          return `${r.name} ${MEAL_SLOT_LABEL[p.cell.slot]} ${MEAL_FIELD_WORD[p.cell.field] ?? ''}`.trim()
+        })}
+      />
+
       {showLoading ? (
         <LoadingBlock label="食事・水分の記録を読み込んでいます…" />
       ) : error && residents.length === 0 ? (
@@ -1615,10 +1728,17 @@ export function MealsGridPage({
               const ov = pending[key] ?? {}
               const fl = fluidByResident.get(r.id)
               const o = outingOnDay(outings, r.id, day)
+              // 他の端末がこの方の、いま選んでいる食事を入力中か（Presence）
+              const at = (field: MealField): CellTarget => ({ table: 'meals', day, residentId: r.id, field, slot })
               return (
                 <MealRow
                   key={r.id}
                   resident={r}
+                  busyMain={presence.cellBusy(at('main_amount'))}
+                  busySide={presence.cellBusy(at('side_amount'))}
+                  busyStatus={presence.cellBusy(at('status'))}
+                  rowBusy={presence.rowBusy('meals', day, r.id)}
+                  onPresence={onPresence}
                   main={ov.main_amount !== undefined ? ov.main_amount : (row?.main_amount ?? null)}
                   side={ov.side_amount !== undefined ? ov.side_amount : (row?.side_amount ?? null)}
                   status={ov.status !== undefined ? ov.status : (row?.status ?? null)}

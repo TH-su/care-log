@@ -23,11 +23,18 @@ L0承認済み。詳細設計の正本: `docs/PLAN.md`・`docs/design/db-design.
 
 ## src/lib/db.ts が export するAPI（他ビルダーはこれを import する）
 
+2026-09-23 に db.ts の export と照合して更新（撤去済みの insertVital / updateVital / insertMeal / updateMeal を外し、
+バイタル・食事の保存 API と Presence を足した）。日報・一覧画面用の追加 API（fetchDailyReport(s)・fetchVitalsSheet・
+fetchMealsSheet・updateNoteFields・saveAttendance・fetchNotesForTargetDay）は `docs/design/sheet-contracts.md` §3。
+
 ```ts
 export type Conflict = 'conflict'
 export type Queued = 'queued'   // 通信失敗→永続キュー(cl_sendQueue／バイタル・食事は cl_sendQueue2)に退避済み
 
+isSupabaseConfigured(): boolean                  // 接続先（.env）が設定されているか
 fetchResidents(): Promise<Resident[]>            // active・room昇順
+fetchAllResidents(): Promise<Resident[]>         // 退居された方も含む全員・居室昇順（申し送りでの表示名の重複判定用）
+setResidentNoteAlias(id: number, alias: string | null): Promise<Resident | Queued>  // 申し送りでの表示名
 fetchStaff(): Promise<Staff[]>                   // active・name昇順
 fetchTimelineChunk(fromIso: string, toIso: string, staffId: number | null): Promise<TimelineChunk>  // RPC timeline_chunk
 fetchKarte(residentId: number, fromIso: string, toIso: string):
@@ -35,18 +42,29 @@ fetchKarte(residentId: number, fromIso: string, toIso: string):
 searchNotes(p: { q: string; target: 'body' | 'reporter'; fromIso: string; toIso: string;
   importance?: Importance; shift?: Shift; limit?: number }): Promise<Note[]>
 
-insertVital(v: Omit<Vital, 'id' | 'rev'>): Promise<Vital | Queued>
-updateVital(id: number, rev: number, patch: Partial<Omit<Vital, 'id' | 'rev'>>): Promise<Vital | Conflict | Queued>
-insertMeal(m: Omit<Meal, 'id' | 'rev'>): Promise<Meal | Queued>
-updateMeal(id: number, rev: number, patch: Partial<Omit<Meal, 'id' | 'rev'>>): Promise<Meal | Conflict | Queued>
+// バイタル・食事の保存（送信待ち → RPC apply_cell_edits の1本。設計の正本は docs/design/concurrent-entry.md）
+saveVitalEdits(target: VitalTarget, sendEdits: CellEditInput<VitalCellField>, opts?: CellSaveOpts):
+  Promise<CellSaveResult<Vital> | Queued>                      // 例外＝サーバーが拒否（送信待ちに rejected として残る）
+saveMealEdits(target: MealTarget, sendEdits: CellEditInput<MealCellField>, opts?: CellSaveOpts):
+  Promise<CellSaveResult<Meal> | Queued>
+pendingRow(table: CellTable, target: VitalTarget | MealTarget): PendingCellRow | null   // その行の送信待ち・止まっている入力
+discardPendingRow(table: CellTable, target: VitalTarget | MealTarget, fields?: readonly string[],
+  vers?: Record<string, string>): Promise<void>                // 取り下げ（vers＝画面が見た版のままの欄だけ）
+fetchLatestVital(target: { routine: true; residentId: number; day: string } | { routine: false; id: number }):
+  Promise<LatestRow<Vital> | null>                             // くらべて選ぶ画面の取り直し
+fetchLatestMeal(residentId: number, day: string, slot: MealSlot): Promise<LatestRow<Meal> | null>
+newClientKey(): string                                         // 定時以外のバイタル・申し送り等の冪等キー
+
+// 水分・申し送り・外出（従来の送り方。opts.editedBy で記入者を記録ごとに渡せる）
 insertFluid(f: Omit<FluidIntake, 'id' | 'rev'>): Promise<FluidIntake | Queued>
-softDeleteFluid(id: number, rev: number): Promise<true | Conflict | Queued>   // 通信断はキューへ退避（2026-09-02）
+softDeleteFluid(id: number, rev: number, opts?: WriteOpts): Promise<true | Conflict | Queued>   // 通信断はキューへ退避（2026-09-02）
 insertNote(n: Omit<Note, 'id' | 'rev' | 'read_count' | 'my_read'>): Promise<Note | Queued>
-updateNote(id: number, rev: number, patch: Partial<Omit<Note, 'id' | 'rev'>>): Promise<Note | Conflict | Queued>
-softDeleteNote(id: number, rev: number): Promise<true | Conflict | Queued>
-endOngoingNote(id: number, rev: number, endedBy: number | null): Promise<Note | Conflict | Queued>  // ended_by に操作者を書く
+updateNote(id: number, rev: number, patch: Partial<Omit<Note, 'id' | 'rev'>>, opts?: WriteOpts): Promise<Note | Conflict | Queued>
+softDeleteNote(id: number, rev: number, opts?: WriteOpts): Promise<true | Conflict | Queued>
+endOngoingNote(id: number, rev: number, endedBy: number | null, opts?: WriteOpts): Promise<Note | Conflict | Queued>  // ended_by に操作者を書く
 insertOuting(o: Omit<Outing, 'id' | 'rev'>): Promise<Outing | Queued>
-setOutingEnd(id: number, rev: number, endOn: string, endAt: string | null): Promise<Outing | Conflict | Queued>  // 部分更新・他項目を送らない
+setOutingEnd(id: number, rev: number, endOn: string, endAt: string | null, opts?: WriteOpts): Promise<Outing | Conflict | Queued>  // 部分更新・他項目を送らない
+setEditor(id: number | null): void                             // 更新系で edited_by として送る操作者（App が確定・切替のたびに呼ぶ）
 
 markRead(noteId: number, staffId: number): Promise<void>       // 明示操作からのみ呼ぶ。通信断はキュー（kind:'read'）へ退避し例外を投げない
 fetchNoteReaders(noteId: number): Promise<Staff[]>             // note_reads×staff・read_at昇順・limit100・氏名表示のみ
@@ -55,14 +73,28 @@ getNativeInputGate(): Promise<{ value: boolean; observed: boolean }>  // observe
 getNativeInputEnabled(): Promise<boolean>                      // 互換用。gate.value を返す（既定 false）
 getAppSetting(key: string): Promise<string | null>
 
-subscribeChanges(cb: (table: string, info?: { event: string; row: Record<string, unknown> | null }) => void): () => void
+subscribeChanges(cb: (table: string, info?: ChangeInfo) => void): () => void
                                                                // Realtime。第2引数は変更行（DELETE は row=null）。受信値は型検査・表示ウィンドウ外は無視
+isSelfWrite(table: string, row: unknown): boolean             // 自分の書込の通知か（行単位で見分ける）
+isSeenRev(seenRev: number | null, row: unknown): boolean
+joinPresence(self: PresenceHere | null, onChange: (others: PresenceHere[]) => void):
+  { update: (next: PresenceHere | null) => void; stop: () => void }   // 居場所の Presence（チャンネル cl_note_presence・DBに書かない）
+joinNotePresence(self: PresenceHere, onChange: (others: PresenceHere[]) => void):
+  { update: (next: PresenceHere) => void; stop: () => void }          // 同じチャンネルの申し送りの居場所だけ（欄を入力中の要素は除く）
 queuePending(): number
 queueSubscribe(cb: (n: number) => void): () => void
-flushQueue(): Promise<void>                                    // 成功観測後にのみキューから消す（保全ゲート）
+flushQueue(force?: boolean): Promise<void>                     // 成功観測後にのみキューから消す（保全ゲート）
+onNetworkBack(): void                                          // 電波が戻った時の再送（待ち時間が残っていても送る）
+isQueueBroken(): boolean                                       // localStorage の未送信データが壊れていて読めなかったか
+isQueuePersisted(): boolean                                    // 退避した書込を端末に残せているか（false＝メモリ上だけ）
 onAuthExpired(cb: () => void): void                            // 401検知→キュー保全のまま再ログインへ
+fetchRecordHistory(p: { residentId?: number | null; fromIso: string; toIso: string; limit?: number }):
+  Promise<RecordHistoryResult>                                 // 変更の記録（0010 未適用なら available:false）
+diffHistoryRow(oldRow: unknown, newRow: unknown): { column: string; before: unknown; after: unknown }[]
 ```
 
+- バイタル・食事は insert / update を端末から直接呼ばない（saveVitalEdits / saveMealEdits → RPC apply_cell_edits が欄ごとに裁く）。
+  下の insert 系の規則は、それ以外の表（水分・申し送り・外出・既読・出勤者・表示名）の従来の送り方に当てはまる
 - insert系: 23505（unique衝突）は他端末先行の証拠 → 既存行を再読込して update に切替（upsert は使わない）
 - 自然キーを持たない insert（notes / fluid_intake / outings / **vitals の routine 以外＝recheck・observation・symptom**）は
   端末生成の冪等キー `client_key` を必ず付ける。キューへ退避した op は同じ client_key で再送し、

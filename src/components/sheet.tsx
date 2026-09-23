@@ -17,6 +17,8 @@ import { Children, useCallback, useEffect, useId, useLayoutEffect, useRef, useSt
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import { LEVEL_MARK, LS, NOTE_COLOR_LABEL, ZOOM_STEPS } from '../lib/types'
 import type { Level, NoteColor, Zoom } from '../lib/types'
+import type { BusyText } from '../lib/presence'
+import { BUSY_RING, BusyMark } from './presence'
 
 // ══════════════════════════════════════════════════════════════
 // 表示倍率（LS.zoom ↔ documentElement の --sheet-zoom）
@@ -389,6 +391,16 @@ export interface SheetCellProps {
    * 最初の列に左罫線を足す方式は、左隣のセルの右罫線と並んで 2px になるため使わない。
    */
   groupEnd?: boolean
+  /**
+   * 他の端末がこの欄を入力中（Presence・2026-09-23 追加）。渡すと枠（破線）と欄の角の「✎」を出し、
+   * 入力要素の aria-describedby で「職員Bが入力中です」を読み上げる。表示だけで編集は妨げない
+   */
+  busy?: BusyText | null
+  /**
+   * 編集を始めた（画面が Presence へ「この欄に入った」を伝える）。戻り値の関数は編集を終えた時に呼ぶ
+   * （入った時に配った欄そのものを取り消すため、終わりの側で欄を組み立て直さない）
+   */
+  onEditStart?: () => (() => void) | void
 }
 
 /**
@@ -410,6 +422,8 @@ export function SheetCell({
   ariaLabel,
   as = 'td',
   groupEnd = false,
+  busy = null,
+  onEditStart,
 }: SheetCellProps) {
   const text = value ?? ''
   const editable = typeof onCommit === 'function'
@@ -423,6 +437,10 @@ export function SheetCell({
   const skipBlurRef = useRef(false)
   /** 編集を始めた時にセルに出ていた文字（構造規約 R-E の基準） */
   const startRef = useRef('')
+  /** 他の端末が入力中の時の読み上げ文の id（aria-describedby） */
+  const busyId = useId()
+  const editStartRef = useRef(onEditStart)
+  editStartRef.current = onEditStart
 
   /** textarea を内容の高さに合わせる（長文は行が伸びる） */
   const autoGrow = useCallback(() => {
@@ -451,6 +469,15 @@ export function SheetCell({
   useEffect(() => {
     if (!editable) setEditing(false)
   }, [editable])
+
+  // 編集の始まり・終わりを画面へ伝える（Presence）。編集中に消えた時も「終わった」を伝える
+  useEffect(() => {
+    if (!isEditing) return
+    const end = editStartRef.current?.()
+    return () => {
+      if (typeof end === 'function') end()
+    }
+  }, [isEditing])
 
   // 確定・取消でセルへフォーカスを戻す（Tab で抜けた時は戻さない）
   useEffect(() => {
@@ -567,6 +594,7 @@ export function SheetCell({
         ref={areaRef}
         value={draft}
         aria-label={ariaLabel}
+        aria-describedby={busy ? busyId : undefined}
         rows={1}
         onChange={(e) => {
           setDraft(e.target.value)
@@ -583,6 +611,7 @@ export function SheetCell({
         type="text"
         value={draft}
         aria-label={ariaLabel}
+        aria-describedby={busy ? busyId : undefined}
         autoComplete="off"
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={onKeyDown}
@@ -596,6 +625,7 @@ export function SheetCell({
       ref={btnRef}
       type="button"
       aria-label={label}
+      aria-describedby={busy ? busyId : undefined}
       onClick={start}
       style={innerStyle}
       className={`${CELL_HIT} block w-full px-1 ${ALIGN_CLASS[align]}`}
@@ -620,22 +650,27 @@ export function SheetCell({
   // relative: 入れ物を位置指定要素にして「後に来たセルが必ず上に描かれる」を保証する。
   // これで、1つ上の行のセルが下へ伸ばした当たり判定（.sheet-hit::before）が
   // このセル（読み取り専用の span でも）を覆えない＝行の取り違えが起きない
-  const wrapClass = `${edge} ${groupEnd ? 'sheet-group-end' : ''} relative p-0 align-top ${look}`
+  const wrapClass = `${edge} ${groupEnd ? 'sheet-group-end' : ''} relative p-0 align-top ${look} ${busy ? BUSY_RING : ''}`
   // 読み取り専用で空のセルは、列見出しだけでは何の欄か分からないので名前を補う
   // （値がある時は付けない＝aria-label で本文を隠さない）。
   // div 経路は aria-label が無視されるため、上の srName を文字として出している
   const wrapLabel = as === 'td' && srName !== null ? srName : undefined
 
+  // 他の端末が入力中の印（枠は wrapClass、「✎」は欄の中の角＝行の高さを変えない・欄の外へ出さない）
+  const busyTag = busy ? <BusyMark busy={busy} id={busyId} corner={align === 'left' ? 'right' : 'left'} /> : null
+
   if (as === 'div') {
     return (
       <div style={wrapStyle} className={wrapClass} aria-label={wrapLabel}>
         {inner}
+        {busyTag}
       </div>
     )
   }
   return (
     <td style={wrapStyle} className={wrapClass} aria-label={wrapLabel}>
       {inner}
+      {busyTag}
     </td>
   )
 }
