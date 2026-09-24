@@ -1633,7 +1633,8 @@ export function MealsGridPage({
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-gap p-4">
       <SectionCard>
-        <div className="flex flex-wrap items-center justify-between gap-gap">
+        {/* bar-compact: スマホの幅では上部のボタンを小さく・間隔を詰める（sheet.css） */}
+        <div className="bar-compact flex flex-wrap items-center justify-between gap-gap">
           <h2 className="text-lg font-bold text-ink">{fmtDayLabel(day)} の食事・水分</h2>
           <button
             type="button"
@@ -1643,7 +1644,7 @@ export function MealsGridPage({
             最新を読み込む
           </button>
         </div>
-        <div className="mt-3">
+        <div className="bar-compact mt-3">
           <span className="text-sm text-ink2">食事の枠</span>
           <div className="mt-1">
             <SegmentPicker
@@ -1655,7 +1656,7 @@ export function MealsGridPage({
           </div>
         </div>
         {floorOptions.length > 0 ? (
-          <div className="mt-3">
+          <div className="bar-compact mt-3">
             <span className="text-sm text-ink2">フロア</span>
             <div className="mt-1">
               <SegmentPicker

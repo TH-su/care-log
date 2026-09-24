@@ -951,6 +951,43 @@
   min-width: 0;
 }
 
+/* ── スマホの幅（480px 以下）では、画面上部の操作ボタンを小さくする（2026-09-24 本人指示）──
+   「iPhoneで使用する際のバイタル画面などでの上部ボタンはもう少し小さくリサイズし、閲覧しやすい状態に」。
+   対象: 一覧の操作バー（.sheet-pickbar＝バイタル一覧・食事一覧）、日報の日付バー（.sheet-bar-fit）、
+   一括入力の上部の切り替え（.bar-compact＝バイタル一括の階・食事一括の食事の枠・フロア・最新を読み込む）。
+   高さ・幅の下限 44px → 36px・文字 14px・左右の余白とボタン同士の間隔を 4px に詰める
+   （本人指示のため HIG の 44pt の目安より小さくする。隣のボタンとは 4px 以上あけて押し間違いを誘わない）。
+   下限は --tap-min（44px 固定）から作る（×9/11 = 36px）＝文字200% でも下限だけが大きくならない
+   （rem で書くと 72px になり、かえって操作バーが高くなった＝実測）。文字・余白・間隔は rem のまま文字の大きさに付いてくる。
+   折り返しの仕組み（上の .sheet-pickbar の規則）はそのまま効く。481px 以上の画面は何も変えない */
+@media (max-width: 480px) {
+  .sheet-pickbar button,
+  .sheet-bar-fit button,
+  .sheet-bar-fit input,
+  .bar-compact button {
+    min-height: calc(var(--tap-min) * 9 / 11);
+    min-width: calc(var(--tap-min) * 9 / 11);
+    font-size: 0.875rem;
+    padding-left: var(--sp-2);
+    padding-right: var(--sp-2);
+  }
+  .sheet-bar-fit label {
+    min-height: calc(var(--tap-min) * 9 / 11);
+    font-size: 0.875rem;
+  }
+  .sheet-pickbar,
+  .sheet-pickbar-group,
+  .sheet-pickbar [role='group'],
+  .sheet-pickbar .gap-gap,
+  .sheet-bar-fit,
+  .sheet-bar-fit [role='group'],
+  .sheet-bar-fit .gap-gap,
+  .bar-compact [role='group'],
+  .bar-compact.gap-gap {
+    gap: var(--sp-1);
+  }
+}
+
 /* ── 入力フォームを狭い画面・大きい文字で画面幅に収める（2026-09-23・申し送りフォーム・外出フォーム）──
    .form-fit はフォームの入れ物（fieldset）に付ける印。
    ・選択ボタン（SegmentPicker・ui.tsx は変更しない）は flex:1（基準の幅 0）なので、幅が足りないと折り返さずに縮み、

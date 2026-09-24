@@ -53,7 +53,7 @@
 //     各セルは幅を持つ入れ物で包んでから SheetCell を置く。
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, ReactNode } from 'react'
+import type { CSSProperties, MutableRefObject, ReactNode } from 'react'
 import {
   ConfirmDialog,
   ErrorBlock,
@@ -1550,6 +1550,79 @@ interface DaySheetProps {
  * （利用者・職員・施設名・入力解禁フラグ・変更通知・トースト・取得のキャッシュ）。
  * 1日ぶんの中身と保存は DaySheet が持つ＝10日表示でも1日表示でも同じ部品を並べるだけになる。
  */
+/**
+ * 日付の行（DayHeader の1段目・data-day-bar）を、その日の枠（section.dsheet-day）を縦にスクロールしている間、
+ * アプリのヘッダの下端に貼り付ける（2026-09-24 本人指示「日付の行はスクロールに付いて動き、常に上部に表示され、
+ * 次の日付に切り替わる際に非表示になる」）。
+ * - シートは横スクロールの枠（SheetFrame・overflow-x:auto）の中にあり、overflow-x が auto だと overflow-y も auto になる。
+ *   枠そのものは縦にスクロールしない（ページが縦にスクロールする）ので、CSS の position: sticky（top）は枠を基準にして
+ *   一度も効かない（実測: 枠の scrollHeight = clientHeight）。そのため縦だけこの関数で位置を決める（横は CSS の sticky）
+ * - 位置 = max(0, ヘッダの下端 − 行の本来の位置)。ただし行が自分の日の枠の下端を越えない＝次の日の枠が上がると押し出される
+ * - 動かすのは transform（--day-bar-y）だけ＝行の高さ・他の行の位置は変えない。印刷の前には元の位置へ戻す
+ */
+function useDayBarPin(dayElsRef: MutableRefObject<Map<string, HTMLElement>>, days: string[]) {
+  useEffect(() => {
+    let raf = 0
+    /** 上に固定されたアプリのヘッダの下端（無ければ画面の上端） */
+    const topLine = (): number => {
+      for (const h of document.querySelectorAll('header')) {
+        const pos = getComputedStyle(h).position
+        if (pos === 'sticky' || pos === 'fixed') return Math.max(0, h.getBoundingClientRect().bottom)
+      }
+      return 0
+    }
+    const setY = (bar: HTMLElement, y: number) => {
+      if (Number(bar.dataset.pinY ?? 0) === y) return
+      bar.dataset.pinY = String(y)
+      if (y === 0) bar.style.removeProperty('--day-bar-y')
+      else bar.style.setProperty('--day-bar-y', `${y}px`)
+    }
+    const pin = () => {
+      raf = 0
+      const line = topLine()
+      for (const sec of dayElsRef.current.values()) {
+        const bar = sec.querySelector<HTMLElement>('[data-day-bar]')
+        if (!bar) continue
+        const cur = Number(bar.dataset.pinY ?? 0)
+        const natural = bar.getBoundingClientRect().top - cur
+        const s = sec.getBoundingClientRect()
+        const bottom = s.bottom - (parseFloat(getComputedStyle(sec).borderBottomWidth) || 0)
+        const max = Math.max(0, bottom - natural - bar.offsetHeight)
+        setY(bar, Math.round(Math.max(0, Math.min(line - natural, max)) * 100) / 100)
+      }
+    }
+    const schedule = () => {
+      if (raf === 0) raf = window.requestAnimationFrame(pin)
+    }
+    const reset = () => {
+      for (const sec of dayElsRef.current.values()) {
+        const bar = sec.querySelector<HTMLElement>('[data-day-bar]')
+        if (bar) setY(bar, 0)
+      }
+    }
+    schedule()
+    window.addEventListener('scroll', schedule, { passive: true })
+    window.addEventListener('resize', schedule)
+    window.addEventListener('beforeprint', reset)
+    window.addEventListener('afterprint', schedule)
+    // 日の中身の読み込み・行の増減で枠の高さが変わった時も測り直す
+    let ro: ResizeObserver | null = null
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(schedule)
+      for (const sec of dayElsRef.current.values()) ro.observe(sec)
+    }
+    return () => {
+      if (raf !== 0) window.cancelAnimationFrame(raf)
+      window.removeEventListener('scroll', schedule)
+      window.removeEventListener('resize', schedule)
+      window.removeEventListener('beforeprint', reset)
+      window.removeEventListener('afterprint', schedule)
+      ro?.disconnect()
+    }
+    // 表示する日が変わると枠が作り直される＝見張り直す
+  }, [dayElsRef, days])
+}
+
 export function DailySheetPage({
   residents: propResidents,
   staff: propStaff,
@@ -1831,6 +1904,9 @@ export function DailySheetPage({
    * （操作を奪わない）。なめらかスクロールにはしない＝何度も走るため。
    */
   const pendingScrollRef = useRef<{ day: string; until: number } | null>(null)
+
+  // 日付の行をスクロールに付いて上に残す（各日の枠の中だけ・次の日の枠が上がると押し出す）
+  useDayBarPin(dayElsRef, visibleDays)
 
   const scrollToDay = useCallback((iso: string) => {
     const el = dayElsRef.current.get(iso)
@@ -4398,11 +4474,20 @@ function DayHeader({
           右＝施設長のとなりに出勤者が横1行（指示6）。
           施設名と「日勤・夜勤日報」はここから外し、施設名は画面最上部の「日報」の右へ移した
           （各日ごとに繰り返す情報ではなく、日付を置くほうがこの位置の役に立つ） */}
-      <div className="flex flex-wrap items-stretch">
+      {/* 日付の行はスクロールしても画面の上（アプリのヘッダの下）に残り、次の日の枠が上がってくると押し出される
+          （2026-09-24 本人指示）。縦の位置は親（DailySheetPage の useDayBarPin）が --day-bar-y で動かす。
+          シートは横スクロールの枠（SheetFrame）の中にあり、枠が縦の sticky の基準になってしまうため CSS の sticky では貼り付かない。
+          背景を持たせて下の行を透かさない。重なりはアプリのヘッダ（z-20）より下・表の中の印（z-10）より上 */}
+      <div
+        data-day-bar=""
+        className="relative flex flex-wrap items-stretch bg-surface"
+        style={{ transform: 'translateY(var(--day-bar-y, 0))', zIndex: 15 }}
+      >
         <div
-          className="shrink-0 border-r border-border"
+          // 横スクロールしても日付は左に残す（横の sticky は枠の中で効く）。背景で下を透かさない
+          className="sticky left-0 shrink-0 border-r border-border bg-surface"
           // 幅は左上セル専用の --w-facility のまま（出勤者の15枠は残りの幅で足りる。sheet.css の計算参照）
-          style={{ width: 'var(--w-facility)', minHeight: 'var(--sheet-row-h-note)' }}
+          style={{ width: 'var(--w-facility)', minHeight: 'var(--sheet-row-h-note)', zIndex: 1 }}
         >
           <DayPicker day={day} onPick={onPickDay} head />
         </div>

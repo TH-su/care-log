@@ -1570,7 +1570,8 @@ export function VitalsGridPage({
         ) : null}
 
         {floorOptions.length > 1 ? (
-          <div className="mt-3">
+          // bar-compact: スマホの幅ではボタンを小さく・間隔を詰める（sheet.css）
+          <div className="bar-compact mt-3">
             <SegmentPicker
               options={floorOptions}
               value={floor}
