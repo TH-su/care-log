@@ -12,6 +12,7 @@ import type { BathCancelReason, BathRecord, BathResult, Resident } from './types
 
 /**
  * 予定者が自動で「全身浴」になる時刻（日本時間・0015_auto_check.sql の cron と同じ。2026-09-27 代表指示）。
+ * デイの休業日（12/31〜1/3 など・app_settings の daycare_closed_dates）は同じ時刻に「訪問介護で入浴」（visit）で入る（0016）。
  * 入浴しなかった方は職員が「チェックを外す」（中止＋理由）。画面の注記はこの値から作る（時刻を直書きしない）
  */
 export const BATH_AUTO_TIME = '12:30'
@@ -113,7 +114,7 @@ export type BathInputCheck = { ok: true } | { ok: false; message: string }
 
 /**
  * 保存前の検証。today は端末の今日（JST の業務日付）。
- * ・区分は4つのどれか ・未来の日付は不可
+ * ・区分は5つのどれか ・未来の日付は不可
  * ・中止は理由が必須、中止以外は理由を持たない（null）
  * ・理由が「その他」の時は備考が必須（空白だけも不可）
  */
@@ -123,7 +124,7 @@ export function validateBathInput(v: BathInput, today: string): BathInputCheck {
     return { ok: false, message: '未来の日付には記録できません。日付を今日以前にしてください。' }
   }
   if (!(BATH_RESULTS as readonly string[]).includes(v.result)) {
-    return { ok: false, message: '区分（全身浴・シャワー浴・部分浴・清拭・中止）を選んでください。' }
+    return { ok: false, message: '区分（全身浴・シャワー浴・部分浴・清拭・訪問介護で入浴・中止）を選んでください。' }
   }
   if (v.result === 'cancel') {
     if (v.cancel_reason === null || !(BATH_CANCEL_REASONS as readonly string[]).includes(v.cancel_reason)) {
@@ -291,6 +292,8 @@ export interface BathMonthTotals {
   billable: number
   partial: number
   cancel: number
+  /** 訪問介護で入浴（デイの休業日）の回数。デイの入浴介助加算の対象ではないので billable に数えない（0016） */
+  visit: number
   /** 予定があったのに記録なし（「未」）の日数 */
   missing: number
 }
@@ -381,12 +384,13 @@ export function aggregateBathMonth(p: {
     const recs = byResident.get(id)
     const anyPlan = days.some((_, i) => plannedOn(id, i))
     if (recs === undefined && !anyPlan) continue
-    const totals: BathMonthTotals = { billable: 0, partial: 0, cancel: 0, missing: 0 }
+    const totals: BathMonthTotals = { billable: 0, partial: 0, cancel: 0, visit: 0, missing: 0 }
     const cells: BathMonthMark[] = days.map((d, i) => {
       const rec = recs?.get(i)
       if (rec !== undefined) {
         if (rec.result === 'full' || rec.result === 'shower') totals.billable += 1
         else if (rec.result === 'partial') totals.partial += 1
+        else if (rec.result === 'visit') totals.visit += 1
         else totals.cancel += 1
         return rec.result
       }

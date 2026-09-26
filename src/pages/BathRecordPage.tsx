@@ -5,11 +5,13 @@
 // その人・その日に未送信の記録（この端末の送信待ち・送信中）がある行は、区分ボタンと取り消しを押せなくする
 // （圏外で続けて押した2件目の追加が 23505 で止まるのを防ぐ。送信待ちそのものは書き換えない・2026-09-26 レビュー3巡目）。
 // 送信待ちの件数が減ったら、その日の記録を読み直して行を記録済みに戻す（自分の書込の通知は isSelfWrite で無視されるため）。
-// 並びは居室順。各行で［全身浴］［シャワー浴］［部分浴・清拭］［中止］を押すと記録する（押し直すと修正、取り消しは確認つき）。
+// 並びは居室順。各行で［全身浴］［シャワー浴］［部分浴・清拭］［訪問介護で入浴］［中止］を押すと記録する（押し直すと修正、取り消しは確認つき）。
 // 12:30（bath.ts の BATH_AUTO_TIME）に DB 側（0015 の cron）が予定者を「全身浴」で自動記録する（2026-09-27 代表指示）。
 // 自動の記録は「全身浴（自動）」と出し、［チェックを外す］で中止の理由を選んで「中止」にする（行は消さない＝加算の根拠として
 // 入浴しなかった理由を残す）。シャワー浴などへの変更も従来どおり。直すと手動の記録（記入者つき）になる。
 // 12:30 より前の今日は従来どおり「未記録」。自動の記録は端末では作らない（この画面は表示と直すだけ）。
+// デイの休業日（12/31〜1/3 など・0016）は、12:30 に予定者が「訪問介護で入浴」（visit・デイの加算対象外）で自動記録される
+// （休業日は訪問介護に振り替えて入浴する・2026-09-27 代表指示）。手でも［訪問介護で入浴］を選べる。
 //
 // 規律:
 // - 取得・保存は db.ts の関数のみ（supabase を直呼びしない）
@@ -546,6 +548,9 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
           <span aria-hidden="true">ⓘ </span>
           {BATH_AUTO_TIME} に予定者は自動で全身浴になります。入浴しなかった方はチェックを外してください
         </p>
+        <p className="mt-1 text-sm text-ink2">
+          休業日（12/31〜1/3 など）は {BATH_AUTO_TIME} に訪問介護での入浴として自動で記録されます
+        </p>
         <p className="mt-1 text-sm text-ink2">※{PARTIAL_NOTE}</p>
         <p className="mt-1 text-sm">
           <Link to="/bath/month" className="inline-flex min-h-tap items-center text-link">
@@ -633,6 +638,7 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
         open={cancelRow !== null}
         name={cancelRow === null ? '' : (residentById.get(cancelRow.residentId)?.name ?? '')}
         uncheck={cancelRow !== null && canUncheckAuto(cancelRow.record)}
+        uncheckFrom={cancelRow?.record?.result ?? null}
         initialReason={cancelRow?.record?.result === 'cancel' ? cancelRow.record.cancel_reason : null}
         initialNote={cancelRow === null ? '' : noteOf(cancelRow)}
         onCancel={() => setCancelFor(null)}
@@ -880,13 +886,15 @@ interface CancelDialogProps {
   name: string
   /** 自動の記録の「チェックを外す」から開いた（入浴しなかった理由を選ぶ案内を出す） */
   uncheck?: boolean
+  /** 「チェックを外す」の元の区分（自動の全身浴／休業日の訪問介護で入浴）。案内の文に出す */
+  uncheckFrom?: BathResult | null
   initialReason: BathCancelReason | null
   initialNote: string
   onCancel: () => void
   onSave: (reason: BathCancelReason, note: string) => void
 }
 
-function CancelDialog({ open, name, uncheck, initialReason, initialNote, onCancel, onSave }: CancelDialogProps) {
+function CancelDialog({ open, name, uncheck, uncheckFrom, initialReason, initialNote, onCancel, onSave }: CancelDialogProps) {
   const [reason, setReason] = useState<BathCancelReason | null>(initialReason)
   const [note, setNote] = useState(initialNote)
   const [showError, setShowError] = useState(false)
@@ -914,7 +922,7 @@ function CancelDialog({ open, name, uncheck, initialReason, initialNote, onCance
         {name ? <p className="mt-1 text-sm text-ink2">{name}</p> : null}
         {uncheck ? (
           <p className="mt-1 text-sm text-ink">
-            自動の「全身浴」を「中止」に変えます。記録は消さずに、入浴しなかった理由を残します。
+            自動の「{BATH_RESULT_LABEL[uncheckFrom ?? 'full']}」を「中止」に変えます。記録は消さずに、入浴しなかった理由を残します。
           </p>
         ) : null}
         <div role="group" aria-label="中止の理由" className="mt-3 grid grid-cols-1 gap-gap">

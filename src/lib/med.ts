@@ -4,9 +4,10 @@
 //
 // 時間帯（朝・昼・夕・眠前）は入居者ごとに med_slots が持つ。その人に設定の無い時間帯は「—」（押せない）。
 // 「未」＝設定のある時間帯で、締め時刻を過ぎても記録が無いもの。過去の日は締めを過ぎたものとして扱う。
-// 自動の時間帯（朝・昼・夕＝MED_AUTO_SLOTS）は、自動の時刻（MED_AUTO_TIMES）に DB 側（0015 の cron）が「服用済み」の記録を作る。
+// 自動の時間帯（朝・昼・夕・眠前＝MED_AUTO_SLOTS）は、自動の時刻（MED_AUTO_TIMES）に DB 側（0015・0016 の cron）が「服用済み」の記録を作る。
 // その時間帯の「未」は締め時刻でなく「自動の時刻から MED_AUTO_GRACE_MIN（15分）過ぎても記録が無い」で付ける
-// （入院・外泊などで自動にしなかった人・cron の失敗を見落とさないため・2026-09-27 チーフ指摘1）。眠前は従来どおり締め時刻。
+// （入院・外泊などで自動にしなかった人・cron の失敗を見落とさないため・2026-09-27 チーフ指摘1）。
+// 眠前も 21:00 に自動になった（0016・2026-09-27 代表指示）ため、締め時刻（MED_DEADLINES）で「未」を決める時間帯は今は無い（表は残す）。
 // 個人情報: ここには氏名も記録本文も薬の名前も書かない（型と計算だけ）。
 
 import { MED_ADMIN_SLOTS, MED_SLOT_LABEL, MED_SLOTS, MED_STATUSES } from './types.ts'
@@ -16,7 +17,8 @@ import { monthDays } from './bath.ts'
 // ── 締め時刻 ────────────────────────────────────────────────────────────────
 
 /**
- * 締め時刻（端末の時刻＝JST 運用）。これを過ぎた今日の未記録は「未」。
+ * 締め時刻（端末の時刻＝JST 運用）。自動でない時間帯は、これを過ぎた今日の未記録が「未」。
+ * 眠前も自動になった（0016）ので今は使われないが、自動の表から外した時の戻り先として残す。
  * 将来は設定から読めるよう、判定は必ずこの表を通す（画面・月次表に時刻を直書きしない）
  */
 export const MED_DEADLINES: Readonly<Record<MedSlot, string>> = {
@@ -27,16 +29,17 @@ export const MED_DEADLINES: Readonly<Record<MedSlot, string>> = {
 }
 
 /**
- * 自動で「服用済み」になる時間帯と時刻（日本時間・0015_auto_check.sql の cron と同じ。2026-09-27 代表指示）。
- * 眠前は自動にしない。画面の注記はこの表から作る（時刻を直書きしない）
+ * 自動で「服用済み」になる時間帯と時刻（日本時間・0015_auto_check.sql／0016_auto_check2.sql の cron と同じ。2026-09-27 代表指示）。
+ * 眠前は 0016 で追加（21:00）。画面の注記はこの表から作る（時刻を直書きしない）
  */
 export const MED_AUTO_TIMES: Readonly<Partial<Record<MedSlot, string>>> = {
   morning: '8:50',
   noon: '13:00',
   evening: '18:20',
+  bedtime: '21:00',
 }
 
-/** 自動で「服用済み」になる時間帯（朝・昼・夕）。「未」は自動の時刻＋15分で判定する */
+/** 自動で「服用済み」になる時間帯（朝・昼・夕・眠前）。「未」は自動の時刻＋15分で判定する */
 export const MED_AUTO_SLOTS: readonly MedSlot[] = MED_SLOTS.filter((s) => MED_AUTO_TIMES[s] !== undefined)
 
 /** 自動の時刻から何分過ぎても記録が無ければ「未」にするか（自動の時間帯だけ） */
@@ -61,7 +64,7 @@ export function isPastMissingLine(slot: MedSlot, day: string, today: string, now
   return nowMin >= autoLine
 }
 
-/** 画面の注記の「朝 8:50・昼 13:00・夕 18:20」 */
+/** 画面の注記の「朝 8:50・昼 13:00・夕 18:20・眠前 21:00」 */
 export function fmtMedAutoTimes(): string {
   return MED_AUTO_SLOTS.map((s) => `${MED_SLOT_LABEL[s]} ${MED_AUTO_TIMES[s] ?? ''}`).join('・')
 }
@@ -180,7 +183,7 @@ export function buildMedDayRows(p: {
   nowMin: number
   /** 「未」を付けてよいか（medMissingAllowed）。省略時は付ける */
   missingAllowed?: boolean
-  /** 自動の時間帯（「未」は自動の時刻＋15分で判定）。省略時は MED_AUTO_SLOTS（朝・昼・夕） */
+  /** 自動の時間帯（「未」は自動の時刻＋15分で判定）。省略時は MED_AUTO_SLOTS（朝・昼・夕・眠前） */
   autoSlots?: readonly MedSlot[]
 }): MedDayRow[] {
   const allowMissing = p.missingAllowed !== false
@@ -414,7 +417,7 @@ function emptyTotals(): MedMonthTotals {
  * ・マス … 記録があれば状態（自動で入った記録は autos が true）。記録が無く、次の全部を満たす時だけ「未」（missing）:
  *     その人の設定（slots＝現在の設定）にある時間帯／締めを過ぎている（今日より前の日、または今日の締め時刻以降）／
  *     startDay（施設全体で最初の与薬の記録の日）以降。startDay が null（記録が1件も無い）なら付けない／退居された方でない／
- *     自動の時間帯（autoSlots・省略時は朝・昼・夕）は締め時刻でなく自動の時刻＋15分で判定する（1日の表と同じ）
+ *     自動の時間帯（autoSlots・省略時は朝・昼・夕・眠前）は締め時刻でなく自動の時刻＋15分で判定する（1日の表と同じ）
  * ・頓服 … その日の頓服の回数
  * その人・その月以外の記録は数えない。同じマスに記録が2件あれば新しい id を採る。
  */
@@ -427,7 +430,7 @@ export function aggregateMedMonth(p: {
   today: string
   nowMin: number
   retired?: boolean
-  /** 自動の時間帯（「未」は自動の時刻＋15分で判定）。省略時は MED_AUTO_SLOTS（朝・昼・夕） */
+  /** 自動の時間帯（「未」は自動の時刻＋15分で判定）。省略時は MED_AUTO_SLOTS（朝・昼・夕・眠前） */
   autoSlots?: readonly MedSlot[]
 }): MedMonthTable {
   const days = monthDays(p.monthKey)

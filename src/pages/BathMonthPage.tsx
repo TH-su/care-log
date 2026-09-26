@@ -2,9 +2,9 @@
 //
 // 行＝在籍の入居者のうち、その月に入浴の予定か記録がある人（居室順）。退居された方も、その月に記録があれば行に出す
 //   （加算の根拠を紙に残すため。行に「退居」と表示。予定だけで記録の無い退居者は出さない・2026-09-26 チーフ裁定）。列＝その月の1日〜月末。
-// マス＝全（全身浴）／シ（シャワー浴）／部（部分浴・清拭）／中（中止）／未（予定があったのに記録なし）。
+// マス＝全（全身浴）／シ（シャワー浴）／部（部分浴・清拭）／訪（訪問介護で入浴・デイの休業日・0016）／中（中止）／未（予定があったのに記録なし）。
 // 自動で入った記録（0015 の cron・12:30）は記号に「*」を添える（「全*」。凡例「*＝自動」・2026-09-27 代表指示）。
-// 右端に月合計（全＋シ＝入浴介助加算の対象の見込み、部、中）。A4 横1枚で印刷できる（PrintArea）。
+// 右端に月合計（全＋シ＝入浴介助加算の対象の見込み、部、中、訪問＝加算の見込みに数えない）。A4 横1枚で印刷できる（PrintArea）。
 //
 // 規律:
 // - 取得は db.ts の fetchAllResidents / fetchBathMonth / fetchBathPlan / fetchBathFirstDay のみ（月の範囲・1行でだけ引く）
@@ -55,7 +55,7 @@ function missingNote(startDay: string | null): string {
   return `「未」は${from}以降・予定は現在の週間計画を当てはめた目安（過去の予定の変更・入院期間は反映されません。今日より後の日と、現在入院中の方には付けません）。`
 }
 const NOTE_NO_PLAN =
-  '入浴予定（週間計画の写し）を取得できないため、「未」は表示していません。記録（全・シ・部・中）はそのまま正しく表示しています。'
+  '入浴予定（週間計画の写し）を取得できないため、「未」は表示していません。記録（全・シ・部・訪・中）はそのまま正しく表示しています。'
 
 /** その月の中で、曜日ごとに最初に来る日（予定は曜日ベースなので7回だけ問い合わせればよい） */
 function firstDayPerWeekday(monthKey: string): Map<number, string> {
@@ -81,7 +81,7 @@ function markLabel(m: BathMonthMark, auto = false): string {
 }
 
 /** 凡例（画面と紙で同じ文） */
-const LEGEND = `全＝全身浴　シ＝シャワー浴　部＝部分浴・清拭　中＝中止　未＝予定あり・記録なし　${AUTO_MARK}＝自動`
+const LEGEND = `全＝全身浴　シ＝シャワー浴　部＝部分浴・清拭　訪＝休業日に訪問介護で入浴（デイの加算対象外）　中＝中止　未＝予定あり・記録なし　${AUTO_MARK}＝自動`
 
 interface Loaded {
   month: string
@@ -353,6 +353,9 @@ function MonthTable({ table, residentById, variant }: MonthTableProps) {
           <th scope="col" rowSpan={2} className={th}>
             中
           </th>
+          <th scope="col" rowSpan={2} className={th}>
+            訪問
+          </th>
         </tr>
         <tr>
           {table.days.map((d) => {
@@ -390,6 +393,7 @@ function MonthTable({ table, residentById, variant }: MonthTableProps) {
               <td className={`${td} ${screen ? 'font-bold' : 'cl-print-strong'}`}>{row.totals.billable}</td>
               <td className={td}>{row.totals.partial}</td>
               <td className={td}>{row.totals.cancel}</td>
+              <td className={td}>{row.totals.visit}</td>
             </tr>
           )
         })}

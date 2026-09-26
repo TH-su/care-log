@@ -119,7 +119,7 @@ attendance ( day date not null, staff_id bigint not null references staff(id),
 -- デイの入浴記録（1行=1人×1業務日。0012・2026-09-26 追加）
 bath_records ( id bigint identity PK, resident_id bigint not null references residents(id),
   bath_on date not null,                         -- 業務日付（JST）
-  result text not null check (result in ('full','shower','partial','cancel')),  -- 全身浴/シャワー浴/部分浴・清拭/中止
+  result text not null check (result in ('full','shower','partial','cancel','visit')),  -- 全身浴/シャワー浴/部分浴・清拭/中止/訪問介護で入浴（visit は 0016）
   cancel_reason text check (null または 'condition','refusal','facility','other'),  -- 体調不良/本人の拒否/事業所の都合/その他
   --   check: result <> 'cancel' or cancel_reason is not null（中止は理由必須。「その他」の備考必須はアプリ側）
   note text, recorded_by bigint references staff(id), rev int default 1,
@@ -161,6 +161,8 @@ med_admin ( id bigint identity PK, resident_id bigint not null references reside
 --   bath_records.auto / med_admin.auto boolean not null default false（自動で入った記録の印。職員が直すと false・記入者つき）
 --   private.care_auto_med(p_slot)（朝・昼・夕のみ）／private.care_auto_bath() を pg_cron が呼ぶ（UTC 23:50・4:00・9:20／3:30＝JST 8:50・13:00・18:20／12:30）
 --   client_key は 'auto:med:<日付>:<時間帯>:<resident_id>' / 'auto:bath:<日付>:<resident_id>'。on conflict do nothing
+--   0016: 眠前も自動（UTC 12:00＝JST 21:00・cron care_auto_med_bedtime）。デイの休業日（app_settings の daycare_closed_dates・
+--   'YYYY-MM-DD' か毎年の 'MM-DD' のカンマ区切り・初期値 '12-31,01-01,01-02,01-03'）は、予定者を result='visit'（訪問介護で入浴）で入れる
 
 -- 事故・ヒヤリハット（1行=1件。0014・2026-09-26 追加）。様式は熊本市の事故報告書（事業者→熊本市）
 incidents ( id bigint identity PK, kind text not null check (kind in ('accident','nearmiss')),
@@ -358,3 +360,4 @@ Supabase 無料枠に自動バックアップは無い（確信度: 高）。介
 - 2026-09-26 移行 0013（服薬の時間帯・与薬の記録）を反映
 - 2026-09-26 移行 0014（事故・ヒヤリハット・事業所の情報のキー）を反映
 - 2026-09-27 移行 0015（与薬・デイの入浴の自動チェック・pg_cron）を反映
+- 2026-09-27 移行 0016（眠前の自動・休業日の訪問介護での入浴 visit）を反映

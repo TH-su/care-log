@@ -208,8 +208,11 @@ export interface Outing {
 
 // ── デイの入浴記録（2026-09-26 追加・契約改訂は代表承認済み・0012_bath_records.sql） ──
 
-/** 入浴の区分。full=全身浴 / shower=シャワー浴 / partial=部分浴・清拭 / cancel=中止 */
-export type BathResult = 'full' | 'shower' | 'partial' | 'cancel'
+/**
+ * 入浴の区分。full=全身浴 / shower=シャワー浴 / partial=部分浴・清拭 / cancel=中止 /
+ * visit=訪問介護で入浴（デイの休業日に訪問介護へ振り替えて入浴した。デイの入浴介助加算の対象外・0016・2026-09-27 代表指示）
+ */
+export type BathResult = 'full' | 'shower' | 'partial' | 'cancel' | 'visit'
 /** 中止の理由。condition=体調不良 / refusal=本人の拒否 / facility=事業所の都合 / other=その他（備考必須） */
 export type BathCancelReason = 'condition' | 'refusal' | 'facility' | 'other'
 
@@ -225,18 +228,19 @@ export interface BathRecord {
   recorded_by: number | null
   rev: number
   /**
-   * 自動で入った記録（0015 の cron が 12:30 に予定者を「全身浴」で作る・recorded_by は null）。
+   * 自動で入った記録（0015 の cron が 12:30 に予定者を「全身浴」で作る。デイの休業日は「訪問介護で入浴」＝0016・recorded_by は null）。
    * 職員が画面で直すと false になる（記入者つき）。0015 未適用の DB の行は無い（false として扱う）
    */
   auto: boolean
 }
 
 /** 画面のボタンの並び（左→右） */
-export const BATH_RESULTS: readonly BathResult[] = ['full', 'shower', 'partial', 'cancel']
+export const BATH_RESULTS: readonly BathResult[] = ['full', 'shower', 'partial', 'visit', 'cancel']
 export const BATH_RESULT_LABEL: Record<BathResult, string> = {
   full: '全身浴',
   shower: 'シャワー浴',
   partial: '部分浴・清拭',
+  visit: '訪問介護で入浴',
   cancel: '中止',
 }
 /** 月次表・印刷の1文字（白黒でも区別できるよう文字で持つ） */
@@ -244,6 +248,7 @@ export const BATH_RESULT_MARK: Record<BathResult, string> = {
   full: '全',
   shower: 'シ',
   partial: '部',
+  visit: '訪',
   cancel: '中',
 }
 export const BATH_CANCEL_REASONS: readonly BathCancelReason[] = ['condition', 'refusal', 'facility', 'other']

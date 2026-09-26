@@ -203,7 +203,7 @@ if (B === null) {
       assert.equal(r1.cells[20], 'missing') // 21日（今日・記録なし）
       assert.equal(r1.cells[27], null) // 28日（今日より後）
       assert.equal(r1.cells[0], null) // 1日（火・予定なし）
-      assert.deepEqual(r1.totals, { billable: 1, partial: 0, cancel: 1, missing: 1 })
+      assert.deepEqual(r1.totals, { billable: 1, partial: 0, cancel: 1, visit: 0, missing: 1 })
     })
     it('合計: 全＋シ（加算対象の見込み）・部・中を分けて数える', () => {
       const t = B.aggregateBathMonth({
@@ -217,7 +217,7 @@ if (B === null) {
         plannedByWeekday: planned,
       })
       const r2 = t.rows.find((r) => r.residentId === 2)
-      assert.deepEqual(r2.totals, { billable: 2, partial: 1, cancel: 1, missing: 0 })
+      assert.deepEqual(r2.totals, { billable: 2, partial: 1, cancel: 1, visit: 0, missing: 0 })
     })
     it('行は予定か記録がある人だけ・居室順（order の順）', () => {
       const t = B.aggregateBathMonth({ ...base, records: [rec(1, 3, '2026-09-05', 'full')], plannedByWeekday: planned })
@@ -258,7 +258,7 @@ if (B === null) {
       const r3 = t.rows.find((r) => r.residentId === 3)
       assert.equal(r3.cells[6], 'shower')
       assert.equal(r3.cells.includes('missing'), false, '退居された方に「未」を付けた')
-      assert.deepEqual(r3.totals, { billable: 1, partial: 0, cancel: 0, missing: 0 })
+      assert.deepEqual(r3.totals, { billable: 1, partial: 0, cancel: 0, visit: 0, missing: 0 })
       assert.equal(t.hiddenRecords, 0)
     })
     it('★M2: 「未」は施設全体で記録を始めた日（startDay）以降だけ。その月の記録が0件でも予定日には付ける・startDay が無い時は付けない', () => {
@@ -341,7 +341,54 @@ if (B === null) {
       assert.deepEqual([r.cells[13], r.autos[13]], ['full', false])
       assert.deepEqual([r.cells[20], r.autos[20]], ['cancel', false])
       assert.deepEqual([r.cells[27], r.autos[27]], ['missing', false])
-      assert.deepEqual(r.totals, { billable: 2, partial: 0, cancel: 1, missing: 1 })
+      assert.deepEqual(r.totals, { billable: 2, partial: 0, cancel: 1, visit: 0, missing: 1 })
+    })
+  })
+
+  // ── デイの休業日の訪問介護での入浴（0016・2026-09-27 代表指示）: 休業日は 12:30 に予定者を「訪問介護で入浴」（visit）で自動記録 ──
+  describe('★訪問介護で入浴（visit）の表示・入力・月次集計', async () => {
+    const T = await import('../src/lib/types.ts')
+    it('区分に visit（訪問介護で入浴・記号「訪」）があり、ボタンの並びは 全身浴→シャワー浴→部分浴・清拭→訪問介護で入浴→中止', () => {
+      assert.deepEqual([...T.BATH_RESULTS], ['full', 'shower', 'partial', 'visit', 'cancel'])
+      assert.equal(T.BATH_RESULT_LABEL.visit, '訪問介護で入浴')
+      assert.equal(T.BATH_RESULT_MARK.visit, '訪')
+      // 記号は区分ごとに違う（白黒の印刷で見分ける）
+      assert.equal(new Set(Object.values(T.BATH_RESULT_MARK)).size, T.BATH_RESULTS.length)
+    })
+    it('入力の検証: visit は理由なしで保存できる・理由は付けられない・知らない区分は止める', () => {
+      const ok = (over = {}) => ({ bath_on: '2026-12-31', result: 'visit', cancel_reason: null, note: null, ...over })
+      assert.deepEqual(B.validateBathInput(ok(), '2026-12-31'), { ok: true })
+      assert.equal(B.validateBathInput(ok({ cancel_reason: 'condition' }), '2026-12-31').ok, false)
+      const bad = B.validateBathInput(ok({ result: 'daycare' }), '2026-12-31')
+      assert.equal(bad.ok, false)
+      assert.match(bad.message, /訪問介護で入浴/)
+    })
+    it('自動の visit も「チェックを外す」を出す・記録済みに数え「未」にしない', () => {
+      const v = rec(1, 1, '2026-12-31', 'visit', { auto: true })
+      assert.equal(B.canUncheckAuto(v), true)
+      const rows = B.buildBathDayRows([{ residentId: 1, startTime: '10:00', endTime: null, hospitalized: false }], [v], [], [1])
+      assert.deepEqual(B.countBathDay(rows), { planned: 1, recorded: 1, unrecorded: 0 })
+    })
+    it('月次表: visit はマスに出し（自動は autos）、合計は visit に数えて 全＋シ（加算の見込み）・中には数えない', () => {
+      // 2026-12: 木曜=3,10,17,24,31。12/31 は休業日（訪問介護で入浴）
+      const t = B.aggregateBathMonth({
+        monthKey: '2026-12',
+        order: [1],
+        today: '2026-12-31',
+        startDay: '2026-12-01',
+        plannedByWeekday: new Map([[3, new Set([1])]]),
+        records: [
+          rec(1, 1, '2026-12-03', 'full', { auto: true }),
+          rec(2, 1, '2026-12-10', 'shower'),
+          rec(3, 1, '2026-12-17', 'visit'),
+          rec(4, 1, '2026-12-31', 'visit', { auto: true }),
+        ],
+      })
+      const r = t.rows[0]
+      assert.deepEqual([r.cells[30], r.autos[30]], ['visit', true])
+      assert.deepEqual([r.cells[16], r.autos[16]], ['visit', false])
+      assert.equal(r.cells[23], 'missing', '12/24 は記録なし')
+      assert.deepEqual(r.totals, { billable: 2, partial: 0, cancel: 0, visit: 2, missing: 1 })
     })
   })
 
@@ -380,6 +427,15 @@ if (B === null) {
       assert.match(hub, /getKindInputGate\('bath'\)/)
       // 2026-09-26 与薬チェックの追加で、与薬の旗（medLocked）が間に入った。入浴は bathLocked・その他は locked のまま
       assert.match(hub, /key === 'bath' \? bathLocked : key === 'med' \? medLocked : locked/)
+    })
+    it('★訪問介護で入浴（0016）: 記録画面の注記・チェックを外す案内は元の区分・月次表の凡例と「訪問」列', () => {
+      const page = read('../src/pages/BathRecordPage.tsx')
+      assert.match(page, /休業日（12\/31〜1\/3 など）は \{BATH_AUTO_TIME\} に訪問介護での入浴として自動で記録されます/)
+      assert.match(page, /自動の「\{BATH_RESULT_LABEL\[uncheckFrom \?\? 'full'\]\}」を「中止」に変えます/)
+      const month = read('../src/pages/BathMonthPage.tsx')
+      assert.match(month, /訪＝休業日に訪問介護で入浴（デイの加算対象外）/)
+      assert.match(month, /\{row\.totals\.visit\}/)
+      assert.match(month, />\s+訪問\s+<\/th>/)
     })
     it('月次表は表示中の月を保存しない（日付に紐づく状態＝原則11の既定。開くと常に今月）', () => {
       const page = read('../src/pages/BathMonthPage.tsx')
