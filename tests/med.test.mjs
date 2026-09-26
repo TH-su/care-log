@@ -539,14 +539,35 @@ if (DB === null || M === null) {
   describe('与薬（db.ts）: 種類ごとの入力解禁 input_enabled_med', () => {
     afterEach(drain)
 
-    it('input_enabled_med が false なら、native・入浴が解禁でも書かずに与薬の理由文で止める（時間帯の設定も同じ）', async () => {
+    it('input_enabled_med が false なら、native・入浴が解禁でも与薬の記録は書かずに与薬の理由文で止める', async () => {
       const srv = medServer()
       Object.assign(srv.db.settings, { native_input_enabled: 'true', input_enabled_bath: 'true', input_enabled_med: 'false' })
       DB.__testHooks.setClient(srv.client, { kinds: { bath: null, med: null } })
       await assert.rejects(() => DB.insertMedAdmin(medInput()), (e) => e.kind === 'blocked' && e.message === DB.kindBlockedMessage('med'))
-      await assert.rejects(() => DB.setMedSlots(1, ['morning'], null, null), (e) => e.kind === 'blocked')
-      assert.equal(srv.calls.filter((q) => q.table === 'med_admin' || q.table === 'med_slots').length, 0, '封鎖中に書き込んだ')
+      const cur = { id: 5, ...medInput(), rev: 1, created_at: null }
+      await assert.rejects(() => DB.updateMedAdmin(cur, { status: 'refused' }), (e) => e.kind === 'blocked')
+      await assert.rejects(() => DB.softDeleteMedAdmin(5, 1), (e) => e.kind === 'blocked')
+      assert.equal(srv.calls.filter((q) => q.table === 'med_admin').length, 0, '封鎖中に与薬の記録を書き込んだ')
       assert.deepEqual(await DB.getKindInputGate('med'), { value: false, observed: true })
+    })
+
+    it('★服薬の時間帯は封鎖の対象外: input_enabled_med・native・入浴がすべて封鎖でも保存できる（2026-09-26 チーフ裁定）', async () => {
+      const srv = medServer()
+      Object.assign(srv.db.settings, { native_input_enabled: 'false', input_enabled_bath: 'false', input_enabled_med: 'false' })
+      DB.__testHooks.setClient(srv.client, { native: false, cellRpc: 'missing', kinds: { bath: false, med: false } })
+      const created = await DB.setMedSlots(1, ['morning', 'evening'], null, null)
+      assert.deepEqual(created.slots, ['morning', 'evening'])
+      const updated = await DB.setMedSlots(1, ['noon'], null, created, { editedBy: 2 })
+      assert.deepEqual(updated.slots, ['noon'])
+      // 旗が未観測（取得できない）でも止めない＝旗を問い合わせない
+      const srv2 = medServer()
+      srv2.db.settings.input_enabled_med = 'false'
+      DB.__testHooks.setClient(srv2.client, { native: null, kinds: { bath: null, med: null } })
+      assert.deepEqual((await DB.setMedSlots(2, ['bedtime'], null, null)).slots, ['bedtime'])
+      assert.equal(srv2.calls.filter((q) => q.table === 'app_settings').length, 0, '服薬の時間帯の保存で旗を問い合わせた')
+      // 与薬の記録は同じ端末・同じ状態（旗は false）で止まる
+      await assert.rejects(() => DB.insertMedAdmin(medInput()), (e) => e.kind === 'blocked')
+      assert.equal(srv2.db.admin.length, 0)
     })
 
     it('input_enabled_med が true なら native・入浴が封鎖でも書ける（旗は独立）', async () => {
@@ -557,7 +578,7 @@ if (DB === null || M === null) {
       await assert.rejects(() => DB.insertBath({ resident_id: 1, bath_on: '2026-09-01', result: 'full', cancel_reason: null, note: null, recorded_by: 1 }), (e) => e.kind === 'blocked')
     })
 
-    it('旗を取得できない（未観測）時は gate-unknown で書かない', async () => {
+    it('旗を取得できない（未観測）時は与薬の記録を gate-unknown で書かない', async () => {
       const off = fakeSupabase(() => ({ data: null, error: { message: 'offline' }, status: 0 }))
       DB.__testHooks.setClient(off.client, { kinds: { med: null } })
       assert.deepEqual(await DB.getKindInputGate('med'), { value: false, observed: false })
@@ -917,6 +938,12 @@ describe('与薬チェックの配線（静的検査）', () => {
     const more = read('../src/pages/MorePage.tsx')
     assert.match(more, /to: '\/med\/slots'/)
     assert.match(more, /to: '\/med\/month'/)
+  })
+
+  it('服薬の時間帯の画面は封鎖の旗を読まない・封鎖の表示を持たない（チーフ裁定）', () => {
+    const src = read('../src/pages/MedSlotsPage.tsx').replace(/\/\/.*$/gm, '')
+    assert.equal(/getKindInputGate|kindBlockedMessage/.test(src), false)
+    assert.match(read('../src/lib/db.ts'), /if \(table === 'med_admin'\) return assertKindWritable\('med'\)/)
   })
 
   it('月次表は月・入居者を保存しない。与薬チェックが保存する UI 状態は階（cl_medFloor）だけ', () => {

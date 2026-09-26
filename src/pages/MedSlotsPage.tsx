@@ -6,7 +6,8 @@
 // 看護師・事務所が設定する画面（画面上部に注記。権限による制限はまだ無い）。
 //
 // 規律:
-// - 取得・保存は db.ts の関数のみ。入力解禁は input_enabled_med（与薬チェックと同じ旗）
+// - 取得・保存は db.ts の関数のみ。この画面の保存は input_enabled_med の封鎖の対象外（2026-09-26 チーフ裁定:
+//   使い始める前に看護師が設定できるように）。与薬の記録（与薬チェック）は従来どおり input_enabled_med で止まる
 // - その人に未送信の設定（この端末の送信待ち・送信中）がある行は保存できない（送信待ちは書き換えない）
 // - 何も localStorage に保存しない（書きかけは画面の中だけ）。氏名・備考を console に出さない
 // - 色だけで意味を伝えない（checkbox の ✓・文字を併記）
@@ -18,11 +19,9 @@ import {
   fetchAllResidents,
   fetchMedSlots,
   fetchStaff,
-  getKindInputGate,
   hasPendingMedSlots,
   isQueuePersisted,
   isSelfWrite,
-  kindBlockedMessage,
   queueSubscribe,
   setMedSlots,
   subscribeMedChanges,
@@ -34,8 +33,6 @@ import type { MedSlot, MedSlotsSetting, Resident, Staff } from '../lib/types'
 import { EmptyBlock, ErrorBlock, LoadingBlock, SectionCard, StaffPickerModal, useToast } from '../components/ui'
 
 const ERR_LOAD = '服薬の時間帯を読み込めませんでした。通信状態を確認して、再試行してください。'
-const ERR_GATE =
-  '与薬の記録を使える期間かどうかを確認できませんでした（通信エラー）。電波状態を確認して、再試行してください。設定の閲覧はこのままできます。'
 const MSG_CONFLICT =
   '他の端末が先にこの方の設定を保存・変更しました。最新の設定を読み直しました。入力はそのまま残っているので、確かめてから保存し直してください。'
 const MSG_NOT_PERSISTED =
@@ -60,7 +57,6 @@ export interface MedSlotsPageProps {
 export function MedSlotsPage({ staff: staffProp, actorId }: MedSlotsPageProps = {}) {
   const [residents, setResidents] = useState<Resident[] | null>(null)
   const [staff, setStaff] = useState<Staff[] | null>(staffProp ?? null)
-  const [gate, setGate] = useState<{ value: boolean; observed: boolean } | null>(null)
   const [settings, setSettings] = useState<MedSlotsSetting[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [tick, setTick] = useState(0)
@@ -86,16 +82,14 @@ export function MedSlotsPage({ staff: staffProp, actorId }: MedSlotsPageProps = 
     setError(null)
     void (async () => {
       try {
-        const [rs, st, g] = await Promise.all([
+        const [rs, st] = await Promise.all([
           fetchAllResidents(),
           staffProp !== undefined ? Promise.resolve(staffProp) : fetchStaff(),
-          getKindInputGate('med'),
         ])
         const ss = await fetchMedSlots(rs.filter((r) => r.active))
         if (!alive) return
         setResidents(rs)
         setStaff(st)
-        setGate(g)
         setSettings(ss)
       } catch (e) {
         if (alive) setError(e instanceof DbError && e.kind === 'server' ? e.message : ERR_LOAD)
@@ -161,9 +155,6 @@ export function MedSlotsPage({ staff: staffProp, actorId }: MedSlotsPageProps = 
     return m
   }, [settings])
 
-  const locked = gate === null || !gate.observed || gate.value !== true
-  const gateUnknown = gate !== null && !gate.observed
-  const reasonId = `${uid}-locked`
   const configured = active.filter((r) => (byResident.get(r.id)?.slots.length ?? 0) > 0).length
   const recorderName = recorderId === null ? null : ((staff ?? []).find((s) => s.id === recorderId)?.name ?? null)
   void queueTick // 送信待ちの変化で描き直す（行の「未送信」の判定を取り直す）
@@ -197,7 +188,7 @@ export function MedSlotsPage({ staff: staffProp, actorId }: MedSlotsPageProps = 
   async function save(r: Resident) {
     const id = r.id
     const cur = byResident.get(id) ?? null
-    if (locked || busy.has(id) || hasPendingMedSlots(id, cur?.id ?? null)) return
+    if (busy.has(id) || hasPendingMedSlots(id, cur?.id ?? null)) return
     if (recorderId === null) {
       setRowMsg(id, { tone: 'warn', text: MSG_NO_RECORDER })
       return
@@ -249,7 +240,7 @@ export function MedSlotsPage({ staff: staffProp, actorId }: MedSlotsPageProps = 
       </div>
     )
   }
-  if (residents === null || staff === null || gate === null || settings === null) {
+  if (residents === null || staff === null || settings === null) {
     return (
       <div className="mx-auto w-full max-w-2xl p-4">
         <LoadingBlock label="服薬の時間帯を読み込み中です…" />
@@ -261,20 +252,8 @@ export function MedSlotsPage({ staff: staffProp, actorId }: MedSlotsPageProps = 
     <div className="mx-auto w-full max-w-2xl space-y-4 p-4">
       <p role="note" className="rounded-lg border border-info bg-info-bg p-3 text-base text-ink">
         <span aria-hidden="true">ⓘ </span>
-        看護師・事務所が設定する画面です
+        看護師・事務所が設定する画面です（与薬の記録を使い始める前から設定できます）
       </p>
-      {gateUnknown ? (
-        <ErrorBlock message={ERR_GATE} onRetry={() => setTick((n) => n + 1)} />
-      ) : locked ? (
-        <div id={reasonId} role="status" className="rounded-lg border border-warn bg-warn-bg p-4">
-          <p className="text-base text-ink">
-            <span aria-hidden="true">▲ </span>
-            <span className="sr-only">お知らせ: </span>
-            {kindBlockedMessage('med')}
-          </p>
-          <p className="mt-2 text-base text-ink2">設定の閲覧はこのままできます。</p>
-        </div>
-      ) : null}
 
       <SectionCard title="服薬の時間帯">
         <p className="text-base text-ink">
@@ -314,10 +293,10 @@ export function MedSlotsPage({ staff: staffProp, actorId }: MedSlotsPageProps = 
             const isBusy = busy.has(r.id)
             const dirty = changed(r)
             const m = msgs.get(r.id) ?? null
-            const disabledInput = locked || isBusy || pending
+            const disabledInput = isBusy || pending
             return (
               <li key={r.id} className={`rounded-lg border bg-surface p-3 ${dirty ? 'border-primary' : 'border-border'}`}>
-                <fieldset disabled={disabledInput} aria-describedby={locked && !gateUnknown ? reasonId : undefined}>
+                <fieldset disabled={disabledInput}>
                   <legend className="flex flex-wrap items-center gap-x-3 gap-y-1">
                     <span className="tabular text-sm text-ink3">{r.room ?? '—'}</span>
                     <span className="text-lg font-bold text-ink">{r.name}</span>

@@ -139,7 +139,7 @@ subscribeMedChanges(cb): () => void                            // med_slots・me
 ```
 
 - 服薬の時間帯（med_slots）・与薬の記録（med_admin）は入浴記録と同じ送り方（client_key・rev 照合・送信待ち cl_sendQueue・edited_by）。
-  入力解禁は input_enabled_med（両方の表）。送信待ちの insert が自然キー（1人1件・1人1日1時間帯1件）の 23505 になった時は blocked='conflict' で止めて残す。
+  入力解禁は input_enabled_med（与薬の記録だけ）。服薬の時間帯はどの旗の封鎖も受けない（使い始める前に看護師が設定できるように・2026-09-26 チーフ裁定）。送信待ちの insert が自然キー（1人1件・1人1日1時間帯1件）の 23505 になった時は blocked='conflict' で止めて残す。
   送信待ちの中身は書き換えない・破棄しない（未送信のマス・行は画面が hasPendingMed / hasPendingMedSlots で押せなくする）
 - 純ロジック（締め判定・1日の表・件数・マスを押した時の動き・入力の検証・月次集計）は `src/lib/med.ts`。締め時刻は `MED_DEADLINES`（将来設定化できる形）
 - 印刷の部品は向き（orientation='portrait'）と1ページずつ（paged・中身の .cl-print-page ごとに改ページ）を足した。既定（横・1枚に収める）は従来どおり

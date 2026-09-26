@@ -2724,12 +2724,18 @@ async function assertKindWritable(kind: InputKind): Promise<void> {
 }
 
 /**
- * 表ごとの書込の入口ガード。入浴記録は input_enabled_bath、服薬の時間帯・与薬の記録は input_enabled_med、
- * それ以外は従来どおり native_input_enabled
+ * 表ごとの書込の入口ガード。入浴記録は input_enabled_bath、与薬の記録は input_enabled_med、
+ * それ以外は従来どおり native_input_enabled。
+ * 服薬の時間帯（med_slots）はどの旗の封鎖も受けない（接続先の設定だけを確かめる）。
+ * 与薬を使い始める前に看護師が時間帯を設定できるようにするため（2026-09-26 チーフ裁定）
  */
 async function writeGate(table: LegacyTable): Promise<void> {
   if (table === 'bath_records') return assertKindWritable('bath')
-  if (table === 'med_slots' || table === 'med_admin') return assertKindWritable('med')
+  if (table === 'med_admin') return assertKindWritable('med')
+  if (table === 'med_slots') {
+    if (!isSupabaseConfigured()) throw new DbError('unconfigured', MSG.unconfigured)
+    return
+  }
   return assertWritable()
 }
 
@@ -4393,7 +4399,8 @@ export async function fetchBathFirstDay(): Promise<string | null> {
 // ── 与薬チェック（服薬介助・2026-09-26 追加・0013_med_admin.sql） ─────────────────
 //
 // 書き方は入浴記録と同じ経路（client_key・rev 照合・送信待ち cl_sendQueue・edited_by・soft delete）。
-//   ・入力解禁は input_enabled_med（writeGate / assertKindWritable）。服薬の時間帯・与薬の記録の両方
+//   ・入力解禁は input_enabled_med（writeGate / assertKindWritable）。与薬の記録だけ。服薬の時間帯は封鎖しない
+//     （使い始める前に看護師が設定できるように・2026-09-26 チーフ裁定）
 //   ・自然キー（部分unique）: 服薬の時間帯は1人1件、与薬の記録は1人1日1時間帯1件（頓服は持たない）。
 //     23505 のうち自分の client_key が載っていないものは「他の端末が先に記録した」→ 'conflict'。
 //     送信待ちから送った分も同じ判定で止める（sendQueuedOp の naturalKeyTaken）
