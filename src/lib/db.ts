@@ -37,6 +37,14 @@ import type {
   FluidIntake,
   ImportDay,
   Importance,
+  Incident,
+  IncidentDetail,
+  IncidentKind,
+  IncidentOffice,
+  IncidentPlace,
+  IncidentReportStage,
+  IncidentSeverity,
+  IncidentStatus,
   InputKind,
   Meal,
   MedAdmin,
@@ -57,10 +65,25 @@ import type {
   Vital,
   VitalKind,
 } from './types'
-import { BATH_CANCEL_REASONS, BATH_RESULTS, LS, MED_ADMIN_SLOTS, MED_STATUSES } from './types'
+import {
+  BATH_CANCEL_REASONS,
+  BATH_RESULTS,
+  INCIDENT_KINDS,
+  INCIDENT_OFFICES,
+  INCIDENT_PLACES,
+  INCIDENT_REPORT_STAGES,
+  INCIDENT_SEVERITIES,
+  INCIDENT_STATUSES,
+  INCIDENT_TYPES,
+  LS,
+  MED_ADMIN_SLOTS,
+  MED_STATUSES,
+} from './types'
 import { matchBathPlan, monthDays, monthRange, validateBathInput } from './bath'
 import type { BathPlanEntry, BathPlanRow } from './bath'
 import { normalizeMedSlots, validateMedAdminInput } from './med'
+import { normalizeChoices, normalizeIncidentDetail, validateIncidentInput } from './incident'
+import type { IncidentInput } from './incident'
 import {
   notePresence,
   othersFromState,
@@ -156,6 +179,15 @@ const MED_SLOTS_COLS = 'id,resident_id,slots,note,rev'
  */
 const MED_ADMIN_COLS =
   'id,resident_id,admin_on,slot,status,given_at,prn_drug,prn_reason,prn_effect,note,recorded_by,rev,created_at'
+/**
+ * 事故・ヒヤリハットの一覧・カルテ・集計で読む列（0014_incidents.sql）。様式の残りの欄（detail）は持ち出さない
+ * （detail には対象者の氏名の写しが入る。一覧・カルテ・集計は名簿の氏名を使う）。client_key・監査列も持ち出さない
+ */
+const INCIDENT_LIST_COLS =
+  'id,kind,resident_id,occurred_on,occurred_at,office,place,place_other,types,severity,status,report_stage,report_no,' +
+  'submitted_on,city_report_needed,city_reported_on,reporter_id,confirmer_id,confirmed_at,rev'
+/** 1件の入力・編集・印刷で読む列（detail を含む） */
+const INCIDENT_COLS = `${INCIDENT_LIST_COLS},detail`
 
 /**
  * Realtime を購読する表（受信は「どの表が変わったか」だけを伝える）。
@@ -618,6 +650,41 @@ function normalizeMedAdmin(row: unknown): MedAdmin | null {
   }
 }
 
+/** 事故・ヒヤリハット（受信値を信じない: 知らない選択肢は null／配列から外す。detail が無い列の取得では空の既定値） */
+function normalizeIncident(row: unknown): Incident | null {
+  const r = asRecord(row)
+  if (!r) return null
+  const id = idNum(r.id)
+  const kind = oneOf<IncidentKind>(r.kind, INCIDENT_KINDS)
+  const occurred_on = dateStr(r.occurred_on)
+  const occurred_at = str(r.occurred_at)
+  if (id === null || kind === null || occurred_on === null || occurred_at === null) return null
+  const reportNo = num(r.report_no)
+  return {
+    id,
+    kind,
+    resident_id: idNum(r.resident_id),
+    occurred_on,
+    occurred_at,
+    office: oneOf<IncidentOffice>(r.office, INCIDENT_OFFICES),
+    place: oneOf<IncidentPlace>(r.place, INCIDENT_PLACES),
+    place_other: str(r.place_other),
+    types: normalizeChoices(r.types, INCIDENT_TYPES),
+    severity: oneOf<IncidentSeverity>(r.severity, INCIDENT_SEVERITIES),
+    status: oneOf<IncidentStatus>(r.status, INCIDENT_STATUSES) ?? 'open',
+    report_stage: oneOf<IncidentReportStage>(r.report_stage, INCIDENT_REPORT_STAGES),
+    report_no: reportNo !== null && Number.isInteger(reportNo) ? reportNo : null,
+    submitted_on: dateStr(r.submitted_on),
+    city_report_needed: r.city_report_needed === true,
+    city_reported_on: dateStr(r.city_reported_on),
+    reporter_id: idNum(r.reporter_id),
+    confirmer_id: idNum(r.confirmer_id),
+    confirmed_at: str(r.confirmed_at),
+    detail: normalizeIncidentDetail(r.detail),
+    rev: num(r.rev) ?? 1,
+  }
+}
+
 function normalizeImportDay(row: unknown): ImportDay | null {
   const r = asRecord(row)
   if (!r) return null
@@ -654,9 +721,10 @@ function normalizeImportDay(row: unknown): ImportDay | null {
  * 旧経路（HEAD の送り方）のまま送る業務表。
  * bath_records（入浴記録・2026-09-26 追加）と med_slots / med_admin（服薬の時間帯・与薬の記録・2026-09-26 追加）も
  * 同じ経路に乗せる（client_key・rev 照合・送信待ち・edited_by）。
- * 入力解禁の判定だけは表ごとに違う（writeGate: 入浴は input_enabled_bath、服薬は input_enabled_med）
+ * incidents（事故・ヒヤリハット・2026-09-26 追加）も同じ経路（自然キーは持たない）。
+ * 入力解禁の判定だけは表ごとに違う（writeGate: 入浴は input_enabled_bath、服薬は input_enabled_med、事故は input_enabled_incident）
  */
-type LegacyTable = 'fluid_intake' | 'notes' | 'outings' | 'bath_records' | 'med_slots' | 'med_admin'
+type LegacyTable = 'fluid_intake' | 'notes' | 'outings' | 'bath_records' | 'med_slots' | 'med_admin' | 'incidents'
 
 /** 列の並び・rev 照合の作法が共通の業務表（読み取りの列は colsOf） */
 type QueueTable = 'vitals' | 'meals' | LegacyTable
@@ -714,7 +782,15 @@ interface AliasQueueOp extends ExtraQueueOp<'residents'> {
 
 type QueueOp = RowQueueOp | ReadQueueOp | AttendanceQueueOp | AliasQueueOp
 
-const LEGACY_TABLES: readonly LegacyTable[] = ['fluid_intake', 'notes', 'outings', 'bath_records', 'med_slots', 'med_admin']
+const LEGACY_TABLES: readonly LegacyTable[] = [
+  'fluid_intake',
+  'notes',
+  'outings',
+  'bath_records',
+  'med_slots',
+  'med_admin',
+  'incidents',
+]
 
 /** 旧版が使っていた退避キー。値は cl_sendQueue の中へ移し、移せたことを観測してから取り除く */
 const LEGACY_BROKEN_KEY = `${LS.sendQueue}_broken`
@@ -2362,6 +2438,8 @@ function colsOf(table: QueueTable): string {
       return MED_SLOTS_COLS
     case 'med_admin':
       return MED_ADMIN_COLS
+    case 'incidents':
+      return INCIDENT_COLS
   }
 }
 
@@ -2725,13 +2803,14 @@ async function assertKindWritable(kind: InputKind): Promise<void> {
 
 /**
  * 表ごとの書込の入口ガード。入浴記録は input_enabled_bath、与薬の記録は input_enabled_med、
- * それ以外は従来どおり native_input_enabled。
+ * 事故・ヒヤリハットは input_enabled_incident、それ以外は従来どおり native_input_enabled。
  * 服薬の時間帯（med_slots）はどの旗の封鎖も受けない（接続先の設定だけを確かめる）。
  * 与薬を使い始める前に看護師が時間帯を設定できるようにするため（2026-09-26 チーフ裁定）
  */
 async function writeGate(table: LegacyTable): Promise<void> {
   if (table === 'bath_records') return assertKindWritable('bath')
   if (table === 'med_admin') return assertKindWritable('med')
+  if (table === 'incidents') return assertKindWritable('incident')
   if (table === 'med_slots') {
     if (!isSupabaseConfigured()) throw new DbError('unconfigured', MSG.unconfigured)
     return
@@ -2861,6 +2940,7 @@ export async function fetchTimelineChunk(
  * 個人カルテ（resident_id＋日付レンジ必須・系列ごとに limit ガード）。
  * baths（入浴記録・2026-09-26 追加）は表が無い DB（0012 未適用）でも空として返し、カルテ全体を失敗させない。
  * meds（与薬の記録・2026-09-26 追加）も同じ（0013 未適用の DB では空）。
+ * incidents（事故・ヒヤリハット・2026-09-26 追加）も同じ（0014 未適用の DB では空）。一覧の列だけ（detail は持ち出さない）
  */
 export async function fetchKarte(
   residentId: number,
@@ -2874,6 +2954,7 @@ export async function fetchKarte(
   outings: Outing[]
   baths: BathRecord[]
   meds: MedAdmin[]
+  incidents: Incident[]
 }> {
   const sb = await getClient()
   const range = <T>(table: string, cols: string, dateCol: string, cap: number) =>
@@ -2908,7 +2989,7 @@ export async function fetchKarte(
         range<unknown>('outings', OUTING_COLS, 'start_on', KARTE_ROWS)
   ) as unknown as Promise<Res<unknown>>
 
-  const [vitals, meals, fluids, notes, outings, baths, meds] = await Promise.all([
+  const [vitals, meals, fluids, notes, outings, baths, meds, incidents] = await Promise.all([
     range<unknown>('vitals', VITAL_COLS, 'measured_on', KARTE_ROWS),
     range<unknown>('meals', MEAL_COLS, 'meal_on', MAX_ROWS),
     range<unknown>('fluid_intake', FLUID_COLS, 'taken_on', MAX_ROWS),
@@ -2917,6 +2998,7 @@ export async function fetchKarte(
     range<unknown>('bath_records', BATH_COLS, 'bath_on', KARTE_ROWS),
     // 与薬は1日に5件前後あるので、食事と同じ上限（MAX_ROWS）にする（KARTE_ROWS では1年表示で欠ける）
     range<unknown>('med_admin', MED_ADMIN_COLS, 'admin_on', MAX_ROWS),
+    range<unknown>('incidents', INCIDENT_LIST_COLS, 'occurred_on', KARTE_ROWS),
   ])
   for (const res of [vitals, meals, fluids, notes, outings]) {
     if (res.error !== null) throw readError(res)
@@ -2925,6 +3007,8 @@ export async function fetchKarte(
   if (baths.error !== null && !isMissingTable(baths)) throw readError(baths)
   // 与薬の記録の表がまだ無い（0013 未適用）だけなら空で返す
   if (meds.error !== null && !isMissingTable(meds)) throw readError(meds)
+  // 事故・ヒヤリハットの表がまだ無い（0014 未適用）だけなら空で返す
+  if (incidents.error !== null && !isMissingTable(incidents)) throw readError(incidents)
   return {
     vitals: list(vitals.data, normalizeVital, KARTE_ROWS),
     meals: list(meals.data, normalizeMeal),
@@ -2933,6 +3017,7 @@ export async function fetchKarte(
     outings: list(outings.data, normalizeOuting, KARTE_ROWS),
     baths: baths.error !== null ? [] : list(baths.data, normalizeBath, KARTE_ROWS),
     meds: meds.error !== null ? [] : list(meds.data, normalizeMedAdmin),
+    incidents: incidents.error !== null ? [] : list(incidents.data, normalizeIncident, KARTE_ROWS),
   }
 }
 
@@ -4739,6 +4824,289 @@ export function hasPendingMedSlots(residentId: number, recordId: number | null):
   return false
 }
 
+// ── 事故・ヒヤリハット（2026-09-26 追加・0014_incidents.sql） ─────────────────────
+//
+// 書き方は入浴・与薬と同じ経路（client_key・rev 照合・送信待ち cl_sendQueue・edited_by・soft delete）。
+//   ・入力解禁は input_enabled_incident（writeGate / assertKindWritable）
+//   ・自然キーは持たない（1件ごとに別の記録）。23505 は自分の client_key が既に載っている＝再送の行き違いだけ
+//   ・送信待ちの中身は書き換えない・破棄しない。未送信の記録は hasPendingIncident で画面が編集できなくする。
+//     まだサーバーに無い追加は pendingIncidentOps で送信待ちから読むだけ（一覧に「未送信」として出す）
+//   ・対象者の氏名の写し（detail.subject_name）は、職員が書き換えた時だけ送る。送らない時はサーバーのトリガが
+//     名簿から写す／前の写しを残す（氏名を送信待ち＝端末の保存領域に置かないため）
+
+const INCIDENT_MSG = {
+  missing: '事故・ヒヤリハットの記録はまだ使えません（サーバー側の設定待ち）。管理者に連絡してください。',
+  badRange: '期間を読み取れませんでした。期間を選び直してください。',
+} as const
+
+/** 一覧・集計の1回の取得上限（取り切れない時は黙って切らずに例外。期間を狭めてもらう） */
+const INCIDENT_LIST_ROWS = MAX_ROWS
+
+/** 表が無い（0014 未適用）時は「サーバー側の設定待ち」で止める */
+function incidentReadError(res: Res<unknown>): DbError {
+  if (isMissingTable(res)) return new DbError('server', INCIDENT_MSG.missing)
+  return readError(res)
+}
+
+/** 一覧・集計の取得条件。期間（発生日）は必須（全件ロードしない） */
+export interface IncidentQuery {
+  fromIso: string
+  toIso: string
+  kind?: IncidentKind | null
+  status?: IncidentStatus | null
+}
+
+/** 期間（発生日）の記録を新しい順に（削除済みを除く・detail は持ち出さない）。区分・状態で絞れる */
+export async function fetchIncidents(q: IncidentQuery): Promise<Incident[]> {
+  assertDay(q.fromIso)
+  assertDay(q.toIso)
+  if (q.fromIso > q.toIso) throw new DbError('server', INCIDENT_MSG.badRange)
+  const sb = await getClient()
+  let query = sb
+    .from('incidents')
+    .select(INCIDENT_LIST_COLS)
+    .gte('occurred_on', q.fromIso)
+    .lte('occurred_on', q.toIso)
+    .is('deleted_at', null)
+  if (q.kind != null) query = query.eq('kind', q.kind)
+  if (q.status != null) query = query.eq('status', q.status)
+  const res = (await query
+    .order('occurred_on', { ascending: false })
+    .order('occurred_at', { ascending: false })
+    .order('id', { ascending: false })
+    .limit(INCIDENT_LIST_ROWS)) as Res<unknown>
+  if (res.error !== null) throw incidentReadError(res)
+  assertLoadedAll(res, INCIDENT_LIST_ROWS)
+  return list(res.data, normalizeIncident, INCIDENT_LIST_ROWS)
+}
+
+/** 1件（様式の残りの欄 detail を含む）。無い・取り消し済みなら null */
+export async function fetchIncident(id: number): Promise<Incident | null> {
+  if (idNum(id) === null) return null
+  const sb = await getClient()
+  const res = (await sb
+    .from('incidents')
+    .select(INCIDENT_COLS)
+    .eq('id', id)
+    .is('deleted_at', null)
+    .limit(1)
+    .maybeSingle()) as Res<unknown>
+  if (res.error !== null) throw incidentReadError(res)
+  return res.data === null ? null : normalizeIncident(res.data)
+}
+
+/** 空白だけの文字の列は null にそろえ、detail の選択肢を照合し直す（送る前・検証の前に通す） */
+function cleanIncident(v: IncidentInput): IncidentInput {
+  return {
+    ...v,
+    place_other: textOrNull(v.place_other),
+    // 種別はそのまま（知らない値・重複は検証で止める。黙って落として別の記録にしない）
+    types: Array.isArray(v.types) ? [...v.types] : [],
+    detail: normalizeIncidentDetail(v.detail),
+  }
+}
+
+/** 保存前の検証（画面と同じ関数）。通らなければ書かずに理由文で止める */
+function assertIncidentInput(v: IncidentInput): void {
+  const check = validateIncidentInput(v, localToday())
+  if (!check.ok) throw new DbError('server', check.message)
+}
+
+/** detail を送る形に。氏名の写しは「職員が書き換えた」時（sendName）だけ入れる（入れない時はトリガが写す・残す） */
+function incidentDetailPayload(d: IncidentDetail, sendName: boolean): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...d }
+  if (!sendName || d.subject_name === null) delete out.subject_name
+  return out
+}
+
+/** 列で持つ項目（detail 以外）。insert・update の送り方をそろえるための並び */
+const INCIDENT_FIELDS = [
+  'kind',
+  'resident_id',
+  'occurred_on',
+  'occurred_at',
+  'office',
+  'place',
+  'place_other',
+  'types',
+  'severity',
+  'status',
+  'report_stage',
+  'report_no',
+  'submitted_on',
+  'city_report_needed',
+  'city_reported_on',
+  'reporter_id',
+  'confirmer_id',
+  'confirmed_at',
+] as const
+
+/**
+ * 事故・ヒヤリハットの追加。端末生成の冪等キー client_key を必ず付ける（再送しても1行に収まる）。
+ * detail.subject_name（氏名の写し）は入れて渡した時だけ送る（職員が書き換えた時。null ならサーバーが名簿から写す）。
+ * 戻り値: 追加した行／'queued'（通信できない・送信待ちへ）
+ */
+export async function insertIncident(i: IncidentInput): Promise<Incident | Queued> {
+  const v = cleanIncident(i)
+  assertIncidentInput(v)
+  const row: Record<string, unknown> = {}
+  for (const k of INCIDENT_FIELDS) row[k] = v[k]
+  row.detail = incidentDetailPayload(v.detail, true)
+  return insertRow('incidents', withClientKey(row), normalizeIncident)
+}
+
+/** 追記・修正で送る変更（列は変えた項目だけ、detail は変えた欄だけを渡す） */
+export type IncidentPatch = Partial<Omit<Incident, 'id' | 'rev' | 'detail'>> & { detail?: Partial<IncidentDetail> }
+
+/**
+ * 事故・ヒヤリハットの追記・修正（rev 照合の部分更新）。current は fetchIncident で読んだ1件（detail を含む）。
+ * 送る前に、修正後の値（current と patch を重ねたもの）を検証する（一覧の列だけの行を渡すと detail が空で通らない＝消さない）。
+ * detail は current.detail に patch.detail を重ねた全体を送る（jsonb は列ごと置き換わるため）。
+ * 氏名の写しは patch.detail に subject_name を入れた時だけ送る（入れない時はサーバーが前の写しを残す／対象者を変えたら写し直す）
+ */
+export async function updateIncident(
+  current: Incident,
+  patch: IncidentPatch,
+  opts?: WriteOpts,
+): Promise<Incident | Conflict | Queued> {
+  const { detail: detailPatch, ...cols } = patch
+  const base: IncidentInput = {
+    kind: current.kind,
+    resident_id: current.resident_id,
+    occurred_on: current.occurred_on,
+    occurred_at: current.occurred_at,
+    office: current.office,
+    place: current.place,
+    place_other: current.place_other,
+    types: current.types,
+    severity: current.severity,
+    status: current.status,
+    report_stage: current.report_stage,
+    report_no: current.report_no,
+    submitted_on: current.submitted_on,
+    city_report_needed: current.city_report_needed,
+    city_reported_on: current.city_reported_on,
+    reporter_id: current.reporter_id,
+    confirmer_id: current.confirmer_id,
+    confirmed_at: current.confirmed_at,
+    detail: current.detail,
+  }
+  const merged = cleanIncident({
+    ...base,
+    ...cleanPayload(cols as Record<string, unknown>),
+    detail: { ...current.detail, ...(detailPatch ?? {}) },
+  } as IncidentInput)
+  assertIncidentInput(merged)
+  const sent: Record<string, unknown> = {}
+  for (const k of INCIDENT_FIELDS) {
+    if (cols[k] !== undefined) sent[k] = merged[k]
+  }
+  const detailKeys = Object.keys(detailPatch ?? {})
+  // 対象者を変えた時は detail も送る（氏名の写しを新しい対象者で写し直させるため）
+  if (detailKeys.length > 0 || cols.resident_id !== undefined) {
+    sent.detail = incidentDetailPayload(merged.detail, detailKeys.includes('subject_name'))
+  }
+  return updateRow('incidents', current.id, current.rev, sent, normalizeIncident, opts)
+}
+
+/** 事故・ヒヤリハットの取り消し（soft delete。物理削除はしない） */
+export async function softDeleteIncident(id: number, rev: number, opts?: WriteOpts): Promise<true | Conflict | Queued> {
+  return softDelete('incidents', id, rev, opts)
+}
+
+/**
+ * この端末（このタブ）の送信待ちに、その記録（recordId）の追記・修正・取り消しが残っているか
+ * （送信中を含む。自動再送を止めた＝blocked の op は含めない）。**読むだけで送信待ちは書き換えない**。
+ * 画面はこれが true の記録を編集できなくする（入浴・与薬と同じ考え方）
+ */
+export function hasPendingIncident(recordId: number): boolean {
+  for (const q of queue) {
+    if (q.table !== 'incidents' || q.blocked !== undefined) continue
+    if (q.kind === 'update' && q.rowId === recordId) return true
+  }
+  return false
+}
+
+/** 送信待ちから組み立てた、まだサーバーに載っていない事故・ヒヤリハットの追加（画面の表示用・読むだけ） */
+export interface PendingIncident {
+  /** 送信待ちの qid（＝client_key） */
+  qid: string
+  kind: IncidentKind | null
+  residentId: number | null
+  occurredOn: string | null
+  occurredAt: string | null
+  types: string[]
+  /** waiting＝送信待ち／sending＝送信中／blocked＝自動再送を止めた（止まっている） */
+  state: 'waiting' | 'sending' | 'blocked'
+}
+
+/**
+ * この端末（このタブ）の送信待ちにある事故・ヒヤリハットの追加（未送信・送信中・止まっているものを含む）。
+ * **読むだけで送信待ちは書き換えない・破棄しない**。一覧に「未送信」として出し、二重に記録しないようにする
+ */
+export function pendingIncidentOps(): PendingIncident[] {
+  const out: PendingIncident[] = []
+  for (const q of queue) {
+    if (q.table !== 'incidents' || q.kind !== 'insert') continue
+    out.push({
+      qid: q.qid,
+      kind: oneOf<IncidentKind>(q.payload.kind, INCIDENT_KINDS),
+      residentId: idNum(q.payload.resident_id),
+      occurredOn: dateStr(q.payload.occurred_on),
+      occurredAt: str(q.payload.occurred_at),
+      types: normalizeChoices(q.payload.types, INCIDENT_TYPES),
+      state: q.blocked !== undefined ? 'blocked' : q.sending === true ? 'sending' : 'waiting',
+    })
+  }
+  return out
+}
+
+/** 事故報告書に刷る事業所の情報（app_settings・0014 でキーを空で作る。値はチーフが本番で入れる） */
+export interface OfficeProfile {
+  corpName: string
+  address: string
+  officeName: Record<IncidentOffice, string>
+  officeNo: Record<IncidentOffice, string>
+}
+
+const OFFICE_KEYS = [
+  'corp_name',
+  'office_name_facility',
+  'office_name_visit',
+  'office_name_daycare',
+  'office_no_facility',
+  'office_no_visit',
+  'office_no_daycare',
+  'office_address',
+] as const
+
+/** 事業所の情報を読む（無いキー・空の値は ''＝印刷は手書き用の空欄）。読めない時は例外 */
+export async function fetchOfficeProfile(): Promise<OfficeProfile> {
+  const sb = await getClient()
+  const res = (await sb
+    .from('app_settings')
+    .select('key,value')
+    .in('key', [...OFFICE_KEYS])
+    .limit(OFFICE_KEYS.length)) as Res<unknown>
+  if (res.error !== null) throw readError(res)
+  const got = new Map<string, string>()
+  if (Array.isArray(res.data)) {
+    for (const raw of res.data) {
+      const r = asRecord(raw)
+      const key = str(r?.key)
+      const value = typeof r?.value === 'string' ? r.value.trim() : ''
+      if (key !== null) got.set(key, value)
+    }
+  }
+  const v = (k: (typeof OFFICE_KEYS)[number]): string => got.get(k) ?? ''
+  return {
+    corpName: v('corp_name'),
+    address: v('office_address'),
+    officeName: { facility: v('office_name_facility'), visit: v('office_name_visit'), daycare: v('office_name_daycare') },
+    officeNo: { facility: v('office_no_facility'), visit: v('office_no_visit'), daycare: v('office_no_daycare') },
+  }
+}
+
 // ── 既読 ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -4986,6 +5354,46 @@ export function subscribeMedChanges(cb: (table: string, info?: ChangeInfo) => vo
       client = sb
       let ch = sb.channel(`cl_med_${Math.random().toString(36).slice(2, 10)}`)
       for (const table of REALTIME_MED_TABLES) {
+        ch = ch.on('postgres_changes', { event: '*', schema: 'public', table }, (payload: unknown) => {
+          if (!cancelled) cb(table, changeInfoOf(payload))
+        })
+      }
+      channel = ch
+      ch.subscribe()
+    } catch {
+      // 接続先未設定・通信不可。購読なしで動く
+    }
+  })()
+
+  return () => {
+    cancelled = true
+    if (client !== null && channel !== null) void client.removeChannel(channel)
+    channel = null
+  }
+}
+
+/**
+ * 事故・ヒヤリハットの Realtime を購読する表（2026-09-26 追加）。入浴・与薬と同じく既存のチャンネルには混ぜない
+ * （0014 を当てる前の DB で既存7表・入浴・与薬の購読まで止まらないようにする）
+ */
+const REALTIME_INCIDENT_TABLES = ['incidents'] as const
+
+/**
+ * 事故・ヒヤリハットの変更通知（事故・ヒヤリハットの画面だけが使う）。呼び方・渡す情報は subscribeChanges と同じ。
+ * 接続できない・配信対象に無い（0014 未適用）場合は通知が来ないだけで、画面は手動更新で成立する。
+ */
+export function subscribeIncidentChanges(cb: (table: string, info?: ChangeInfo) => void): () => void {
+  let cancelled = false
+  let client: SupabaseClient | null = null
+  let channel: ReturnType<SupabaseClient['channel']> | null = null
+
+  void (async () => {
+    try {
+      const sb = await getClient()
+      if (cancelled) return
+      client = sb
+      let ch = sb.channel(`cl_incident_${Math.random().toString(36).slice(2, 10)}`)
+      for (const table of REALTIME_INCIDENT_TABLES) {
         ch = ch.on('postgres_changes', { event: '*', schema: 'public', table }, (payload: unknown) => {
           if (!cancelled) cb(table, changeInfoOf(payload))
         })

@@ -165,6 +165,8 @@
   - 追加（2026-09-26）: `cl_view` の既知値に `medSlots`（/med/slots＝服薬の時間帯）・`medMonth`（/med/month＝与薬 月次表）。
     与薬チェック（/record/med）の階は `cl_medFloor`（'1'〜'9'・'other'・'all'。既知値照合・今の名簿に無い階は「全」へ。
     バイタル一覧の `cl_vitalsFloor`・一覧の `cl_sheetFloor` とは既定と選べる値が違うので別キー）。日付・月・選んだ入居者は保存しない
+  - 追加（2026-09-26）: `cl_view` の既知値に `incident`（/incident＝事故・ヒヤリハット 一覧。/incident/new・/incident/:id も一覧の配下）・
+    `incidentSummary`（/incident/summary＝委員会用の月次集計）。一覧の期間・区分・状態、集計の月、入力中の値は保存しない（開くと常に直近3か月・全て／今月）
   - 追加（2026-09-26）: `cl_notePhraseCat`（申し送りの定型句で最後に選んだ場面 id＝body/meal/excretion/night/skin/fall/medical/meds/family/notice。正本は `src/lib/notePhrases.ts`。既知値照合・不正/未知は先頭の場面 body。キー定数は凍結の types.ts に足さず NoteFormPage.tsx に置く）
 - **操作者キー（別枠・#1）**: `cl_staffId`（staff_id 数値のみ・氏名なし）。復元は**固定リストでなく staff スナップショットとの動的照合**（不在・無効は操作者ピッカーへ）。業務データに紐づく状態だが操作主体の同定に必須のため、**理由を添えてスコープ例外として承認時に確定**（原則11の但し書きに準拠）。
 - **データ保護キー（別枠・#4）**: `cl_sendQueue`／`cl_sendQueue2`（バイタル・食事の送信待ち・2026-09-23 追加）／`cl_draftNote`（§6.5の保持規則に従う。UI状態復元には使わない）。

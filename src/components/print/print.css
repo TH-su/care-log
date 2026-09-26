@@ -107,3 +107,52 @@
   break-after: auto;
   page-break-after: auto;
 }
+
+/* ── 事故報告書（事業者→熊本市）の様式の表（2026-09-26 追加・src/pages/IncidentReportSheet.tsx） ──
+   既存の .cl-print-table（1行に収める・中央寄せ）には触らず、この表だけの組み方を足す。
+   長い文は折り返し、記録の無い欄は手書き用の余白を空ける。見出し（thead）は2枚目以降にも繰り返して刷られる */
+.cl-print-area .cl-print-form {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+.cl-print-area .cl-print-form th,
+.cl-print-area .cl-print-form td {
+  border: 1px solid currentColor;
+  padding: 0.15em 0.35em;
+  text-align: left;
+  vertical-align: top;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-weight: 400;
+}
+.cl-print-area .cl-print-form thead th {
+  border: none;
+  padding: 0 0 0.3em;
+  text-align: center;
+}
+.cl-print-area .cl-print-form .cl-print-item {
+  width: 10em;
+}
+.cl-print-area .cl-print-form .cl-print-sec {
+  font-weight: 700;
+}
+.cl-print-area .cl-print-form .cl-print-notes {
+  border: none;
+  padding: 0 0 0.3em;
+  font-size: 0.9em;
+}
+.cl-print-area .cl-print-form .cl-print-check {
+  display: inline-block;
+  margin-right: 0.8em;
+}
+.cl-print-area .cl-print-form .cl-print-text {
+  white-space: pre-wrap;
+}
+.cl-print-area .cl-print-form .cl-print-blank {
+  height: 3.5em;
+}
+.cl-print-area .cl-print-form tr {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}

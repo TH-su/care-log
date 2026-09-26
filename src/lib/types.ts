@@ -331,6 +331,270 @@ export const MED_STATUS_MARK: Record<MedStatus, string> = {
 export type InputKind = 'bath' | 'med' | 'incident'
 export const INPUT_KINDS: readonly InputKind[] = ['bath', 'med', 'incident']
 
+// ── 事故・ヒヤリハット（2026-09-26 追加・契約改訂は代表承認済み・0014_incidents.sql） ──
+// 熊本市の「事故報告書（事業者→熊本市）」の欄と選択肢に合わせる（並び・文言は様式どおり。変える時は様式を確かめる）。
+// 列で持つのは一覧・集計・絞り込みに使う項目だけ。様式の残りの欄は detail（jsonb・下の IncidentDetail）に持つ。
+// 身体拘束の記録はここでは扱わない。
+
+/** 区分。accident=事故 / nearmiss=ヒヤリハット */
+export type IncidentKind = 'accident' | 'nearmiss'
+export const INCIDENT_KINDS: readonly IncidentKind[] = ['accident', 'nearmiss']
+export const INCIDENT_KIND_LABEL: Record<IncidentKind, string> = { accident: '事故', nearmiss: 'ヒヤリハット' }
+
+/** 事業所（様式の「サービス種別」）。facility=入所（住宅型）/ visit=訪問 / daycare=通所 */
+export type IncidentOffice = 'facility' | 'visit' | 'daycare'
+export const INCIDENT_OFFICES: readonly IncidentOffice[] = ['facility', 'visit', 'daycare']
+export const INCIDENT_OFFICE_LABEL: Record<IncidentOffice, string> = { facility: '入所', visit: '訪問', daycare: '通所' }
+
+/** 発生場所（様式の並び） */
+export type IncidentPlace =
+  | 'room_private'
+  | 'room_shared'
+  | 'toilet'
+  | 'hallway'
+  | 'common'
+  | 'bathroom'
+  | 'training'
+  | 'premises'
+  | 'offsite'
+  | 'other'
+export const INCIDENT_PLACES: readonly IncidentPlace[] = [
+  'room_private',
+  'room_shared',
+  'toilet',
+  'hallway',
+  'common',
+  'bathroom',
+  'training',
+  'premises',
+  'offsite',
+  'other',
+]
+export const INCIDENT_PLACE_LABEL: Record<IncidentPlace, string> = {
+  room_private: '居室（個室）',
+  room_shared: '居室（多床室）',
+  toilet: 'トイレ',
+  hallway: '廊下',
+  common: '食堂等共用部',
+  bathroom: '浴室・脱衣室',
+  training: '機能訓練室',
+  premises: '施設敷地内の建物外',
+  offsite: '敷地外',
+  other: 'その他',
+}
+
+/** 事故の種別（様式の並び・複数選択可） */
+export type IncidentType = 'fall' | 'fall_from' | 'aspiration' | 'pica' | 'med_error' | 'medical' | 'unknown' | 'other'
+export const INCIDENT_TYPES: readonly IncidentType[] = [
+  'fall',
+  'fall_from',
+  'aspiration',
+  'pica',
+  'med_error',
+  'medical',
+  'unknown',
+  'other',
+]
+export const INCIDENT_TYPE_LABEL: Record<IncidentType, string> = {
+  fall: '転倒',
+  fall_from: '転落',
+  aspiration: '誤嚥・窒息',
+  pica: '異食',
+  med_error: '誤薬、与薬もれ等',
+  medical: '医療処置関連（チューブ抜去等）',
+  unknown: '不明',
+  other: 'その他',
+}
+
+/** 事故状況の程度 */
+export type IncidentSeverity = 'treated' | 'hospitalized' | 'death' | 'other'
+export const INCIDENT_SEVERITIES: readonly IncidentSeverity[] = ['treated', 'hospitalized', 'death', 'other']
+export const INCIDENT_SEVERITY_LABEL: Record<IncidentSeverity, string> = {
+  treated: '受診(外来･往診)、自施設で応急処置',
+  hospitalized: '入院',
+  death: '死亡',
+  other: 'その他',
+}
+
+/** 状態。open=対応中 / closed=完了 */
+export type IncidentStatus = 'open' | 'closed'
+export const INCIDENT_STATUSES: readonly IncidentStatus[] = ['open', 'closed']
+export const INCIDENT_STATUS_LABEL: Record<IncidentStatus, string> = { open: '対応中', closed: '完了' }
+
+/** 報告区分。first=第1報 / nth=第＿報（report_no に数） / final=最終報告 */
+export type IncidentReportStage = 'first' | 'nth' | 'final'
+export const INCIDENT_REPORT_STAGES: readonly IncidentReportStage[] = ['first', 'nth', 'final']
+export const INCIDENT_REPORT_STAGE_LABEL: Record<IncidentReportStage, string> = {
+  first: '第1報',
+  nth: '第＿報',
+  final: '最終報告',
+}
+
+/** 受診方法（複数選択可） */
+export type IncidentVisitMethod = 'in_house' | 'outpatient' | 'ambulance' | 'other'
+export const INCIDENT_VISIT_METHODS: readonly IncidentVisitMethod[] = ['in_house', 'outpatient', 'ambulance', 'other']
+export const INCIDENT_VISIT_METHOD_LABEL: Record<IncidentVisitMethod, string> = {
+  in_house: '施設内の医師(配置医含む)が対応',
+  outpatient: '受診(外来･往診)',
+  ambulance: '救急搬送',
+  other: 'その他',
+}
+
+/** 診断内容（複数選択可。骨折は部位を添える） */
+export type IncidentDiagnosisKind = 'cut' | 'bruise' | 'fracture' | 'other'
+export const INCIDENT_DIAGNOSIS_KINDS: readonly IncidentDiagnosisKind[] = ['cut', 'bruise', 'fracture', 'other']
+export const INCIDENT_DIAGNOSIS_KIND_LABEL: Record<IncidentDiagnosisKind, string> = {
+  cut: '切傷・擦過傷',
+  bruise: '打撲・捻挫・脱臼',
+  fracture: '骨折',
+  other: 'その他',
+}
+
+/** 報告した家族等の続柄（複数選択可） */
+export type IncidentFamilyRelation = 'spouse' | 'child' | 'other'
+export const INCIDENT_FAMILY_RELATIONS: readonly IncidentFamilyRelation[] = ['spouse', 'child', 'other']
+export const INCIDENT_FAMILY_RELATION_LABEL: Record<IncidentFamilyRelation, string> = {
+  spouse: '配偶者',
+  child: '子、子の配偶者',
+  other: 'その他',
+}
+
+/** 対象者の性別 */
+export type IncidentGender = 'male' | 'female'
+export const INCIDENT_GENDERS: readonly IncidentGender[] = ['male', 'female']
+export const INCIDENT_GENDER_LABEL: Record<IncidentGender, string> = { male: '男性', female: '女性' }
+
+/** 対象者の住所 */
+export type IncidentAddressKind = 'office' | 'other'
+export const INCIDENT_ADDRESS_KINDS: readonly IncidentAddressKind[] = ['office', 'other']
+export const INCIDENT_ADDRESS_KIND_LABEL: Record<IncidentAddressKind, string> = { office: '事業所所在地', other: 'その他' }
+
+/** 要介護度（様式の並び） */
+export type IncidentCareLevel =
+  | 'support1'
+  | 'support2'
+  | 'care1'
+  | 'care2'
+  | 'care3'
+  | 'care4'
+  | 'care5'
+  | 'independent'
+export const INCIDENT_CARE_LEVELS: readonly IncidentCareLevel[] = [
+  'support1',
+  'support2',
+  'care1',
+  'care2',
+  'care3',
+  'care4',
+  'care5',
+  'independent',
+]
+export const INCIDENT_CARE_LEVEL_LABEL: Record<IncidentCareLevel, string> = {
+  support1: '要支援1',
+  support2: '要支援2',
+  care1: '要介護1',
+  care2: '要介護2',
+  care3: '要介護3',
+  care4: '要介護4',
+  care5: '要介護5',
+  independent: '自立',
+}
+
+/** 認知症高齢者の日常生活自立度（様式の並び） */
+export type IncidentDementiaLevel = 'I' | 'IIa' | 'IIb' | 'IIIa' | 'IIIb' | 'IV' | 'M'
+export const INCIDENT_DEMENTIA_LEVELS: readonly IncidentDementiaLevel[] = ['I', 'IIa', 'IIb', 'IIIa', 'IIIb', 'IV', 'M']
+export const INCIDENT_DEMENTIA_LEVEL_LABEL: Record<IncidentDementiaLevel, string> = {
+  I: 'Ⅰ',
+  IIa: 'Ⅱa',
+  IIb: 'Ⅱb',
+  IIIa: 'Ⅲa',
+  IIIb: 'Ⅲb',
+  IV: 'Ⅳ',
+  M: 'M',
+}
+
+/**
+ * 様式の残りの欄（incidents.detail・jsonb）。キーは平らに持つ（入れ子にしない＝欄ごとに差分を取れる）。
+ * 文字の欄は空＝null。選択肢の欄は上の定数のキーだけ（受信値は incident.ts の normalizeIncidentDetail で照合する）。
+ * subject_name（氏名）は記録時点の写し。アプリは職員が書き換えた時だけ送り、送らない時はサーバーのトリガが
+ * 名簿の氏名を入れる／前の写しを残す（氏名を送信待ち＝端末の保存領域に置かないため・0014）
+ */
+export interface IncidentDetail {
+  // 1 事故状況
+  severity_other: string | null
+  death_on: string | null
+  // 3 対象者
+  subject_name: string | null
+  subject_age: number | null
+  subject_gender: IncidentGender | null
+  service_start_on: string | null
+  insurer: string | null
+  address_kind: IncidentAddressKind | null
+  address_other: string | null
+  care_level: IncidentCareLevel | null
+  dementia_level: IncidentDementiaLevel | null
+  // 4 事故の概要
+  type_other: string | null
+  situation: string | null
+  special_notes: string | null
+  // 5 事故発生時の対応
+  response: string | null
+  visit_methods: IncidentVisitMethod[]
+  visit_method_other: string | null
+  hospital_name: string | null
+  hospital_phone: string | null
+  diagnosis_name: string | null
+  diagnosis_kinds: IncidentDiagnosisKind[]
+  fracture_site: string | null
+  diagnosis_other: string | null
+  treatment: string | null
+  // 6 事故発生後の状況
+  after_status: string | null
+  family_relations: IncidentFamilyRelation[]
+  family_relation_other: string | null
+  family_reported_on: string | null
+  agency_municipality: boolean
+  agency_municipality_name: string | null
+  agency_police: boolean
+  agency_police_name: string | null
+  agency_other: boolean
+  agency_other_name: string | null
+  followup: string | null
+  // 7〜9
+  cause: string | null
+  prevention: string | null
+  other_notes: string | null
+}
+
+/** 事故・ヒヤリハットの記録（1行＝1件。occurred_on は JST の発生日） */
+export interface Incident {
+  id: number
+  kind: IncidentKind
+  /** 対象者（ヒヤリハットでは null＝対象者なしも可） */
+  resident_id: number | null
+  occurred_on: string
+  /** 発生日時（ISO 8601） */
+  occurred_at: string
+  office: IncidentOffice | null
+  place: IncidentPlace | null
+  place_other: string | null
+  types: IncidentType[]
+  severity: IncidentSeverity | null
+  status: IncidentStatus
+  report_stage: IncidentReportStage | null
+  report_no: number | null
+  submitted_on: string | null
+  /** 市への報告が必要（人が判断して付ける） */
+  city_report_needed: boolean
+  city_reported_on: string | null
+  reporter_id: number | null
+  confirmer_id: number | null
+  confirmed_at: string | null
+  /** 一覧の取得（detail を持ち出さない列）では空の既定値 */
+  detail: IncidentDetail
+  rev: number
+}
+
 export interface ImportDay {
   source: string
   day: string

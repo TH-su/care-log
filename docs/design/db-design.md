@@ -157,8 +157,28 @@ med_admin ( id bigint identity PK, resident_id bigint not null references reside
 -- トリガ: set_updated_at_rev／record_history_capture('admin_on')。RLS は bath_records と同じ
 -- Realtime: 2表とも publication に add table（既存の購読とは別チャンネル subscribeMedChanges）
 
+-- 事故・ヒヤリハット（1行=1件。0014・2026-09-26 追加）。様式は熊本市の事故報告書（事業者→熊本市）
+incidents ( id bigint identity PK, kind text not null check (kind in ('accident','nearmiss')),
+  resident_id bigint references residents(id),   -- ヒヤリハットは null 可（check: kind <> 'accident' or resident_id is not null）
+  occurred_on date not null,                     -- 発生日（JST）
+  occurred_at timestamptz not null,
+  office text check (null or facility/visit/daycare), place text check (null or 10個のキー), place_other text,
+  types text[] not null check (1つ以上・8個のキーだけ・null の要素なし),
+  severity text check (null or treated/hospitalized/death/other), status text not null default 'open' check (open/closed),
+  report_stage text check (null or first/nth/final), report_no int check (null or 1〜99), submitted_on date,
+  city_report_needed boolean not null default false, city_reported_on date,
+  reporter_id / confirmer_id bigint references staff(id), confirmed_at timestamptz,
+  detail jsonb not null default '{}' check (jsonb_typeof = 'object'),   -- 様式の残りの欄（キーは types.ts の IncidentDetail）
+  rev, created_at/updated_at, deleted_at, deleted_by, edited_by, client_key text unique )
+-- 索引: (occurred_on desc, id desc) / (resident_id, occurred_on desc)（いずれも where deleted_at is null）
+-- トリガ: incidents_subject_snapshot（before insert/update。detail.subject_name が空なら名簿から写す／更新で対象者が同じなら前の写しを残す）・
+--   set_updated_at_rev・record_history_capture('occurred_on')。RLS は bath_records と同じ（3本＋restrictive の member_only・delete ポリシーなし）
+-- Realtime: publication に add table（既存の購読とは別チャンネル subscribeIncidentChanges）
+
 -- app_settings … 0009 流用。★追加キー: 'native_input_enabled'（切替日Dの機能フラグ・監査#4）
 --   ★2026-09-26 追加: 'input_enabled_bath' / 'input_enabled_med' / 'input_enabled_incident'（種類ごとの入力解禁。初期値 'false'）
+--   ★2026-09-26 追加（0014）: 事故報告書に刷る事業所の情報 'corp_name' / 'office_name_facility' / 'office_name_visit' / 'office_name_daycare' /
+--     'office_no_facility' / 'office_no_visit' / 'office_no_daycare' / 'office_address'（初期値 ''。値はチーフが本番で入れる。空は印刷で空欄）
 -- import_days ( source, day, imported_at, src_rows, inserted, updated, skipped,
 --   native_skip, unmatched, PK(source,day) )   ★列拡張（監査#4/#9）
 -- master_sync_log ( id, synced_at, source, before_count, after_count, added, deactivated, renamed )
@@ -330,3 +350,4 @@ Supabase 無料枠に自動バックアップは無い（確信度: 高）。介
 - 2026-09-02 移行 0003〜0008 を反映
 - 2026-09-26 移行 0012（入浴記録・種類ごとの入力解禁・daycare_bath_plan）を反映
 - 2026-09-26 移行 0013（服薬の時間帯・与薬の記録）を反映
+- 2026-09-26 移行 0014（事故・ヒヤリハット・事業所の情報のキー）を反映

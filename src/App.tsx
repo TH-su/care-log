@@ -94,6 +94,12 @@ const BathMonthPage = lazy(() => import('./pages/BathMonthPage').then((m) => ({ 
 const MedRecordPage = lazy(() => import('./pages/MedRecordPage').then((m) => ({ default: m.MedRecordPage })))
 const MedSlotsPage = lazy(() => import('./pages/MedSlotsPage').then((m) => ({ default: m.MedSlotsPage })))
 const MedMonthPage = lazy(() => import('./pages/MedMonthPage').then((m) => ({ default: m.MedMonthPage })))
+// 事故・ヒヤリハット（2026-09-26 追加）。一覧は「その他」と記録ハブから、月次集計は「その他」から入る
+const IncidentListPage = lazy(() => import('./pages/IncidentListPage').then((m) => ({ default: m.IncidentListPage })))
+const IncidentFormPage = lazy(() => import('./pages/IncidentFormPage').then((m) => ({ default: m.IncidentFormPage })))
+const IncidentSummaryPage = lazy(() =>
+  import('./pages/IncidentSummaryPage').then((m) => ({ default: m.IncidentSummaryPage })),
+)
 const KartePage = lazy(() => import('./pages/KartePage').then((m) => ({ default: m.KartePage })))
 const SearchPage = lazy(() => import('./pages/SearchPage').then((m) => ({ default: m.SearchPage })))
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })))
@@ -118,6 +124,8 @@ const VIEWS = [
   'bathMonth',
   'medSlots',
   'medMonth',
+  'incident',
+  'incidentSummary',
 ] as const
 type View = (typeof VIEWS)[number]
 const DEFAULT_VIEW: View = 'daily'
@@ -134,6 +142,8 @@ const VIEW_PATH: Record<View, string> = {
   bathMonth: '/bath/month',
   medSlots: '/med/slots',
   medMonth: '/med/month',
+  incident: '/incident',
+  incidentSummary: '/incident/summary',
 }
 
 function readView(): View | null {
@@ -167,6 +177,9 @@ function viewOf(pathname: string): View | null {
   if (pathname === '/bath/month') return 'bathMonth'
   if (pathname === '/med/slots') return 'medSlots'
   if (pathname === '/med/month') return 'medMonth'
+  // 事故・ヒヤリハット: 月次集計だけ別の既知値。入力・編集（/incident/new・/incident/:id）は一覧の配下
+  if (pathname === '/incident/summary') return 'incidentSummary'
+  if (pathname === '/incident' || pathname.startsWith('/incident/')) return 'incident'
   return null
 }
 
@@ -215,7 +228,18 @@ const NAV_RAIL: NavItem[] = [
 ]
 
 // 下部タブに枠が無い画面は「その他」の配下扱いにして、現在地の表示が消えないようにする
-const MORE_VIEWS: View[] = ['more', 'timeline', 'record', 'search', 'settings', 'bathMonth', 'medSlots', 'medMonth']
+const MORE_VIEWS: View[] = [
+  'more',
+  'timeline',
+  'record',
+  'search',
+  'settings',
+  'bathMonth',
+  'medSlots',
+  'medMonth',
+  'incident',
+  'incidentSummary',
+]
 
 const ICON_PATHS: Record<IconName, ReactNode> = {
   daily: (
@@ -297,6 +321,18 @@ const ICON_PATHS: Record<IconName, ReactNode> = {
       <path d="M4 10h16M4 15h16M10 5v15" />
     </>
   ),
+  // 事故・ヒヤリハットの一覧・月次集計（ナビには出さないが、アイコンの表は全ての画面の分を持つ型のため置く）
+  incident: (
+    <>
+      <path d="M12 4l9 16H3z" />
+      <path d="M12 10v4.5M12 17.5v.01" />
+    </>
+  ),
+  incidentSummary: (
+    <>
+      <path d="M5 20V10M10 20V5M15 20v-7M20 20v-4" />
+    </>
+  ),
 }
 
 /** タブのアイコン（文字ラベルと必ず併記する。単独では意味を持たせない） */
@@ -341,6 +377,9 @@ function screenTitle(pathname: string): string {
   if (pathname === '/record/med') return '与薬チェック'
   if (pathname === '/med/slots') return '服薬の時間帯'
   if (pathname === '/med/month') return '与薬 月次表'
+  if (pathname === '/incident') return '事故・ヒヤリハット'
+  if (pathname === '/incident/summary') return '事故・ヒヤリ 月次集計'
+  if (pathname.startsWith('/incident/')) return '事故・ヒヤリハットの記録'
   if (pathname === '/karte' || pathname.startsWith('/karte/')) return 'カルテ'
   if (pathname === '/search') return '検索'
   if (pathname === '/settings') return '設定'
@@ -352,6 +391,8 @@ function screenTitle(pathname: string): string {
 function backTarget(pathname: string): string | null {
   if (pathname.startsWith('/record/')) return '/record'
   if (pathname.startsWith('/karte/')) return '/karte'
+  // 事故・ヒヤリハットの入力・編集から一覧へ（月次集計は「その他」から入る画面なので戻り先を持たない）
+  if (pathname.startsWith('/incident/') && pathname !== '/incident/summary') return '/incident'
   return null
 }
 
@@ -870,6 +911,11 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
             <Route path="/record/med" element={<MedRecordPage actorId={actorId} staff={staff} />} />
             <Route path="/med/slots" element={<MedSlotsPage actorId={actorId} staff={staff} />} />
             <Route path="/med/month" element={<MedMonthPage />} />
+            {/* 事故・ヒヤリハット。入力解禁は input_enabled_incident（画面が自前で取り直す） */}
+            <Route path="/incident" element={<IncidentListPage />} />
+            <Route path="/incident/summary" element={<IncidentSummaryPage />} />
+            <Route path="/incident/new" element={<IncidentFormPage actorId={actorId} staff={staff} />} />
+            <Route path="/incident/:id" element={<IncidentFormPage actorId={actorId} staff={staff} />} />
             <Route path="/karte" element={<KartePage staff={staff} />} />
             <Route path="/karte/:id" element={<KartePage staff={staff} />} />
             <Route path="/search" element={<SearchPage />} />

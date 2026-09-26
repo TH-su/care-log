@@ -34,6 +34,11 @@
 //   input_enabled_med で判定するので、ここでは押せなくしない（服薬の時間帯は封鎖中も閲覧できる）
 // - 「記録」の入口は、入浴と同じく input_enabled_med が解禁なら開ける（与薬だけ先に始めた時に記録ハブへ辿り着けるように）
 //
+// 事故・ヒヤリハット（2026-09-26 追加）:
+// - 「事故・ヒヤリハット」（/incident・一覧）と「事故・ヒヤリ 月次集計」（/incident/summary）の入口を足す。
+//   一覧・集計は閲覧できるので、ここでは押せなくしない（記録の封鎖は各画面が input_enabled_incident で判定する）。
+//   「記録」の入口の封鎖の判定は変えない（事故・ヒヤリハットの一覧はこの画面から直接開けるため）
+//
 // 寸法メモ（トークン外の値を直書きしないための読み替え。RecordHubPage と同一）:
 // - min-height 72px … 4px グリッドの利用可能値が 64px / 80px のため、下回らない側の min-h-20（80px）を使う
 // - 17px 文字   … ops 系統のトークンは fs-base=16px / fs-lg=18px。下回らない側の text-lg（18px）を使う
@@ -57,7 +62,16 @@ const LOAD_ERROR =
 
 const LOADING_LABEL = '「記録」を開けるかどうか確認しています…'
 
-type MoreKey = 'search' | 'timeline' | 'record' | 'settings' | 'bathMonth' | 'medSlots' | 'medMonth'
+type MoreKey =
+  | 'search'
+  | 'timeline'
+  | 'record'
+  | 'settings'
+  | 'bathMonth'
+  | 'medSlots'
+  | 'medMonth'
+  | 'incident'
+  | 'incidentSummary'
 
 /**
  * 2×2 の並び順（左上→右上→左下→右下）。ルートは sheet-contracts.md §2 のとおり。
@@ -99,6 +113,20 @@ const ITEMS: { key: MoreKey; to: string; label: string; desc: string; needsInput
     to: '/med/month',
     label: '与薬 月次表',
     desc: '1人ずつ月の与薬を見る・印刷する',
+    needsInput: false,
+  },
+  {
+    key: 'incident',
+    to: '/incident',
+    label: '事故・ヒヤリハット',
+    desc: '記録する・一覧・事故報告書を印刷する',
+    needsInput: false,
+  },
+  {
+    key: 'incidentSummary',
+    to: '/incident/summary',
+    label: '事故・ヒヤリ 月次集計',
+    desc: '委員会用に月ごとの件数を見る・印刷する（氏名なし）',
     needsInput: false,
   },
 ]
@@ -160,6 +188,19 @@ const ICON_PATHS: Record<MoreKey, ReactNode> = {
     <>
       <rect x="4" y="5" width="16" height="15" rx="1.5" />
       <path d="M4 10h16M4 15h16M10 5v15" />
+    </>
+  ),
+  // 注意の三角（事故・ヒヤリハット）
+  incident: (
+    <>
+      <path d="M12 4l9 16H3z" />
+      <path d="M12 10v4.5M12 17.5v.01" />
+    </>
+  ),
+  // 棒グラフ（月次集計）
+  incidentSummary: (
+    <>
+      <path d="M5 20V10M10 20V5M15 20v-7M20 20v-4" />
     </>
   ),
 }

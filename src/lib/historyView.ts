@@ -6,6 +6,13 @@ import {
   BATH_CANCEL_REASON_LABEL,
   BATH_RESULT_LABEL,
   IMPORTANCE_LABEL,
+  INCIDENT_KIND_LABEL,
+  INCIDENT_OFFICE_LABEL,
+  INCIDENT_PLACE_LABEL,
+  INCIDENT_REPORT_STAGE_LABEL,
+  INCIDENT_SEVERITY_LABEL,
+  INCIDENT_STATUS_LABEL,
+  INCIDENT_TYPE_LABEL,
   MEAL_SLOT_LABEL,
   MEAL_STATUS_LABEL,
   MED_SLOT_LABEL,
@@ -18,6 +25,13 @@ import type {
   BathCancelReason,
   BathResult,
   Importance,
+  IncidentKind,
+  IncidentOffice,
+  IncidentPlace,
+  IncidentReportStage,
+  IncidentSeverity,
+  IncidentStatus,
+  IncidentType,
   MealSlot,
   MealStatus,
   MedAdminSlot,
@@ -39,6 +53,7 @@ export const HISTORY_TABLE_LABEL: Record<string, string> = {
   bath_records: '入浴（デイ）',
   med_slots: '服薬の時間帯',
   med_admin: '与薬',
+  incidents: '事故・ヒヤリハット',
 }
 
 const VITAL_KIND_NAME: Record<string, string> = {
@@ -130,6 +145,26 @@ const TABLE_LABEL: Record<string, Record<string, string>> = {
     prn_effect: '頓服の効果',
     note: '備考',
   },
+  incidents: {
+    kind: '区分',
+    occurred_on: '発生日',
+    occurred_at: '発生日時',
+    office: 'サービス種別',
+    place: '発生場所',
+    place_other: '発生場所（その他）',
+    types: '事故の種別',
+    severity: '事故状況の程度',
+    status: '状態',
+    report_stage: '報告区分',
+    report_no: '第＿報の数',
+    submitted_on: '提出日',
+    city_report_needed: '市への報告が必要',
+    city_reported_on: '市へ報告した日',
+    reporter_id: '記録者',
+    confirmer_id: '確認者',
+    confirmed_at: '確認した日時',
+    detail: '様式の欄',
+  },
 }
 
 /** 画面に出さない列（内部の鍵・作成時刻。変わっても職員が読む意味が無い） */
@@ -142,7 +177,7 @@ export function historyColumnLabel(table: string, column: string): string | null
 }
 
 /** 職員の列（値は staff の id） */
-const STAFF_COLS = new Set(['recorded_by', 'deleted_by', 'ended_by', 'reporter_id'])
+const STAFF_COLS = new Set(['recorded_by', 'deleted_by', 'ended_by', 'reporter_id', 'confirmer_id'])
 
 function stampText(v: string): string {
   const d = new Date(v)
@@ -184,6 +219,17 @@ export function fmtHistoryValue(
   if (table === 'med_admin' && column === 'status') return MED_STATUS_LABEL[v as MedStatus] ?? String(v)
   if (table === 'med_slots' && column === 'slots' && Array.isArray(v)) {
     return v.length === 0 ? '（なし）' : v.map((x) => MED_SLOT_LABEL[x as MedAdminSlot] ?? String(x)).join('・')
+  }
+  if (table === 'incidents') {
+    if (column === 'kind') return INCIDENT_KIND_LABEL[v as IncidentKind] ?? String(v)
+    if (column === 'office') return INCIDENT_OFFICE_LABEL[v as IncidentOffice] ?? String(v)
+    if (column === 'place') return INCIDENT_PLACE_LABEL[v as IncidentPlace] ?? String(v)
+    if (column === 'severity') return INCIDENT_SEVERITY_LABEL[v as IncidentSeverity] ?? String(v)
+    if (column === 'status') return INCIDENT_STATUS_LABEL[v as IncidentStatus] ?? String(v)
+    if (column === 'report_stage') return INCIDENT_REPORT_STAGE_LABEL[v as IncidentReportStage] ?? String(v)
+    if (column === 'types' && Array.isArray(v)) {
+      return v.length === 0 ? '（空）' : v.map((x) => INCIDENT_TYPE_LABEL[x as IncidentType] ?? String(x)).join('・')
+    }
   }
   if (column === 'status') return MEAL_STATUS_LABEL[v as MealStatus] ?? String(v)
   if (typeof v === 'boolean') return v ? 'はい' : 'いいえ'

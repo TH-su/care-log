@@ -24,6 +24,9 @@ L0承認済み。詳細設計の正本: `docs/PLAN.md`・`docs/design/db-design.
 追加（2026-09-26・代表承認）: `/record/med`=与薬チェック（記録ハブの6つ目）・`/med/slots`=服薬の時間帯・`/med/month`=与薬 月次表
 （後の2つは「その他」から。`LS.view` の既知値 `medSlots` / `medMonth`）
 
+追加（2026-09-26・代表承認）: `/incident`=事故・ヒヤリハット 一覧（「その他」と記録ハブの7つ目）・`/incident/new`・`/incident/:id`=入力・編集（事故報告書の印刷を含む）・
+`/incident/summary`=委員会用の月次集計（「その他」から）。`LS.view` の既知値 `incident`（入力・編集も一覧の配下）/ `incidentSummary`
+
 リロード復元: HashRouter のURLが第一。ベースURL直開き時のみ `LS.view` の既知値照合で復元。
 
 ## src/lib/db.ts が export するAPI（他ビルダーはこれを import する）
@@ -43,8 +46,9 @@ setResidentNoteAlias(id: number, alias: string | null): Promise<Resident | Queue
 fetchStaff(): Promise<Staff[]>                   // active・name昇順
 fetchTimelineChunk(fromIso: string, toIso: string, staffId: number | null): Promise<TimelineChunk>  // RPC timeline_chunk
 fetchKarte(residentId: number, fromIso: string, toIso: string):
-  Promise<{ vitals: Vital[]; meals: Meal[]; fluids: FluidIntake[]; notes: Note[]; outings: Outing[]; baths: BathRecord[]; meds: MedAdmin[] }>
-                                                               // baths / meds は 2026-09-26 追加。0012 / 0013 未適用の DB では [] で返し、カルテ全体を失敗させない
+  Promise<{ vitals: Vital[]; meals: Meal[]; fluids: FluidIntake[]; notes: Note[]; outings: Outing[]; baths: BathRecord[]; meds: MedAdmin[]; incidents: Incident[] }>
+                                                               // baths / meds / incidents は 2026-09-26 追加。0012 / 0013 / 0014 未適用の DB では [] で返し、カルテ全体を失敗させない
+                                                               // incidents は一覧の列だけ（detail＝様式の残りの欄・氏名の写しは持ち出さない）
 searchNotes(p: { q: string; target: 'body' | 'reporter'; fromIso: string; toIso: string;
   importance?: Importance; shift?: Shift; limit?: number }): Promise<Note[]>
 
@@ -138,7 +142,29 @@ hasPendingMedSlots(residentId: number, recordId: number | null): boolean   // �
 pendingPrnOps(day: string): PendingPrn[]                       // このタブの送信待ちにある、その日の頓服の追加（未送信・送信中・止まっている）。読むだけ。
                                                                // 頓服一覧は「サーバーの記録」＋これで描く（再読み込み・日付切替で未送信が消えない＝二重記録を防ぐ）
 subscribeMedChanges(cb): () => void                            // med_slots・med_admin の Realtime（既存・入浴とは別のチャンネル）
+
+// ── 事故・ヒヤリハット（2026-09-26 追加・代表承認の契約改訂。既存の定義は変えない） ──
+fetchIncidents(q: { fromIso: string; toIso: string; kind?: IncidentKind | null; status?: IncidentStatus | null }): Promise<Incident[]>
+                                                               // 発生日の期間（必須）・区分・状態で絞り、新しい順。detail は持ち出さない。取り切れない時は例外
+fetchIncident(id: number): Promise<Incident | null>             // 1件（detail を含む）。無い・取り消し済みは null
+insertIncident(i: IncidentInput): Promise<Incident | Queued>   // client_key 付き。第1報の最小項目だけで通る（incident.ts の validateIncidentInput）。
+                                                               // detail.subject_name（氏名の写し）は null なら送らない＝サーバーのトリガが名簿から写す
+updateIncident(current: Incident, patch: IncidentPatch, opts?: WriteOpts): Promise<Incident | Conflict | Queued>
+                                                               // rev 照合。列は変えた項目だけ、detail は current.detail に patch.detail を重ねた全体（jsonb は列ごと置換）。
+                                                               // 氏名の写しは patch.detail に subject_name を入れた時だけ送る。対象者を変えた時は detail も送る（写し直させる）
+softDeleteIncident(id: number, rev: number, opts?: WriteOpts): Promise<true | Conflict | Queued>
+hasPendingIncident(recordId: number): boolean                  // このタブの送信待ち（送信中を含む・blocked は除く）にその記録の追記・取り消しがあるか。読むだけ
+pendingIncidentOps(): PendingIncident[]                        // 送信待ちにある追加（未送信・送信中・止まっている）。読むだけ。一覧に「未送信」として出す
+fetchOfficeProfile(): Promise<OfficeProfile>                    // app_settings の corp_name / office_name_* / office_no_* / office_address（無い・空は ''）
+subscribeIncidentChanges(cb): () => void                       // incidents の Realtime（既存・入浴・与薬とは別のチャンネル）
 ```
+
+- 事故・ヒヤリハット（incidents）は入浴・与薬と同じ送り方（client_key・rev 照合・送信待ち cl_sendQueue・edited_by・soft delete）。入力解禁は input_enabled_incident。
+  自然キーは持たない。送信待ちの中身は書き換えない・破棄しない（未送信の記録は画面が hasPendingIncident で編集できなくする）
+- 対象者の氏名の写し（detail.subject_name）は、職員が名簿と違う名前に書き換えた時だけアプリが送る。送らない時は 0014 のトリガ
+  （incidents_subject_snapshot）が追加で名簿から写し、更新で前の写しを残す（対象者を変えたら写し直す）。氏名を送信待ち（端末の保存領域）に置かないため
+- 純ロジック（入力の検証・市への報告の案内・月次集計・受け渡しの照合）は `src/lib/incident.ts`。選択肢の並び・文言の正本は types.ts の INCIDENT_*（熊本市の様式どおり）
+- 事故報告書（A4 縦）は既存の印刷部品（PrintArea orientation='portrait'・文字 11〜9px）で刷る。はみ出す時は2枚目に続き、見出し（thead）を繰り返す。印刷の表の組み方は print.css の .cl-print-form（既存の .cl-print-table は変えない）
 
 - 服薬の時間帯（med_slots）・与薬の記録（med_admin）は入浴記録と同じ送り方（client_key・rev 照合・送信待ち cl_sendQueue・edited_by）。
   入力解禁は input_enabled_med（与薬の記録だけ）。服薬の時間帯はどの旗の封鎖も受けない（使い始める前に看護師が設定できるように・2026-09-26 チーフ裁定）。送信待ちの insert が自然キー（1人1件・1人1日1時間帯1件）の 23505 になった時は blocked='conflict' で止めて残す。
@@ -256,5 +282,9 @@ ResidentPickerModal({ open, residents: Resident[], onPick(id: number | null), on
   med_admin 表（1人1日1時間帯1件の部分unique・頓服 prn は除く・slot/status の check・頓服は taken だけで使用時刻・薬・理由が必須の check）・
   client_key 全体unique・rev／変更の記録トリガ（med_admin は admin_on、med_slots は業務日付が無いので updated_at を渡す）・
   RLS＋restrictive の member_only・delete ポリシーなし・Realtime 登録（2表）。0012 と同じく**初回に1回だけ流す**（修正は新しい番号で）
+- `0014_incidents.sql`（2026-09-26）: incidents 表（kind/office/place/types/severity/status/report_stage の check・事故は対象者必須・types は1つ以上・detail は jsonb のオブジェクト・
+  client_key 全体unique・rev／変更の記録トリガ（occurred_on）・氏名の写しのトリガ・RLS＋restrictive の member_only・delete ポリシーなし・Realtime 登録）、
+  app_settings に事業所の情報のキー（corp_name / office_name_facility・visit・daycare / office_no_facility・visit・daycare / office_address。値 ''・既存は触らない。
+  値はチーフが本番で入れる）。0012 と同じく**初回に1回だけ流す**（修正は新しい番号で）
 - **適用順は 0001 → 0002 → 0003 → 0004 → 0005**。0003〜0005 は互いに独立だが、
   0003 未適用のまま新UIを配ると「定時以外のバイタル保存」と「食事一覧の読み込み」が失敗する（意図的にフォールバックを作っていない）。

@@ -21,6 +21,7 @@ import {
   historyColumnLabel,
 } from '../lib/historyView'
 import { addDays, fmtDayLabel, fmtTimeHM, isoDate, todayIso } from '../lib/format'
+import { typesText } from '../lib/incident'
 import {
   Chip,
   EmptyBlock,
@@ -34,6 +35,8 @@ import {
   BATH_CANCEL_REASON_LABEL,
   BATH_RESULT_LABEL,
   IMPORTANCE_LABEL,
+  INCIDENT_KIND_LABEL,
+  INCIDENT_STATUS_LABEL,
   LEVEL_MARK,
   LS,
   MEAL_STATUS_LABEL,
@@ -51,6 +54,7 @@ import {
 import type {
   BathRecord,
   FluidIntake,
+  Incident,
   Level,
   Meal,
   MealSlot,
@@ -1407,6 +1411,51 @@ function MedSection({ meds }: MedSectionProps) {
 }
 
 // ══════════════════════════════════════════════════════════════
+// 事故・ヒヤリ（incidents・0014_incidents.sql・2026-09-26 追加）
+// ══════════════════════════════════════════════════════════════
+
+interface IncidentSectionProps {
+  incidents: Incident[]
+}
+
+/** 表示期間の事故・ヒヤリハットを新しい順に（日付・区分・種別・状態） */
+function IncidentSection({ incidents }: IncidentSectionProps) {
+  const sorted = useMemo(
+    () =>
+      incidents.slice().sort((a, b) => {
+        if (a.occurred_on !== b.occurred_on) return a.occurred_on < b.occurred_on ? 1 : -1
+        return b.id - a.id
+      }),
+    [incidents],
+  )
+  return (
+    <SectionCard title="事故・ヒヤリ" className="mt-4">
+      {sorted.length === 0 ? (
+        <div className="mt-2">
+          <EmptyBlock message="この期間の事故・ヒヤリハットの記録はありません。期間を広げてお試しください。" />
+        </div>
+      ) : (
+        <ul className="mt-2 space-y-2">
+          {sorted.map((i) => (
+            <li key={i.id} className={`rounded-md border bg-surface p-3 ${i.kind === 'accident' ? 'border-danger' : 'border-border'}`}>
+              <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-base text-ink">
+                <span className="tabular text-sm text-ink2">{fmtDayLabel(i.occurred_on)}</span>
+                <span className={`font-bold ${i.kind === 'accident' ? 'text-danger' : ''}`}>
+                  {i.kind === 'accident' ? <span aria-hidden="true">▲ </span> : null}
+                  {INCIDENT_KIND_LABEL[i.kind]}
+                </span>
+                <span className="text-sm text-ink2">状態: {INCIDENT_STATUS_LABEL[i.status]}</span>
+              </p>
+              <p className="mt-1 break-words text-sm text-ink">種別: {typesText(i.types)}</p>
+            </li>
+          ))}
+        </ul>
+      )}
+    </SectionCard>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════
 // 変更の記録（record_history・0010_record_history.sql）
 // ══════════════════════════════════════════════════════════════
 
@@ -1625,9 +1674,10 @@ interface KarteData {
   outings: Outing[]
   baths: BathRecord[]
   meds: MedAdmin[]
+  incidents: Incident[]
 }
 
-const EMPTY_KARTE: KarteData = { vitals: [], meals: [], fluids: [], notes: [], outings: [], baths: [], meds: [] }
+const EMPTY_KARTE: KarteData = { vitals: [], meals: [], fluids: [], notes: [], outings: [], baths: [], meds: [], incidents: [] }
 
 interface KarteDetailProps {
   residentId: number
@@ -1686,6 +1736,8 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
           outings: ownedBy<Outing>(res?.outings, residentId),
           baths: ownedBy<BathRecord>(res?.baths, residentId),
           meds: ownedBy<MedAdmin>(res?.meds, residentId),
+          // 本人分だけ（対象者なしのヒヤリハットは resident_id が null＝カルテには出ない）
+          incidents: asArray<Incident>(res?.incidents).filter((i) => i != null && i.resident_id === residentId),
         })
         setError(null)
       })
@@ -1813,6 +1865,7 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
           <NotesSection notes={data.notes} staffById={staffById} />
           <BathSection baths={data.baths} staffById={staffById} />
           <MedSection meds={data.meds} />
+          <IncidentSection incidents={data.incidents} />
         </>
       )}
 
