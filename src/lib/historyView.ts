@@ -8,6 +8,8 @@ import {
   IMPORTANCE_LABEL,
   MEAL_SLOT_LABEL,
   MEAL_STATUS_LABEL,
+  MED_SLOT_LABEL,
+  MED_STATUS_LABEL,
   NOTE_COLOR_LABEL,
   OUTING_KIND_LABEL,
   SHIFT_LABEL,
@@ -18,6 +20,8 @@ import type {
   Importance,
   MealSlot,
   MealStatus,
+  MedAdminSlot,
+  MedStatus,
   NoteColor,
   OutingKind,
   Shift,
@@ -33,6 +37,8 @@ export const HISTORY_TABLE_LABEL: Record<string, string> = {
   notes: '申し送り',
   outings: '外出',
   bath_records: '入浴（デイ）',
+  med_slots: '服薬の時間帯',
+  med_admin: '与薬',
 }
 
 const VITAL_KIND_NAME: Record<string, string> = {
@@ -110,6 +116,20 @@ const TABLE_LABEL: Record<string, Record<string, string>> = {
     cancel_reason: '中止の理由',
     note: '備考',
   },
+  med_slots: {
+    slots: '服薬の時間帯',
+    note: '備考',
+  },
+  med_admin: {
+    admin_on: '日付',
+    slot: '時間帯',
+    status: '状態',
+    given_at: '使用時刻',
+    prn_drug: '頓服の薬',
+    prn_reason: '頓服の理由',
+    prn_effect: '頓服の効果',
+    note: '備考',
+  },
 }
 
 /** 画面に出さない列（内部の鍵・作成時刻。変わっても職員が読む意味が無い） */
@@ -159,6 +179,11 @@ export function fmtHistoryValue(
   if (table === 'bath_records' && column === 'result') return BATH_RESULT_LABEL[v as BathResult] ?? String(v)
   if (table === 'bath_records' && column === 'cancel_reason') {
     return BATH_CANCEL_REASON_LABEL[v as BathCancelReason] ?? String(v)
+  }
+  if (table === 'med_admin' && column === 'slot') return MED_SLOT_LABEL[v as MedAdminSlot] ?? String(v)
+  if (table === 'med_admin' && column === 'status') return MED_STATUS_LABEL[v as MedStatus] ?? String(v)
+  if (table === 'med_slots' && column === 'slots' && Array.isArray(v)) {
+    return v.length === 0 ? '（なし）' : v.map((x) => MED_SLOT_LABEL[x as MedAdminSlot] ?? String(x)).join('・')
   }
   if (column === 'status') return MEAL_STATUS_LABEL[v as MealStatus] ?? String(v)
   if (typeof v === 'boolean') return v ? 'はい' : 'いいえ'

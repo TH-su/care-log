@@ -21,6 +21,9 @@ L0承認済み。詳細設計の正本: `docs/PLAN.md`・`docs/design/db-design.
 
 追加（2026-09-26・代表承認）: `/record/bath`=入浴（デイ）の記録（記録ハブの5つ目）・`/bath/month`=入浴 月次表（「その他」から。`LS.view` の既知値 `bathMonth`）
 
+追加（2026-09-26・代表承認）: `/record/med`=与薬チェック（記録ハブの6つ目）・`/med/slots`=服薬の時間帯・`/med/month`=与薬 月次表
+（後の2つは「その他」から。`LS.view` の既知値 `medSlots` / `medMonth`）
+
 リロード復元: HashRouter のURLが第一。ベースURL直開き時のみ `LS.view` の既知値照合で復元。
 
 ## src/lib/db.ts が export するAPI（他ビルダーはこれを import する）
@@ -40,8 +43,8 @@ setResidentNoteAlias(id: number, alias: string | null): Promise<Resident | Queue
 fetchStaff(): Promise<Staff[]>                   // active・name昇順
 fetchTimelineChunk(fromIso: string, toIso: string, staffId: number | null): Promise<TimelineChunk>  // RPC timeline_chunk
 fetchKarte(residentId: number, fromIso: string, toIso: string):
-  Promise<{ vitals: Vital[]; meals: Meal[]; fluids: FluidIntake[]; notes: Note[]; outings: Outing[]; baths: BathRecord[] }>
-                                                               // baths は 2026-09-26 追加。0012 未適用の DB では [] で返し、カルテ全体を失敗させない
+  Promise<{ vitals: Vital[]; meals: Meal[]; fluids: FluidIntake[]; notes: Note[]; outings: Outing[]; baths: BathRecord[]; meds: MedAdmin[] }>
+                                                               // baths / meds は 2026-09-26 追加。0012 / 0013 未適用の DB では [] で返し、カルテ全体を失敗させない
 searchNotes(p: { q: string; target: 'body' | 'reporter'; fromIso: string; toIso: string;
   importance?: Importance; shift?: Shift; limit?: number }): Promise<Note[]>
 
@@ -114,7 +117,32 @@ updateBath(current: BathRecord, patch: Partial<Pick<BathRecord, 'result' | 'canc
   Promise<BathRecord | Conflict | Queued>                      // rev 照合の部分更新。中止以外にしたら cancel_reason は null で送る
 softDeleteBath(id: number, rev: number, opts?: WriteOpts): Promise<true | Conflict | Queued>
 subscribeBathChanges(cb): () => void                           // 入浴記録の Realtime（既存7表とは別のチャンネル）
+
+// ── 与薬チェック（服薬介助・2026-09-26 追加・代表承認の契約改訂。既存の定義は変えない） ──
+fetchMedSlots(residents?: Resident[]): Promise<MedSlotsSetting[]>   // 在籍の方の服薬の時間帯（resident_id で絞って引く）
+fetchMedDay(dayIso: string): Promise<MedAdmin[]>               // その日の与薬の記録（時間帯・頓服とも。削除済みを除く）
+fetchMedMonth(monthKey: string, residentId?: number): Promise<MedAdmin[]>
+                                                               // 1人なら1回・全員なら7日ずつ分けて引く（1回2,000行を超えない）。取り切れない時は例外
+fetchMedFirstDay(): Promise<string | null>                     // 施設全体で最初の与薬の記録の日（月次表の「未」を付け始める日）
+setMedSlots(residentId: number, slots: readonly MedSlot[], note: string | null, current: MedSlotsSetting | null, opts?: WriteOpts):
+  Promise<MedSlotsSetting | Conflict | Queued>                 // current が null なら insert（client_key）、あれば rev 照合 update。upsert は使わない
+insertMedAdmin(m: Omit<MedAdmin, 'id' | 'rev' | 'created_at'>): Promise<MedAdmin | Conflict | Queued>
+                                                               // client_key 付き。1人1日1時間帯1件の 23505（自分のキーでない）は 'conflict'
+updateMedAdmin(current: MedAdmin, patch: Partial<Pick<MedAdmin, 'status' | 'note' | 'given_at' | 'prn_drug' | 'prn_reason' | 'prn_effect'>>,
+  opts?: WriteOpts): Promise<MedAdmin | Conflict | Queued>     // rev 照合の部分更新（変えた項目と edited_by だけ）
+softDeleteMedAdmin(id: number, rev: number, opts?: WriteOpts): Promise<true | Conflict | Queued>
+hasPendingMed(residentId: number, day: string, slot: MedAdminSlot, recordId?: number | null): boolean
+                                                               // このタブの送信待ち（送信中を含む・blocked は除く）にそのマスの追加か、その記録の修正・取り消しがあるか。
+                                                               // 読むだけ。頓服で recordId を渡した時はその記録の修正・取り消しだけを見る
+hasPendingMedSlots(residentId: number, recordId: number | null): boolean   // 服薬の時間帯の同じ判定
+subscribeMedChanges(cb): () => void                            // med_slots・med_admin の Realtime（既存・入浴とは別のチャンネル）
 ```
+
+- 服薬の時間帯（med_slots）・与薬の記録（med_admin）は入浴記録と同じ送り方（client_key・rev 照合・送信待ち cl_sendQueue・edited_by）。
+  入力解禁は input_enabled_med（両方の表）。送信待ちの insert が自然キー（1人1件・1人1日1時間帯1件）の 23505 になった時は blocked='conflict' で止めて残す。
+  送信待ちの中身は書き換えない・破棄しない（未送信のマス・行は画面が hasPendingMed / hasPendingMedSlots で押せなくする）
+- 純ロジック（締め判定・1日の表・件数・マスを押した時の動き・入力の検証・月次集計）は `src/lib/med.ts`。締め時刻は `MED_DEADLINES`（将来設定化できる形）
+- 印刷の部品は向き（orientation='portrait'）と1ページずつ（paged・中身の .cl-print-page ごとに改ページ）を足した。既定（横・1枚に収める）は従来どおり
 
 - 入浴記録（bath_records）は水分・申し送り・外出と同じ送り方（client_key・rev 照合・送信待ち cl_sendQueue・edited_by）。
   入力解禁だけは native_input_enabled ではなく input_enabled_bath で判定する（既存の封鎖・cells の挙動は変えない）。
@@ -220,5 +248,9 @@ ResidentPickerModal({ open, residents: Resident[], onPick(id: number | null), on
   client_key 全体unique・rev／変更の記録トリガ・RLS＋restrictive の member_only（care-backend と同じ形）・delete ポリシーなし）・RPC `daycare_bath_plan(p_date)`（週間計画の写し kv_entries の
   care_schedule_v2 から、その日のデイの入浴予定。0行＝写しなし／source_id が null の1行＝予定なし）・Realtime 登録。
   **初回に1回だけ流す。2回目以降は Realtime の登録（add table）の文でエラーになりファイル全体が巻き戻るので、修正は新しい番号のファイルで流す**
+- `0013_med_admin.sql`（2026-09-26）: med_slots 表（1人1件の部分unique・slots は morning/noon/evening/bedtime の配列を check）・
+  med_admin 表（1人1日1時間帯1件の部分unique・頓服 prn は除く・slot/status の check・頓服は taken だけで使用時刻・薬・理由が必須の check）・
+  client_key 全体unique・rev／変更の記録トリガ（med_admin は admin_on、med_slots は業務日付が無いので updated_at を渡す）・
+  RLS＋restrictive の member_only・delete ポリシーなし・Realtime 登録（2表）。0012 と同じく**初回に1回だけ流す**（修正は新しい番号で）
 - **適用順は 0001 → 0002 → 0003 → 0004 → 0005**。0003〜0005 は互いに独立だが、
   0003 未適用のまま新UIを配ると「定時以外のバイタル保存」と「食事一覧の読み込み」が失敗する（意図的にフォールバックを作っていない）。

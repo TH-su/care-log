@@ -337,7 +337,8 @@ if (B === null) {
     it('記録ハブは入浴だけ input_enabled_bath で封鎖を判定する', () => {
       const hub = read('../src/pages/RecordHubPage.tsx')
       assert.match(hub, /getKindInputGate\('bath'\)/)
-      assert.match(hub, /key === 'bath' \? bathLocked : locked/)
+      // 2026-09-26 与薬チェックの追加で、与薬の旗（medLocked）が間に入った。入浴は bathLocked・その他は locked のまま
+      assert.match(hub, /key === 'bath' \? bathLocked : key === 'med' \? medLocked : locked/)
     })
     it('月次表は表示中の月を保存しない（日付に紐づく状態＝原則11の既定。開くと常に今月）', () => {
       const page = read('../src/pages/BathMonthPage.tsx')

@@ -133,6 +133,30 @@ bath_records ( id bigint identity PK, resident_id bigint not null references res
 --   （security invoker・search_path=''・authenticated のみ。返すのは source_id・開始・終了・入院中・写しの更新時刻だけ。
 --    曜日は dayOfWeek 0=月…6=日 と extract(isodow from p_date)-1 を突き合わせる）
 
+-- 服薬の時間帯（1行=1人。0013・2026-09-26 追加）。薬の名前は持たない（処方の正本は入居者マスタ）
+med_slots ( id bigint identity PK, resident_id bigint not null references residents(id),
+  slots text[] not null default '{}' check (slots <@ array['morning','noon','evening','bedtime'] and null の要素なし),
+  note text, rev int default 1, created_at/updated_at, deleted_at, deleted_by, edited_by bigint references staff(id),
+  client_key text unique )
+-- 部分unique: (resident_id) where deleted_at is null（1人1件）
+-- トリガ: set_updated_at_rev／record_history_capture('updated_at')（業務日付の列が無いので「変更した日」を record_day に入れる。
+--   jsonb の時刻はセッションの時刻帯＝Supabase は UTC なので、日本時間 0〜9 時の変更は前日の日付になる）
+-- RLS は bath_records と同じ（3本＋restrictive の member_only・delete ポリシーなし）
+
+-- 与薬の記録（1行=1人×1業務日×1時間帯。頓服 prn は何件でも。0013・2026-09-26 追加）
+med_admin ( id bigint identity PK, resident_id bigint not null references residents(id),
+  admin_on date not null,                        -- 業務日付（JST）
+  slot text not null check (slot in ('morning','noon','evening','bedtime','prn')),
+  status text not null check (status in ('taken','partial','refused','absent','stopped','dropped','wrong')),
+  given_at timestamptz, prn_drug text, prn_reason text, prn_effect text,
+  --   check: slot <> 'prn' or (status='taken' and given_at・prn_drug・prn_reason がある（空白だけ不可）)
+  note text, recorded_by bigint references staff(id), rev int default 1,
+  created_at/updated_at, deleted_at, deleted_by, edited_by, client_key text unique )
+-- 部分unique: (resident_id, admin_on, slot) where deleted_at is null and slot <> 'prn'
+-- 索引: (admin_on desc, id desc) / (resident_id, admin_on desc)（いずれも where deleted_at is null）
+-- トリガ: set_updated_at_rev／record_history_capture('admin_on')。RLS は bath_records と同じ
+-- Realtime: 2表とも publication に add table（既存の購読とは別チャンネル subscribeMedChanges）
+
 -- app_settings … 0009 流用。★追加キー: 'native_input_enabled'（切替日Dの機能フラグ・監査#4）
 --   ★2026-09-26 追加: 'input_enabled_bath' / 'input_enabled_med' / 'input_enabled_incident'（種類ごとの入力解禁。初期値 'false'）
 -- import_days ( source, day, imported_at, src_rows, inserted, updated, skipped,
@@ -305,3 +329,4 @@ Supabase 無料枠に自動バックアップは無い（確信度: 高）。介
 
 - 2026-09-02 移行 0003〜0008 を反映
 - 2026-09-26 移行 0012（入浴記録・種類ごとの入力解禁・daycare_bath_plan）を反映
+- 2026-09-26 移行 0013（服薬の時間帯・与薬の記録）を反映

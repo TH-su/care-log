@@ -37,6 +37,8 @@ import {
   LEVEL_MARK,
   LS,
   MEAL_STATUS_LABEL,
+  MED_SLOT_LABEL,
+  MED_STATUS_LABEL,
   OUTING_KIND_LABEL,
   SHIFT_LABEL,
   diaBpLevel,
@@ -52,6 +54,7 @@ import type {
   Level,
   Meal,
   MealSlot,
+  MedAdmin,
   Note,
   Outing,
   Resident,
@@ -1333,6 +1336,77 @@ function BathSection({ baths, staffById }: BathSectionProps) {
 }
 
 // ══════════════════════════════════════════════════════════════
+// 与薬（med_admin・0013_med_admin.sql・2026-09-26 追加）
+// ══════════════════════════════════════════════════════════════
+
+/** 時間帯の並び（同じ日の中で朝→昼→夕→眠前→頓服の順に出す） */
+const MED_SLOT_ORDER: Record<string, number> = { morning: 0, noon: 1, evening: 2, bedtime: 3, prn: 4 }
+
+/** ISO の時刻 → 端末の時刻 'H:MM'（読めなければ ''） */
+function clockOf(iso: string | null): string {
+  if (iso === null) return ''
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? '' : `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+interface MedSectionProps {
+  meds: MedAdmin[]
+}
+
+/** 表示期間の与薬の記録を新しい順に（日付・時間帯・状態。頓服は時刻・薬・理由・効果） */
+function MedSection({ meds }: MedSectionProps) {
+  const sorted = useMemo(
+    () =>
+      meds.slice().sort((a, b) => {
+        if (a.admin_on !== b.admin_on) return a.admin_on < b.admin_on ? 1 : -1
+        const so = (MED_SLOT_ORDER[a.slot] ?? 9) - (MED_SLOT_ORDER[b.slot] ?? 9)
+        return so !== 0 ? so : a.id - b.id
+      }),
+    [meds],
+  )
+  return (
+    <SectionCard title="与薬" className="mt-4">
+      {sorted.length === 0 ? (
+        <div className="mt-2">
+          <EmptyBlock message="この期間の与薬の記録はありません。期間を広げてお試しください。" />
+        </div>
+      ) : (
+        <ul className="mt-2 space-y-2">
+          {sorted.map((m) => {
+            const incident = m.status === 'dropped' || m.status === 'wrong'
+            return (
+              <li key={m.id} className={`rounded-md border bg-surface p-3 ${incident ? 'border-danger' : 'border-border'}`}>
+                <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-base text-ink">
+                  <span className="tabular text-sm text-ink2">{fmtDayLabel(m.admin_on)}</span>
+                  <span className="font-bold">{MED_SLOT_LABEL[m.slot]}</span>
+                  {m.slot === 'prn' ? (
+                    <span className="tabular text-sm text-ink2">{clockOf(m.given_at)}</span>
+                  ) : (
+                    <span className={incident ? 'font-bold text-danger' : ''}>
+                      {incident ? <span aria-hidden="true">▲ </span> : null}
+                      {MED_STATUS_LABEL[m.status]}
+                    </span>
+                  )}
+                </p>
+                {m.slot === 'prn' ? (
+                  <p className="mt-1 break-words text-sm text-ink">
+                    薬: {m.prn_drug ?? '—'}　理由: {m.prn_reason ?? '—'}
+                    {m.prn_effect !== null ? `　効果: ${m.prn_effect}` : ''}
+                  </p>
+                ) : null}
+                {m.note !== null && m.note !== '' ? (
+                  <p className="mt-1 whitespace-pre-wrap break-words text-sm text-ink">{m.note}</p>
+                ) : null}
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </SectionCard>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════
 // 変更の記録（record_history・0010_record_history.sql）
 // ══════════════════════════════════════════════════════════════
 
@@ -1550,9 +1624,10 @@ interface KarteData {
   notes: Note[]
   outings: Outing[]
   baths: BathRecord[]
+  meds: MedAdmin[]
 }
 
-const EMPTY_KARTE: KarteData = { vitals: [], meals: [], fluids: [], notes: [], outings: [], baths: [] }
+const EMPTY_KARTE: KarteData = { vitals: [], meals: [], fluids: [], notes: [], outings: [], baths: [], meds: [] }
 
 interface KarteDetailProps {
   residentId: number
@@ -1610,6 +1685,7 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
           notes: asArray<Note>(res?.notes).filter((n) => n != null && n.resident_id === residentId),
           outings: ownedBy<Outing>(res?.outings, residentId),
           baths: ownedBy<BathRecord>(res?.baths, residentId),
+          meds: ownedBy<MedAdmin>(res?.meds, residentId),
         })
         setError(null)
       })
@@ -1736,6 +1812,7 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
           />
           <NotesSection notes={data.notes} staffById={staffById} />
           <BathSection baths={data.baths} staffById={staffById} />
+          <MedSection meds={data.meds} />
         </>
       )}
 

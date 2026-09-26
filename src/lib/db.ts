@@ -39,6 +39,11 @@ import type {
   Importance,
   InputKind,
   Meal,
+  MedAdmin,
+  MedAdminSlot,
+  MedSlot,
+  MedSlotsSetting,
+  MedStatus,
   MealSlot,
   MealStatus,
   Note,
@@ -52,9 +57,10 @@ import type {
   Vital,
   VitalKind,
 } from './types'
-import { BATH_CANCEL_REASONS, BATH_RESULTS, LS } from './types'
-import { matchBathPlan, monthRange, validateBathInput } from './bath'
+import { BATH_CANCEL_REASONS, BATH_RESULTS, LS, MED_ADMIN_SLOTS, MED_STATUSES } from './types'
+import { matchBathPlan, monthDays, monthRange, validateBathInput } from './bath'
 import type { BathPlanEntry, BathPlanRow } from './bath'
+import { normalizeMedSlots, validateMedAdminInput } from './med'
 import {
   notePresence,
   othersFromState,
@@ -142,6 +148,14 @@ const ATTENDANCE_COLS = 'day,staff_id,role,sort'
 const IMPORT_DAY_COLS = 'source,day,imported_at,src_rows,inserted,updated,skipped,native_skip,unmatched'
 /** 入浴記録（0012_bath_records.sql）。監査列・client_key は端末へ持ち出さない */
 const BATH_COLS = 'id,resident_id,bath_on,result,cancel_reason,note,recorded_by,rev'
+/** 服薬の時間帯（0013_med_admin.sql）。監査列・client_key は端末へ持ち出さない */
+const MED_SLOTS_COLS = 'id,resident_id,slots,note,rev'
+/**
+ * 与薬の記録（0013_med_admin.sql）。client_key・監査列（updated_at・deleted_*・edited_by）は持ち出さない。
+ * created_at だけは画面が「いつ記録したか」（時間帯の記録の時刻）に使うので読む
+ */
+const MED_ADMIN_COLS =
+  'id,resident_id,admin_on,slot,status,given_at,prn_drug,prn_reason,prn_effect,note,recorded_by,rev,created_at'
 
 /**
  * Realtime を購読する表（受信は「どの表が変わったか」だけを伝える）。
@@ -560,6 +574,50 @@ function normalizeBath(row: unknown): BathRecord | null {
   }
 }
 
+function normalizeMedSlotsRow(row: unknown): MedSlotsSetting | null {
+  const r = asRecord(row)
+  if (!r) return null
+  const id = idNum(r.id)
+  const resident_id = idNum(r.resident_id)
+  if (id === null || resident_id === null) return null
+  return {
+    id,
+    resident_id,
+    // 知らない値・重複は落とし、朝→昼→夕→眠前の順にそろえる（DB の check と同じ。受信値を信じない）
+    slots: normalizeMedSlots(r.slots),
+    note: str(r.note),
+    rev: num(r.rev) ?? 1,
+  }
+}
+
+function normalizeMedAdmin(row: unknown): MedAdmin | null {
+  const r = asRecord(row)
+  if (!r) return null
+  const id = idNum(r.id)
+  const resident_id = idNum(r.resident_id)
+  const admin_on = dateStr(r.admin_on)
+  const slot = oneOf<MedAdminSlot>(r.slot, MED_ADMIN_SLOTS)
+  const status = oneOf<MedStatus>(r.status, MED_STATUSES)
+  if (id === null || resident_id === null || admin_on === null || slot === null || status === null) return null
+  const prn = slot === 'prn'
+  return {
+    id,
+    resident_id,
+    admin_on,
+    slot,
+    status,
+    // 頓服以外は頓服の項目を持たない（DB の check と同じ考え方。受信値を信じない）
+    given_at: prn ? str(r.given_at) : null,
+    prn_drug: prn ? str(r.prn_drug) : null,
+    prn_reason: prn ? str(r.prn_reason) : null,
+    prn_effect: prn ? str(r.prn_effect) : null,
+    note: str(r.note),
+    recorded_by: idNum(r.recorded_by),
+    rev: num(r.rev) ?? 1,
+    created_at: str(r.created_at),
+  }
+}
+
 function normalizeImportDay(row: unknown): ImportDay | null {
   const r = asRecord(row)
   if (!r) return null
@@ -594,10 +652,11 @@ function normalizeImportDay(row: unknown): ImportDay | null {
 
 /**
  * 旧経路（HEAD の送り方）のまま送る業務表。
- * bath_records（入浴記録・2026-09-26 追加）も同じ経路に乗せる（client_key・rev 照合・送信待ち・edited_by）。
- * 入力解禁の判定だけは表ごとに違う（writeGate: 入浴は input_enabled_bath）
+ * bath_records（入浴記録・2026-09-26 追加）と med_slots / med_admin（服薬の時間帯・与薬の記録・2026-09-26 追加）も
+ * 同じ経路に乗せる（client_key・rev 照合・送信待ち・edited_by）。
+ * 入力解禁の判定だけは表ごとに違う（writeGate: 入浴は input_enabled_bath、服薬は input_enabled_med）
  */
-type LegacyTable = 'fluid_intake' | 'notes' | 'outings' | 'bath_records'
+type LegacyTable = 'fluid_intake' | 'notes' | 'outings' | 'bath_records' | 'med_slots' | 'med_admin'
 
 /** 列の並び・rev 照合の作法が共通の業務表（読み取りの列は colsOf） */
 type QueueTable = 'vitals' | 'meals' | LegacyTable
@@ -655,7 +714,7 @@ interface AliasQueueOp extends ExtraQueueOp<'residents'> {
 
 type QueueOp = RowQueueOp | ReadQueueOp | AttendanceQueueOp | AliasQueueOp
 
-const LEGACY_TABLES: readonly LegacyTable[] = ['fluid_intake', 'notes', 'outings', 'bath_records']
+const LEGACY_TABLES: readonly LegacyTable[] = ['fluid_intake', 'notes', 'outings', 'bath_records', 'med_slots', 'med_admin']
 
 /** 旧版が使っていた退避キー。値は cl_sendQueue の中へ移し、移せたことを観測してから取り除く */
 const LEGACY_BROKEN_KEY = `${LS.sendQueue}_broken`
@@ -2175,10 +2234,10 @@ async function sendQueuedOp(sb: SupabaseClient, op: QueueOp): Promise<SendResult
         // 読めなければ消さずに再試行へ回す（観測できない消去はしない＝原則8）
         const landed = await findByKey(sb, op.table, ck, 'id,rev', true)
         if (landed !== null) return 'sent'
-        // 入浴記録は「1人1日1件」の自然キー（部分unique）も持つ。自分の client_key が載っておらず、
-        // 同じ人・同じ日の生きている行がある＝他の端末が先に記録した。再送しても通らないので止める
-        // （消さずに残し「未送信」として数え続ける＝rev 不一致の update と同じ扱い）
-        if (op.table === 'bath_records' && (await bathDayTaken(sb, op.payload))) return 'conflict'
+        // 入浴記録（1人1日1件）・服薬の時間帯（1人1件）・与薬の記録（1人1日1時間帯1件）は自然キー（部分unique）も持つ。
+        // 自分の client_key が載っておらず、同じ自然キーの生きている行がある＝他の端末が先に記録した。
+        // 再送しても通らないので止める（消さずに残し「未送信」として数え続ける＝rev 不一致の update と同じ扱い）
+        if (await naturalKeyTaken(sb, op.table, op.payload)) return 'conflict'
         return 'retry'
       }
     }
@@ -2299,6 +2358,10 @@ function colsOf(table: QueueTable): string {
       return OUTING_COLS
     case 'bath_records':
       return BATH_COLS
+    case 'med_slots':
+      return MED_SLOTS_COLS
+    case 'med_admin':
+      return MED_ADMIN_COLS
   }
 }
 
@@ -2343,6 +2406,31 @@ async function bathDayTaken(sb: SupabaseClient, payload: Record<string, unknown>
   const day = dateStr(payload.bath_on)
   if (residentId === null || day === null) return false
   return (await findByKey(sb, 'bath_records', { resident_id: residentId, bath_on: day })) !== null
+}
+
+/**
+ * 服薬の時間帯（1人1件）・与薬の記録（1人1日1時間帯1件。頓服は自然キーを持たない）の自然キーに生きている行があるか。
+ * 読めなかった時は false（入浴と同じ）
+ */
+async function medKeyTaken(
+  sb: SupabaseClient,
+  table: 'med_slots' | 'med_admin',
+  payload: Record<string, unknown>,
+): Promise<boolean> {
+  const residentId = idNum(payload.resident_id)
+  if (residentId === null) return false
+  if (table === 'med_slots') return (await findByKey(sb, 'med_slots', { resident_id: residentId })) !== null
+  const day = dateStr(payload.admin_on)
+  const slot = oneOf<MedAdminSlot>(payload.slot, MED_ADMIN_SLOTS)
+  if (day === null || slot === null || slot === 'prn') return false
+  return (await findByKey(sb, 'med_admin', { resident_id: residentId, admin_on: day, slot })) !== null
+}
+
+/** 自然キー（部分unique）を持つ表で、同じキーの生きている行があるか。自然キーを持たない表は false */
+async function naturalKeyTaken(sb: SupabaseClient, table: QueueTable, payload: Record<string, unknown>): Promise<boolean> {
+  if (table === 'bath_records') return bathDayTaken(sb, payload)
+  if (table === 'med_slots' || table === 'med_admin') return medKeyTaken(sb, table, payload)
+  return false
 }
 
 function omitKeys(src: Record<string, unknown>, keys: string[]): Record<string, unknown> {
@@ -2635,9 +2723,13 @@ async function assertKindWritable(kind: InputKind): Promise<void> {
   if (!v) throw new DbError('blocked', KIND_BLOCKED_MSG[kind])
 }
 
-/** 表ごとの書込の入口ガード。入浴記録は input_enabled_bath、それ以外は従来どおり native_input_enabled */
+/**
+ * 表ごとの書込の入口ガード。入浴記録は input_enabled_bath、服薬の時間帯・与薬の記録は input_enabled_med、
+ * それ以外は従来どおり native_input_enabled
+ */
 async function writeGate(table: LegacyTable): Promise<void> {
   if (table === 'bath_records') return assertKindWritable('bath')
+  if (table === 'med_slots' || table === 'med_admin') return assertKindWritable('med')
   return assertWritable()
 }
 
@@ -2762,6 +2854,7 @@ export async function fetchTimelineChunk(
 /**
  * 個人カルテ（resident_id＋日付レンジ必須・系列ごとに limit ガード）。
  * baths（入浴記録・2026-09-26 追加）は表が無い DB（0012 未適用）でも空として返し、カルテ全体を失敗させない。
+ * meds（与薬の記録・2026-09-26 追加）も同じ（0013 未適用の DB では空）。
  */
 export async function fetchKarte(
   residentId: number,
@@ -2774,6 +2867,7 @@ export async function fetchKarte(
   notes: Note[]
   outings: Outing[]
   baths: BathRecord[]
+  meds: MedAdmin[]
 }> {
   const sb = await getClient()
   const range = <T>(table: string, cols: string, dateCol: string, cap: number) =>
@@ -2808,19 +2902,22 @@ export async function fetchKarte(
         range<unknown>('outings', OUTING_COLS, 'start_on', KARTE_ROWS)
   ) as unknown as Promise<Res<unknown>>
 
-  const [vitals, meals, fluids, notes, outings, baths] = await Promise.all([
+  const [vitals, meals, fluids, notes, outings, baths, meds] = await Promise.all([
     range<unknown>('vitals', VITAL_COLS, 'measured_on', KARTE_ROWS),
     range<unknown>('meals', MEAL_COLS, 'meal_on', MAX_ROWS),
     range<unknown>('fluid_intake', FLUID_COLS, 'taken_on', MAX_ROWS),
     range<unknown>('notes', NOTE_COLS, 'note_on', KARTE_ROWS),
     outingsQuery,
     range<unknown>('bath_records', BATH_COLS, 'bath_on', KARTE_ROWS),
+    range<unknown>('med_admin', MED_ADMIN_COLS, 'admin_on', KARTE_ROWS),
   ])
   for (const res of [vitals, meals, fluids, notes, outings]) {
     if (res.error !== null) throw readError(res)
   }
   // 入浴記録の表がまだ無い（0012 未適用）だけなら空で返す。それ以外の失敗は他の系列と同じく例外
   if (baths.error !== null && !isMissingTable(baths)) throw readError(baths)
+  // 与薬の記録の表がまだ無い（0013 未適用）だけなら空で返す
+  if (meds.error !== null && !isMissingTable(meds)) throw readError(meds)
   return {
     vitals: list(vitals.data, normalizeVital, KARTE_ROWS),
     meals: list(meals.data, normalizeMeal),
@@ -2828,6 +2925,7 @@ export async function fetchKarte(
     notes: list(notes.data, normalizeNote, KARTE_ROWS),
     outings: list(outings.data, normalizeOuting, KARTE_ROWS),
     baths: baths.error !== null ? [] : list(baths.data, normalizeBath, KARTE_ROWS),
+    meds: meds.error !== null ? [] : list(meds.data, normalizeMedAdmin, KARTE_ROWS),
   }
 }
 
@@ -4292,6 +4390,309 @@ export async function fetchBathFirstDay(): Promise<string | null> {
   return dateStr(asRecord(res.data)?.bath_on)
 }
 
+// ── 与薬チェック（服薬介助・2026-09-26 追加・0013_med_admin.sql） ─────────────────
+//
+// 書き方は入浴記録と同じ経路（client_key・rev 照合・送信待ち cl_sendQueue・edited_by・soft delete）。
+//   ・入力解禁は input_enabled_med（writeGate / assertKindWritable）。服薬の時間帯・与薬の記録の両方
+//   ・自然キー（部分unique）: 服薬の時間帯は1人1件、与薬の記録は1人1日1時間帯1件（頓服は持たない）。
+//     23505 のうち自分の client_key が載っていないものは「他の端末が先に記録した」→ 'conflict'。
+//     送信待ちから送った分も同じ判定で止める（sendQueuedOp の naturalKeyTaken）
+//   ・送信待ちの中身は書き換えない・破棄しない（入浴のレビュー3巡目の教訓）。未送信の行・マスは
+//     hasPendingMed / hasPendingMedSlots で画面が押せなくする
+
+const MED_MSG = {
+  missing: '与薬の記録はまだ使えません（サーバー側の設定待ち）。管理者に連絡してください。',
+  badMonth: '月を読み取れませんでした。月を選び直してください。',
+  badSlots: '服薬の時間帯を読み取れませんでした。選び直してから、もう一度お試しください。',
+  badCurrent: '設定を読み取れませんでした。画面を読み直してから、もう一度お試しください。入力は消えていません。',
+} as const
+
+/** 1日の与薬の記録の取得上限（在籍33名×（4時間帯＋頓服数件）。これを超える運用は無い） */
+const MED_DAY_ROWS = DAY_ROWS
+/** 1回の月の取得上限。取り切れない時は黙って切らずに例外 */
+const MED_MONTH_ROWS = MAX_ROWS
+/**
+ * 全員の月次表を引く時の1回の日数。在籍33名×7日×（4時間帯＋頓服）≒1,200件で 2,000件に収まる
+ * （1か月をまとめて引くと 33名×31日×4≒4,100件で上限を超えるため、7日ずつ分けて引く）
+ */
+const MED_MONTH_CHUNK_DAYS = 7
+
+/** 表が無い（0013 未適用）時は「サーバー側の設定待ち」で止める */
+function medReadError(res: Res<unknown>): DbError {
+  if (isMissingTable(res)) return new DbError('server', MED_MSG.missing)
+  return readError(res)
+}
+
+/**
+ * 在籍の方の服薬の時間帯（削除済みを除く・1人1件）。residents を渡さない時は在籍の名簿を取る。
+ * 名簿の利用者ID で絞って引く（全件ロードしない）。在籍の方が0人なら問い合わせない
+ */
+export async function fetchMedSlots(residents?: Resident[]): Promise<MedSlotsSetting[]> {
+  const roster = residents ?? (await fetchResidents())
+  const ids = roster.filter((r) => r.active).map((r) => r.id)
+  if (ids.length === 0) return []
+  const sb = await getClient()
+  const res = (await sb
+    .from('med_slots')
+    .select(MED_SLOTS_COLS)
+    .in('resident_id', ids.slice(0, MAX_ROWS))
+    .is('deleted_at', null)
+    .order('resident_id', { ascending: true })
+    .order('id', { ascending: true })
+    .limit(MAX_ROWS)) as Res<unknown>
+  if (res.error !== null) throw medReadError(res)
+  return list(res.data, normalizeMedSlotsRow)
+}
+
+/** その日の与薬の記録（時間帯・頓服とも。削除済みを除く） */
+export async function fetchMedDay(dayIso: string): Promise<MedAdmin[]> {
+  assertDay(dayIso)
+  const sb = await getClient()
+  const res = (await sb
+    .from('med_admin')
+    .select(MED_ADMIN_COLS)
+    .eq('admin_on', dayIso)
+    .is('deleted_at', null)
+    .order('id', { ascending: true })
+    .limit(MED_DAY_ROWS)) as Res<unknown>
+  if (res.error !== null) throw medReadError(res)
+  assertLoadedAll(res, MED_DAY_ROWS)
+  return list(res.data, normalizeMedAdmin, MED_DAY_ROWS)
+}
+
+/**
+ * その月（'yyyy-MM'）の与薬の記録（削除済みを除く）。residentId を渡せばその人だけ（1回で引く）、
+ * 省略すると全員（MED_MONTH_CHUNK_DAYS 日ずつ分けて引く）。どの回も取り切れない時は黙って切らずに例外
+ */
+export async function fetchMedMonth(monthKey: string, residentId?: number): Promise<MedAdmin[]> {
+  const days = monthDays(monthKey)
+  if (days.length === 0) throw new DbError('server', MED_MSG.badMonth)
+  const sb = await getClient()
+  const one = async (from: string, to: string): Promise<MedAdmin[]> => {
+    let q = sb.from('med_admin').select(MED_ADMIN_COLS)
+    if (residentId !== undefined) q = q.eq('resident_id', residentId)
+    const res = (await q
+      .gte('admin_on', from)
+      .lte('admin_on', to)
+      .is('deleted_at', null)
+      .order('admin_on', { ascending: true })
+      .order('id', { ascending: true })
+      .limit(MED_MONTH_ROWS)) as Res<unknown>
+    if (res.error !== null) throw medReadError(res)
+    assertLoadedAll(res, MED_MONTH_ROWS)
+    return list(res.data, normalizeMedAdmin, MED_MONTH_ROWS)
+  }
+  if (residentId !== undefined) return one(days[0], days[days.length - 1])
+  const spans: [string, string][] = []
+  for (let i = 0; i < days.length; i += MED_MONTH_CHUNK_DAYS) {
+    spans.push([days[i], days[Math.min(i + MED_MONTH_CHUNK_DAYS, days.length) - 1]])
+  }
+  const parts = await Promise.all(spans.map(([from, to]) => one(from, to)))
+  return parts.flat()
+}
+
+/**
+ * 施設全体で最初の与薬の記録の日（削除済みを除く・無ければ null）。月次表の「未」を、記録を始めた日以降にだけ付けるために使う。
+ * 1行だけ（limit 1）を (admin_on) の索引で引くので全件を読まない
+ */
+export async function fetchMedFirstDay(): Promise<string | null> {
+  const sb = await getClient()
+  const res = (await sb
+    .from('med_admin')
+    .select('admin_on')
+    .is('deleted_at', null)
+    .order('admin_on', { ascending: true })
+    .limit(1)
+    .maybeSingle()) as Res<unknown>
+  if (res.error !== null) throw medReadError(res)
+  return dateStr(asRecord(res.data)?.admin_on)
+}
+
+/**
+ * 自然キー（部分unique）を持つ表への追加（入浴記録の insertBath と同じ作り）。
+ * 自分の送信が既に載っていればその行、他の端末が同じ自然キーを先に記録していれば 'conflict'、
+ * 通信できなければ送信待ち（'queued'）
+ */
+async function insertKeyed<T>(
+  table: 'med_slots' | 'med_admin',
+  payload: Record<string, unknown>,
+  normalize: (row: unknown) => T | null,
+): Promise<T | Conflict | Queued> {
+  await writeGate(table)
+  const sb = await getClient()
+  const cols = colsOf(table)
+  const res = (await sb.from(table).insert(payload).select(cols).maybeSingle()) as Res<unknown>
+  if (res.error !== null) {
+    if (isAuthFail(res)) {
+      fireAuthExpired()
+      return enqueue({ table, kind: 'insert', payload })
+    }
+    if (isTransient(res)) return enqueue({ table, kind: 'insert', payload })
+    if (isUniqueViolation(res)) {
+      const ck = clientKeyOf(payload)
+      // 自分の送信が既に載っている（再送の行き違い）→ 載っている行を返す
+      const landed = ck === null ? null : await findByKey(sb, table, ck, cols, true)
+      const row = landed === null ? null : normalize(landed.row)
+      if (row !== null) return row
+      // 他の端末が同じ自然キーを先に記録した → 入力を消さず読み直しを促す
+      if (await naturalKeyTaken(sb, table, payload)) return CONFLICT
+      // どちらとも確かめられない（読めない）→ 送信待ちへ（次の再送で同じ判定をやり直す）
+      return enqueue({ table, kind: 'insert', payload })
+    }
+    throw new DbError('server', serverMsg('保存でき', errCode(res)))
+  }
+  markSelfRow(table, res.data, num(asRecord(res.data)?.rev))
+  const row = normalize(res.data)
+  if (row === null) throw new DbError('server', MSG.broken)
+  return row
+}
+
+/**
+ * 服薬の時間帯を保存する（upsert は使わない）。current＝画面が読んだその人の設定（無ければ null）。
+ * ・current が null … insert（client_key 付き）。他の端末が先に設定していれば 'conflict'
+ * ・current がある … rev 照合の update（slots と note）。他の端末が先に変えていれば 'conflict'
+ * slots は朝→昼→夕→眠前の順にそろえて送る。知らない値が混じっていれば書かずに止める
+ */
+export async function setMedSlots(
+  residentId: number,
+  slots: readonly MedSlot[],
+  note: string | null,
+  current: MedSlotsSetting | null,
+  opts?: WriteOpts,
+): Promise<MedSlotsSetting | Conflict | Queued> {
+  const normalized = normalizeMedSlots(slots)
+  if (normalized.length !== new Set(slots).size) throw new DbError('server', MED_MSG.badSlots)
+  if (idNum(residentId) === null || (current !== null && current.resident_id !== residentId)) {
+    throw new DbError('server', MED_MSG.badCurrent)
+  }
+  const cleanNote = note === null || note.trim() === '' ? null : note
+  if (current === null) {
+    const payload = withClientKey({ resident_id: residentId, slots: normalized, note: cleanNote })
+    return insertKeyed('med_slots', payload, normalizeMedSlotsRow)
+  }
+  return updateRow('med_slots', current.id, current.rev, { slots: normalized, note: cleanNote }, normalizeMedSlotsRow, opts)
+}
+
+/** 保存前の検証（画面と同じ関数）。通らなければ書かずに理由文で止める */
+function assertMedInput(v: {
+  admin_on: string
+  slot: MedAdminSlot
+  status: MedStatus
+  given_at: string | null
+  prn_drug: string | null
+  prn_reason: string | null
+  prn_effect: string | null
+  note: string | null
+}): void {
+  const check = validateMedAdminInput(v, localToday())
+  if (!check.ok) throw new DbError('server', check.message)
+}
+
+/** 空白だけの文字は null にする（自由記述の欄） */
+function textOrNull(v: string | null | undefined): string | null {
+  return v === null || v === undefined || v.trim() === '' ? null : v
+}
+
+/**
+ * 与薬の記録の追加。端末生成の冪等キー client_key を必ず付ける（再送しても1行に収まる）。
+ * 頓服以外は頓服の項目（使用時刻・薬・理由・効果）を null にして送る。
+ * 戻り値: 追加した行／'conflict'（同じ人・同じ日・同じ時間帯を他の端末が先に記録した）／'queued'（通信できない）
+ */
+export async function insertMedAdmin(
+  m: Omit<MedAdmin, 'id' | 'rev' | 'created_at'>,
+): Promise<MedAdmin | Conflict | Queued> {
+  const prn = m.slot === 'prn'
+  const v = {
+    admin_on: m.admin_on,
+    slot: m.slot,
+    status: m.status,
+    given_at: prn ? m.given_at : null,
+    prn_drug: prn ? textOrNull(m.prn_drug) : null,
+    prn_reason: prn ? textOrNull(m.prn_reason) : null,
+    prn_effect: prn ? textOrNull(m.prn_effect) : null,
+    note: textOrNull(m.note),
+  }
+  assertMedInput(v)
+  const payload = withClientKey({ resident_id: m.resident_id, ...v, recorded_by: idNum(m.recorded_by) })
+  return insertKeyed('med_admin', payload, normalizeMedAdmin)
+}
+
+/**
+ * 与薬の記録の修正（rev 照合の部分更新）。送るのは patch に入れた項目だけ。
+ * 送る前に、修正後の値（current と patch を重ねたもの）を検証する（頓服は服用済みだけ・頓服以外は頓服の項目を持たない）
+ */
+export async function updateMedAdmin(
+  current: MedAdmin,
+  patch: Partial<Pick<MedAdmin, 'status' | 'note' | 'given_at' | 'prn_drug' | 'prn_reason' | 'prn_effect'>>,
+  opts?: WriteOpts,
+): Promise<MedAdmin | Conflict | Queued> {
+  const pick = <K extends keyof typeof patch>(k: K): MedAdmin[K] =>
+    (patch[k] !== undefined ? patch[k] : current[k]) as MedAdmin[K]
+  const v = {
+    admin_on: current.admin_on,
+    slot: current.slot,
+    status: pick('status'),
+    given_at: pick('given_at'),
+    prn_drug: textOrNull(pick('prn_drug')),
+    prn_reason: textOrNull(pick('prn_reason')),
+    prn_effect: textOrNull(pick('prn_effect')),
+    note: textOrNull(pick('note')),
+  }
+  assertMedInput(v)
+  const sent: Record<string, unknown> = {}
+  for (const k of ['status', 'note', 'given_at', 'prn_drug', 'prn_reason', 'prn_effect'] as const) {
+    if (patch[k] !== undefined) sent[k] = v[k]
+  }
+  return updateRow('med_admin', current.id, current.rev, sent, normalizeMedAdmin, opts)
+}
+
+/** 与薬の記録の取り消し（soft delete。物理削除はしない） */
+export async function softDeleteMedAdmin(id: number, rev: number, opts?: WriteOpts): Promise<true | Conflict | Queued> {
+  return softDelete('med_admin', id, rev, opts)
+}
+
+/**
+ * この端末（このタブ）の送信待ちに、その人・その日・その時間帯の与薬の記録の追加、またはその記録（recordId）の
+ * 修正・取り消しが残っているか（送信中を含む。自動再送を止めた＝blocked の op は含めない）。
+ * **読むだけで送信待ちは書き換えない**。画面はこれが true のマスを押せなくする（hasPendingBath と同じ考え方）。
+ * 頓服（slot='prn'）で recordId を渡した時は、その記録の修正・取り消しだけを見る（頓服の追加は別の記録のため）
+ */
+export function hasPendingMed(residentId: number, day: string, slot: MedAdminSlot, recordId: number | null = null): boolean {
+  for (const q of queue) {
+    if (q.table !== 'med_admin' || q.blocked !== undefined) continue
+    if (q.kind === 'insert') {
+      // 頓服は1日に何件でも持てるので、まだ送っていない頓服の追加は、既にある頓服の記録（recordId）を止めない
+      if (slot === 'prn' && recordId !== null) continue
+      if (
+        idNum(q.payload.resident_id) === residentId &&
+        dateStr(q.payload.admin_on) === day &&
+        q.payload.slot === slot
+      ) {
+        return true
+      }
+    } else if (q.kind === 'update' && recordId !== null && q.rowId === recordId) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * この端末（このタブ）の送信待ちに、その人の服薬の時間帯の追加、またはその設定（recordId）の修正が残っているか。
+ * 読むだけ。画面はこれが true の行を保存できなくする
+ */
+export function hasPendingMedSlots(residentId: number, recordId: number | null): boolean {
+  for (const q of queue) {
+    if (q.table !== 'med_slots' || q.blocked !== undefined) continue
+    if (q.kind === 'insert') {
+      if (idNum(q.payload.resident_id) === residentId) return true
+    } else if (q.kind === 'update' && recordId !== null && q.rowId === recordId) {
+      return true
+    }
+  }
+  return false
+}
+
 // ── 既読 ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -4499,6 +4900,46 @@ export function subscribeBathChanges(cb: (table: string, info?: ChangeInfo) => v
       client = sb
       let ch = sb.channel(`cl_bath_${Math.random().toString(36).slice(2, 10)}`)
       for (const table of REALTIME_BATH_TABLES) {
+        ch = ch.on('postgres_changes', { event: '*', schema: 'public', table }, (payload: unknown) => {
+          if (!cancelled) cb(table, changeInfoOf(payload))
+        })
+      }
+      channel = ch
+      ch.subscribe()
+    } catch {
+      // 接続先未設定・通信不可。購読なしで動く
+    }
+  })()
+
+  return () => {
+    cancelled = true
+    if (client !== null && channel !== null) void client.removeChannel(channel)
+    channel = null
+  }
+}
+
+/**
+ * 与薬チェックの Realtime を購読する表（2026-09-26 追加）。入浴と同じく既存のチャンネルには混ぜない
+ * （0013 を当てる前の DB で既存7表・入浴の購読まで止まらないようにする）
+ */
+const REALTIME_MED_TABLES = ['med_slots', 'med_admin'] as const
+
+/**
+ * 服薬の時間帯・与薬の記録の変更通知（与薬の画面だけが使う）。呼び方・渡す情報は subscribeChanges と同じ。
+ * 接続できない・配信対象に無い（0013 未適用）場合は通知が来ないだけで、画面は手動更新で成立する。
+ */
+export function subscribeMedChanges(cb: (table: string, info?: ChangeInfo) => void): () => void {
+  let cancelled = false
+  let client: SupabaseClient | null = null
+  let channel: ReturnType<SupabaseClient['channel']> | null = null
+
+  void (async () => {
+    try {
+      const sb = await getClient()
+      if (cancelled) return
+      client = sb
+      let ch = sb.channel(`cl_med_${Math.random().toString(36).slice(2, 10)}`)
+      for (const table of REALTIME_MED_TABLES) {
         ch = ch.on('postgres_changes', { event: '*', schema: 'public', table }, (payload: unknown) => {
           if (!cancelled) cb(table, changeInfoOf(payload))
         })

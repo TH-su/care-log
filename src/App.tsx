@@ -90,6 +90,10 @@ const OutingFormPage = lazy(() => import('./pages/OutingFormPage').then((m) => (
 // デイの入浴記録（2026-09-26 追加）。記録は記録ハブから、月次表は「その他」から入る
 const BathRecordPage = lazy(() => import('./pages/BathRecordPage').then((m) => ({ default: m.BathRecordPage })))
 const BathMonthPage = lazy(() => import('./pages/BathMonthPage').then((m) => ({ default: m.BathMonthPage })))
+// 与薬チェック（2026-09-26 追加）。記録は記録ハブから、服薬の時間帯・月次表は「その他」から入る
+const MedRecordPage = lazy(() => import('./pages/MedRecordPage').then((m) => ({ default: m.MedRecordPage })))
+const MedSlotsPage = lazy(() => import('./pages/MedSlotsPage').then((m) => ({ default: m.MedSlotsPage })))
+const MedMonthPage = lazy(() => import('./pages/MedMonthPage').then((m) => ({ default: m.MedMonthPage })))
 const KartePage = lazy(() => import('./pages/KartePage').then((m) => ({ default: m.KartePage })))
 const SearchPage = lazy(() => import('./pages/SearchPage').then((m) => ({ default: m.SearchPage })))
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })))
@@ -112,6 +116,8 @@ const VIEWS = [
   'search',
   'settings',
   'bathMonth',
+  'medSlots',
+  'medMonth',
 ] as const
 type View = (typeof VIEWS)[number]
 const DEFAULT_VIEW: View = 'daily'
@@ -126,6 +132,8 @@ const VIEW_PATH: Record<View, string> = {
   search: '/search',
   settings: '/settings',
   bathMonth: '/bath/month',
+  medSlots: '/med/slots',
+  medMonth: '/med/month',
 }
 
 function readView(): View | null {
@@ -157,6 +165,8 @@ function viewOf(pathname: string): View | null {
   if (pathname === '/search') return 'search'
   if (pathname === '/settings') return 'settings'
   if (pathname === '/bath/month') return 'bathMonth'
+  if (pathname === '/med/slots') return 'medSlots'
+  if (pathname === '/med/month') return 'medMonth'
   return null
 }
 
@@ -205,7 +215,7 @@ const NAV_RAIL: NavItem[] = [
 ]
 
 // 下部タブに枠が無い画面は「その他」の配下扱いにして、現在地の表示が消えないようにする
-const MORE_VIEWS: View[] = ['more', 'timeline', 'record', 'search', 'settings', 'bathMonth']
+const MORE_VIEWS: View[] = ['more', 'timeline', 'record', 'search', 'settings', 'bathMonth', 'medSlots', 'medMonth']
 
 const ICON_PATHS: Record<IconName, ReactNode> = {
   daily: (
@@ -274,6 +284,19 @@ const ICON_PATHS: Record<IconName, ReactNode> = {
       <path d="M4 10h16M9 5v15M14 5v15" />
     </>
   ),
+  // 服薬の時間帯・与薬の月次表（ナビには出さないが、アイコンの表は全ての画面の分を持つ型のため置く）
+  medSlots: (
+    <>
+      <circle cx="12" cy="12" r="8" />
+      <path d="M12 7.5V12l3 2" />
+    </>
+  ),
+  medMonth: (
+    <>
+      <rect x="4" y="5" width="16" height="15" rx="1.5" />
+      <path d="M4 10h16M4 15h16M10 5v15" />
+    </>
+  ),
 }
 
 /** タブのアイコン（文字ラベルと必ず併記する。単独では意味を持たせない） */
@@ -315,6 +338,9 @@ function screenTitle(pathname: string): string {
   if (pathname === '/record/outing') return '外出・外泊'
   if (pathname === '/record/bath') return '入浴（デイ）'
   if (pathname === '/bath/month') return '入浴 月次表'
+  if (pathname === '/record/med') return '与薬チェック'
+  if (pathname === '/med/slots') return '服薬の時間帯'
+  if (pathname === '/med/month') return '与薬 月次表'
   if (pathname === '/karte' || pathname.startsWith('/karte/')) return 'カルテ'
   if (pathname === '/search') return '検索'
   if (pathname === '/settings') return '設定'
@@ -840,6 +866,10 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
             {/* 入浴（デイ）。入力解禁は native_input_enabled ではなく input_enabled_bath（画面が自前で取り直す） */}
             <Route path="/record/bath" element={<BathRecordPage actorId={actorId} staff={staff} />} />
             <Route path="/bath/month" element={<BathMonthPage />} />
+            {/* 与薬チェック。入力解禁は input_enabled_med（画面が自前で取り直す） */}
+            <Route path="/record/med" element={<MedRecordPage actorId={actorId} staff={staff} />} />
+            <Route path="/med/slots" element={<MedSlotsPage actorId={actorId} staff={staff} />} />
+            <Route path="/med/month" element={<MedMonthPage />} />
             <Route path="/karte" element={<KartePage staff={staff} />} />
             <Route path="/karte/:id" element={<KartePage staff={staff} />} />
             <Route path="/search" element={<SearchPage />} />

@@ -38,6 +38,10 @@
   font-size: var(--cl-print-font, 10px);
   line-height: 1.25;
 }
+/* 縦の用紙で測る時は A4 縦 210mm − 左右の余白 8mm×2（2026-09-26 与薬の月次表で追加） */
+.cl-print-area[data-cl-measure][data-cl-orient='portrait'] {
+  width: 194mm;
+}
 
 @media print {
   html[data-cl-print],
@@ -93,4 +97,13 @@
 }
 .cl-print-area .cl-print-table .cl-print-strong {
   font-weight: 700;
+}
+/* 1ページずつ刷る中身（PrintArea の paged）。最後のページの後ろでは改ページしない */
+.cl-print-area .cl-print-page {
+  break-after: page;
+  page-break-after: always;
+}
+.cl-print-area .cl-print-page:last-child {
+  break-after: auto;
+  page-break-after: auto;
 }

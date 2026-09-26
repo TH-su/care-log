@@ -23,6 +23,10 @@
 //   他の4つ（バイタル一括・食事一括・申し送り・外出・外泊）の封鎖判定は従来どおり native_input_enabled のまま
 // - 入浴の旗を取得できない時は入浴のボタンだけを押せなくする（他の4つの表示・封鎖には影響させない）
 //
+// 与薬チェック（2026-09-26 追加）:
+// - 6つ目の項目。封鎖は app_settings の input_enabled_med（getKindInputGate('med')）で決める（入浴と同じ作り）。
+//   取得できない時は与薬のボタンだけを押せなくする（他の項目の表示・封鎖には影響させない）
+//
 // 寸法メモ（トークン外の値を直書きしないための読み替え）:
 // - min-height 72px … 4px グリッドの利用可能値が 64px / 80px のため、下回らない側の min-h-20（80px）を使う
 // - 17px 文字   … ops 系統のトークンは fs-base=16px / fs-lg=18px。下回らない側の text-lg（18px）を使う
@@ -50,7 +54,7 @@ const LOCKED_NEXT =
 const LOAD_ERROR =
   'アプリで入力できる期間かどうかを確認できませんでした。通信状態を確認して［再試行する］を押してください。押せない場合は、下のタブで日報などほかの画面に移ってから、下のタブ「その他」→「記録」をもう一度開いてください。'
 
-type HubKey = 'vitals' | 'meals' | 'note' | 'outing' | 'bath'
+type HubKey = 'vitals' | 'meals' | 'note' | 'outing' | 'bath' | 'med'
 
 /** 2×2 の並び順（左上→右上→左下→右下）。ルートは contracts.md のルーティング定義どおり */
 const ITEMS: { key: HubKey; to: string; label: string }[] = [
@@ -60,11 +64,17 @@ const ITEMS: { key: HubKey; to: string; label: string }[] = [
   { key: 'outing', to: '/record/outing', label: '外出・外泊' },
   // 封鎖は input_enabled_bath で判定する（下の bathLocked）
   { key: 'bath', to: '/record/bath', label: '入浴（デイ）' },
+  // 封鎖は input_enabled_med で判定する（下の medLocked）
+  { key: 'med', to: '/record/med', label: '与薬チェック' },
 ]
 
 /** 入浴の旗を取得できなかった時の一言（入浴のボタンだけに付ける） */
 const BATH_GATE_UNKNOWN =
   '入浴の記録を使える期間かどうかを確認できませんでした（通信エラー）。電波状態を確認して、この画面を開き直してください。'
+
+/** 与薬の旗を取得できなかった時の一言（与薬のボタンだけに付ける） */
+const MED_GATE_UNKNOWN =
+  '与薬の記録を使える期間かどうかを確認できませんでした（通信エラー）。電波状態を確認して、この画面を開き直してください。'
 
 /** アイコンは必ず文字ラベルと併記する（アイコン単独では意味を持たせない） */
 const ICON_PATHS: Record<HubKey, ReactNode> = {
@@ -101,6 +111,13 @@ const ICON_PATHS: Record<HubKey, ReactNode> = {
       <path d="M8 9c0-1 1-1.5 1-2.5M12 9c0-1 1-1.5 1-2.5M16 9c0-1 1-1.5 1-2.5" />
     </>
   ),
+  // カプセル（薬）
+  med: (
+    <>
+      <rect x="3.5" y="8.5" width="17" height="7" rx="3.5" transform="rotate(-35 12 12)" />
+      <path d="M9.6 8.6l4.8 6.8" />
+    </>
+  ),
 }
 
 function HubIcon({ name }: { name: HubKey }) {
@@ -131,12 +148,15 @@ export function RecordHubPage({ inputEnabled: inputEnabledProp }: RecordHubPageP
   const uid = useId()
   const reasonId = `${uid}-locked`
   const bathReasonId = `${uid}-bath-locked`
+  const medReasonId = `${uid}-med-locked`
 
   const [fetchedEnabled, setFetchedEnabled] = useState<boolean | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [reloadKey, setReloadKey] = useState(0)
   /** 入浴の旗（null＝取得中、observed=false＝取得できなかった） */
   const [bathGate, setBathGate] = useState<{ value: boolean; observed: boolean } | null>(null)
+  /** 与薬の旗（null＝取得中、observed=false＝取得できなかった） */
+  const [medGate, setMedGate] = useState<{ value: boolean; observed: boolean } | null>(null)
 
   // 入力解禁フラグは「記録タブを表示するたびに毎回取り直す」（ui-design.md §0.5・前提情報は毎回取り直す規範）。
   // 取得できなければ入力へ進ませない（安全側フォールバック）。
@@ -179,11 +199,29 @@ export function RecordHubPage({ inputEnabled: inputEnabledProp }: RecordHubPageP
     }
   }, [reloadKey])
 
+  // 与薬の旗（input_enabled_med）も画面を開くたびに取り直す。取得できなくても他の項目には影響させない
+  useEffect(() => {
+    let alive = true
+    setMedGate(null)
+    getKindInputGate('med')
+      .then((g) => {
+        if (alive) setMedGate(g)
+      })
+      .catch(() => {
+        if (alive) setMedGate({ value: false, observed: false })
+      })
+    return () => {
+      alive = false
+    }
+  }, [reloadKey])
+
   // 親が「封鎖」と言っている場合と、取り直した値が false の場合の両方で封鎖する（安全側）
   const locked = fetchedEnabled !== true || inputEnabledProp === false
   /** 入浴は自分の旗だけで決める（取得中・取得できない間は押せない＝安全側） */
   const bathLocked = bathGate === null || !bathGate.observed || bathGate.value !== true
-  const lockedOf = (key: HubKey): boolean => (key === 'bath' ? bathLocked : locked)
+  /** 与薬も自分の旗だけで決める（取得中・取得できない間は押せない＝安全側） */
+  const medLocked = medGate === null || !medGate.observed || medGate.value !== true
+  const lockedOf = (key: HubKey): boolean => (key === 'bath' ? bathLocked : key === 'med' ? medLocked : locked)
 
   const open = useCallback(
     (to: string, itemLocked: boolean) => {
@@ -231,7 +269,11 @@ export function RecordHubPage({ inputEnabled: inputEnabledProp }: RecordHubPageP
                 ? bathGate === null
                   ? undefined
                   : bathReasonId
-                : reasonId
+                : item.key === 'med'
+                  ? medGate === null
+                    ? undefined
+                    : medReasonId
+                  : reasonId
             return (
               <li key={item.key}>
                 <button
@@ -254,6 +296,13 @@ export function RecordHubPage({ inputEnabled: inputEnabledProp }: RecordHubPageP
           <p id={bathReasonId} role="status" className="mt-3 text-sm text-ink2">
             <span aria-hidden="true">▲ </span>
             入浴（デイ）: {bathGate.observed ? kindBlockedMessage('bath') : BATH_GATE_UNKNOWN}
+          </p>
+        ) : null}
+        {/* 与薬の封鎖の理由（入浴と同じく他の項目の理由文とは別） */}
+        {medGate !== null && medLocked ? (
+          <p id={medReasonId} role="status" className="mt-3 text-sm text-ink2">
+            <span aria-hidden="true">▲ </span>
+            与薬チェック: {medGate.observed ? kindBlockedMessage('med') : MED_GATE_UNKNOWN}
           </p>
         ) : null}
       </SectionCard>

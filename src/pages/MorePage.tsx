@@ -29,6 +29,11 @@
 //   （入浴だけ先に始めた時に、スマホの下部タブから記録ハブの「入浴（デイ）」へ辿り着けるようにする）。
 //   入浴の旗も封鎖・未取得なら従来どおり押せない（従来の挙動は入浴の旗が 'true' の時にしか変わらない）
 //
+// 与薬チェック（2026-09-26 追加）:
+// - 「服薬の時間帯」（/med/slots）と「与薬 月次表」（/med/month）の入口を足す。閲覧・設定の画面の封鎖は各画面が
+//   input_enabled_med で判定するので、ここでは押せなくしない（服薬の時間帯は封鎖中も閲覧できる）
+// - 「記録」の入口は、入浴と同じく input_enabled_med が解禁なら開ける（与薬だけ先に始めた時に記録ハブへ辿り着けるように）
+//
 // 寸法メモ（トークン外の値を直書きしないための読み替え。RecordHubPage と同一）:
 // - min-height 72px … 4px グリッドの利用可能値が 64px / 80px のため、下回らない側の min-h-20（80px）を使う
 // - 17px 文字   … ops 系統のトークンは fs-base=16px / fs-lg=18px。下回らない側の text-lg（18px）を使う
@@ -52,7 +57,7 @@ const LOAD_ERROR =
 
 const LOADING_LABEL = '「記録」を開けるかどうか確認しています…'
 
-type MoreKey = 'search' | 'timeline' | 'record' | 'settings' | 'bathMonth'
+type MoreKey = 'search' | 'timeline' | 'record' | 'settings' | 'bathMonth' | 'medSlots' | 'medMonth'
 
 /**
  * 2×2 の並び順（左上→右上→左下→右下）。ルートは sheet-contracts.md §2 のとおり。
@@ -80,6 +85,20 @@ const ITEMS: { key: MoreKey; to: string; label: string; desc: string; needsInput
     to: '/bath/month',
     label: '入浴 月次表',
     desc: 'デイの入浴の実施を月ごとに見る・印刷する',
+    needsInput: false,
+  },
+  {
+    key: 'medSlots',
+    to: '/med/slots',
+    label: '服薬の時間帯',
+    desc: '入居者ごとに朝・昼・夕・眠前を設定する（看護師・事務所）',
+    needsInput: false,
+  },
+  {
+    key: 'medMonth',
+    to: '/med/month',
+    label: '与薬 月次表',
+    desc: '1人ずつ月の与薬を見る・印刷する',
     needsInput: false,
   },
 ]
@@ -129,6 +148,20 @@ const ICON_PATHS: Record<MoreKey, ReactNode> = {
       <path d="M4 10h16M9 5v15M14 5v15" />
     </>
   ),
+  // 時計（服薬の時間帯）
+  medSlots: (
+    <>
+      <circle cx="12" cy="12" r="8" />
+      <path d="M12 7.5V12l3 2" />
+    </>
+  ),
+  // 表（与薬の月次表）
+  medMonth: (
+    <>
+      <rect x="4" y="5" width="16" height="15" rx="1.5" />
+      <path d="M4 10h16M4 15h16M10 5v15" />
+    </>
+  ),
 }
 
 function MoreIcon({ name }: { name: MoreKey }) {
@@ -164,6 +197,8 @@ export function MorePage({ inputEnabled: inputEnabledProp }: MorePageProps = {})
   const [reloadKey, setReloadKey] = useState(0)
   /** 入浴の旗（input_enabled_bath）が解禁か。取得中・取得できない時は false（従来どおりの封鎖側） */
   const [bathEnabled, setBathEnabled] = useState(false)
+  /** 与薬の旗（input_enabled_med）が解禁か。取得中・取得できない時は false（従来どおりの封鎖側） */
+  const [medEnabled, setMedEnabled] = useState(false)
 
   // 入力解禁フラグは「この画面を表示するたびに毎回取り直す」（ui-design.md §0.5・前提情報は毎回取り直す規範）。
   // 「false を観測した（＝スプシ期間）」と「観測できなかった（＝通信エラー）」は別物なので、
@@ -204,6 +239,21 @@ export function MorePage({ inputEnabled: inputEnabledProp }: MorePageProps = {})
     }
   }, [reloadKey])
 
+  useEffect(() => {
+    let alive = true
+    setMedEnabled(false)
+    getKindInputGate('med')
+      .then((g) => {
+        if (alive) setMedEnabled(g.observed && g.value === true)
+      })
+      .catch(() => {
+        if (alive) setMedEnabled(false)
+      })
+    return () => {
+      alive = false
+    }
+  }, [reloadKey])
+
   // 自分で取り直した観測値が正本。まだ取得できていない間（null）だけ、親の既知値か
   // 安全側（封鎖）に倒す。観測が成立したあとも親の値を混ぜると、App.tsx が起動直後に持っている
   // 古い false のせいで「解禁済みなのに封鎖表示のまま」になり、事実と違う案内が出てしまう
@@ -212,8 +262,8 @@ export function MorePage({ inputEnabled: inputEnabledProp }: MorePageProps = {})
   // 「自分で false を観測できた」状態だけ理由文を出す（未取得・エラーは別の案内を出す）
   const lockedObserved = loadError == null && fetchedEnabled === false
 
-  /** 「記録」の入口の封鎖。入浴だけ解禁されている時は開ける（中の項目ごとの封鎖は記録ハブが判定する） */
-  const recordLocked = locked && !bathEnabled
+  /** 「記録」の入口の封鎖。入浴・与薬だけ解禁されている時は開ける（中の項目ごとの封鎖は記録ハブが判定する） */
+  const recordLocked = locked && !bathEnabled && !medEnabled
 
   const open = useCallback(
     (to: string, needsInput: boolean) => {

@@ -249,6 +249,81 @@ export const BATH_CANCEL_REASON_LABEL: Record<BathCancelReason, string> = {
   other: 'その他',
 }
 
+// ── 服薬介助の実施チェック（2026-09-26 追加・契約改訂は代表承認済み・0013_med_admin.sql） ──
+// 薬の名前は持たない（処方の正本は入居者マスタで自由記述）。頓服だけ、使った薬を自由記述で残す。
+
+/** 服薬の時間帯。morning=朝 / noon=昼 / evening=夕 / bedtime=眠前 */
+export type MedSlot = 'morning' | 'noon' | 'evening' | 'bedtime'
+/** 記録の時間帯（時間帯＋頓服 prn） */
+export type MedAdminSlot = MedSlot | 'prn'
+/**
+ * 実施の状態。taken=服用済み / partial=一部残し / refused=拒否（再度の声かけ後も）/ absent=不在（外出・入院）/
+ * stopped=医師指示で中止 / dropped=落薬 / wrong=誤薬。頓服は taken のみ
+ */
+export type MedStatus = 'taken' | 'partial' | 'refused' | 'absent' | 'stopped' | 'dropped' | 'wrong'
+
+/** 入居者ごとの服薬の時間帯の設定（1人1件） */
+export interface MedSlotsSetting {
+  id: number
+  resident_id: number
+  /** 服薬のある時間帯（MED_SLOTS の順にそろえて持つ。空＝服薬なし） */
+  slots: MedSlot[]
+  note: string | null
+  rev: number
+}
+
+/** 与薬の記録（1人1日1時間帯1件。頓服は何件でも。admin_on は JST の業務日付） */
+export interface MedAdmin {
+  id: number
+  resident_id: number
+  admin_on: string
+  slot: MedAdminSlot
+  status: MedStatus
+  /** 頓服の使用時刻（ISO 8601）。頓服以外は null */
+  given_at: string | null
+  /** 頓服の薬（自由記述）・理由・効果（効果は後から追記）。頓服以外は null */
+  prn_drug: string | null
+  prn_reason: string | null
+  prn_effect: string | null
+  note: string | null
+  recorded_by: number | null
+  rev: number
+  /** 記録した時刻（サーバーの created_at。時間帯の記録の「いつ記録したか」に使う） */
+  created_at: string | null
+}
+
+/** 表の列の並び（左→右） */
+export const MED_SLOTS: readonly MedSlot[] = ['morning', 'noon', 'evening', 'bedtime']
+export const MED_ADMIN_SLOTS: readonly MedAdminSlot[] = ['morning', 'noon', 'evening', 'bedtime', 'prn']
+export const MED_SLOT_LABEL: Record<MedAdminSlot, string> = {
+  morning: '朝',
+  noon: '昼',
+  evening: '夕',
+  bedtime: '眠前',
+  prn: '頓服',
+}
+/** 状態の小窓の並び（上→下） */
+export const MED_STATUSES: readonly MedStatus[] = ['taken', 'partial', 'refused', 'absent', 'stopped', 'dropped', 'wrong']
+export const MED_STATUS_LABEL: Record<MedStatus, string> = {
+  taken: '服用済み',
+  partial: '一部残し',
+  refused: '拒否（再度の声かけ後も）',
+  absent: '不在（外出・入院）',
+  stopped: '医師指示で中止',
+  dropped: '落薬',
+  wrong: '誤薬',
+}
+/** 表・月次表・印刷の1文字（白黒でも区別できるよう文字で持つ） */
+export const MED_STATUS_MARK: Record<MedStatus, string> = {
+  taken: '済',
+  partial: '残',
+  refused: '拒',
+  absent: '不',
+  stopped: '止',
+  dropped: '落',
+  wrong: '誤',
+}
+
 /**
  * 種類ごとの入力解禁（2026-09-26 追加）。app_settings の input_enabled_<種類> を読む。
  * 既存の native_input_enabled（切替日D）とは別の旗で、種類ごとに開始日を決められる。
@@ -402,6 +477,11 @@ export const LS = {
    * リロードすると跡形もなく消えていた（保存経路の監査で判明）。
    */
   dailyDraft: 'cl_dailyDraft',
+  /**
+   * 与薬チェックで表示中の階（2026-09-26 追加・UI状態のみ）。値は階の数字（'1' '2' …）・'other'（居室未設定）・'all'（全）。
+   * 他の一覧の階（cl_vitalsFloor・cl_sheetFloor）とは既定と選べる値が違うため、別のキーにする（既存の画面の値を書き換えない）
+   */
+  medFloor: 'cl_medFloor',
 } as const
 
 /**
