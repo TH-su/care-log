@@ -444,7 +444,21 @@ export interface IncidentOpenItem {
   occurred_on: string
   kind: IncidentKind
   types: IncidentType[]
+  /** いまの状態 */
   status: IncidentStatus
+  /** 月末より後に完了にした日（端末の日付。いまも対応中なら null） */
+  closed_on: string | null
+}
+
+/**
+ * その日（dayIso）の終わりの時点で未完了だったか。その日までに発生し、
+ * いま対応中か、完了にした日時（closed_at）がその日より後なら未完了。完了なのに日時が無い（読めない）時は完了として扱う
+ */
+export function unfinishedAt(i: Pick<Incident, 'occurred_on' | 'status' | 'closed_at'>, dayIso: string): boolean {
+  if (i.occurred_on > dayIso) return false
+  if (i.status !== 'closed') return true
+  const closedOn = i.closed_at === null ? null : localDayOf(i.closed_at)
+  return closedOn !== null && closedOn > dayIso
 }
 
 export interface IncidentMonthSummary {
@@ -474,9 +488,9 @@ const UNSET_LABEL = '未入力'
  * その月（'yyyy-MM'）の集計。件数の表は、発生日（occurred_on）がその月の記録だけを数える。
  * 種別は1件に複数あれば、それぞれに数える（種別の行の合計は件数より多くなることがある）。
  * 場所・程度が空の記録は「未入力」に数える。
- * 未完了の一覧は「その月末までに発生して未完了のもの」（前月以前からの持ち越しを含む・月末より後に発生したものは除く・
- * 2026-09-26 チーフ裁定）。openCandidates に対応中の記録（fetchOpenIncidentsUntil の結果）を渡す。省略時はその月の記録から選ぶ。
- * 未完了かどうかは記録のいまの状態で見る（完了にした日を持たないため）。発生日の古い順で、**氏名・対象者を出さない**
+ * 未完了の一覧は「その月末の時点で未完了だったもの」（前月以前からの持ち越しを含む・月末より後に発生したものは除く・
+ * 完了にした日時 closed_at が月末より後なら未完了・2026-09-26 チーフ裁定）。openCandidates に fetchIncidentsOpenAt（月末）の結果を渡す。
+ * 省略時はその月の記録から選ぶ。発生日の古い順で、**氏名・対象者を出さない**
  */
 export function aggregateIncidentMonth(
   list: readonly Incident[],
@@ -513,11 +527,12 @@ export function aggregateIncidentMonth(
   const seen = new Set<number>()
   for (const i of openCandidates ?? inMonth) {
     if (days.length === 0 || seen.has(i.id)) continue
-    if (i.status === 'closed' || i.occurred_on > to) continue
+    if (!unfinishedAt(i, to)) continue
     if (!(INCIDENT_KINDS as readonly string[]).includes(i.kind)) continue
     seen.add(i.id)
     // 氏名・対象者・本文はここへ写さない（委員会の資料に出すため）
-    open.push({ id: i.id, occurred_on: i.occurred_on, kind: i.kind, types: [...i.types], status: i.status })
+    const closedOn = i.status === 'closed' && i.closed_at !== null ? localDayOf(i.closed_at) : null
+    open.push({ id: i.id, occurred_on: i.occurred_on, kind: i.kind, types: [...i.types], status: i.status, closed_on: closedOn })
   }
   open.sort((a, b) => (a.occurred_on === b.occurred_on ? a.id - b.id : a.occurred_on < b.occurred_on ? -1 : 1))
   return { month, total, byType, byPlace, byBand, bySeverity, open }

@@ -56,7 +56,7 @@ on conflict (key) do nothing;
 --   types     fall=転倒 / fall_from=転落 / aspiration=誤嚥・窒息 / pica=異食 / med_error=誤薬、与薬もれ等 /
 --             medical=医療処置関連（チューブ抜去等）/ unknown=不明 / other=その他（複数選択可）
 --   severity  treated=受診(外来･往診)、自施設で応急処置 / hospitalized=入院 / death=死亡 / other=その他
---   status    open=対応中 / closed=完了
+--   status    open=対応中 / closed=完了（closed_at＝完了にした日時。完了の時だけ値を持つ）
 --   report_stage  first=第1報 / nth=第＿報（report_no）/ final=最終報告
 -- occurred_on は発生日（JST・クライアントが明示指定する）。occurred_at は発生日時。
 -- client_key は端末生成の冪等キー（全体 unique ＝削除済みの行もキーを押さえたまま。0012 と同じ考え方）。自然キーは持たない。
@@ -72,6 +72,7 @@ create table if not exists public.incidents (
   types              text[] not null,
   severity           text,
   status             text not null default 'open',
+  closed_at          timestamptz,                               -- 完了にした日時（対応中に戻したら null。委員会集計の「月末時点で未完了」の判定に使う）
   report_stage       text,
   report_no          int,
   submitted_on       date,
@@ -125,6 +126,11 @@ alter table public.incidents add constraint incidents_severity_check
 alter table public.incidents drop constraint if exists incidents_status_check;
 alter table public.incidents add constraint incidents_status_check
   check (status in ('open', 'closed'));
+
+-- 完了（closed）の時だけ完了にした日時を持つ（対応中は null）。アプリは状態と一緒に送る
+alter table public.incidents drop constraint if exists incidents_closed_at_check;
+alter table public.incidents add constraint incidents_closed_at_check
+  check ((status = 'closed') = (closed_at is not null));
 
 alter table public.incidents drop constraint if exists incidents_report_stage_check;
 alter table public.incidents add constraint incidents_report_stage_check
@@ -249,4 +255,6 @@ select
   (select count(*) from public.app_settings
     where key in ('corp_name', 'office_name_facility', 'office_name_visit', 'office_name_daycare',
                   'office_no_facility', 'office_no_visit', 'office_no_daycare', 'office_address')) as office_keys_8,
+  (select count(*) from information_schema.columns
+    where table_schema = 'public' and table_name = 'incidents' and column_name = 'closed_at')  as closed_at_col_1,
   (select count(*) from public.app_settings where key = 'input_enabled_incident')        as input_flag_1;

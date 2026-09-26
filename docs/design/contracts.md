@@ -146,7 +146,8 @@ subscribeMedChanges(cb): () => void                            // med_slots・me
 // ── 事故・ヒヤリハット（2026-09-26 追加・代表承認の契約改訂。既存の定義は変えない） ──
 fetchIncidents(q: { fromIso: string; toIso: string; kind?: IncidentKind | null; status?: IncidentStatus | null }): Promise<Incident[]>
                                                                // 発生日の期間（必須）・区分・状態で絞り、新しい順。detail は持ち出さない。取り切れない時は例外
-fetchOpenIncidentsUntil(toIso: string): Promise<Incident[]>     // その日までに発生して対応中の記録（古い順・detail なし）。委員会集計の「未完了の一覧」用
+fetchIncidentsOpenAt(dayIso: string): Promise<Incident[]>      // その日の終わりの時点で未完了だった記録（対応中＋closed_at がその日より後。古い順・detail なし）。
+                                                               // 委員会集計の「未完了の一覧」用（対応中と「後で完了」の2回に分けて引く）
 fetchIncident(id: number): Promise<Incident | null>             // 1件（detail を含む）。無い・取り消し済みは null
 insertIncident(i: IncidentInput): Promise<Incident | Queued>   // client_key 付き。第1報の最小項目だけで通る（incident.ts の validateIncidentInput）。
                                                                // detail.subject_name（氏名の写し）は送らない＝サーバーのトリガが名簿から写す
@@ -165,8 +166,9 @@ subscribeIncidentChanges(cb): () => void                       // incidents の 
 - 対象者の氏名の写し（detail.subject_name）はアプリから送らない（画面でも直せない・名簿の値だけ＝2026-09-26 チーフ裁定。db.ts が payload から必ず外す）。0014 のトリガ
   （incidents_subject_snapshot）が追加で名簿から写し、更新で前の写しを残す（対象者を変えたら写し直す）。氏名を送信待ち（端末の保存領域）に置かないため
 - 2026-09-26 チーフ裁定: 氏名は入力・編集の画面で直せない（名簿の値だけ）。委員会集計の「未完了の一覧」は、その月末までに発生して未完了のもの
-  （前月以前からの持ち越しを含む・月末より後に発生したものは除く。未完了かどうかはいまの状態で見る＝完了にした日は持たない）。
-  「完了」→「対応中に戻す」（確認つき・rev 照合）。カルテの事故・ヒヤリの行から記録の画面（/incident/:id）を開ける
+  （前月以前からの持ち越しを含む・月末より後に発生したものは除く）。月末の時点で未完了かは closed_at（完了にした日時）で判定する
+  （closed_at が null か月末より後なら未完了。incident.ts の unfinishedAt）。closed_at は updateIncident が状態の変更に合わせて送る
+  （完了＝いまの日時・対応中に戻す＝null。DB の check で status と揃える）。「完了」→「対応中に戻す」（確認つき・rev 照合）。カルテの事故・ヒヤリの行から記録の画面（/incident/:id）を開ける
 - 純ロジック（入力の検証・市への報告の案内・月次集計・受け渡しの照合）は `src/lib/incident.ts`。選択肢の並び・文言の正本は types.ts の INCIDENT_*（熊本市の様式どおり）
 - 事故報告書（A4 縦）は既存の印刷部品（PrintArea orientation='portrait'・文字 11〜9px）で刷る。はみ出す時は2枚目に続き、見出し（thead）を繰り返す。印刷の表の組み方は print.css の .cl-print-form（既存の .cl-print-table は変えない）
 
@@ -287,6 +289,7 @@ ResidentPickerModal({ open, residents: Resident[], onPick(id: number | null), on
   client_key 全体unique・rev／変更の記録トリガ（med_admin は admin_on、med_slots は業務日付が無いので updated_at を渡す）・
   RLS＋restrictive の member_only・delete ポリシーなし・Realtime 登録（2表）。0012 と同じく**初回に1回だけ流す**（修正は新しい番号で）
 - `0014_incidents.sql`（2026-09-26）: incidents 表（kind/office/place/types/severity/status/report_stage の check・事故は対象者必須・types は1つ以上・detail は jsonb のオブジェクト・
+  closed_at（完了にした日時。check: status='closed' と closed_at の有無が一致）・
   client_key 全体unique・rev／変更の記録トリガ（occurred_on）・氏名の写しのトリガ・RLS＋restrictive の member_only・delete ポリシーなし・Realtime 登録）、
   app_settings に事業所の情報のキー（corp_name / office_name_facility・visit・daycare / office_no_facility・visit・daycare / office_address。値 ''・既存は触らない。
   値はチーフが本番で入れる）。0012 と同じく**初回に1回だけ流す**（修正は新しい番号で）

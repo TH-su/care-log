@@ -581,6 +581,8 @@ export interface Incident {
   types: IncidentType[]
   severity: IncidentSeverity | null
   status: IncidentStatus
+  /** 完了にした日時（ISO 8601）。完了の時だけ値を持ち、対応中に戻したら null（委員会集計の「月末時点で未完了」の判定に使う） */
+  closed_at: string | null
   report_stage: IncidentReportStage | null
   report_no: number | null
   submitted_on: string | null

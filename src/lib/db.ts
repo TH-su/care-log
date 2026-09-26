@@ -185,7 +185,7 @@ const MED_ADMIN_COLS =
  */
 const INCIDENT_LIST_COLS =
   'id,kind,resident_id,occurred_on,occurred_at,office,place,place_other,types,severity,status,report_stage,report_no,' +
-  'submitted_on,city_report_needed,city_reported_on,reporter_id,confirmer_id,confirmed_at,rev'
+  'submitted_on,city_report_needed,city_reported_on,reporter_id,confirmer_id,confirmed_at,closed_at,rev'
 /** 1件の入力・編集・印刷で読む列（detail を含む） */
 const INCIDENT_COLS = `${INCIDENT_LIST_COLS},detail`
 
@@ -660,6 +660,7 @@ function normalizeIncident(row: unknown): Incident | null {
   const occurred_at = str(r.occurred_at)
   if (id === null || kind === null || occurred_on === null || occurred_at === null) return null
   const reportNo = num(r.report_no)
+  const status = oneOf<IncidentStatus>(r.status, INCIDENT_STATUSES) ?? 'open'
   return {
     id,
     kind,
@@ -671,7 +672,9 @@ function normalizeIncident(row: unknown): Incident | null {
     place_other: str(r.place_other),
     types: normalizeChoices(r.types, INCIDENT_TYPES),
     severity: oneOf<IncidentSeverity>(r.severity, INCIDENT_SEVERITIES),
-    status: oneOf<IncidentStatus>(r.status, INCIDENT_STATUSES) ?? 'open',
+    status,
+    // 完了の時だけ持つ（DB の check と同じ考え方。受信値を信じない）
+    closed_at: status === 'closed' ? str(r.closed_at) : null,
     report_stage: oneOf<IncidentReportStage>(r.report_stage, INCIDENT_REPORT_STAGES),
     report_no: reportNo !== null && Number.isInteger(reportNo) ? reportNo : null,
     submitted_on: dateStr(r.submitted_on),
@@ -4880,26 +4883,42 @@ export async function fetchIncidents(q: IncidentQuery): Promise<Incident[]> {
   return list(res.data, normalizeIncident, INCIDENT_LIST_ROWS)
 }
 
+/** 'YYYY-MM-DD' の翌日 0:00（端末の時刻＝JST 運用）の ISO。その日の「終わり」の境目 */
+function nextDayStartIso(dayIso: string): string {
+  const [y, m, d] = dayIso.split('-').map(Number)
+  return new Date(y, m - 1, d + 1, 0, 0, 0, 0).toISOString()
+}
+
 /**
- * その日（toIso）までに発生して、いま対応中（status='open'）の記録（削除済みを除く・古い順・detail は持ち出さない）。
- * 委員会用の月次集計の「未完了の一覧」（前月以前からの持ち越しを含む・月末より後に発生したものは除く）に使う。
- * 期間の始まりは持たないが、対応中に絞るので件数は限られる（上限を超えたら黙って切らずに例外）
+ * その日（dayIso）の終わりの時点で未完了だった記録（削除済みを除く・発生日の古い順・detail は持ち出さない）。
+ * ＝その日までに発生し、いま対応中（status='open'）か、完了にした日時（closed_at）がその日より後のもの。
+ * 委員会用の月次集計の「未完了の一覧」（月末時点。前月以前からの持ち越しを含む・月末より後に発生したものは除く）に使う。
+ * 対応中と「月末より後に完了」の2回に分けて引く（or の式に値を差し込まない）。上限を超えたら黙って切らずに例外
  */
-export async function fetchOpenIncidentsUntil(toIso: string): Promise<Incident[]> {
-  assertDay(toIso)
+export async function fetchIncidentsOpenAt(dayIso: string): Promise<Incident[]> {
+  assertDay(dayIso)
+  const boundary = nextDayStartIso(dayIso)
   const sb = await getClient()
-  const res = (await sb
-    .from('incidents')
-    .select(INCIDENT_LIST_COLS)
-    .eq('status', 'open')
-    .lte('occurred_on', toIso)
-    .is('deleted_at', null)
-    .order('occurred_on', { ascending: true })
-    .order('id', { ascending: true })
-    .limit(INCIDENT_LIST_ROWS)) as Res<unknown>
-  if (res.error !== null) throw incidentReadError(res)
-  assertLoadedAll(res, INCIDENT_LIST_ROWS)
-  return list(res.data, normalizeIncident, INCIDENT_LIST_ROWS)
+  const base = () =>
+    sb.from('incidents').select(INCIDENT_LIST_COLS).lte('occurred_on', dayIso).is('deleted_at', null)
+  const [openRes, laterRes] = (await Promise.all([
+    base().eq('status', 'open').order('occurred_on', { ascending: true }).order('id', { ascending: true }).limit(INCIDENT_LIST_ROWS),
+    base()
+      .eq('status', 'closed')
+      .gte('closed_at', boundary)
+      .order('occurred_on', { ascending: true })
+      .order('id', { ascending: true })
+      .limit(INCIDENT_LIST_ROWS),
+  ])) as unknown as [Res<unknown>, Res<unknown>]
+  for (const res of [openRes, laterRes]) {
+    if (res.error !== null) throw incidentReadError(res)
+    assertLoadedAll(res, INCIDENT_LIST_ROWS)
+  }
+  const out = new Map<number, Incident>()
+  for (const res of [openRes, laterRes]) {
+    for (const i of list(res.data, normalizeIncident, INCIDENT_LIST_ROWS)) out.set(i.id, i)
+  }
+  return [...out.values()].sort((a, b) => (a.occurred_on === b.occurred_on ? a.id - b.id : a.occurred_on < b.occurred_on ? -1 : 1))
 }
 
 /** 1件（様式の残りの欄 detail を含む）。無い・取り消し済みなら null */
@@ -4976,6 +4995,7 @@ export async function insertIncident(i: IncidentInput): Promise<Incident | Queue
   assertIncidentInput(v)
   const row: Record<string, unknown> = {}
   for (const k of INCIDENT_FIELDS) row[k] = v[k]
+  row.closed_at = v.status === 'closed' ? new Date().toISOString() : null
   row.detail = incidentDetailPayload(v.detail)
   return insertRow('incidents', withClientKey(row), normalizeIncident)
 }
@@ -4986,6 +5006,7 @@ export type IncidentPatch = Partial<Omit<Incident, 'id' | 'rev' | 'detail'>> & {
 /**
  * 事故・ヒヤリハットの追記・修正（rev 照合の部分更新）。current は fetchIncident で読んだ1件（detail を含む）。
  * 送る前に、修正後の値（current と patch を重ねたもの）を検証する（一覧の列だけの行を渡すと detail が空で通らない＝消さない）。
+ * 状態を変えた時は closed_at（完了にした日時）を一緒に送る（完了＝いまの日時・対応中に戻す＝null）。
  * detail は current.detail に patch.detail を重ねた全体を送る（jsonb は列ごと置き換わるため）。
  * 氏名の写しは送らない（patch.detail に subject_name があっても無視。サーバーが前の写しを残す／対象者を変えたら写し直す）
  */
@@ -5014,6 +5035,7 @@ export async function updateIncident(
     reporter_id: current.reporter_id,
     confirmer_id: current.confirmer_id,
     confirmed_at: current.confirmed_at,
+    closed_at: current.closed_at,
     detail: current.detail,
   }
   const merged = cleanIncident({
@@ -5025,6 +5047,10 @@ export async function updateIncident(
   const sent: Record<string, unknown> = {}
   for (const k of INCIDENT_FIELDS) {
     if (cols[k] !== undefined) sent[k] = merged[k]
+  }
+  // 状態を変えた時は、完了にした日時を一緒に送る（完了＝いまの日時・対応中に戻す＝null。patch の closed_at は使わない）
+  if (cols.status !== undefined && merged.status !== current.status) {
+    sent.closed_at = merged.status === 'closed' ? new Date().toISOString() : null
   }
   // 氏名の写しは送らないので、変更の有無の判定からも外す
   const detailKeys = Object.keys(detailPatch ?? {}).filter((k) => k !== 'subject_name')

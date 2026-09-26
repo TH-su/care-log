@@ -86,6 +86,7 @@ function firstReport(over = {}, detailOver = {}) {
     reporter_id: 3,
     confirmer_id: null,
     confirmed_at: null,
+    closed_at: null,
     ...over,
     detail: { ...I.emptyIncidentDetail(), situation: '状況A', response: '対応A', ...detailOver },
   }
@@ -260,27 +261,44 @@ if (I === null) {
         [2, '2026-09-15', 'nearmiss', 'open'],
       ])
     })
-    it('★集計の結果に氏名・対象者・本文が出ない（未完了の一覧も日付・区分・種別・状態だけ）', () => {
+    it('★集計の結果に氏名・対象者・本文が出ない（未完了の一覧も日付・区分・種別・状態・完了にした日だけ）', () => {
       const s = I.aggregateIncidentMonth([rec(1, '2026-09-02', '10:00')], '2026-09')
       const json = JSON.stringify(s)
       assert.equal(json.includes('利用者A'), false, '氏名が集計に出た')
       assert.equal(json.includes('状況A'), false, '本文が集計に出た')
       assert.equal(/resident_id|subject_name|detail/.test(json), false, '対象者の項目が集計に出た')
-      assert.deepEqual(Object.keys(s.open[0]).sort(), ['id', 'kind', 'occurred_on', 'status', 'types'])
+      assert.deepEqual(Object.keys(s.open[0]).sort(), ['closed_on', 'id', 'kind', 'occurred_on', 'status', 'types'])
     })
-    it('★未完了の一覧は月末までに発生して未完了のもの（前月以前の持ち越しを含む・月末より後・完了は除く・重複しない）', () => {
-      const month = [rec(1, '2026-09-02', '10:00'), rec(2, '2026-09-20', '10:00', { status: 'closed' })]
+    it('★未完了の一覧は月末の時点で未完了だったもの（前月以前の持ち越し・月末より後に完了したものを含む・月末より後の発生・月末までに完了は除く）', () => {
+      const month = [rec(1, '2026-09-02', '10:00'), rec(2, '2026-09-20', '10:00', { status: 'closed', closed_at: at('2026-09-25', '10:00') })]
       const openCandidates = [
-        rec(7, '2026-07-15', '10:00'), // 前々月からの持ち越し
+        rec(7, '2026-07-15', '10:00'), // 前々月からの持ち越し（いまも対応中）
         rec(8, '2025-12-31', '10:00'), // 前年からの持ち越し
         rec(1, '2026-09-02', '10:00'), // その月の記録（重複しても1回）
         rec(9, '2026-10-01', '10:00'), // 月末より後に発生 → 除く
-        rec(10, '2026-08-31', '10:00', { status: 'closed' }), // 完了 → 除く
+        rec(10, '2026-08-31', '10:00', { status: 'closed', closed_at: at('2026-09-30', '23:59') }), // 月末の日に完了 → 除く
+        rec(11, '2026-08-30', '10:00', { status: 'closed', closed_at: at('2026-10-01', '00:00') }), // 月末より後に完了 → 月末時点は未完了
+        rec(12, '2026-08-29', '10:00', { status: 'closed', closed_at: null }), // 完了なのに日時が無い → 完了として扱う
       ]
       const s = I.aggregateIncidentMonth(month, '2026-09', openCandidates)
-      assert.deepEqual(s.open.map((o) => o.id), [8, 7, 1])
+      assert.deepEqual(s.open.map((o) => [o.id, o.closed_on]), [
+        [8, null],
+        [7, null],
+        [11, '2026-10-01'],
+        [1, null],
+      ])
       assert.deepEqual(s.total, { accident: 2, nearmiss: 0, total: 2 }, '件数はその月の発生だけ')
       assert.equal(JSON.stringify(s).includes('利用者A'), false)
+      // 省略時はその月の記録から（月末より後に完了したものは未完了・月末までに完了したものは除く）
+      assert.deepEqual(I.aggregateIncidentMonth(month, '2026-09').open.map((o) => o.id), [1])
+    })
+    it('unfinishedAt: その日の終わりの時点で未完了か', () => {
+      const r = (over) => ({ occurred_on: '2026-09-10', status: 'open', closed_at: null, ...over })
+      assert.equal(I.unfinishedAt(r({}), '2026-09-30'), true)
+      assert.equal(I.unfinishedAt(r({ occurred_on: '2026-10-01' }), '2026-09-30'), false)
+      assert.equal(I.unfinishedAt(r({ status: 'closed', closed_at: at('2026-09-30', '23:59') }), '2026-09-30'), false)
+      assert.equal(I.unfinishedAt(r({ status: 'closed', closed_at: at('2026-10-01', '00:00') }), '2026-09-30'), true)
+      assert.equal(I.unfinishedAt(r({ status: 'closed', closed_at: null }), '2026-09-30'), false)
     })
     it('月の形が不正なら何も数えない', () => {
       assert.equal(I.aggregateIncidentMonth([rec(1, '2026-09-02', '10:00')], '2026-13').total.total, 0)
@@ -745,6 +763,16 @@ if (DB === null || I === null) {
       assert.deepEqual([cur.confirmer_id, cur.confirmed_at], [7, '2026-09-21T01:00:00.000Z'])
       cur = await DB.updateIncident(cur, { status: 'closed', report_stage: 'nth', report_no: 2, submitted_on: '2026-09-22', city_report_needed: true, city_reported_on: '2026-09-22' })
       assert.deepEqual([cur.status, cur.report_stage, cur.report_no, cur.submitted_on, cur.city_report_needed], ['closed', 'nth', 2, '2026-09-22', true])
+      const closeUp = srv.calls.filter((q) => q.action === 'update').at(-1)
+      assert.ok(Math.abs(new Date(closeUp.payload.closed_at).getTime() - Date.now()) < 60_000, '完了にした日時（いま）を送っていない')
+      assert.equal(cur.closed_at, closeUp.payload.closed_at)
+      // 状態を変えない追記では完了にした日時を送らない
+      cur = await DB.updateIncident(cur, { detail: { cause: 'x' }, closed_at: '2000-01-01T00:00:00Z' })
+      assert.equal('closed_at' in srv.calls.filter((q) => q.action === 'update').at(-1).payload, false)
+      // 対応中に戻す → 完了にした日時は null
+      cur = await DB.updateIncident(cur, { status: 'open' })
+      assert.deepEqual(srv.calls.filter((q) => q.action === 'update').at(-1).payload.closed_at, null)
+      assert.deepEqual([cur.status, cur.closed_at], ['open', null])
       await assert.rejects(() => DB.updateIncident(cur, { report_stage: 'nth', report_no: 1 }), /2 以上/)
     })
 
@@ -920,7 +948,7 @@ if (DB === null || I === null) {
       await assert.rejects(() => DB.fetchIncidents({ fromIso: 'x', toIso: '2026-09-01' }))
     })
 
-    it('fetchOpenIncidentsUntil: その日までに発生して対応中の記録（前月以前も・完了と削除済みと後の日は除く・古い順・detail なし）', async () => {
+    it('fetchIncidentsOpenAt: その日の終わりの時点で未完了（対応中＋その日より後に完了）・後の日の発生・完了済み・削除済みは除く・古い順・detail なし', async () => {
       const srv = incidentServer()
       DB.__testHooks.setClient(srv.client)
       const mk = (day, over = {}) => DB.insertIncident(firstReport({ occurred_on: day, occurred_at: at(day, '09:00'), ...over }))
@@ -928,15 +956,23 @@ if (DB === null || I === null) {
       const b = await mk('2026-09-20')
       await mk('2026-09-21') // 指定の日より後に発生 → 除く
       const c = await mk('2026-08-01')
-      await DB.updateIncident(await DB.fetchIncident(c.id), { status: 'closed' })
+      await DB.updateIncident(await DB.fetchIncident(c.id), { status: 'closed' }) // いま完了（テストの今日＝指定の日より後）
+      const e = await mk('2026-08-03')
+      await DB.updateIncident(await DB.fetchIncident(e.id), { status: 'closed' })
+      srv.db.rows.find((r) => r.id === e.id).closed_at = at('2026-09-20', '23:00') // 指定の日のうちに完了 → 除く
       const d = await mk('2026-08-02')
       await DB.softDeleteIncident(d.id, d.rev)
-      const rows = await DB.fetchOpenIncidentsUntil('2026-09-20')
-      assert.deepEqual(rows.map((r) => r.id), [a.id, b.id])
-      const q = srv.calls.filter((x) => x.table === 'incidents' && x.action === 'select').at(-1)
-      assert.deepEqual(eqOf(q), { status: 'open' })
-      assert.equal(q.cols.split(',').includes('detail'), false)
-      await assert.rejects(() => DB.fetchOpenIncidentsUntil('bogus'))
+      const rows = await DB.fetchIncidentsOpenAt('2026-09-20')
+      assert.deepEqual(rows.map((r) => r.id), [a.id, c.id, b.id])
+      const qs = srv.calls.filter((x) => x.table === 'incidents' && x.action === 'select').slice(-2)
+      assert.deepEqual(qs.map((q) => eqOf(q)), [{ status: 'open' }, { status: 'closed' }])
+      const gte = qs[1].filters.find(([op, k]) => op === 'gte' && k === 'closed_at')
+      assert.equal(new Date(gte[2]).getTime(), new Date(2026, 8, 21, 0, 0).getTime(), '境目はその日の翌日 0:00（端末の時刻）')
+      for (const q of qs) {
+        assert.equal(q.cols.split(',').includes('detail'), false)
+        assert.ok(q.filters.some(([op, k, v]) => op === 'lte' && k === 'occurred_on' && v === '2026-09-20'))
+      }
+      await assert.rejects(() => DB.fetchIncidentsOpenAt('bogus'))
     })
 
     it('受信値を信じない: 知らない区分の行は落とし、知らない場所・種別・程度は空にする', async () => {
@@ -1020,6 +1056,8 @@ describe('事故・ヒヤリハットの配線（静的検査）', () => {
   it('0014: 変更の記録のトリガ（occurred_on）・rev・索引・client_key・事業所のキーは値 空で既存を触らない', () => {
     const s = sql()
     assert.match(s, /record_history_capture\('occurred_on'\)/)
+    assert.match(s, /closed_at\s+timestamptz,/)
+    assert.match(s, /add constraint incidents_closed_at_check\s+check \(\(status = 'closed'\) = \(closed_at is not null\)\);/)
     assert.match(s, /execute function public\.set_updated_at_rev\(\)/)
     assert.match(s, /create index if not exists idx_incidents_timeline\s+on public\.incidents \(occurred_on desc, id desc\)/)
     assert.match(s, /create index if not exists idx_incidents_resident\s+on public\.incidents \(resident_id, occurred_on desc\)/)
@@ -1077,7 +1115,7 @@ describe('事故・ヒヤリハットの配線（静的検査）', () => {
     assert.match(form, /title="対応中に戻しますか"/)
     assert.match(form, /void save\(\{ status: 'open' \}\)/)
     assert.match(read('../src/pages/KartePage.tsx'), /to=\{`\/incident\/\$\{i\.id\}`\}/)
-    assert.match(read('../src/pages/IncidentSummaryPage.tsx'), /fetchOpenIncidentsUntil\(range\.to\)/)
+    assert.match(read('../src/pages/IncidentSummaryPage.tsx'), /fetchIncidentsOpenAt\(range\.to\)/)
   })
 
   it('印刷: 事故報告書は A4 縦（PrintArea orientation="portrait"）・様式の見出しと注記・□／■', () => {

@@ -3,19 +3,19 @@
 // 月を選び（保存しない）、その月（発生日）の記録を集計する:
 //   事故・ヒヤリ別の件数／種別×件数／場所×件数／時間帯（0-6・6-9・9-12・12-15・15-18・18-21・21-24）×件数／程度別／
 //   未完了の一覧（日付・区分・種別・状態）。**氏名は出さない**（名簿を読まない・集計の結果に対象者を持たない）。
-//   未完了の一覧は、その月末までに発生して未完了のもの（前月以前からの持ち越しを含む・月末より後に発生したものは除く。
-//   2026-09-26 チーフ裁定）。未完了かどうかは記録のいまの状態で見る（完了にした日を持たないため）。
+//   未完了の一覧は、その月末の時点で未完了だったもの（前月以前からの持ち越しを含む・月末より後に発生したものは除く・
+//   完了にした日時 closed_at が月末より後なら未完了。2026-09-26 チーフ裁定）。
 // 印刷は既存の印刷部品（PrintArea）で A4 縦・1枚に収める。
 //
 // 規律:
-// - 取得は db.ts の fetchIncidents（月の範囲だけ）と fetchOpenIncidentsUntil（月末までに発生して対応中のもの）。
+// - 取得は db.ts の fetchIncidents（月の範囲だけ）と fetchIncidentsOpenAt（月末の時点で未完了だったもの）。
 //   集計は incident.ts の aggregateIncidentMonth（純関数）
 // - 表示中の月は保存しない（日付に紐づく状態＝原則11の既定。開くと常に今月）
 // - console に何も出さない。色だけで意味を伝えない
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { DbError, fetchIncidents, fetchOpenIncidentsUntil, subscribeIncidentChanges } from '../lib/db'
+import { DbError, fetchIncidents, fetchIncidentsOpenAt, subscribeIncidentChanges } from '../lib/db'
 import { aggregateIncidentMonth, kindShortLabel, typesText } from '../lib/incident'
 import type { IncidentCountRow, IncidentMonthSummary } from '../lib/incident'
 import { fmtMonthLabel, monthKeyOf, monthRange, parseMonthKey, shiftMonth } from '../lib/bath'
@@ -28,8 +28,7 @@ import type { PrintAreaHandle } from '../components/print/PrintArea'
 
 const ERR_LOAD = '事故・ヒヤリハットの月次集計を読み込めませんでした。通信状態を確認して、再試行してください。'
 const TYPE_NOTE = '種別は1件に複数あれば、それぞれに数えます（種別の合計は件数より多くなることがあります）。'
-const OPEN_NOTE =
-  '未完了の一覧は、この月末までに発生して、いま対応中のものです（前月以前からの持ち越しを含みます。完了にした日は記録していないため、いまの状態で見ます）。'
+const OPEN_NOTE = '未完了の一覧は、この月末の時点で未完了だったものです（前月以前からの持ち越しを含みます）。'
 
 export function IncidentSummaryPage() {
   const current = monthKeyOf(todayIso())
@@ -52,7 +51,7 @@ export function IncidentSummaryPage() {
     let alive = true
     setError(null)
     setData((d) => (d !== null && d.month === month ? d : null))
-    Promise.all([fetchIncidents({ fromIso: range.from, toIso: range.to }), fetchOpenIncidentsUntil(range.to)])
+    Promise.all([fetchIncidents({ fromIso: range.from, toIso: range.to }), fetchIncidentsOpenAt(range.to)])
       .then(([list, open]) => {
         if (alive) setData({ month, list, open })
       })
@@ -240,7 +239,7 @@ function OpenList({ summary, screen }: { summary: IncidentMonthSummary; screen: 
   const table = (
     <table className={screen ? 'w-full border-collapse' : 'cl-print-table'}>
       <caption className={screen ? 'mb-1 text-left text-base font-bold text-ink' : 'cl-print-left cl-print-strong'}>
-        未完了の一覧（月末までに発生・{summary.open.length}件）
+        未完了の一覧（月末の時点・{summary.open.length}件）
       </caption>
       <thead>
         <tr>
@@ -254,7 +253,7 @@ function OpenList({ summary, screen }: { summary: IncidentMonthSummary; screen: 
             種別
           </th>
           <th scope="col" className={th}>
-            状態
+            月末の状態
           </th>
         </tr>
       </thead>
@@ -264,7 +263,9 @@ function OpenList({ summary, screen }: { summary: IncidentMonthSummary; screen: 
             <td className={`${td} tabular`}>{openDayText(o.occurred_on, summary.month)}</td>
             <td className={td}>{kindShortLabel(o.kind)}</td>
             <td className={td}>{typesText(o.types)}</td>
-            <td className={td}>{INCIDENT_STATUS_LABEL[o.status]}</td>
+            <td className={td}>
+              {o.closed_on === null ? INCIDENT_STATUS_LABEL.open : `${INCIDENT_STATUS_LABEL.open}（${fmtDayLabel(o.closed_on)}に完了）`}
+            </td>
           </tr>
         ))}
       </tbody>

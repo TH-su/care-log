@@ -165,6 +165,7 @@ incidents ( id bigint identity PK, kind text not null check (kind in ('accident'
   office text check (null or facility/visit/daycare), place text check (null or 10個のキー), place_other text,
   types text[] not null check (1つ以上・8個のキーだけ・null の要素なし),
   severity text check (null or treated/hospitalized/death/other), status text not null default 'open' check (open/closed),
+  closed_at timestamptz,                         -- 完了にした日時（check: (status='closed') = (closed_at is not null)。対応中に戻したら null）
   report_stage text check (null or first/nth/final), report_no int check (null or 1〜99), submitted_on date,
   city_report_needed boolean not null default false, city_reported_on date,
   reporter_id / confirmer_id bigint references staff(id), confirmed_at timestamptz,

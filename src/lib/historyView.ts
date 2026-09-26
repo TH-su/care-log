@@ -155,6 +155,7 @@ const TABLE_LABEL: Record<string, Record<string, string>> = {
     types: '事故の種別',
     severity: '事故状況の程度',
     status: '状態',
+    closed_at: '完了にした日時',
     report_stage: '報告区分',
     report_no: '第＿報の数',
     submitted_on: '提出日',

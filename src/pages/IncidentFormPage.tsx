@@ -155,6 +155,8 @@ interface FormState {
   reporter_id: number | null
   confirmer_id: number | null
   confirmed_at: string | null
+  /** 完了にした日時（表示用。送る値は db.ts が状態の変更に合わせて決める） */
+  closed_at: string | null
   detail: IncidentDetail
 }
 
@@ -200,6 +202,7 @@ function formOf(i: Incident): FormState {
     reporter_id: i.reporter_id,
     confirmer_id: i.confirmer_id,
     confirmed_at: i.confirmed_at,
+    closed_at: i.closed_at,
     detail: { ...i.detail },
   }
 }
@@ -225,6 +228,7 @@ function toInput(f: FormState): IncidentInput {
     reporter_id: f.reporter_id,
     confirmer_id: f.confirmer_id,
     confirmed_at: f.confirmed_at,
+    closed_at: f.closed_at,
     detail: { ...f.detail },
   }
 }
@@ -281,6 +285,7 @@ function blankForm(day: string, reporterId: number | null): FormState {
     reporter_id: reporterId,
     confirmer_id: null,
     confirmed_at: null,
+    closed_at: null,
     detail: { ...emptyIncidentDetail(), insurer: DEFAULT_INSURER },
   }
 }
@@ -1231,6 +1236,7 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
             <p className="mt-1 text-base text-ink">
               {f.status === 'open' ? '▲ ' : '✓ '}
               {INCIDENT_STATUS_LABEL[f.status]}
+              {f.status === 'closed' && f.closed_at !== null ? `（${fmtStamp(f.closed_at)} に完了）` : ''}
             </p>
             {f.status === 'open' ? (
               <button
