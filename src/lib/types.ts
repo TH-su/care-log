@@ -206,6 +206,56 @@ export interface Outing {
   rev: number
 }
 
+// ── デイの入浴記録（2026-09-26 追加・契約改訂は代表承認済み・0012_bath_records.sql） ──
+
+/** 入浴の区分。full=全身浴 / shower=シャワー浴 / partial=部分浴・清拭 / cancel=中止 */
+export type BathResult = 'full' | 'shower' | 'partial' | 'cancel'
+/** 中止の理由。condition=体調不良 / refusal=本人の拒否 / facility=事業所の都合 / other=その他（備考必須） */
+export type BathCancelReason = 'condition' | 'refusal' | 'facility' | 'other'
+
+/** 入浴記録（1人1日1件。bath_on は JST の業務日付） */
+export interface BathRecord {
+  id: number
+  resident_id: number
+  bath_on: string
+  result: BathResult
+  /** result='cancel' の時だけ値を持つ（それ以外は null） */
+  cancel_reason: BathCancelReason | null
+  note: string | null
+  recorded_by: number | null
+  rev: number
+}
+
+/** 画面のボタンの並び（左→右） */
+export const BATH_RESULTS: readonly BathResult[] = ['full', 'shower', 'partial', 'cancel']
+export const BATH_RESULT_LABEL: Record<BathResult, string> = {
+  full: '全身浴',
+  shower: 'シャワー浴',
+  partial: '部分浴・清拭',
+  cancel: '中止',
+}
+/** 月次表・印刷の1文字（白黒でも区別できるよう文字で持つ） */
+export const BATH_RESULT_MARK: Record<BathResult, string> = {
+  full: '全',
+  shower: 'シ',
+  partial: '部',
+  cancel: '中',
+}
+export const BATH_CANCEL_REASONS: readonly BathCancelReason[] = ['condition', 'refusal', 'facility', 'other']
+export const BATH_CANCEL_REASON_LABEL: Record<BathCancelReason, string> = {
+  condition: '体調不良',
+  refusal: '本人の拒否',
+  facility: '事業所の都合',
+  other: 'その他',
+}
+
+/**
+ * 種類ごとの入力解禁（2026-09-26 追加）。app_settings の input_enabled_<種類> を読む。
+ * 既存の native_input_enabled（切替日D）とは別の旗で、種類ごとに開始日を決められる。
+ */
+export type InputKind = 'bath' | 'med' | 'incident'
+export const INPUT_KINDS: readonly InputKind[] = ['bath', 'med', 'incident']
+
 export interface ImportDay {
   source: string
   day: string
@@ -352,6 +402,11 @@ export const LS = {
    * リロードすると跡形もなく消えていた（保存経路の監査で判明）。
    */
   dailyDraft: 'cl_dailyDraft',
+  /**
+   * 入浴の月次表で表示中の月（2026-09-26 追加・UI状態のみ）。値は 'yyyy-MM' だけ。
+   * 読む時は形式と範囲（今月より先は不可）を照合し、不正値は今月へ戻す。
+   */
+  bathMonth: 'cl_bathMonth',
 } as const
 
 /**

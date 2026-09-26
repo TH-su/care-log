@@ -161,6 +161,8 @@
 
 - プレフィクス `cl_`（全キー統一・`clg_` 廃止【#4】）。
 - **UI状態ホワイトリスト**: `cl_view`（timeline/record/karte/search/settings）／`cl_recordTab`（vitals/meals/note/outing）／`cl_vitalsFloor`（1/2）／`cl_karteRange`（14d/1m/3m/6m/1y）／`cl_mode`（light/dark/auto）。復元は既知値の完全一致照合・不一致は既定へフォールバック（try/catch・壊れた値で起動不能にしない）。
+  - 追加（2026-09-26）: `cl_bathMonth`（入浴 月次表で表示中の月。値は 'yyyy-MM' だけ。形式が違う・今月より先の値は今月へ戻す。
+    照合は `src/lib/bath.ts` の parseMonthKey。キーは types.ts の `LS.bathMonth`）。`cl_view` の既知値に `bathMonth`（/bath/month）
   - 追加（2026-09-26）: `cl_notePhraseCat`（申し送りの定型句で最後に選んだ場面 id＝body/meal/excretion/night/skin/fall/medical/meds/family/notice。正本は `src/lib/notePhrases.ts`。既知値照合・不正/未知は先頭の場面 body。キー定数は凍結の types.ts に足さず NoteFormPage.tsx に置く）
 - **操作者キー（別枠・#1）**: `cl_staffId`（staff_id 数値のみ・氏名なし）。復元は**固定リストでなく staff スナップショットとの動的照合**（不在・無効は操作者ピッカーへ）。業務データに紐づく状態だが操作主体の同定に必須のため、**理由を添えてスコープ例外として承認時に確定**（原則11の但し書きに準拠）。
 - **データ保護キー（別枠・#4）**: `cl_sendQueue`／`cl_sendQueue2`（バイタル・食事の送信待ち・2026-09-23 追加）／`cl_draftNote`（§6.5の保持規則に従う。UI状態復元には使わない）。

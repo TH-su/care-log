@@ -116,7 +116,24 @@ attendance ( day date not null, staff_id bigint not null references staff(id),
 --   authenticated には delete ポリシーを作らない（他表と同じ「物理削除の構造的不可」の考え方）。
 -- realtime publication にも追加（notes/vitals/meals/fluid_intake/outings/note_reads と合わせて計7表）
 
+-- デイの入浴記録（1行=1人×1業務日。0012・2026-09-26 追加）
+bath_records ( id bigint identity PK, resident_id bigint not null references residents(id),
+  bath_on date not null,                         -- 業務日付（JST）
+  result text not null check (result in ('full','shower','partial','cancel')),  -- 全身浴/シャワー浴/部分浴・清拭/中止
+  cancel_reason text check (null または 'condition','refusal','facility','other'),  -- 体調不良/本人の拒否/事業所の都合/その他
+  --   check: result <> 'cancel' or cancel_reason is not null（中止は理由必須。「その他」の備考必須はアプリ側）
+  note text, recorded_by bigint references staff(id), rev int default 1,
+  created_at/updated_at, deleted_at, deleted_by, edited_by bigint references staff(id),
+  client_key text unique )                       -- 全体unique（削除済みもキーを押さえる）
+-- 部分unique: (resident_id, bath_on) where deleted_at is null（1人1日1件）
+-- 索引: (bath_on desc, id desc) / (resident_id, bath_on desc)（いずれも where deleted_at is null）
+-- トリガ: set_updated_at_rev（rev+1）／record_history_capture('bath_on')（変更の記録）。RLS は他の業務表と同じ・delete ポリシーなし
+-- 予定は週間計画の写し（public.kv_entries・key='care_schedule_v2'）を RPC daycare_bath_plan(p_date) で読む
+--   （security invoker・search_path=''・authenticated のみ。返すのは source_id・開始・終了・入院中・写しの更新時刻だけ。
+--    曜日は dayOfWeek 0=月…6=日 と extract(isodow from p_date)-1 を突き合わせる）
+
 -- app_settings … 0009 流用。★追加キー: 'native_input_enabled'（切替日Dの機能フラグ・監査#4）
+--   ★2026-09-26 追加: 'input_enabled_bath' / 'input_enabled_med' / 'input_enabled_incident'（種類ごとの入力解禁。初期値 'false'）
 -- import_days ( source, day, imported_at, src_rows, inserted, updated, skipped,
 --   native_skip, unmatched, PK(source,day) )   ★列拡張（監査#4/#9）
 -- master_sync_log ( id, synced_at, source, before_count, after_count, added, deactivated, renamed )
@@ -286,3 +303,4 @@ Supabase 無料枠に自動バックアップは無い（確信度: 高）。介
 ## 変更履歴
 
 - 2026-09-02 移行 0003〜0008 を反映
+- 2026-09-26 移行 0012（入浴記録・種類ごとの入力解禁・daycare_bath_plan）を反映

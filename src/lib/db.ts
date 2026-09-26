@@ -31,9 +31,13 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type {
   Attendance,
+  BathCancelReason,
+  BathRecord,
+  BathResult,
   FluidIntake,
   ImportDay,
   Importance,
+  InputKind,
   Meal,
   MealSlot,
   MealStatus,
@@ -48,7 +52,9 @@ import type {
   Vital,
   VitalKind,
 } from './types'
-import { LS } from './types'
+import { BATH_CANCEL_REASONS, BATH_RESULTS, LS } from './types'
+import { matchBathPlan, monthRange, validateBathInput } from './bath'
+import type { BathPlanEntry, BathPlanRow } from './bath'
 import {
   notePresence,
   othersFromState,
@@ -134,6 +140,8 @@ const NOTE_COLS =
 const OUTING_COLS = 'id,resident_id,kind,start_on,start_at,end_on,end_at,companion,note,recorded_by,rev'
 const ATTENDANCE_COLS = 'day,staff_id,role,sort'
 const IMPORT_DAY_COLS = 'source,day,imported_at,src_rows,inserted,updated,skipped,native_skip,unmatched'
+/** 入浴記録（0012_bath_records.sql）。監査列・client_key は端末へ持ち出さない */
+const BATH_COLS = 'id,resident_id,bath_on,result,cancel_reason,note,recorded_by,rev'
 
 /**
  * Realtime を購読する表（受信は「どの表が変わったか」だけを伝える）。
@@ -531,6 +539,27 @@ function normalizeOuting(row: unknown): Outing | null {
   }
 }
 
+function normalizeBath(row: unknown): BathRecord | null {
+  const r = asRecord(row)
+  if (!r) return null
+  const id = idNum(r.id)
+  const resident_id = idNum(r.resident_id)
+  const bath_on = dateStr(r.bath_on)
+  const result = oneOf<BathResult>(r.result, BATH_RESULTS)
+  if (id === null || resident_id === null || bath_on === null || result === null) return null
+  return {
+    id,
+    resident_id,
+    bath_on,
+    result,
+    // 中止以外は理由を持たない（DB の check と同じ。受信値を信じない）
+    cancel_reason: result === 'cancel' ? oneOf<BathCancelReason>(r.cancel_reason, BATH_CANCEL_REASONS) : null,
+    note: str(r.note),
+    recorded_by: idNum(r.recorded_by),
+    rev: num(r.rev) ?? 1,
+  }
+}
+
 function normalizeImportDay(row: unknown): ImportDay | null {
   const r = asRecord(row)
   if (!r) return null
@@ -563,8 +592,12 @@ function normalizeImportDay(row: unknown): ImportDay | null {
 // cl_sendQueue から外すのは、cl_sendQueue2 に書けたことを読み直して確かめた後だけ（書けなければ外さない＝消さない）。
 // 書き戻しはすべて書込ロック（cl_sendQueue_write）の中で「読み直し → 和集合 → 書き戻し」（#5）。
 
-/** 旧経路（HEAD の送り方）のまま送る業務表 */
-type LegacyTable = 'fluid_intake' | 'notes' | 'outings'
+/**
+ * 旧経路（HEAD の送り方）のまま送る業務表。
+ * bath_records（入浴記録・2026-09-26 追加）も同じ経路に乗せる（client_key・rev 照合・送信待ち・edited_by）。
+ * 入力解禁の判定だけは表ごとに違う（writeGate: 入浴は input_enabled_bath）
+ */
+type LegacyTable = 'fluid_intake' | 'notes' | 'outings' | 'bath_records'
 
 /** 列の並び・rev 照合の作法が共通の業務表（読み取りの列は colsOf） */
 type QueueTable = 'vitals' | 'meals' | LegacyTable
@@ -592,7 +625,7 @@ interface QueueOpBase {
   sending?: boolean
 }
 
-/** 水分・申し送り・外出への insert / update（HEAD と同じ形） */
+/** 水分・申し送り・外出・入浴への insert / update（HEAD と同じ形） */
 interface RowQueueOp extends QueueOpBase {
   table: LegacyTable
   kind: 'insert' | 'update'
@@ -622,7 +655,7 @@ interface AliasQueueOp extends ExtraQueueOp<'residents'> {
 
 type QueueOp = RowQueueOp | ReadQueueOp | AttendanceQueueOp | AliasQueueOp
 
-const LEGACY_TABLES: readonly LegacyTable[] = ['fluid_intake', 'notes', 'outings']
+const LEGACY_TABLES: readonly LegacyTable[] = ['fluid_intake', 'notes', 'outings', 'bath_records']
 
 /** 旧版が使っていた退避キー。値は cl_sendQueue の中へ移し、移せたことを観測してから取り除く */
 const LEGACY_BROKEN_KEY = `${LS.sendQueue}_broken`
@@ -2141,7 +2174,12 @@ async function sendQueuedOp(sb: SupabaseClient, op: QueueOp): Promise<SendResult
         // 届いていることを読んで確かめられた時だけキューから外す（削除済みでも「届いた」証拠）。
         // 読めなければ消さずに再試行へ回す（観測できない消去はしない＝原則8）
         const landed = await findByKey(sb, op.table, ck, 'id,rev', true)
-        return landed === null ? 'retry' : 'sent'
+        if (landed !== null) return 'sent'
+        // 入浴記録は「1人1日1件」の自然キー（部分unique）も持つ。自分の client_key が載っておらず、
+        // 同じ人・同じ日の生きている行がある＝他の端末が先に記録した。再送しても通らないので止める
+        // （消さずに残し「未送信」として数え続ける＝rev 不一致の update と同じ扱い）
+        if (op.table === 'bath_records' && (await bathDayTaken(sb, op.payload))) return 'conflict'
+        return 'retry'
       }
     }
     return 'rejected'
@@ -2259,6 +2297,8 @@ function colsOf(table: QueueTable): string {
       return NOTE_COLS
     case 'outings':
       return OUTING_COLS
+    case 'bath_records':
+      return BATH_COLS
   }
 }
 
@@ -2292,6 +2332,17 @@ async function findByKey(
   const id = idNum(r?.id)
   const rev = num(r?.rev)
   return id !== null && rev !== null ? { id, rev, row: res.data } : null
+}
+
+/**
+ * 入浴記録の自然キー（同じ人・同じ日）に生きている行があるか。
+ * 読めなかった時は false（＝他の端末の行とは断定しない。呼び側は再試行へ回す）
+ */
+async function bathDayTaken(sb: SupabaseClient, payload: Record<string, unknown>): Promise<boolean> {
+  const residentId = idNum(payload.resident_id)
+  const day = dateStr(payload.bath_on)
+  if (residentId === null || day === null) return false
+  return (await findByKey(sb, 'bath_records', { resident_id: residentId, bath_on: day })) !== null
 }
 
 function omitKeys(src: Record<string, unknown>, keys: string[]): Record<string, unknown> {
@@ -2499,6 +2550,97 @@ async function assertCellWritable(): Promise<void> {
   if ((await probeCellRpc()) === 'missing') throw new DbError('blocked', MSG.cellsPending)
 }
 
+// ── 種類ごとの入力解禁（2026-09-26 追加・入浴／服薬／事故） ─────────────────────
+//
+// app_settings の input_enabled_<種類>（0012 で 'false' を入れる）。既存の native_input_enabled と
+// その封鎖（assertWritable・getNativeInputGate・cells）は一切変えない。新しい種類の書き込みは
+// native_input_enabled ではなく、自分の種類の旗で判定する（assertKindWritable）。
+// 取り直しの間隔・真偽の読み方・「観測できたか」の扱いは refreshGate / assertWritable と同じ。
+
+/** 封鎖中の理由文（種類ごと）。入浴は代表指定の文言。服薬・事故は画面ができる時に見直す */
+const KIND_BLOCKED_MSG: Record<InputKind, string> = {
+  bath: '入浴の記録はまだ使い始めていません（開始日に解禁します）',
+  med: '服薬の記録はまだ使い始めていません（開始日に解禁します）',
+  incident: '事故・ヒヤリハットの記録はまだ使い始めていません（開始日に解禁します）',
+}
+
+interface KindGateState {
+  /** 未観測 = null */
+  value: boolean | null
+  fetchedAt: number
+  inFlight: Promise<boolean | null> | null
+}
+
+function newKindGates(): Record<InputKind, KindGateState> {
+  return {
+    bath: { value: null, fetchedAt: 0, inFlight: null },
+    med: { value: null, fetchedAt: 0, inFlight: null },
+    incident: { value: null, fetchedAt: 0, inFlight: null },
+  }
+}
+
+let kindGates = newKindGates()
+
+/** その種類の封鎖中の理由文（画面の案内に使う） */
+export function kindBlockedMessage(kind: InputKind): string {
+  return KIND_BLOCKED_MSG[kind]
+}
+
+async function refreshKindGate(kind: InputKind): Promise<boolean | null> {
+  const st = kindGates[kind]
+  if (st.inFlight !== null) return st.inFlight
+  const run = (async (): Promise<boolean | null> => {
+    try {
+      const raw = await getAppSetting(`input_enabled_${kind}`)
+      const v = raw !== null && TRUE_WORDS.has(raw.trim().toLowerCase())
+      st.value = v
+      st.fetchedAt = Date.now()
+      return v
+    } catch {
+      return null // 直近の観測値（st.value）は消さない
+    } finally {
+      st.inFlight = null
+    }
+  })()
+  st.inFlight = run
+  return run
+}
+
+/**
+ * app_settings.input_enabled_<kind> と「サーバーの値を観測できたか」。画面を開くたびに取り直す。
+ * observed=false は「入力できるかどうかが分からない」（通信エラー）で、封鎖とは別物（getNativeInputGate と同じ）。
+ */
+export async function getKindInputGate(kind: InputKind): Promise<{ value: boolean; observed: boolean }> {
+  const v = await refreshKindGate(kind)
+  if (v !== null) return { value: v, observed: true }
+  const last = kindGates[kind].value
+  if (last !== null) return { value: last, observed: true }
+  return { value: false, observed: false }
+}
+
+/**
+ * 種類ごとの書込の入口ガード（assertWritable と同じ作り。旗だけが違う）。
+ * 一度も「解禁」を観測できていない状態では書かせない。
+ */
+async function assertKindWritable(kind: InputKind): Promise<void> {
+  if (!isSupabaseConfigured()) throw new DbError('unconfigured', MSG.unconfigured)
+  const st = kindGates[kind]
+  if (st.value === true) {
+    // 解禁を観測済み。期限切れなら背景で取り直し、この書込は待たせない（オフラインでもキューに載る）
+    if (Date.now() - st.fetchedAt >= GATE_TTL_MS) void refreshKindGate(kind)
+    return
+  }
+  const v = await refreshKindGate(kind)
+  if (v === null) throw new DbError('gate-unknown', MSG.gateUnknown)
+  if (!v) throw new DbError('blocked', KIND_BLOCKED_MSG[kind])
+}
+
+/** 表ごとの書込の入口ガード。入浴記録は input_enabled_bath、それ以外は従来どおり native_input_enabled */
+async function writeGate(table: LegacyTable): Promise<void> {
+  if (table === 'bath_records') return assertKindWritable('bath')
+  return assertWritable()
+}
+
 // ── 読取 ─────────────────────────────────────────────────────────────────────
 
 /** 利用者スナップショット（active のみ・居室昇順） */
@@ -2617,12 +2759,22 @@ export async function fetchTimelineChunk(
   }
 }
 
-/** 個人カルテ（resident_id＋日付レンジ必須・系列ごとに limit ガード） */
+/**
+ * 個人カルテ（resident_id＋日付レンジ必須・系列ごとに limit ガード）。
+ * baths（入浴記録・2026-09-26 追加）は表が無い DB（0012 未適用）でも空として返し、カルテ全体を失敗させない。
+ */
 export async function fetchKarte(
   residentId: number,
   fromIso: string,
   toIso: string,
-): Promise<{ vitals: Vital[]; meals: Meal[]; fluids: FluidIntake[]; notes: Note[]; outings: Outing[] }> {
+): Promise<{
+  vitals: Vital[]
+  meals: Meal[]
+  fluids: FluidIntake[]
+  notes: Note[]
+  outings: Outing[]
+  baths: BathRecord[]
+}> {
   const sb = await getClient()
   const range = <T>(table: string, cols: string, dateCol: string, cap: number) =>
     sb
@@ -2656,22 +2808,26 @@ export async function fetchKarte(
         range<unknown>('outings', OUTING_COLS, 'start_on', KARTE_ROWS)
   ) as unknown as Promise<Res<unknown>>
 
-  const [vitals, meals, fluids, notes, outings] = await Promise.all([
+  const [vitals, meals, fluids, notes, outings, baths] = await Promise.all([
     range<unknown>('vitals', VITAL_COLS, 'measured_on', KARTE_ROWS),
     range<unknown>('meals', MEAL_COLS, 'meal_on', MAX_ROWS),
     range<unknown>('fluid_intake', FLUID_COLS, 'taken_on', MAX_ROWS),
     range<unknown>('notes', NOTE_COLS, 'note_on', KARTE_ROWS),
     outingsQuery,
+    range<unknown>('bath_records', BATH_COLS, 'bath_on', KARTE_ROWS),
   ])
   for (const res of [vitals, meals, fluids, notes, outings]) {
     if (res.error !== null) throw readError(res)
   }
+  // 入浴記録の表がまだ無い（0012 未適用）だけなら空で返す。それ以外の失敗は他の系列と同じく例外
+  if (baths.error !== null && !isMissingTable(baths)) throw readError(baths)
   return {
     vitals: list(vitals.data, normalizeVital, KARTE_ROWS),
     meals: list(meals.data, normalizeMeal),
     fluids: list(fluids.data, normalizeFluid),
     notes: list(notes.data, normalizeNote, KARTE_ROWS),
     outings: list(outings.data, normalizeOuting, KARTE_ROWS),
+    baths: baths.error !== null ? [] : list(baths.data, normalizeBath, KARTE_ROWS),
   }
 }
 
@@ -2898,7 +3054,7 @@ async function insertRow<T>(
   payload: Record<string, unknown>,
   normalize: (row: unknown) => T | null,
 ): Promise<T | Queued> {
-  await assertWritable()
+  await writeGate(table)
   const sb = await getClient()
   const cols = colsOf(table)
   const res = (await sb.from(table).insert(payload).select(cols).maybeSingle()) as Res<unknown>
@@ -2937,7 +3093,7 @@ async function updateRow<T>(
   normalize: (row: unknown) => T | null,
   opts?: WriteOpts,
 ): Promise<T | Conflict | Queued> {
-  await assertWritable()
+  await writeGate(table)
   if (Object.keys(patch).length === 0) throw new DbError('server', MSG.emptyPatch)
   const sb = await getClient()
   // edited_by を必ず添える（分からない時は null。退避する時も添えたまま＝触った人を後から取り違えない）
@@ -2985,7 +3141,7 @@ async function updateNow<T>(
   normalize: (row: unknown) => T | null,
   opts?: WriteOpts,
 ): Promise<T | Conflict | Queued> {
-  await assertWritable()
+  await writeGate(table)
   const sb = await getClient()
   const sent = withEditor(patch, opts?.editedBy) // edited_by を必ず添える（分からない時は null。退避にも添えたまま）
   // 自分の更新は rev + 1 になる。応答を待たずに覚えてよい（版で限定するので他端末の変更は落ちない）
@@ -3026,7 +3182,7 @@ async function softDelete(
   rev: number,
   opts?: WriteOpts,
 ): Promise<true | Conflict | Queued> {
-  await assertWritable()
+  await writeGate(table)
   const sb = await getClient()
   // edited_by を必ず添える（誰が消したかを変更の記録に残す。分からない時は null。退避にも添えたまま）
   const payload = withEditor({ deleted_at: new Date().toISOString() }, opts?.editedBy)
@@ -3909,6 +4065,198 @@ export async function setOutingEnd(
   return updateNow('outings', id, rev, { end_on: endOn, end_at: endAt }, normalizeOuting, opts)
 }
 
+// ── 入浴記録（デイ・2026-09-26 追加・0012_bath_records.sql） ─────────────────────
+//
+// 書き方は水分・申し送り・外出と同じ経路（client_key・rev 照合・送信待ち・edited_by・soft delete）。
+// 違うのは2点だけ:
+//   ・入力解禁は input_enabled_bath（writeGate / assertKindWritable）
+//   ・「1人1日1件」の自然キー（部分unique）を持つ。23505 のうち自分の client_key が載っていないものは
+//     「他の端末が先に記録した」証拠 → 'conflict' を返す（画面は入力を消さず読み直しを促す）。
+//     送信待ちから送った分は同じ判定で止める（sendQueuedOp）
+
+const BATH_MSG = {
+  missing: '入浴の記録はまだ使えません（サーバー側の設定待ち）。管理者に連絡してください。',
+  badMonth: '月を読み取れませんでした。月を選び直してください。',
+} as const
+
+/** 1日の入浴記録の取得上限（1日の利用者数がこれを超える運用は無い） */
+const BATH_DAY_ROWS = DAY_ROWS
+/** 1か月の入浴記録の取得上限（在籍33名×31日≒1,000件。超えたら黙って切らずに知らせる） */
+const BATH_MONTH_ROWS = MAX_ROWS
+
+/** 表が無い（0012 未適用）時は「サーバー側の設定待ち」で止める（読めない理由を取り違えさせない） */
+function bathReadError(res: Res<unknown>): DbError {
+  if (isMissingTable(res)) return new DbError('server', BATH_MSG.missing)
+  return readError(res)
+}
+
+/** 保存前の検証（画面と同じ関数）。通らなければ書かずに理由文で止める */
+function assertBathInput(v: {
+  bath_on: string
+  result: BathResult
+  cancel_reason: BathCancelReason | null
+  note: string | null
+}): void {
+  const check = validateBathInput(v, localToday())
+  if (!check.ok) throw new DbError('server', check.message)
+}
+
+/** 端末の今日（YYYY-MM-DD・ローカル時刻＝JST 運用）。format.ts の todayIso と同じ計算 */
+function localToday(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+/** その日の入浴記録（削除済みを除く） */
+export async function fetchBathDay(dayIso: string): Promise<BathRecord[]> {
+  assertDay(dayIso)
+  const sb = await getClient()
+  const res = (await sb
+    .from('bath_records')
+    .select(BATH_COLS)
+    .eq('bath_on', dayIso)
+    .is('deleted_at', null)
+    .order('id', { ascending: true })
+    .limit(BATH_DAY_ROWS)) as Res<unknown>
+  if (res.error !== null) throw bathReadError(res)
+  return list(res.data, normalizeBath, BATH_DAY_ROWS)
+}
+
+/** その月（'yyyy-MM'）の入浴記録（削除済みを除く）。取り切れない時は黙って切らずに例外 */
+export async function fetchBathMonth(monthKey: string): Promise<BathRecord[]> {
+  const range = monthRange(monthKey)
+  if (range === null) throw new DbError('server', BATH_MSG.badMonth)
+  const sb = await getClient()
+  const res = (await sb
+    .from('bath_records')
+    .select(BATH_COLS)
+    .gte('bath_on', range.from)
+    .lte('bath_on', range.to)
+    .is('deleted_at', null)
+    .order('bath_on', { ascending: true })
+    .order('id', { ascending: true })
+    .limit(BATH_MONTH_ROWS)) as Res<unknown>
+  if (res.error !== null) throw bathReadError(res)
+  assertLoadedAll(res, BATH_MONTH_ROWS)
+  return list(res.data, normalizeBath, BATH_MONTH_ROWS)
+}
+
+/**
+ * その日のデイの入浴予定（週間計画の写しから・RPC daycare_bath_plan）。
+ * available=false … 予定を取得できない（写しが無い・関数が無い＝0012 未適用）。画面は記録を妨げない。
+ * updatedAt       … 写しの更新時刻（RPC の updated_at 列。写しの中身＝介護度などは端末へ持ち出さない）
+ * unmatched       … 名簿（residents.source_id）と突き合わせられなかった予定の件数
+ * residents を渡さない時は在籍の名簿を取って突き合わせる。通信できない等は例外（DbError）。
+ */
+export interface BathPlanResult {
+  available: boolean
+  updatedAt: string | null
+  entries: BathPlanEntry[]
+  unmatched: number
+}
+
+export async function fetchBathPlan(dayIso: string, residents?: Resident[]): Promise<BathPlanResult> {
+  assertDay(dayIso)
+  const sb = await getClient()
+  const [res, roster] = await Promise.all([
+    sb.rpc('daycare_bath_plan', { p_date: dayIso }) as unknown as Promise<Res<unknown>>,
+    residents !== undefined ? Promise.resolve(residents) : fetchResidents(),
+  ])
+  if (res.error !== null) {
+    if (isMissingRpc(res)) return { available: false, updatedAt: null, entries: [], unmatched: 0 }
+    throw readError(res)
+  }
+  const rows: BathPlanRow[] = []
+  let updatedAt: string | null = null
+  if (Array.isArray(res.data)) {
+    for (const raw of res.data.slice(0, MAX_ROWS)) {
+      const r = asRecord(raw)
+      if (r === null) continue
+      updatedAt = updatedAt ?? str(r.updated_at)
+      rows.push({
+        source_id: str(r.source_id),
+        start_time: str(r.start_time),
+        end_time: str(r.end_time),
+        hospitalized: r.hospitalized === true,
+      })
+    }
+  }
+  // 0行＝写しが無い（読めない）。source_id が null の1行だけ＝写しはあるが、その日の予定は無い
+  if (rows.length === 0) return { available: false, updatedAt: null, entries: [], unmatched: 0 }
+  const { entries, unmatched } = matchBathPlan(rows, roster)
+  return { available: true, updatedAt, entries, unmatched }
+}
+
+/**
+ * 入浴記録の追加。端末生成の冪等キー client_key を必ず付ける（再送しても1行に収まる）。
+ * 戻り値: 追加した行／'conflict'（同じ人・同じ日に他の端末が先に記録した）／'queued'（通信できない）
+ */
+export async function insertBath(b: Omit<BathRecord, 'id' | 'rev'>): Promise<BathRecord | Conflict | Queued> {
+  const cancel_reason = b.result === 'cancel' ? b.cancel_reason : null
+  const note = b.note === null || b.note.trim() === '' ? null : b.note
+  assertBathInput({ bath_on: b.bath_on, result: b.result, cancel_reason, note })
+  await writeGate('bath_records')
+  const payload = withClientKey({
+    resident_id: b.resident_id,
+    bath_on: b.bath_on,
+    result: b.result,
+    cancel_reason,
+    note,
+    recorded_by: idNum(b.recorded_by),
+  })
+  const sb = await getClient()
+  const res = (await sb.from('bath_records').insert(payload).select(BATH_COLS).maybeSingle()) as Res<unknown>
+  if (res.error !== null) {
+    if (isAuthFail(res)) {
+      fireAuthExpired()
+      return enqueue({ table: 'bath_records', kind: 'insert', payload })
+    }
+    if (isTransient(res)) return enqueue({ table: 'bath_records', kind: 'insert', payload })
+    if (isUniqueViolation(res)) {
+      const ck = clientKeyOf(payload)
+      // 自分の送信が既に載っている（再送の行き違い）→ 載っている行を返す
+      const landed = ck === null ? null : await findByKey(sb, 'bath_records', ck, BATH_COLS, true)
+      const row = landed === null ? null : normalizeBath(landed.row)
+      if (row !== null) return row
+      // 他の端末が同じ人・同じ日を先に記録した（1人1日1件）→ 入力を消さず読み直しを促す
+      if (await bathDayTaken(sb, payload)) return CONFLICT
+      // どちらとも確かめられない（読めない）→ 送信待ちへ（次の再送で同じ判定をやり直す）
+      return enqueue({ table: 'bath_records', kind: 'insert', payload })
+    }
+    throw new DbError('server', serverMsg('保存でき', errCode(res)))
+  }
+  markSelfRow('bath_records', res.data, num(asRecord(res.data)?.rev))
+  const row = normalizeBath(res.data)
+  if (row === null) throw new DbError('server', MSG.broken)
+  return row
+}
+
+/**
+ * 入浴記録の修正（rev 照合の部分更新）。区分を中止以外にしたら理由は空（null）にして送る。
+ * 送る前に、修正後の値（current と patch を重ねたもの）を検証する。
+ */
+export async function updateBath(
+  current: BathRecord,
+  patch: Partial<Pick<BathRecord, 'result' | 'cancel_reason' | 'note'>>,
+  opts?: WriteOpts,
+): Promise<BathRecord | Conflict | Queued> {
+  const result = patch.result ?? current.result
+  const cancel_reason = result === 'cancel' ? (patch.cancel_reason !== undefined ? patch.cancel_reason : current.cancel_reason) : null
+  const rawNote = patch.note !== undefined ? patch.note : current.note
+  const note = rawNote === null || rawNote.trim() === '' ? null : rawNote
+  assertBathInput({ bath_on: current.bath_on, result, cancel_reason, note })
+  const sent: Record<string, unknown> = {}
+  if (patch.result !== undefined) sent.result = result
+  if (patch.result !== undefined || patch.cancel_reason !== undefined) sent.cancel_reason = cancel_reason
+  if (patch.note !== undefined) sent.note = note
+  return updateRow('bath_records', current.id, current.rev, sent, normalizeBath, opts)
+}
+
+/** 入浴記録の取り消し（soft delete。物理削除はしない） */
+export async function softDeleteBath(id: number, rev: number, opts?: WriteOpts): Promise<true | Conflict | Queued> {
+  return softDelete('bath_records', id, rev, opts)
+}
+
 // ── 既読 ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -4074,6 +4422,48 @@ export function subscribeChanges(cb: (table: string, info?: ChangeInfo) => void)
       client = sb
       let ch = sb.channel(`cl_changes_${Math.random().toString(36).slice(2, 10)}`)
       for (const table of REALTIME_TABLES) {
+        ch = ch.on('postgres_changes', { event: '*', schema: 'public', table }, (payload: unknown) => {
+          if (!cancelled) cb(table, changeInfoOf(payload))
+        })
+      }
+      channel = ch
+      ch.subscribe()
+    } catch {
+      // 接続先未設定・通信不可。購読なしで動く
+    }
+  })()
+
+  return () => {
+    cancelled = true
+    if (client !== null && channel !== null) void client.removeChannel(channel)
+    channel = null
+  }
+}
+
+/**
+ * 入浴記録の Realtime を購読する表（2026-09-26 追加）。
+ * 既存の REALTIME_TABLES のチャンネルには混ぜず、別のチャンネルで購読する。
+ * Realtime は「配信対象（publication）に無い表」を1つでも含む購読をチャンネルごと拒否するため、
+ * 0012 を当てる前の DB で既存7表の購読まで止まらないようにする（既存画面の同期を変えない）。
+ */
+const REALTIME_BATH_TABLES = ['bath_records'] as const
+
+/**
+ * 入浴記録の変更通知（入浴の画面だけが使う）。呼び方・渡す情報は subscribeChanges と同じ。
+ * 接続できない・配信対象に無い（0012 未適用）場合は通知が来ないだけで、画面は手動更新で成立する。
+ */
+export function subscribeBathChanges(cb: (table: string, info?: ChangeInfo) => void): () => void {
+  let cancelled = false
+  let client: SupabaseClient | null = null
+  let channel: ReturnType<SupabaseClient['channel']> | null = null
+
+  void (async () => {
+    try {
+      const sb = await getClient()
+      if (cancelled) return
+      client = sb
+      let ch = sb.channel(`cl_bath_${Math.random().toString(36).slice(2, 10)}`)
+      for (const table of REALTIME_BATH_TABLES) {
         ch = ch.on('postgres_changes', { event: '*', schema: 'public', table }, (payload: unknown) => {
           if (!cancelled) cb(table, changeInfoOf(payload))
         })
@@ -5137,11 +5527,24 @@ export const __testHooks = import.meta.env?.PROD === true ? undefined : {
    * null を渡すと差し込みを外し、未設定・未観測の状態へ戻す。
    * 差し替えのたびに操作者（setEditor）と「edited_by 列が無い」印も初期化する。
    * cellRpc は 0011 の有無（既定 'ready'＝観測済み。null＝未観測で、保存の前に問い合わせる）
+   * kinds は種類ごとの入力解禁（既定は native と同じく解禁を観測済み。false＝封鎖を観測済み／
+   * null＝未観測で、書く前に app_settings へ問い合わせる）
    */
-  setClient(sb: SupabaseClient | null, opts?: { cellRpc?: 'ready' | 'missing' | null }): void {
+  setClient(
+    sb: SupabaseClient | null,
+    opts?: { cellRpc?: 'ready' | 'missing' | null; kinds?: Partial<Record<InputKind, boolean | null>> },
+  ): void {
     testClient = sb
     gateValue = sb === null ? null : true
     gateFetchedAt = sb === null ? 0 : Date.now()
+    kindGates = newKindGates()
+    if (sb !== null) {
+      for (const k of Object.keys(kindGates) as InputKind[]) {
+        const v = opts?.kinds?.[k] === undefined ? true : (opts.kinds[k] ?? null)
+        kindGates[k].value = v
+        kindGates[k].fetchedAt = v === null ? 0 : Date.now()
+      }
+    }
     // 差し替えは「別の起動」とみなし、起動単位の状態（操作者・edited_by 列が無い印）を初期化する
     editorId = null
     editedByUnsupported = false

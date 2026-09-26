@@ -3,6 +3,8 @@
 // 拡張子付きで import する（actor.ts と同じ。tests/logic.test.mjs から直接読めるようにするため）
 
 import {
+  BATH_CANCEL_REASON_LABEL,
+  BATH_RESULT_LABEL,
   IMPORTANCE_LABEL,
   MEAL_SLOT_LABEL,
   MEAL_STATUS_LABEL,
@@ -10,7 +12,16 @@ import {
   OUTING_KIND_LABEL,
   SHIFT_LABEL,
 } from './types.ts'
-import type { Importance, MealSlot, MealStatus, NoteColor, OutingKind, Shift } from './types.ts'
+import type {
+  BathCancelReason,
+  BathResult,
+  Importance,
+  MealSlot,
+  MealStatus,
+  NoteColor,
+  OutingKind,
+  Shift,
+} from './types.ts'
 import { fmtDayLabel, fmtTimeHM } from './format.ts'
 import { fmtMealValue, fmtVitalValue } from './conflict.ts'
 
@@ -21,6 +32,7 @@ export const HISTORY_TABLE_LABEL: Record<string, string> = {
   fluid_intake: '水分',
   notes: '申し送り',
   outings: '外出',
+  bath_records: '入浴（デイ）',
 }
 
 const VITAL_KIND_NAME: Record<string, string> = {
@@ -92,6 +104,12 @@ const TABLE_LABEL: Record<string, Record<string, string>> = {
     companion: '付添',
     note: '行き先',
   },
+  bath_records: {
+    bath_on: '入浴日',
+    result: '区分',
+    cancel_reason: '中止の理由',
+    note: '備考',
+  },
 }
 
 /** 画面に出さない列（内部の鍵・作成時刻。変わっても職員が読む意味が無い） */
@@ -138,6 +156,10 @@ export function fmtHistoryValue(
   if (table === 'notes' && column === 'shift') return SHIFT_LABEL[v as Shift] ?? String(v)
   if (table === 'notes' && column === 'importance') return IMPORTANCE_LABEL[v as Importance] ?? String(v)
   if (table === 'notes' && column === 'color') return NOTE_COLOR_LABEL[v as NoteColor] ?? String(v)
+  if (table === 'bath_records' && column === 'result') return BATH_RESULT_LABEL[v as BathResult] ?? String(v)
+  if (table === 'bath_records' && column === 'cancel_reason') {
+    return BATH_CANCEL_REASON_LABEL[v as BathCancelReason] ?? String(v)
+  }
   if (column === 'status') return MEAL_STATUS_LABEL[v as MealStatus] ?? String(v)
   if (typeof v === 'boolean') return v ? 'はい' : 'いいえ'
   if (Array.isArray(v)) return v.length === 0 ? '（空）' : v.map((x) => String(x)).join('・')

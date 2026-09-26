@@ -305,6 +305,11 @@ function fakeSupabase(handler) {
         q.filters.push(['lte', k, v])
         return b
       },
+      // カルテの外出（期間に重なる行）が使う or フィルタ。式を控えるだけ（入浴記録のテストで fetchKarte を通すため）
+      or(expr) {
+        q.filters.push(['or', expr])
+        return b
+      },
       limit(n) {
         q.limit = n
         return b
@@ -2344,6 +2349,352 @@ function registerDbTests() {
       live[0].fn()
       await settle()
       assert.equal(srv.db.vitals[0]?.temp, 38.2, 'タイマーで送り直していない')
+    })
+  })
+
+  // ══════════════════════════════════════════════════════════════
+  // 入浴記録（db.ts・2026-09-26 追加）
+  //
+  // - 書き方は水分・申し送り・外出と同じ経路（client_key・rev 照合・送信待ち cl_sendQueue・edited_by）
+  // - 入力解禁は種類ごとの旗 input_enabled_bath（native_input_enabled とは独立）
+  // - 1人1日1件（部分unique）の 23505 は「他の端末が先に記録した」→ 'conflict'（送信待ちは止めて残す）
+  // - 予定（RPC daycare_bath_plan）は名簿と source_id で突き合わせ、写しが無い・関数が無い時は available:false
+  // 偽のサーバーは数値IDと記号だけ（個人情報なし）
+  // ══════════════════════════════════════════════════════════════
+
+  /**
+   * 入浴記録の偽のサーバー。bath_records（client_key の全体unique＋生きている行の (resident_id, bath_on) unique・
+   * rev トリガ）・app_settings・residents・RPC daycare_bath_plan に答える。
+   * opts.offline() が true の間は通信できない。opts.missingTable は 0012 未適用（42P01）
+   */
+  function bathServer(opts = {}) {
+    const db = {
+      rows: [],
+      nextId: 1,
+      settings: { native_input_enabled: 'true', input_enabled_bath: 'true' },
+      plan: [],
+      residents: [
+        resident(1, '利用者A', { room: '101' }),
+        resident(2, '利用者B', { room: '102' }),
+      ],
+    }
+    const match = (q, r) =>
+      q.filters.every(([op, k, v]) => {
+        if (op === 'eq') return r[k] === v
+        if (op === 'is') return r[k] === v
+        if (op === 'gte') return r[k] >= v
+        if (op === 'lte') return r[k] <= v
+        return true
+      })
+    const fake = fakeSupabase((q) => {
+      if (opts.offline?.()) return { data: null, error: { message: 'offline' }, status: 0 }
+      if (q.table === 'app_settings') {
+        const key = eqOf(q).key
+        return { data: key in db.settings ? { value: db.settings[key] } : null, error: null, status: 200 }
+      }
+      if (q.action === 'rpc' && q.fn === 'daycare_bath_plan') {
+        if (db.plan === 'missing') return { data: null, error: { code: 'PGRST202', message: 'no function' }, status: 404 }
+        return { data: db.plan, error: null, status: 200 }
+      }
+      if (q.table === 'residents') return { data: db.residents, error: null, status: 200 }
+      if (q.table === 'bath_records') {
+        if (opts.missingTable) return { data: null, error: { code: '42P01', message: 'undefined table' }, status: 404 }
+        if (q.action === 'insert') {
+          const p = q.payload
+          const dupKey = p.client_key && db.rows.some((r) => r.client_key === p.client_key)
+          const dupDay = db.rows.some((r) => r.deleted_at === null && r.resident_id === p.resident_id && r.bath_on === p.bath_on)
+          if (dupKey || dupDay) return { data: null, error: { code: '23505', message: 'duplicate key' }, status: 409 }
+          const row = { id: db.nextId++, rev: 1, deleted_at: null, edited_by: null, ...p }
+          db.rows.push(row)
+          return { data: { ...row }, error: null, status: 201 }
+        }
+        if (q.action === 'update') {
+          const r = db.rows.find((x) => match(q, x))
+          if (!r) return { data: null, error: null, status: 200 }
+          Object.assign(r, q.payload, { rev: r.rev + 1 })
+          return { data: { ...r }, error: null, status: 200 }
+        }
+        const hits = db.rows.filter((x) => match(q, x))
+        if (q.limit === 1) return { data: hits[0] ? { ...hits[0] } : null, error: null, status: 200 }
+        return { data: hits.map((x) => ({ ...x })), error: null, status: 200 }
+      }
+      // カルテの他の系列（空で答える）
+      if (q.action === 'select') return { data: [], error: null, status: 200 }
+      return { data: null, error: { code: 'X', message: 'unexpected' }, status: 500 }
+    })
+    return { ...fake, db }
+  }
+
+  /** 入浴記録の入力（未入力は null） */
+  const bathInput = (over = {}) => ({
+    resident_id: 1,
+    bath_on: '2026-09-01',
+    result: 'full',
+    cancel_reason: null,
+    note: null,
+    recorded_by: 3,
+    ...over,
+  })
+
+  describe('入浴記録（db.ts）: 種類ごとの入力解禁', () => {
+    afterEach(async () => {
+      await drainRows()
+    })
+
+    it('input_enabled_bath が false なら書かずに種類ごとの理由文で止める（native が解禁でも）', async () => {
+      const srv = bathServer()
+      srv.db.settings.input_enabled_bath = 'false'
+      DB.__testHooks.setClient(srv.client, { kinds: { bath: null } })
+      await assert.rejects(
+        () => DB.insertBath(bathInput()),
+        (e) => e.kind === 'blocked' && e.message === '入浴の記録はまだ使い始めていません（開始日に解禁します）',
+      )
+      assert.equal(srv.calls.filter((q) => q.table === 'bath_records').length, 0, '封鎖中に書き込んだ')
+      assert.deepEqual(await DB.getKindInputGate('bath'), { value: false, observed: true })
+      // 申し送り（native）は従来どおり書ける＝入浴の旗が他の記録に影響しない
+      assert.equal(DB.kindBlockedMessage('bath'), '入浴の記録はまだ使い始めていません（開始日に解禁します）')
+    })
+
+    it('入浴の旗は native_input_enabled と独立（native が封鎖でも入浴は書ける・申し送りは従来どおり止まる）', async () => {
+      const srv = bathServer()
+      srv.db.settings.native_input_enabled = 'false'
+      DB.__testHooks.setClient(srv.client, { kinds: { bath: null } })
+      const native = await DB.getNativeInputGate() // サーバーの値（false）を観測し直す
+      assert.equal(native.value, false)
+      await assert.rejects(() => DB.insertNote({ note_on: '2026-09-01', shift: 'day', body: '本文', resident_id: null }), (e) => e.kind === 'blocked')
+      const row = await DB.insertBath(bathInput())
+      assert.equal(row.result, 'full')
+    })
+
+    it('旗を観測できない（通信エラー・未観測）時は gate-unknown で止め、observed:false を返す', async () => {
+      DB.__testHooks.setClient(offline().client, { kinds: { bath: null } })
+      assert.deepEqual(await DB.getKindInputGate('bath'), { value: false, observed: false })
+      await assert.rejects(() => DB.insertBath(bathInput()), (e) => e.kind === 'gate-unknown')
+    })
+
+    it('真偽の読み方は native と同じ（true/1/on/yes/enabled・大文字小文字・前後の空白）', async () => {
+      for (const [raw, want] of [['TRUE ', true], ['1', true], ['on', true], ['false', false], ['', false], ['no', false]]) {
+        const srv = bathServer()
+        srv.db.settings.input_enabled_bath = raw
+        DB.__testHooks.setClient(srv.client, { kinds: { bath: null } })
+        assert.equal((await DB.getKindInputGate('bath')).value, want, JSON.stringify(raw))
+      }
+    })
+  })
+
+  describe('入浴記録（db.ts）: 保存・修正・取り消し', () => {
+    afterEach(async () => {
+      await drainRows()
+    })
+
+    it('追加は client_key を付けて1行。中止以外は理由を null で送る・記入者を recorded_by に', async () => {
+      const srv = bathServer()
+      DB.__testHooks.setClient(srv.client)
+      const row = await DB.insertBath(bathInput({ result: 'shower' }))
+      assert.equal(row.result, 'shower')
+      const ins = srv.calls.find((q) => q.table === 'bath_records' && q.action === 'insert')
+      assert.equal(typeof ins.payload.client_key, 'string')
+      assert.equal(ins.payload.cancel_reason, null)
+      assert.equal(ins.payload.recorded_by, 3)
+      assert.equal(srv.db.rows.length, 1)
+    })
+
+    it('保存前の検証: 中止は理由必須・「その他」は備考必須・未来の日付は不可（1件も送らない）', async () => {
+      const srv = bathServer()
+      DB.__testHooks.setClient(srv.client)
+      await assert.rejects(() => DB.insertBath(bathInput({ result: 'cancel' })))
+      await assert.rejects(() => DB.insertBath(bathInput({ result: 'cancel', cancel_reason: 'other', note: ' ' })))
+      await assert.rejects(() => DB.insertBath(bathInput({ bath_on: '2999-01-01' })))
+      assert.equal(srv.calls.filter((q) => q.table === 'bath_records').length, 0)
+      const ok = await DB.insertBath(bathInput({ result: 'cancel', cancel_reason: 'other', note: '内容' }))
+      assert.equal(ok.cancel_reason, 'other')
+    })
+
+    it('★同じ人・同じ日に他の端末が先に記録していた（23505・自分のキーは無い）→ conflict（送信待ちに積まない）', async () => {
+      const srv = bathServer()
+      srv.db.rows.push({ id: 50, ...bathInput(), rev: 1, deleted_at: null, client_key: 'other-device' })
+      DB.__testHooks.setClient(srv.client)
+      assert.equal(await DB.insertBath(bathInput({ result: 'shower' })), 'conflict')
+      assert.equal(DB.queuePending(), 0)
+      assert.equal(srv.db.rows[0].result, 'full', '他の端末の記録を書き換えた')
+    })
+
+    it('修正は rev 照合の部分更新＋edited_by。中止→全身浴で理由を空にする。古い rev は conflict', async () => {
+      const srv = bathServer()
+      DB.__testHooks.setClient(srv.client)
+      DB.setEditor(4)
+      const first = await DB.insertBath(bathInput({ result: 'cancel', cancel_reason: 'refusal' }))
+      const next = await DB.updateBath(first, { result: 'full' }, { editedBy: 5 })
+      assert.equal(next.result, 'full')
+      assert.equal(next.cancel_reason, null)
+      assert.equal(next.rev, 2)
+      const up = srv.calls.filter((q) => q.table === 'bath_records' && q.action === 'update').at(-1)
+      assert.deepEqual(up.payload, { result: 'full', cancel_reason: null, edited_by: 5 })
+      assert.deepEqual(eqOf(up), { id: first.id, rev: 1 })
+      // 画面が持っている版が古い（他の端末が先に変えた）
+      assert.equal(await DB.updateBath(first, { result: 'shower' }), 'conflict')
+      assert.equal(srv.db.rows[0].result, 'full')
+    })
+
+    it('取り消しは soft delete（deleted_at＋edited_by）。物理削除の要求を出さない', async () => {
+      const srv = bathServer()
+      DB.__testHooks.setClient(srv.client)
+      DB.setEditor(4)
+      const row = await DB.insertBath(bathInput())
+      assert.equal(await DB.softDeleteBath(row.id, row.rev), true)
+      const up = srv.calls.filter((q) => q.table === 'bath_records' && q.action === 'update').at(-1)
+      assert.equal(typeof up.payload.deleted_at, 'string')
+      assert.equal(up.payload.edited_by, 4)
+      assert.equal(srv.db.rows.length, 1, '行が消えた')
+      assert.equal(await DB.softDeleteBath(row.id, row.rev), 'conflict', '取り消し済みを二重に取り消した')
+    })
+  })
+
+  describe('入浴記録（db.ts）: 送信待ち（cl_sendQueue）', () => {
+    afterEach(async () => {
+      await drainRows()
+    })
+
+    it('通信できない追加は cl_sendQueue に bath_records の op として残り、次の起動でも読めて、電波が戻ると同じキーで1行だけ載る', async () => {
+      setQueueRaw(null)
+      let off = true
+      const srv = bathServer({ offline: () => off })
+      DB.__testHooks.setClient(srv.client)
+      assert.equal(await DB.insertBath(bathInput()), 'queued')
+      const saved = storedQueue().ops
+      assert.equal(saved.length, 1)
+      assert.equal(saved[0].table, 'bath_records')
+      assert.equal(saved[0].kind, 'insert')
+      assert.equal(saved[0].qid, saved[0].payload.client_key, 'qid と client_key が同じでない')
+      // 次の起動（LEGACY_TABLES に bath_records があるので捨てずに読める）
+      await DB.__testHooks.restartQueue()
+      assert.equal(DB.queuePending(), 1)
+      assert.equal(DB.isQueueBroken(), false, '読めずに壊れた扱いになった')
+      off = false
+      await DB.flushQueue(true)
+      assert.equal(srv.db.rows.length, 1)
+      assert.equal(srv.db.rows[0].client_key, saved[0].payload.client_key)
+      assert.equal(DB.queuePending(), 0)
+      // もう一度送っても（行き違いの再送）2行にならない
+      await DB.flushQueue(true)
+      assert.equal(srv.db.rows.length, 1)
+    })
+
+    it('★送信待ちの間に他の端末が同じ人・同じ日を記録した → 止めて残す（blocked=conflict・未送信として数え続ける）', async () => {
+      setQueueRaw(null)
+      let off = true
+      const srv = bathServer({ offline: () => off })
+      DB.__testHooks.setClient(srv.client)
+      assert.equal(await DB.insertBath(bathInput({ result: 'shower' })), 'queued')
+      srv.db.rows.push({ id: 60, ...bathInput(), rev: 1, deleted_at: null, client_key: 'other-device' })
+      off = false
+      await DB.flushQueue(true)
+      const ops = storedQueue().ops
+      assert.equal(ops.length, 1)
+      assert.equal(ops[0].blocked, 'conflict')
+      assert.equal(DB.queuePending(), 1)
+      assert.equal(srv.db.rows.length, 1)
+      assert.equal(srv.db.rows[0].result, 'full', '他の端末の記録を書き換えた')
+    })
+
+    it('送信待ちの op が既に届いていた（同じ client_key の行がある）→ 送れたとして消す（2行にしない）', async () => {
+      setQueueRaw(null)
+      let off = true
+      const srv = bathServer({ offline: () => off })
+      DB.__testHooks.setClient(srv.client)
+      assert.equal(await DB.insertBath(bathInput()), 'queued')
+      const key = storedQueue().ops[0].payload.client_key
+      srv.db.rows.push({ id: 70, ...bathInput(), rev: 1, deleted_at: null, client_key: key })
+      off = false
+      await DB.flushQueue(true)
+      assert.equal(DB.queuePending(), 0)
+      assert.equal(srv.db.rows.length, 1)
+    })
+
+    it('通信できない修正は update op として退避し、退避時の操作者（edited_by）と rev を持つ', async () => {
+      setQueueRaw(null)
+      DB.__testHooks.setClient(offline().client)
+      const cur = { id: 5, ...bathInput(), rev: 3 }
+      assert.equal(await DB.updateBath(cur, { note: 'メモ' }, { editedBy: 6 }), 'queued')
+      const op = storedQueue().ops[0]
+      assert.equal(op.table, 'bath_records')
+      assert.equal(op.kind, 'update')
+      assert.equal(op.rowId, 5)
+      assert.equal(op.rev, 3)
+      assert.deepEqual(op.payload, { note: 'メモ', edited_by: 6 })
+    })
+  })
+
+  describe('入浴記録（db.ts）: 取得・予定・カルテ', () => {
+    afterEach(async () => {
+      await drainRows()
+    })
+
+    it('fetchBathDay / fetchBathMonth は削除済みを除き、日付・月の範囲でだけ引く', async () => {
+      const srv = bathServer()
+      srv.db.rows.push(
+        { id: 1, ...bathInput({ bath_on: '2026-09-01' }), rev: 1, deleted_at: null },
+        { id: 2, ...bathInput({ resident_id: 2, bath_on: '2026-09-01' }), rev: 1, deleted_at: '2026-09-01T00:00:00Z' },
+        { id: 3, ...bathInput({ bath_on: '2026-09-30' }), rev: 1, deleted_at: null },
+        { id: 4, ...bathInput({ bath_on: '2026-10-01' }), rev: 1, deleted_at: null },
+      )
+      DB.__testHooks.setClient(srv.client)
+      assert.deepEqual((await DB.fetchBathDay('2026-09-01')).map((r) => r.id), [1])
+      assert.deepEqual((await DB.fetchBathMonth('2026-09')).map((r) => r.id).sort(), [1, 3])
+      const q = srv.calls.filter((c) => c.table === 'bath_records').at(-1)
+      assert.deepEqual(q.filters.filter(([op]) => op !== 'is'), [
+        ['gte', 'bath_on', '2026-09-01'],
+        ['lte', 'bath_on', '2026-09-30'],
+      ])
+      assert.ok(q.filters.some(([op, k, v]) => op === 'is' && k === 'deleted_at' && v === null))
+      await assert.rejects(() => DB.fetchBathMonth('2026-13'))
+    })
+
+    it('表が無い（0012 未適用）時は「サーバー側の設定待ち」、カルテは入浴だけ空で他の系列は読める', async () => {
+      const srv = bathServer({ missingTable: true })
+      DB.__testHooks.setClient(srv.client)
+      await assert.rejects(() => DB.fetchBathDay('2026-09-01'), (e) => /サーバー側の設定待ち/.test(e.message))
+      const k = await DB.fetchKarte(1, '2026-09-01', '2026-09-30')
+      assert.deepEqual(k.baths, [])
+      assert.deepEqual(k.vitals, [])
+    })
+
+    it('fetchKarte は本人・期間の入浴記録を返す', async () => {
+      const srv = bathServer()
+      srv.db.rows.push({ id: 9, ...bathInput({ bath_on: '2026-09-05', result: 'partial' }), rev: 1, deleted_at: null })
+      DB.__testHooks.setClient(srv.client)
+      const k = await DB.fetchKarte(1, '2026-09-01', '2026-09-30')
+      assert.deepEqual(k.baths.map((b) => [b.id, b.result]), [[9, 'partial']])
+    })
+
+    it('fetchBathPlan: 名簿と source_id で突き合わせ、写しの更新時刻を返す（名簿に無い予定は unmatched）', async () => {
+      const srv = bathServer()
+      srv.db.plan = [
+        { source_id: 'S2', start_time: '10:00', end_time: '15:00', hospitalized: true, updated_at: '2026-09-20T01:02:03Z' },
+        { source_id: 'S9', start_time: '10:00', end_time: '15:00', hospitalized: false, updated_at: '2026-09-20T01:02:03Z' },
+      ]
+      DB.__testHooks.setClient(srv.client)
+      const p = await DB.fetchBathPlan('2026-09-21')
+      assert.equal(p.available, true)
+      assert.equal(p.updatedAt, '2026-09-20T01:02:03Z')
+      assert.deepEqual(p.entries, [{ residentId: 2, startTime: '10:00', endTime: '15:00', hospitalized: true }])
+      assert.equal(p.unmatched, 1)
+      const rpc = srv.calls.find((q) => q.action === 'rpc' && q.fn === 'daycare_bath_plan')
+      assert.deepEqual(rpc.args, { p_date: '2026-09-21' })
+    })
+
+    it('fetchBathPlan: 写しはあるが予定なし（source_id が null の1行）は available・0件／0行・関数なしは available:false', async () => {
+      const srv = bathServer()
+      srv.db.plan = [{ source_id: null, start_time: null, end_time: null, hospitalized: null, updated_at: '2026-09-20T01:02:03Z' }]
+      DB.__testHooks.setClient(srv.client)
+      const none = await DB.fetchBathPlan('2026-09-25')
+      assert.equal(none.available, true)
+      assert.equal(none.entries.length, 0)
+      assert.equal(none.updatedAt, '2026-09-20T01:02:03Z')
+      srv.db.plan = []
+      assert.equal((await DB.fetchBathPlan('2026-09-25')).available, false)
+      srv.db.plan = 'missing'
+      assert.equal((await DB.fetchBathPlan('2026-09-25')).available, false)
     })
   })
 

@@ -19,6 +19,8 @@ L0承認済み。詳細設計の正本: `docs/PLAN.md`・`docs/design/db-design.
 
 `/`=タイムライン ・ `/record`=記録ハブ ・ `/record/vitals` ・ `/record/meals` ・ `/record/note` ・ `/record/outing` ・ `/karte`=利用者一覧 ・ `/karte/:id` ・ `/search` ・ `/settings` ・ `/login`
 
+追加（2026-09-26・代表承認）: `/record/bath`=入浴（デイ）の記録（記録ハブの5つ目）・`/bath/month`=入浴 月次表（「その他」から。`LS.view` の既知値 `bathMonth`）
+
 リロード復元: HashRouter のURLが第一。ベースURL直開き時のみ `LS.view` の既知値照合で復元。
 
 ## src/lib/db.ts が export するAPI（他ビルダーはこれを import する）
@@ -38,7 +40,8 @@ setResidentNoteAlias(id: number, alias: string | null): Promise<Resident | Queue
 fetchStaff(): Promise<Staff[]>                   // active・name昇順
 fetchTimelineChunk(fromIso: string, toIso: string, staffId: number | null): Promise<TimelineChunk>  // RPC timeline_chunk
 fetchKarte(residentId: number, fromIso: string, toIso: string):
-  Promise<{ vitals: Vital[]; meals: Meal[]; fluids: FluidIntake[]; notes: Note[]; outings: Outing[] }>
+  Promise<{ vitals: Vital[]; meals: Meal[]; fluids: FluidIntake[]; notes: Note[]; outings: Outing[]; baths: BathRecord[] }>
+                                                               // baths は 2026-09-26 追加。0012 未適用の DB では [] で返し、カルテ全体を失敗させない
 searchNotes(p: { q: string; target: 'body' | 'reporter'; fromIso: string; toIso: string;
   importance?: Importance; shift?: Shift; limit?: number }): Promise<Note[]>
 
@@ -91,7 +94,29 @@ onAuthExpired(cb: () => void): void                            // 401検知→�
 fetchRecordHistory(p: { residentId?: number | null; fromIso: string; toIso: string; limit?: number }):
   Promise<RecordHistoryResult>                                 // 変更の記録（0010 未適用なら available:false）
 diffHistoryRow(oldRow: unknown, newRow: unknown): { column: string; before: unknown; after: unknown }[]
+
+// ── 入浴（デイ）・種類ごとの入力解禁（2026-09-26 追加・代表承認の契約改訂。既存の定義は変えない） ──
+getKindInputGate(kind: InputKind): Promise<{ value: boolean; observed: boolean }>  // app_settings.input_enabled_<kind>（bath/med/incident）
+kindBlockedMessage(kind: InputKind): string                    // 封鎖中の理由文（入浴:「入浴の記録はまだ使い始めていません（開始日に解禁します）」）
+fetchBathDay(dayIso: string): Promise<BathRecord[]>            // その日の入浴記録（削除済みを除く）
+fetchBathMonth(monthKey: string): Promise<BathRecord[]>        // 'yyyy-MM' の月の入浴記録。取り切れない時は例外（黙って切らない）
+fetchBathPlan(dayIso: string, residents?: Resident[]): Promise<BathPlanResult>
+                                                               // RPC daycare_bath_plan を名簿と source_id で突き合わせる
+                                                               // { available, updatedAt（写しの更新時刻）, entries:[{residentId,startTime,endTime,hospitalized}], unmatched }
+insertBath(b: Omit<BathRecord, 'id' | 'rev'>): Promise<BathRecord | Conflict | Queued>
+                                                               // client_key 付き。1人1日1件の 23505（自分のキーでない）は 'conflict'
+updateBath(current: BathRecord, patch: Partial<Pick<BathRecord, 'result' | 'cancel_reason' | 'note'>>, opts?: WriteOpts):
+  Promise<BathRecord | Conflict | Queued>                      // rev 照合の部分更新。中止以外にしたら cancel_reason は null で送る
+softDeleteBath(id: number, rev: number, opts?: WriteOpts): Promise<true | Conflict | Queued>
+subscribeBathChanges(cb): () => void                           // 入浴記録の Realtime（既存7表とは別のチャンネル）
 ```
+
+- 入浴記録（bath_records）は水分・申し送り・外出と同じ送り方（client_key・rev 照合・送信待ち cl_sendQueue・edited_by）。
+  入力解禁だけは native_input_enabled ではなく input_enabled_bath で判定する（既存の封鎖・cells の挙動は変えない）。
+  送信待ちの insert が「他の端末が先に同じ人・同じ日を記録した」23505 になった時は blocked='conflict' で止めて残す
+- Realtime は既存の購読（REALTIME_TABLES の1チャンネル）に混ぜない。配信対象に無い表を含む購読はチャンネルごと拒否されるため、
+  0012 を当てる前の DB でも既存7表の同期が止まらないよう、入浴は別チャンネル（subscribeBathChanges）にした
+- 純ロジック（曜日・予定と記録の突き合わせ・件数・月次集計・入力の検証）は `src/lib/bath.ts`。印刷の部品は `src/components/print/PrintArea.tsx`
 
 - バイタル・食事は insert / update を端末から直接呼ばない（saveVitalEdits / saveMealEdits → RPC apply_cell_edits が欄ごとに裁く）。
   下の insert 系の規則は、それ以外の表（水分・申し送り・外出・既読・出勤者・表示名）の従来の送り方に当てはまる
@@ -186,5 +211,9 @@ ResidentPickerModal({ open, residents: Resident[], onPick(id: number | null), on
 - `0004_vitals_client_key.sql`: `vitals.client_key`＋全体unique索引。routine 以外の再送二重登録を DB 側で止める。
 - `0005_meals_sheet_fluids.sql`: RPC `meals_sheet_fluids(p_from, p_to)` → 1名1日=1行に畳み、内訳を jsonb で返す。
   食事一覧が水分で行数上限を食い潰さないための集約（security invoker・anon revoke・期間ガード付き）。
+- `0012_bath_records.sql`（2026-09-26）: app_settings に input_enabled_bath / med / incident（'false'）・bath_records 表（1人1日1件の部分unique・
+  client_key 全体unique・rev／変更の記録トリガ・RLS・delete ポリシーなし）・RPC `daycare_bath_plan(p_date)`（週間計画の写し kv_entries の
+  care_schedule_v2 から、その日のデイの入浴予定。0行＝写しなし／source_id が null の1行＝予定なし）・Realtime 登録。
+  **Realtime の登録（alter publication … add table）だけは初回のみ通り、再実行時はこの1文で止まる**（それ以前の文は冪等）
 - **適用順は 0001 → 0002 → 0003 → 0004 → 0005**。0003〜0005 は互いに独立だが、
   0003 未適用のまま新UIを配ると「定時以外のバイタル保存」と「食事一覧の読み込み」が失敗する（意図的にフォールバックを作っていない）。
