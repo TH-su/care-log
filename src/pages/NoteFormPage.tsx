@@ -294,7 +294,10 @@ export function NoteFormPage() {
 
   /** 定型句: 選んでいる場面の id（最後に選んだ場面を復元） */
   const [phraseCat, setPhraseCat] = useState<string>(loadPhraseCat)
-  /** 定型句を入れる前の本文（「1つ戻す」用・この画面の中だけ・最大 PHRASE_UNDO_MAX 件） */
+  /**
+   * 定型句を入れる前の本文（「1つ戻す」用・この画面の中だけ・最大 PHRASE_UNDO_MAX 件）。
+   * 本文欄に手で入力した時点で空にする＝差し込んだ直後（手入力する前）だけ戻せる
+   */
   const [phraseUndo, setPhraseUndo] = useState<string[]>([])
   /** 本文を書き換えた後に本文欄へ置く選択範囲（描画の後で setSelectionRange する） */
   const [bodySel, setBodySel] = useState<{ start: number; end: number } | null>(null)
@@ -1002,7 +1005,12 @@ export function NoteFormPage() {
                   id={ids.body}
                   ref={bodyRef}
                   value={form.body}
-                  onChange={(e) => update({ body: e.target.value }, 'body')}
+                  onChange={(e) => {
+                    // 手で入力したら定型句の「1つ戻す」は使えなくする（戻すと手入力まで消えるため・2026-09-26 裁定）。
+                    // 定型句の差し込み・1つ戻すは onChange を通らない（insertPhrase / undoPhrase が update を直接呼ぶ）
+                    setPhraseUndo((s) => (s.length === 0 ? s : []))
+                    update({ body: e.target.value }, 'body')
+                  }}
                   rows={6}
                   aria-invalid={errors.body ? true : undefined}
                   aria-describedby={
