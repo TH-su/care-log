@@ -146,12 +146,13 @@ subscribeMedChanges(cb): () => void                            // med_slots・me
 // ── 事故・ヒヤリハット（2026-09-26 追加・代表承認の契約改訂。既存の定義は変えない） ──
 fetchIncidents(q: { fromIso: string; toIso: string; kind?: IncidentKind | null; status?: IncidentStatus | null }): Promise<Incident[]>
                                                                // 発生日の期間（必須）・区分・状態で絞り、新しい順。detail は持ち出さない。取り切れない時は例外
+fetchOpenIncidentsUntil(toIso: string): Promise<Incident[]>     // その日までに発生して対応中の記録（古い順・detail なし）。委員会集計の「未完了の一覧」用
 fetchIncident(id: number): Promise<Incident | null>             // 1件（detail を含む）。無い・取り消し済みは null
 insertIncident(i: IncidentInput): Promise<Incident | Queued>   // client_key 付き。第1報の最小項目だけで通る（incident.ts の validateIncidentInput）。
-                                                               // detail.subject_name（氏名の写し）は null なら送らない＝サーバーのトリガが名簿から写す
+                                                               // detail.subject_name（氏名の写し）は送らない＝サーバーのトリガが名簿から写す
 updateIncident(current: Incident, patch: IncidentPatch, opts?: WriteOpts): Promise<Incident | Conflict | Queued>
                                                                // rev 照合。列は変えた項目だけ、detail は current.detail に patch.detail を重ねた全体（jsonb は列ごと置換）。
-                                                               // 氏名の写しは patch.detail に subject_name を入れた時だけ送る。対象者を変えた時は detail も送る（写し直させる）
+                                                               // 氏名の写しは送らない（patch にあっても外す）。対象者を変えた時は detail も送る（写し直させる）
 softDeleteIncident(id: number, rev: number, opts?: WriteOpts): Promise<true | Conflict | Queued>
 hasPendingIncident(recordId: number): boolean                  // このタブの送信待ち（送信中を含む・blocked は除く）にその記録の追記・取り消しがあるか。読むだけ
 pendingIncidentOps(): PendingIncident[]                        // 送信待ちにある追加（未送信・送信中・止まっている）。読むだけ。一覧に「未送信」として出す
@@ -161,8 +162,11 @@ subscribeIncidentChanges(cb): () => void                       // incidents の 
 
 - 事故・ヒヤリハット（incidents）は入浴・与薬と同じ送り方（client_key・rev 照合・送信待ち cl_sendQueue・edited_by・soft delete）。入力解禁は input_enabled_incident。
   自然キーは持たない。送信待ちの中身は書き換えない・破棄しない（未送信の記録は画面が hasPendingIncident で編集できなくする）
-- 対象者の氏名の写し（detail.subject_name）は、職員が名簿と違う名前に書き換えた時だけアプリが送る。送らない時は 0014 のトリガ
+- 対象者の氏名の写し（detail.subject_name）はアプリから送らない（画面でも直せない・名簿の値だけ＝2026-09-26 チーフ裁定。db.ts が payload から必ず外す）。0014 のトリガ
   （incidents_subject_snapshot）が追加で名簿から写し、更新で前の写しを残す（対象者を変えたら写し直す）。氏名を送信待ち（端末の保存領域）に置かないため
+- 2026-09-26 チーフ裁定: 氏名は入力・編集の画面で直せない（名簿の値だけ）。委員会集計の「未完了の一覧」は、その月末までに発生して未完了のもの
+  （前月以前からの持ち越しを含む・月末より後に発生したものは除く。未完了かどうかはいまの状態で見る＝完了にした日は持たない）。
+  「完了」→「対応中に戻す」（確認つき・rev 照合）。カルテの事故・ヒヤリの行から記録の画面（/incident/:id）を開ける
 - 純ロジック（入力の検証・市への報告の案内・月次集計・受け渡しの照合）は `src/lib/incident.ts`。選択肢の並び・文言の正本は types.ts の INCIDENT_*（熊本市の様式どおり）
 - 事故報告書（A4 縦）は既存の印刷部品（PrintArea orientation='portrait'・文字 11〜9px）で刷る。はみ出す時は2枚目に続き、見出し（thead）を繰り返す。印刷の表の組み方は print.css の .cl-print-form（既存の .cl-print-table は変えない）
 

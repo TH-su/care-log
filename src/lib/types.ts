@@ -516,7 +516,7 @@ export const INCIDENT_DEMENTIA_LEVEL_LABEL: Record<IncidentDementiaLevel, string
 /**
  * 様式の残りの欄（incidents.detail・jsonb）。キーは平らに持つ（入れ子にしない＝欄ごとに差分を取れる）。
  * 文字の欄は空＝null。選択肢の欄は上の定数のキーだけ（受信値は incident.ts の normalizeIncidentDetail で照合する）。
- * subject_name（氏名）は記録時点の写し。アプリは職員が書き換えた時だけ送り、送らない時はサーバーのトリガが
+ * subject_name（氏名）は記録時点の写し。アプリは送らず（画面でも直せない・2026-09-26 チーフ裁定）、サーバーのトリガが
  * 名簿の氏名を入れる／前の写しを残す（氏名を送信待ち＝端末の保存領域に置かないため・0014）
  */
 export interface IncidentDetail {

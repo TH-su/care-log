@@ -4831,8 +4831,8 @@ export function hasPendingMedSlots(residentId: number, recordId: number | null):
 //   ・自然キーは持たない（1件ごとに別の記録）。23505 は自分の client_key が既に載っている＝再送の行き違いだけ
 //   ・送信待ちの中身は書き換えない・破棄しない。未送信の記録は hasPendingIncident で画面が編集できなくする。
 //     まだサーバーに無い追加は pendingIncidentOps で送信待ちから読むだけ（一覧に「未送信」として出す）
-//   ・対象者の氏名の写し（detail.subject_name）は、職員が書き換えた時だけ送る。送らない時はサーバーのトリガが
-//     名簿から写す／前の写しを残す（氏名を送信待ち＝端末の保存領域に置かないため）
+//   ・対象者の氏名の写し（detail.subject_name）は**アプリからは一切送らない**（2026-09-26 チーフ裁定: 氏名は名簿の値だけを使う・
+//     画面では直せない）。サーバーのトリガが名簿から写す／前の写しを残す（氏名を送信待ち＝端末の保存領域に置かないため）
 
 const INCIDENT_MSG = {
   missing: '事故・ヒヤリハットの記録はまだ使えません（サーバー側の設定待ち）。管理者に連絡してください。',
@@ -4880,6 +4880,28 @@ export async function fetchIncidents(q: IncidentQuery): Promise<Incident[]> {
   return list(res.data, normalizeIncident, INCIDENT_LIST_ROWS)
 }
 
+/**
+ * その日（toIso）までに発生して、いま対応中（status='open'）の記録（削除済みを除く・古い順・detail は持ち出さない）。
+ * 委員会用の月次集計の「未完了の一覧」（前月以前からの持ち越しを含む・月末より後に発生したものは除く）に使う。
+ * 期間の始まりは持たないが、対応中に絞るので件数は限られる（上限を超えたら黙って切らずに例外）
+ */
+export async function fetchOpenIncidentsUntil(toIso: string): Promise<Incident[]> {
+  assertDay(toIso)
+  const sb = await getClient()
+  const res = (await sb
+    .from('incidents')
+    .select(INCIDENT_LIST_COLS)
+    .eq('status', 'open')
+    .lte('occurred_on', toIso)
+    .is('deleted_at', null)
+    .order('occurred_on', { ascending: true })
+    .order('id', { ascending: true })
+    .limit(INCIDENT_LIST_ROWS)) as Res<unknown>
+  if (res.error !== null) throw incidentReadError(res)
+  assertLoadedAll(res, INCIDENT_LIST_ROWS)
+  return list(res.data, normalizeIncident, INCIDENT_LIST_ROWS)
+}
+
 /** 1件（様式の残りの欄 detail を含む）。無い・取り消し済みなら null */
 export async function fetchIncident(id: number): Promise<Incident | null> {
   if (idNum(id) === null) return null
@@ -4912,10 +4934,13 @@ function assertIncidentInput(v: IncidentInput): void {
   if (!check.ok) throw new DbError('server', check.message)
 }
 
-/** detail を送る形に。氏名の写しは「職員が書き換えた」時（sendName）だけ入れる（入れない時はトリガが写す・残す） */
-function incidentDetailPayload(d: IncidentDetail, sendName: boolean): Record<string, unknown> {
+/**
+ * detail を送る形に。氏名の写し（subject_name）は渡されても必ず外す＝送らない（サーバーのトリガが名簿から写す・残す）。
+ * 送信待ち（cl_sendQueue）に入る payload はこの形なので、送信待ちに氏名が入る経路が無い
+ */
+function incidentDetailPayload(d: IncidentDetail): Record<string, unknown> {
   const out: Record<string, unknown> = { ...d }
-  if (!sendName || d.subject_name === null) delete out.subject_name
+  delete out.subject_name
   return out
 }
 
@@ -4943,7 +4968,7 @@ const INCIDENT_FIELDS = [
 
 /**
  * 事故・ヒヤリハットの追加。端末生成の冪等キー client_key を必ず付ける（再送しても1行に収まる）。
- * detail.subject_name（氏名の写し）は入れて渡した時だけ送る（職員が書き換えた時。null ならサーバーが名簿から写す）。
+ * detail.subject_name（氏名の写し）は送らない（サーバーが名簿から写す）。
  * 戻り値: 追加した行／'queued'（通信できない・送信待ちへ）
  */
 export async function insertIncident(i: IncidentInput): Promise<Incident | Queued> {
@@ -4951,7 +4976,7 @@ export async function insertIncident(i: IncidentInput): Promise<Incident | Queue
   assertIncidentInput(v)
   const row: Record<string, unknown> = {}
   for (const k of INCIDENT_FIELDS) row[k] = v[k]
-  row.detail = incidentDetailPayload(v.detail, true)
+  row.detail = incidentDetailPayload(v.detail)
   return insertRow('incidents', withClientKey(row), normalizeIncident)
 }
 
@@ -4962,7 +4987,7 @@ export type IncidentPatch = Partial<Omit<Incident, 'id' | 'rev' | 'detail'>> & {
  * 事故・ヒヤリハットの追記・修正（rev 照合の部分更新）。current は fetchIncident で読んだ1件（detail を含む）。
  * 送る前に、修正後の値（current と patch を重ねたもの）を検証する（一覧の列だけの行を渡すと detail が空で通らない＝消さない）。
  * detail は current.detail に patch.detail を重ねた全体を送る（jsonb は列ごと置き換わるため）。
- * 氏名の写しは patch.detail に subject_name を入れた時だけ送る（入れない時はサーバーが前の写しを残す／対象者を変えたら写し直す）
+ * 氏名の写しは送らない（patch.detail に subject_name があっても無視。サーバーが前の写しを残す／対象者を変えたら写し直す）
  */
 export async function updateIncident(
   current: Incident,
@@ -5001,10 +5026,11 @@ export async function updateIncident(
   for (const k of INCIDENT_FIELDS) {
     if (cols[k] !== undefined) sent[k] = merged[k]
   }
-  const detailKeys = Object.keys(detailPatch ?? {})
+  // 氏名の写しは送らないので、変更の有無の判定からも外す
+  const detailKeys = Object.keys(detailPatch ?? {}).filter((k) => k !== 'subject_name')
   // 対象者を変えた時は detail も送る（氏名の写しを新しい対象者で写し直させるため）
   if (detailKeys.length > 0 || cols.resident_id !== undefined) {
-    sent.detail = incidentDetailPayload(merged.detail, detailKeys.includes('subject_name'))
+    sent.detail = incidentDetailPayload(merged.detail)
   }
   return updateRow('incidents', current.id, current.rev, sent, normalizeIncident, opts)
 }

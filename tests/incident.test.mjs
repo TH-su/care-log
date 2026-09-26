@@ -268,6 +268,20 @@ if (I === null) {
       assert.equal(/resident_id|subject_name|detail/.test(json), false, '対象者の項目が集計に出た')
       assert.deepEqual(Object.keys(s.open[0]).sort(), ['id', 'kind', 'occurred_on', 'status', 'types'])
     })
+    it('★未完了の一覧は月末までに発生して未完了のもの（前月以前の持ち越しを含む・月末より後・完了は除く・重複しない）', () => {
+      const month = [rec(1, '2026-09-02', '10:00'), rec(2, '2026-09-20', '10:00', { status: 'closed' })]
+      const openCandidates = [
+        rec(7, '2026-07-15', '10:00'), // 前々月からの持ち越し
+        rec(8, '2025-12-31', '10:00'), // 前年からの持ち越し
+        rec(1, '2026-09-02', '10:00'), // その月の記録（重複しても1回）
+        rec(9, '2026-10-01', '10:00'), // 月末より後に発生 → 除く
+        rec(10, '2026-08-31', '10:00', { status: 'closed' }), // 完了 → 除く
+      ]
+      const s = I.aggregateIncidentMonth(month, '2026-09', openCandidates)
+      assert.deepEqual(s.open.map((o) => o.id), [8, 7, 1])
+      assert.deepEqual(s.total, { accident: 2, nearmiss: 0, total: 2 }, '件数はその月の発生だけ')
+      assert.equal(JSON.stringify(s).includes('利用者A'), false)
+    })
     it('月の形が不正なら何も数えない', () => {
       assert.equal(I.aggregateIncidentMonth([rec(1, '2026-09-02', '10:00')], '2026-13').total.total, 0)
     })
@@ -654,11 +668,21 @@ if (DB === null || I === null) {
       assert.equal(row.reporter_id, 3)
     })
 
-    it('職員が書き換えた氏名は送る（その値が残る）', async () => {
+    it('★氏名を渡しても送らない（名簿の値だけを使う・2026-09-26 チーフ裁定）: 追加・追記とも payload に氏名が無い', async () => {
       const srv = incidentServer()
       DB.__testHooks.setClient(srv.client)
-      const row = await DB.insertIncident(firstReport({}, { subject_name: '利用者A（異体字）' }))
-      assert.equal(row.detail.subject_name, '利用者A（異体字）')
+      const row = await DB.insertIncident(firstReport({}, { subject_name: '利用者A（別の名前）' }))
+      assert.equal(row.detail.subject_name, '利用者A', '名簿の値ではない')
+      const ins = srv.calls.find((q) => q.action === 'insert')
+      assert.equal('subject_name' in ins.payload.detail, false)
+      const cur = await DB.fetchIncident(row.id)
+      // 氏名だけの変更は送る物が無い（空の変更で止まる）・他の欄と一緒でも氏名は外す
+      await assert.rejects(() => DB.updateIncident(cur, { detail: { subject_name: '別の名前' } }))
+      const next = await DB.updateIncident(cur, { detail: { subject_name: '別の名前', cause: '原因A' } })
+      const up = srv.calls.filter((q) => q.action === 'update').at(-1)
+      assert.equal('subject_name' in up.payload.detail, false)
+      assert.equal(JSON.stringify(up.payload).includes('名前'), false)
+      assert.equal(next.detail.subject_name, '利用者A')
     })
 
     it('第1報の必須項目・「その他」の文字が無いと送る前に止める（書き込まない）', async () => {
@@ -761,6 +785,25 @@ if (DB === null || I === null) {
       assert.equal(DB.queuePending(), 0)
       await DB.flushQueue(true)
       assert.equal(srv.db.rows.length, 1)
+    })
+
+    it('★送信待ち（cl_sendQueue）の payload に氏名が入らない: 氏名を渡した追加・追記・対象者の変更（圏外）', async () => {
+      let off = false
+      const srv = incidentServer({ offline: () => off })
+      DB.__testHooks.setClient(srv.client)
+      const first = await DB.insertIncident(firstReport())
+      const cur = await DB.fetchIncident(first.id)
+      off = true
+      assert.equal(await DB.insertIncident(firstReport({}, { subject_name: '利用者A' })), 'queued')
+      assert.equal(await DB.updateIncident(cur, { resident_id: 2, detail: { subject_name: '利用者B', cause: 'x' } }), 'queued')
+      const raw = lsStore.get('cl_sendQueue')
+      assert.equal(storedOps().length, 2)
+      assert.equal(/利用者/.test(raw), false, '送信待ちに氏名が入った')
+      for (const op of storedOps()) assert.equal('subject_name' in (op.payload.detail ?? {}), false)
+      off = false
+      await DB.flushQueue(true)
+      assert.equal(srv.db.rows.find((r) => r.id === first.id).detail.subject_name, '利用者B', '対象者を変えたらサーバーが写し直す')
+      assert.equal(srv.db.rows.length, 2)
     })
 
     it('pendingIncidentOps: 送信待ちの追加を読むだけ（未送信・止まっているを含む・送信待ちは変わらない）・送れたら消える', async () => {
@@ -875,6 +918,25 @@ if (DB === null || I === null) {
       assert.deepEqual((await DB.fetchIncidents({ fromIso: '2026-09-01', toIso: '2026-09-30', status: 'closed' })).map((r) => r.id), [])
       await assert.rejects(() => DB.fetchIncidents({ fromIso: '2026-09-30', toIso: '2026-09-01' }))
       await assert.rejects(() => DB.fetchIncidents({ fromIso: 'x', toIso: '2026-09-01' }))
+    })
+
+    it('fetchOpenIncidentsUntil: その日までに発生して対応中の記録（前月以前も・完了と削除済みと後の日は除く・古い順・detail なし）', async () => {
+      const srv = incidentServer()
+      DB.__testHooks.setClient(srv.client)
+      const mk = (day, over = {}) => DB.insertIncident(firstReport({ occurred_on: day, occurred_at: at(day, '09:00'), ...over }))
+      const a = await mk('2026-07-01')
+      const b = await mk('2026-09-20')
+      await mk('2026-09-21') // 指定の日より後に発生 → 除く
+      const c = await mk('2026-08-01')
+      await DB.updateIncident(await DB.fetchIncident(c.id), { status: 'closed' })
+      const d = await mk('2026-08-02')
+      await DB.softDeleteIncident(d.id, d.rev)
+      const rows = await DB.fetchOpenIncidentsUntil('2026-09-20')
+      assert.deepEqual(rows.map((r) => r.id), [a.id, b.id])
+      const q = srv.calls.filter((x) => x.table === 'incidents' && x.action === 'select').at(-1)
+      assert.deepEqual(eqOf(q), { status: 'open' })
+      assert.equal(q.cols.split(',').includes('detail'), false)
+      await assert.rejects(() => DB.fetchOpenIncidentsUntil('bogus'))
     })
 
     it('受信値を信じない: 知らない区分の行は落とし、知らない場所・種別・程度は空にする', async () => {
@@ -1006,6 +1068,16 @@ describe('事故・ヒヤリハットの配線（静的検査）', () => {
       assert.equal(/console\./.test(read(p)), false, p)
     }
     assert.equal(/console\./.test(read('../src/lib/incident.ts')), false)
+  })
+
+  it('★氏名は画面で直せない（入力欄を持たない）・対応中に戻す（確認つき）・カルテの行から記録を開く', () => {
+    const form = read('../src/pages/IncidentFormPage.tsx')
+    assert.equal(/setDetail\(\{ subject_name/.test(form), false, '氏名を入力できる')
+    assert.match(form, /ここでは直せません/)
+    assert.match(form, /title="対応中に戻しますか"/)
+    assert.match(form, /void save\(\{ status: 'open' \}\)/)
+    assert.match(read('../src/pages/KartePage.tsx'), /to=\{`\/incident\/\$\{i\.id\}`\}/)
+    assert.match(read('../src/pages/IncidentSummaryPage.tsx'), /fetchOpenIncidentsUntil\(range\.to\)/)
   })
 
   it('印刷: 事故報告書は A4 縦（PrintArea orientation="portrait"）・様式の見出しと注記・□／■', () => {

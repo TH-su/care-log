@@ -471,11 +471,18 @@ const UNSET_KEY = 'unset'
 const UNSET_LABEL = '未入力'
 
 /**
- * その月（'yyyy-MM'）の集計。発生日（occurred_on）がその月の記録だけを数える。
+ * その月（'yyyy-MM'）の集計。件数の表は、発生日（occurred_on）がその月の記録だけを数える。
  * 種別は1件に複数あれば、それぞれに数える（種別の行の合計は件数より多くなることがある）。
- * 場所・程度が空の記録は「未入力」に数える。未完了の一覧は発生日の古い順で、**氏名・対象者を出さない**
+ * 場所・程度が空の記録は「未入力」に数える。
+ * 未完了の一覧は「その月末までに発生して未完了のもの」（前月以前からの持ち越しを含む・月末より後に発生したものは除く・
+ * 2026-09-26 チーフ裁定）。openCandidates に対応中の記録（fetchOpenIncidentsUntil の結果）を渡す。省略時はその月の記録から選ぶ。
+ * 未完了かどうかは記録のいまの状態で見る（完了にした日を持たないため）。発生日の古い順で、**氏名・対象者を出さない**
  */
-export function aggregateIncidentMonth(list: readonly Incident[], month: string): IncidentMonthSummary {
+export function aggregateIncidentMonth(
+  list: readonly Incident[],
+  month: string,
+  openCandidates?: readonly Incident[],
+): IncidentMonthSummary {
   const days = monthDays(month)
   const from = days[0] ?? ''
   const to = days[days.length - 1] ?? ''
@@ -502,10 +509,15 @@ export function aggregateIncidentMonth(list: readonly Incident[], month: string)
     const band = timeBandOf(i.occurred_at)
     if (band !== null) bump(byBand[band], i.kind)
     bump(bySeverity.find((r) => r.key === (i.severity ?? UNSET_KEY)) ?? bySeverity[bySeverity.length - 1], i.kind)
-    if (i.status !== 'closed') {
-      // 氏名・対象者・本文はここへ写さない（委員会の資料に出すため）
-      open.push({ id: i.id, occurred_on: i.occurred_on, kind: i.kind, types: [...i.types], status: i.status })
-    }
+  }
+  const seen = new Set<number>()
+  for (const i of openCandidates ?? inMonth) {
+    if (days.length === 0 || seen.has(i.id)) continue
+    if (i.status === 'closed' || i.occurred_on > to) continue
+    if (!(INCIDENT_KINDS as readonly string[]).includes(i.kind)) continue
+    seen.add(i.id)
+    // 氏名・対象者・本文はここへ写さない（委員会の資料に出すため）
+    open.push({ id: i.id, occurred_on: i.occurred_on, kind: i.kind, types: [...i.types], status: i.status })
   }
   open.sort((a, b) => (a.occurred_on === b.occurred_on ? a.id - b.id : a.occurred_on < b.occurred_on ? -1 : 1))
   return { month, total, byType, byPlace, byBand, bySeverity, open }

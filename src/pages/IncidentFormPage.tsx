@@ -6,7 +6,8 @@
 //   ・ヒヤリハットでは 5・6 の受診・診断・家族への報告・関係機関の欄を隠す（値は消さない）
 //   ・「市への報告が必要な可能性」の案内（判断は人。印は人が付ける）と「第1報は発生から5日以内が目安（国の通知）」の注記
 //   ・確認者（既定は施設長 app_settings.manager_staff_id）＋「確認しました」。権限の強制はまだ無い
-//   ・「完了にする」（原因分析・再発防止策が空なら確認）／取り消し（論理削除・確認つき・記入者必須）
+//   ・「完了にする」（原因分析・再発防止策が空なら確認）／「対応中に戻す」（確認つき・rev 照合・2026-09-26 チーフ追加）／
+//     取り消し（論理削除・確認つき・記入者必須）
 //   ・「事故報告書を印刷」: 報告区分・提出日を小窓で選び（保存する）、A4 縦で刷る（IncidentReportSheet）
 //   ・与薬チェックからは /incident/new?resident=ID&date=YYYY-MM-DD&type=med_error で開く（区分は未選択のまま。URL に氏名を載せない）
 // 未送信の変更がある記録は編集できない（入浴・与薬と同じ。送信待ちは書き換えない・読むだけ）。
@@ -14,7 +15,8 @@
 //
 // 規律:
 // - 取得・保存は db.ts の関数のみ。入力解禁は input_enabled_incident（封鎖中は隠さずにディセーブル＋理由文。書込関数の入口でも止まる）
-// - 対象者の氏名の写しは、職員が書き換えた時だけ送る（送らない時はサーバーが名簿から写す＝氏名を送信待ちに置かない）
+// - 対象者の氏名は名簿の値だけを使い、画面では直せない（2026-09-26 チーフ裁定）。氏名は送らず、サーバーのトリガが名簿から写す
+//   （記録時点の写しを残す＝送信待ちに氏名を置かない）
 // - 入力中の値・日付は localStorage に保存しない（原則11: 現在地は URL で復元される）。未保存の入力がある時は画面を離れる前に確認する
 // - 氏名・記録を console に出さない。色だけで意味を伝えない（文字・記号を併記）
 
@@ -230,10 +232,9 @@ function toInput(f: FormState): IncidentInput {
 const same = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
 
 /**
- * サーバーの記録と画面の入力の差（送る変更）。氏名の写しは、職員が名簿と違う名前に書き換えた時だけ入れる
- * （名簿どおり・空の時は送らない＝サーバーが写す・残す）
+ * サーバーの記録と画面の入力の差（送る変更）。氏名の写しは入れない（画面では直せない・サーバーが写す・残す）
  */
-function patchOf(server: Incident, f: FormState, rosterName: (id: number | null) => string | null): IncidentPatch {
+function patchOf(server: Incident, f: FormState): IncidentPatch {
   const next = toInput(f)
   const p: Record<string, unknown> = {}
   for (const k of COLUMN_KEYS) {
@@ -244,9 +245,7 @@ function patchOf(server: Incident, f: FormState, rosterName: (id: number | null)
     if (!same(server[k], next[k])) p[k] = next[k]
   }
   const dc = detailChanges(server.detail, next.detail)
-  if ('subject_name' in dc && (dc.subject_name === null || dc.subject_name === rosterName(next.resident_id))) {
-    delete dc.subject_name
-  }
+  delete dc.subject_name
   if (Object.keys(dc).length > 0) p.detail = dc
   return p as IncidentPatch
 }
@@ -352,6 +351,7 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
   const [staffPicker, setStaffPicker] = useState<'operator' | 'reporter' | 'confirmer' | null>(null)
   const [residentPickerOpen, setResidentPickerOpen] = useState(false)
   const [closeAsk, setCloseAsk] = useState<string[] | null>(null)
+  const [reopenAsk, setReopenAsk] = useState(false)
   const [deleteAsk, setDeleteAsk] = useState(false)
   const [printOpen, setPrintOpen] = useState(false)
   const [printSource, setPrintSource] = useState<FormState | null>(null)
@@ -488,7 +488,7 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
     if (form === null) return false
     if (isNew) return !queuedInsert && initialNew !== null && !same(form, initialNew)
     if (server === null) return false
-    return Object.keys(patchOf(server, form, rosterName)).length > 0
+    return Object.keys(patchOf(server, form)).length > 0
   }, [form, isNew, initialNew, server, rosterName, queuedInsert])
   dirtyRef.current = dirty
 
@@ -589,10 +589,8 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
     setMsg(null)
     try {
       if (isNew) {
-        // 氏名の写しは名簿と違う名前に書き換えた時だけ送る（名簿どおりならサーバーが写す＝送信待ちに氏名を置かない）
-        const name = input.detail.subject_name
-        const sendName = name !== null && name !== rosterName(input.resident_id)
-        const res = await insertIncident({ ...input, detail: { ...input.detail, subject_name: sendName ? name : null } })
+        // 氏名は送らない（サーバーが名簿から写す＝送信待ちに氏名を置かない）
+        const res = await insertIncident({ ...input, detail: { ...input.detail, subject_name: null } })
         touchActivity()
         if (!aliveRef.current) return { status: 'failed' }
         if (res === 'queued') {
@@ -610,7 +608,7 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
         return { status: 'saved', form: formOf(res) }
       }
       if (server === null) return { status: 'failed' }
-      const patch = patchOf(server, next, rosterName)
+      const patch = patchOf(server, next)
       if (Object.keys(patch).length === 0) return { status: 'saved', form: next }
       const res = await updateIncident(server, patch, { editedBy: operatorId })
       touchActivity()
@@ -980,13 +978,17 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
 
         {/* ── 3 対象者 ── */}
         <Section title="3 対象者" defaultOpen={open}>
-          <TextField
-            id={`${uid}-name`}
-            label="氏名（名簿から。記録時点の値を残します・直せます）"
-            value={d.subject_name}
-            onChange={(v) => setDetail({ subject_name: v })}
-            disabled={f.resident_id === null}
-          />
+          {/* 氏名は名簿の値だけ（直せない）。保存するとサーバーが記録時点の氏名を写して残す */}
+          <div>
+            <span className="block text-sm text-ink2">氏名（名簿の値。記録時点の氏名を残します）</span>
+            <p className="mt-1 min-h-tap rounded border border-border bg-surface2 px-3 py-2 text-base text-ink">
+              {f.resident_id === null ? '（対象者なし）' : (d.subject_name ?? rosterName(f.resident_id) ?? `利用者番号 ${f.resident_id}`)}
+            </p>
+            <p className="mt-1 text-sm text-ink2">
+              <span aria-hidden="true">ⓘ </span>
+              ここでは直せません。氏名が違う時は、名簿（マスタ）を直してください。
+            </p>
+          </div>
           <div className="flex flex-wrap items-end gap-gap">
             <div className="min-w-0">
               <label htmlFor={`${uid}-age`} className="block text-sm text-ink2">
@@ -1243,7 +1245,16 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
               >
                 完了にする
               </button>
-            ) : null}
+            ) : (
+              <button
+                type="button"
+                disabled={!editable}
+                onClick={() => setReopenAsk(true)}
+                className="mt-2 min-h-tap rounded border border-border-strong bg-surface px-4 text-base text-ink disabled:border-border disabled:text-ink3"
+              >
+                対応中に戻す
+              </button>
+            )}
           </div>
 
           <div className="flex flex-wrap gap-gap">
@@ -1301,6 +1312,18 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
           void save({ status: 'closed' })
         }}
         onCancel={() => setCloseAsk(null)}
+      />
+
+      <ConfirmDialog
+        open={reopenAsk}
+        title="対応中に戻しますか"
+        body="この記録の状態を「完了」から「対応中」に戻します。一覧・委員会の集計で未完了として数えます。"
+        confirmLabel="対応中に戻す"
+        onConfirm={() => {
+          setReopenAsk(false)
+          void save({ status: 'open' })
+        }}
+        onCancel={() => setReopenAsk(false)}
       />
 
       <ConfirmDialog

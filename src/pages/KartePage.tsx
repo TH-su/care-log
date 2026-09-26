@@ -1437,16 +1437,25 @@ function IncidentSection({ incidents }: IncidentSectionProps) {
       ) : (
         <ul className="mt-2 space-y-2">
           {sorted.map((i) => (
-            <li key={i.id} className={`rounded-md border bg-surface p-3 ${i.kind === 'accident' ? 'border-danger' : 'border-border'}`}>
-              <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-base text-ink">
-                <span className="tabular text-sm text-ink2">{fmtDayLabel(i.occurred_on)}</span>
-                <span className={`font-bold ${i.kind === 'accident' ? 'text-danger' : ''}`}>
-                  {i.kind === 'accident' ? <span aria-hidden="true">▲ </span> : null}
-                  {INCIDENT_KIND_LABEL[i.kind]}
+            <li key={i.id}>
+              {/* 行を押すと記録の画面（/incident/:id）を開く（2026-09-26 チーフ追加。カルテからは書き込まない＝開くだけ） */}
+              <Link
+                to={`/incident/${i.id}`}
+                className={`block min-h-tap rounded-md border bg-surface p-3 ${i.kind === 'accident' ? 'border-danger' : 'border-border'}`}
+              >
+                <span className="flex flex-wrap items-center gap-x-3 gap-y-1 text-base text-ink">
+                  <span className="tabular text-sm text-ink2">{fmtDayLabel(i.occurred_on)}</span>
+                  <span className={`font-bold ${i.kind === 'accident' ? 'text-danger' : ''}`}>
+                    {i.kind === 'accident' ? <span aria-hidden="true">▲ </span> : null}
+                    {INCIDENT_KIND_LABEL[i.kind]}
+                  </span>
+                  <span className="text-sm text-ink2">状態: {INCIDENT_STATUS_LABEL[i.status]}</span>
+                  <span className="ml-auto text-sm text-link">
+                    記録を開く<span aria-hidden="true"> ›</span>
+                  </span>
                 </span>
-                <span className="text-sm text-ink2">状態: {INCIDENT_STATUS_LABEL[i.status]}</span>
-              </p>
-              <p className="mt-1 break-words text-sm text-ink">種別: {typesText(i.types)}</p>
+                <span className="mt-1 block break-words text-sm text-ink">種別: {typesText(i.types)}</span>
+              </Link>
             </li>
           ))}
         </ul>
