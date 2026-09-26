@@ -19,6 +19,7 @@ import {
   fmtHistoryValue,
   HISTORY_TABLE_LABEL,
   historyColumnLabel,
+  incidentDetailChangeLabels,
 } from '../lib/historyView'
 import { addDays, fmtDayLabel, fmtTimeHM, isoDate, todayIso } from '../lib/format'
 import { typesText } from '../lib/incident'
@@ -1523,6 +1524,15 @@ function HistoryItem({ entry, staffById }: { entry: RecordHistoryEntry; staffByI
         <ul className="mt-2 space-y-1">
           {changes.map((c) => {
             const label = historyColumnLabel(entry.table_name, c.column) ?? c.column
+            // 事故・ヒヤリハットの様式の欄は、JSON を出さず変わった欄の名前だけ（氏名の写しは名前を出さない）
+            if (entry.table_name === 'incidents' && c.column === 'detail') {
+              const names = incidentDetailChangeLabels(c.before, c.after)
+              return (
+                <li key={c.column} className="text-base text-ink">
+                  <span className="font-bold">{label}</span>：{names.length > 0 ? names.join('・') : '（変更なし）'}
+                </li>
+              )
+            }
             const before = fmtHistoryValue(entry.table_name, c.column, c.before, staffName)
             const after = fmtHistoryValue(entry.table_name, c.column, c.after, staffName)
             return (

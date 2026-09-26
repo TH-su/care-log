@@ -168,6 +168,73 @@ const TABLE_LABEL: Record<string, Record<string, string>> = {
   },
 }
 
+/**
+ * 事故・ヒヤリハットの detail（様式の残りの欄）の欄の日本語名。変更の記録では JSON を出さず、変わった欄の名前だけを並べる。
+ * 氏名の写しは名前（値）を出さず「氏名の写し」とだけ書く
+ */
+const INCIDENT_DETAIL_LABEL: Record<string, string> = {
+  severity_other: '程度（その他）',
+  death_on: '死亡年月日',
+  subject_name: '氏名の写し',
+  subject_age: '年齢',
+  subject_gender: '性別',
+  service_start_on: 'サービス提供開始日',
+  insurer: '保険者',
+  address_kind: '住所',
+  address_other: '住所（その他）',
+  care_level: '要介護度',
+  dementia_level: '認知症高齢者日常生活自立度',
+  type_other: '種別（その他）',
+  situation: '発生時状況、事故内容の詳細',
+  special_notes: 'その他特記すべき事項（4）',
+  response: '発生時の対応',
+  visit_methods: '受診方法',
+  visit_method_other: '受診方法（その他）',
+  hospital_name: '受診先の医療機関名',
+  hospital_phone: '受診先の連絡先',
+  diagnosis_name: '診断名',
+  diagnosis_kinds: '診断内容',
+  fracture_site: '骨折の部位',
+  diagnosis_other: '診断内容（その他）',
+  treatment: '検査、処置等の概要',
+  after_status: '利用者の状況',
+  family_relations: '報告した家族等の続柄',
+  family_relation_other: '続柄（その他）',
+  family_reported_on: '家族等への報告年月日',
+  agency_municipality: '他の自治体への連絡',
+  agency_municipality_name: '自治体名',
+  agency_police: '警察への連絡',
+  agency_police_name: '警察署名',
+  agency_other: 'その他の関係機関への連絡',
+  agency_other_name: '関係機関の名称',
+  followup: '追加対応予定',
+  cause: '事故の原因分析',
+  prevention: '再発防止策',
+  other_notes: 'その他特記すべき事項（9）',
+}
+
+/**
+ * 事故・ヒヤリハットの detail の変更を「変わった欄の日本語名」の並びにする（値・JSON は出さない）。
+ * 並びは様式の順。知らない欄は「その他の欄」にまとめる。変わった欄が無ければ空の配列
+ */
+export function incidentDetailChangeLabels(before: unknown, after: unknown): string[] {
+  const o = before !== null && typeof before === 'object' && !Array.isArray(before) ? (before as Record<string, unknown>) : {}
+  const n = after !== null && typeof after === 'object' && !Array.isArray(after) ? (after as Record<string, unknown>) : {}
+  // 並びは様式の順（INCIDENT_DETAIL_LABEL の順）。知らない欄は後ろ
+  const keys: string[] = Object.keys(INCIDENT_DETAIL_LABEL)
+  for (const k of [...Object.keys(o), ...Object.keys(n)]) if (!keys.includes(k)) keys.push(k)
+  const out: string[] = []
+  let unknown = false
+  for (const k of keys) {
+    if (JSON.stringify(o[k] ?? null) === JSON.stringify(n[k] ?? null)) continue
+    const label = INCIDENT_DETAIL_LABEL[k]
+    if (label === undefined) unknown = true
+    else out.push(label)
+  }
+  if (unknown) out.push('その他の欄')
+  return out
+}
+
 /** 画面に出さない列（内部の鍵・作成時刻。変わっても職員が読む意味が無い） */
 const HIDDEN_COLS = new Set(['id', 'created_at', 'client_key', 'import_key'])
 
@@ -222,6 +289,8 @@ export function fmtHistoryValue(
     return v.length === 0 ? '（なし）' : v.map((x) => MED_SLOT_LABEL[x as MedAdminSlot] ?? String(x)).join('・')
   }
   if (table === 'incidents') {
+    // detail は JSON を出さない（変更の記録は incidentDetailChangeLabels で欄の名前だけを出す）
+    if (column === 'detail') return '（様式の欄）'
     if (column === 'kind') return INCIDENT_KIND_LABEL[v as IncidentKind] ?? String(v)
     if (column === 'office') return INCIDENT_OFFICE_LABEL[v as IncidentOffice] ?? String(v)
     if (column === 'place') return INCIDENT_PLACE_LABEL[v as IncidentPlace] ?? String(v)

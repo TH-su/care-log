@@ -264,6 +264,28 @@ function overlay(latest: Incident, p: IncidentPatch): FormState {
   return out
 }
 
+/**
+ * 送信待ちになった保存の後に、手元の基準（サーバーの記録の代わり）として使う形。送った値を重ね、未保存の差分を無くす
+ * （送れたら読み直して本物に戻す）。版（rev）は送る前のまま（送信待ちの間は直せないので使わない）。
+ * 氏名の写しは、対象者が同じなら前の写しのまま（送っていない）
+ */
+function asQueued(server: Incident, f: FormState): Incident {
+  const v = toInput(f)
+  const closed_at =
+    v.status !== 'closed' ? null : server.status === 'closed' && server.closed_at !== null ? server.closed_at : new Date().toISOString()
+  return {
+    ...server,
+    ...v,
+    closed_at,
+    detail: {
+      ...v.detail,
+      subject_name: v.resident_id === server.resident_id ? server.detail.subject_name : v.detail.subject_name,
+    },
+    id: server.id,
+    rev: server.rev,
+  }
+}
+
 /** 新しい記録の初期値 */
 function blankForm(day: string, reporterId: number | null): FormState {
   return {
@@ -366,6 +388,7 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
   const { toast, show } = useToast()
   const aliveRef = useRef(true)
   const dirtyRef = useRef(false)
+  const pendingRef = useRef(false)
 
   useEffect(() => {
     aliveRef.current = true
@@ -519,14 +542,15 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
       })
   }, [loadRecord])
 
-  // 送信待ちの件数の変化を画面に映す。減った時（送れた）は、未保存の入力が無ければ読み直す
+  // 送信待ちの件数の変化を画面に映す。減った時（送れた）は、この記録に未送信があった（その間は直せない）か、
+  // 未保存の入力が無ければ読み直す（未送信の無い記録で入力中の時だけは、入力を消さないよう読み直さない）
   useEffect(() => {
     let last = -1
     return queueSubscribe((n) => {
       const prev = last
       last = n
       setQueueTick((t) => t + 1)
-      if (prev >= 0 && n < prev && !isNew && !dirtyRef.current) reload()
+      if (prev >= 0 && n < prev && !isNew && (pendingRef.current || !dirtyRef.current)) reload()
     })
   }, [isNew, reload])
 
@@ -563,6 +587,10 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
     void queueTick
     return server !== null && hasPendingIncident(server.id)
   }, [server, queueTick])
+  // 送れた時に読み直すかの判断に使う（この記録に未送信があったか）。送信待ちが減った時点で、まだ前の値を見られるよう描画の後に更新する
+  useEffect(() => {
+    pendingRef.current = pendingNow
+  }, [pendingNow])
   const editable = !locked && !pendingNow && !queuedInsert && !busy && !notFound
   const reasonId = `${uid}-locked`
 
@@ -577,7 +605,7 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
    * 保存する（extra は保存の時だけ重ねる値＝状態・確認・報告区分など）。
    * 新しい記録は追加、既存は変えた欄だけを rev 照合で送る。結果を画面に出し、保存した形を返す
    */
-  async function save(extra: Partial<FormState> = {}): Promise<SaveOutcome> {
+  async function save(extra: Partial<FormState> = {}, opts: { resyncName?: boolean } = {}): Promise<SaveOutcome> {
     if (form === null || !editable) return { status: 'failed' }
     if (operatorId === null) {
       setMsg({ tone: 'warn', text: MSG_NO_OPERATOR })
@@ -614,6 +642,10 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
       }
       if (server === null) return { status: 'failed' }
       const patch = patchOf(server, next)
+      // 状態の変更（完了・対応中に戻す）は差分に頼らず必ず送る（手元の記録が古くても、押した操作をそのまま届ける）
+      if (extra.status !== undefined) patch.status = extra.status
+      // 「名簿の氏名に合わせる」: 氏名は送らず、写し直しの印だけを送る
+      if (opts.resyncName === true) patch.resyncSubjectName = true
       if (Object.keys(patch).length === 0) return { status: 'saved', form: next }
       const res = await updateIncident(server, patch, { editedBy: operatorId })
       touchActivity()
@@ -639,7 +671,11 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
           setMsg({ tone: 'danger', text: MSG_NOT_PERSISTED })
           return { status: 'failed' }
         }
-        setForm(next)
+        // 送った値を手元の基準にして未保存の差分を無くす（送れたら読み直す）
+        const queuedBase = asQueued(server, next)
+        pendingRef.current = true
+        setServer(queuedBase)
+        setForm(formOf(queuedBase))
         setQueueTick((t) => t + 1)
         setMsg({ tone: 'warn', text: MSG_QUEUED })
         return { status: 'queued', form: next }
@@ -746,6 +782,14 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
   const operatorName = staffName(operatorId)
   const pickerResidents = residents.filter((r) => r.active || r.id === f.resident_id)
   const open = isNew ? false : true
+  /** 3 対象者の氏名の表示。記録と同じ対象者なら記録の写し、選び直した直後（保存前）・新しい記録は名簿の氏名 */
+  const roster = rosterName(f.resident_id)
+  const sameSubject = server !== null && f.resident_id === server.resident_id
+  const snapshotName = sameSubject ? server.detail.subject_name : null
+  const shownName =
+    f.resident_id === null ? '（対象者なし）' : (snapshotName ?? roster ?? `利用者番号 ${f.resident_id}`)
+  /** 名簿の氏名と写しが違う（名簿の氏名が変わった）時だけ「名簿の氏名に合わせる」を出す */
+  const nameMismatch = sameSubject && snapshotName !== null && roster !== null && snapshotName !== roster
   /** 確認者（選び直した職員 → 記録の確認者 → 施設長 app_settings.manager_staff_id の順） */
   const confirmer = confirmPick ?? f.confirmer_id ?? managerId
   const subjectForPrint = printSource === null ? null : (printSource.detail.subject_name ?? rosterName(printSource.resident_id))
@@ -983,16 +1027,29 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
 
         {/* ── 3 対象者 ── */}
         <Section title="3 対象者" defaultOpen={open}>
-          {/* 氏名は名簿の値だけ（直せない）。保存するとサーバーが記録時点の氏名を写して残す */}
+          {/* 氏名は名簿の値だけ（直せない）。保存するとサーバーが記録時点の氏名を写して残す。
+              対象者を選び直した直後（保存前）は、選び直した方の名簿の氏名を出す */}
           <div>
-            <span className="block text-sm text-ink2">氏名（名簿の値。記録時点の氏名を残します）</span>
-            <p className="mt-1 min-h-tap rounded border border-border bg-surface2 px-3 py-2 text-base text-ink">
-              {f.resident_id === null ? '（対象者なし）' : (d.subject_name ?? rosterName(f.resident_id) ?? `利用者番号 ${f.resident_id}`)}
-            </p>
+            <span className="block text-sm text-ink2">氏名（記録した時点の名簿の氏名）</span>
+            <p className="mt-1 min-h-tap rounded border border-border bg-surface2 px-3 py-2 text-base text-ink">{shownName}</p>
             <p className="mt-1 text-sm text-ink2">
               <span aria-hidden="true">ⓘ </span>
-              ここでは直せません。氏名が違う時は、名簿（マスタ）を直してください。
+              ここでは書き換えられません。名簿の氏名が変わって写しと違う時だけ、「名簿の氏名に合わせる」で写し直せます。
             </p>
+            {nameMismatch ? (
+              <div className="mt-2 flex flex-wrap items-center gap-gap">
+                <p className="text-sm text-warn">
+                  <span aria-hidden="true">▲ </span>名簿の氏名（{roster}）と違います。
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void save({}, { resyncName: true })}
+                  className="min-h-tap rounded border border-primary bg-surface px-4 text-base font-bold text-primary disabled:border-border disabled:text-ink3"
+                >
+                  名簿の氏名に合わせる
+                </button>
+              </div>
+            ) : null}
           </div>
           <div className="flex flex-wrap items-end gap-gap">
             <div className="min-w-0">

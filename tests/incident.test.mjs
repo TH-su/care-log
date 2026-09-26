@@ -563,10 +563,16 @@ function incidentServer(opts = {}) {
   const nameOf = (id) => db.residents.find((r) => r.id === id)?.name ?? null
   /** 0014 の incidents_subject_snapshot と同じ動き */
   const snapshot = (next, old) => {
+    let resync = false
+    if (next.detail && '_resync_subject_name' in next.detail) {
+      resync = true
+      const { _resync_subject_name: _drop, ...rest } = next.detail
+      next.detail = rest
+    }
     if (next.resident_id === null || next.resident_id === undefined) return
     const d = next.detail
-    if (typeof d?.subject_name === 'string' && d.subject_name.trim() !== '') return
-    if (old && old.resident_id === next.resident_id && typeof old.detail?.subject_name === 'string' && old.detail.subject_name !== '') {
+    if (!resync && typeof d?.subject_name === 'string' && d.subject_name.trim() !== '') return
+    if (!resync && old && old.resident_id === next.resident_id && typeof old.detail?.subject_name === 'string' && old.detail.subject_name !== '') {
       next.detail = { ...d, subject_name: old.detail.subject_name }
     } else {
       next.detail = { ...d, subject_name: nameOf(next.resident_id) }
@@ -776,6 +782,39 @@ if (DB === null || I === null) {
       await assert.rejects(() => DB.updateIncident(cur, { report_stage: 'nth', report_no: 1 }), /2 以上/)
     })
 
+    it('★M1 状態は必ず送る: 手元と同じ状態でも status と整合する closed_at を送る（DB の check を崩さない）', async () => {
+      const srv = incidentServer()
+      DB.__testHooks.setClient(srv.client)
+      const first = await DB.insertIncident(firstReport())
+      let cur = await DB.fetchIncident(first.id)
+      cur = await DB.updateIncident(cur, { status: 'open' })
+      let up = srv.calls.filter((q) => q.action === 'update').at(-1)
+      assert.deepEqual([up.payload.status, up.payload.closed_at], ['open', null])
+      cur = await DB.updateIncident(cur, { status: 'closed' })
+      const closedAt = cur.closed_at
+      cur = await DB.updateIncident(cur, { status: 'closed' }) // もう一度完了を送っても、完了にした日時は変えない
+      up = srv.calls.filter((q) => q.action === 'update').at(-1)
+      assert.deepEqual([up.payload.status, up.payload.closed_at], ['closed', closedAt])
+    })
+
+    it('★M3 名簿の氏名に合わせる: 氏名は送らず印だけを送り、サーバーが名簿の現在の氏名で写し直す（他の欄は変えない・印は残らない）', async () => {
+      const srv = incidentServer()
+      DB.__testHooks.setClient(srv.client)
+      const first = await DB.insertIncident(firstReport({}, { subject_age: 88 }))
+      srv.db.residents[0].name = '利用者A改' // 名簿の氏名が変わった
+      const cur = await DB.fetchIncident(first.id)
+      assert.equal(cur.detail.subject_name, '利用者A', '写しは記録時点のまま')
+      const next = await DB.updateIncident(cur, { resyncSubjectName: true }, { editedBy: 2 })
+      const up = srv.calls.filter((q) => q.action === 'update').at(-1)
+      assert.equal(up.payload.detail._resync_subject_name, true)
+      assert.equal('subject_name' in up.payload.detail, false)
+      assert.equal(JSON.stringify(up.payload).includes('利用者'), false, '氏名を送った')
+      assert.equal(next.detail.subject_name, '利用者A改')
+      assert.equal(next.detail.subject_age, 88, '他の欄が変わった')
+      assert.equal('_resync_subject_name' in srv.db.rows[0].detail, false, '印が残った')
+      assert.equal('_resync_subject_name' in next.detail, false)
+    })
+
     it('softDeleteIncident は deleted_at と edited_by の update（物理削除しない）・取り消した記録は読めない', async () => {
       const srv = incidentServer()
       DB.__testHooks.setClient(srv.client)
@@ -832,6 +871,30 @@ if (DB === null || I === null) {
       await DB.flushQueue(true)
       assert.equal(srv.db.rows.find((r) => r.id === first.id).detail.subject_name, '利用者B', '対象者を変えたらサーバーが写し直す')
       assert.equal(srv.db.rows.length, 2)
+    })
+
+    it('★M1 圏外で完了 → 電波が戻る → 読み直して対応中に戻す → サーバーが open（closed_at は null）', async () => {
+      let off = false
+      const srv = incidentServer({ offline: () => off })
+      DB.__testHooks.setClient(srv.client)
+      const first = await DB.insertIncident(firstReport())
+      const cur = await DB.fetchIncident(first.id)
+      off = true
+      assert.equal(await DB.updateIncident(cur, { status: 'closed' }), 'queued')
+      assert.equal(DB.hasPendingIncident(first.id), true)
+      off = false
+      await DB.flushQueue(true)
+      assert.equal(DB.hasPendingIncident(first.id), false)
+      const latest = await DB.fetchIncident(first.id) // 画面は送信待ちが減ったら読み直す
+      assert.deepEqual([latest.status, latest.closed_at !== null, latest.rev], ['closed', true, 2])
+      const reopened = await DB.updateIncident(latest, { status: 'open' })
+      assert.deepEqual([reopened.status, reopened.closed_at], ['open', null])
+      assert.deepEqual([srv.db.rows[0].status, srv.db.rows[0].closed_at], ['open', null])
+      // 名簿の氏名に合わせる（圏外）も送信待ちに氏名が入らない
+      off = true
+      assert.equal(await DB.updateIncident(reopened, { resyncSubjectName: true }), 'queued')
+      assert.equal(/利用者/.test(lsStore.get('cl_sendQueue')), false)
+      assert.equal(lsStore.get('cl_sendQueue').includes('_resync_subject_name'), true)
     })
 
     it('pendingIncidentOps: 送信待ちの追加を読むだけ（未送信・止まっているを含む・送信待ちは変わらない）・送れたら消える', async () => {
@@ -1111,11 +1174,45 @@ describe('事故・ヒヤリハットの配線（静的検査）', () => {
   it('★氏名は画面で直せない（入力欄を持たない）・対応中に戻す（確認つき）・カルテの行から記録を開く', () => {
     const form = read('../src/pages/IncidentFormPage.tsx')
     assert.equal(/setDetail\(\{ subject_name/.test(form), false, '氏名を入力できる')
-    assert.match(form, /ここでは直せません/)
+    assert.match(form, /ここでは書き換えられません/)
+    assert.match(form, /名簿の氏名に合わせる/)
+    assert.match(form, /save\(\{\}, \{ resyncName: true \}\)/)
     assert.match(form, /title="対応中に戻しますか"/)
     assert.match(form, /void save\(\{ status: 'open' \}\)/)
     assert.match(read('../src/pages/KartePage.tsx'), /to=\{`\/incident\/\$\{i\.id\}`\}/)
     assert.match(read('../src/pages/IncidentSummaryPage.tsx'), /fetchIncidentsOpenAt\(range\.to\)/)
+  })
+
+  it('L1 変更の記録: detail は JSON を出さず、変わった欄の日本語名だけ（氏名の写しは名前を出さない）', async () => {
+    const HV = await import('../src/lib/historyView.ts')
+    const labels = HV.incidentDetailChangeLabels(
+      { situation: 'a', cause: null, subject_name: '利用者A', visit_methods: [] },
+      { situation: 'a', cause: 'b', subject_name: '利用者A改', visit_methods: ['ambulance'], future_key: 1 },
+    )
+    assert.deepEqual(labels, ['氏名の写し', '受診方法', '事故の原因分析', 'その他の欄'], '様式の順')
+    assert.equal(JSON.stringify(labels).includes('利用者'), false)
+    assert.deepEqual(HV.incidentDetailChangeLabels({ a: 1 }, { a: 1 }), [])
+    assert.equal(HV.fmtHistoryValue('incidents', 'detail', { subject_name: '利用者A' }, () => null), '（様式の欄）')
+    assert.equal(HV.fmtHistoryValue('incidents', 'closed_at', null, () => null), '（空）')
+    assert.match(read('../src/pages/KartePage.tsx'), /incidentDetailChangeLabels\(c\.before, c\.after\)/)
+  })
+
+  it('M2 与薬の落薬・誤薬: 事故の入力が解禁ならボタン、封鎖・確かめられない時は「事故報告書（紙）に記録してください」', () => {
+    const med = read('../src/pages/MedRecordPage.tsx')
+    assert.match(med, /getKindInputGate\('incident'\)/)
+    assert.match(med, /setIncidentEnabled\(g\.observed && g\.value === true\)/)
+    assert.match(med, /const MSG_INCIDENT_PAPER = '事故報告書（紙）に記録してください'/)
+    assert.match(med, /if \(!enabled\) \{/)
+    assert.match(med, /enabled=\{incidentEnabled\}/)
+  })
+
+  it('L3 集計の注記: 完了後に対応中へ戻した記録は、最後に完了した日時で判定', () => {
+    assert.match(read('../src/pages/IncidentSummaryPage.tsx'), /完了後に対応中へ戻した記録は、最後に完了した日時で判定します。/)
+  })
+
+  it('0014: 写し直しの印（_resync_subject_name）をトリガが取り除いて名簿から写し直す', () => {
+    const s = sql()
+    assert.match(s, /if new\.detail \? '_resync_subject_name' then\s+resync := true;\s+new\.detail := new\.detail - '_resync_subject_name';/)
   })
 
   it('印刷: 事故報告書は A4 縦（PrintArea orientation="portrait"）・様式の見出しと注記・□／■', () => {

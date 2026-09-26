@@ -6,7 +6,9 @@
 //   ・記録済みのマスを押すと状態の小窓（服用済み／一部残し／拒否／不在／医師指示で中止／落薬／誤薬・備考・取り消す）
 //   ・落薬・誤薬を保存したら「事故・ヒヤリハットを記録する」ボタンの小窓を出す（2026-09-26 事故・ヒヤリハットの追加で紙の案内から変更）。
 //     押すと /incident/new?resident=ID&date=YYYY-MM-DD&type=med_error を開く（対象者・日付・種別「誤薬、与薬もれ等」を渡す。
-//     区分は未選択のまま。URL に氏名は載せない＝利用者 id・日付・種別のキーだけ）
+//     区分は未選択のまま。URL に氏名は載せない＝利用者 id・日付・種別のキーだけ）。
+//     事故・ヒヤリハットの入力（input_enabled_incident）が封鎖中・確かめられない時は、ボタンの代わりに
+//     「事故報告書（紙）に記録してください」を出す（2026-09-26 チーフ裁定 M2）
 //   ・締め時刻（med.ts の MED_DEADLINES）を過ぎた今日の未記録と、過去の日の未記録は「未」（赤枠＋文字）。
 //     今日の締め前の未記録は空欄。今日を表示している間は 60 秒ごとに締めを判定し直す
 //   ・入院中かどうかは care-log の名簿（residents）が持っていないので、入院中の方のマスも通常どおり（「不在」で記録する）
@@ -87,9 +89,11 @@ const MSG_SAVE_FAILED = '保存できませんでした。通信状態を確認�
 const MSG_NO_RECORDER = '記入者が選ばれていません。上の「記入者」で選んでから記録してください。'
 const MSG_QUEUED = '未送信です（電波が戻ると自動で送信します）。送信が終わるまで、このマスは押せません。'
 const MSG_PRN_QUEUED = '頓服の記録は未送信です（電波が戻ると自動で送信します）。'
-const MSG_INCIDENT = '事故・ヒヤリハットとして記録してください（保存すると、記録の画面へ進むボタンが出ます）'
-/** 保存した後の小窓の文（ボタンで事故・ヒヤリハットの記録の画面へ進む） */
+const MSG_INCIDENT = '事故・ヒヤリハットとして記録してください（保存の後に案内が出ます）'
+/** 保存した後の小窓の文（事故・ヒヤリハットの入力が解禁中＝ボタンで記録の画面へ進む） */
 const MSG_INCIDENT_AFTER = '事故・ヒヤリハットとして記録してください。下のボタンで記録の画面を開きます（対象者・日付・種別を入れて開きます）。'
+/** 保存した後の小窓の文（事故・ヒヤリハットの入力が封鎖中・確かめられない＝紙へ） */
+const MSG_INCIDENT_PAPER = '事故報告書（紙）に記録してください'
 const MSG_NO_SLOTS = '服薬の時間帯が未設定です（その他→服薬の時間帯）'
 
 const FLOOR_ALL = 'all'
@@ -163,6 +167,8 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
   const [deleteFor, setDeleteFor] = useState<MedAdmin | null>(null)
   /** 落薬・誤薬を保存した後の小窓（事故・ヒヤリハットの記録へ渡す利用者 id と日付。氏名は持たない） */
   const [incidentFor, setIncidentFor] = useState<{ residentId: number; day: string } | null>(null)
+  /** 事故・ヒヤリハットの入力が解禁中か（input_enabled_incident。取得中・確かめられない時は false＝紙の案内） */
+  const [incidentEnabled, setIncidentEnabled] = useState(false)
   const navigate = useNavigate()
   const [prnOpen, setPrnOpen] = useState(false)
   const [effectFor, setEffectFor] = useState<MedAdmin | null>(null)
@@ -206,6 +212,22 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
       alive = false
     }
   }, [baseTick, staffProp])
+
+  // 事故・ヒヤリハットの入力の旗（落薬・誤薬の後の案内をボタンにするか紙にするか）。画面を開くたびに取り直す。
+  // 取れなくても与薬チェックは妨げない（案内が紙になるだけ）
+  useEffect(() => {
+    let alive = true
+    getKindInputGate('incident')
+      .then((g) => {
+        if (alive) setIncidentEnabled(g.observed && g.value === true)
+      })
+      .catch(() => {
+        if (alive) setIncidentEnabled(false)
+      })
+    return () => {
+      alive = false
+    }
+  }, [baseTick])
 
   // 記入者の既定値（名簿と照合できた操作者。できなければ未選択＝記録前に選んでもらう）
   useEffect(() => {
@@ -927,6 +949,7 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
 
       <IncidentDialog
         open={incidentFor !== null}
+        enabled={incidentEnabled}
         onClose={() => setIncidentFor(null)}
         onRecord={() => {
           const target = incidentFor
@@ -1278,8 +1301,41 @@ function StatusDialog({ open, record, name, locked, onCancel, onSave, onDelete }
 // 落薬・誤薬の案内
 // ══════════════════════════════════════════════════════════════
 
-function IncidentDialog({ open, onClose, onRecord }: { open: boolean; onClose: () => void; onRecord: () => void }) {
+function IncidentDialog({
+  open,
+  enabled,
+  onClose,
+  onRecord,
+}: {
+  open: boolean
+  /** 事故・ヒヤリハットの入力が解禁中（ボタン）か、封鎖中・確かめられない（紙の案内）か */
+  enabled: boolean
+  onClose: () => void
+  onRecord: () => void
+}) {
   const okRef = useRef<HTMLButtonElement>(null)
+  if (!enabled) {
+    return (
+      <ModalShell open={open} label="事故・ヒヤリハットの記録" onClose={onClose} initialFocus={okRef} narrow>
+        <div className="p-4" role="alert">
+          <h2 className="text-lg font-bold text-danger">
+            <span aria-hidden="true">▲ </span>落薬・誤薬を記録しました
+          </h2>
+          <p className="mt-2 text-base text-ink">{MSG_INCIDENT_PAPER}</p>
+        </div>
+        <div className="flex justify-end border-t border-border p-4">
+          <button
+            ref={okRef}
+            type="button"
+            onClick={onClose}
+            className="min-h-tap rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink"
+          >
+            わかりました
+          </button>
+        </div>
+      </ModalShell>
+    )
+  }
   return (
     <ModalShell open={open} label="事故・ヒヤリハットの記録" onClose={onClose} initialFocus={okRef} narrow>
       <div className="p-4" role="alert">

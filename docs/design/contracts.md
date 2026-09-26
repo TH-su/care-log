@@ -169,6 +169,14 @@ subscribeIncidentChanges(cb): () => void                       // incidents の 
   （前月以前からの持ち越しを含む・月末より後に発生したものは除く）。月末の時点で未完了かは closed_at（完了にした日時）で判定する
   （closed_at が null か月末より後なら未完了。incident.ts の unfinishedAt）。closed_at は updateIncident が状態の変更に合わせて送る
   （完了＝いまの日時・対応中に戻す＝null。DB の check で status と揃える）。「完了」→「対応中に戻す」（確認つき・rev 照合）。カルテの事故・ヒヤリの行から記録の画面（/incident/:id）を開ける
+- レビュー2巡目（2026-09-26 チーフ差し戻し）:
+  M1 状態を送る時（完了・対応中に戻す）は差分に頼らず必ず status を送り、closed_at を status と整合させて送る（対応中＝null／完了＝手元が完了で日時があればそのまま・無ければいまの日時）。
+  画面は保存が 'queued' になったら送った値を手元の基準にして未保存の差分を解除し、送信待ちが減ったら（その記録に未送信があった時・未保存の入力が無い時）読み直す。
+  M2 与薬の落薬・誤薬の後は、input_enabled_incident が解禁なら「事故・ヒヤリハットを記録する」、封鎖・確かめられない時は「事故報告書（紙）に記録してください」。
+  M3 氏名の写しが名簿の氏名と違う時だけ「名簿の氏名に合わせる」。updateIncident(current, { resyncSubjectName: true }) は氏名を送らず detail に一時の印
+  `_resync_subject_name` を入れて送り、0014 のトリガが印を取り除いて名簿の現在の氏名で写し直す（他の欄は変えない）。
+  L1 変更の記録の detail は JSON を出さず「様式の欄：変わった欄の日本語名」（historyView の incidentDetailChangeLabels・氏名は「氏名の写し」とだけ）。
+  L4 対象者を選び直した直後（保存前）は選び直した方の名簿の氏名を出す。L3 集計の注記に「完了後に対応中へ戻した記録は、最後に完了した日時で判定」
 - 純ロジック（入力の検証・市への報告の案内・月次集計・受け渡しの照合）は `src/lib/incident.ts`。選択肢の並び・文言の正本は types.ts の INCIDENT_*（熊本市の様式どおり）
 - 事故報告書（A4 縦）は既存の印刷部品（PrintArea orientation='portrait'・文字 11〜9px）で刷る。はみ出す時は2枚目に続き、見出し（thead）を繰り返す。印刷の表の組み方は print.css の .cl-print-form（既存の .cl-print-table は変えない）
 

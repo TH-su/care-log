@@ -29,6 +29,8 @@ import type { PrintAreaHandle } from '../components/print/PrintArea'
 const ERR_LOAD = '事故・ヒヤリハットの月次集計を読み込めませんでした。通信状態を確認して、再試行してください。'
 const TYPE_NOTE = '種別は1件に複数あれば、それぞれに数えます（種別の合計は件数より多くなることがあります）。'
 const OPEN_NOTE = '未完了の一覧は、この月末の時点で未完了だったものです（前月以前からの持ち越しを含みます）。'
+/** 完了にした日時は最後の1つだけを持つ（2026-09-26 チーフ裁定 L3 で注記） */
+const REOPEN_NOTE = '完了後に対応中へ戻した記録は、最後に完了した日時で判定します。'
 
 export function IncidentSummaryPage() {
   const current = monthKeyOf(todayIso())
@@ -127,6 +129,7 @@ export function IncidentSummaryPage() {
           <span aria-hidden="true">ⓘ </span>
           委員会用の資料です。氏名は出しません。件数は発生日がこの月の記録を数えます。{TYPE_NOTE}
           {OPEN_NOTE}
+          {REOPEN_NOTE}
         </p>
         <p className="mt-1 text-sm">
           <Link to="/incident" className="inline-flex min-h-tap items-center text-link">
@@ -154,6 +157,7 @@ export function IncidentSummaryPage() {
               印刷日 {printedOn}　件数は発生日がこの月の記録を数えます。{TYPE_NOTE}
             </p>
             <p className="cl-print-meta">{OPEN_NOTE}</p>
+            <p className="cl-print-meta">{REOPEN_NOTE}</p>
             <SummaryBody summary={summary} variant="print" />
           </section>
         ) : null}

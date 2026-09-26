@@ -5001,7 +5001,17 @@ export async function insertIncident(i: IncidentInput): Promise<Incident | Queue
 }
 
 /** 追記・修正で送る変更（列は変えた項目だけ、detail は変えた欄だけを渡す） */
-export type IncidentPatch = Partial<Omit<Incident, 'id' | 'rev' | 'detail'>> & { detail?: Partial<IncidentDetail> }
+export type IncidentPatch = Partial<Omit<Incident, 'id' | 'rev' | 'detail'>> & {
+  detail?: Partial<IncidentDetail>
+  /**
+   * 氏名の写しを名簿の現在の氏名で写し直す（「名簿の氏名に合わせる」）。氏名そのものは送らず、detail に一時の印
+   * RESYNC_SUBJECT_KEY を入れて送る。0014 のトリガが印を見て写し直し、印を取り除く
+   */
+  resyncSubjectName?: boolean
+}
+
+/** 氏名の写しを写し直させる一時の印（detail のキー。0014 の incidents_subject_snapshot と同じ名前） */
+export const RESYNC_SUBJECT_KEY = '_resync_subject_name'
 
 /**
  * 事故・ヒヤリハットの追記・修正（rev 照合の部分更新）。current は fetchIncident で読んだ1件（detail を含む）。
@@ -5015,7 +5025,7 @@ export async function updateIncident(
   patch: IncidentPatch,
   opts?: WriteOpts,
 ): Promise<Incident | Conflict | Queued> {
-  const { detail: detailPatch, ...cols } = patch
+  const { detail: detailPatch, resyncSubjectName, ...cols } = patch
   const base: IncidentInput = {
     kind: current.kind,
     resident_id: current.resident_id,
@@ -5048,15 +5058,24 @@ export async function updateIncident(
   for (const k of INCIDENT_FIELDS) {
     if (cols[k] !== undefined) sent[k] = merged[k]
   }
-  // 状態を変えた時は、完了にした日時を一緒に送る（完了＝いまの日時・対応中に戻す＝null。patch の closed_at は使わない）
-  if (cols.status !== undefined && merged.status !== current.status) {
-    sent.closed_at = merged.status === 'closed' ? new Date().toISOString() : null
+  // 状態を送る時は、完了にした日時を必ず一緒に送る（patch の closed_at は使わない）。
+  //   対応中 … null ／ 完了 … 手元の記録も完了で日時があればその日時のまま、無ければいまの日時。
+  //   手元の記録が古くても（送信待ちの後など）、状態と日時が DB の check（incidents_closed_at_check）で食い違わないようにする
+  if (cols.status !== undefined) {
+    sent.closed_at =
+      merged.status !== 'closed'
+        ? null
+        : current.status === 'closed' && current.closed_at !== null
+          ? current.closed_at
+          : new Date().toISOString()
   }
   // 氏名の写しは送らないので、変更の有無の判定からも外す
   const detailKeys = Object.keys(detailPatch ?? {}).filter((k) => k !== 'subject_name')
   // 対象者を変えた時は detail も送る（氏名の写しを新しい対象者で写し直させるため）
-  if (detailKeys.length > 0 || cols.resident_id !== undefined) {
+  if (detailKeys.length > 0 || cols.resident_id !== undefined || resyncSubjectName === true) {
     sent.detail = incidentDetailPayload(merged.detail)
+    // 「名簿の氏名に合わせる」: 印だけを送る（氏名は送らない。トリガが写し直して印を取り除く）
+    if (resyncSubjectName === true) (sent.detail as Record<string, unknown>)[RESYNC_SUBJECT_KEY] = true
   }
   return updateRow('incidents', current.id, current.rev, sent, normalizeIncident, opts)
 }

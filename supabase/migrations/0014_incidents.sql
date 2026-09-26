@@ -26,7 +26,7 @@
 --        update public.app_settings set value = '（値）' where key = 'corp_name';
 --      空のままなら、印刷はその欄を手書き用の空欄で刷る
 --   2. incidents 表（soft delete・rev 楽観ロック・変更の記録トリガ・RLS＋member_only）
---   3. 対象者の氏名の写しを入れるトリガ（アプリが氏名を送らない時に、サーバーで名簿から写す・前の写しを残す）
+--   3. 対象者の氏名の写しを入れるトリガ（アプリは氏名を送らない。サーバーで名簿から写す・前の写しを残す・印があれば名簿の氏名で写し直す）
 --   4. Realtime への登録（初回のみ。上の注記）
 --
 -- 個人情報: このファイルに実在の氏名・記録本文・事業所の名前・番号・住所・電話番号を書かない（構造だけを定義する）。
@@ -168,24 +168,33 @@ create index if not exists idx_incidents_resident
 --   ・追加 … 名簿（residents.name）の氏名を写す
 --   ・更新 … 対象者が同じなら前の写しを残す／対象者を変えたら新しい対象者の氏名を写す
 --   ・対象者なし（ヒヤリハット）… 何もしない
+-- 「名簿の氏名に合わせる」: アプリは氏名の代わりに detail へ一時の印 _resync_subject_name を入れて送る。
+--   印がある時は、印を取り除いてから、名簿の現在の氏名で写し直す（他の欄は変えない）。印は行に残さない
 -- security invoker（呼んだ職員の権限で residents を読む）。search_path は空にし、全部の名前を修飾する。
 create or replace function public.incidents_subject_snapshot() returns trigger
 language plpgsql
 security invoker
 set search_path = ''
 as $fn$
+declare
+  resync boolean := false;
 begin
   -- detail が無い・オブジェクトでない時は触らない（not null・incidents_detail_check がそのまま弾く）
   if new.detail is null or pg_catalog.jsonb_typeof(new.detail) <> 'object' then
     return new;
   end if;
+  if new.detail ? '_resync_subject_name' then
+    resync := true;
+    new.detail := new.detail - '_resync_subject_name';
+  end if;
   if new.resident_id is null then
     return new;
   end if;
-  if coalesce(pg_catalog.btrim(new.detail ->> 'subject_name'), '') <> '' then
+  if not resync and coalesce(pg_catalog.btrim(new.detail ->> 'subject_name'), '') <> '' then
     return new;
   end if;
-  if tg_op = 'UPDATE'
+  if not resync
+     and tg_op = 'UPDATE'
      and old.resident_id is not distinct from new.resident_id
      and coalesce(pg_catalog.btrim(old.detail ->> 'subject_name'), '') <> '' then
     new.detail := new.detail || pg_catalog.jsonb_build_object('subject_name', old.detail -> 'subject_name');
