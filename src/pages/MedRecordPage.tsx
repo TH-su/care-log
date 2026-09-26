@@ -3,6 +3,7 @@
 // 住宅型の服薬介助（一包化された袋を時間帯ごとに渡す）の実施チェック。薬の名前は持たない。
 // 表: 行＝在籍の入居者（居室順・階で絞れる）、列＝朝・昼・夕・眠前。その人の服薬の時間帯（med_slots）に無い列は「—」（押せない）。
 //   ・空いているマスを1回押すと「服用済み」で記録する（時刻はサーバーの記録時刻 created_at）
+//     ただし「未」のマスは即記録せず、状態の小窓を開いて選んでから記録する（外泊・入院などで自動にしなかった可能性があるため・チーフ承認）
 //   ・記録済みのマスを押すと状態の小窓（服用済み／一部残し／拒否／不在／医師指示で中止／落薬／誤薬・備考・取り消す）
 //   ・落薬・誤薬を保存したら「事故・ヒヤリハットを記録する」ボタンの小窓を出す（2026-09-26 事故・ヒヤリハットの追加で紙の案内から変更）。
 //     押すと /incident/new?resident=ID&date=YYYY-MM-DD&type=med_error を開く（対象者・日付・種別「誤薬、与薬もれ等」を渡す。
@@ -172,6 +173,8 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
   const [startDay, setStartDay] = useState<string | null>(null)
   const [msg, setMsg] = useState<Msg | null>(null)
   const [statusFor, setStatusFor] = useState<MedAdmin | null>(null)
+  /** 「未」のマスを押した時の新しい記録の小窓（利用者 id と時間帯。氏名は持たない） */
+  const [newFor, setNewFor] = useState<{ residentId: number; slot: MedSlot } | null>(null)
   const [deleteFor, setDeleteFor] = useState<MedAdmin | null>(null)
   /** 落薬・誤薬を保存した後の小窓（事故・ヒヤリハットの記録へ渡す利用者 id と日付。氏名は持たない） */
   const [incidentFor, setIncidentFor] = useState<{ residentId: number; day: string } | null>(null)
@@ -466,8 +469,8 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
     return res
   }
 
-  /** 空いているマスを押した: 「服用済み」で記録する */
-  async function recordTaken(residentId: number, slot: MedSlot) {
+  /** 空いているマスを押した（「服用済み」）・「未」のマスの小窓で状態を選んだ: その状態で記録する */
+  async function recordNew(residentId: number, slot: MedSlot, status: MedStatus = 'taken', note = '') {
     const key = cellKey(residentId, slot)
     if (locked || busy.has(key)) return
     if (recorderId === null) {
@@ -477,12 +480,12 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
     const input = {
       admin_on: day,
       slot,
-      status: 'taken' as MedStatus,
+      status,
       given_at: null,
       prn_drug: null,
       prn_reason: null,
       prn_effect: null,
-      note: null,
+      note: note.trim() === '' ? null : note,
     }
     const check = validateMedAdminInput(input, todayIso())
     if (!check.ok) {
@@ -495,11 +498,15 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
       const res = await insertMedAdmin({ resident_id: residentId, ...input, recorded_by: recorderId })
       touchActivity()
       if (!aliveRef.current) return
-      const saved = handleResult(res, () => setPendingMarks((prev) => new Map(prev).set(key, 'taken')))
+      const saved = handleResult(res, () => setPendingMarks((prev) => new Map(prev).set(key, status)))
+      // 落薬・誤薬を選んだ時は、送れたか（送信待ちか）に関係なく事故報告の案内を出す（状態を直した時と同じ）
+      if (isIncidentStatus(status) && (saved !== null || (res === 'queued' && isQueuePersisted()))) {
+        setIncidentFor({ residentId, day })
+      }
       if (saved === null) return
       applySaved(saved)
       const name = residentById.get(residentId)?.name ?? ''
-      show(`${name ? `${name}　` : ''}${MED_SLOT_LABEL[slot]}を「服用済み」で記録しました。`)
+      show(`${name ? `${name}　` : ''}${MED_SLOT_LABEL[slot]}を「${MED_STATUS_LABEL[saved.status]}」で記録しました。`)
     } catch (e) {
       if (!aliveRef.current) return
       setMsg({ tone: 'danger', text: e instanceof DbError ? e.message : MSG_SAVE_FAILED })
@@ -512,7 +519,8 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
     const cell = row.cells[slot]
     const blocked = locked || busy.has(cellKey(row.residentId, slot)) || cellPending(row.residentId, slot, cell)
     const action = tapActionOf(cell, blocked)
-    if (action === 'insert') void recordTaken(row.residentId, slot)
+    if (action === 'insert') void recordNew(row.residentId, slot)
+    else if (action === 'choose') setNewFor({ residentId: row.residentId, slot })
     else if (action === 'dialog' && cell.kind === 'record') setStatusFor(cell.record)
   }
 
@@ -784,7 +792,7 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
           {fmtMedAutoTimes()} に自動で済みになります（例外は押して変更）。自動で入らなかった方（外泊・入院など）は『不在』等を押してください
         </p>
         <p className="mt-1 text-sm text-ink2">
-          空いているマスを押すと「服用済み」で記録します。記録済みのマスを押すと状態を直せます。
+          空いているマスを押すと「服用済み」で記録します。「未」のマスは押すと状態を選んで記録します。記録済みのマスを押すと状態を直せます。
           「未」は、{MED_AUTO_SLOTS.map((s) => MED_SLOT_LABEL[s]).join('・')}は自動の時刻から{MED_AUTO_GRACE_MIN}分、
           {MED_SLOTS.filter((s) => !MED_AUTO_SLOTS.includes(s)).map((s) => `${MED_SLOT_LABEL[s]}は締め（${MED_DEADLINES[s]}）`).join('・')}を過ぎても記録が無いマスです。
         </p>
@@ -928,6 +936,21 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
       />
 
       <StatusDialog
+        open={newFor !== null}
+        record={null}
+        newSlot={newFor?.slot ?? null}
+        name={newFor === null ? '' : (residentById.get(newFor.residentId)?.name ?? '')}
+        locked={locked}
+        onCancel={() => setNewFor(null)}
+        onSave={(status, note) => {
+          const target = newFor
+          setNewFor(null)
+          if (target !== null) void recordNew(target.residentId, target.slot, status, note)
+        }}
+        onDelete={() => setNewFor(null)}
+      />
+
+      <StatusDialog
         open={statusFor !== null}
         record={statusFor}
         name={statusName}
@@ -1040,7 +1063,7 @@ function MedCellButton({ name, slot, cell, pendingStatus, pending, busy, locked,
     status !== null
       ? `${name} ${label} ${MED_STATUS_LABEL[status]}${auto ? '（自動）' : ''}${time ? ` ${time}` : ''}${pending ? '（未送信）' : ''}`
       : missing
-        ? `${name} ${label} 未記録（締めを過ぎています）。押すと服用済みで記録`
+        ? `${name} ${label} 未記録（時刻を過ぎています）。押すと状態を選んで記録`
         : `${name} ${label} 未記録。押すと服用済みで記録`
   const tone = incident
     ? 'border-2 border-danger bg-danger-bg text-danger font-bold'
@@ -1225,6 +1248,8 @@ function PrnSection({ records, pending, residentById, staffName, locked, busy, r
 interface StatusDialogProps {
   open: boolean
   record: MedAdmin | null
+  /** 記録の無い「未」のマスから開いた時の時間帯（新しい記録の状態を選ぶ。取り消すは出さない・状態は選ぶまで未選択） */
+  newSlot?: MedSlot | null
   name: string
   locked: boolean
   onCancel: () => void
@@ -1232,19 +1257,26 @@ interface StatusDialogProps {
   onDelete: () => void
 }
 
-function StatusDialog({ open, record, name, locked, onCancel, onSave, onDelete }: StatusDialogProps) {
-  const [status, setStatus] = useState<MedStatus>('taken')
+function StatusDialog({ open, record, newSlot = null, name, locked, onCancel, onSave, onDelete }: StatusDialogProps) {
+  const [status, setStatus] = useState<MedStatus | null>('taken')
   const [note, setNote] = useState('')
   const uid = useId()
   const firstRef = useRef<HTMLButtonElement>(null)
+  const isNew = record === null && newSlot !== null
 
   useEffect(() => {
-    if (!open || record === null) return
-    setStatus(record.status)
-    setNote(record.note ?? '')
+    if (!open) return
+    if (record !== null) {
+      setStatus(record.status)
+      setNote(record.note ?? '')
+    } else {
+      // 「未」のマスから開いた時は、服用済みを勝手に選ばない（渡せたか・不在かを職員が選ぶ）
+      setStatus(null)
+      setNote('')
+    }
   }, [open, record])
 
-  const title = record === null ? '状態' : `${MED_SLOT_LABEL[record.slot]}の状態`
+  const title = record !== null ? `${MED_SLOT_LABEL[record.slot]}の状態` : newSlot !== null ? `${MED_SLOT_LABEL[newSlot]}の状態` : '状態'
   return (
     <ModalShell open={open} label={title} onClose={onCancel} initialFocus={firstRef} narrow>
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
@@ -1257,6 +1289,11 @@ function StatusDialog({ open, record, name, locked, onCancel, onSave, onDelete }
           </p>
         ) : record !== null && record.created_at !== null ? (
           <p className="mt-1 text-sm text-ink2">記録した時刻 {fmtClock(record.created_at)}</p>
+        ) : isNew ? (
+          <p className="mt-1 text-sm text-warn">
+            <span aria-hidden="true">▲ </span>
+            記録がありません（自動で入らなかった方です）。状態を選んで保存してください（外泊・入院などは「不在」）。
+          </p>
         ) : null}
         <div role="group" aria-label="状態" className="mt-3 grid grid-cols-1 gap-gap">
           {MED_STATUSES.map((s, i) => {
@@ -1282,7 +1319,7 @@ function StatusDialog({ open, record, name, locked, onCancel, onSave, onDelete }
             )
           })}
         </div>
-        {isIncidentStatus(status) ? (
+        {status !== null && isIncidentStatus(status) ? (
           <p className="mt-2 text-sm font-bold text-danger">
             <span aria-hidden="true">▲ </span>
             {MSG_INCIDENT}
@@ -1300,21 +1337,25 @@ function StatusDialog({ open, record, name, locked, onCancel, onSave, onDelete }
         />
       </div>
       <div className="flex flex-wrap justify-end gap-gap border-t border-border p-4">
-        <button
-          type="button"
-          onClick={onDelete}
-          disabled={locked}
-          className="mr-auto min-h-tap rounded border border-danger px-4 text-base text-danger disabled:border-border disabled:text-ink3"
-        >
-          取り消す
-        </button>
+        {isNew ? null : (
+          <button
+            type="button"
+            onClick={onDelete}
+            disabled={locked}
+            className="mr-auto min-h-tap rounded border border-danger px-4 text-base text-danger disabled:border-border disabled:text-ink3"
+          >
+            取り消す
+          </button>
+        )}
         <button type="button" onClick={onCancel} className="min-h-tap rounded border border-border-strong px-4 text-base text-ink">
           やめる
         </button>
         <button
           type="button"
-          onClick={() => onSave(status, note)}
-          disabled={locked}
+          onClick={() => {
+            if (status !== null) onSave(status, note)
+          }}
+          disabled={locked || status === null}
           className="min-h-tap rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink disabled:opacity-60"
         >
           保存する

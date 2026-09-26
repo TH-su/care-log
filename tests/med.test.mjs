@@ -220,7 +220,7 @@ if (M === null) {
       assert.deepEqual(Object.values(off[0].cells).map((c) => c.kind), ['open', 'record', 'open', 'open'])
       assert.deepEqual(M.countMedDay(off), { missing: 0, incident: 1, recorded: 1 })
       assert.equal(M.countMedDay(build(true)).missing, 3)
-      assert.equal(M.tapActionOf(off[0].cells.morning, false), 'insert', '空欄のままでも押せば記録できる')
+      assert.equal(M.tapActionOf(off[0].cells.morning, false), 'insert', '空欄のまま（「未」でない）なら従来どおり1回で記録')
     })
 
     it('別の日の記録は混ぜない', () => {
@@ -230,9 +230,9 @@ if (M === null) {
   })
 
   describe('マスを押した時の動き・状態の遷移（tapActionOf・statusChoicesFor・isIncidentStatus）', () => {
-    it('空欄と「未」は1回押すと記録（insert）・記録済みは小窓（dialog）・「—」は押せない', () => {
+    it('空欄は1回押すと記録（insert）・「未」は状態の小窓で選ぶ（choose・チーフ承認）・記録済みは小窓（dialog）・「—」は押せない', () => {
       assert.equal(M.tapActionOf({ kind: 'open' }, false), 'insert')
-      assert.equal(M.tapActionOf({ kind: 'missing' }, false), 'insert')
+      assert.equal(M.tapActionOf({ kind: 'missing' }, false), 'choose')
       assert.equal(M.tapActionOf({ kind: 'record', record: rec(1, 1, '2026-09-01', 'morning') }, false), 'dialog')
       assert.equal(M.tapActionOf({ kind: 'none' }, false), 'none')
     })
@@ -399,7 +399,8 @@ if (M === null) {
       assert.deepEqual(k(at(day, H(18, 35))), { morning: 'missing', noon: 'missing', evening: 'missing', bedtime: 'open' })
       assert.deepEqual(k(at(day, H(23, 0))), { morning: 'missing', noon: 'missing', evening: 'missing', bedtime: 'missing' }, '眠前は締め 23:00')
       assert.deepEqual(k(at('2026-09-20', H(6, 0))), { morning: 'missing', noon: 'missing', evening: 'missing', bedtime: 'missing' }, '過去の日')
-      assert.equal(M.tapActionOf(at(day, H(23, 30)).morning, false), 'insert', '「未」を押せば記録できる')
+      assert.equal(M.tapActionOf(at(day, H(23, 30)).morning, false), 'choose', '「未」を押すと状態の小窓（服用済みで即記録しない）')
+      assert.equal(M.tapActionOf(at(day, H(9, 4)).morning, false), 'insert', 'まだ時刻前の空欄は従来どおり1回で服用済み')
       // 解禁前・記録を始める前は、自動の時間帯も「未」を付けない（従来の missingAllowed のまま）
       const off = M.buildMedDayRows({ order: [1], slotsByResident: slotsBy, records: [], day, today: day, nowMin: H(23, 30), missingAllowed: false })
       assert.equal(M.countMedDay(off).missing, 0)
@@ -1320,6 +1321,9 @@ describe('★自動チェック（0015_auto_check.sql）の配線（静的検査
     const med = read('../src/pages/MedRecordPage.tsx')
     assert.match(med, /\{fmtMedAutoTimes\(\)\} に自動で済みになります（例外は押して変更）。自動で入らなかった方（外泊・入院など）は『不在』等を押してください/)
     assert.match(med, /（自動）/)
+    // 「未」のマスは状態の小窓（新しい記録）を開く・まだ時刻前の空欄は1回で服用済み
+    assert.match(med, /else if \(action === 'choose'\) setNewFor\(\{ residentId: row\.residentId, slot \}\)/)
+    assert.match(med, /if \(action === 'insert'\) void recordNew\(row\.residentId, slot\)/)
     const bath = read('../src/pages/BathRecordPage.tsx')
     assert.match(bath, /\{BATH_AUTO_TIME\} に予定者は自動で全身浴になります。入浴しなかった方はチェックを外してください/)
     assert.match(bath, /チェックを外す/)

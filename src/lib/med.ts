@@ -263,11 +263,14 @@ export function countMedDay(rows: MedDayRow[]): { missing: number; incident: num
  * マスを押した時の動き。
  * ・押せない（none・封鎖中・未送信の記録がある・保存中）… 'none'
  * ・記録がある … 'dialog'（状態の小窓）
- * ・未記録（空欄・「未」）… 'insert'（「服用済み」で記録する）
+ * ・「未」（自動の時刻＋15分・締めを過ぎても記録なし）… 'choose'（服用済みで即記録せず、状態の小窓を開いて選ぶ。
+ *   自動で入らなかった＝外泊・入院などの可能性があるため・2026-09-27 チーフ承認）
+ * ・まだ時刻前の空欄 … 'insert'（従来どおり1回で「服用済み」で記録する）
  */
-export function tapActionOf(cell: MedCell, blocked: boolean): 'none' | 'dialog' | 'insert' {
+export function tapActionOf(cell: MedCell, blocked: boolean): 'none' | 'dialog' | 'choose' | 'insert' {
   if (blocked || cell.kind === 'none') return 'none'
   if (cell.kind === 'record') return 'dialog'
+  if (cell.kind === 'missing') return 'choose'
   return 'insert'
 }
 
