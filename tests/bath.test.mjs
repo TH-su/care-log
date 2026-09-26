@@ -166,10 +166,19 @@ if (B === null) {
       assert.equal(rows.length, 1)
       assert.equal(rows[0].record.id, 12)
     })
-    it('件数: 予定＝予定のある人／記録済み＝記録のある人（予定外も含む）／未記録＝予定があって記録が無い人', () => {
-      const rows = B.buildBathDayRows(plan, [rec(10, 1, '2026-09-21', 'full'), rec(11, 3, '2026-09-21', 'partial')], [4], order)
-      assert.deepEqual(B.countBathDay(rows), { planned: 2, recorded: 2, unrecorded: 1 })
+    it('件数: 予定＝予定のある人（入院中を除く）／記録済み＝記録のある人（予定外も含む）／未記録＝予定があって記録が無い人（入院中を除く）', () => {
+      // 利用者1（予定・記録なし）・利用者2（予定・入院中・記録なし）・利用者3（予定外・記録あり）・利用者4（予定外に足した）
+      const rows = B.buildBathDayRows(plan, [rec(11, 3, '2026-09-21', 'partial')], [4], order)
+      assert.deepEqual(B.countBathDay(rows), { planned: 1, recorded: 1, unrecorded: 1 })
       assert.deepEqual(B.countBathDay([]), { planned: 0, recorded: 0, unrecorded: 0 })
+    })
+    it('★入院中の方は予定があっても「未記録」に数えない（チーフ裁定 2026-09-26）。記録があれば記録済みに数える', () => {
+      const rows = B.buildBathDayRows(plan, [], [], order)
+      const byId = Object.fromEntries(rows.map((r) => [r.residentId, r]))
+      assert.equal(B.isUnrecorded(byId[1]), true)
+      assert.equal(B.isUnrecorded(byId[2]), false, '入院中を未記録にした')
+      const withRec = B.buildBathDayRows(plan, [rec(12, 2, '2026-09-21', 'cancel')], [], order)
+      assert.deepEqual(B.countBathDay(withRec), { planned: 1, recorded: 1, unrecorded: 1 })
     })
   })
 
@@ -227,7 +236,32 @@ if (B === null) {
       )
       assert.equal(t.rows[0].cells.includes('missing'), false)
     })
-    it('在籍の名簿に居ない方の記録は行を作らず hiddenRecords に数える（無言で消さない）・月外の記録は数えない', () => {
+    it('★退居された方: その月に記録があれば行に出し（retired）、「未」は付けない。予定だけなら出さない（チーフ裁定 2026-09-26）', () => {
+      const plannedWithRetired = new Map([
+        [0, new Set([1, 3])], // 月曜に利用者1と、退居された利用者3（写しの遅れ等で予定に残っていても）
+      ])
+      const t = B.aggregateBathMonth({
+        ...base,
+        order: [2, 1, 3, 4],
+        retiredIds: new Set([3, 4]),
+        records: [rec(1, 3, '2026-09-07', 'shower')],
+        plannedByWeekday: plannedWithRetired,
+      })
+      assert.deepEqual(
+        t.rows.map((r) => [r.residentId, r.retired]),
+        [
+          [1, false],
+          [3, true],
+        ],
+        '退居・記録なし（4）を出した、または退居・記録あり（3）を出していない',
+      )
+      const r3 = t.rows.find((r) => r.residentId === 3)
+      assert.equal(r3.cells[6], 'shower')
+      assert.equal(r3.cells.includes('missing'), false, '退居された方に「未」を付けた')
+      assert.deepEqual(r3.totals, { billable: 1, partial: 0, cancel: 0, missing: 0 })
+      assert.equal(t.hiddenRecords, 0)
+    })
+    it('名簿のどこにも居ない方の記録は行を作らず hiddenRecords に数える（無言で消さない）・月外の記録は数えない', () => {
       const t = B.aggregateBathMonth({
         ...base,
         records: [rec(1, 99, '2026-09-07', 'full'), rec(2, 1, '2026-08-31', 'full')],

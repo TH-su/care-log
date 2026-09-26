@@ -1,6 +1,7 @@
 // 入浴（デイ）の記録（記録ハブ →「入浴（デイ）」／ルート /record/bath）。2026-09-26 追加。
 //
 // 一覧＝その日の入浴予定者（週間計画の写し・RPC daycare_bath_plan）＋その日に記録がある人＋画面で足した予定外の人。
+// 入院中の方は予定があっても「未記録」に数えず「入院」と出す（件数の「予定」からも除く・2026-09-26 チーフ裁定）。
 // 並びは居室順。各行で［全身浴］［シャワー浴］［部分浴・清拭］［中止］を押すと記録する（押し直すと修正、取り消しは確認つき）。
 //
 // 規律:
@@ -32,7 +33,7 @@ import {
 } from '../lib/db'
 import type { BathPlanResult } from '../lib/db'
 import { resolveActor, touchActivity } from '../lib/actor'
-import { buildBathDayRows, countBathDay, fmtCopyStamp, validateBathInput } from '../lib/bath'
+import { buildBathDayRows, countBathDay, fmtCopyStamp, isUnrecorded, validateBathInput } from '../lib/bath'
 import type { BathDayRow } from '../lib/bath'
 import { fmtDayLabel, fmtTimeHM, todayIso } from '../lib/format'
 import {
@@ -643,7 +644,8 @@ function BathRow({
   // 表示する区分: 保存済み → 送信待ちにした入力 の順
   const shown: BathResult | null = rec?.result ?? pending?.result ?? null
   const shownReason = rec?.result === 'cancel' ? rec.cancel_reason : pending?.result === 'cancel' ? pending.cancel_reason : null
-  const unrecorded = rec === null && pending === null && row.planned
+  // 入院中の方は予定があっても「未」にしない（入浴できないため・「入院」と出す）
+  const unrecorded = pending === null && isUnrecorded(row)
   const noteChanged = rec !== null && note !== (rec.note ?? '')
   const disabled = locked || busy
   const name = resident?.name ?? `利用者番号 ${row.residentId}`
@@ -666,7 +668,7 @@ function BathRow({
           <span className="rounded-full border border-border px-2 text-sm text-ink2">予定外</span>
         )}
         {row.hospitalized ? (
-          <span className="rounded-full border border-warn bg-warn-bg px-2 text-sm font-bold text-warn">入院中</span>
+          <span className="rounded-full border border-border-strong bg-surface2 px-2 text-sm font-bold text-ink">入院</span>
         ) : null}
         {unrecorded ? (
           <span className="rounded-full border border-warn bg-warn-bg px-2 text-sm font-bold text-warn">

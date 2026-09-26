@@ -1,11 +1,12 @@
 // デイの入浴 月次表（ルート /bath/month・「その他」から）。2026-09-26 追加。
 //
-// 行＝在籍の入居者のうち、その月に入浴の予定か記録がある人（居室順）。列＝その月の1日〜月末。
+// 行＝在籍の入居者のうち、その月に入浴の予定か記録がある人（居室順）。退居された方も、その月に記録があれば行に出す
+//   （加算の根拠を紙に残すため。行に「退居」と表示。予定だけで記録の無い退居者は出さない・2026-09-26 チーフ裁定）。列＝その月の1日〜月末。
 // マス＝全（全身浴）／シ（シャワー浴）／部（部分浴・清拭）／中（中止）／未（予定があったのに記録なし）。
 // 右端に月合計（全＋シ＝入浴介助加算の対象の見込み、部、中）。A4 横1枚で印刷できる（PrintArea）。
 //
 // 規律:
-// - 取得は db.ts の fetchResidents / fetchBathMonth / fetchBathPlan のみ（月の範囲でだけ引く）
+// - 取得は db.ts の fetchAllResidents / fetchBathMonth / fetchBathPlan のみ（月の範囲でだけ引く）
 // - 予定は週間計画の写しの「曜日」だけで決まる（毎週同じ）。過去の月にも現在の予定を当てはめるので、
 //   「未」は目安であることを画面と紙の両方に書く
 // - localStorage に置くのは表示中の月（cl_bathMonth・'yyyy-MM' だけ）。読む時は形式と範囲を照合する（原則11）
@@ -14,7 +15,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { DbError, fetchBathMonth, fetchBathPlan, fetchResidents, subscribeBathChanges } from '../lib/db'
+import { DbError, fetchAllResidents, fetchBathMonth, fetchBathPlan, subscribeBathChanges } from '../lib/db'
 import {
   aggregateBathMonth,
   BATH_MONTH_MISSING_MARK,
@@ -118,7 +119,9 @@ export function BathMonthPage() {
     setData((d) => (d !== null && d.month === month ? d : null))
     void (async () => {
       try {
-        const residents = await fetchResidents()
+        // 退居された方も含む全員（居室順）。予定の突き合わせは在籍の方だけで行う
+        const residents = await fetchAllResidents()
+        const active = residents.filter((r) => r.active)
         const perWeekday = firstDayPerWeekday(month)
         const [records, plans] = await Promise.all([
           fetchBathMonth(month),
@@ -126,7 +129,7 @@ export function BathMonthPage() {
           Promise.all(
             Array.from(perWeekday.entries()).map(async ([w, day]) => {
               try {
-                return { w, plan: await fetchBathPlan(day, residents) }
+                return { w, plan: await fetchBathPlan(day, active) }
               } catch {
                 return { w, plan: null }
               }
@@ -177,6 +180,7 @@ export function BathMonthPage() {
     return aggregateBathMonth({
       monthKey: month,
       order: data.residents.map((r) => r.id),
+      retiredIds: new Set(data.residents.filter((r) => !r.active).map((r) => r.id)),
       records: data.records,
       plannedByWeekday: data.planned,
       today: todayIso(),
@@ -266,7 +270,7 @@ export function BathMonthPage() {
             {table.hiddenRecords > 0 ? (
               <p className="text-sm text-warn">
                 <span aria-hidden="true">▲ </span>
-                在籍の名簿に居ない方の記録が {table.hiddenRecords}件あり、この表には出していません（退居された方など）。
+                利用者の名簿に居ない方の記録が {table.hiddenRecords}件あり、この表には出していません（管理者に連絡してください）。
               </p>
             ) : null}
           </div>
@@ -356,6 +360,7 @@ function MonthTable({ table, residentById, variant }: MonthTableProps) {
                 <span className="tabular">{r?.room ?? '—'}</span>
                 {'　'}
                 <span className={screen ? 'font-bold' : ''}>{name}</span>
+                {row.retired ? <span className={screen ? 'text-sm text-ink2' : ''}>（退居）</span> : null}
               </th>
               {row.cells.map((m, i) => (
                 <td

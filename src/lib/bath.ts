@@ -242,19 +242,27 @@ export function buildBathDayRows(
 }
 
 /**
+ * 未記録（「未」）として扱う行か。予定があって記録が無い人。
+ * ただし入院中の方は予定があっても入浴できないので「未」にしない（画面は「入院」と出す・2026-09-26 チーフ裁定）
+ */
+export function isUnrecorded(row: BathDayRow): boolean {
+  return row.planned && !row.hospitalized && row.record === null
+}
+
+/**
  * 上部の件数。「予定 N人・記録済み N・未記録 N」
- * ・予定     … その日の曜日に入浴の予定がある人
- * ・記録済み … その日に記録がある人（予定外の人の記録も含む）
- * ・未記録   … 予定があるのに記録が無い人（入院中の方も予定があれば数える＝記録で「中止」を付けて消す）
+ * ・予定     … その日の曜日に入浴の予定がある人（入院中の方は除く＝入浴できないため）
+ * ・記録済み … その日に記録がある人（予定外・入院中の方の記録も含む）
+ * ・未記録   … 予定があるのに記録が無い人（入院中の方は除く）
  */
 export function countBathDay(rows: BathDayRow[]): { planned: number; recorded: number; unrecorded: number } {
   let planned = 0
   let recorded = 0
   let unrecorded = 0
   for (const r of rows) {
-    if (r.planned) planned += 1
+    if (r.planned && !r.hospitalized) planned += 1
     if (r.record !== null) recorded += 1
-    else if (r.planned) unrecorded += 1
+    if (isUnrecorded(r)) unrecorded += 1
   }
   return { planned, recorded, unrecorded }
 }
@@ -275,6 +283,8 @@ export interface BathMonthTotals {
 
 export interface BathMonthRow {
   residentId: number
+  /** 退居された方（その月に記録があるので行に出す。「未」は付けない） */
+  retired: boolean
   /** 月の日付と同じ並び（monthDays の順） */
   cells: BathMonthMark[]
   totals: BathMonthTotals
@@ -283,21 +293,25 @@ export interface BathMonthRow {
 export interface BathMonthTable {
   days: string[]
   rows: BathMonthRow[]
-  /** 表に出していない記録の件数（在籍の名簿に居ない方の記録）。0 でなければ画面が知らせる */
+  /** 表に出していない記録の件数（名簿のどこにも居ない方の記録）。0 でなければ画面が知らせる */
   hiddenRecords: number
 }
 
 /**
  * 月次表を組む。
- * ・行 … 在籍の名簿（order＝居室順に並んだ在籍の利用者ID）のうち、その月に予定か記録がある人
+ * ・行 … 名簿（order＝居室順に並んだ利用者ID。退居された方も含めてよい）のうち、
+ *        在籍の方はその月に予定か記録がある人、退居された方（retiredIds）はその月に記録がある人だけ
+ *        （加算の根拠を紙に残すため記録は出す。予定だけの退居者は出さない・2026-09-26 チーフ裁定）
  * ・列 … その月の1日〜月末
- * ・マス … 記録があれば区分。記録が無く、その日の曜日に予定があり、その日が today 以前なら 'missing'（「未」）
+ * ・マス … 記録があれば区分。記録が無く、その日の曜日に予定があり、その日が today 以前なら 'missing'（「未」）。
+ *          退居された方の行には「未」を付けない
  * plannedByWeekday … 曜日番号（0=月 … 6=日）→ 予定がある利用者ID。null は「予定を取得できなかった」（「未」を出さない）
- * 名簿に居ない方の記録は行を作らず hiddenRecords に数える（無言で消さない）。
+ * 名簿のどこにも居ない方の記録は行を作らず hiddenRecords に数える（無言で消さない）。
  */
 export function aggregateBathMonth(p: {
   monthKey: string
   order: number[]
+  retiredIds?: ReadonlySet<number>
   records: BathRecord[]
   plannedByWeekday: Map<number, Set<number>> | null
   today: string
@@ -324,8 +338,9 @@ export function aggregateBathMonth(p: {
   }
 
   const weekdays = days.map((d) => isoWeekdayIndex(d))
+  const retired = p.retiredIds ?? new Set<number>()
   const plannedOn = (id: number, i: number): boolean => {
-    if (p.plannedByWeekday === null) return false
+    if (p.plannedByWeekday === null || retired.has(id)) return false
     const w = weekdays[i]
     return w !== null && (p.plannedByWeekday.get(w)?.has(id) ?? false)
   }
@@ -353,7 +368,7 @@ export function aggregateBathMonth(p: {
       }
       return null
     })
-    rows.push({ residentId: id, cells, totals })
+    rows.push({ residentId: id, retired: retired.has(id), cells, totals })
   }
   return { days, rows, hiddenRecords }
 }
