@@ -10,6 +10,12 @@
 import { BATH_CANCEL_REASONS, BATH_RESULTS } from './types.ts'
 import type { BathCancelReason, BathRecord, BathResult, Resident } from './types.ts'
 
+/**
+ * 予定者が自動で「全身浴」になる時刻（日本時間・0015_auto_check.sql の cron と同じ。2026-09-27 代表指示）。
+ * 入浴しなかった方は職員が「チェックを外す」（中止＋理由）。画面の注記はこの値から作る（時刻を直書きしない）
+ */
+export const BATH_AUTO_TIME = '12:30'
+
 // ── 日付・月 ────────────────────────────────────────────────────────────────
 
 const DAY_RE = /^(\d{4})-(\d{2})-(\d{2})$/
@@ -250,6 +256,14 @@ export function isUnrecorded(row: BathDayRow): boolean {
 }
 
 /**
+ * 「チェックを外す」を出す記録か（2026-09-27 代表指示）。自動で入った記録（auto）にだけ出す。
+ * 押すと中止の理由を選び、区分を「中止」にする（行は消さない＝加算の根拠として入浴しなかった理由を残す）
+ */
+export function canUncheckAuto(record: BathRecord | null): boolean {
+  return record !== null && record.auto === true
+}
+
+/**
  * 上部の件数。「予定 N人・記録済み N・未記録 N」
  * ・予定     … その日の曜日に入浴の予定がある人（入院中の方は除く＝入浴できないため）
  * ・記録済み … その日に記録がある人（予定外・入院中の方の記録も含む）
@@ -289,6 +303,8 @@ export interface BathMonthRow {
   hospitalized: boolean
   /** 月の日付と同じ並び（monthDays の順） */
   cells: BathMonthMark[]
+  /** cells と同じ並び。そのマスの記録が自動で入ったものか（記号に「*」を添える。記録の無いマスは false） */
+  autos: boolean[]
   totals: BathMonthTotals
 }
 
@@ -305,7 +321,7 @@ export interface BathMonthTable {
  *        在籍の方はその月に予定か記録がある人、退居された方（retiredIds）はその月に記録がある人だけ
  *        （加算の根拠を紙に残すため記録は出す。予定だけの退居者は出さない・2026-09-26 チーフ裁定）
  * ・列 … その月の1日〜月末
- * ・マス … 記録があれば区分。記録が無く、その日の曜日に予定があり、その日が today 以前なら 'missing'（「未」）。
+ * ・マス … 記録があれば区分（自動で入った記録は autos が true）。記録が無く、その日の曜日に予定があり、その日が today 以前なら 'missing'（「未」）。
  *          ただし「未」は次の全部を満たす時だけ（2026-09-26 レビュー M1・M2）:
  *            ・その日が startDay（施設全体で最初の入浴記録の日）以降。startDay が null（記録が1件も無い）なら付けない
  *              （startDay 以降なら、その月の記録が0件でも予定日には付ける＝記録の付け忘れの月を見逃さない）
@@ -380,7 +396,8 @@ export function aggregateBathMonth(p: {
       }
       return null
     })
-    rows.push({ residentId: id, retired: retired.has(id), hospitalized: hospitalized.has(id), cells, totals })
+    const autos = days.map((_, i) => recs?.get(i)?.auto === true)
+    rows.push({ residentId: id, retired: retired.has(id), hospitalized: hospitalized.has(id), cells, autos, totals })
   }
   return { days, rows, hiddenRecords }
 }

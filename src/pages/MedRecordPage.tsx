@@ -11,6 +11,10 @@
 //     「事故報告書（紙）に記録してください」を出す（2026-09-26 チーフ裁定 M2）
 //   ・締め時刻（med.ts の MED_DEADLINES）を過ぎた今日の未記録と、過去の日の未記録は「未」（赤枠＋文字）。
 //     今日の締め前の未記録は空欄。今日を表示している間は 60 秒ごとに締めを判定し直す
+//   ・朝・昼・夕は自動の時刻（med.ts の MED_AUTO_TIMES＝8:50・13:00・18:20）に DB 側（0015 の cron）が「服用済み」で記録する
+//     （2026-09-27 代表指示）。自動の記録は「済（自動）」（色＋文字）。押すと状態の小窓で直せ、直すと手動の記録（記入者つき）になる。
+//     自動の時間帯には「未」を付けない（自動の時刻を過ぎても記録が無い＝入院・外泊・未設定などで自動にしなかった人は空欄のまま）。
+//     眠前は従来どおり。自動の記録は端末では作らない（この画面は表示と直すだけ）
 //   ・入院中かどうかは care-log の名簿（residents）が持っていないので、入院中の方のマスも通常どおり（「不在」で記録する）
 // 下に頓服の区画（その日の頓服の一覧・＋頓服を記録・効果は後から追記）。
 // その人・その時間帯に未送信の記録（この端末の送信待ち・送信中）があるマスは押せない（入浴と同じ方式。送信待ちは書き換えない）。
@@ -51,9 +55,12 @@ import {
   clockInputValue,
   countMedDay,
   fmtClock,
+  fmtMedAutoTimes,
   isIncidentStatus,
   localDateTimeIso,
   medMissingAllowed,
+  MED_AUTO_SLOTS,
+  MED_AUTO_TIMES,
   MED_DEADLINES,
   MED_RECHECK_MS,
   minutesOfDay,
@@ -771,10 +778,13 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
             </span>
           ) : null}
         </p>
-        <p className="mt-1 text-sm text-ink2">
+        <p className="mt-1 text-sm font-bold text-ink">
           <span aria-hidden="true">ⓘ </span>
+          {fmtMedAutoTimes()} に自動で済みになります（例外は押して変更）
+        </p>
+        <p className="mt-1 text-sm text-ink2">
           空いているマスを押すと「服用済み」で記録します。記録済みのマスを押すと状態を直せます。
-          「未」は締め（{MED_SLOTS.map((s) => `${MED_SLOT_LABEL[s]}${MED_DEADLINES[s]}`).join('・')}）を過ぎても記録が無いマスです。
+          「未」は締め（{MED_SLOTS.filter((s) => !MED_AUTO_SLOTS.includes(s)).map((s) => `${MED_SLOT_LABEL[s]}${MED_DEADLINES[s]}`).join('・')}）を過ぎても記録が無いマスです。
         </p>
         <p className="mt-1 text-sm">
           <Link to="/med/month" className="inline-flex min-h-tap items-center text-link">
@@ -827,7 +837,7 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
               <div className="relative overflow-x-auto rounded-lg border border-border bg-surface">
                 <table className="w-full border-collapse">
                   <caption className="sr-only">
-                    与薬の実施（行＝入居者、列＝時間帯。— は服薬の設定なし、未は締めを過ぎても記録なし）
+                    与薬の実施（行＝入居者、列＝時間帯。— は服薬の設定なし、未は締めを過ぎても記録なし、自動は自動で入った記録）
                   </caption>
                   <thead>
                     <tr>
@@ -1021,10 +1031,12 @@ function MedCellButton({ name, slot, cell, pendingStatus, pending, busy, locked,
   const disabled = locked || busy || pending
   const incident = status !== null && isIncidentStatus(status)
   const missing = status === null && cell.kind === 'missing'
-  const time = pendingStatus === null && cell.kind === 'record' ? fmtClock(cell.record.created_at) : ''
+  // 自動で入った記録（送信待ちにした入力があればそちらを見せる＝直した後は自動でない）
+  const auto = pendingStatus === null && cell.kind === 'record' && cell.record.auto
+  const time = pendingStatus === null && cell.kind === 'record' && !auto ? fmtClock(cell.record.created_at) : ''
   const srText =
     status !== null
-      ? `${name} ${label} ${MED_STATUS_LABEL[status]}${time ? ` ${time}` : ''}${pending ? '（未送信）' : ''}`
+      ? `${name} ${label} ${MED_STATUS_LABEL[status]}${auto ? '（自動）' : ''}${time ? ` ${time}` : ''}${pending ? '（未送信）' : ''}`
       : missing
         ? `${name} ${label} 未記録（締めを過ぎています）。押すと服用済みで記録`
         : `${name} ${label} 未記録。押すと服用済みで記録`
@@ -1032,7 +1044,9 @@ function MedCellButton({ name, slot, cell, pendingStatus, pending, busy, locked,
     ? 'border-2 border-danger bg-danger-bg text-danger font-bold'
     : missing
       ? 'border-2 border-danger bg-surface text-danger font-bold'
-      : status === 'taken'
+      : auto
+        ? 'border border-info bg-info-bg text-ink font-bold'
+        : status === 'taken'
         ? 'border border-ok bg-ok-bg text-ink font-bold'
         : status !== null
           ? 'border border-warn bg-warn-bg text-ink font-bold'
@@ -1047,6 +1061,12 @@ function MedCellButton({ name, slot, cell, pendingStatus, pending, busy, locked,
       className={`inline-flex min-h-tap w-full min-w-tap flex-col items-center justify-center rounded px-1 text-base disabled:opacity-60 ${tone}`}
     >
       <span aria-hidden="true">{status !== null ? MED_STATUS_MARK[status] : missing ? '未' : ''}</span>
+      {auto ? (
+        // 文字200%・狭い幅でも「（自動）」を1字ずつ折り返さない（はみ出す分は表の枠の中で横に送る）
+        <span aria-hidden="true" className="whitespace-nowrap text-xs font-normal text-info">
+          （自動）
+        </span>
+      ) : null}
       {time ? (
         <span aria-hidden="true" className="tabular text-xs font-normal text-ink2">
           {time}
@@ -1228,7 +1248,12 @@ function StatusDialog({ open, record, name, locked, onCancel, onSave, onDelete }
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         <h2 className="text-lg font-bold text-ink">{title}</h2>
         {name ? <p className="mt-1 text-sm text-ink2">{name}</p> : null}
-        {record !== null && record.created_at !== null ? (
+        {record !== null && record.auto ? (
+          <p className="mt-1 text-sm text-info">
+            自動で「服用済み」になった記録です（{record.slot !== 'prn' ? (MED_AUTO_TIMES[record.slot] ?? '') : ''}）。
+            状態・備考を変えると、手動の記録（記入者つき）になります。
+          </p>
+        ) : record !== null && record.created_at !== null ? (
           <p className="mt-1 text-sm text-ink2">記録した時刻 {fmtClock(record.created_at)}</p>
         ) : null}
         <div role="group" aria-label="状態" className="mt-3 grid grid-cols-1 gap-gap">

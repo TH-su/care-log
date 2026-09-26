@@ -130,6 +130,7 @@ const TABLE_LABEL: Record<string, Record<string, string>> = {
     result: '区分',
     cancel_reason: '中止の理由',
     note: '備考',
+    auto: '記録の方法',
   },
   med_slots: {
     slots: '服薬の時間帯',
@@ -144,6 +145,7 @@ const TABLE_LABEL: Record<string, Record<string, string>> = {
     prn_reason: '頓服の理由',
     prn_effect: '頓服の効果',
     note: '備考',
+    auto: '記録の方法',
   },
   incidents: {
     kind: '区分',
@@ -282,6 +284,10 @@ export function fmtHistoryValue(
   if (table === 'bath_records' && column === 'result') return BATH_RESULT_LABEL[v as BathResult] ?? String(v)
   if (table === 'bath_records' && column === 'cancel_reason') {
     return BATH_CANCEL_REASON_LABEL[v as BathCancelReason] ?? String(v)
+  }
+  // 自動で入った記録の印（0015）。true＝自動（cron が作った）／false＝手動（職員が記録・直した）
+  if ((table === 'bath_records' || table === 'med_admin') && column === 'auto' && typeof v === 'boolean') {
+    return v ? '自動' : '手動'
   }
   if (table === 'med_admin' && column === 'slot') return MED_SLOT_LABEL[v as MedAdminSlot] ?? String(v)
   if (table === 'med_admin' && column === 'status') return MED_STATUS_LABEL[v as MedStatus] ?? String(v)

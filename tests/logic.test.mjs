@@ -2778,6 +2778,86 @@ function registerDbTests() {
     })
   })
 
+  // ── 自動の入浴記録（0015・2026-09-27 代表指示）: 自動の記録は DB（cron）だけが作る。画面は表示と直すだけ ──
+  describe('★入浴記録（db.ts）: 自動の記録（auto）の読み取りと「チェックを外す」', () => {
+    afterEach(async () => {
+      await drainRows()
+    })
+
+    it('取得の列に auto があり、auto=true の行は自動・無い／true 以外の値は手動として読む', async () => {
+      const srv = bathServer()
+      srv.db.rows.push(
+        { id: 1, ...bathInput({ recorded_by: null }), rev: 1, deleted_at: null, auto: true },
+        { id: 2, ...bathInput({ resident_id: 2 }), rev: 1, deleted_at: null, auto: false },
+        { id: 3, ...bathInput({ resident_id: 3 }), rev: 1, deleted_at: null },
+        { id: 4, ...bathInput({ resident_id: 4 }), rev: 1, deleted_at: null, auto: 'true' },
+      )
+      DB.__testHooks.setClient(srv.client)
+      const rows = await DB.fetchBathDay('2026-09-01')
+      assert.deepEqual(rows.map((r) => [r.id, r.auto]), [[1, true], [2, false], [3, false], [4, false]])
+      const sel = srv.calls.find((q) => q.table === 'bath_records' && q.action === 'select')
+      assert.ok(sel.cols.split(',').includes('auto'), '取得の列に auto が無い')
+    })
+
+    it('★チェックを外す＝自動の全身浴を「中止＋理由」に update（行は消さない）。auto=false・記入者＝直した職員を一緒に送る', async () => {
+      const srv = bathServer()
+      srv.db.rows.push({ id: 7, ...bathInput({ recorded_by: null }), rev: 1, deleted_at: null, auto: true })
+      DB.__testHooks.setClient(srv.client)
+      DB.setEditor(4)
+      const [cur] = await DB.fetchBathDay('2026-09-01')
+      assert.equal(cur.auto, true)
+      const next = await DB.updateBath(cur, { result: 'cancel', cancel_reason: 'refusal', note: null }, { editedBy: 5 })
+      assert.equal(next.result, 'cancel')
+      assert.equal(next.cancel_reason, 'refusal')
+      assert.equal(next.auto, false)
+      assert.equal(next.recorded_by, 5)
+      const up = srv.calls.filter((q) => q.table === 'bath_records' && q.action === 'update').at(-1)
+      assert.deepEqual(up.payload, { result: 'cancel', cancel_reason: 'refusal', note: null, auto: false, recorded_by: 5, edited_by: 5 })
+      assert.deepEqual(eqOf(up), { id: 7, rev: 1 })
+      assert.equal(srv.db.rows.length, 1, '行が増えた・消えた')
+      assert.equal(srv.db.rows[0].deleted_at, null, '行を消した')
+      assert.equal(srv.calls.filter((q) => q.table === 'bath_records' && q.action === 'insert').length, 0, '端末が記録を作った')
+    })
+
+    it('シャワー浴への変更・備考だけの修正も auto=false になる。editedBy が無ければ端末の既定の操作者を記入者にする', async () => {
+      const srv = bathServer()
+      srv.db.rows.push(
+        { id: 8, ...bathInput({ recorded_by: null }), rev: 1, deleted_at: null, auto: true },
+        { id: 9, ...bathInput({ resident_id: 2, recorded_by: null }), rev: 1, deleted_at: null, auto: true },
+      )
+      DB.__testHooks.setClient(srv.client)
+      DB.setEditor(6)
+      const [a, b] = await DB.fetchBathDay('2026-09-01')
+      await DB.updateBath(a, { result: 'shower' })
+      await DB.updateBath(b, { note: 'メモ' })
+      const ups = srv.calls.filter((q) => q.table === 'bath_records' && q.action === 'update')
+      assert.deepEqual(ups[0].payload, { result: 'shower', cancel_reason: null, auto: false, recorded_by: 6, edited_by: 6 })
+      assert.deepEqual(ups[1].payload, { note: 'メモ', auto: false, recorded_by: 6, edited_by: 6 })
+    })
+
+    it('自動でない記録の修正は従来どおり（auto・recorded_by を送らない）', async () => {
+      const srv = bathServer()
+      DB.__testHooks.setClient(srv.client)
+      const first = await DB.insertBath(bathInput())
+      assert.equal(first.auto, false)
+      const ins = srv.calls.find((q) => q.table === 'bath_records' && q.action === 'insert')
+      assert.equal('auto' in ins.payload, false, '端末の記録に auto を付けた（既定の false に任せる）')
+      await DB.updateBath(first, { result: 'shower' }, { editedBy: 5 })
+      const up = srv.calls.filter((q) => q.table === 'bath_records' && q.action === 'update').at(-1)
+      assert.deepEqual(up.payload, { result: 'shower', cancel_reason: null, edited_by: 5 })
+    })
+
+    it('通信できない「チェックを外す」は update op として退避し、auto=false と記入者を持ったまま送る（送信待ちの経路は同じ）', async () => {
+      setQueueRaw(null)
+      DB.__testHooks.setClient(offline().client)
+      const cur = { id: 5, ...bathInput({ recorded_by: null }), rev: 3, auto: true }
+      assert.equal(await DB.updateBath(cur, { result: 'cancel', cancel_reason: 'condition', note: null }, { editedBy: 6 }), 'queued')
+      const op = storedQueue().ops[0]
+      assert.deepEqual([op.table, op.kind, op.rowId, op.rev], ['bath_records', 'update', 5, 3])
+      assert.deepEqual(op.payload, { result: 'cancel', cancel_reason: 'condition', note: null, auto: false, recorded_by: 6, edited_by: 6 })
+    })
+  })
+
 }
 
 function registerTests() {

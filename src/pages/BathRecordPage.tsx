@@ -6,6 +6,10 @@
 // （圏外で続けて押した2件目の追加が 23505 で止まるのを防ぐ。送信待ちそのものは書き換えない・2026-09-26 レビュー3巡目）。
 // 送信待ちの件数が減ったら、その日の記録を読み直して行を記録済みに戻す（自分の書込の通知は isSelfWrite で無視されるため）。
 // 並びは居室順。各行で［全身浴］［シャワー浴］［部分浴・清拭］［中止］を押すと記録する（押し直すと修正、取り消しは確認つき）。
+// 12:30（bath.ts の BATH_AUTO_TIME）に DB 側（0015 の cron）が予定者を「全身浴」で自動記録する（2026-09-27 代表指示）。
+// 自動の記録は「全身浴（自動）」と出し、［チェックを外す］で中止の理由を選んで「中止」にする（行は消さない＝加算の根拠として
+// 入浴しなかった理由を残す）。シャワー浴などへの変更も従来どおり。直すと手動の記録（記入者つき）になる。
+// 12:30 より前の今日は従来どおり「未記録」。自動の記録は端末では作らない（この画面は表示と直すだけ）。
 //
 // 規律:
 // - 取得・保存は db.ts の関数のみ（supabase を直呼びしない）
@@ -38,7 +42,15 @@ import {
 } from '../lib/db'
 import type { BathPlanResult } from '../lib/db'
 import { resolveActor, touchActivity } from '../lib/actor'
-import { buildBathDayRows, countBathDay, fmtCopyStamp, isUnrecorded, validateBathInput } from '../lib/bath'
+import {
+  BATH_AUTO_TIME,
+  buildBathDayRows,
+  canUncheckAuto,
+  countBathDay,
+  fmtCopyStamp,
+  isUnrecorded,
+  validateBathInput,
+} from '../lib/bath'
 import type { BathDayRow } from '../lib/bath'
 import { fmtDayLabel, fmtTimeHM, todayIso } from '../lib/format'
 import {
@@ -530,6 +542,10 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
             週間計画の予定のうち {plan.unmatched}件は、利用者の名簿と突き合わせられませんでした（設定タブのマスタ同期をお試しください）。
           </p>
         ) : null}
+        <p className="mt-1 text-sm font-bold text-ink">
+          <span aria-hidden="true">ⓘ </span>
+          {BATH_AUTO_TIME} に予定者は自動で全身浴になります。入浴しなかった方はチェックを外してください
+        </p>
         <p className="mt-1 text-sm text-ink2">※{PARTIAL_NOTE}</p>
         <p className="mt-1 text-sm">
           <Link to="/bath/month" className="inline-flex min-h-tap items-center text-link">
@@ -560,6 +576,7 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
                     if (row.record !== null) void save(row, row.record.result, row.record.cancel_reason, noteOf(row))
                   }}
                   onDelete={() => setDeleteFor(row.record)}
+                  onUncheck={() => setCancelFor(row.residentId)}
                   locked={locked}
                   rowPending={rowPending(row)}
                   busy={busy.has(row.residentId)}
@@ -615,6 +632,7 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
       <CancelDialog
         open={cancelRow !== null}
         name={cancelRow === null ? '' : (residentById.get(cancelRow.residentId)?.name ?? '')}
+        uncheck={cancelRow !== null && canUncheckAuto(cancelRow.record)}
         initialReason={cancelRow?.record?.result === 'cancel' ? cancelRow.record.cancel_reason : null}
         initialNote={cancelRow === null ? '' : noteOf(cancelRow)}
         onCancel={() => setCancelFor(null)}
@@ -660,6 +678,8 @@ interface BathRowProps {
   onResult: (r: BathResult) => void
   onSaveNote: () => void
   onDelete: () => void
+  /** 自動の記録の「チェックを外す」（中止の理由の小窓を開く） */
+  onUncheck: () => void
   locked: boolean
   /** 未送信の記録がある（区分ボタン・取り消しを押せない） */
   rowPending: boolean
@@ -677,6 +697,7 @@ function BathRow({
   onResult,
   onSaveNote,
   onDelete,
+  onUncheck,
   locked,
   rowPending,
   busy,
@@ -698,6 +719,8 @@ function BathRow({
         : null
   // 入院中の方は予定があっても「未」にしない（入浴できないため・「入院」と出す）
   const unrecorded = pending === null && isUnrecorded(row)
+  // 自動で入った記録（送信待ちにした入力があればそちらを見せる＝直した後は自動でない）
+  const auto = pending === null && canUncheckAuto(rec)
   const noteChanged = rec !== null && note !== (rec.note ?? '')
   // 未送信の記録がある行は区分ボタン・取り消しを押せない（備考の入力は残す）
   const disabled = locked || busy || rowPending
@@ -727,6 +750,10 @@ function BathRow({
           <span className="rounded-full border border-warn bg-warn-bg px-2 text-sm font-bold text-warn">
             未<span className="sr-only">記録</span>
           </span>
+        ) : auto ? (
+          <span className="rounded-full border border-info bg-info-bg px-2 text-sm font-bold text-info">
+            <span aria-hidden="true">✓ </span>自動で記録
+          </span>
         ) : rec !== null ? (
           <span className="text-sm font-bold text-ok">
             <span aria-hidden="true">✓ </span>記録済み
@@ -754,6 +781,7 @@ function BathRow({
               {/* ✓ は選んだ時だけ出す（場所取りの見えない ✓ を置くと、文字200%・狭い幅で文字が1字ずつ折り返す） */}
               {selected ? <span aria-hidden="true">✓ </span> : null}
               {BATH_RESULT_LABEL[r]}
+              {selected && auto ? '（自動）' : null}
             </button>
           )
         })}
@@ -794,6 +822,17 @@ function BathRow({
             className="min-h-tap rounded border border-primary bg-surface px-3 text-base font-bold text-primary disabled:border-border disabled:text-ink3"
           >
             備考を保存
+          </button>
+        ) : null}
+        {auto ? (
+          <button
+            type="button"
+            onClick={onUncheck}
+            disabled={disabled}
+            aria-describedby={reasonId}
+            className="min-h-tap rounded border border-warn bg-surface px-3 text-base font-bold text-warn disabled:border-border disabled:text-ink3"
+          >
+            チェックを外す
           </button>
         ) : null}
         {rec !== null ? (
@@ -839,13 +878,15 @@ function BathRow({
 interface CancelDialogProps {
   open: boolean
   name: string
+  /** 自動の記録の「チェックを外す」から開いた（入浴しなかった理由を選ぶ案内を出す） */
+  uncheck?: boolean
   initialReason: BathCancelReason | null
   initialNote: string
   onCancel: () => void
   onSave: (reason: BathCancelReason, note: string) => void
 }
 
-function CancelDialog({ open, name, initialReason, initialNote, onCancel, onSave }: CancelDialogProps) {
+function CancelDialog({ open, name, uncheck, initialReason, initialNote, onCancel, onSave }: CancelDialogProps) {
   const [reason, setReason] = useState<BathCancelReason | null>(initialReason)
   const [note, setNote] = useState(initialNote)
   const [showError, setShowError] = useState(false)
@@ -869,8 +910,13 @@ function CancelDialog({ open, name, initialReason, initialNote, onCancel, onSave
   return (
     <ModalShell open={open} label="中止の理由" onClose={onCancel} initialFocus={firstRef} narrow>
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
-        <h2 className="text-lg font-bold text-ink">中止の理由</h2>
+        <h2 className="text-lg font-bold text-ink">{uncheck ? 'チェックを外す（入浴しなかった理由）' : '中止の理由'}</h2>
         {name ? <p className="mt-1 text-sm text-ink2">{name}</p> : null}
+        {uncheck ? (
+          <p className="mt-1 text-sm text-ink">
+            自動の「全身浴」を「中止」に変えます。記録は消さずに、入浴しなかった理由を残します。
+          </p>
+        ) : null}
         <div role="group" aria-label="中止の理由" className="mt-3 grid grid-cols-1 gap-gap">
           {BATH_CANCEL_REASONS.map((r, i) => {
             const selected = reason === r

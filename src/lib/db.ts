@@ -169,16 +169,20 @@ const NOTE_COLS =
 const OUTING_COLS = 'id,resident_id,kind,start_on,start_at,end_on,end_at,companion,note,recorded_by,rev'
 const ATTENDANCE_COLS = 'day,staff_id,role,sort'
 const IMPORT_DAY_COLS = 'source,day,imported_at,src_rows,inserted,updated,skipped,native_skip,unmatched'
-/** 入浴記録（0012_bath_records.sql）。監査列・client_key は端末へ持ち出さない */
-const BATH_COLS = 'id,resident_id,bath_on,result,cancel_reason,note,recorded_by,rev'
+/**
+ * 入浴記録（0012_bath_records.sql）。監査列・client_key は端末へ持ち出さない。
+ * auto（自動で入った記録の印）は 0015_auto_check.sql で追加（0015 を当ててからこの版を公開する）
+ */
+const BATH_COLS = 'id,resident_id,bath_on,result,cancel_reason,note,recorded_by,rev,auto'
 /** 服薬の時間帯（0013_med_admin.sql）。監査列・client_key は端末へ持ち出さない */
 const MED_SLOTS_COLS = 'id,resident_id,slots,note,rev'
 /**
  * 与薬の記録（0013_med_admin.sql）。client_key・監査列（updated_at・deleted_*・edited_by）は持ち出さない。
- * created_at だけは画面が「いつ記録したか」（時間帯の記録の時刻）に使うので読む
+ * created_at だけは画面が「いつ記録したか」（時間帯の記録の時刻）に使うので読む。
+ * auto（自動で入った記録の印）は 0015_auto_check.sql で追加（0015 を当ててからこの版を公開する）
  */
 const MED_ADMIN_COLS =
-  'id,resident_id,admin_on,slot,status,given_at,prn_drug,prn_reason,prn_effect,note,recorded_by,rev,created_at'
+  'id,resident_id,admin_on,slot,status,given_at,prn_drug,prn_reason,prn_effect,note,recorded_by,rev,created_at,auto'
 /**
  * 事故・ヒヤリハットの一覧・カルテ・集計で読む列（0014_incidents.sql）。様式の残りの欄（detail）は持ち出さない
  * （detail には対象者の氏名の写しが入る。一覧・カルテ・集計は名簿の氏名を使う）。client_key・監査列も持ち出さない
@@ -603,6 +607,8 @@ function normalizeBath(row: unknown): BathRecord | null {
     note: str(r.note),
     recorded_by: idNum(r.recorded_by),
     rev: num(r.rev) ?? 1,
+    // 自動で入った記録の印（true の時だけ自動。無い・読めない値は手動として扱う）
+    auto: r.auto === true,
   }
 }
 
@@ -647,6 +653,8 @@ function normalizeMedAdmin(row: unknown): MedAdmin | null {
     recorded_by: idNum(r.recorded_by),
     rev: num(r.rev) ?? 1,
     created_at: str(r.created_at),
+    // 自動で入った記録の印（true の時だけ自動。無い・読めない値は手動として扱う）
+    auto: r.auto === true,
   }
 }
 
@@ -4294,6 +4302,16 @@ function assertBathInput(v: {
   if (!check.ok) throw new DbError('server', check.message)
 }
 
+/**
+ * 自動で入った記録（0015 の cron が作る・auto=true・recorded_by=null）を職員が直す時に一緒に送る項目。
+ * auto=false（手動の記録になる）と、記入者＝直した職員（opts.editedBy、無ければ端末の既定の操作者）。
+ * 自動でない記録には何も足さない（従来どおりの送り方のまま）。rev 照合なので、読んだ時点で自動だった行にだけ効く
+ */
+function autoOffPatch(current: { auto: boolean }, opts?: WriteOpts): Record<string, unknown> {
+  if (current.auto !== true) return {}
+  return { auto: false, recorded_by: idNum(opts?.editedBy) ?? editorId }
+}
+
 /** 端末の今日（YYYY-MM-DD・ローカル時刻＝JST 運用）。format.ts の todayIso と同じ計算 */
 function localToday(): string {
   const d = new Date()
@@ -4384,7 +4402,7 @@ export async function fetchBathPlan(dayIso: string, residents?: Resident[]): Pro
  * 入浴記録の追加。端末生成の冪等キー client_key を必ず付ける（再送しても1行に収まる）。
  * 戻り値: 追加した行／'conflict'（同じ人・同じ日に他の端末が先に記録した）／'queued'（通信できない）
  */
-export async function insertBath(b: Omit<BathRecord, 'id' | 'rev'>): Promise<BathRecord | Conflict | Queued> {
+export async function insertBath(b: Omit<BathRecord, 'id' | 'rev' | 'auto'>): Promise<BathRecord | Conflict | Queued> {
   const cancel_reason = b.result === 'cancel' ? b.cancel_reason : null
   const note = b.note === null || b.note.trim() === '' ? null : b.note
   assertBathInput({ bath_on: b.bath_on, result: b.result, cancel_reason, note })
@@ -4427,6 +4445,7 @@ export async function insertBath(b: Omit<BathRecord, 'id' | 'rev'>): Promise<Bat
 /**
  * 入浴記録の修正（rev 照合の部分更新）。区分を中止以外にしたら理由は空（null）にして送る。
  * 送る前に、修正後の値（current と patch を重ねたもの）を検証する。
+ * 自動で入った記録（current.auto）を直す時は auto=false と記入者（recorded_by）を一緒に送る（autoOffPatch）
  */
 export async function updateBath(
   current: BathRecord,
@@ -4442,6 +4461,7 @@ export async function updateBath(
   if (patch.result !== undefined) sent.result = result
   if (patch.result !== undefined || patch.cancel_reason !== undefined) sent.cancel_reason = cancel_reason
   if (patch.note !== undefined) sent.note = note
+  if (Object.keys(sent).length > 0) Object.assign(sent, autoOffPatch(current, opts))
   return updateRow('bath_records', current.id, current.rev, sent, normalizeBath, opts)
 }
 
@@ -4695,7 +4715,7 @@ function textOrNull(v: string | null | undefined): string | null {
  * 戻り値: 追加した行／'conflict'（同じ人・同じ日・同じ時間帯を他の端末が先に記録した）／'queued'（通信できない）
  */
 export async function insertMedAdmin(
-  m: Omit<MedAdmin, 'id' | 'rev' | 'created_at'>,
+  m: Omit<MedAdmin, 'id' | 'rev' | 'created_at' | 'auto'>,
 ): Promise<MedAdmin | Conflict | Queued> {
   const prn = m.slot === 'prn'
   const v = {
@@ -4716,6 +4736,7 @@ export async function insertMedAdmin(
 /**
  * 与薬の記録の修正（rev 照合の部分更新）。送るのは patch に入れた項目だけ。
  * 送る前に、修正後の値（current と patch を重ねたもの）を検証する（頓服は服用済みだけ・頓服以外は頓服の項目を持たない）
+ * 自動で入った記録（current.auto）を直す時は auto=false と記入者（recorded_by）を一緒に送る（autoOffPatch）
  */
 export async function updateMedAdmin(
   current: MedAdmin,
@@ -4739,6 +4760,7 @@ export async function updateMedAdmin(
   for (const k of ['status', 'note', 'given_at', 'prn_drug', 'prn_reason', 'prn_effect'] as const) {
     if (patch[k] !== undefined) sent[k] = v[k]
   }
+  if (Object.keys(sent).length > 0) Object.assign(sent, autoOffPatch(current, opts))
   return updateRow('med_admin', current.id, current.rev, sent, normalizeMedAdmin, opts)
 }
 

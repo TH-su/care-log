@@ -304,6 +304,47 @@ if (B === null) {
     })
   })
 
+  // ── 自動の入浴記録（0015・2026-09-27 代表指示）: 12:30 に予定者を DB 側が「全身浴」で記録する ──
+  describe('★自動の入浴記録（BATH_AUTO_TIME・チェックを外す・月次の印）', () => {
+    it('自動の時刻は 12:30（0015 の cron と同じ）', () => {
+      assert.equal(B.BATH_AUTO_TIME, '12:30')
+    })
+    it('「チェックを外す」は自動の記録にだけ出す（手動の記録・記録なしには出さない）', () => {
+      assert.equal(B.canUncheckAuto(rec(1, 1, '2026-09-28', 'full', { auto: true })), true)
+      assert.equal(B.canUncheckAuto(rec(1, 1, '2026-09-28', 'full', { auto: false })), false)
+      assert.equal(B.canUncheckAuto(rec(1, 1, '2026-09-28', 'full')), false, 'auto の無い行（0015 前）は手動')
+      assert.equal(B.canUncheckAuto(null), false)
+    })
+    it('自動の記録は記録済みに数え、「未」にしない（12:30 より前で記録が無い予定者は従来どおり「未」）', () => {
+      const plan = [{ residentId: 1, startTime: '10:00', endTime: null, hospitalized: false }, { residentId: 2, startTime: null, endTime: null, hospitalized: false }]
+      const rows = B.buildBathDayRows(plan, [rec(5, 1, '2026-09-28', 'full', { auto: true })], [], [1, 2])
+      assert.deepEqual(B.countBathDay(rows), { planned: 2, recorded: 1, unrecorded: 1 })
+      assert.equal(B.isUnrecorded(rows[0]), false)
+      assert.equal(B.isUnrecorded(rows[1]), true)
+    })
+    it('月次表: 自動の記録は autos が true（「全*」の印）。合計は区分どおり（自動でも全＋シに数える）', () => {
+      const t = B.aggregateBathMonth({
+        monthKey: '2026-09',
+        order: [1],
+        today: '2026-09-30',
+        startDay: '2026-09-01',
+        plannedByWeekday: new Map([[0, new Set([1])]]),
+        records: [
+          rec(1, 1, '2026-09-07', 'full', { auto: true }),
+          rec(2, 1, '2026-09-14', 'full'),
+          rec(3, 1, '2026-09-21', 'cancel', { auto: false }),
+        ],
+      })
+      const r = t.rows[0]
+      assert.equal(r.autos.length, 30)
+      assert.deepEqual([r.cells[6], r.autos[6]], ['full', true])
+      assert.deepEqual([r.cells[13], r.autos[13]], ['full', false])
+      assert.deepEqual([r.cells[20], r.autos[20]], ['cancel', false])
+      assert.deepEqual([r.cells[27], r.autos[27]], ['missing', false])
+      assert.deepEqual(r.totals, { billable: 2, partial: 0, cancel: 1, missing: 1 })
+    })
+  })
+
   describe('配線（静的検査）', () => {
     const read = (p) => readFileSync(new URL(p, import.meta.url), 'utf8')
     it('0012 に restrictive の member_only（care-backend と同じ形）があり、dayOfWeek は case で数にする', () => {

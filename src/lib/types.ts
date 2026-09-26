@@ -224,6 +224,11 @@ export interface BathRecord {
   note: string | null
   recorded_by: number | null
   rev: number
+  /**
+   * 自動で入った記録（0015 の cron が 12:30 に予定者を「全身浴」で作る・recorded_by は null）。
+   * 職員が画面で直すと false になる（記入者つき）。0015 未適用の DB の行は無い（false として扱う）
+   */
+  auto: boolean
 }
 
 /** 画面のボタンの並び（左→右） */
@@ -290,7 +295,15 @@ export interface MedAdmin {
   rev: number
   /** 記録した時刻（サーバーの created_at。時間帯の記録の「いつ記録したか」に使う） */
   created_at: string | null
+  /**
+   * 自動で入った記録（0015 の cron が朝 8:50・昼 13:00・夕 18:20 に「服用済み」で作る・recorded_by は null）。
+   * 職員が画面で状態を変えると false になる（記入者つき）
+   */
+  auto: boolean
 }
+
+/** 月次表・印刷で自動の記録に添える印（「全*」「済*」。凡例は「*＝自動」） */
+export const AUTO_MARK = '*'
 
 /** 表の列の並び（左→右） */
 export const MED_SLOTS: readonly MedSlot[] = ['morning', 'noon', 'evening', 'bedtime']

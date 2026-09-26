@@ -157,6 +157,11 @@ med_admin ( id bigint identity PK, resident_id bigint not null references reside
 -- トリガ: set_updated_at_rev／record_history_capture('admin_on')。RLS は bath_records と同じ
 -- Realtime: 2表とも publication に add table（既存の購読とは別チャンネル subscribeMedChanges）
 
+-- 自動チェック（0015・2026-09-27 代表指示）
+--   bath_records.auto / med_admin.auto boolean not null default false（自動で入った記録の印。職員が直すと false・記入者つき）
+--   private.care_auto_med(p_slot)（朝・昼・夕のみ）／private.care_auto_bath() を pg_cron が呼ぶ（UTC 23:50・4:00・9:20／3:30＝JST 8:50・13:00・18:20／12:30）
+--   client_key は 'auto:med:<日付>:<時間帯>:<resident_id>' / 'auto:bath:<日付>:<resident_id>'。on conflict do nothing
+
 -- 事故・ヒヤリハット（1行=1件。0014・2026-09-26 追加）。様式は熊本市の事故報告書（事業者→熊本市）
 incidents ( id bigint identity PK, kind text not null check (kind in ('accident','nearmiss')),
   resident_id bigint references residents(id),   -- ヒヤリハットは null 可（check: kind <> 'accident' or resident_id is not null）
@@ -352,3 +357,4 @@ Supabase 無料枠に自動バックアップは無い（確信度: 高）。介
 - 2026-09-26 移行 0012（入浴記録・種類ごとの入力解禁・daycare_bath_plan）を反映
 - 2026-09-26 移行 0013（服薬の時間帯・与薬の記録）を反映
 - 2026-09-26 移行 0014（事故・ヒヤリハット・事業所の情報のキー）を反映
+- 2026-09-27 移行 0015（与薬・デイの入浴の自動チェック・pg_cron）を反映

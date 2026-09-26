@@ -301,5 +301,14 @@ ResidentPickerModal({ open, residents: Resident[], onPick(id: number | null), on
   client_key 全体unique・rev／変更の記録トリガ（occurred_on）・氏名の写しのトリガ・RLS＋restrictive の member_only・delete ポリシーなし・Realtime 登録）、
   app_settings に事業所の情報のキー（corp_name / office_name_facility・visit・daycare / office_no_facility・visit・daycare / office_address。値 ''・既存は触らない。
   値はチーフが本番で入れる）。0012 と同じく**初回に1回だけ流す**（修正は新しい番号で）
+- `0015_auto_check.sql`（2026-09-27・代表指示）: pg_cron（pg_catalog）・bath_records.auto / med_admin.auto（boolean not null default false）・
+  private.care_auto_med(時間帯)／care_auto_bath()（security definer・search_path=''・anon/authenticated から revoke。本体は日付を引数に取る
+  care_auto_med_on / care_auto_bath_on、日本時間の日付は care_auto_today）・cron 4件（UTC: 与薬 朝 '50 23 * * *'＝JST 8:50／昼 '0 4 * * *'＝13:00／
+  夕 '20 9 * * *'＝18:20／入浴 '30 3 * * *'＝12:30）。自動の記録は DB 側だけが作る（端末は作らない）。その日その時間帯（入浴はその日）に
+  **取り消し済みを含めて**行があれば作らない。入院中（与薬は master_residents、入浴は写しと master_residents）・外泊の期間・外出中（与薬のみ）・
+  服薬の時間帯が無い人・在籍でない人・種類ごとの入力解禁が 'true' でない間は作らない。**0015 を当ててからアプリを公開する**
+  （取得の列に auto を足したため、0015 未適用の DB では入浴・与薬・カルテの読み込みが失敗する）
+- 自動の記録（auto=true・recorded_by=null）を職員が直す時、updateBath / updateMedAdmin は auto=false と recorded_by（直した職員）を一緒に送る
+  （自動でない記録の送り方は変えない）。与薬チェックの「未」は眠前だけ（朝・昼・夕は自動の時間帯＝空欄のまま）。月次表は自動の記録に「*」
 - **適用順は 0001 → 0002 → 0003 → 0004 → 0005**。0003〜0005 は互いに独立だが、
   0003 未適用のまま新UIを配ると「定時以外のバイタル保存」と「食事一覧の読み込み」が失敗する（意図的にフォールバックを作っていない）。

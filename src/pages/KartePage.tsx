@@ -1322,6 +1322,7 @@ function BathSection({ baths, staffById }: BathSectionProps) {
               <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-base text-ink">
                 <span className="tabular text-sm text-ink2">{fmtDayLabel(b.bath_on)}</span>
                 <span className="font-bold">{BATH_RESULT_LABEL[b.result]}</span>
+                {b.auto ? <span className="rounded-full border border-info bg-info-bg px-2 text-sm text-info">自動</span> : null}
                 {b.result === 'cancel' && b.cancel_reason !== null ? (
                   <span className="text-sm text-ink2">理由: {BATH_CANCEL_REASON_LABEL[b.cancel_reason]}</span>
                 ) : null}
@@ -1330,7 +1331,7 @@ function BathSection({ baths, staffById }: BathSectionProps) {
                 <p className="mt-1 whitespace-pre-wrap break-words text-sm text-ink">{b.note}</p>
               ) : null}
               <p className="mt-1 text-sm text-ink2">
-                記入者 {b.recorded_by === null ? '—' : (staffById.get(b.recorded_by) ?? '—')}
+                記入者 {b.recorded_by === null ? (b.auto ? '自動' : '—') : (staffById.get(b.recorded_by) ?? '—')}
               </p>
             </li>
           ))}
@@ -1392,6 +1393,7 @@ function MedSection({ meds }: MedSectionProps) {
                       {MED_STATUS_LABEL[m.status]}
                     </span>
                   )}
+                  {m.auto ? <span className="rounded-full border border-info bg-info-bg px-2 text-sm text-info">自動</span> : null}
                 </p>
                 {m.slot === 'prn' ? (
                   <p className="mt-1 break-words text-sm text-ink">

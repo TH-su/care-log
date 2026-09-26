@@ -3,6 +3,7 @@
 // 行＝在籍の入居者のうち、その月に入浴の予定か記録がある人（居室順）。退居された方も、その月に記録があれば行に出す
 //   （加算の根拠を紙に残すため。行に「退居」と表示。予定だけで記録の無い退居者は出さない・2026-09-26 チーフ裁定）。列＝その月の1日〜月末。
 // マス＝全（全身浴）／シ（シャワー浴）／部（部分浴・清拭）／中（中止）／未（予定があったのに記録なし）。
+// 自動で入った記録（0015 の cron・12:30）は記号に「*」を添える（「全*」。凡例「*＝自動」・2026-09-27 代表指示）。
 // 右端に月合計（全＋シ＝入浴介助加算の対象の見込み、部、中）。A4 横1枚で印刷できる（PrintArea）。
 //
 // 規律:
@@ -37,7 +38,7 @@ import {
 } from '../lib/bath'
 import type { BathMonthMark, BathMonthTable } from '../lib/bath'
 import { todayIso } from '../lib/format'
-import { BATH_RESULT_LABEL, BATH_RESULT_MARK } from '../lib/types'
+import { AUTO_MARK, BATH_RESULT_LABEL, BATH_RESULT_MARK } from '../lib/types'
 import type { BathRecord, Resident } from '../lib/types'
 import { EmptyBlock, ErrorBlock, LoadingBlock, SectionCard } from '../components/ui'
 import { PrintArea, PrintButton } from '../components/print/PrintArea'
@@ -66,17 +67,21 @@ function firstDayPerWeekday(monthKey: string): Map<number, string> {
   return out
 }
 
-function markText(m: BathMonthMark): string {
+/** マスの文字。自動で入った記録は「*」を添える（「全*」） */
+function markText(m: BathMonthMark, auto = false): string {
   if (m === null) return ''
   if (m === 'missing') return BATH_MONTH_MISSING_MARK
-  return BATH_RESULT_MARK[m]
+  return `${BATH_RESULT_MARK[m]}${auto ? AUTO_MARK : ''}`
 }
 
-function markLabel(m: BathMonthMark): string {
+function markLabel(m: BathMonthMark, auto = false): string {
   if (m === null) return '記録なし'
   if (m === 'missing') return '予定あり・記録なし'
-  return BATH_RESULT_LABEL[m]
+  return `${BATH_RESULT_LABEL[m]}${auto ? '（自動）' : ''}`
 }
+
+/** 凡例（画面と紙で同じ文） */
+const LEGEND = `全＝全身浴　シ＝シャワー浴　部＝部分浴・清拭　中＝中止　未＝予定あり・記録なし　${AUTO_MARK}＝自動`
 
 interface Loaded {
   month: string
@@ -243,7 +248,7 @@ export function BathMonthPage() {
         </div>
 
         <p className="mt-2 text-sm text-ink2">
-          全＝全身浴　シ＝シャワー浴　部＝部分浴・清拭　中＝中止　未＝予定あり・記録なし（今日まで）
+          {LEGEND}（未は今日まで）
         </p>
         <p className="mt-1 text-sm text-ink2">
           合計の「全＋シ」は入浴介助加算の対象の見込みです（部分浴・清拭は対象外の可能性があるため別に数えます・要確認）。
@@ -295,7 +300,7 @@ export function BathMonthPage() {
           <PrintArea ref={printRef}>
             <h1 className="cl-print-title">デイ 入浴実施表 {monthLabel}</h1>
             <p className="cl-print-meta">
-              印刷日 {printedOn}　全＝全身浴　シ＝シャワー浴　部＝部分浴・清拭　中＝中止　未＝予定あり・記録なし
+              印刷日 {printedOn}　{LEGEND}
               {data.planned === null ? '（予定を取得できないため「未」は表示していません）' : ''}
             </p>
             <p className="cl-print-meta">
@@ -378,8 +383,8 @@ function MonthTable({ table, residentById, variant }: MonthTableProps) {
                   key={table.days[i]}
                   className={`${td} ${screen && m === 'missing' ? 'bg-warn-bg font-bold text-warn' : ''}`}
                 >
-                  <span aria-hidden="true">{markText(m)}</span>
-                  <span className="sr-only">{`${Number(table.days[i].slice(8, 10))}日 ${markLabel(m)}`}</span>
+                  <span aria-hidden="true">{markText(m, row.autos[i])}</span>
+                  <span className="sr-only">{`${Number(table.days[i].slice(8, 10))}日 ${markLabel(m, row.autos[i])}`}</span>
                 </td>
               ))}
               <td className={`${td} ${screen ? 'font-bold' : 'cl-print-strong'}`}>{row.totals.billable}</td>

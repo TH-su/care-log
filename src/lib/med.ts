@@ -4,9 +4,12 @@
 //
 // 時間帯（朝・昼・夕・眠前）は入居者ごとに med_slots が持つ。その人に設定の無い時間帯は「—」（押せない）。
 // 「未」＝設定のある時間帯で、締め時刻を過ぎても記録が無いもの。過去の日は締めを過ぎたものとして扱う。
+// ただし自動の時間帯（朝・昼・夕＝MED_AUTO_SLOTS）には「未」を付けない（2026-09-27 代表指示）:
+//   自動の時刻（MED_AUTO_TIMES）に DB 側（0015 の cron）が「服用済み」の記録を作る前提なので、
+//   自動の時刻を過ぎても記録が無いのは、服薬の時間帯が未設定・入院・外泊・外出などで自動にしなかった人。空欄のままにする。
 // 個人情報: ここには氏名も記録本文も薬の名前も書かない（型と計算だけ）。
 
-import { MED_ADMIN_SLOTS, MED_SLOTS, MED_STATUSES } from './types.ts'
+import { MED_ADMIN_SLOTS, MED_SLOT_LABEL, MED_SLOTS, MED_STATUSES } from './types.ts'
 import type { MedAdmin, MedAdminSlot, MedSlot, MedStatus } from './types.ts'
 import { monthDays } from './bath.ts'
 
@@ -21,6 +24,24 @@ export const MED_DEADLINES: Readonly<Record<MedSlot, string>> = {
   noon: '14:00',
   evening: '20:00',
   bedtime: '23:00',
+}
+
+/**
+ * 自動で「服用済み」になる時間帯と時刻（日本時間・0015_auto_check.sql の cron と同じ。2026-09-27 代表指示）。
+ * 眠前は自動にしない。画面の注記はこの表から作る（時刻を直書きしない）
+ */
+export const MED_AUTO_TIMES: Readonly<Partial<Record<MedSlot, string>>> = {
+  morning: '8:50',
+  noon: '13:00',
+  evening: '18:20',
+}
+
+/** 自動で「服用済み」になる時間帯（朝・昼・夕）。「未」を付けない */
+export const MED_AUTO_SLOTS: readonly MedSlot[] = MED_SLOTS.filter((s) => MED_AUTO_TIMES[s] !== undefined)
+
+/** 画面の注記の「朝 8:50・昼 13:00・夕 18:20」 */
+export function fmtMedAutoTimes(): string {
+  return MED_AUTO_SLOTS.map((s) => `${MED_SLOT_LABEL[s]} ${MED_AUTO_TIMES[s] ?? ''}`).join('・')
 }
 
 /** 画面の「未」を取り直す間隔（ms）。今日の表示だけ、この間隔で締めを判定し直す */
@@ -103,7 +124,10 @@ export interface MedDayRow {
   cells: Record<MedSlot, MedCell>
 }
 
-/** 1マスを決める（締めの判定は isPastDeadline） */
+/**
+ * 1マスを決める（締めの判定は isPastDeadline）。
+ * auto（自動の時間帯）は「未」にしない（記録が無ければ締めを過ぎても空欄＝open）
+ */
 export function medCellOf(p: {
   configured: boolean
   record: MedAdmin | null
@@ -111,9 +135,11 @@ export function medCellOf(p: {
   day: string
   today: string
   nowMin: number
+  auto?: boolean
 }): MedCell {
   if (p.record !== null) return { kind: 'record', record: p.record }
   if (!p.configured) return { kind: 'none' }
+  if (p.auto === true) return { kind: 'open' }
   return isPastDeadline(p.slot, p.day, p.today, p.nowMin) ? { kind: 'missing' } : { kind: 'open' }
 }
 
@@ -133,8 +159,11 @@ export function buildMedDayRows(p: {
   nowMin: number
   /** 「未」を付けてよいか（medMissingAllowed）。省略時は付ける */
   missingAllowed?: boolean
+  /** 自動の時間帯（「未」を付けない）。省略時は MED_AUTO_SLOTS（朝・昼・夕） */
+  autoSlots?: readonly MedSlot[]
 }): MedDayRow[] {
   const allowMissing = p.missingAllowed !== false
+  const autoSlots = new Set(p.autoSlots ?? MED_AUTO_SLOTS)
   const byResident = new Map<number, Map<MedSlot, MedAdmin>>()
   for (const r of p.records) {
     if (r.admin_on !== p.day || r.slot === 'prn') continue
@@ -165,6 +194,7 @@ export function buildMedDayRows(p: {
         day: p.day,
         today: p.today,
         nowMin: p.nowMin,
+        auto: autoSlots.has(slot),
       })
       cells[slot] = cell.kind === 'missing' && !allowMissing ? { kind: 'open' } : cell
     }
@@ -324,6 +354,8 @@ export type MedMonthMark = MedStatus | 'missing' | null
 export interface MedMonthDay {
   day: string
   cells: Record<MedSlot, MedMonthMark>
+  /** そのマスの記録が自動で入ったものか（記号に「*」を添える。記録の無いマスは false） */
+  autos: Record<MedSlot, boolean>
   /** その日の頓服の回数 */
   prn: number
 }
@@ -355,9 +387,10 @@ function emptyTotals(): MedMonthTotals {
 
 /**
  * 1人の月次表を組む。行＝その月の1日〜月末、列＝朝・昼・夕・眠前・頓服。
- * ・マス … 記録があれば状態。記録が無く、次の全部を満たす時だけ「未」（missing）:
+ * ・マス … 記録があれば状態（自動で入った記録は autos が true）。記録が無く、次の全部を満たす時だけ「未」（missing）:
  *     その人の設定（slots＝現在の設定）にある時間帯／締めを過ぎている（今日より前の日、または今日の締め時刻以降）／
- *     startDay（施設全体で最初の与薬の記録の日）以降。startDay が null（記録が1件も無い）なら付けない／退居された方でない
+ *     startDay（施設全体で最初の与薬の記録の日）以降。startDay が null（記録が1件も無い）なら付けない／退居された方でない／
+ *     自動の時間帯（autoSlots・省略時は朝・昼・夕）でない（1日の表と同じ）
  * ・頓服 … その日の頓服の回数
  * その人・その月以外の記録は数えない。同じマスに記録が2件あれば新しい id を採る。
  */
@@ -370,8 +403,11 @@ export function aggregateMedMonth(p: {
   today: string
   nowMin: number
   retired?: boolean
+  /** 自動の時間帯（「未」を付けない）。省略時は MED_AUTO_SLOTS（朝・昼・夕） */
+  autoSlots?: readonly MedSlot[]
 }): MedMonthTable {
   const days = monthDays(p.monthKey)
+  const autoSlots = new Set(p.autoSlots ?? MED_AUTO_SLOTS)
   const inMonth = new Set(days)
   const configured = new Set(normalizeMedSlots(p.slots))
   const cellRec = new Map<string, MedAdmin>()
@@ -389,8 +425,10 @@ export function aggregateMedMonth(p: {
   const totals = emptyTotals()
   const out: MedMonthDay[] = days.map((day) => {
     const cells = {} as Record<MedSlot, MedMonthMark>
+    const autos = {} as Record<MedSlot, boolean>
     for (const slot of MED_SLOTS) {
       const rec = cellRec.get(`${day}|${slot}`)
+      autos[slot] = rec?.auto === true
       if (rec !== undefined) {
         cells[slot] = rec.status
         totals.byStatus[rec.status] += 1
@@ -399,6 +437,7 @@ export function aggregateMedMonth(p: {
       }
       const missing =
         configured.has(slot) &&
+        !autoSlots.has(slot) &&
         p.retired !== true &&
         p.startDay !== null &&
         day >= p.startDay &&
@@ -411,7 +450,7 @@ export function aggregateMedMonth(p: {
     }
     const prn = prnCount.get(day) ?? 0
     totals.prn += prn
-    return { day, cells, prn }
+    return { day, cells, autos, prn }
   })
   return { residentId: p.residentId, days: out, totals }
 }
