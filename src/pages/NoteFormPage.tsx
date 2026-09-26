@@ -37,6 +37,7 @@ import {
   softDeleteNote,
 } from '../lib/db'
 import { addDays, fmtDayLabel, fmtTimeHM, todayIso } from '../lib/format'
+import { appendPhrase, NOTE_PHRASE_CATEGORIES, PHRASE_BLANK } from '../lib/notePhrases'
 import { IMPORTANCE_LABEL, LS, noteDisplayName, ROLE_TAGS, SHIFT_LABEL } from '../lib/types'
 import type { PresenceHere } from '../lib/db'
 import { presenceOnDay, presenceWhoNames } from '../lib/presence'
@@ -67,6 +68,15 @@ const SHIFT_OPTIONS = SHIFTS.map((v) => ({ value: v, label: SHIFT_LABEL[v] }))
 const IMPORTANCE_OPTIONS = IMPORTANCES.map((v) => ({ value: v, label: IMPORTANCE_LABEL[v] }))
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+
+/**
+ * 定型句で最後に選んだ場面（UI状態・値は場面 id だけ）。凍結の types.ts の LS には足さず、ここに置く。
+ * 本文・対象などの業務データは入れない（それは下書き cl_draftNote の役目）
+ */
+const PHRASE_CAT_KEY = 'cl_notePhraseCat'
+
+/** 定型句の「1つ戻す」で覚えておく本文の数（古いものから捨てる） */
+const PHRASE_UNDO_MAX = 20
 
 // ── 入力状態 ──────────────────────────────────────────
 
@@ -227,6 +237,27 @@ function loadDraft(): FormState | null {
   }
 }
 
+// ── 定型句の場面（cl_notePhraseCat・UI状態）──────────────────
+// 既知の場面 id とだけ照合する。不正・未知・読めない時は先頭の場面（壊れた値で画面を止めない）
+
+function loadPhraseCat(): string {
+  const first = NOTE_PHRASE_CATEGORIES[0]?.id ?? ''
+  try {
+    const raw = window.localStorage.getItem(PHRASE_CAT_KEY)
+    return NOTE_PHRASE_CATEGORIES.some((c) => c.id === raw) ? (raw as string) : first
+  } catch {
+    return first
+  }
+}
+
+function savePhraseCat(id: string): void {
+  try {
+    window.localStorage.setItem(PHRASE_CAT_KEY, id)
+  } catch {
+    // 保存できなくても定型句は使える（次に開いた時が先頭の場面になるだけ）
+  }
+}
+
 // ── 本体 ──────────────────────────────────────────────
 
 type Phase = 'loading' | 'error' | 'ready'
@@ -261,6 +292,13 @@ export function NoteFormPage() {
   const [staffPicker, setStaffPicker] = useState(false)
   const [restorePrompt, setRestorePrompt] = useState(false)
 
+  /** 定型句: 選んでいる場面の id（最後に選んだ場面を復元） */
+  const [phraseCat, setPhraseCat] = useState<string>(loadPhraseCat)
+  /** 定型句を入れる前の本文（「1つ戻す」用・この画面の中だけ・最大 PHRASE_UNDO_MAX 件） */
+  const [phraseUndo, setPhraseUndo] = useState<string[]>([])
+  /** 本文を書き換えた後に本文欄へ置く選択範囲（描画の後で setSelectionRange する） */
+  const [bodySel, setBodySel] = useState<{ start: number; end: number } | null>(null)
+
   // 初期化（既定値・下書き復元）は最初の読込成功時に1回だけ行い、再試行で入力を巻き戻さない
   const initedRef = useRef(false)
   const targetBtnRef = useRef<HTMLButtonElement>(null)
@@ -278,6 +316,7 @@ export function NoteFormPage() {
       importance: `${uid}-importance`,
       body: `${uid}-body`,
       bodyHint: `${uid}-body-hint`,
+      phraseHint: `${uid}-phrase-hint`,
       ongoing: `${uid}-ongoing`,
       ended: `${uid}-ended`,
       endedHint: `${uid}-ended-hint`,
@@ -404,6 +443,50 @@ export function NoteFormPage() {
           },
     )
   }, [])
+
+  // ── 定型句（本文の末尾に差し込む・2026-09-26 追加）────────────
+  // 変えるのは本文だけ。重要度・職種タグ・継続・対象・記録日には触れない
+
+  const pickPhraseCat = useCallback((id: string) => {
+    setPhraseCat(id)
+    savePhraseCat(id)
+  }, [])
+
+  const insertPhrase = useCallback(
+    (phrase: string) => {
+      // 本文欄へのフォーカスは押した操作の中で行う（描画の後だと端末によってはキーボードが開かない）
+      bodyRef.current?.focus()
+      const next = appendPhrase(form.body, phrase)
+      const prev = form.body
+      setPhraseUndo((s) => [...s, prev].slice(-PHRASE_UNDO_MAX))
+      update({ body: next.body }, 'body')
+      setBodySel({ start: next.selStart, end: next.selEnd })
+    },
+    [form.body, update],
+  )
+
+  /** 直前の定型句を入れる前の本文に戻す。戻した後は本文欄の最後にカーソルを置く */
+  const undoPhrase = useCallback(() => {
+    if (phraseUndo.length === 0) return
+    const prev = phraseUndo[phraseUndo.length - 1]
+    bodyRef.current?.focus()
+    setPhraseUndo(phraseUndo.slice(0, -1))
+    update({ body: prev }, 'body')
+    setBodySel({ start: prev.length, end: prev.length })
+  }, [phraseUndo, update])
+
+  // 本文を書き換えた描画の後に、選択範囲（最初の「＿」か末尾）を置く
+  useEffect(() => {
+    if (bodySel === null) return
+    const el = bodyRef.current
+    if (!el) return
+    el.focus()
+    try {
+      el.setSelectionRange(bodySel.start, bodySel.end)
+    } catch {
+      // 選択範囲を置けなくても本文は入っている（カーソル位置が変わらないだけ）
+    }
+  }, [bodySel])
 
   /** 書きかけを破棄する（確認1回のあとに実行・§6.5） */
   const discardDraft = useCallback(() => {
@@ -558,6 +641,7 @@ export function NoteFormPage() {
           noteOn: form.noteOn,
           shift: form.shift,
         })
+        setPhraseUndo([]) // 定型句の「1つ戻す」も初期化（登録した本文へ戻せないようにする）
         if (res === 'queued') {
           show(
             '送信できませんでしたが、端末に保存しました。電波が戻ると自動で送信します（ヘッダの「未送信」で確認できます）。',
@@ -675,6 +759,9 @@ export function NoteFormPage() {
       : (staffById.get(form.reporterId)?.name ?? `職員ID ${form.reporterId}`)
   const dayLabel = ISO_DATE_RE.test(form.noteOn) ? fmtDayLabel(form.noteOn) : ''
   const inputsDisabled = !enabled || saving
+  /** 定型句で開いている場面（phraseCat は読込時に照合済み。念のため見つからなければ先頭） */
+  const phraseCatNow =
+    NOTE_PHRASE_CATEGORIES.find((c) => c.id === phraseCat) ?? NOTE_PHRASE_CATEGORIES[0]
 
   const fieldError = (key: ErrorKey) =>
     errors[key] ? (
@@ -927,6 +1014,78 @@ export function NoteFormPage() {
                   引き継ぎたい事実と、次に必要な対応を書きます。
                 </p>
                 {fieldError('body')}
+              </div>
+
+              {/* 定型句（2026-09-26 追加）: 場面ボタン → その場面の文ボタン。文を押すと本文の最後に入る。
+                  封鎖中・送信中は外側の fieldset で押せなくなる。
+                  role="group" は使わない（sheet.css の .form-fit [role='group'] > button が最小幅を「文字ぶん」にするため、
+                  長い文が文字200%・幅375pxで画面からはみ出す）。まとまりは入れ子の fieldset と読み上げ用の legend で示す */}
+              <div>
+                <p className={labelClass}>定型句</p>
+                <p id={ids.phraseHint} className="mt-1 text-sm text-ink2">
+                  場面を選び、文を押すと本文の最後に入ります。破線の枠の文は、入れた後に「＿」の所を書き直してください。
+                </p>
+                <fieldset aria-describedby={ids.phraseHint} className="mt-2 min-w-0">
+                  <legend className="sr-only">定型句の場面</legend>
+                  <div className="flex flex-wrap gap-gap">
+                    {NOTE_PHRASE_CATEGORIES.map((c) => {
+                      const on = c.id === phraseCatNow.id
+                      return (
+                        <button
+                          key={c.id}
+                          type="button"
+                          aria-pressed={on}
+                          onClick={() => pickPhraseCat(c.id)}
+                          className={
+                            on
+                              ? 'min-h-tap max-w-full rounded-full border border-primary bg-primary px-4 text-base font-bold text-primary-ink disabled:border-border disabled:bg-surface2 disabled:text-ink3'
+                              : 'min-h-tap max-w-full rounded-full border border-border bg-surface px-4 text-base text-ink disabled:bg-surface2 disabled:text-ink3'
+                          }
+                        >
+                          <span aria-hidden="true" className={on ? 'mr-1' : 'mr-1 invisible'}>
+                            ✓
+                          </span>
+                          {c.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </fieldset>
+                <fieldset className="mt-3 min-w-0 rounded-md border border-border bg-surface2 p-3">
+                  <legend className="sr-only">「{phraseCatNow.label}」の定型句</legend>
+                  <div className="flex flex-wrap gap-gap">
+                    {phraseCatNow.phrases.map((p) => {
+                      // 「＿」のある文は枠を破線にし、読み上げにも一言足す（色だけに頼らない）
+                      const blank = p.includes(PHRASE_BLANK)
+                      return (
+                        <button
+                          key={p}
+                          type="button"
+                          onClick={() => insertPhrase(p)}
+                          className={`min-h-tap max-w-full rounded-md border bg-surface px-3 py-2 text-left text-base text-ink disabled:bg-surface2 disabled:text-ink3 ${
+                            blank ? 'border-dashed border-border-strong' : 'border-border'
+                          }`}
+                        >
+                          {p}
+                          {blank && <span className="sr-only">（書き足す所があります）</span>}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </fieldset>
+                {/* 下に出す＝出た時に上の文ボタンの位置がずれない（続けて押す指の先を動かさない） */}
+                {phraseUndo.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={undoPhrase}
+                    className="mt-3 min-h-tap rounded-md border border-border-strong bg-surface px-4 text-base text-ink disabled:border-border disabled:bg-surface2 disabled:text-ink3"
+                  >
+                    <span aria-hidden="true" className="mr-1">
+                      ↶
+                    </span>
+                    1つ戻す
+                  </button>
+                )}
               </div>
             </div>
           </SectionCard>
