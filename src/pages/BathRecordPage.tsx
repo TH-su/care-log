@@ -2,6 +2,9 @@
 //
 // 一覧＝その日の入浴予定者（週間計画の写し・RPC daycare_bath_plan）＋その日に記録がある人＋画面で足した予定外の人。
 // 入院中の方は予定があっても「未記録」に数えず「入院」と出す（件数の「予定」からも除く・2026-09-26 チーフ裁定）。
+// その人・その日に未送信の記録（この端末の送信待ち・送信中）がある行は、区分ボタンと取り消しを押せなくする
+// （圏外で続けて押した2件目の追加が 23505 で止まるのを防ぐ。送信待ちそのものは書き換えない・2026-09-26 レビュー3巡目）。
+// 送信待ちの件数が減ったら、その日の記録を読み直して行を記録済みに戻す（自分の書込の通知は isSelfWrite で無視されるため）。
 // 並びは居室順。各行で［全身浴］［シャワー浴］［部分浴・清拭］［中止］を押すと記録する（押し直すと修正、取り消しは確認つき）。
 //
 // 規律:
@@ -18,12 +21,12 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   DbError,
-  discardPendingBath,
   fetchAllResidents,
   fetchBathDay,
   fetchBathPlan,
   fetchStaff,
   getKindInputGate,
+  hasPendingBath,
   insertBath,
   isQueuePersisted,
   isSelfWrite,
@@ -63,12 +66,11 @@ const ERR_GATE =
   '入浴の記録を使える期間かどうかを確認できませんでした（通信エラー）。電波状態を確認して、再試行してください。記録の閲覧はこのままできます。'
 const MSG_CONFLICT =
   '他の端末が先にこの方の記録を保存・変更しました。最新の内容に読み直しました。確かめてから、もう一度選んでください（入力した備考は残っています）。'
-const MSG_QUEUED = '未送信（通信できないため端末に控えました。電波が戻ると自動で送信します）'
 const MSG_NOT_PERSISTED =
   '送信できませんでした。この端末にも保存できていません（保存領域の空きが不足している可能性があります）。この画面を閉じずに、電波が戻ってからもう一度選んでください。'
 const MSG_SAVE_FAILED = '保存できませんでした。通信状態を確認して、もう一度選んでください。'
 const MSG_NO_RECORDER = '記入者が選ばれていません。上の「記入者」で選んでから記録・取り消しをしてください。'
-const MSG_SENDING = 'いま送信中のため取り消せませんでした。少し待ってから、もう一度「取り消す」を押してください。'
+const MSG_ROW_PENDING = '未送信の記録があります。送信が終わってから直してください'
 const PARTIAL_NOTE = '部分浴・清拭は加算の対象外の可能性（要確認）'
 
 type RowMsg = { tone: 'warn' | 'danger' | 'info'; text: string }
@@ -111,8 +113,7 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
   const [busy, setBusy] = useState<Set<number>>(new Set())
   const [pending, setPending] = useState<Map<number, LocalPending>>(new Map())
   const [cancelFor, setCancelFor] = useState<number | null>(null)
-  /** 取り消しの確認中の行（record が null＝まだ送っていない追加だけがある行） */
-  const [deleteFor, setDeleteFor] = useState<{ residentId: number; record: BathRecord | null; result: BathResult } | null>(null)
+  const [deleteFor, setDeleteFor] = useState<BathRecord | null>(null)
   const { toast, show } = useToast()
   const uid = useId()
   const aliveRef = useRef(true)
@@ -212,39 +213,31 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
       })
   }, [day, loadRecords])
 
-  // 送信待ちが送れた（未送信の件数が減った）ら、その日の記録を読み直す。
-  // 自分の書込の Realtime 通知は isSelfWrite で無視するので、ここで読み直さないと「未送信」の表示が残り続ける（レビュー H2）
-  const pendingRef = useRef(pending)
-  pendingRef.current = pending
+  // 送信待ちの件数の変化を画面に映す（行のロックの判定を取り直す）。減った時は、その日の記録を読み直して
+  // 行を記録済みに戻す（自分の書込の Realtime 通知は isSelfWrite で無視するので、ここで読み直す）
+  const [queueTick, setQueueTick] = useState(0)
   useEffect(() => {
     let last = -1
     return queueSubscribe((n) => {
       const prev = last
       last = n
-      if (prev >= 0 && n < prev && pendingRef.current.size > 0) reloadRecords()
+      setQueueTick((t) => t + 1)
+      if (prev >= 0 && n < prev) reloadRecords()
     })
   }, [reloadRecords])
 
-  // 読み直した記録が送信待ちにした入力と同じになった行は、「未送信」の印と一言を外す
+  // 送信待ちから消えた（送れた・止まった）行の「送信待ちにした入力」の印は外す（表示は読み直した記録に任せる）
   useEffect(() => {
-    if (records === null || pendingRef.current.size === 0) return
-    const done: number[] = []
-    for (const [id, p] of pendingRef.current) {
-      const rec = records.find((r) => r.resident_id === id)
-      if (rec !== undefined && rec.result === p.result && rec.cancel_reason === p.cancel_reason) done.push(id)
-    }
-    if (done.length === 0) return
     setPending((prev) => {
+      if (prev.size === 0) return prev
       const next = new Map(prev)
-      for (const id of done) next.delete(id)
-      return next
+      for (const id of prev.keys()) {
+        const rec = (records ?? []).find((r) => r.resident_id === id) ?? null
+        if (!hasPendingBath(id, day, rec?.id ?? null)) next.delete(id)
+      }
+      return next.size === prev.size ? prev : next
     })
-    setMsgs((prev) => {
-      const next = new Map(prev)
-      for (const id of done) if (next.get(id)?.text === MSG_QUEUED) next.delete(id)
-      return next
-    })
-  }, [records])
+  }, [queueTick, records, day])
 
   // 他の端末の記録を取り込む（自分の書込の通知・別の日の通知は無視。行を特定できない通知は取り直す）
   useEffect(() => {
@@ -329,7 +322,7 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
   /** 1行の保存（新規は insert、記録済みは rev 照合の update） */
   async function save(row: BathDayRow, result: BathResult, cancelReason: BathCancelReason | null, note: string) {
     const id = row.residentId
-    if (locked || busy.has(id)) return
+    if (locked || busy.has(id) || rowPending(row)) return
     if (recorderId === null) {
       setRowMsg(id, { tone: 'warn', text: MSG_NO_RECORDER })
       return
@@ -360,7 +353,6 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
           return
         }
         setPending((prev) => new Map(prev).set(id, { result, cancel_reason: input.cancel_reason }))
-        setRowMsg(id, { tone: 'warn', text: MSG_QUEUED })
         return
       }
       applySaved(res)
@@ -384,15 +376,17 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
     void save(row, result, null, noteOf(row))
   }
 
-  /**
-   * 取り消し（確認の後）。記入者の選択は保存と同じく必須（L3）。
-   * まだ送っていない追加だけがある行は、送信待ちから外す（サーバーには何も送らない）。
-   * 送り終えていて画面がまだ記録を読んでいない時は、読み直してから論理削除する（H2）
-   */
-  async function remove(target: { residentId: number; record: BathRecord | null }) {
-    const id = target.residentId
+  /** その行に未送信の記録（この端末の送信待ち・送信中、または画面の「送信待ちにした入力」の印）があるか */
+  function rowPending(row: BathDayRow): boolean {
+    return pending.has(row.residentId) || hasPendingBath(row.residentId, day, row.record?.id ?? null)
+  }
+
+  /** 取り消し（確認の後）。記入者の選択は保存と同じく必須（レビュー L3） */
+  async function remove(rec: BathRecord) {
+    const id = rec.resident_id
     setDeleteFor(null)
-    if (locked || busy.has(id)) return
+    const row = rows.find((r) => r.residentId === id)
+    if (locked || busy.has(id) || (row !== undefined && rowPending(row))) return
     if (recorderId === null) {
       setRowMsg(id, { tone: 'warn', text: MSG_NO_RECORDER })
       return
@@ -400,38 +394,6 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
     setRowBusy(id, true)
     setRowMsg(id, null)
     try {
-      let rec = target.record
-      if (rec === null) {
-        const d = await discardPendingBath(id, day)
-        if (!aliveRef.current) return
-        if (d === 'discarded') {
-          setPending((prev) => {
-            const next = new Map(prev)
-            next.delete(id)
-            return next
-          })
-          show('未送信の記録を送らずに取り消しました。')
-          return
-        }
-        if (d === 'sending') {
-          setRowMsg(id, { tone: 'warn', text: MSG_SENDING })
-          return
-        }
-        // 送り終えている → 読み直してから取り消す
-        const rows = await loadRecords(day)
-        if (!aliveRef.current) return
-        setRecords(rows)
-        rec = rows.find((r) => r.resident_id === id) ?? null
-        if (rec === null) {
-          setPending((prev) => {
-            const next = new Map(prev)
-            next.delete(id)
-            return next
-          })
-          setRowMsg(id, { tone: 'info', text: 'この方の記録はありません（取り消す記録が見つかりませんでした）。' })
-          return
-        }
-      }
       const res = await softDeleteBath(rec.id, rec.rev, { editedBy: recorderId })
       touchActivity()
       if (!aliveRef.current) return
@@ -444,13 +406,7 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
         setRowMsg(id, { tone: 'warn', text: isQueuePersisted() ? '取り消しは未送信です（電波が戻ると自動で送信します）' : MSG_NOT_PERSISTED })
         return
       }
-      const removedId = rec.id
-      setRecords((prev) => (prev ?? []).filter((r) => r.id !== removedId))
-      setPending((prev) => {
-        const next = new Map(prev)
-        next.delete(id)
-        return next
-      })
+      setRecords((prev) => (prev ?? []).filter((r) => r.id !== rec.id))
       show('記録を取り消しました。')
     } catch (e) {
       if (!aliveRef.current) return
@@ -603,11 +559,9 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
                   onSaveNote={() => {
                     if (row.record !== null) void save(row, row.record.result, row.record.cancel_reason, noteOf(row))
                   }}
-                  onDelete={() => {
-                    const shownResult = row.record?.result ?? pending.get(row.residentId)?.result
-                    if (shownResult !== undefined) setDeleteFor({ residentId: row.residentId, record: row.record, result: shownResult })
-                  }}
+                  onDelete={() => setDeleteFor(row.record)}
                   locked={locked}
+                  rowPending={rowPending(row)}
                   busy={busy.has(row.residentId)}
                   msg={msgs.get(row.residentId) ?? null}
                   pending={pending.get(row.residentId) ?? null}
@@ -679,9 +633,7 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
         body={
           deleteFor === null
             ? undefined
-            : deleteFor.record === null
-              ? `${residentById.get(deleteFor.residentId)?.name ?? ''}　${fmtDayLabel(day)}の「${BATH_RESULT_LABEL[deleteFor.result]}」（未送信）を取り消します。まだ送っていない記録は送らずに消えます。`
-              : `${residentById.get(deleteFor.residentId)?.name ?? ''}　${fmtDayLabel(deleteFor.record.bath_on)}の「${BATH_RESULT_LABEL[deleteFor.record.result]}」の記録を取り消します。取り消した記録は変更の記録に残ります。`
+            : `${residentById.get(deleteFor.resident_id)?.name ?? ''}　${fmtDayLabel(deleteFor.bath_on)}の「${BATH_RESULT_LABEL[deleteFor.result]}」の記録を取り消します。取り消した記録は変更の記録に残ります。`
         }
         confirmLabel="取り消す"
         danger
@@ -709,6 +661,8 @@ interface BathRowProps {
   onSaveNote: () => void
   onDelete: () => void
   locked: boolean
+  /** 未送信の記録がある（区分ボタン・取り消しを押せない） */
+  rowPending: boolean
   busy: boolean
   msg: RowMsg | null
   pending: LocalPending | null
@@ -724,6 +678,7 @@ function BathRow({
   onSaveNote,
   onDelete,
   locked,
+  rowPending,
   busy,
   msg,
   pending,
@@ -731,13 +686,21 @@ function BathRow({
 }: BathRowProps) {
   const uid = useId()
   const rec = row.record
-  // 表示する区分: 保存済み → 送信待ちにした入力 の順
-  const shown: BathResult | null = rec?.result ?? pending?.result ?? null
-  const shownReason = rec?.result === 'cancel' ? rec.cancel_reason : pending?.result === 'cancel' ? pending.cancel_reason : null
+  // 表示する区分: 送信待ちにした入力（未送信の選択） → 保存済み の順（圏外で直した時も、選んだ区分を見せる）
+  const shown: BathResult | null = pending?.result ?? rec?.result ?? null
+  const shownReason =
+    pending !== null
+      ? pending.result === 'cancel'
+        ? pending.cancel_reason
+        : null
+      : rec?.result === 'cancel'
+        ? rec.cancel_reason
+        : null
   // 入院中の方は予定があっても「未」にしない（入浴できないため・「入院」と出す）
   const unrecorded = pending === null && isUnrecorded(row)
   const noteChanged = rec !== null && note !== (rec.note ?? '')
-  const disabled = locked || busy
+  // 未送信の記録がある行は区分ボタン・取り消しを押せない（備考の入力は残す）
+  const disabled = locked || busy || rowPending
   const name = resident?.name ?? `利用者番号 ${row.residentId}`
   const time =
     row.startTime !== null || row.endTime !== null
@@ -833,7 +796,7 @@ function BathRow({
             備考を保存
           </button>
         ) : null}
-        {rec !== null || pending !== null ? (
+        {rec !== null ? (
           <button
             type="button"
             onClick={onDelete}
@@ -845,6 +808,12 @@ function BathRow({
         ) : null}
       </div>
 
+      {rowPending ? (
+        <p role="status" className="mt-2 rounded border border-warn bg-warn-bg px-2 py-1 text-sm font-bold text-warn">
+          <span aria-hidden="true">⚠ </span>
+          {MSG_ROW_PENDING}
+        </p>
+      ) : null}
       {busy ? (
         <p role="status" className="mt-2 text-sm text-ink2">
           保存しています…

@@ -308,7 +308,7 @@ export interface BathMonthTable {
  * ・マス … 記録があれば区分。記録が無く、その日の曜日に予定があり、その日が today 以前なら 'missing'（「未」）。
  *          ただし「未」は次の全部を満たす時だけ（2026-09-26 レビュー M1・M2）:
  *            ・その日が startDay（施設全体で最初の入浴記録の日）以降。startDay が null（記録が1件も無い）なら付けない
- *            ・その月に記録が1件以上ある（使い始める前の月に「未」を並べない）
+ *              （startDay 以降なら、その月の記録が0件でも予定日には付ける＝記録の付け忘れの月を見逃さない）
  *            ・退居された方でない・現在入院中（hospitalizedIds）の方でない
  *              （過去の入院期間は分からないので、現在の入院で判断する＝記録画面の isUnrecorded と同じ）
  * plannedByWeekday … 曜日番号（0=月 … 6=日）→ 予定がある利用者ID。null は「予定を取得できなかった」（「未」を出さない）
@@ -349,10 +349,8 @@ export function aggregateBathMonth(p: {
   const weekdays = days.map((d) => isoWeekdayIndex(d))
   const retired = p.retiredIds ?? new Set<number>()
   const hospitalized = p.hospitalizedIds ?? new Set<number>()
-  // その月に記録が1件でもあるか（名簿に居ない方の記録も含めて、月の中の記録で判断する）
-  const monthHasRecords = p.records.some((r) => dayIndex.has(r.bath_on))
   const missingAllowed = (id: number, d: string): boolean =>
-    monthHasRecords && p.startDay !== null && d >= p.startDay && d <= p.today && !hospitalized.has(id)
+    p.startDay !== null && d >= p.startDay && d <= p.today && !hospitalized.has(id)
   const plannedOn = (id: number, i: number): boolean => {
     if (p.plannedByWeekday === null || retired.has(id)) return false
     const w = weekdays[i]

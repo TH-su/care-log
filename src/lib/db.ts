@@ -674,11 +674,6 @@ let convertedOnLoad = false
 let queuePersisted = true
 /** この起動中に「サーバーへ載った」ことを観測できた op の qid（他タブの控えから復活させない印） */
 const sentQids = new Set<string>()
-/**
- * この起動中に「送らずに破棄した」op の qid（入浴記録の未送信の追加を取り消した時だけ入る・2026-09-26）。
- * 書き戻しの和集合で保存先の古い控えから復活させない・未送信件数に数えない（sentQids と同じ扱いの別の印）
- */
-const discardedQids = new Set<string>()
 const queueCbs = new Set<(n: number) => void>()
 
 function normalizeQueueOp(row: unknown): QueueOp | null {
@@ -1693,7 +1688,7 @@ function mergeLegacyForPersist(stored: QueueOp[] | null): QueueOp[] {
   if (stored === null) return queue
   const mine = new Set(queue.map((o) => o.qid))
   // 送信できたことを観測した op は復活させない（他タブの古い控えからの二重送信を防ぐ）
-  const others = stored.filter((o) => !mine.has(o.qid) && !sentQids.has(o.qid) && !discardedQids.has(o.qid))
+  const others = stored.filter((o) => !mine.has(o.qid) && !sentQids.has(o.qid))
   return others.length === 0 ? queue : queue.concat(others)
 }
 
@@ -1801,9 +1796,7 @@ function notifyQueue(): void {
 export function queuePending(): number {
   const ids = new Set<string>()
   const { s1 } = readStoresQuiet()
-  if (s1 !== null) {
-    for (const op of s1.legacy) if (!sentQids.has(op.qid) && !discardedQids.has(op.qid)) ids.add(`op:${op.qid}`)
-  }
+  if (s1 !== null) for (const op of s1.legacy) if (!sentQids.has(op.qid)) ids.add(`op:${op.qid}`)
   for (const op of queue) ids.add(`op:${op.qid}`)
   for (const k of currentCellRows().keys()) ids.add(`row:${k}`)
   return ids.size
@@ -4195,62 +4188,22 @@ export async function fetchBathPlan(dayIso: string, residents?: Resident[]): Pro
 }
 
 /**
- * この端末の送信待ちにある、まだ送っていない入浴記録の追加（同じ人・同じ日）。無ければ null。
- * 送信中（sending）・止まっている（blocked）ものは差し替えられないので対象にしない。
- */
-function pendingBathInsert(residentId: number, day: string): RowQueueOp | null {
-  for (const q of queue) {
-    if (q.table !== 'bath_records' || q.kind !== 'insert') continue
-    if (q.blocked !== undefined || q.sending === true) continue
-    if (idNum(q.payload.resident_id) === residentId && dateStr(q.payload.bath_on) === day) return q
-  }
-  return null
-}
-
-/** 同じ人・同じ日の生きている行が「この端末が送り終えた追加」の行か（その行の id・rev。違えば null） */
-async function ownBathRow(sb: SupabaseClient, residentId: number, day: string): Promise<{ id: number; rev: number } | null> {
-  const hit = await findByKey(sb, 'bath_records', { resident_id: residentId, bath_on: day }, 'id,rev,client_key')
-  if (hit === null) return null
-  const ck = str(asRecord(hit.row)?.client_key)
-  return ck !== null && sentQids.has(ck) ? { id: hit.id, rev: hit.rev } : null
-}
-
-/**
  * 入浴記録の追加。端末生成の冪等キー client_key を必ず付ける（再送しても1行に収まる）。
  * 戻り値: 追加した行／'conflict'（同じ人・同じ日に他の端末が先に記録した）／'queued'（通信できない）
- *
- * 圏外で同じ人を続けて押した時（2026-09-26 レビュー H2）:
- *   ・同じ人・同じ日のまだ送っていない追加が送信待ちにあれば、新しい追加を積まずに、その待ち行の中身
- *     （区分・理由・備考・記入者）を同じ client_key のまま差し替える（2件積むと2件目が 23505 で永久に止まるため）
- *   ・その追加が既に送り終わっていて（画面がまだ読み直していない）同じ人・同じ日の行が自分の送った行なら、
- *     読み直した版で update に切り替える
  */
 export async function insertBath(b: Omit<BathRecord, 'id' | 'rev'>): Promise<BathRecord | Conflict | Queued> {
   const cancel_reason = b.result === 'cancel' ? b.cancel_reason : null
   const note = b.note === null || b.note.trim() === '' ? null : b.note
   assertBathInput({ bath_on: b.bath_on, result: b.result, cancel_reason, note })
   await writeGate('bath_records')
-  const fields = { result: b.result, cancel_reason, note, recorded_by: idNum(b.recorded_by) }
-
-  const waiting = pendingBathInsert(b.resident_id, b.bath_on)
-  if (waiting !== null) {
-    waiting.payload = { ...waiting.payload, ...fields }
-    waiting.tries = 0
-    waiting.nextAt = 0 // 新しい入力が乗ったので待ち時間を置かずに送る
-    await persistQueueLocked()
-    await flushQueue()
-    const still = queue.find((o) => o.qid === waiting.qid)
-    if (still !== undefined) {
-      armRetryTimer()
-      return still.blocked === 'conflict' ? CONFLICT : QUEUED
-    }
-    // 送れた。載った行を client_key で読んで返す（読めなければ送信待ちと同じ見せ方＝画面は次の読み直しで追いつく）
-    const ck = clientKeyOf(waiting.payload)
-    const landed = ck === null ? null : await findByKey(await getClient(), 'bath_records', ck, BATH_COLS, true)
-    return (landed === null ? null : normalizeBath(landed.row)) ?? QUEUED
-  }
-
-  const payload = withClientKey({ resident_id: b.resident_id, bath_on: b.bath_on, ...fields })
+  const payload = withClientKey({
+    resident_id: b.resident_id,
+    bath_on: b.bath_on,
+    result: b.result,
+    cancel_reason,
+    note,
+    recorded_by: idNum(b.recorded_by),
+  })
   const sb = await getClient()
   const res = (await sb.from('bath_records').insert(payload).select(BATH_COLS).maybeSingle()) as Res<unknown>
   if (res.error !== null) {
@@ -4265,18 +4218,6 @@ export async function insertBath(b: Omit<BathRecord, 'id' | 'rev'>): Promise<Bat
       const landed = ck === null ? null : await findByKey(sb, 'bath_records', ck, BATH_COLS, true)
       const row = landed === null ? null : normalizeBath(landed.row)
       if (row !== null) return row
-      // この端末が先に送り終えた追加の行（画面が未取得）→ 読み直した版で修正に切り替える
-      const own = await ownBathRow(sb, b.resident_id, b.bath_on)
-      if (own !== null) {
-        return updateRow(
-          'bath_records',
-          own.id,
-          own.rev,
-          { result: fields.result, cancel_reason, note },
-          normalizeBath,
-          { editedBy: fields.recorded_by },
-        )
-      }
       // 他の端末が同じ人・同じ日を先に記録した（1人1日1件）→ 入力を消さず読み直しを促す
       if (await bathDayTaken(sb, payload)) return CONFLICT
       // どちらとも確かめられない（読めない）→ 送信待ちへ（次の再送で同じ判定をやり直す）
@@ -4288,47 +4229,6 @@ export async function insertBath(b: Omit<BathRecord, 'id' | 'rev'>): Promise<Bat
   const row = normalizeBath(res.data)
   if (row === null) throw new DbError('server', MSG.broken)
   return row
-}
-
-/**
- * 画面にまだ記録が無い（送信待ちの追加だけがある）行の取り消し。
- *   'discarded' … まだ送っていない追加を、送らずに送信待ちから外した（サーバーには何も載らない）
- *   'sending'   … いま送っている最中で外せない（少し待ってからもう一度）
- *   'none'      … この端末の送信待ちに無い（送り終えている等）。呼び側は記録を読み直してから取り消す
- * 他の表の送信待ちには触れない。
- */
-export async function discardPendingBath(residentId: number, day: string): Promise<'discarded' | 'sending' | 'none'> {
-  const hit = queue.find(
-    (q) =>
-      q.table === 'bath_records' &&
-      q.kind === 'insert' &&
-      idNum(q.payload.resident_id) === residentId &&
-      dateStr(q.payload.bath_on) === day,
-  )
-  if (hit === undefined) return 'none'
-  if (hit.sending === true) return 'sending'
-  queue = queue.filter((o) => o.qid !== hit.qid)
-  discardedQids.add(hit.qid) // 保存先の古い控えから復活させない
-  await persistQueueLocked()
-  armRetryTimer()
-  return 'discarded'
-}
-
-/**
- * 施設全体で最初の入浴記録の日（削除済みを除く・無ければ null）。月次表の「未」を、記録を始めた日以降にだけ付けるために使う。
- * 期間を持たない読み取りだが、1行だけ（limit 1）を (bath_on) の索引で引くので全件を読まない。
- */
-export async function fetchBathFirstDay(): Promise<string | null> {
-  const sb = await getClient()
-  const res = (await sb
-    .from('bath_records')
-    .select('bath_on')
-    .is('deleted_at', null)
-    .order('bath_on', { ascending: true })
-    .limit(1)
-    .maybeSingle()) as Res<unknown>
-  if (res.error !== null) throw bathReadError(res)
-  return dateStr(asRecord(res.data)?.bath_on)
 }
 
 /**
@@ -4355,6 +4255,41 @@ export async function updateBath(
 /** 入浴記録の取り消し（soft delete。物理削除はしない） */
 export async function softDeleteBath(id: number, rev: number, opts?: WriteOpts): Promise<true | Conflict | Queued> {
   return softDelete('bath_records', id, rev, opts)
+}
+
+/**
+ * この端末（このタブ）の送信待ちに、その人・その日の入浴記録の追加、またはその記録（recordId）の修正・取り消しが
+ * 残っているか（送信中を含む。自動再送を止めた＝blocked の op は含めない）。**読むだけで送信待ちは書き換えない**。
+ * 画面はこれが true の行の区分ボタン・取り消しを押せなくする（圏外で同じ人を続けて押して2件目の追加が
+ * 23505 で止まるのを防ぐ・2026-09-26 レビュー3巡目。送信待ちの経路そのものは他の表と同じ）
+ */
+export function hasPendingBath(residentId: number, day: string, recordId: number | null): boolean {
+  for (const q of queue) {
+    if (q.table !== 'bath_records' || q.blocked !== undefined) continue
+    if (q.kind === 'insert') {
+      if (idNum(q.payload.resident_id) === residentId && dateStr(q.payload.bath_on) === day) return true
+    } else if (q.kind === 'update' && recordId !== null && q.rowId === recordId) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * 施設全体で最初の入浴記録の日（削除済みを除く・無ければ null）。月次表の「未」を、記録を始めた日以降にだけ付けるために使う。
+ * 期間を持たない読み取りだが、1行だけ（limit 1）を (bath_on) の索引で引くので全件を読まない。
+ */
+export async function fetchBathFirstDay(): Promise<string | null> {
+  const sb = await getClient()
+  const res = (await sb
+    .from('bath_records')
+    .select('bath_on')
+    .is('deleted_at', null)
+    .order('bath_on', { ascending: true })
+    .limit(1)
+    .maybeSingle()) as Res<unknown>
+  if (res.error !== null) throw bathReadError(res)
+  return dateStr(asRecord(res.data)?.bath_on)
 }
 
 // ── 既読 ─────────────────────────────────────────────────────────────────────

@@ -105,10 +105,10 @@ fetchBathPlan(dayIso: string, residents?: Resident[]): Promise<BathPlanResult>
                                                                // { available, updatedAt（写しの更新時刻）, entries:[{residentId,startTime,endTime,hospitalized}], unmatched }
 insertBath(b: Omit<BathRecord, 'id' | 'rev'>): Promise<BathRecord | Conflict | Queued>
                                                                // client_key 付き。1人1日1件の 23505（自分のキーでない）は 'conflict'
-                                                               // 同じ人・同じ日のまだ送っていない追加が送信待ちにあれば、積まずに中身を同じ client_key のまま差し替える
-                                                               // 送り終えた自分の行（画面が未取得）なら読み直した版で update に切り替える（2026-09-26 レビュー H2）
-discardPendingBath(residentId: number, day: string): Promise<'discarded' | 'sending' | 'none'>
-                                                               // まだ送っていない追加を送らずに送信待ちから外す（他の表の送信待ちには触れない）
+hasPendingBath(residentId: number, day: string, recordId: number | null): boolean
+                                                               // このタブの送信待ち（送信中を含む・blocked は除く）に、その人・その日の追加か
+                                                               // その記録の修正・取り消しがあるか。読むだけ。画面はこの行の区分ボタン・取り消しを押せなくする
+                                                               // （送信待ちの経路は他の表と同じ。差し替え・破棄はしない＝2026-09-26 レビュー3巡目）
 fetchBathFirstDay(): Promise<string | null>                    // 施設全体で最初の入浴記録の日（月次表の「未」を付け始める日。1行だけ引く）
 updateBath(current: BathRecord, patch: Partial<Pick<BathRecord, 'result' | 'cancel_reason' | 'note'>>, opts?: WriteOpts):
   Promise<BathRecord | Conflict | Queued>                      // rev 照合の部分更新。中止以外にしたら cancel_reason は null で送る

@@ -261,7 +261,7 @@ if (B === null) {
       assert.deepEqual(r3.totals, { billable: 1, partial: 0, cancel: 0, missing: 0 })
       assert.equal(t.hiddenRecords, 0)
     })
-    it('★M2: 「未」は施設全体で記録を始めた日（startDay）以降だけ。記録が無い月・startDay が無い時は付けない', () => {
+    it('★M2: 「未」は施設全体で記録を始めた日（startDay）以降だけ。その月の記録が0件でも予定日には付ける・startDay が無い時は付けない', () => {
       const recs = [rec(1, 1, '2026-09-14', 'full')]
       const t = B.aggregateBathMonth({ ...base, startDay: '2026-09-10', records: recs, plannedByWeekday: planned })
       const r1 = t.rows.find((r) => r.residentId === 1)
@@ -269,8 +269,14 @@ if (B === null) {
       assert.equal(r1.cells[13], 'full')
       assert.equal(r1.cells[20], 'missing', '記録を始めた後（21日）の「未」が無い')
       assert.equal(r1.totals.missing, 1)
+      // その月の記録が0件でも、startDay 以降の予定日には「未」を付ける（記録の付け忘れの月を見逃さない）
       const empty = B.aggregateBathMonth({ ...base, records: [], plannedByWeekday: planned })
-      assert.equal(empty.rows.flatMap((r) => r.cells).includes('missing'), false, '記録が1件も無い月に「未」を付けた')
+      const e1 = empty.rows.find((r) => r.residentId === 1)
+      assert.equal(e1.cells[6], 'missing', '記録0件の月の予定日（7日）に「未」が無い')
+      assert.equal(e1.cells[27], null, '今日より後（28日）に「未」を付けた')
+      // 記録を始める前の月（startDay より前）には付けない
+      const before = B.aggregateBathMonth({ ...base, monthKey: '2026-08', today: '2026-09-21', records: [], plannedByWeekday: planned })
+      assert.equal(before.rows.flatMap((r) => r.cells).includes('missing'), false, '記録を始める前の月に「未」を付けた')
       const noStart = B.aggregateBathMonth({ ...base, startDay: null, records: recs, plannedByWeekday: planned })
       assert.equal(noStart.rows.flatMap((r) => r.cells).includes('missing'), false)
     })
