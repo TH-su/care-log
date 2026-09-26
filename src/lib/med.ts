@@ -119,6 +119,8 @@ export function medCellOf(p: {
 
 /**
  * 1日の表を組む。行は order（居室順の在籍の利用者ID）の順。
+ * 「未」は missingAllowed の時だけ付ける（与薬の記録が解禁済み かつ その日が施設で記録を始めた日以降＝月次表と同じ条件。
+ * 封鎖中・記録を始める前は、締めを過ぎても空欄＝open）。呼び側は medMissingAllowed で決める
  * order に居ない人でも、その日に時間帯の記録がある人は後ろ（ID順）に足す（記録を無言で隠さない）。
  * 頓服（prn）はこの表に入れない（下の頓服の区画）。同じマスに記録が2件あれば新しい id を採る。
  */
@@ -129,7 +131,10 @@ export function buildMedDayRows(p: {
   day: string
   today: string
   nowMin: number
+  /** 「未」を付けてよいか（medMissingAllowed）。省略時は付ける */
+  missingAllowed?: boolean
 }): MedDayRow[] {
+  const allowMissing = p.missingAllowed !== false
   const byResident = new Map<number, Map<MedSlot, MedAdmin>>()
   for (const r of p.records) {
     if (r.admin_on !== p.day || r.slot === 'prn') continue
@@ -153,7 +158,7 @@ export function buildMedDayRows(p: {
     const recs = byResident.get(id)
     const cells = {} as Record<MedSlot, MedCell>
     for (const slot of MED_SLOTS) {
-      cells[slot] = medCellOf({
+      const cell = medCellOf({
         configured: configured.includes(slot),
         record: recs?.get(slot) ?? null,
         slot,
@@ -161,9 +166,18 @@ export function buildMedDayRows(p: {
         today: p.today,
         nowMin: p.nowMin,
       })
+      cells[slot] = cell.kind === 'missing' && !allowMissing ? { kind: 'open' } : cell
     }
     return { residentId: id, configured, cells }
   })
+}
+
+/**
+ * 与薬チェックの日次表で「未」を付けてよいか（月次表とそろえる）。
+ * 与薬の記録が解禁済み（enabled）で、施設で記録を始めた日（startDay）が分かっていて、その日が startDay 以降の時だけ
+ */
+export function medMissingAllowed(enabled: boolean, startDay: string | null, day: string): boolean {
+  return enabled && startDay !== null && day >= startDay
 }
 
 /** 落薬・誤薬（事故・ヒヤリハットとして記録が要る状態） */

@@ -2915,7 +2915,8 @@ export async function fetchKarte(
     range<unknown>('notes', NOTE_COLS, 'note_on', KARTE_ROWS),
     outingsQuery,
     range<unknown>('bath_records', BATH_COLS, 'bath_on', KARTE_ROWS),
-    range<unknown>('med_admin', MED_ADMIN_COLS, 'admin_on', KARTE_ROWS),
+    // 与薬は1日に5件前後あるので、食事と同じ上限（MAX_ROWS）にする（KARTE_ROWS では1年表示で欠ける）
+    range<unknown>('med_admin', MED_ADMIN_COLS, 'admin_on', MAX_ROWS),
   ])
   for (const res of [vitals, meals, fluids, notes, outings]) {
     if (res.error !== null) throw readError(res)
@@ -2931,7 +2932,7 @@ export async function fetchKarte(
     notes: list(notes.data, normalizeNote, KARTE_ROWS),
     outings: list(outings.data, normalizeOuting, KARTE_ROWS),
     baths: baths.error !== null ? [] : list(baths.data, normalizeBath, KARTE_ROWS),
-    meds: meds.error !== null ? [] : list(meds.data, normalizeMedAdmin, KARTE_ROWS),
+    meds: meds.error !== null ? [] : list(meds.data, normalizeMedAdmin),
   }
 }
 
@@ -4682,6 +4683,44 @@ export function hasPendingMed(residentId: number, day: string, slot: MedAdminSlo
     }
   }
   return false
+}
+
+/** 送信待ちから組み立てた、まだサーバーに載っていない頓服の記録（画面の表示用・読むだけ） */
+export interface PendingPrn {
+  /** 送信待ちの qid（＝client_key） */
+  qid: string
+  residentId: number
+  givenAt: string | null
+  drug: string | null
+  reason: string | null
+  note: string | null
+  /** waiting＝送信待ち／sending＝送信中／blocked＝自動再送を止めた（止まっている） */
+  state: 'waiting' | 'sending' | 'blocked'
+}
+
+/**
+ * この端末（このタブ）の送信待ちにある、その日の頓服の追加（未送信・送信中・止まっているものを含む）。
+ * **読むだけで送信待ちは書き換えない・破棄しない**。送信待ちは起動時に localStorage から読み直されるので、
+ * 再読み込み・日付の切り替えの後も、送れるまで画面に「未送信」として出し続けられる（二重記録を防ぐ）
+ */
+export function pendingPrnOps(day: string): PendingPrn[] {
+  const out: PendingPrn[] = []
+  for (const q of queue) {
+    if (q.table !== 'med_admin' || q.kind !== 'insert') continue
+    if (q.payload.slot !== 'prn' || dateStr(q.payload.admin_on) !== day) continue
+    const residentId = idNum(q.payload.resident_id)
+    if (residentId === null) continue
+    out.push({
+      qid: q.qid,
+      residentId,
+      givenAt: str(q.payload.given_at),
+      drug: str(q.payload.prn_drug),
+      reason: str(q.payload.prn_reason),
+      note: str(q.payload.note),
+      state: q.blocked !== undefined ? 'blocked' : q.sending === true ? 'sending' : 'waiting',
+    })
+  }
+  return out
 }
 
 /**

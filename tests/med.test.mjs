@@ -206,6 +206,21 @@ if (M === null) {
       assert.deepEqual(rows.map((r) => r.residentId), [1, 9])
       assert.equal(rows[0].cells.morning.record.status, 'partial')
     })
+    it('「未」は解禁済み かつ 記録を始めた日以降だけ（medMissingAllowed）。それ以外は締め後も空欄（open）で件数に数えない', () => {
+      assert.equal(M.medMissingAllowed(true, '2026-09-10', '2026-09-26'), true)
+      assert.equal(M.medMissingAllowed(true, '2026-09-26', '2026-09-26'), true, '始めた日そのもの')
+      assert.equal(M.medMissingAllowed(true, '2026-09-27', '2026-09-26'), false, '始めた日より前')
+      assert.equal(M.medMissingAllowed(true, null, '2026-09-26'), false, 'まだ1件も記録が無い')
+      assert.equal(M.medMissingAllowed(false, '2026-09-10', '2026-09-26'), false, '封鎖中')
+      const build = (missingAllowed) =>
+        M.buildMedDayRows({ order: [2], slotsByResident: slotsBy, records: [rec(1, 2, day, 'noon', 'dropped')], day, today: day, nowMin: H(23, 30), missingAllowed })
+      const off = build(false)
+      assert.deepEqual(Object.values(off[0].cells).map((c) => c.kind), ['open', 'record', 'open', 'open'])
+      assert.deepEqual(M.countMedDay(off), { missing: 0, incident: 1, recorded: 1 })
+      assert.equal(M.countMedDay(build(true)).missing, 3)
+      assert.equal(M.tapActionOf(off[0].cells.morning, false), 'insert', '空欄のままでも押せば記録できる')
+    })
+
     it('別の日の記録は混ぜない', () => {
       const rows = M.buildMedDayRows({ order: [1], slotsByResident: slotsBy, records: [rec(1, 1, '2026-09-25', 'morning')], day, today: day, nowMin: H(8, 0) })
       assert.equal(rows[0].cells.morning.kind, 'open')
@@ -719,6 +734,39 @@ if (DB === null || M === null) {
       assert.equal(DB.hasPendingMed(1, '2026-09-01', 'prn', 99), false, '既にある別の頓服の記録は止めない')
     })
 
+    it('★頓服の未送信は送信待ちから読める: 圏外で頓服→画面を作り直す（次の起動）→ pendingPrnOps に未送信として残る・送れたら消える', async () => {
+      let off = true
+      const srv = medServer({ offline: () => off })
+      DB.__testHooks.setClient(srv.client)
+      const prn = medInput({ slot: 'prn', given_at: M.localDateTimeIso('2026-09-01', '09:00'), prn_drug: '頓服薬A', prn_reason: '理由A', note: 'メモ' })
+      assert.equal(await DB.insertMedAdmin(prn), 'queued')
+      assert.equal(await DB.insertMedAdmin(medInput()), 'queued') // 時間帯の記録は頓服の一覧に出さない
+      await DB.__testHooks.restartQueue() // 再読み込み相当（メモリを捨てて localStorage から読み直す）
+      const list = DB.pendingPrnOps('2026-09-01')
+      assert.equal(list.length, 1)
+      assert.deepEqual(
+        { ...list[0], qid: typeof list[0].qid },
+        { qid: 'string', residentId: 1, givenAt: prn.given_at, drug: '頓服薬A', reason: '理由A', note: 'メモ', state: 'waiting' },
+      )
+      assert.deepEqual(DB.pendingPrnOps('2026-09-02'), [], '別の日（日付を切り替えた先）には出さない')
+      // 止まっている op も出す（state=blocked）。読むだけで送信待ちは変えない
+      const raw = JSON.parse(lsStore.get('cl_sendQueue'))
+      raw.ops.find((o) => o.payload.slot === 'prn').blocked = 'rejected'
+      lsStore.set('cl_sendQueue', JSON.stringify(raw))
+      await DB.__testHooks.restartQueue()
+      const beforeRaw = lsStore.get('cl_sendQueue')
+      assert.equal(DB.pendingPrnOps('2026-09-01')[0].state, 'blocked')
+      assert.equal(lsStore.get('cl_sendQueue'), beforeRaw, '読んだだけで送信待ちが変わった')
+      // 止めていない状態に戻して送る → 一覧から消え、サーバーに1件だけ載る
+      raw.ops.find((o) => o.payload.slot === 'prn').blocked = undefined
+      lsStore.set('cl_sendQueue', JSON.stringify(raw))
+      await DB.__testHooks.restartQueue()
+      off = false
+      await DB.flushQueue(true)
+      assert.deepEqual(DB.pendingPrnOps('2026-09-01'), [])
+      assert.equal(srv.db.admin.filter((r) => r.slot === 'prn').length, 1)
+    })
+
     it('★送信待ちの間に他の端末が同じマスを記録した → 止めて残す（blocked=conflict・未送信として数え続け、hasPendingMed は false）', async () => {
       let off = true
       const srv = medServer({ offline: () => off })
@@ -736,11 +784,52 @@ if (DB === null || M === null) {
       assert.equal(DB.hasPendingMed(1, '2026-09-01', 'morning'), false)
     })
 
-    it('db.ts に送信待ちを書き換える与薬専用の経路が無い（差し替え・破棄を持たない）', () => {
-      const src = read('../src/lib/db.ts')
-      for (const name of ['discardPendingMed', 'replacePendingMed', 'pendingMedInsert', 'dropPendingMed']) {
-        assert.equal(src.includes(name), false, name)
+    it('★送信待ちの op は与薬の操作の前後で（送れた分が消える以外に）変わらない（差し替え・破棄・中身の書き換えをしない）', async () => {
+      let off = true
+      const srv = medServer({ offline: () => off })
+      DB.__testHooks.setClient(srv.client)
+      const prn = medInput({ slot: 'prn', given_at: M.localDateTimeIso('2026-09-01', '09:00'), prn_drug: '頓服薬A', prn_reason: '理由A' })
+      // 圏外で、同じマスの追加・頓服・時間帯の設定・別の記録の修正と取り消しを積む
+      assert.equal(await DB.insertMedAdmin(medInput()), 'queued')
+      assert.equal(await DB.insertMedAdmin(prn), 'queued')
+      assert.equal(await DB.setMedSlots(2, ['noon'], null, null), 'queued')
+      assert.equal(await DB.updateMedAdmin({ id: 7, ...medInput({ resident_id: 2 }), rev: 2, created_at: null }, { status: 'refused' }), 'queued')
+      const snap = (ops) => ops.map((o) => JSON.stringify([o.qid, o.table, o.kind, o.rowId ?? null, o.rev ?? null, o.payload]))
+      const before = snap(storedOps())
+      assert.equal(before.length, 4)
+      // 読むだけの関数・同じマスをもう一度押す（新しい op が後ろに足されるだけ）・別の記録の取り消し
+      DB.hasPendingMed(1, '2026-09-01', 'morning')
+      DB.hasPendingMedSlots(2, null)
+      DB.pendingPrnOps('2026-09-01')
+      assert.equal(await DB.insertMedAdmin(medInput({ status: 'partial' })), 'queued')
+      assert.equal(await DB.softDeleteMedAdmin(8, 1), 'queued')
+      await DB.__testHooks.restartQueue()
+      const mid = snap(storedOps())
+      assert.deepEqual(mid.slice(0, 4), before, '積んであった op の中身が変わった・消えた')
+      assert.equal(mid.length, 6)
+      // 電波が戻る: 他の端末が同じマスを先に記録していた → その op は止まって残る（中身は同じ）。送れた op だけが消える
+      srv.db.admin.push({ id: 60, ...medInput(), rev: 1, deleted_at: null, client_key: 'other-device' })
+      srv.db.admin.push({ id: 7, ...medInput({ resident_id: 2 }), rev: 2, deleted_at: null, client_key: 'x7' })
+      srv.db.admin.push({ id: 8, ...medInput({ resident_id: 2, slot: 'noon' }), rev: 1, deleted_at: null, client_key: 'x8' })
+      off = false
+      await DB.flushQueue(true)
+      const after = storedOps()
+      const sentKeys = new Set([...srv.db.admin, ...srv.db.slots].map((r) => r.client_key).filter(Boolean))
+      for (const s of mid) {
+        const [qid] = JSON.parse(s)
+        const still = after.find((o) => o.qid === qid)
+        if (still === undefined) {
+          // 消えてよいのは「サーバーに載った」ことが確かめられた op だけ（追加は client_key、更新は行の rev が進んだ）
+          const op = JSON.parse(s)
+          const landed = op[2] === 'insert' ? sentKeys.has(op[0]) : [...srv.db.admin].some((r) => r.id === op[3] && r.rev > op[4])
+          assert.ok(landed, `載っていない op が消えた: ${op[1]} ${op[2]}`)
+        } else {
+          assert.equal(snap([still])[0], s, '残った op の中身が変わった')
+        }
       }
+      const blocked = after.filter((o) => o.blocked === 'conflict')
+      assert.equal(blocked.length, 2, '同じマスの2つの追加は他の端末の記録と重なって止まる')
+      assert.ok(blocked.every((o) => o.table === 'med_admin' && o.payload.slot === 'morning'))
     })
   })
 
@@ -858,6 +947,7 @@ if (DB === null || M === null) {
       DB.__testHooks.setClient(srv.client)
       const k = await DB.fetchKarte(1, '2026-09-01', '2026-09-30')
       assert.deepEqual(k.meds.map((m) => [m.id, m.status]), [[9, 'absent']])
+      assert.equal(srv.calls.filter((q) => q.table === 'med_admin').at(-1).limit, 2000, 'カルテの与薬の上限は食事と同じ MAX_ROWS')
       const missing = medServer({ missingTable: true })
       DB.__testHooks.setClient(missing.client)
       const k2 = await DB.fetchKarte(1, '2026-09-01', '2026-09-30')

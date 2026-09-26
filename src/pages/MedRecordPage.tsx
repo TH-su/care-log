@@ -10,6 +10,8 @@
 //   ・入院中かどうかは care-log の名簿（residents）が持っていないので、入院中の方のマスも通常どおり（「不在」で記録する）
 // 下に頓服の区画（その日の頓服の一覧・＋頓服を記録・効果は後から追記）。
 // その人・その時間帯に未送信の記録（この端末の送信待ち・送信中）があるマスは押せない（入浴と同じ方式。送信待ちは書き換えない）。
+// 頓服の未送信は送信待ち（pendingPrnOps）から組み立てて一覧に出す（再読み込み・日付の切り替えの後も消えない＝二重記録を防ぐ）。
+// 「未」と「未記録 N」は、与薬の記録が解禁済み かつ 施設で記録を始めた日（fetchMedFirstDay）以降の日だけ（月次表とそろえる）。
 //
 // 規律:
 // - 取得・保存は db.ts の関数のみ（supabase を直呼びしない）
@@ -24,6 +26,7 @@ import {
   DbError,
   fetchAllResidents,
   fetchMedDay,
+  fetchMedFirstDay,
   fetchMedSlots,
   fetchStaff,
   getKindInputGate,
@@ -32,6 +35,7 @@ import {
   isQueuePersisted,
   isSelfWrite,
   kindBlockedMessage,
+  pendingPrnOps,
   queueSubscribe,
   softDeleteMedAdmin,
   subscribeMedChanges,
@@ -45,6 +49,7 @@ import {
   fmtClock,
   isIncidentStatus,
   localDateTimeIso,
+  medMissingAllowed,
   MED_DEADLINES,
   MED_RECHECK_MS,
   minutesOfDay,
@@ -52,6 +57,7 @@ import {
   validateMedAdminInput,
 } from '../lib/med'
 import type { MedCell, MedDayRow } from '../lib/med'
+import type { PendingPrn } from '../lib/db'
 import { fmtDayLabel, todayIso } from '../lib/format'
 import { LS, MED_SLOT_LABEL, MED_SLOTS, MED_STATUS_LABEL, MED_STATUS_MARK, MED_STATUSES } from '../lib/types'
 import type { MedAdmin, MedSlot, MedSlotsSetting, MedStatus, Resident, Staff } from '../lib/types'
@@ -116,14 +122,6 @@ type Msg = { tone: 'warn' | 'danger' | 'info'; text: string }
 /** マスの鍵（利用者ID と時間帯） */
 const cellKey = (residentId: number, slot: string): string => `${residentId}|${slot}`
 
-/** 送信待ちにした頓服（画面の表示だけ。送れたら次の読み込みで記録に置き換わる。localStorage には置かない） */
-interface LocalPrn {
-  key: string
-  residentId: number
-  givenAt: string
-  drug: string
-  reason: string
-}
 
 export interface MedRecordPageProps {
   /** App.tsx が持っている職員名簿（未指定ならこの画面が取得する） */
@@ -154,7 +152,8 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
   const [staffPickerOpen, setStaffPickerOpen] = useState(false)
   const [busy, setBusy] = useState<Set<string>>(new Set())
   const [pendingMarks, setPendingMarks] = useState<Map<string, MedStatus>>(new Map())
-  const [pendingPrn, setPendingPrn] = useState<LocalPrn[]>([])
+  /** 施設で与薬の記録を始めた日（null＝まだ1件も無い・読めていない）。「未」を付け始める日 */
+  const [startDay, setStartDay] = useState<string | null>(null)
   const [msg, setMsg] = useState<Msg | null>(null)
   const [statusFor, setStatusFor] = useState<MedAdmin | null>(null)
   const [deleteFor, setDeleteFor] = useState<MedAdmin | null>(null)
@@ -227,11 +226,12 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
     setDayError(null)
     setRecords(null)
     setSlots(null)
-    Promise.all([loadRecords(day), fetchMedSlots(activeResidents)])
-      .then(([rs, ss]) => {
+    Promise.all([loadRecords(day), fetchMedSlots(activeResidents), fetchMedFirstDay()])
+      .then(([rs, ss, first]) => {
         if (!alive) return
         setRecords(rs)
         setSlots(ss)
+        setStartDay(first)
       })
       .catch((e: unknown) => {
         if (!alive) return
@@ -245,17 +245,17 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
   // 日付を変えたら、その日に紐づく画面の状態を持ち越さない
   useEffect(() => {
     setPendingMarks(new Map())
-    setPendingPrn([])
     setMsg(null)
   }, [day])
 
   /** 記録と時間帯を読み直す（保存の競合・他の端末の変更の後）。読めなければ表示中のまま */
   const reloadDay = useCallback(() => {
-    Promise.all([loadRecords(day), fetchMedSlots(activeResidents)])
-      .then(([rs, ss]) => {
+    Promise.all([loadRecords(day), fetchMedSlots(activeResidents), fetchMedFirstDay()])
+      .then(([rs, ss, first]) => {
         if (!aliveRef.current) return
         setRecords(rs)
         setSlots(ss)
+        setStartDay(first)
       })
       .catch(() => {
         // 読み直せなかっただけ。表示中の記録はそのまま残す（「最新を読み込む」で再試行できる）
@@ -286,10 +286,6 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
       }
       return next.size === prev.size ? prev : next
     })
-    setPendingPrn((prev) => {
-      const next = prev.filter((p) => hasPendingMed(p.residentId, day, 'prn'))
-      return next.length === prev.length ? prev : next
-    })
   }, [queueTick, records, day])
 
   // 他の端末の記録・時間帯の変更を取り込む（自分の書込の通知・別の日の通知は無視。行を特定できない通知は取り直す）
@@ -309,6 +305,8 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
   }, [day, reloadDay])
 
   const locked = gate === null || !gate.observed || gate.value !== true
+  /** 「未」を付けてよいか（解禁済み かつ 記録を始めた日以降。封鎖中・開始前は締めを過ぎても空欄） */
+  const missingAllowed = medMissingAllowed(gate !== null && gate.observed && gate.value === true, startDay, day)
   const gateUnknown = gate !== null && !gate.observed
   const reasonId = `${uid}-locked`
 
@@ -338,8 +336,9 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
         day,
         today,
         nowMin,
+        missingAllowed,
       }),
-    [activeResidents, slotsByResident, records, day, today, nowMin],
+    [activeResidents, slotsByResident, records, day, today, nowMin, missingAllowed],
   )
 
   const floorOptions = useMemo(() => {
@@ -389,6 +388,8 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
   }
 
   function applySaved(saved: MedAdmin) {
+    // 施設で最初の記録なら、その日から「未」を付け始める（読み直しを待たない）
+    setStartDay((cur) => (cur === null || saved.admin_on < cur ? saved.admin_on : cur))
     setRecords((prev) => {
       const list = (prev ?? []).filter(
         (r) => r.id !== saved.id && !(saved.slot !== 'prn' && r.resident_id === saved.resident_id && r.slot === saved.slot),
@@ -580,9 +581,9 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
       }
       if (res === 'queued') {
         // 端末に残せなかった時は小窓を閉じずに入力を残す
+        // 一覧の「未送信」の行は送信待ちから組み立てる（画面の state には持たない）
         if (!isQueuePersisted()) return MSG_NOT_PERSISTED
-        const local: LocalPrn = { key: `${Date.now()}`, residentId: p.residentId, givenAt: givenAt ?? '', drug: p.drug, reason: p.reason }
-        setPendingPrn((prev) => [...prev, local])
+        setQueueTick((t) => t + 1)
         setMsg({ tone: 'warn', text: MSG_PRN_QUEUED })
         return null
       }
@@ -850,7 +851,7 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
 
           <PrnSection
             records={prnRecords}
-            pending={pendingPrn}
+            pending={pendingPrnOps(day)}
             residentById={residentById}
             staffName={staffName}
             locked={locked}
@@ -1027,7 +1028,8 @@ function MedCellButton({ name, slot, cell, pendingStatus, pending, busy, locked,
 
 interface PrnSectionProps {
   records: MedAdmin[]
-  pending: LocalPrn[]
+  /** 送信待ちにある、その日の頓服の追加（pendingPrnOps。読むだけ） */
+  pending: PendingPrn[]
   residentById: Map<number, Resident>
   staffName: (id: number | null) => string | null
   locked: boolean
@@ -1113,18 +1115,26 @@ function PrnSection({ records, pending, residentById, staffName, locked, busy, r
           })}
           {pending.map((p) => {
             const r = residentById.get(p.residentId)
+            const blocked = p.state === 'blocked'
             return (
-              <li key={p.key} className="rounded-md border border-warn bg-warn-bg p-3">
+              <li key={p.qid} className={`rounded-md border p-3 ${blocked ? 'border-danger bg-danger-bg' : 'border-warn bg-warn-bg'}`}>
                 <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-base text-ink">
                   <span className="tabular text-sm text-ink3">{r?.room ?? '—'}</span>
                   <span className="font-bold">{r?.name ?? `利用者番号 ${p.residentId}`}</span>
-                  <span className="tabular text-sm text-ink2">{fmtClock(p.givenAt)}</span>
-                  <span className="text-sm font-bold text-warn">
-                    <span aria-hidden="true">⚠ </span>未送信
+                  <span className="tabular text-sm text-ink2">{fmtClock(p.givenAt) || '—'}</span>
+                  <span className={`text-sm font-bold ${blocked ? 'text-danger' : 'text-warn'}`}>
+                    <span aria-hidden="true">⚠ </span>
+                    {blocked ? '止まっている（送信できませんでした）' : p.state === 'sending' ? '送信中' : '未送信'}
                   </span>
                 </p>
                 <p className="mt-1 break-words text-sm text-ink">
-                  薬 {p.drug}　理由 {p.reason}
+                  薬 {p.drug ?? '—'}　理由 {p.reason ?? '—'}
+                  {p.note !== null ? `　備考 ${p.note}` : ''}
+                </p>
+                <p className="mt-1 text-sm text-ink2">
+                  {blocked
+                    ? 'この記録は自動では送れません。管理者に連絡してください（同じ頓服を記録し直さないでください）。'
+                    : '電波が戻ると自動で送信します。同じ頓服を記録し直さないでください。'}
                 </p>
               </li>
             )
