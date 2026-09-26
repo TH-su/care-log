@@ -583,7 +583,9 @@ export function SettingsPage() {
     setLogoutError(null)
     try {
       const { supabase } = await import('../lib/supabase')
-      const { error } = await supabase.auth.signOut()
+      // 「この端末だけ」ログアウトする（scope: 'local'）。既定の global だと、同じアカウントで入っている
+      // 他のタブレット（施設の共用アカウント）まで次のトークン更新で締め出される（2026-09-26）
+      const { error } = await supabase.auth.signOut({ scope: 'local' })
       if (error) setLogoutError(MSG.logoutFailed)
       // 成功時は App.tsx の認証ゲートがログイン画面へ切り替える
     } catch {
