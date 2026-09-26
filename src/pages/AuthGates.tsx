@@ -19,7 +19,7 @@
 //   同じ th-su.github.io の上なので、ログイン状態（localStorage の sb-<ref>-auth-token）はそのまま共有される。
 //   src/lib/supabase.ts は凍結（detectSessionInUrl: false）なので、この画面で Google から戻る受け口は作らない。
 //   誰が使えるかはデータベースの許可リスト（care-backend 0001/0002）が決める。
-//   ID とパスワードの欄は、施設の共用アカウントを Google に切り替え終えるまでの移行期間だけ残す。
+//   ID とパスワードの欄は 2026-09-26 に外した（施設の共用アカウントも Google 限定＝care-backend 0003）。
 //
 // 規律:
 // - 実名・入力値（メールアドレス・パスワード）をコード/コメント/console/localStorage に書かない
@@ -27,9 +27,8 @@
 // - エラー文は「何が起きたか＋次にどうすればよいか」。英語の生メッセージをそのまま出さない
 // - Tailwind はトークン由来クラスのみ（arbitrary value・色/px 直書きなし）
 
-import { useEffect, useId, useState } from 'react'
-import type { FormEvent, ReactNode } from 'react'
-import { ErrorBlock } from '../components/ui'
+import { useEffect, useState } from 'react'
+import type { ReactNode } from 'react'
 
 // ── 接続設定の状態（値そのものは絶対に表示しない。設定の有無・形式だけを見る）──────
 
@@ -161,60 +160,19 @@ export { NotConfiguredPage as UnconfiguredPage }
 // ログイン
 // ══════════════════════════════════════════════════════════════
 
-const MSG = {
-  emailRequired: 'メールアドレスを入力してください。',
-  passwordRequired: 'パスワードを入力してください。',
-  invalid: 'メールアドレスまたはパスワードが違います。入力内容を確認して、もう一度お試しください。',
-  unconfirmed: 'このアカウントはまだ使える状態になっていません。管理者にご連絡ください。',
-  rateLimit:
-    '試行回数が多いため、一時的に受け付けられません。1分ほど待ってから、もう一度お試しください。',
-  offline: '通信できませんでした。電波・ネットワークの状態を確認して、もう一度お試しください。',
-  failed:
-    'ログインできませんでした。少し時間をおいて、もう一度お試しください。解決しない場合は管理者にご連絡ください。',
-} as const
-
-interface AuthFailure {
-  status?: number
-  code?: string
-  message?: string
-}
-
-/**
- * 認証エラーを日本語の「何が起きたか＋次にどうすればよいか」へ変換する。
- * サーバーの英語メッセージはそのまま出さない（利用者が読めず、内部情報も混ざり得るため）。
- */
-function loginErrorMessage(e: AuthFailure): string {
-  const code = (e.code ?? '').toLowerCase()
-  const msg = (e.message ?? '').toLowerCase()
-  if (code === 'invalid_credentials' || msg.includes('invalid login credentials')) return MSG.invalid
-  if (code === 'email_not_confirmed' || msg.includes('not confirmed')) return MSG.unconfirmed
-  if (e.status === 429 || code.includes('rate_limit') || msg.includes('too many')) return MSG.rateLimit
-  if (msg.includes('fetch') || msg.includes('network')) return MSG.offline
-  return MSG.failed
-}
-
-/**
- * 未ログイン時に全画面で出すログイン画面（ルート /login）。
- * 認証は施設共有アカウント。「誰として記録するか」は別レイヤー（App.tsx の操作者ピッカー）。
- *
- * 3状態: ローディング＝送信中（ボタン無効化＋状況テキスト）／エラー＝入力不備・認証失敗・通信失敗／
- *        空＝初期表示の未入力フォーム（何を入れるか・入れない場合の連絡先を明示）。
- */
 /** Google ログインの入口（care-tools の共通ログイン画面。?return=care-log でログイン後にここへ戻る） */
 const GOOGLE_LOGIN_URL = '../care-tools/login.html?return=care-log'
 
+/**
+ * 未ログイン時に全画面で出すログイン画面（ルート /login）。
+ * ログインは Google だけ（2026-09-26 に施設の共用アカウントも Google 限定にした＝care-backend 0003。
+ * ID とパスワードでは、たとえ正しくてもデータベースが何も返さないので、入力欄も置かない）。
+ * 「誰として記録するか」は別レイヤー（App.tsx の操作者ピッカー）。
+ *
+ * 3状態: ローディング＝なし（押すと別画面へ移るだけ）／エラー＝Google 側・許可リスト側の断りは
+ *        共通ログイン画面が日本語で出す／空＝初期表示（何を押すか・入れない場合の連絡先を明示）。
+ */
 export function LoginPage() {
-  const emailId = useId()
-  const passwordId = useId()
-  const emailErrorId = `${emailId}-error`
-  const passwordErrorId = `${passwordId}-error`
-
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [revealed, setRevealed] = useState(false)
-  const [fieldError, setFieldError] = useState<{ email?: string; password?: string }>({})
-  const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
   const [pending, setPending] = useState(0)
 
   // 401（セッション失効）でこの画面に戻された場合に備え、未送信の記録が残っていることを伝える。
@@ -231,45 +189,6 @@ export function LoginPage() {
       alive = false
     }
   }, [])
-
-  const submit = async (e: FormEvent) => {
-    e.preventDefault()
-    if (busy) return
-
-    // 入力不備は通信前に日本語で指摘する（ブラウザ既定の英語バブルを出さないため form は noValidate）
-    const trimmed = email.trim()
-    const next: { email?: string; password?: string } = {}
-    if (trimmed === '') next.email = MSG.emailRequired
-    if (password === '') next.password = MSG.passwordRequired
-    setFieldError(next)
-    if (next.email || next.password) {
-      setError(null)
-      return
-    }
-
-    setBusy(true)
-    setError(null)
-    try {
-      // 接続未設定でも本ファイルを読めるようにするため、ここで初めて supabase を読み込む
-      const { supabase } = await import('../lib/supabase')
-      const { error: err } = await supabase.auth.signInWithPassword({
-        email: trimmed,
-        password,
-      })
-      // 失敗しても入力は消さない（1文字直せば済むようにする。手袋・片手操作での打ち直しは負担が大きい）
-      if (err) setError(loginErrorMessage(err as AuthFailure))
-      // 成功時: useAuth（onAuthStateChange）が session を更新し、App.tsx が元の画面へ戻す。
-      //         退避してある書込は db.ts の SIGNED_IN 監視が自動で再送する。
-    } catch {
-      // 通信断・モジュール取得失敗。例外の中身は個人情報を含み得るため表示・記録しない
-      setError(MSG.offline)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const inputClass =
-    'mt-1 min-h-tap w-full rounded border border-border bg-surface px-3 text-base text-ink'
 
   return (
     <FullScreen>
@@ -288,8 +207,8 @@ export function LoginPage() {
         </p>
       )}
 
-      <section className="mb-4 space-y-3 rounded-lg border border-border bg-surface p-4">
-        <h2 className="text-lg font-bold text-ink">Google でログイン</h2>
+      <section className="space-y-3 rounded-lg border border-border bg-surface p-4">
+        <h2 className="text-lg font-bold text-ink">ログイン</h2>
         <p className="text-base text-ink2">
           登録された Google アカウントで入ります。施設のタブレットでは、施設の Google アカウントを選んでください。
         </p>
@@ -299,100 +218,10 @@ export function LoginPage() {
         >
           Google でログイン
         </a>
-      </section>
-
-      <details className="rounded-lg border border-border bg-surface">
-        <summary className="flex min-h-tap cursor-pointer items-center px-4 text-base font-bold text-ink">
-          ID とパスワードでログイン（施設の共用アカウント・移行期間のみ）
-        </summary>
-      <form
-        onSubmit={submit}
-        noValidate
-        className="space-y-4 border-t border-border p-4"
-      >
-
-        <div>
-          <label htmlFor={emailId} className="block text-base text-ink">
-            メールアドレス
-          </label>
-          <input
-            id={emailId}
-            type="email"
-            inputMode="email"
-            autoComplete="username"
-            autoCapitalize="none"
-            autoCorrect="off"
-            spellCheck={false}
-            value={email}
-            onChange={(ev) => setEmail(ev.target.value)}
-            aria-invalid={fieldError.email ? true : undefined}
-            aria-describedby={fieldError.email ? emailErrorId : undefined}
-            className={inputClass}
-          />
-          {fieldError.email && (
-            <p id={emailErrorId} role="alert" className="mt-1 text-sm font-bold text-danger">
-              <span aria-hidden="true">▲ </span>
-              {fieldError.email}
-            </p>
-          )}
-        </div>
-
-        <div>
-          <label htmlFor={passwordId} className="block text-base text-ink">
-            パスワード
-          </label>
-          <div className="flex items-start gap-gap">
-            <input
-              id={passwordId}
-              type={revealed ? 'text' : 'password'}
-              autoComplete="current-password"
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck={false}
-              value={password}
-              onChange={(ev) => setPassword(ev.target.value)}
-              aria-invalid={fieldError.password ? true : undefined}
-              aria-describedby={fieldError.password ? passwordErrorId : undefined}
-              className={`${inputClass} min-w-0 flex-1`}
-            />
-            {/* 手袋・片手操作での打ち間違いを確認できるようにする（表示は端末上のみ・保存しない） */}
-            <button
-              type="button"
-              aria-pressed={revealed}
-              onClick={() => setRevealed((v) => !v)}
-              className="mt-1 min-h-tap shrink-0 rounded border border-border-strong px-3 text-base text-ink"
-            >
-              {revealed ? '隠す' : '表示'}
-            </button>
-          </div>
-          {fieldError.password && (
-            <p id={passwordErrorId} role="alert" className="mt-1 text-sm font-bold text-danger">
-              <span aria-hidden="true">▲ </span>
-              {fieldError.password}
-            </p>
-          )}
-        </div>
-
-        {error && <ErrorBlock message={error} />}
-
-        <button
-          type="submit"
-          disabled={busy}
-          aria-busy={busy}
-          className="min-h-tap w-full rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink disabled:border-border disabled:bg-surface2 disabled:text-ink3"
-        >
-          {busy ? 'ログインしています…' : 'ログイン'}
-        </button>
-
-        <p role="status" aria-live="polite" className="text-sm text-ink2">
-          {busy ? 'ログインしています。しばらくお待ちください…' : ''}
-        </p>
-
         <p className="text-sm text-ink2">
-          アカウントは管理者が発行します。ログインできない場合は管理者にご連絡ください。
+          使えるアカウントは管理者が登録します。ログインできない場合は管理者にご連絡ください。
         </p>
-      </form>
-      </details>
+      </section>
     </FullScreen>
   )
 }
