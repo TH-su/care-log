@@ -14,6 +14,13 @@
 //   dynamic import する（凍結仕様の絶対条件1「env 未設定でも白画面にしない」の担保）。
 //   → components/ui.tsx は lib/types.ts しか参照しないため静的 import して差し支えない。
 //
+// Google ログイン（2026-09-26 追加・統合 Phase 1）:
+//   Google でのログインは care-tools の共通ログイン画面（/care-tools/login.html）で行い、終わったらここへ戻る。
+//   同じ th-su.github.io の上なので、ログイン状態（localStorage の sb-<ref>-auth-token）はそのまま共有される。
+//   src/lib/supabase.ts は凍結（detectSessionInUrl: false）なので、この画面で Google から戻る受け口は作らない。
+//   誰が使えるかはデータベースの許可リスト（care-backend 0001/0002）が決める。
+//   ID とパスワードの欄は、施設の共用アカウントを Google に切り替え終えるまでの移行期間だけ残す。
+//
 // 規律:
 // - 実名・入力値（メールアドレス・パスワード）をコード/コメント/console/localStorage に書かない
 // - タップ要素は min-h-tap（44px）＋隣接 gap-gap（8px）。色だけで意味を伝えない（記号・文字を併記）
@@ -193,6 +200,9 @@ function loginErrorMessage(e: AuthFailure): string {
  * 3状態: ローディング＝送信中（ボタン無効化＋状況テキスト）／エラー＝入力不備・認証失敗・通信失敗／
  *        空＝初期表示の未入力フォーム（何を入れるか・入れない場合の連絡先を明示）。
  */
+/** Google ログインの入口（care-tools の共通ログイン画面。?return=care-log でログイン後にここへ戻る） */
+const GOOGLE_LOGIN_URL = '../care-tools/login.html?return=care-log'
+
 export function LoginPage() {
   const emailId = useId()
   const passwordId = useId()
@@ -278,12 +288,28 @@ export function LoginPage() {
         </p>
       )}
 
+      <section className="mb-4 space-y-3 rounded-lg border border-border bg-surface p-4">
+        <h2 className="text-lg font-bold text-ink">Google でログイン</h2>
+        <p className="text-base text-ink2">
+          登録された Google アカウントで入ります。施設のタブレットでは、施設の Google アカウントを選んでください。
+        </p>
+        <a
+          href={GOOGLE_LOGIN_URL}
+          className="flex min-h-tap w-full items-center justify-center rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink"
+        >
+          Google でログイン
+        </a>
+      </section>
+
+      <details className="rounded-lg border border-border bg-surface">
+        <summary className="flex min-h-tap cursor-pointer items-center px-4 text-base font-bold text-ink">
+          ID とパスワードでログイン（施設の共用アカウント・移行期間のみ）
+        </summary>
       <form
         onSubmit={submit}
         noValidate
-        className="space-y-4 rounded-lg border border-border bg-surface p-4"
+        className="space-y-4 border-t border-border p-4"
       >
-        <h2 className="text-lg font-bold text-ink">ログイン</h2>
 
         <div>
           <label htmlFor={emailId} className="block text-base text-ink">
@@ -366,6 +392,7 @@ export function LoginPage() {
           アカウントは管理者が発行します。ログインできない場合は管理者にご連絡ください。
         </p>
       </form>
+      </details>
     </FullScreen>
   )
 }
