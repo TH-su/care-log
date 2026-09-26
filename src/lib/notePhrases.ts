@@ -124,8 +124,12 @@ export const NOTE_PHRASE_CATEGORIES: readonly NotePhraseCategory[] = [
 /** 書き足す所の印（全角の低線 U+FF3F） */
 export const PHRASE_BLANK = '＿'
 
+/** 末尾から取り除く空白（半角スペース・全角スペース・タブ）。改行は区切りとして残す */
+const TRAILING_SPACES_RE = /[ 　\t]+$/
+
 /**
  * 本文の末尾に定型句を差し込む（純関数）。
+ * - 末尾の空白（半角・全角・タブ。改行は除く）を取り除いてから判定する。空白だけの本文は空として扱う
  * - 本文が空でなく、末尾1文字が「。」でも改行でもなければ「。」を補ってからつなぐ
  * - 差し込んだ文の中に「＿」があれば、最初の「＿」1文字を選択範囲として返す（そのまま打てば置き換わる）。
  *   無ければ選択範囲は新しい本文の末尾（カーソルを最後に置く）
@@ -135,9 +139,10 @@ export function appendPhrase(
   body: string,
   phrase: string,
 ): { body: string; selStart: number; selEnd: number } {
-  const last = body.slice(-1)
-  const needsStop = body !== '' && last !== '。' && last !== '\n' && last !== '\r'
-  const head = needsStop ? `${body}。` : body
+  const base = body.replace(TRAILING_SPACES_RE, '')
+  const last = base.slice(-1)
+  const needsStop = base !== '' && last !== '。' && last !== '\n' && last !== '\r'
+  const head = needsStop ? `${base}。` : base
   const next = head + phrase
   const blank = next.indexOf(PHRASE_BLANK, head.length)
   if (blank >= 0) return { body: next, selStart: blank, selEnd: blank + 1 }

@@ -380,6 +380,7 @@ export function NoteFormPage() {
           } else {
             setForm(base)
           }
+          setPhraseUndo([]) // 本文を onChange を通らずに置いた＝定型句の「1つ戻す」は使えなくする
         }
         setPhase('ready')
       } catch {
@@ -455,30 +456,41 @@ export function NoteFormPage() {
     savePhraseCat(id)
   }, [])
 
+  /**
+   * 文ボタン: 本文の末尾に差し込む。本文欄へフォーカスを移すのは「＿」のある文だけ（そこへ打ち込むため）。
+   * 「＿」の無い文ではフォーカスを移さない（スマホでキーボードが開いて文ボタンを隠し、続けて押せなくなるため）
+   */
   const insertPhrase = useCallback(
     (phrase: string) => {
+      const toBlank = phrase.includes(PHRASE_BLANK)
       // 本文欄へのフォーカスは押した操作の中で行う（描画の後だと端末によってはキーボードが開かない）
-      bodyRef.current?.focus()
+      if (toBlank) bodyRef.current?.focus()
       const next = appendPhrase(form.body, phrase)
       const prev = form.body
       setPhraseUndo((s) => [...s, prev].slice(-PHRASE_UNDO_MAX))
       update({ body: next.body }, 'body')
-      setBodySel({ start: next.selStart, end: next.selEnd })
+      if (toBlank) setBodySel({ start: next.selStart, end: next.selEnd })
     },
     [form.body, update],
   )
 
-  /** 直前の定型句を入れる前の本文に戻す。戻した後は本文欄の最後にカーソルを置く */
+  /**
+   * 直前の定型句を入れる前の本文に戻す。
+   * 最後の1つを戻してボタンが消える時だけ本文欄へフォーカスを移し、最後にカーソルを置く
+   * （押したボタンが消えてフォーカスの行き場が無くなるのを防ぐ。ボタンが残る時は移さない）
+   */
   const undoPhrase = useCallback(() => {
     if (phraseUndo.length === 0) return
     const prev = phraseUndo[phraseUndo.length - 1]
-    bodyRef.current?.focus()
+    const vanishes = phraseUndo.length === 1
+    if (vanishes) bodyRef.current?.focus()
     setPhraseUndo(phraseUndo.slice(0, -1))
     update({ body: prev }, 'body')
-    setBodySel({ start: prev.length, end: prev.length })
+    if (vanishes) setBodySel({ start: prev.length, end: prev.length })
   }, [phraseUndo, update])
 
-  // 本文を書き換えた描画の後に、選択範囲（最初の「＿」か末尾）を置く
+  // 本文を書き換えた描画の後に、選択範囲（最初の「＿」か末尾）を置く。
+  // bodySel はフォーカスを移す時（「＿」のある文・最後の1つを戻した時）だけ設定される
   useEffect(() => {
     if (bodySel === null) return
     const el = bodyRef.current
@@ -498,6 +510,7 @@ export function NoteFormPage() {
     setErrors({})
     setFormError(null)
     setForm(defaultForm(resolveActor(staff)?.id ?? null, new Date()))
+    setPhraseUndo([]) // 破棄した本文へ「1つ戻す」で戻れないようにする
     show('書きかけを破棄しました')
   }, [staff, show])
 
@@ -551,6 +564,7 @@ export function NoteFormPage() {
           return
         }
         setForm(snapshot)
+        setPhraseUndo([]) // 取り消しで戻した本文に対して「1つ戻す」を残さない
         setErrors({})
         if (res === 'queued') {
           // 取り消しはキューへ退避済み。サーバー上の記録はまだ残っているので「取り消しました」とは言わない

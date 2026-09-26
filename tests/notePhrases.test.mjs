@@ -68,6 +68,42 @@ if (NP === null) {
       assert.equal(r.body, `体温${BLANK}℃。夜間トイレ＿回`)
       assert.equal(r.selStart, `体温${BLANK}℃。夜間トイレ`.length)
     })
+    it('本文が空白だけ（半角・全角・タブ）: 空として扱い、「。」も空白も残さない', () => {
+      for (const ws of [' ', '   ', '　', '\t', ' 　\t ']) {
+        const r = appendPhrase(ws, '夜間良眠')
+        assert.deepEqual(r, { body: '夜間良眠', selStart: 4, selEnd: 4 }, JSON.stringify(ws))
+      }
+    })
+    it('本文が空白だけで「＿」のある文: 選択位置は空白を除いた本文で数える', () => {
+      const r = appendPhrase(' 　', '体温＿℃、クーリング実施')
+      assert.equal(r.body, '体温＿℃、クーリング実施')
+      assert.deepEqual([r.selStart, r.selEnd], [2, 3])
+    })
+    it('末尾が文字＋空白: 空白を取り除いてから「。」を補う', () => {
+      for (const tail of [' ', '  ', '　', '\t', ' 　\t']) {
+        const r = appendPhrase(`経過を見た${tail}`, '確認済み')
+        assert.equal(r.body, '経過を見た。確認済み', JSON.stringify(tail))
+        assert.equal(r.selStart, r.body.length)
+      }
+    })
+    it('末尾が「。」＋空白: 空白を取り除き、「。」は重ねない', () => {
+      const r = appendPhrase('経過を見た。　 ', '確認済み')
+      assert.equal(r.body, '経過を見た。確認済み')
+    })
+    it('末尾が改行＋空白: 空白だけ取り除き、改行は残して「。」は補わない', () => {
+      const r = appendPhrase('経過を見た\n\t ', '確認済み')
+      assert.equal(r.body, '経過を見た\n確認済み')
+    })
+    it('文の途中の空白は取り除かない（末尾だけ）', () => {
+      const r = appendPhrase('朝 経過を見た ', '確認済み')
+      assert.equal(r.body, '朝 経過を見た。確認済み')
+    })
+    it('末尾空白を除いた後の「＿」の選択位置', () => {
+      const r = appendPhrase('経過を見た  ', '夜間トイレ＿回')
+      assert.equal(r.body, '経過を見た。夜間トイレ＿回')
+      assert.equal(r.body.slice(r.selStart, r.selEnd), BLANK)
+      assert.equal(r.selStart, '経過を見た。夜間トイレ'.length)
+    })
     it('入力（本文・文）を書き換えない（純関数）', () => {
       const body = '経過を見た'
       appendPhrase(body, '確認済み')
