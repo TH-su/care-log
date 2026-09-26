@@ -188,7 +188,7 @@ if (B === null) {
       [0, new Set([1])], // 月曜に利用者1
       [2, new Set([2])], // 水曜に利用者2
     ])
-    const base = { monthKey: '2026-09', order: [2, 1, 3], today: '2026-09-21' }
+    const base = { monthKey: '2026-09', order: [2, 1, 3], today: '2026-09-21', startDay: '2026-09-01' }
 
     it('マス: 記録は区分、予定の曜日で記録が無い日は今日まで「未」、今日より後は空', () => {
       const t = B.aggregateBathMonth({
@@ -261,6 +261,32 @@ if (B === null) {
       assert.deepEqual(r3.totals, { billable: 1, partial: 0, cancel: 0, missing: 0 })
       assert.equal(t.hiddenRecords, 0)
     })
+    it('★M2: 「未」は施設全体で記録を始めた日（startDay）以降だけ。記録が無い月・startDay が無い時は付けない', () => {
+      const recs = [rec(1, 1, '2026-09-14', 'full')]
+      const t = B.aggregateBathMonth({ ...base, startDay: '2026-09-10', records: recs, plannedByWeekday: planned })
+      const r1 = t.rows.find((r) => r.residentId === 1)
+      assert.equal(r1.cells[6], null, '記録を始める前（7日）に「未」を付けた')
+      assert.equal(r1.cells[13], 'full')
+      assert.equal(r1.cells[20], 'missing', '記録を始めた後（21日）の「未」が無い')
+      assert.equal(r1.totals.missing, 1)
+      const empty = B.aggregateBathMonth({ ...base, records: [], plannedByWeekday: planned })
+      assert.equal(empty.rows.flatMap((r) => r.cells).includes('missing'), false, '記録が1件も無い月に「未」を付けた')
+      const noStart = B.aggregateBathMonth({ ...base, startDay: null, records: recs, plannedByWeekday: planned })
+      assert.equal(noStart.rows.flatMap((r) => r.cells).includes('missing'), false)
+    })
+    it('★M1: 現在入院中の方の行は「未」を付けず hospitalized=true（記録は出す）', () => {
+      const t = B.aggregateBathMonth({
+        ...base,
+        hospitalizedIds: new Set([1]),
+        records: [rec(1, 1, '2026-09-07', 'cancel')],
+        plannedByWeekday: planned,
+      })
+      const r1 = t.rows.find((r) => r.residentId === 1)
+      assert.equal(r1.hospitalized, true)
+      assert.equal(r1.cells[6], 'cancel')
+      assert.equal(r1.cells.includes('missing'), false, '入院中の方に「未」を付けた')
+      assert.equal(t.rows.find((r) => r.residentId === 2).hospitalized, false)
+    })
     it('名簿のどこにも居ない方の記録は行を作らず hiddenRecords に数える（無言で消さない）・月外の記録は数えない', () => {
       const t = B.aggregateBathMonth({
         ...base,
@@ -274,6 +300,15 @@ if (B === null) {
 
   describe('配線（静的検査）', () => {
     const read = (p) => readFileSync(new URL(p, import.meta.url), 'utf8')
+    it('0012 に restrictive の member_only（care-backend と同じ形）があり、dayOfWeek は case で数にする', () => {
+      const raw = read('../supabase/migrations/0012_bath_records.sql')
+      assert.match(
+        raw,
+        /create policy member_only on public\.bath_records as restrictive for all to authenticated\s+using \(private\.is_member\(\)\) with check \(private\.is_member\(\)\);/,
+      )
+      assert.match(raw, /case when \(e\.v ->> 'dayOfWeek'\) ~ '\^\[0-6\]\$' then \(e\.v ->> 'dayOfWeek'\)::int end/)
+      assert.match(raw, /bath_policies_4/)
+    })
     it('移行ファイル 0012 は do $$ を使わず、Realtime は add table（set table ではない）', () => {
       // 注記（-- で始まる行の後ろ）は除いて、実際に流れる文だけを見る
       const sql = read('../supabase/migrations/0012_bath_records.sql')
@@ -298,10 +333,11 @@ if (B === null) {
       assert.match(hub, /getKindInputGate\('bath'\)/)
       assert.match(hub, /key === 'bath' \? bathLocked : locked/)
     })
-    it('月次表の月は cl_bathMonth（types.ts の LS）に yyyy-MM だけを置き、読む時に照合する', () => {
+    it('月次表は表示中の月を保存しない（日付に紐づく状態＝原則11の既定。開くと常に今月）', () => {
       const page = read('../src/pages/BathMonthPage.tsx')
-      assert.match(page, /parseMonthKey\(window\.localStorage\.getItem\(LS\.bathMonth\), current\)/)
-      assert.match(read('../src/lib/types.ts'), /bathMonth: 'cl_bathMonth'/)
+      assert.equal(/localStorage/.test(page.replace(/\/\/.*$/gm, '')), false)
+      assert.match(page, /useState<string>\(current\)/)
+      assert.equal(/cl_bathMonth/.test(read('../src/lib/types.ts')), false)
     })
   })
 }

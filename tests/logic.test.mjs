@@ -2625,6 +2625,86 @@ function registerDbTests() {
     })
   })
 
+  describe('★入浴記録（db.ts）: 圏外で同じ人を続けて押す（レビュー H2）', () => {
+    afterEach(async () => {
+      await drainRows()
+    })
+
+    it('圏外で全身浴→中止→復帰: 追加は1件のまま中身を差し替え、サーバーは中止1件・blocked なし', async () => {
+      setQueueRaw(null)
+      let off = true
+      const srv = bathServer({ offline: () => off })
+      DB.__testHooks.setClient(srv.client)
+      assert.equal(await DB.insertBath(bathInput({ result: 'full' })), 'queued')
+      const key = storedQueue().ops[0].payload.client_key
+      assert.equal(await DB.insertBath(bathInput({ result: 'cancel', cancel_reason: 'refusal', note: 'メモ', recorded_by: 4 })), 'queued')
+      const ops = storedQueue().ops
+      assert.equal(ops.length, 1, '2件目の追加を積んだ')
+      assert.equal(ops[0].payload.client_key, key, 'client_key が変わった')
+      assert.equal(ops[0].payload.result, 'cancel')
+      assert.equal(ops[0].payload.cancel_reason, 'refusal')
+      assert.equal(ops[0].payload.note, 'メモ')
+      assert.equal(ops[0].payload.recorded_by, 4)
+      off = false
+      await DB.flushQueue(true)
+      assert.equal(srv.db.rows.length, 1)
+      assert.equal(srv.db.rows[0].result, 'cancel')
+      assert.equal(srv.db.rows[0].client_key, key)
+      assert.equal(storedQueue().ops.filter((o) => o.blocked !== undefined).length, 0, 'blocked が残った')
+      assert.equal(DB.queuePending(), 0)
+    })
+
+    it('圏外で記録→取り消し→復帰: 送らずに外し、サーバーは0件（次の起動でも復活しない）', async () => {
+      setQueueRaw(null)
+      let off = true
+      const srv = bathServer({ offline: () => off })
+      DB.__testHooks.setClient(srv.client)
+      assert.equal(await DB.insertBath(bathInput()), 'queued')
+      assert.equal(await DB.discardPendingBath(1, '2026-09-01'), 'discarded')
+      assert.equal(DB.queuePending(), 0)
+      assert.equal(storedQueue().ops.length, 0)
+      await DB.__testHooks.restartQueue()
+      off = false
+      await DB.flushQueue(true)
+      assert.equal(srv.db.rows.length, 0, '取り消したのに送った')
+      assert.equal(await DB.discardPendingBath(1, '2026-09-01'), 'none')
+    })
+
+    it('送り終えた後（画面は未取得）に同じ人を押す → 自分の送った行を読み直して update（conflict にしない）', async () => {
+      setQueueRaw(null)
+      let off = true
+      const srv = bathServer({ offline: () => off })
+      DB.__testHooks.setClient(srv.client)
+      assert.equal(await DB.insertBath(bathInput({ result: 'full' })), 'queued')
+      off = false
+      await DB.flushQueue(true)
+      assert.equal(srv.db.rows.length, 1)
+      const res = await DB.insertBath(bathInput({ result: 'shower', recorded_by: 5 }))
+      assert.equal(typeof res, 'object', `update に切り替わらない: ${String(res)}`)
+      assert.equal(res.result, 'shower')
+      assert.equal(srv.db.rows.length, 1)
+      assert.equal(srv.db.rows[0].result, 'shower')
+      assert.equal(srv.db.rows[0].edited_by, 5)
+    })
+
+    it('他の端末の行（自分のキーでない）は従来どおり conflict のまま', async () => {
+      const srv = bathServer()
+      srv.db.rows.push({ id: 80, ...bathInput(), rev: 1, deleted_at: null, client_key: 'other-device' })
+      DB.__testHooks.setClient(srv.client)
+      assert.equal(await DB.insertBath(bathInput({ result: 'shower' })), 'conflict')
+    })
+
+    it('他の表（申し送り）の送信待ちは差し替え・破棄の対象にしない', async () => {
+      setQueueRaw(null)
+      DB.__testHooks.setClient(offline().client)
+      assert.equal(await DB.insertNote({ note_on: '2026-09-01', shift: 'day', body: '本文', resident_id: 1 }), 'queued')
+      assert.equal(await DB.insertNote({ note_on: '2026-09-01', shift: 'day', body: '本文2', resident_id: 1 }), 'queued')
+      assert.equal(storedQueue().ops.length, 2, '申し送りの追加をまとめた')
+      assert.equal(await DB.discardPendingBath(1, '2026-09-01'), 'none')
+      assert.equal(storedQueue().ops.length, 2)
+    })
+  })
+
   describe('入浴記録（db.ts）: 取得・予定・カルテ', () => {
     afterEach(async () => {
       await drainRows()
@@ -2665,6 +2745,17 @@ function registerDbTests() {
       DB.__testHooks.setClient(srv.client)
       const k = await DB.fetchKarte(1, '2026-09-01', '2026-09-30')
       assert.deepEqual(k.baths.map((b) => [b.id, b.result]), [[9, 'partial']])
+    })
+
+    it('fetchBathFirstDay: 生きている記録の最初の日を1行だけ引く（無ければ null）', async () => {
+      const srv = bathServer()
+      DB.__testHooks.setClient(srv.client)
+      assert.equal(await DB.fetchBathFirstDay(), null)
+      srv.db.rows.push({ id: 1, ...bathInput({ bath_on: '2026-08-03' }), rev: 1, deleted_at: null })
+      assert.equal(await DB.fetchBathFirstDay(), '2026-08-03')
+      const q = srv.calls.filter((c) => c.table === 'bath_records').at(-1)
+      assert.equal(q.limit, 1)
+      assert.ok(q.filters.some(([op, k, v]) => op === 'is' && k === 'deleted_at' && v === null))
     })
 
     it('fetchBathPlan: 名簿と source_id で突き合わせ、写しの更新時刻を返す（名簿に無い予定は unmatched）', async () => {

@@ -105,6 +105,11 @@ fetchBathPlan(dayIso: string, residents?: Resident[]): Promise<BathPlanResult>
                                                                // { available, updatedAt（写しの更新時刻）, entries:[{residentId,startTime,endTime,hospitalized}], unmatched }
 insertBath(b: Omit<BathRecord, 'id' | 'rev'>): Promise<BathRecord | Conflict | Queued>
                                                                // client_key 付き。1人1日1件の 23505（自分のキーでない）は 'conflict'
+                                                               // 同じ人・同じ日のまだ送っていない追加が送信待ちにあれば、積まずに中身を同じ client_key のまま差し替える
+                                                               // 送り終えた自分の行（画面が未取得）なら読み直した版で update に切り替える（2026-09-26 レビュー H2）
+discardPendingBath(residentId: number, day: string): Promise<'discarded' | 'sending' | 'none'>
+                                                               // まだ送っていない追加を送らずに送信待ちから外す（他の表の送信待ちには触れない）
+fetchBathFirstDay(): Promise<string | null>                    // 施設全体で最初の入浴記録の日（月次表の「未」を付け始める日。1行だけ引く）
 updateBath(current: BathRecord, patch: Partial<Pick<BathRecord, 'result' | 'cancel_reason' | 'note'>>, opts?: WriteOpts):
   Promise<BathRecord | Conflict | Queued>                      // rev 照合の部分更新。中止以外にしたら cancel_reason は null で送る
 softDeleteBath(id: number, rev: number, opts?: WriteOpts): Promise<true | Conflict | Queued>
@@ -212,8 +217,8 @@ ResidentPickerModal({ open, residents: Resident[], onPick(id: number | null), on
 - `0005_meals_sheet_fluids.sql`: RPC `meals_sheet_fluids(p_from, p_to)` → 1名1日=1行に畳み、内訳を jsonb で返す。
   食事一覧が水分で行数上限を食い潰さないための集約（security invoker・anon revoke・期間ガード付き）。
 - `0012_bath_records.sql`（2026-09-26）: app_settings に input_enabled_bath / med / incident（'false'）・bath_records 表（1人1日1件の部分unique・
-  client_key 全体unique・rev／変更の記録トリガ・RLS・delete ポリシーなし）・RPC `daycare_bath_plan(p_date)`（週間計画の写し kv_entries の
+  client_key 全体unique・rev／変更の記録トリガ・RLS＋restrictive の member_only（care-backend と同じ形）・delete ポリシーなし）・RPC `daycare_bath_plan(p_date)`（週間計画の写し kv_entries の
   care_schedule_v2 から、その日のデイの入浴予定。0行＝写しなし／source_id が null の1行＝予定なし）・Realtime 登録。
-  **Realtime の登録（alter publication … add table）だけは初回のみ通り、再実行時はこの1文で止まる**（それ以前の文は冪等）
+  **初回に1回だけ流す。2回目以降は Realtime の登録（add table）の文でエラーになりファイル全体が巻き戻るので、修正は新しい番号のファイルで流す**
 - **適用順は 0001 → 0002 → 0003 → 0004 → 0005**。0003〜0005 は互いに独立だが、
   0003 未適用のまま新UIを配ると「定時以外のバイタル保存」と「食事一覧の読み込み」が失敗する（意図的にフォールバックを作っていない）。

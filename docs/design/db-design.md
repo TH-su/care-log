@@ -128,6 +128,7 @@ bath_records ( id bigint identity PK, resident_id bigint not null references res
 -- 部分unique: (resident_id, bath_on) where deleted_at is null（1人1日1件）
 -- 索引: (bath_on desc, id desc) / (resident_id, bath_on desc)（いずれも where deleted_at is null）
 -- トリガ: set_updated_at_rev（rev+1）／record_history_capture('bath_on')（変更の記録）。RLS は他の業務表と同じ・delete ポリシーなし
+--   ＋ restrictive の member_only（using/with check private.is_member()。care-backend 0001_foundation と同じ形）
 -- 予定は週間計画の写し（public.kv_entries・key='care_schedule_v2'）を RPC daycare_bath_plan(p_date) で読む
 --   （security invoker・search_path=''・authenticated のみ。返すのは source_id・開始・終了・入院中・写しの更新時刻だけ。
 --    曜日は dayOfWeek 0=月…6=日 と extract(isodow from p_date)-1 を突き合わせる）

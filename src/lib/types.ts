@@ -402,11 +402,6 @@ export const LS = {
    * リロードすると跡形もなく消えていた（保存経路の監査で判明）。
    */
   dailyDraft: 'cl_dailyDraft',
-  /**
-   * 入浴の月次表で表示中の月（2026-09-26 追加・UI状態のみ）。値は 'yyyy-MM' だけ。
-   * 読む時は形式と範囲（今月より先は不可）を照合し、不正値は今月へ戻す。
-   */
-  bathMonth: 'cl_bathMonth',
 } as const
 
 /**

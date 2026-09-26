@@ -4,11 +4,10 @@
 -- 0001〜0011 を当てたあとに実行する。既存のテーブル・列・データは一切削除しない（追加のみ）。
 --
 -- ★再実行について（必ず読む）:
---   このファイルは「Realtime への登録（alter publication … add table）」の1文だけが冪等ではない。
---   **初回のみ通る。2回目以降はこの1文で「既に登録済み（42710）」のエラーになって止まる。**
---   それより前の文はすべて冪等（if not exists / on conflict do nothing / drop … if exists → create）で、
---   2回目に流しても結果は同じなので、再実行でこのエラーが出るのは正常（何も壊れていない）。
---   SQL エディタが全体を1つのトランザクションで流す場合も、巻き戻るのは「同じ結果の再作成」だけ。
+--   **このファイルは初回に1回だけ流す。2回目以降は「Realtime への登録（alter publication … add table）」の文で
+--   「既に登録済み（42710）」のエラーになり、ファイル全体が巻き戻る（それより前の文の変更も入らない）。**
+--   したがって、このファイルを書き換えて流し直すことで修正はできない。
+--   **修正が要る時は、新しい番号のファイル（0013_… 等）を作って、その差分だけを流すこと。**
 --   do $$ … $$ のブロック（登録済みかを確かめてから足す書き方）は使えない
 --   （Supabase の SQL エディタが誤解釈するため・0001 の注記）。そのためこの1文をファイルの最後の方へ置いた。
 --   ※0001 / 0003 の「alter publication … set table（一覧の置き換え）」を後から流し直すと、
@@ -108,9 +107,14 @@ alter table public.bath_records enable row level security;
 drop policy if exists "read_auth"   on public.bath_records;
 drop policy if exists "insert_auth" on public.bath_records;
 drop policy if exists "update_auth" on public.bath_records;
+drop policy if exists member_only   on public.bath_records;
 create policy "read_auth"   on public.bath_records for select to authenticated using (true);
 create policy "insert_auth" on public.bath_records for insert to authenticated with check (true);
 create policy "update_auth" on public.bath_records for update to authenticated using (true) with check (true);
+-- 許可リストの有効な人だけ（care-backend 0001_foundation.sql の member_only と同じ形）。
+-- restrictive は上の3つと AND で効く＝既存の決まりは緩めない。0001_foundation を当てた後に作る表なので、ここで個別に付ける
+create policy member_only on public.bath_records as restrictive for all to authenticated
+  using (private.is_member()) with check (private.is_member());
 
 -- ---------- 3. その日のデイの入浴予定（週間計画の写しから） ----------
 -- 読むのは kv_entries（key='care_schedule_v2'・自分のテナントの行）の data.residents[] だけ。
@@ -173,8 +177,9 @@ as $fn$
        and coalesce(r.v ->> 'external', '') <> 'true'
        and (e.v ->> 'serviceType') = 'daycare'
        and (e.v ->> 'bathing') = 'true'
-       and (e.v ->> 'dayOfWeek') ~ '^[0-6]$'
-       and (e.v ->> 'dayOfWeek')::int = (extract(isodow from p_date)::int - 1)
+       -- 形が 0〜6 の時だけ数にする（and の評価順に頼らない。不正な値は null＝一致しない）
+       and (case when (e.v ->> 'dayOfWeek') ~ '^[0-6]$' then (e.v ->> 'dayOfWeek')::int end)
+           = (extract(isodow from p_date)::int - 1)
      order by x.source_id, x.start_key nulls last, x.end_time nulls last
   )
   select p.source_id, p.start_time, p.end_time, p.hospitalized, s.updated_at
@@ -205,7 +210,10 @@ select
   (select count(*) from information_schema.tables
     where table_schema = 'public' and table_name = 'bath_records')                       as bath_table_1,
   (select count(*) from pg_policies
-    where schemaname = 'public' and tablename = 'bath_records')                          as bath_policies_3,
+    where schemaname = 'public' and tablename = 'bath_records')                          as bath_policies_4,
+  (select count(*) from pg_policies
+    where schemaname = 'public' and tablename = 'bath_records'
+      and policyname = 'member_only' and permissive = 'RESTRICTIVE')                     as bath_member_only_1,
   (select count(*) from pg_policies
     where schemaname = 'public' and tablename = 'bath_records' and cmd = 'DELETE')       as bath_delete_policies_0,
   (select count(*) from information_schema.triggers

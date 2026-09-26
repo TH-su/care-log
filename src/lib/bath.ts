@@ -285,6 +285,8 @@ export interface BathMonthRow {
   residentId: number
   /** 退居された方（その月に記録があるので行に出す。「未」は付けない） */
   retired: boolean
+  /** 現在入院中の方（週間計画の写しの入院中。「未」は付けない＝記録画面と同じ判定） */
+  hospitalized: boolean
   /** 月の日付と同じ並び（monthDays の順） */
   cells: BathMonthMark[]
   totals: BathMonthTotals
@@ -304,7 +306,11 @@ export interface BathMonthTable {
  *        （加算の根拠を紙に残すため記録は出す。予定だけの退居者は出さない・2026-09-26 チーフ裁定）
  * ・列 … その月の1日〜月末
  * ・マス … 記録があれば区分。記録が無く、その日の曜日に予定があり、その日が today 以前なら 'missing'（「未」）。
- *          退居された方の行には「未」を付けない
+ *          ただし「未」は次の全部を満たす時だけ（2026-09-26 レビュー M1・M2）:
+ *            ・その日が startDay（施設全体で最初の入浴記録の日）以降。startDay が null（記録が1件も無い）なら付けない
+ *            ・その月に記録が1件以上ある（使い始める前の月に「未」を並べない）
+ *            ・退居された方でない・現在入院中（hospitalizedIds）の方でない
+ *              （過去の入院期間は分からないので、現在の入院で判断する＝記録画面の isUnrecorded と同じ）
  * plannedByWeekday … 曜日番号（0=月 … 6=日）→ 予定がある利用者ID。null は「予定を取得できなかった」（「未」を出さない）
  * 名簿のどこにも居ない方の記録は行を作らず hiddenRecords に数える（無言で消さない）。
  */
@@ -312,6 +318,9 @@ export function aggregateBathMonth(p: {
   monthKey: string
   order: number[]
   retiredIds?: ReadonlySet<number>
+  hospitalizedIds?: ReadonlySet<number>
+  /** 施設全体で最初の入浴記録の日（fetchBathFirstDay）。null＝記録が1件も無い＝「未」を付けない */
+  startDay: string | null
   records: BathRecord[]
   plannedByWeekday: Map<number, Set<number>> | null
   today: string
@@ -339,6 +348,11 @@ export function aggregateBathMonth(p: {
 
   const weekdays = days.map((d) => isoWeekdayIndex(d))
   const retired = p.retiredIds ?? new Set<number>()
+  const hospitalized = p.hospitalizedIds ?? new Set<number>()
+  // その月に記録が1件でもあるか（名簿に居ない方の記録も含めて、月の中の記録で判断する）
+  const monthHasRecords = p.records.some((r) => dayIndex.has(r.bath_on))
+  const missingAllowed = (id: number, d: string): boolean =>
+    monthHasRecords && p.startDay !== null && d >= p.startDay && d <= p.today && !hospitalized.has(id)
   const plannedOn = (id: number, i: number): boolean => {
     if (p.plannedByWeekday === null || retired.has(id)) return false
     const w = weekdays[i]
@@ -362,13 +376,13 @@ export function aggregateBathMonth(p: {
         else totals.cancel += 1
         return rec.result
       }
-      if (plannedOn(id, i) && d <= p.today) {
+      if (plannedOn(id, i) && missingAllowed(id, d)) {
         totals.missing += 1
         return 'missing'
       }
       return null
     })
-    rows.push({ residentId: id, retired: retired.has(id), cells, totals })
+    rows.push({ residentId: id, retired: retired.has(id), hospitalized: hospitalized.has(id), cells, totals })
   }
   return { days, rows, hiddenRecords }
 }

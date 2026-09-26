@@ -194,15 +194,9 @@ export function RecordHubPage({ inputEnabled: inputEnabledProp }: RecordHubPageP
   )
 
   // ── 3状態: エラー → ローディング → 本体（封鎖中は「空」相当の案内＋ディセーブル）──
-  if (loadError) {
-    return (
-      <div className="mx-auto w-full max-w-2xl p-4">
-        <ErrorBlock message={loadError} onRetry={() => setReloadKey((n) => n + 1)} />
-      </div>
-    )
-  }
-
-  if (fetchedEnabled == null) {
+  // native_input_enabled を取得できなかった時も、入浴のボタンは input_enabled_bath の値だけで判定する（レビュー L4）。
+  // そのためエラーでもメニューは出し、他の4つは従来どおり押せない（locked＝取得できていない間は封鎖）
+  if (loadError == null && fetchedEnabled == null) {
     return (
       <div className="mx-auto w-full max-w-2xl p-4">
         <LoadingBlock label="記録メニューを準備しています…" />
@@ -212,7 +206,11 @@ export function RecordHubPage({ inputEnabled: inputEnabledProp }: RecordHubPageP
 
   return (
     <div className="mx-auto w-full max-w-2xl space-y-4 p-4">
-      {locked ? (
+      {loadError ? (
+        <div id={reasonId}>
+          <ErrorBlock message={loadError} onRetry={() => setReloadKey((n) => n + 1)} />
+        </div>
+      ) : locked ? (
         <div id={reasonId} role="status" className="rounded-lg border border-warn bg-warn-bg p-4">
           <p className="text-base text-ink">
             <span aria-hidden="true">▲ </span>

@@ -6,16 +6,24 @@
 // 右端に月合計（全＋シ＝入浴介助加算の対象の見込み、部、中）。A4 横1枚で印刷できる（PrintArea）。
 //
 // 規律:
-// - 取得は db.ts の fetchAllResidents / fetchBathMonth / fetchBathPlan のみ（月の範囲でだけ引く）
+// - 取得は db.ts の fetchAllResidents / fetchBathMonth / fetchBathPlan / fetchBathFirstDay のみ（月の範囲・1行でだけ引く）
 // - 予定は週間計画の写しの「曜日」だけで決まる（毎週同じ）。過去の月にも現在の予定を当てはめるので、
-//   「未」は目安であることを画面と紙の両方に書く
-// - localStorage に置くのは表示中の月（cl_bathMonth・'yyyy-MM' だけ）。読む時は形式と範囲を照合する（原則11）
+//   「未」は目安であることを画面と紙の両方に書く。「未」は施設全体で記録を始めた日以降だけ・記録のある月だけに付け、
+//   現在入院中の方の行には付けない（行に「（入院中）」。2026-09-26 レビュー M1・M2）
+// - 表示中の月は保存しない（日付に紐づく状態は原則11の既定どおり保存しない。開いた時は常に今月・レビュー指摘）
 // - 氏名・記録を localStorage・console に出さない。記号は文字（白黒でも区別できる）。色だけで意味を伝えない
 // - Tailwind はトークン由来クラスのみ（arbitrary value なし）。印刷の見た目は src/components/print/print.css
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { DbError, fetchAllResidents, fetchBathMonth, fetchBathPlan, subscribeBathChanges } from '../lib/db'
+import {
+  DbError,
+  fetchAllResidents,
+  fetchBathFirstDay,
+  fetchBathMonth,
+  fetchBathPlan,
+  subscribeBathChanges,
+} from '../lib/db'
 import {
   aggregateBathMonth,
   BATH_MONTH_MISSING_MARK,
@@ -29,7 +37,7 @@ import {
 } from '../lib/bath'
 import type { BathMonthMark, BathMonthTable } from '../lib/bath'
 import { todayIso } from '../lib/format'
-import { BATH_RESULT_LABEL, BATH_RESULT_MARK, LS } from '../lib/types'
+import { BATH_RESULT_LABEL, BATH_RESULT_MARK } from '../lib/types'
 import type { BathRecord, Resident } from '../lib/types'
 import { EmptyBlock, ErrorBlock, LoadingBlock, SectionCard } from '../components/ui'
 import { PrintArea, PrintButton } from '../components/print/PrintArea'
@@ -40,26 +48,13 @@ const WEEKDAY_CHAR = ['月', '火', '水', '木', '金', '土', '日']
 const ERR_LOAD =
   '入浴の月次表を読み込めませんでした。通信状態を確認して、再試行してください。'
 
-const NOTE_PLAN =
-  '「未」は現在の週間計画の曜日から判定しています（過去に予定が変わった日は反映されません）。今日より後の日には出しません。'
+/** 「未」の注記（画面と紙で同じ文）。startDay＝記録を始めた日 */
+function missingNote(startDay: string | null): string {
+  const from = startDay === null ? '記録を始めた日' : `記録を始めた日（${Number(startDay.slice(5, 7))}/${Number(startDay.slice(8, 10))}）`
+  return `「未」は${from}以降・予定は現在の週間計画を当てはめた目安（過去の予定の変更・入院期間は反映されません。今日より後の日と、現在入院中の方には付けません）。`
+}
 const NOTE_NO_PLAN =
   '入浴予定（週間計画の写し）を取得できないため、「未」は表示していません。記録（全・シ・部・中）はそのまま正しく表示しています。'
-
-function readMonth(current: string): string {
-  try {
-    return parseMonthKey(window.localStorage.getItem(LS.bathMonth), current) ?? current
-  } catch {
-    return current // 参照できない環境では今月（壊れた値で表示不能にしない）
-  }
-}
-
-function writeMonth(v: string): void {
-  try {
-    window.localStorage.setItem(LS.bathMonth, v)
-  } catch {
-    // 保存できなくても表示は続ける
-  }
-}
 
 /** その月の中で、曜日ごとに最初に来る日（予定は曜日ベースなので7回だけ問い合わせればよい） */
 function firstDayPerWeekday(monthKey: string): Map<number, string> {
@@ -88,13 +83,17 @@ interface Loaded {
   residents: Resident[]
   records: BathRecord[]
   planned: Map<number, Set<number>> | null
+  /** 現在入院中の方（週間計画の写しの入院中） */
+  hospitalized: Set<number>
+  /** 施設全体で最初の入浴記録の日（無ければ null） */
+  startDay: string | null
   planUpdatedAt: string | null
   unmatched: number
 }
 
 export function BathMonthPage() {
   const current = monthKeyOf(todayIso())
-  const [month, setMonth] = useState<string>(() => readMonth(current))
+  const [month, setMonth] = useState<string>(current)
   const [data, setData] = useState<Loaded | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [tick, setTick] = useState(0)
@@ -102,16 +101,10 @@ export function BathMonthPage() {
 
   const changeMonth = useCallback(
     (next: string) => {
-      const v = parseMonthKey(next, current) ?? current
-      setMonth(v)
-      writeMonth(v)
+      setMonth(parseMonthKey(next, current) ?? current)
     },
     [current],
   )
-
-  useEffect(() => {
-    writeMonth(month)
-  }, [month])
 
   useEffect(() => {
     let alive = true
@@ -123,8 +116,9 @@ export function BathMonthPage() {
         const residents = await fetchAllResidents()
         const active = residents.filter((r) => r.active)
         const perWeekday = firstDayPerWeekday(month)
-        const [records, plans] = await Promise.all([
+        const [records, startDay, plans] = await Promise.all([
           fetchBathMonth(month),
+          fetchBathFirstDay(),
           // 予定は取れなくても表は出す（「未」を出さないだけ）
           Promise.all(
             Array.from(perWeekday.entries()).map(async ([w, day]) => {
@@ -140,16 +134,27 @@ export function BathMonthPage() {
         let planned: Map<number, Set<number>> | null = new Map()
         let planUpdatedAt: string | null = null
         let unmatched = 0
+        const hospitalized = new Set<number>()
         for (const { w, plan } of plans) {
           if (plan === null || !plan.available) {
             planned = null
             break
           }
           planned.set(w, new Set(plan.entries.map((e) => e.residentId)))
+          for (const e of plan.entries) if (e.hospitalized) hospitalized.add(e.residentId)
           planUpdatedAt = planUpdatedAt ?? plan.updatedAt
           unmatched = Math.max(unmatched, plan.unmatched)
         }
-        setData({ month, residents, records, planned, planUpdatedAt: planned === null ? null : planUpdatedAt, unmatched })
+        setData({
+          month,
+          residents,
+          records,
+          planned,
+          hospitalized: planned === null ? new Set() : hospitalized,
+          startDay,
+          planUpdatedAt: planned === null ? null : planUpdatedAt,
+          unmatched,
+        })
       } catch (e) {
         if (!alive) return
         setError(e instanceof DbError && e.kind === 'server' ? e.message : ERR_LOAD)
@@ -181,6 +186,8 @@ export function BathMonthPage() {
       monthKey: month,
       order: data.residents.map((r) => r.id),
       retiredIds: new Set(data.residents.filter((r) => !r.active).map((r) => r.id)),
+      hospitalizedIds: data.hospitalized,
+      startDay: data.startDay,
       records: data.records,
       plannedByWeekday: data.planned,
       today: todayIso(),
@@ -259,7 +266,7 @@ export function BathMonthPage() {
               <span aria-hidden="true">ⓘ </span>
               {data.planned === null
                 ? NOTE_NO_PLAN
-                : `予定は週間計画の写しから${data.planUpdatedAt ? `（最終更新 ${fmtCopyStamp(data.planUpdatedAt)}）` : ''}。${NOTE_PLAN}`}
+                : `予定は週間計画の写しから${data.planUpdatedAt ? `（最終更新 ${fmtCopyStamp(data.planUpdatedAt)}）` : ''}。${missingNote(data.startDay)}`}
             </p>
             {data.unmatched > 0 ? (
               <p className="text-sm text-warn">
@@ -289,7 +296,10 @@ export function BathMonthPage() {
             <h1 className="cl-print-title">デイ 入浴実施表 {monthLabel}</h1>
             <p className="cl-print-meta">
               印刷日 {printedOn}　全＝全身浴　シ＝シャワー浴　部＝部分浴・清拭　中＝中止　未＝予定あり・記録なし
-              {data.planned === null ? '（予定を取得できないため「未」は表示していません）' : '（「未」は現在の週間計画の曜日から判定）'}
+              {data.planned === null ? '（予定を取得できないため「未」は表示していません）' : ''}
+            </p>
+            <p className="cl-print-meta">
+              {data.planned === null ? '' : missingNote(data.startDay)}
             </p>
             {table.rows.length === 0 ? (
               <p className="cl-print-meta">この月の入浴の予定と記録はありません。</p>
@@ -361,6 +371,7 @@ function MonthTable({ table, residentById, variant }: MonthTableProps) {
                 {'　'}
                 <span className={screen ? 'font-bold' : ''}>{name}</span>
                 {row.retired ? <span className={screen ? 'text-sm text-ink2' : ''}>（退居）</span> : null}
+                {row.hospitalized ? <span className={screen ? 'text-sm text-ink2' : ''}>（入院中）</span> : null}
               </th>
               {row.cells.map((m, i) => (
                 <td
