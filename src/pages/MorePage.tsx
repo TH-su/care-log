@@ -23,6 +23,12 @@
 // 封鎖中でも「検索・タイムライン・設定」は使える（sheet-contracts.md §8-5「閲覧は可能」）。
 // フラグを取得できなかった場合も同じ扱いにし、記録だけを安全側でディセーブルにする。
 //
+// 入浴（デイ）（2026-09-26 追加）:
+// - 「入浴 月次表」（/bath/month）の入口を足す。閲覧なので封鎖の対象にしない
+// - 「記録」の入口は、native_input_enabled が封鎖中でも input_enabled_bath が解禁なら開ける
+//   （入浴だけ先に始めた時に、スマホの下部タブから記録ハブの「入浴（デイ）」へ辿り着けるようにする）。
+//   入浴の旗も封鎖・未取得なら従来どおり押せない（従来の挙動は入浴の旗が 'true' の時にしか変わらない）
+//
 // 寸法メモ（トークン外の値を直書きしないための読み替え。RecordHubPage と同一）:
 // - min-height 72px … 4px グリッドの利用可能値が 64px / 80px のため、下回らない側の min-h-20（80px）を使う
 // - 17px 文字   … ops 系統のトークンは fs-base=16px / fs-lg=18px。下回らない側の text-lg（18px）を使う
@@ -30,7 +36,7 @@
 import { useCallback, useEffect, useId, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { getNativeInputGate } from '../lib/db'
+import { getKindInputGate, getNativeInputGate } from '../lib/db'
 import { ErrorBlock, LoadingBlock, SectionCard } from '../components/ui'
 
 /** 入力封鎖中の理由文（ui-design.md §0.5 の定型文。文言を変えない） */
@@ -46,7 +52,7 @@ const LOAD_ERROR =
 
 const LOADING_LABEL = '「記録」を開けるかどうか確認しています…'
 
-type MoreKey = 'search' | 'timeline' | 'record' | 'settings'
+type MoreKey = 'search' | 'timeline' | 'record' | 'settings' | 'bathMonth'
 
 /**
  * 2×2 の並び順（左上→右上→左下→右下）。ルートは sheet-contracts.md §2 のとおり。
@@ -69,6 +75,13 @@ const ITEMS: { key: MoreKey; to: string; label: string; desc: string; needsInput
     needsInput: true,
   },
   { key: 'settings', to: '/settings', label: '設定', desc: 'マスタ同期・表示モード・ログアウト', needsInput: false },
+  {
+    key: 'bathMonth',
+    to: '/bath/month',
+    label: '入浴 月次表',
+    desc: 'デイの入浴の実施を月ごとに見る・印刷する',
+    needsInput: false,
+  },
 ]
 
 /**
@@ -109,6 +122,13 @@ const ICON_PATHS: Record<MoreKey, ReactNode> = {
       <circle cx="9.5" cy="17" r="2.2" />
     </>
   ),
+  // 表（月次表）
+  bathMonth: (
+    <>
+      <rect x="4" y="5" width="16" height="15" rx="1.5" />
+      <path d="M4 10h16M9 5v15M14 5v15" />
+    </>
+  ),
 }
 
 function MoreIcon({ name }: { name: MoreKey }) {
@@ -142,6 +162,8 @@ export function MorePage({ inputEnabled: inputEnabledProp }: MorePageProps = {})
   const [fetchedEnabled, setFetchedEnabled] = useState<boolean | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [reloadKey, setReloadKey] = useState(0)
+  /** 入浴の旗（input_enabled_bath）が解禁か。取得中・取得できない時は false（従来どおりの封鎖側） */
+  const [bathEnabled, setBathEnabled] = useState(false)
 
   // 入力解禁フラグは「この画面を表示するたびに毎回取り直す」（ui-design.md §0.5・前提情報は毎回取り直す規範）。
   // 「false を観測した（＝スプシ期間）」と「観測できなかった（＝通信エラー）」は別物なので、
@@ -167,6 +189,21 @@ export function MorePage({ inputEnabled: inputEnabledProp }: MorePageProps = {})
     }
   }, [reloadKey])
 
+  useEffect(() => {
+    let alive = true
+    setBathEnabled(false)
+    getKindInputGate('bath')
+      .then((g) => {
+        if (alive) setBathEnabled(g.observed && g.value === true)
+      })
+      .catch(() => {
+        if (alive) setBathEnabled(false)
+      })
+    return () => {
+      alive = false
+    }
+  }, [reloadKey])
+
   // 自分で取り直した観測値が正本。まだ取得できていない間（null）だけ、親の既知値か
   // 安全側（封鎖）に倒す。観測が成立したあとも親の値を混ぜると、App.tsx が起動直後に持っている
   // 古い false のせいで「解禁済みなのに封鎖表示のまま」になり、事実と違う案内が出てしまう
@@ -175,12 +212,15 @@ export function MorePage({ inputEnabled: inputEnabledProp }: MorePageProps = {})
   // 「自分で false を観測できた」状態だけ理由文を出す（未取得・エラーは別の案内を出す）
   const lockedObserved = loadError == null && fetchedEnabled === false
 
+  /** 「記録」の入口の封鎖。入浴だけ解禁されている時は開ける（中の項目ごとの封鎖は記録ハブが判定する） */
+  const recordLocked = locked && !bathEnabled
+
   const open = useCallback(
     (to: string, needsInput: boolean) => {
-      if (needsInput && locked) return // UI のディセーブルに加えた二重ガード（ui-design.md §0.5）
+      if (needsInput && recordLocked) return // UI のディセーブルに加えた二重ガード（ui-design.md §0.5）
       navigate(to)
     },
-    [locked, navigate],
+    [recordLocked, navigate],
   )
 
   // 案内欄（エラー／ローディング／封鎖）。閲覧系のボタンは待たせずに出す＝行き止まりを作らない
@@ -206,7 +246,7 @@ export function MorePage({ inputEnabled: inputEnabledProp }: MorePageProps = {})
       <SectionCard title="その他のメニュー">
         <ul className="grid grid-cols-2 gap-gap">
           {ITEMS.map((item) => {
-            const disabled = item.needsInput && locked
+            const disabled = item.needsInput && recordLocked
             return (
               <li key={item.key}>
                 <button

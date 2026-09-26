@@ -31,6 +31,8 @@ import {
   SegmentPicker,
 } from '../components/ui'
 import {
+  BATH_CANCEL_REASON_LABEL,
+  BATH_RESULT_LABEL,
   IMPORTANCE_LABEL,
   LEVEL_MARK,
   LS,
@@ -45,6 +47,7 @@ import {
   tempLevel,
 } from '../lib/types'
 import type {
+  BathRecord,
   FluidIntake,
   Level,
   Meal,
@@ -1280,6 +1283,56 @@ function NotesSection({ notes, staffById }: NotesSectionProps) {
 }
 
 // ══════════════════════════════════════════════════════════════
+// 入浴（デイ）（bath_records・0012_bath_records.sql・2026-09-26 追加）
+// ══════════════════════════════════════════════════════════════
+
+interface BathSectionProps {
+  baths: BathRecord[]
+  staffById: Map<number, string>
+}
+
+/** 表示期間の入浴記録を日付の新しい順に（区分・中止の理由・備考・記入者） */
+function BathSection({ baths, staffById }: BathSectionProps) {
+  const sorted = useMemo(
+    () =>
+      baths.slice().sort((a, b) => {
+        if (a.bath_on !== b.bath_on) return a.bath_on < b.bath_on ? 1 : -1
+        return b.id - a.id
+      }),
+    [baths],
+  )
+  return (
+    <SectionCard title="入浴（デイ）" className="mt-4">
+      {sorted.length === 0 ? (
+        <div className="mt-2">
+          <EmptyBlock message="この期間の入浴（デイ）の記録はありません。期間を広げてお試しください。" />
+        </div>
+      ) : (
+        <ul className="mt-2 space-y-2">
+          {sorted.map((b) => (
+            <li key={b.id} className="rounded-md border border-border bg-surface p-3">
+              <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-base text-ink">
+                <span className="tabular text-sm text-ink2">{fmtDayLabel(b.bath_on)}</span>
+                <span className="font-bold">{BATH_RESULT_LABEL[b.result]}</span>
+                {b.result === 'cancel' && b.cancel_reason !== null ? (
+                  <span className="text-sm text-ink2">理由: {BATH_CANCEL_REASON_LABEL[b.cancel_reason]}</span>
+                ) : null}
+              </p>
+              {b.note !== null && b.note !== '' ? (
+                <p className="mt-1 whitespace-pre-wrap break-words text-sm text-ink">{b.note}</p>
+              ) : null}
+              <p className="mt-1 text-sm text-ink2">
+                記入者 {b.recorded_by === null ? '—' : (staffById.get(b.recorded_by) ?? '—')}
+              </p>
+            </li>
+          ))}
+        </ul>
+      )}
+    </SectionCard>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════
 // 変更の記録（record_history・0010_record_history.sql）
 // ══════════════════════════════════════════════════════════════
 
@@ -1496,9 +1549,10 @@ interface KarteData {
   fluids: FluidIntake[]
   notes: Note[]
   outings: Outing[]
+  baths: BathRecord[]
 }
 
-const EMPTY_KARTE: KarteData = { vitals: [], meals: [], fluids: [], notes: [], outings: [] }
+const EMPTY_KARTE: KarteData = { vitals: [], meals: [], fluids: [], notes: [], outings: [], baths: [] }
 
 interface KarteDetailProps {
   residentId: number
@@ -1555,6 +1609,7 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
           // 本人分の申し送りだけを出す（「スタッフへ（全体）」は resident_id が null）
           notes: asArray<Note>(res?.notes).filter((n) => n != null && n.resident_id === residentId),
           outings: ownedBy<Outing>(res?.outings, residentId),
+          baths: ownedBy<BathRecord>(res?.baths, residentId),
         })
         setError(null)
       })
@@ -1680,6 +1735,7 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
             days={days}
           />
           <NotesSection notes={data.notes} staffById={staffById} />
+          <BathSection baths={data.baths} staffById={staffById} />
         </>
       )}
 

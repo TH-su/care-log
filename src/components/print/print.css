@@ -1,0 +1,96 @@
+/* ══════════════════════════════════════════════════════════════
+   印刷の小さな部品（src/components/print/PrintArea.tsx）のスタイル
+
+   ・印刷する中身は PrintArea が body の直下の .cl-print-area へ描く（画面では常に隠す）
+   ・印刷する時だけ html に data-cl-print が付き、その間の印刷では .cl-print-area 以外を隠す
+     （ヘッダ・タブ・操作ボタンなど画面の操作部は紙に出ない）
+   ・data-cl-print が無い時の印刷（他の画面で Ctrl+P を押した時）には一切効かない
+   ・用紙の向き・余白（@page）はこのファイルに書かない。PrintArea が印刷の直前だけ <style> を差し込み、
+     afterprint で外す（他の画面の印刷の用紙設定を変えない）
+   ・文字の大きさは --cl-print-font（PrintArea が「1枚に収まる大きさ」を実測して書き込む。最小 7px）
+
+   色: 紙に出すものなので、画面の表示モード（ダーク等）に関係なく「白い紙に黒い文字」で刷る。
+       tokens.css のトークンはダークで明るい文字色になり、白い紙ではほぼ読めなくなるため、
+       印刷専用の2色だけをここで定義する（画面には使わない）。
+   ══════════════════════════════════════════════════════════════ */
+
+:root {
+  --cl-print-ink: #000000;
+  --cl-print-paper: #ffffff;
+}
+
+/* 画面では隠す */
+.cl-print-area {
+  display: none;
+}
+
+/* 1枚に収まる文字の大きさを測る間だけ、印刷と同じ幅（A4 横 297mm − 左右の余白 8mm×2）で組む。
+   見えない位置・見えない状態で組むので、画面はちらつかない */
+.cl-print-area[data-cl-measure] {
+  display: block;
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 281mm;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: -1;
+  font-size: var(--cl-print-font, 10px);
+  line-height: 1.25;
+}
+
+@media print {
+  html[data-cl-print],
+  html[data-cl-print] body {
+    background: var(--cl-print-paper) !important;
+  }
+  /* ダーク表示のまま刷ると、用紙の余白（@page の margin）がダークの地色で塗られる。紙は常に明るい配色で刷る */
+  html[data-cl-print] {
+    color-scheme: light !important;
+  }
+  /* 印刷する中身以外（アプリの画面全体）を紙に出さない */
+  html[data-cl-print] body > *:not(.cl-print-area) {
+    display: none !important;
+  }
+  html[data-cl-print] .cl-print-area {
+    display: block !important;
+    font-size: var(--cl-print-font, 10px);
+    line-height: 1.25;
+    color: var(--cl-print-ink);
+    background: var(--cl-print-paper);
+  }
+}
+
+/* 印刷する中身の組み方（測る時と刷る時で同じにする） */
+.cl-print-area * {
+  color: inherit;
+  background: transparent;
+  border-color: currentColor;
+}
+.cl-print-area .cl-print-title {
+  margin: 0;
+  font-size: 1.5em;
+  font-weight: 700;
+}
+.cl-print-area .cl-print-meta {
+  margin: 0.2em 0 0.4em;
+  font-size: 1em;
+}
+.cl-print-area .cl-print-table {
+  border-collapse: collapse;
+  width: auto;
+}
+.cl-print-area .cl-print-table th,
+.cl-print-area .cl-print-table td {
+  border: 1px solid currentColor;
+  padding: 0 0.25em;
+  text-align: center;
+  white-space: nowrap;
+  font-weight: 400;
+}
+.cl-print-area .cl-print-table .cl-print-left {
+  text-align: left;
+}
+.cl-print-area .cl-print-table .cl-print-strong {
+  font-weight: 700;
+}

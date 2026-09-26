@@ -87,6 +87,9 @@ const VitalsGridPage = lazy(() => import('./pages/VitalsGridPage').then((m) => (
 const MealsGridPage = lazy(() => import('./pages/MealsGridPage').then((m) => ({ default: m.MealsGridPage })))
 const NoteFormPage = lazy(() => import('./pages/NoteFormPage').then((m) => ({ default: m.NoteFormPage })))
 const OutingFormPage = lazy(() => import('./pages/OutingFormPage').then((m) => ({ default: m.OutingFormPage })))
+// デイの入浴記録（2026-09-26 追加）。記録は記録ハブから、月次表は「その他」から入る
+const BathRecordPage = lazy(() => import('./pages/BathRecordPage').then((m) => ({ default: m.BathRecordPage })))
+const BathMonthPage = lazy(() => import('./pages/BathMonthPage').then((m) => ({ default: m.BathMonthPage })))
 const KartePage = lazy(() => import('./pages/KartePage').then((m) => ({ default: m.KartePage })))
 const SearchPage = lazy(() => import('./pages/SearchPage').then((m) => ({ default: m.SearchPage })))
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })))
@@ -108,6 +111,7 @@ const VIEWS = [
   'karte',
   'search',
   'settings',
+  'bathMonth',
 ] as const
 type View = (typeof VIEWS)[number]
 const DEFAULT_VIEW: View = 'daily'
@@ -121,6 +125,7 @@ const VIEW_PATH: Record<View, string> = {
   karte: '/karte',
   search: '/search',
   settings: '/settings',
+  bathMonth: '/bath/month',
 }
 
 function readView(): View | null {
@@ -151,6 +156,7 @@ function viewOf(pathname: string): View | null {
   if (pathname === '/karte' || pathname.startsWith('/karte/')) return 'karte'
   if (pathname === '/search') return 'search'
   if (pathname === '/settings') return 'settings'
+  if (pathname === '/bath/month') return 'bathMonth'
   return null
 }
 
@@ -199,7 +205,7 @@ const NAV_RAIL: NavItem[] = [
 ]
 
 // 下部タブに枠が無い画面は「その他」の配下扱いにして、現在地の表示が消えないようにする
-const MORE_VIEWS: View[] = ['more', 'timeline', 'record', 'search', 'settings']
+const MORE_VIEWS: View[] = ['more', 'timeline', 'record', 'search', 'settings', 'bathMonth']
 
 const ICON_PATHS: Record<IconName, ReactNode> = {
   daily: (
@@ -261,6 +267,13 @@ const ICON_PATHS: Record<IconName, ReactNode> = {
       <circle cx="9.5" cy="17" r="2.2" />
     </>
   ),
+  // 月次表（ナビには出さないが、アイコンの表は全ての画面の分を持つ型のため置く）
+  bathMonth: (
+    <>
+      <rect x="4" y="5" width="16" height="15" rx="1.5" />
+      <path d="M4 10h16M9 5v15M14 5v15" />
+    </>
+  ),
 }
 
 /** タブのアイコン（文字ラベルと必ず併記する。単独では意味を持たせない） */
@@ -300,6 +313,8 @@ function screenTitle(pathname: string): string {
   if (pathname === '/record/meals') return '食事・水分'
   if (pathname === '/record/note') return '申し送り'
   if (pathname === '/record/outing') return '外出・外泊'
+  if (pathname === '/record/bath') return '入浴（デイ）'
+  if (pathname === '/bath/month') return '入浴 月次表'
   if (pathname === '/karte' || pathname.startsWith('/karte/')) return 'カルテ'
   if (pathname === '/search') return '検索'
   if (pathname === '/settings') return '設定'
@@ -822,6 +837,9 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
               path="/record/outing"
               element={<OutingFormPage actorId={actorId} inputEnabled={inputEnabled} />}
             />
+            {/* 入浴（デイ）。入力解禁は native_input_enabled ではなく input_enabled_bath（画面が自前で取り直す） */}
+            <Route path="/record/bath" element={<BathRecordPage actorId={actorId} staff={staff} />} />
+            <Route path="/bath/month" element={<BathMonthPage />} />
             <Route path="/karte" element={<KartePage staff={staff} />} />
             <Route path="/karte/:id" element={<KartePage staff={staff} />} />
             <Route path="/search" element={<SearchPage />} />

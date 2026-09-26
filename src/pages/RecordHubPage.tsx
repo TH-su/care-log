@@ -18,6 +18,11 @@
 // - 空     : 封鎖中＝いま使える入力が1つも無い状態。ボタンは隠さずディセーブルにし、理由文と
 //            「いま何ができるか」を併記する（ui-design.md §0.5）
 //
+// 入浴（デイ）（2026-09-26 追加）:
+// - 5つ目の項目。封鎖の判定だけが他と違い、app_settings の input_enabled_bath（getKindInputGate('bath')）で決める。
+//   他の4つ（バイタル一括・食事一括・申し送り・外出・外泊）の封鎖判定は従来どおり native_input_enabled のまま
+// - 入浴の旗を取得できない時は入浴のボタンだけを押せなくする（他の4つの表示・封鎖には影響させない）
+//
 // 寸法メモ（トークン外の値を直書きしないための読み替え）:
 // - min-height 72px … 4px グリッドの利用可能値が 64px / 80px のため、下回らない側の min-h-20（80px）を使う
 // - 17px 文字   … ops 系統のトークンは fs-base=16px / fs-lg=18px。下回らない側の text-lg（18px）を使う
@@ -25,7 +30,7 @@
 import { useCallback, useEffect, useId, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { getNativeInputGate } from '../lib/db'
+import { getKindInputGate, getNativeInputGate, kindBlockedMessage } from '../lib/db'
 import { ErrorBlock, LoadingBlock, SectionCard } from '../components/ui'
 
 /** 入力封鎖中の理由文（ui-design.md §0.5 の定型文。文言を変えない） */
@@ -45,7 +50,7 @@ const LOCKED_NEXT =
 const LOAD_ERROR =
   'アプリで入力できる期間かどうかを確認できませんでした。通信状態を確認して［再試行する］を押してください。押せない場合は、下のタブで日報などほかの画面に移ってから、下のタブ「その他」→「記録」をもう一度開いてください。'
 
-type HubKey = 'vitals' | 'meals' | 'note' | 'outing'
+type HubKey = 'vitals' | 'meals' | 'note' | 'outing' | 'bath'
 
 /** 2×2 の並び順（左上→右上→左下→右下）。ルートは contracts.md のルーティング定義どおり */
 const ITEMS: { key: HubKey; to: string; label: string }[] = [
@@ -53,7 +58,13 @@ const ITEMS: { key: HubKey; to: string; label: string }[] = [
   { key: 'meals', to: '/record/meals', label: '食事一括' },
   { key: 'note', to: '/record/note', label: '申し送り' },
   { key: 'outing', to: '/record/outing', label: '外出・外泊' },
+  // 封鎖は input_enabled_bath で判定する（下の bathLocked）
+  { key: 'bath', to: '/record/bath', label: '入浴（デイ）' },
 ]
+
+/** 入浴の旗を取得できなかった時の一言（入浴のボタンだけに付ける） */
+const BATH_GATE_UNKNOWN =
+  '入浴の記録を使える期間かどうかを確認できませんでした（通信エラー）。電波状態を確認して、この画面を開き直してください。'
 
 /** アイコンは必ず文字ラベルと併記する（アイコン単独では意味を持たせない） */
 const ICON_PATHS: Record<HubKey, ReactNode> = {
@@ -81,6 +92,13 @@ const ICON_PATHS: Record<HubKey, ReactNode> = {
       <path d="M13 4H5v16h8" />
       <path d="M10 12h10" />
       <path d="M17 9l3 3-3 3" />
+    </>
+  ),
+  // 湯気と浴槽
+  bath: (
+    <>
+      <path d="M3.5 12h17v2.5a5 5 0 0 1-5 5h-7a5 5 0 0 1-5-5V12z" />
+      <path d="M8 9c0-1 1-1.5 1-2.5M12 9c0-1 1-1.5 1-2.5M16 9c0-1 1-1.5 1-2.5" />
     </>
   ),
 }
@@ -112,10 +130,13 @@ export function RecordHubPage({ inputEnabled: inputEnabledProp }: RecordHubPageP
   const navigate = useNavigate()
   const uid = useId()
   const reasonId = `${uid}-locked`
+  const bathReasonId = `${uid}-bath-locked`
 
   const [fetchedEnabled, setFetchedEnabled] = useState<boolean | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [reloadKey, setReloadKey] = useState(0)
+  /** 入浴の旗（null＝取得中、observed=false＝取得できなかった） */
+  const [bathGate, setBathGate] = useState<{ value: boolean; observed: boolean } | null>(null)
 
   // 入力解禁フラグは「記録タブを表示するたびに毎回取り直す」（ui-design.md §0.5・前提情報は毎回取り直す規範）。
   // 取得できなければ入力へ進ませない（安全側フォールバック）。
@@ -142,15 +163,34 @@ export function RecordHubPage({ inputEnabled: inputEnabledProp }: RecordHubPageP
     }
   }, [reloadKey])
 
+  // 入浴の旗（input_enabled_bath）も画面を開くたびに取り直す。取得できなくても他の4つには影響させない
+  useEffect(() => {
+    let alive = true
+    setBathGate(null)
+    getKindInputGate('bath')
+      .then((g) => {
+        if (alive) setBathGate(g)
+      })
+      .catch(() => {
+        if (alive) setBathGate({ value: false, observed: false })
+      })
+    return () => {
+      alive = false
+    }
+  }, [reloadKey])
+
   // 親が「封鎖」と言っている場合と、取り直した値が false の場合の両方で封鎖する（安全側）
   const locked = fetchedEnabled !== true || inputEnabledProp === false
+  /** 入浴は自分の旗だけで決める（取得中・取得できない間は押せない＝安全側） */
+  const bathLocked = bathGate === null || !bathGate.observed || bathGate.value !== true
+  const lockedOf = (key: HubKey): boolean => (key === 'bath' ? bathLocked : locked)
 
   const open = useCallback(
-    (to: string) => {
-      if (locked) return // UI のディセーブルに加えた二重ガード（ui-design.md §0.5）
+    (to: string, itemLocked: boolean) => {
+      if (itemLocked) return // UI のディセーブルに加えた二重ガード（ui-design.md §0.5）
       navigate(to)
     },
-    [locked, navigate],
+    [navigate],
   )
 
   // ── 3状態: エラー → ローディング → 本体（封鎖中は「空」相当の案内＋ディセーブル）──
@@ -185,22 +225,39 @@ export function RecordHubPage({ inputEnabled: inputEnabledProp }: RecordHubPageP
 
       <SectionCard title="記録メニュー">
         <ul className="grid grid-cols-2 gap-gap">
-          {ITEMS.map((item) => (
-            <li key={item.key}>
-              <button
-                type="button"
-                onClick={() => open(item.to)}
-                disabled={locked}
-                aria-describedby={locked ? reasonId : undefined}
-                className="flex min-h-20 w-full flex-col items-center justify-center gap-1 rounded-lg border border-primary bg-surface px-3 py-3 text-lg font-bold text-primary disabled:border-border disabled:bg-surface2 disabled:text-ink2"
-              >
-                <HubIcon name={item.key} />
-                <span className="text-center">{item.label}</span>
-                {locked ? <span className="sr-only">（いまは入力できません）</span> : null}
-              </button>
-            </li>
-          ))}
+          {ITEMS.map((item) => {
+            const itemLocked = lockedOf(item.key)
+            const describedBy = !itemLocked
+              ? undefined
+              : item.key === 'bath'
+                ? bathGate === null
+                  ? undefined
+                  : bathReasonId
+                : reasonId
+            return (
+              <li key={item.key}>
+                <button
+                  type="button"
+                  onClick={() => open(item.to, itemLocked)}
+                  disabled={itemLocked}
+                  aria-describedby={describedBy}
+                  className="flex min-h-20 w-full flex-col items-center justify-center gap-1 rounded-lg border border-primary bg-surface px-3 py-3 text-lg font-bold text-primary disabled:border-border disabled:bg-surface2 disabled:text-ink2"
+                >
+                  <HubIcon name={item.key} />
+                  <span className="text-center">{item.label}</span>
+                  {itemLocked ? <span className="sr-only">（いまは入力できません）</span> : null}
+                </button>
+              </li>
+            )
+          })}
         </ul>
+        {/* 入浴の封鎖の理由（他の4つの理由文とは別。入浴だけ解禁・入浴だけ封鎖のどちらもあり得る） */}
+        {bathGate !== null && bathLocked ? (
+          <p id={bathReasonId} role="status" className="mt-3 text-sm text-ink2">
+            <span aria-hidden="true">▲ </span>
+            入浴（デイ）: {bathGate.observed ? kindBlockedMessage('bath') : BATH_GATE_UNKNOWN}
+          </p>
+        ) : null}
       </SectionCard>
     </div>
   )
