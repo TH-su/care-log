@@ -1222,8 +1222,9 @@ describe('★自動チェック（0015_auto_check.sql）の配線（静的検査
     const exists = /select 1 from public\.med_admin a\s+where a\.resident_id = r\.id\s+and a\.admin_on = p_on\s+and a\.slot = p_slot\)/.exec(s)
     assert.ok(exists, '既にある記録の判定が見つからない')
     assert.match(s, /mr\.hospitalized is true/)
-    assert.match(s, /o\.kind = 'overnight'/)
-    assert.match(s, /p_on <= coalesce\(o\.end_on, o\.start_on\)/)
+    // 外泊は帰着未定（end_on が null）を継続中とみなす（チーフ裁定）。外出は帰着日が無ければ出発日だけ
+    assert.match(s, /\(o\.kind = 'overnight' and \(o\.end_on is null or p_on <= o\.end_on\)\)/)
+    assert.match(s, /o\.kind = 'outing'\s+and p_on <= coalesce\(o\.end_on, o\.start_on\)/)
     assert.match(s, /input_enabled_med/)
   })
 

@@ -305,7 +305,7 @@ ResidentPickerModal({ open, residents: Resident[], onPick(id: number | null), on
   private.care_auto_med(時間帯)／care_auto_bath()（security definer・search_path=''・anon/authenticated から revoke。本体は日付を引数に取る
   care_auto_med_on / care_auto_bath_on、日本時間の日付は care_auto_today）・cron 4件（UTC: 与薬 朝 '50 23 * * *'＝JST 8:50／昼 '0 4 * * *'＝13:00／
   夕 '20 9 * * *'＝18:20／入浴 '30 3 * * *'＝12:30）。自動の記録は DB 側だけが作る（端末は作らない）。その日その時間帯（入浴はその日）に
-  **取り消し済みを含めて**行があれば作らない。入院中（与薬は master_residents、入浴は写しと master_residents）・外泊の期間・外出中（与薬のみ）・
+  **取り消し済みを含めて**行があれば作らない。入院中（与薬は master_residents、入浴は写しと master_residents）・外泊の期間（帰着未定は継続中）・外出中（与薬のみ）・
   服薬の時間帯が無い人・在籍でない人・種類ごとの入力解禁が 'true' でない間は作らない。**0015 を当ててからアプリを公開する**
   （取得の列に auto を足したため、0015 未適用の DB では入浴・与薬・カルテの読み込みが失敗する）
 - 自動の記録（auto=true・recorded_by=null）を職員が直す時、updateBath / updateMedAdmin は auto=false と recorded_by（直した職員）を一緒に送る

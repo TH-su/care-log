@@ -31,7 +31,8 @@
 -- 自動にしない人（与薬）:
 --   ・その時間帯が服薬の時間帯（med_slots）に無い人・在籍でない人（residents.active=false）
 --   ・入院中（入居者マスタの写し master_residents.hospitalized=true。テナントは写しにある唯一のテナント）
---   ・外泊の期間中（outings.kind='overnight' で start_on ≤ その日 ≤ coalesce(end_on, start_on)・取り消し済みは除く）
+--   ・外泊の期間中（outings.kind='overnight' で start_on ≤ その日 ≤ end_on・取り消し済みは除く）。
+--     帰着未定（end_on が null）の外泊は継続中とみなし、start_on 以降の毎日を除く（カルテの扱いとそろえる・2026-09-27 チーフ裁定）
 --   ・外出中（outings.kind='outing' で同じ日付の範囲、かつ自動の時刻に外出の時刻がかかる。
 --             出発時刻が無い＝その日の初めから、帰着時刻が無い＝まだ戻っていないとみなす＝安全側に倒して自動にしない）
 --   ・その日その時間帯に記録が既にある人（**取り消し済みの行も含む**＝職員が消した・直した後に作り直さない）
@@ -131,11 +132,13 @@ begin
             where o.resident_id = r.id
               and o.deleted_at is null
               and o.start_on <= p_on
-              and p_on <= coalesce(o.end_on, o.start_on)
               and (
-                    o.kind = 'overnight'
+                    -- 外泊: 帰着日まで（帰着未定は継続中＝以降の毎日）
+                    (o.kind = 'overnight' and (o.end_on is null or p_on <= o.end_on))
                     or (
+                         -- 外出: 同じ日付の範囲（帰着日が無ければ出発日だけ）で、自動の時刻に外出の時刻がかかる
                          o.kind = 'outing'
+                         and p_on <= coalesce(o.end_on, o.start_on)
                          and (o.start_on < p_on or o.start_at is null or o.start_at <= v_at)
                          and (coalesce(o.end_on, o.start_on) > p_on or o.end_at is null or o.end_at >= v_at)
                        )
