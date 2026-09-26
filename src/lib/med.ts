@@ -4,9 +4,9 @@
 //
 // 時間帯（朝・昼・夕・眠前）は入居者ごとに med_slots が持つ。その人に設定の無い時間帯は「—」（押せない）。
 // 「未」＝設定のある時間帯で、締め時刻を過ぎても記録が無いもの。過去の日は締めを過ぎたものとして扱う。
-// ただし自動の時間帯（朝・昼・夕＝MED_AUTO_SLOTS）には「未」を付けない（2026-09-27 代表指示）:
-//   自動の時刻（MED_AUTO_TIMES）に DB 側（0015 の cron）が「服用済み」の記録を作る前提なので、
-//   自動の時刻を過ぎても記録が無いのは、服薬の時間帯が未設定・入院・外泊・外出などで自動にしなかった人。空欄のままにする。
+// 自動の時間帯（朝・昼・夕＝MED_AUTO_SLOTS）は、自動の時刻（MED_AUTO_TIMES）に DB 側（0015 の cron）が「服用済み」の記録を作る。
+// その時間帯の「未」は締め時刻でなく「自動の時刻から MED_AUTO_GRACE_MIN（15分）過ぎても記録が無い」で付ける
+// （入院・外泊などで自動にしなかった人・cron の失敗を見落とさないため・2026-09-27 チーフ指摘1）。眠前は従来どおり締め時刻。
 // 個人情報: ここには氏名も記録本文も薬の名前も書かない（型と計算だけ）。
 
 import { MED_ADMIN_SLOTS, MED_SLOT_LABEL, MED_SLOTS, MED_STATUSES } from './types.ts'
@@ -36,8 +36,30 @@ export const MED_AUTO_TIMES: Readonly<Partial<Record<MedSlot, string>>> = {
   evening: '18:20',
 }
 
-/** 自動で「服用済み」になる時間帯（朝・昼・夕）。「未」を付けない */
+/** 自動で「服用済み」になる時間帯（朝・昼・夕）。「未」は自動の時刻＋15分で判定する */
 export const MED_AUTO_SLOTS: readonly MedSlot[] = MED_SLOTS.filter((s) => MED_AUTO_TIMES[s] !== undefined)
+
+/** 自動の時刻から何分過ぎても記録が無ければ「未」にするか（自動の時間帯だけ） */
+export const MED_AUTO_GRACE_MIN = 15
+
+/** 自動の時間帯の「未」を付け始める時刻（0時からの分＝自動の時刻＋MED_AUTO_GRACE_MIN）。自動でない時間帯は null */
+export function autoMissingMinutes(slot: MedSlot): number | null {
+  const t = MED_AUTO_TIMES[slot]
+  const m = t === undefined ? null : hmToMinutes(t)
+  return m === null ? null : m + MED_AUTO_GRACE_MIN
+}
+
+/**
+ * 「未」を付けてよい時刻を過ぎているか。自動の時間帯（auto）は自動の時刻＋15分、それ以外は締め時刻（isPastDeadline）。
+ * 今日より前の日は過ぎている・今日より後の日は過ぎていない
+ */
+export function isPastMissingLine(slot: MedSlot, day: string, today: string, nowMin: number, auto: boolean): boolean {
+  const autoLine = auto ? autoMissingMinutes(slot) : null
+  if (autoLine === null) return isPastDeadline(slot, day, today, nowMin)
+  if (day < today) return true
+  if (day > today) return false
+  return nowMin >= autoLine
+}
 
 /** 画面の注記の「朝 8:50・昼 13:00・夕 18:20」 */
 export function fmtMedAutoTimes(): string {
@@ -125,8 +147,8 @@ export interface MedDayRow {
 }
 
 /**
- * 1マスを決める（締めの判定は isPastDeadline）。
- * auto（自動の時間帯）は「未」にしない（記録が無ければ締めを過ぎても空欄＝open）
+ * 1マスを決める（「未」の時刻の判定は isPastMissingLine）。
+ * auto（自動の時間帯）は自動の時刻＋15分を過ぎても記録が無ければ「未」、それ以外は締め時刻で「未」
  */
 export function medCellOf(p: {
   configured: boolean
@@ -139,8 +161,7 @@ export function medCellOf(p: {
 }): MedCell {
   if (p.record !== null) return { kind: 'record', record: p.record }
   if (!p.configured) return { kind: 'none' }
-  if (p.auto === true) return { kind: 'open' }
-  return isPastDeadline(p.slot, p.day, p.today, p.nowMin) ? { kind: 'missing' } : { kind: 'open' }
+  return isPastMissingLine(p.slot, p.day, p.today, p.nowMin, p.auto === true) ? { kind: 'missing' } : { kind: 'open' }
 }
 
 /**
@@ -159,7 +180,7 @@ export function buildMedDayRows(p: {
   nowMin: number
   /** 「未」を付けてよいか（medMissingAllowed）。省略時は付ける */
   missingAllowed?: boolean
-  /** 自動の時間帯（「未」を付けない）。省略時は MED_AUTO_SLOTS（朝・昼・夕） */
+  /** 自動の時間帯（「未」は自動の時刻＋15分で判定）。省略時は MED_AUTO_SLOTS（朝・昼・夕） */
   autoSlots?: readonly MedSlot[]
 }): MedDayRow[] {
   const allowMissing = p.missingAllowed !== false
@@ -390,7 +411,7 @@ function emptyTotals(): MedMonthTotals {
  * ・マス … 記録があれば状態（自動で入った記録は autos が true）。記録が無く、次の全部を満たす時だけ「未」（missing）:
  *     その人の設定（slots＝現在の設定）にある時間帯／締めを過ぎている（今日より前の日、または今日の締め時刻以降）／
  *     startDay（施設全体で最初の与薬の記録の日）以降。startDay が null（記録が1件も無い）なら付けない／退居された方でない／
- *     自動の時間帯（autoSlots・省略時は朝・昼・夕）でない（1日の表と同じ）
+ *     自動の時間帯（autoSlots・省略時は朝・昼・夕）は締め時刻でなく自動の時刻＋15分で判定する（1日の表と同じ）
  * ・頓服 … その日の頓服の回数
  * その人・その月以外の記録は数えない。同じマスに記録が2件あれば新しい id を採る。
  */
@@ -403,7 +424,7 @@ export function aggregateMedMonth(p: {
   today: string
   nowMin: number
   retired?: boolean
-  /** 自動の時間帯（「未」を付けない）。省略時は MED_AUTO_SLOTS（朝・昼・夕） */
+  /** 自動の時間帯（「未」は自動の時刻＋15分で判定）。省略時は MED_AUTO_SLOTS（朝・昼・夕） */
   autoSlots?: readonly MedSlot[]
 }): MedMonthTable {
   const days = monthDays(p.monthKey)
@@ -437,11 +458,10 @@ export function aggregateMedMonth(p: {
       }
       const missing =
         configured.has(slot) &&
-        !autoSlots.has(slot) &&
         p.retired !== true &&
         p.startDay !== null &&
         day >= p.startDay &&
-        isPastDeadline(slot, day, p.today, p.nowMin)
+        isPastMissingLine(slot, day, p.today, p.nowMin, autoSlots.has(slot))
       if (missing) {
         totals.missing += 1
         totals.bySlot[slot].missing += 1

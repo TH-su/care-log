@@ -2321,6 +2321,11 @@ async function sendQueuedOp(sb: SupabaseClient, op: QueueOp): Promise<SendResult
         // 読めなければ消さずに再試行へ回す（観測できない消去はしない＝原則8）
         const landed = await findByKey(sb, op.table, ck, 'id,rev', true)
         if (landed !== null) return 'sent'
+        // 先に載っていたのが自動の記録（0015 の cron・auto=true）なら、その行をこの手動の記録で上書きする（チーフ指摘5）。
+        // 圏外で「中止」を記録している間に 12:30 の自動の「全身浴」が先に載った、などの時に職員の記録を優先するため。
+        // 手動の記録どうし（auto=false）は従来どおり conflict。送信待ちの中身は書き換えない（送る時の解決だけ）
+        const overAuto = await overrideAutoRow(sb, op.table, op.payload)
+        if (overAuto !== null) return overAuto
         // 入浴記録（1人1日1件）・服薬の時間帯（1人1件）・与薬の記録（1人1日1時間帯1件）は自然キー（部分unique）も持つ。
         // 自分の client_key が載っておらず、同じ自然キーの生きている行がある＝他の端末が先に記録した。
         // 再送しても通らないので止める（消さずに残し「未送信」として数え続ける＝rev 不一致の update と同じ扱い）
@@ -2513,6 +2518,70 @@ async function medKeyTaken(
   const slot = oneOf<MedAdminSlot>(payload.slot, MED_ADMIN_SLOTS)
   if (day === null || slot === null || slot === 'prn') return false
   return (await findByKey(sb, 'med_admin', { resident_id: residentId, admin_on: day, slot })) !== null
+}
+
+/**
+ * 送信待ちの手動の追加（入浴・与薬の時間帯の記録）が自然キーで衝突した時、衝突した生きている行が自動の記録（auto=true）なら、
+ * その行を読んだ rev で、送信待ちの中身（区分・理由・備考 / 状態・備考・記入者）と auto=false に update する。
+ * 戻り値: 上書きできた 'sent'／通信・ログインの失敗や読んだ後に行が変わった 'retry'（次の送信で判定し直す）／
+ *         受け付けられなかった 'rejected'／自動の記録ではない・行が無い・対象外の表 null（呼び側は従来どおり判定する）。
+ * 送信待ちの op は書き換えない（上書きの中身は op.payload から毎回組み立てる）
+ */
+async function overrideAutoRow(
+  sb: SupabaseClient,
+  table: QueueTable,
+  payload: Record<string, unknown>,
+): Promise<SendResult | null> {
+  const residentId = idNum(payload.resident_id)
+  if (residentId === null) return null
+  let key: Record<string, unknown>
+  let patch: Record<string, unknown>
+  if (table === 'bath_records') {
+    const day = dateStr(payload.bath_on)
+    if (day === null) return null
+    key = { resident_id: residentId, bath_on: day }
+    patch = { result: payload.result, cancel_reason: payload.cancel_reason ?? null, note: payload.note ?? null }
+  } else if (table === 'med_admin') {
+    const day = dateStr(payload.admin_on)
+    const slot = oneOf<MedAdminSlot>(payload.slot, MED_ADMIN_SLOTS)
+    if (day === null || slot === null || slot === 'prn') return null
+    key = { resident_id: residentId, admin_on: day, slot }
+    patch = { status: payload.status, note: payload.note ?? null }
+  } else {
+    return null
+  }
+  const found = await findByKey(sb, table, key, 'id,rev,auto')
+  if (found === null || asRecord(found.row)?.auto !== true) return null
+  const recorder = idNum(payload.recorded_by)
+  const sent = {
+    ...patch,
+    recorded_by: recorder,
+    auto: false,
+    // 変更の記録の「変えた職員」は送信待ちに残っている操作者（無ければ記録者）
+    edited_by: idNum(payload.edited_by) ?? recorder,
+  }
+  markSelfRow(table, { id: found.id }, found.rev + 1)
+  const res = await sendWithEditor(
+    sent,
+    async (p) =>
+      (await sb
+        .from(table)
+        .update(p)
+        .eq('id', found.id)
+        .eq('rev', found.rev)
+        .is('deleted_at', null)
+        .select(colsOf(table))
+        .maybeSingle()) as Res<unknown>,
+  )
+  if (res.error !== null) {
+    if (isAuthFail(res)) {
+      fireAuthExpired()
+      return 'retry'
+    }
+    return isTransient(res) ? 'retry' : 'rejected'
+  }
+  // 0行＝読んだ後に他の端末が変えた（または取り消した）。次の送信で判定し直す（手動になっていれば conflict で止まる）
+  return res.data === null ? 'retry' : 'sent'
 }
 
 /** 自然キー（部分unique）を持つ表で、同じキーの生きている行があるか。自然キーを持たない表は false */

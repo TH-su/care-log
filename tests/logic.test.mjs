@@ -2847,6 +2847,44 @@ function registerDbTests() {
       assert.deepEqual(up.payload, { result: 'shower', cancel_reason: null, edited_by: 5 })
     })
 
+    it('★圏外で「中止」を記録 → その間に cron が自動の全身浴を作る → 電波が戻ると自動の行を中止で上書き（1行のまま・送信待ちは書き換えない・指摘5）', async () => {
+      setQueueRaw(null)
+      let off = true
+      const srv = bathServer({ offline: () => off })
+      DB.__testHooks.setClient(srv.client)
+      assert.equal(await DB.insertBath(bathInput({ result: 'cancel', cancel_reason: 'refusal', recorded_by: 3 })), 'queued')
+      const before = JSON.stringify(storedQueue().ops[0])
+      // 12:30 の cron が同じ人・同じ日に自動の全身浴を作った
+      srv.db.rows.push({ id: 90, ...bathInput({ recorded_by: null }), rev: 1, deleted_at: null, auto: true, client_key: 'auto:bath:2026-09-01:1' })
+      off = false
+      await DB.flushQueue(true)
+      assert.equal(DB.queuePending(), 0, '上書きできたのに送信待ちに残った')
+      assert.equal(srv.db.rows.length, 1, '行が増えた')
+      const r = srv.db.rows[0]
+      assert.deepEqual([r.id, r.result, r.cancel_reason, r.auto, r.recorded_by, r.rev], [90, 'cancel', 'refusal', false, 3, 2])
+      const up = srv.calls.filter((q) => q.table === 'bath_records' && q.action === 'update').at(-1)
+      assert.deepEqual(eqOf(up), { id: 90, rev: 1 })
+      assert.deepEqual(up.payload, { result: 'cancel', cancel_reason: 'refusal', note: null, recorded_by: 3, auto: false, edited_by: 3 })
+      assert.equal(typeof JSON.parse(before).payload.client_key, 'string', '送信待ちの中身が読めない')
+    })
+
+    it('★先に載っていたのが手動の記録（auto=false）なら従来どおり conflict で止め、上書きしない（指摘5）', async () => {
+      setQueueRaw(null)
+      let off = true
+      const srv = bathServer({ offline: () => off })
+      DB.__testHooks.setClient(srv.client)
+      assert.equal(await DB.insertBath(bathInput({ result: 'cancel', cancel_reason: 'refusal' })), 'queued')
+      const before = JSON.stringify(storedQueue().ops)
+      srv.db.rows.push({ id: 91, ...bathInput({ result: 'shower' }), rev: 1, deleted_at: null, auto: false, client_key: 'other-device' })
+      off = false
+      await DB.flushQueue(true)
+      assert.equal(DB.queuePending(), 1, '手動の記録どうしの衝突で送信待ちを消した')
+      assert.equal(srv.db.rows[0].result, 'shower', '他の端末の手動の記録を書き換えた')
+      assert.equal(srv.calls.filter((q) => q.table === 'bath_records' && q.action === 'update').length, 0)
+      // 送信待ちの中身（送る内容と冪等キー）は変えない（試行回数などの管理の欄だけが動く）
+      assert.deepEqual(storedQueue().ops.map((o) => [o.qid, o.payload]), JSON.parse(before).map((o) => [o.qid, o.payload]), '送信待ちの中身を書き換えた')
+    })
+
     it('通信できない「チェックを外す」は update op として退避し、auto=false と記入者を持ったまま送る（送信待ちの経路は同じ）', async () => {
       setQueueRaw(null)
       DB.__testHooks.setClient(offline().client)

@@ -386,15 +386,23 @@ if (M === null) {
       assert.deepEqual([...M.MED_AUTO_SLOTS], ['morning', 'noon', 'evening'])
       assert.equal(M.fmtMedAutoTimes(), '朝 8:50・昼 13:00・夕 18:20')
     })
-    it('既定では朝・昼・夕に「未」を付けない（自動の時刻を過ぎても記録が無い＝空欄 open）。眠前は従来どおり締めで「未」', () => {
+    it('★朝・昼・夕は自動の時刻から15分過ぎても記録が無ければ「未」（除外された人・cron の失敗を見落とさない・チーフ指摘1）。眠前は締め', () => {
+      assert.equal(M.MED_AUTO_GRACE_MIN, 15)
+      assert.deepEqual(['morning', 'noon', 'evening', 'bedtime'].map((s) => M.autoMissingMinutes(s)), [H(9, 5), H(13, 15), H(18, 35), null])
       const at = (d, nowMin) =>
         M.buildMedDayRows({ order: [1], slotsByResident: slotsBy, records: [], day: d, today: day, nowMin })[0].cells
       const k = (cells) => Object.fromEntries(Object.entries(cells).map(([s, c]) => [s, c.kind]))
-      assert.deepEqual(k(at(day, H(23, 30))), { morning: 'open', noon: 'open', evening: 'open', bedtime: 'missing' })
-      assert.deepEqual(k(at(day, H(22, 59))), { morning: 'open', noon: 'open', evening: 'open', bedtime: 'open' })
-      assert.deepEqual(k(at('2026-09-20', H(6, 0))), { morning: 'open', noon: 'open', evening: 'open', bedtime: 'missing' }, '過去の日')
-      assert.equal(M.countMedDay([{ residentId: 1, configured: [], cells: at('2026-09-20', H(6, 0)) }]).missing, 1)
-      assert.equal(M.tapActionOf(at(day, H(23, 30)).morning, false), 'insert', '空欄のままでも押せば記録できる')
+      assert.deepEqual(k(at(day, H(9, 4))), { morning: 'open', noon: 'open', evening: 'open', bedtime: 'open' }, '8:50 から15分たつ前')
+      assert.deepEqual(k(at(day, H(9, 5))), { morning: 'missing', noon: 'open', evening: 'open', bedtime: 'open' }, '9:05（締め10:00より前でも）')
+      assert.deepEqual(k(at(day, H(13, 15))), { morning: 'missing', noon: 'missing', evening: 'open', bedtime: 'open' })
+      assert.deepEqual(k(at(day, H(18, 34))), { morning: 'missing', noon: 'missing', evening: 'open', bedtime: 'open' })
+      assert.deepEqual(k(at(day, H(18, 35))), { morning: 'missing', noon: 'missing', evening: 'missing', bedtime: 'open' })
+      assert.deepEqual(k(at(day, H(23, 0))), { morning: 'missing', noon: 'missing', evening: 'missing', bedtime: 'missing' }, '眠前は締め 23:00')
+      assert.deepEqual(k(at('2026-09-20', H(6, 0))), { morning: 'missing', noon: 'missing', evening: 'missing', bedtime: 'missing' }, '過去の日')
+      assert.equal(M.tapActionOf(at(day, H(23, 30)).morning, false), 'insert', '「未」を押せば記録できる')
+      // 解禁前・記録を始める前は、自動の時間帯も「未」を付けない（従来の missingAllowed のまま）
+      const off = M.buildMedDayRows({ order: [1], slotsByResident: slotsBy, records: [], day, today: day, nowMin: H(23, 30), missingAllowed: false })
+      assert.equal(M.countMedDay(off).missing, 0)
     })
     it('自動で入った記録は記録として出し（押すと状態の小窓）、件数は記録済みに数える', () => {
       const rows = M.buildMedDayRows({
@@ -408,9 +416,10 @@ if (M === null) {
       assert.equal(rows[0].cells.morning.kind, 'record')
       assert.equal(rows[0].cells.morning.record.auto, true)
       assert.equal(M.tapActionOf(rows[0].cells.morning, false), 'dialog')
-      assert.deepEqual(M.countMedDay(rows), { missing: 1, incident: 0, recorded: 2 })
+      // 夕（18:35 を過ぎて記録なし）と眠前（23:00 を過ぎて記録なし）が「未」
+      assert.deepEqual(M.countMedDay(rows), { missing: 2, incident: 0, recorded: 2 })
     })
-    it('月次表: 朝・昼・夕は「未」を付けず（眠前だけ）、自動の記録は autos が true（「済*」の印）', () => {
+    it('月次表: 朝・昼・夕も自動の時刻＋15分で「未」（記録の無い過去の日）。自動の記録は autos が true（「済*」の印）', () => {
       const t = M.aggregateMedMonth({
         monthKey: '2026-09',
         residentId: 1,
@@ -421,12 +430,15 @@ if (M === null) {
         records: [rec(1, 1, '2026-09-10', 'morning', 'taken', { auto: true }), rec(2, 1, '2026-09-10', 'noon', 'taken')],
       })
       const d10 = t.days[9]
-      assert.deepEqual(d10.cells, { morning: 'taken', noon: 'taken', evening: null, bedtime: 'missing' })
+      assert.deepEqual(d10.cells, { morning: 'taken', noon: 'taken', evening: 'missing', bedtime: 'missing' })
       assert.deepEqual(d10.autos, { morning: true, noon: false, evening: false, bedtime: false })
       assert.equal(t.totals.byStatus.taken, 2, '自動の記録も服用済みに数える')
-      // 10日〜26日の17日×眠前だけ
-      assert.equal(t.totals.missing, 17)
-      assert.deepEqual([t.totals.bySlot.morning.missing, t.totals.bySlot.noon.missing, t.totals.bySlot.evening.missing], [0, 0, 0])
+      // 10日〜26日の17日×4列−記録2＝66（今日 23:30 は4列とも過ぎている）
+      assert.equal(t.totals.missing, 17 * 4 - 2)
+      assert.deepEqual([t.totals.bySlot.morning.missing, t.totals.bySlot.noon.missing, t.totals.bySlot.evening.missing], [16, 16, 17])
+      // 今日 9:10 なら、今日の朝だけ「未」（昼・夕・眠前はまだ）
+      const t2 = M.aggregateMedMonth({ monthKey: '2026-09', residentId: 1, slots: ['morning', 'noon', 'evening', 'bedtime'], startDay: '2026-09-26', today: '2026-09-26', nowMin: H(9, 10), records: [] })
+      assert.deepEqual(t2.days[25].cells, { morning: 'missing', noon: null, evening: null, bedtime: null })
     })
   })
 }
@@ -1076,6 +1088,31 @@ if (DB === null || M === null) {
       assert.equal('auto' in ins.payload, false)
     })
 
+    it('★圏外で「拒否」を記録 → cron が自動の服用済みを作る → 電波が戻ると自動の行を拒否で上書き（指摘5）。手動の行なら conflict', async () => {
+      let off = true
+      const srv = medServer({ offline: () => off })
+      DB.__testHooks.setClient(srv.client)
+      assert.equal(await DB.insertMedAdmin(medInput({ status: 'refused', recorded_by: 4 })), 'queued')
+      assert.equal(await DB.insertMedAdmin(medInput({ slot: 'noon', status: 'absent' })), 'queued')
+      srv.db.admin.push(
+        { id: 70, ...medInput({ recorded_by: null }), rev: 1, deleted_at: null, auto: true, client_key: 'auto:med:2026-09-01:morning:1' },
+        { id: 71, ...medInput({ slot: 'noon' }), rev: 1, deleted_at: null, auto: false, client_key: 'other-device' },
+      )
+      off = false
+      await DB.flushQueue(true)
+      assert.equal(srv.db.admin.length, 2, '行が増えた')
+      const [a, b] = srv.db.admin
+      assert.deepEqual([a.status, a.auto, a.recorded_by, a.rev], ['refused', false, 4, 2], '自動の行を上書きしていない')
+      assert.deepEqual([b.status, b.auto, b.rev], ['taken', false, 1], '手動の行を書き換えた')
+      const up = srv.calls.filter((q) => q.table === 'med_admin' && q.action === 'update')
+      assert.equal(up.length, 1)
+      assert.deepEqual(up[0].payload, { status: 'refused', note: null, recorded_by: 4, auto: false, edited_by: 4 })
+      assert.deepEqual(eqOf(up[0]), { id: 70, rev: 1 })
+      const left = storedOps()
+      assert.equal(left.length, 1, '手動の行との衝突は送信待ちに残す（conflict）')
+      assert.equal(left[0].payload.slot, 'noon')
+    })
+
     it('通信できない修正は update op として退避し、auto=false と記入者を持ったまま（送信待ちの経路は同じ）', async () => {
       const srv = medServer({ offline: () => true })
       DB.__testHooks.setClient(srv.client)
@@ -1200,7 +1237,7 @@ describe('★自動チェック（0015_auto_check.sql）の配線（静的検査
 
   it('関数は private・security definer・search_path 空。anon / authenticated からは呼べない（revoke）', () => {
     const s = sql()
-    for (const f of ['care_auto_today', 'care_auto_med_on', 'care_auto_med', 'care_auto_bath_on', 'care_auto_bath']) {
+    for (const f of ['care_auto_today', 'care_auto_flag_on', 'care_auto_tenant', 'care_auto_med_on', 'care_auto_med', 'care_auto_bath_on', 'care_auto_bath']) {
       const m = new RegExp(`create or replace function private\\.${f}\\([^)]*\\)[\\s\\S]*?as \\$fn\\$`).exec(s)
       assert.ok(m, f)
       assert.match(m[0], /security definer/, f)
@@ -1222,10 +1259,14 @@ describe('★自動チェック（0015_auto_check.sql）の配線（静的検査
     const exists = /select 1 from public\.med_admin a\s+where a\.resident_id = r\.id\s+and a\.admin_on = p_on\s+and a\.slot = p_slot\)/.exec(s)
     assert.ok(exists, '既にある記録の判定が見つからない')
     assert.match(s, /mr\.hospitalized is true/)
-    // 外泊は帰着未定（end_on が null）を継続中とみなす（チーフ裁定）。外出は帰着日が無ければ出発日だけ
+    // 外泊・外出とも帰着未定（end_on が null）は継続中（チーフ裁定・指摘3）。帰着日のある外出だけ時刻で判定
     assert.match(s, /\(o\.kind = 'overnight' and \(o\.end_on is null or p_on <= o\.end_on\)\)/)
-    assert.match(s, /o\.kind = 'outing'\s+and p_on <= coalesce\(o\.end_on, o\.start_on\)/)
-    assert.match(s, /input_enabled_med/)
+    assert.match(s, /or \(o\.kind = 'outing' and o\.end_on is null\)/)
+    assert.match(s, /o\.kind = 'outing'\s+and o\.end_on is not null\s+and p_on <= o\.end_on/)
+    // 入院: 入居者マスタの写し・週間計画の写しのどちらか（指摘4）
+    assert.match(s, /mr\.hospitalized is true/)
+    assert.match(s, /coalesce\(kr\.v ->> 'hospitalized', ''\) = 'true'/)
+    assert.match(s, /private\.care_auto_flag_on\('input_enabled_med'\)/)
   })
 
   it('入浴: full・auto=true・記入者なし・client_key の形・取り消し済みも「既にある」に数える・予定の抽出は 0012 と同じ除外', () => {
@@ -1235,7 +1276,28 @@ describe('★自動チェック（0015_auto_check.sql）の配線（静的検査
     assert.ok(/select 1 from public\.bath_records b\s+where b\.resident_id = r\.id\s+and b\.bath_on = p_on\)/.test(s))
     for (const k of ['movedOut', 'preAdmitted', 'external', 'hospitalized']) assert.match(s, new RegExp(`coalesce\\(r\\.v ->> '${k}', ''\\) <> 'true'`), k)
     assert.match(s, /\(extract\(isodow from p_on\)::int - 1\)/)
-    assert.match(s, /input_enabled_bath/)
+    assert.match(s, /private\.care_auto_flag_on\('input_enabled_bath'\)/)
+    // デイの休業日（指摘7）
+    assert.match(s, /insert into public\.app_settings \(key, value\)\s+values \('daycare_closed_dates', ''\)\s+on conflict \(key\) do nothing;/)
+    assert.match(s, /where s\.key = 'daycare_closed_dates'\s+and pg_catalog\.btrim\(d\.v\) = pg_catalog\.to_char\(p_on, 'YYYY-MM-DD'\)\) then\s+return 0;/)
+  })
+
+  it('旗の解釈はアプリ（db.ts の TRUE_WORDS）と同じ・テナントは2つ以上の時だけ例外（指摘2・4）', () => {
+    const s = sql()
+    assert.match(s, /pg_catalog\.lower\(pg_catalog\.btrim\(s\.value\)\) in \('true', '1', 'on', 'yes', 'enabled'\)/)
+    assert.match(read('../src/lib/db.ts'), /const TRUE_WORDS = new Set\(\['true', '1', 'on', 'yes', 'enabled'\]\)/)
+    assert.equal(/<> 'true'\s+then\s+return 0/.test(s), false, '旗を文字どおり true だけで判定している')
+    assert.match(s, /if v_n > 1 then\s+raise exception/)
+    assert.equal((s.match(/raise exception/g) ?? []).length, 4, '例外は 時間帯・日付（与薬）・日付（入浴）・テナント だけ')
+  })
+
+  it('自動の印を外すトリガ（指摘6）: before update・区分/状態/理由/備考の変更で auto=false・取り消しでは外さない', () => {
+    const s = sql()
+    assert.match(s, /create or replace trigger trg_auto_off_bath_records\s+before update on public\.bath_records\s+for each row execute function public\.care_auto_off_on_edit\('result', 'cancel_reason', 'note'\);/)
+    assert.match(s, /create or replace trigger trg_auto_off_med_admin\s+before update on public\.med_admin\s+for each row execute function public\.care_auto_off_on_edit\('status', 'note', 'given_at', 'prn_drug', 'prn_reason', 'prn_effect'\);/)
+    assert.match(s, /if old\.auto is true and new\.auto is true then/)
+    assert.match(s, /new\.auto := false;/)
+    assert.match(s, /revoke all on function public\.care_auto_off_on_edit\(\) from public, anon, authenticated;/)
   })
 
   it('日本時間の今日は Asia/Tokyo で数える・cron は UTC で4件（名前付き＝登録し直しても重複しない）', () => {
@@ -1256,7 +1318,7 @@ describe('★自動チェック（0015_auto_check.sql）の配線（静的検査
       assert.equal(/auto:\s*true/.test(read(p)), false, p)
     }
     const med = read('../src/pages/MedRecordPage.tsx')
-    assert.match(med, /\{fmtMedAutoTimes\(\)\} に自動で済みになります（例外は押して変更）/)
+    assert.match(med, /\{fmtMedAutoTimes\(\)\} に自動で済みになります（例外は押して変更）。自動で入らなかった方（外泊・入院など）は『不在』等を押してください/)
     assert.match(med, /（自動）/)
     const bath = read('../src/pages/BathRecordPage.tsx')
     assert.match(bath, /\{BATH_AUTO_TIME\} に予定者は自動で全身浴になります。入浴しなかった方はチェックを外してください/)

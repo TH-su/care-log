@@ -13,8 +13,8 @@
 //     今日の締め前の未記録は空欄。今日を表示している間は 60 秒ごとに締めを判定し直す
 //   ・朝・昼・夕は自動の時刻（med.ts の MED_AUTO_TIMES＝8:50・13:00・18:20）に DB 側（0015 の cron）が「服用済み」で記録する
 //     （2026-09-27 代表指示）。自動の記録は「済（自動）」（色＋文字）。押すと状態の小窓で直せ、直すと手動の記録（記入者つき）になる。
-//     自動の時間帯には「未」を付けない（自動の時刻を過ぎても記録が無い＝入院・外泊・未設定などで自動にしなかった人は空欄のまま）。
-//     眠前は従来どおり。自動の記録は端末では作らない（この画面は表示と直すだけ）
+//     自動の時間帯は、自動の時刻から15分過ぎても記録が無ければ「未」（入院・外泊などで自動にしなかった人・cron の失敗を
+//     見落とさない・チーフ指摘1）。眠前は従来どおり締め時刻。自動の記録は端末では作らない（この画面は表示と直すだけ）
 //   ・入院中かどうかは care-log の名簿（residents）が持っていないので、入院中の方のマスも通常どおり（「不在」で記録する）
 // 下に頓服の区画（その日の頓服の一覧・＋頓服を記録・効果は後から追記）。
 // その人・その時間帯に未送信の記録（この端末の送信待ち・送信中）があるマスは押せない（入浴と同じ方式。送信待ちは書き換えない）。
@@ -59,6 +59,7 @@ import {
   isIncidentStatus,
   localDateTimeIso,
   medMissingAllowed,
+  MED_AUTO_GRACE_MIN,
   MED_AUTO_SLOTS,
   MED_AUTO_TIMES,
   MED_DEADLINES,
@@ -780,11 +781,12 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
         </p>
         <p className="mt-1 text-sm font-bold text-ink">
           <span aria-hidden="true">ⓘ </span>
-          {fmtMedAutoTimes()} に自動で済みになります（例外は押して変更）
+          {fmtMedAutoTimes()} に自動で済みになります（例外は押して変更）。自動で入らなかった方（外泊・入院など）は『不在』等を押してください
         </p>
         <p className="mt-1 text-sm text-ink2">
           空いているマスを押すと「服用済み」で記録します。記録済みのマスを押すと状態を直せます。
-          「未」は締め（{MED_SLOTS.filter((s) => !MED_AUTO_SLOTS.includes(s)).map((s) => `${MED_SLOT_LABEL[s]}${MED_DEADLINES[s]}`).join('・')}）を過ぎても記録が無いマスです。
+          「未」は、{MED_AUTO_SLOTS.map((s) => MED_SLOT_LABEL[s]).join('・')}は自動の時刻から{MED_AUTO_GRACE_MIN}分、
+          {MED_SLOTS.filter((s) => !MED_AUTO_SLOTS.includes(s)).map((s) => `${MED_SLOT_LABEL[s]}は締め（${MED_DEADLINES[s]}）`).join('・')}を過ぎても記録が無いマスです。
         </p>
         <p className="mt-1 text-sm">
           <Link to="/med/month" className="inline-flex min-h-tap items-center text-link">
