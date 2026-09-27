@@ -6,6 +6,9 @@
 // - 取得は db.ts の fetchResidents / fetchStaff / fetchKarte / fetchRecordHistory のみ
 //   （supabase 直呼びなし・期間指定必須。変更の記録は14日ずつ遡る＝全件ロードしない）
 // - localStorage に保存するのは期間セグメント（cl_karteRange）だけ。氏名・記録本文は保存しない
+// - 体重（2026-09-27 追加）は weightClient.ts の fetchWeights で体重管理アプリの GAS から読むだけ。
+//   体重管理アプリの接続設定（wtmgr_api_*）は weightClient が読むだけで、この画面は localStorage に触れない。
+//   取得した体重は画面のメモリだけに持つ（期間切替では取り直さない。利用者・再試行・「体重を読み直す」で取り直す）
 // - Tailwind はトークン由来クラスのみ。色・px の直書きと arbitrary value は書かない
 // - console 出力を持たない（個人情報の漏出経路を作らない）
 
@@ -23,6 +26,16 @@ import {
 } from '../lib/historyView'
 import { addDays, fmtDayLabel, fmtTimeHM, isoDate, todayIso } from '../lib/format'
 import { typesText } from '../lib/incident'
+import {
+  fetchWeights,
+  fmtKg,
+  fmtWeightDiff,
+  MSG_WEIGHT_UNCONFIGURED,
+  weightAppHref,
+  weightFailMessage,
+  weightRowsInRange,
+} from '../lib/weightClient'
+import type { WeightEntry } from '../lib/weightClient'
 import {
   Chip,
   EmptyBlock,
@@ -475,6 +488,10 @@ interface PanelSpec {
   bands: BandSpec[]
   refs: RefLineSpec[]
   legend?: string
+  /** しきい値の無い指標（体重）。読み上げの「しきい値を外れた記録」を言わない */
+  noLevels?: boolean
+  /** 数値表の読み上げ用の説明（未指定はバイタルの既定文） */
+  caption?: string
 }
 
 /** コンテナ幅を実測する（viewBox を CSS px と 1:1 にしてヒット領域を実寸にするため） */
@@ -618,7 +635,8 @@ function VitalChart({ panel, days, width }: VitalChartProps) {
         const max = Math.max(...vals)
         const min = Math.min(...vals)
         const alerts = vals.filter((v) => s.level(v) != null).length
-        return `${s.label}は記録${vals.length}件、最高${fmtNum(max, panel.digits)}${panel.unit}、最低${fmtNum(min, panel.digits)}${panel.unit}、しきい値を外れた記録${alerts}件。`
+        const tail = panel.noLevels ? '' : `、しきい値を外れた記録${alerts}件`
+        return `${s.label}は記録${vals.length}件、最高${fmtNum(max, panel.digits)}${panel.unit}、最低${fmtNum(min, panel.digits)}${panel.unit}${tail}。`
       })
       .join('')
     return `${head}${body}詳しい数値はこの下の「数値の表を開く」で確認できます。`
@@ -820,7 +838,8 @@ function VitalPanel({ panel, days, width }: VitalPanelProps) {
               {tableOpen ? (
                 <table className="w-full border-collapse text-sm">
                   <caption className="sr-only">
-                    {panel.title}の記録（新しい日が上。同じ日に複数回の記録がある場合は定時測定を優先）
+                    {panel.caption ??
+                      `${panel.title}の記録（新しい日が上。同じ日に複数回の記録がある場合は定時測定を優先）`}
                   </caption>
                   <thead>
                     <tr className="border-b border-border-strong text-ink2">
@@ -864,9 +883,11 @@ function VitalPanel({ panel, days, width }: VitalPanelProps) {
 interface VitalsSectionProps {
   vitals: Vital[]
   days: string[]
+  /** 体重のパネル（2026-09-27 追加）。既存4パネルの後ろに足すだけ。取得できていない時は null */
+  weightPanel?: PanelSpec | null
 }
 
-function VitalsSection({ vitals, days }: VitalsSectionProps) {
+function VitalsSection({ vitals, days, weightPanel }: VitalsSectionProps) {
   const { ref, width } = useElementWidth()
 
   const panels = useMemo<PanelSpec[]>(() => {
@@ -992,6 +1013,147 @@ function VitalsSection({ vitals, days }: VitalsSectionProps) {
           </div>
         ) : (
           panels.map((p) => <VitalPanel key={p.key} panel={p} days={days} width={width} />)
+        )}
+        {weightPanel ? <VitalPanel panel={weightPanel} days={days} width={width} /> : null}
+      </div>
+    </SectionCard>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════
+// 体重（体重管理アプリの記録を読むだけ・2026-09-27 追加）
+// ══════════════════════════════════════════════════════════════
+
+type WeightState =
+  | { status: 'loading' }
+  | { status: 'unconfigured' }
+  | { status: 'error'; message: string }
+  | { status: 'ready'; list: WeightEntry[] }
+
+/** 体重のグラフ（バイタルと同じ日付軸。測定日にだけ点＝欠測日は線でつながない既存の作法のまま） */
+function buildWeightPanel(list: WeightEntry[], fromIso: string, toIso: string): PanelSpec {
+  const values = new Map<string, number>()
+  for (const e of list) {
+    if (e.date >= fromIso && e.date <= toIso) values.set(e.date, e.weight)
+  }
+  const vals = Array.from(values.values())
+  const lo = vals.length > 0 ? Math.floor(Math.min(...vals)) - 2 : 40
+  const hi = vals.length > 0 ? Math.ceil(Math.max(...vals)) + 2 : 60
+  return {
+    key: 'weight',
+    title: '体重',
+    unit: 'kg',
+    digits: 1,
+    base: [lo, hi],
+    series: [
+      {
+        label: '体重',
+        values,
+        strokeClass: 'stroke-primary',
+        fillClass: 'fill-primary',
+        level: () => null,
+      },
+    ],
+    bands: [],
+    refs: [],
+    legend: '体重管理アプリの測定日だけ点で表示',
+    noLevels: true,
+    caption: '体重の記録（新しい日が上。体重管理アプリの測定日だけ）',
+  }
+}
+
+const WEIGHT_DIFF_CLASS: Record<'up' | 'down' | 'same', string> = {
+  up: 'text-warn',
+  down: 'text-info',
+  same: 'text-ink2',
+}
+const WEIGHT_DIFF_SR: Record<'up' | 'down' | 'same', string> = {
+  up: '増加 ',
+  down: '減少 ',
+  same: '変化なし ',
+}
+
+interface WeightSectionProps {
+  state: WeightState
+  fromIso: string
+  toIso: string
+  sourceId: string
+  onReload(): void
+}
+
+/** 期間内の測定を新しい順に「M/D（曜） 52.3kg（前回53.1kg・↓−0.8）」。前回は期間外の測定でもよい */
+function WeightSection({ state, fromIso, toIso, sourceId, onReload }: WeightSectionProps) {
+  const rows = useMemo(
+    () => (state.status === 'ready' ? weightRowsInRange(state.list, fromIso, toIso) : []),
+    [state, fromIso, toIso],
+  )
+  return (
+    <SectionCard title="体重" className="mt-4">
+      <p className="text-sm text-ink2">
+        体重管理アプリで入力した体重です（この画面では読むだけです）。前回は、その測定の直前の測定です（表示期間より前も含みます）。
+      </p>
+      <div className="mt-2">
+        {state.status === 'loading' ? (
+          <LoadingBlock label="体重を読み込み中です…" />
+        ) : state.status === 'error' ? (
+          <ErrorBlock message={state.message} onRetry={onReload} />
+        ) : state.status === 'unconfigured' ? (
+          <p className="text-base text-ink2">
+            <span aria-hidden="true">ⓘ </span>
+            {MSG_WEIGHT_UNCONFIGURED}
+          </p>
+        ) : rows.length === 0 ? (
+          <EmptyBlock message="この期間の体重の測定はありません。期間を広げてお試しください。" />
+        ) : (
+          <ul className="space-y-2">
+            {rows.map((r) => {
+              const d = r.diff === null ? null : fmtWeightDiff(r.diff)
+              return (
+                <li key={r.entry.date} className="rounded-md border border-border bg-surface p-3">
+                  <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-base text-ink">
+                    <span className="tabular text-sm text-ink2">{fmtDayLabel(r.entry.date)}</span>
+                    <span className="tabular font-bold">{fmtKg(r.entry.weight)}kg</span>
+                    {r.entry.mode === 'chair' ? (
+                      <span className="rounded-full border border-info bg-info-bg px-2 text-sm text-info">車椅子</span>
+                    ) : null}
+                    <span className="tabular text-sm text-ink2">
+                      {r.prev === null || d === null ? (
+                        '（前回なし）'
+                      ) : (
+                        <>
+                          （前回{fmtKg(r.prev.weight)}kg・
+                          <span className={`font-bold ${WEIGHT_DIFF_CLASS[d.dir]}`}>
+                            <span className="sr-only">{WEIGHT_DIFF_SR[d.dir]}</span>
+                            {d.arrow ? <span aria-hidden="true">{d.arrow}</span> : null}
+                            {d.text}
+                          </span>
+                          ）
+                        </>
+                      )}
+                    </span>
+                  </p>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </div>
+      <div className="mt-3 flex flex-wrap gap-gap">
+        <a
+          href={weightAppHref(sourceId)}
+          className="inline-flex min-h-tap items-center rounded border border-border-strong px-4 text-base text-link"
+        >
+          体重管理アプリを開く<span aria-hidden="true"> ›</span>
+        </a>
+        {state.status === 'error' ? null : (
+          <button
+            type="button"
+            onClick={onReload}
+            disabled={state.status === 'loading'}
+            className="min-h-tap rounded border border-border-strong px-4 text-base text-ink disabled:text-ink3"
+          >
+            体重を読み直す
+          </button>
         )}
       </div>
     </SectionCard>
@@ -1714,6 +1876,8 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
   const [error, setError] = useState<string | null>(null)
   const [tick, setTick] = useState(0)
   const [staffList, setStaffList] = useState<Staff[]>(staff ?? [])
+  const [weight, setWeight] = useState<WeightState>({ status: 'loading' })
+  const [weightTick, setWeightTick] = useState(0)
   const aliveRef = useRef(true)
 
   const toIso = todayIso()
@@ -1776,6 +1940,34 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
       cancelled = true
     }
   }, [residentId, fromIso, toIso, tick])
+
+  // 体重（体重管理アプリの GAS から読むだけ）。期間では取り直さない＝fromIso/toIso を依存に入れない。
+  // 利用者・カルテの再試行（tick）・「体重を読み直す」（weightTick）で取り直す
+  const sourceId = resident ? resident.source_id : null
+  useEffect(() => {
+    if (sourceId === null) return
+    let cancelled = false
+    setWeight({ status: 'loading' })
+    fetchWeights([{ id: residentId, source_id: sourceId }])
+      .then((res) => {
+        if (cancelled || !aliveRef.current) return
+        if (res === null) setWeight({ status: 'unconfigured' })
+        else if (!res.ok) setWeight({ status: 'error', message: weightFailMessage(res.reason) })
+        else setWeight({ status: 'ready', list: res.byResident.get(residentId) ?? [] })
+      })
+      .catch(() => {
+        if (cancelled || !aliveRef.current) return
+        setWeight({ status: 'error', message: weightFailMessage('network') })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [residentId, sourceId, tick, weightTick])
+
+  const weightPanel = useMemo(
+    () => (weight.status === 'ready' ? buildWeightPanel(weight.list, fromIso, toIso) : null),
+    [weight, fromIso, toIso],
+  )
 
   // 記入者名の対応表（職員マスタ。取得できなくてもカルテ本体は表示する）
   useEffect(() => {
@@ -1876,7 +2068,14 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
         </div>
       ) : (
         <>
-          <VitalsSection vitals={data.vitals} days={days} />
+          <VitalsSection vitals={data.vitals} days={days} weightPanel={weightPanel} />
+          <WeightSection
+            state={weight}
+            fromIso={fromIso}
+            toIso={toIso}
+            sourceId={resident.source_id}
+            onReload={() => setWeightTick((n) => n + 1)}
+          />
           <MealsSection
             meals={data.meals}
             fluids={data.fluids}
