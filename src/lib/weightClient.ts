@@ -7,8 +7,12 @@
 //     `wtmgr_api_url`・`wtmgr_api_token` を**読むだけ**。書かない・消さない（体重管理アプリの設定を壊さない）。
 //  2. GAS へ送るのは読み取りの getAll だけ（POST 本文。合言葉を URL に載せない）。書き込み action の経路を作らない。
 //  3. 取得した体重は画面のメモリにだけ持つ。localStorage にも console にも残さない（この file は console を使わない）。
-//  4. 照合は体重管理の residents.masterId ↔ care-log の residents.source_id だけ。照合できない記録は捨てる
+//  4. 照合は体重管理の入居者の masterId ↔ care-log の residents.source_id だけ。照合できない記録は捨てる
 //     （氏名で寄せない＝取り違えを作らない）。
+//     ★masterId は体重管理の GAS（シート）にはほぼ無い。体重管理アプリは masterId を端末の中だけに持つ
+//       （weight-record.html の RES_CLIENT_ONLY）。そこで同じ端末の `wtmgr_v1` から「入居者 id → masterId」の
+//       対応表だけを読み（書かない）、サーバーの記録に当てる。フェイスシート・入居者マスタと同じ読み方
+//       （2026-09-27 本番で全員「記録なし」になった不具合の根治）。サーバーと端末で masterId が食い違う人は出さない。
 //  5. 実名・合言葉・接続先の具体値をコードに書かない。
 
 import { fmtDayLabel } from './format.ts'
@@ -17,6 +21,8 @@ import type { Resident } from './types.ts'
 /** 体重管理アプリが localStorage に置く接続先のキー（weight-record.html の API_KEY / API_TOKEN_KEY と同じ） */
 export const WEIGHT_LS_URL = 'wtmgr_api_url'
 export const WEIGHT_LS_TOKEN = 'wtmgr_api_token'
+/** 体重管理アプリの端末データ（入居者と記録の塊）。ここから入居者 id → masterId の対応表だけを読む */
+export const WEIGHT_LS_DB = 'wtmgr_v1'
 
 /** GAS エンドポイントの許容形式（gasClient.ts と同じ基準。これ以外の宛先へ合言葉を送らない） */
 const GAS_ENDPOINT_RE = /^https:\/\/script\.google\.com\/macros\/s\/.+\/exec/
@@ -58,7 +64,12 @@ export interface WeightEntry {
 export type WeightFailReason = 'url' | 'timeout' | 'network' | 'http' | 'refused' | 'format'
 
 export type WeightFetchResult =
-  | { ok: true; byResident: Map<number, WeightEntry[]> }
+  | {
+      ok: true
+      byResident: Map<number, WeightEntry[]>
+      /** この端末の体重管理アプリの対応表（入居者 id → masterId）の件数。0＝この端末では体重管理アプリの紐づけが無い */
+      linked: number
+    }
   | { ok: false; reason: WeightFailReason }
 
 // ───────────────────────── 接続設定（読むだけ） ─────────────────────────
@@ -181,6 +192,83 @@ export function parseWeightPayload(payload: unknown): WeightSnapshot {
 }
 
 /**
+ * 直近に読んだ端末データの目印（長さ＋要約値）と対応表。同じなら JSON を読み直さない（体重の塊は MB 級になりうるため）。
+ * 全文は持たない（氏名・記録を画面のメモリに残さない）
+ */
+let localMapKey: string | null = null
+let localMapCache: Map<string, string> = new Map()
+
+/** 文字列の要約値（FNV-1a 32bit。一致の目印にだけ使う） */
+function fnv1a(str: string): string {
+  let h = 0x811c9dc5
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  return (h >>> 0).toString(36)
+}
+
+/**
+ * 同じ端末の体重管理アプリのデータ（wtmgr_v1）から、入居者 id → masterId の対応表だけを作る。読むだけ。
+ * 氏名・記録は取り出さない。無い・壊れている・読めない時は空（例外を外へ出さない）。
+ */
+export function readLocalMasterMap(): Map<string, string> {
+  let raw: string | null = null
+  try {
+    if (typeof localStorage === 'undefined') return new Map()
+    raw = localStorage.getItem(WEIGHT_LS_DB)
+  } catch {
+    return new Map()
+  }
+  if (!raw) return new Map()
+  const key = `${raw.length}:${fnv1a(raw)}`
+  if (key === localMapKey) return localMapCache
+  const out = new Map<string, string>()
+  try {
+    const db = JSON.parse(raw) as { residents?: unknown }
+    const list = db && Array.isArray(db.residents) ? db.residents : []
+    for (const w of list) {
+      if (!w || typeof w !== 'object') continue
+      const o = w as { id?: unknown; masterId?: unknown }
+      const wid = toKey(o.id)
+      const mid = toKey(o.masterId)
+      if (wid !== null && mid !== null) out.set(wid, mid)
+    }
+  } catch {
+    return new Map()
+  }
+  localMapKey = key
+  localMapCache = out
+  return out
+}
+
+/**
+ * サーバーと端末の対応表を合わせる（入居者 id → masterId の候補列）。
+ * - サーバーに masterId が無い人は端末の値を使う
+ * - サーバーにある人で端末にも値がある時: サーバーの候補に端末の値があればそれ1つに絞る。どれとも違えば
+ *   どちらが正しいか分からないので外す＝その人の体重は出さない（別人の体重を出さない）
+ * - サーバーにだけある人は従来どおりサーバーの値
+ */
+export function resolveWidMids(
+  server: ReadonlyMap<string, string[]>,
+  local: ReadonlyMap<string, string>,
+): Map<string, string[]> {
+  const out = new Map<string, string[]>()
+  for (const [wid, mids] of server) {
+    const lm = local.get(wid)
+    if (lm !== undefined && mids.length > 0) {
+      if (mids.includes(lm)) out.set(wid, [lm])
+      continue
+    }
+    out.set(wid, mids.slice())
+  }
+  for (const [wid, mid] of local) {
+    if (!server.has(wid)) out.set(wid, [mid])
+  }
+  return out
+}
+
+/**
  * 取り出した記録を care-log の resident_id ごとの測定の列（日付の古い順）にする。
  * 照合の手順は 2026-09-27 までの mapWeights と同じ:
  * - care-log: source_id → resident_id（同じ source_id が重なれば後の人）
@@ -190,6 +278,7 @@ export function parseWeightPayload(payload: unknown): WeightSnapshot {
 function pickForResidents(
   snap: WeightSnapshot,
   residents: ReadonlyArray<Pick<Resident, 'id' | 'source_id'>>,
+  widMids: ReadonlyMap<string, string[]> = snap.widMids,
 ): Map<number, WeightEntry[]> {
   const bySource = new Map<string, number>()
   for (const r of residents) {
@@ -198,7 +287,7 @@ function pickForResidents(
     if (k !== null) bySource.set(k, r.id)
   }
   const toCareLog = new Map<string, number>()
-  for (const [wid, mids] of snap.widMids) {
+  for (const [wid, mids] of widMids) {
     for (const mid of mids) {
       const rid = bySource.get(mid)
       if (rid !== undefined) toCareLog.set(wid, rid)
@@ -249,6 +338,8 @@ let weightInflight: { url: string; p: Promise<SnapFetchResult> } | null = null
 export function clearWeightCache(): void {
   weightCache = null
   weightInflight = null
+  localMapKey = null
+  localMapCache = new Map()
 }
 
 async function requestAll(url: string, token: string): Promise<SnapFetchResult> {
@@ -303,7 +394,7 @@ export async function fetchWeights(
     now - weightCache.at >= 0 &&
     now - weightCache.at < WEIGHT_CACHE_MS
   ) {
-    return { ok: true, byResident: pickForResidents(weightCache.snap, residents) }
+    return pickWithLocal(weightCache.snap, residents)
   }
   let p: Promise<SnapFetchResult>
   if (weightInflight !== null && weightInflight.url === cfg.url) {
@@ -322,7 +413,17 @@ export async function fetchWeights(
   }
   const r = await p
   if (!r.ok) return { ok: false, reason: r.reason }
-  return { ok: true, byResident: pickForResidents(r.snap, residents) }
+  return pickWithLocal(r.snap, residents)
+}
+
+/** サーバーの記録に、端末の対応表を合わせて当てる（対応表は表示のたびに読む＝体重管理アプリで紐づけ直した分がすぐ効く） */
+function pickWithLocal(
+  snap: WeightSnapshot,
+  residents: ReadonlyArray<Pick<Resident, 'id' | 'source_id'>>,
+): WeightFetchResult {
+  const local = readLocalMasterMap()
+  const widMids = resolveWidMids(snap.widMids, local)
+  return { ok: true, byResident: pickForResidents(snap, residents, widMids), linked: local.size }
 }
 
 /** 失敗の理由を画面の文にする（応答の中身は出さない） */
@@ -385,6 +486,13 @@ export function latestWeightRow(list: ReadonlyArray<WeightEntry>): WeightRow | n
   const diff = prev ? Math.round((entry.weight - prev.weight) * 10) / 10 : null
   return { entry, prev, diff }
 }
+
+/**
+ * この端末では体重管理の入居者を誰も結びつけられない時の文（端末の体重管理アプリに入居者マスタとの紐づけが無い）。
+ * 体重管理アプリを開くと入居者マスタの名簿と紐づく（mergeCommonWeight）ので、それを案内する
+ */
+export const MSG_WEIGHT_UNLINKED =
+  'この端末では、体重管理アプリの入居者とカルテの入居者を結びつけられませんでした。この端末で体重管理アプリを一度開いてから、カルテを再読み込みしてください'
 
 /** 体重管理アプリにこの方の記録が1件も無い（照合できない場合も含む）時の文 */
 export const MSG_WEIGHT_NO_RECORDS =

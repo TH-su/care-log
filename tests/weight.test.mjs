@@ -457,6 +457,132 @@ describe('weightClient メモリ保持と取り直し（2026-09-27）', { skip: 
   })
 })
 
+describe('端末の対応表で照合する（2026-09-27 本番で全員「記録なし」になった不具合の根治）', { skip: W === null ? TS_UNSUPPORTED : false }, () => {
+  let calls = []
+  beforeEach(() => {
+    calls = []
+    W.clearWeightCache()
+  })
+  afterEach(() => {
+    globalThis.localStorage = realLS
+    globalThis.fetch = realFetch
+    W.clearWeightCache()
+  })
+  // 本番の GAS と同じく、サーバーの入居者には masterId が無い
+  const serverNoMid = {
+    ok: true,
+    residents: [{ id: 'w1', name: 'ダミー甲' }, { id: 'w2', name: 'ダミー乙' }],
+    records: [
+      { residentId: 'w1', measuredOn: '2026-08-14', weight: 53.1 },
+      { residentId: 'w2', measuredOn: '2026-09-14', weight: 61.2 },
+    ],
+  }
+  const localDb = (residents) => JSON.stringify({ residents, records: [], thresholds: {} })
+  function setup(localResidents, body = serverNoMid) {
+    const entries = { wtmgr_api_url: DUMMY_URL, wtmgr_api_token: DUMMY_TOKEN }
+    if (localResidents !== undefined) entries.wtmgr_v1 = localDb(localResidents)
+    installLS(entries)
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url: String(url), init })
+      return { ok: true, status: 200, json: async () => body }
+    }
+  }
+
+  it('サーバーに masterId が無くても、端末の対応表で当てる（書き込み0）', async () => {
+    setup([
+      { id: 'w1', masterId: 'M001', name: 'ダミー甲' },
+      { id: 'w2', masterId: 'M002', name: 'ダミー乙' },
+    ])
+    const r = await W.fetchWeights(CL)
+    assert.equal(r.ok, true)
+    assert.deepEqual(r.byResident.get(1).map((e) => e.weight), [53.1])
+    assert.deepEqual(r.byResident.get(2).map((e) => e.weight), [61.2])
+    assert.equal(r.linked, 2)
+    assert.equal(writes, 0)
+    assert.equal(r.byResident.size, 2)
+  })
+
+  it('端末に対応表が無ければ linked=0（画面は「この端末で体重管理アプリを開いて」と出す）', async () => {
+    setup(undefined)
+    const r = await W.fetchWeights(CL)
+    assert.equal(r.ok, true)
+    assert.equal(r.byResident.size, 0)
+    assert.equal(r.linked, 0)
+    assert.match(W.MSG_WEIGHT_UNLINKED, /この端末で体重管理アプリを一度開いて/)
+  })
+
+  it('サーバーと端末で masterId が食い違う人は出さない（別人の体重を出さない）', async () => {
+    setup([{ id: 'w1', masterId: 'M002' }], {
+      ok: true,
+      residents: [{ id: 'w1', masterId: 'M001' }],
+      records: [{ residentId: 'w1', measuredOn: '2026-09-14', weight: 52.3 }],
+    })
+    const r = await W.fetchWeights(CL)
+    assert.equal(r.byResident.has(1), false)
+    assert.equal(r.byResident.has(2), false)
+    assert.equal(r.linked, 1) // 端末には対応表がある（食い違いで外しただけ）
+  })
+
+  it('端末に対応表が無ければ、サーバーに一部 masterId があっても linked=0（案内文を出す・レビュー指摘）', async () => {
+    setup(undefined, {
+      ok: true,
+      residents: [{ id: 'w9', masterId: 'M001' }],
+      records: [{ residentId: 'w9', measuredOn: '2026-09-14', weight: 50.0 }],
+    })
+    const r = await W.fetchWeights([{ id: 2, source_id: 'M002' }])
+    assert.equal(r.linked, 0)
+    assert.equal(r.byResident.has(2), false)
+  })
+
+  it('サーバーに同じ人が複数行でも、端末の値と一致する1つに絞る（別人へ振らない・レビュー指摘）', () => {
+    const m = W.resolveWidMids(new Map([['w1', ['M001', 'M002']]]), new Map([['w1', 'M001']]))
+    assert.deepEqual([...m], [['w1', ['M001']]])
+    const p = {
+      ok: true,
+      residents: [{ id: 'w1', masterId: 'M001' }, { id: 'w1', masterId: 'M002' }],
+      records: [{ residentId: 'w1', measuredOn: '2026-09-14', weight: 52.3 }],
+    }
+    installLS({ wtmgr_v1: JSON.stringify({ residents: [{ id: 'w1', masterId: 'M001' }], records: [] }) })
+    const snap = W.parseWeightPayload(p)
+    const resolved = W.resolveWidMids(snap.widMids, W.readLocalMasterMap())
+    assert.deepEqual([...resolved], [['w1', ['M001']]])
+  })
+
+  it('サーバーと端末が一致する人・サーバーにだけある人は従来どおり当てる', async () => {
+    setup([{ id: 'w1', masterId: 'M001' }], {
+      ok: true,
+      residents: [{ id: 'w1', masterId: 'M001' }, { id: 'w2', masterId: 'M002' }],
+      records: [
+        { residentId: 'w1', measuredOn: '2026-09-14', weight: 52.3 },
+        { residentId: 'w2', measuredOn: '2026-09-14', weight: 61.2 },
+      ],
+    })
+    const r = await W.fetchWeights(CL)
+    assert.deepEqual(r.byResident.get(1).map((e) => e.weight), [52.3])
+    assert.deepEqual(r.byResident.get(2).map((e) => e.weight), [61.2])
+  })
+
+  it('対応表は表示のたびに読む（体重管理アプリで紐づけた分が、メモリ保持中でもすぐ効く）', async () => {
+    setup([])
+    const a = await W.fetchWeights(CL)
+    assert.equal(a.linked, 0)
+    store.set('wtmgr_v1', localDb([{ id: 'w1', masterId: 'M001' }]))
+    const b = await W.fetchWeights(CL)
+    assert.equal(calls.length, 1) // 通信は1回のまま
+    assert.deepEqual(b.byResident.get(1).map((e) => e.weight), [53.1])
+  })
+
+  it('端末データが壊れていても例外を出さず空・氏名は対応表に入れない', () => {
+    installLS({ wtmgr_v1: '{broken' })
+    assert.equal(W.readLocalMasterMap().size, 0)
+    installLS({ wtmgr_v1: localDb([{ id: 'w1', masterId: 'M001', name: 'ダミー甲' }, { id: 'w9', name: 'ダミー丙' }]) })
+    const m = W.readLocalMasterMap()
+    assert.deepEqual([...m], [['w1', 'M001']])
+    assert.equal(JSON.stringify([...m]).includes('ダミー'), false)
+    assert.equal(writes, 0)
+  })
+})
+
 describe('カルテ上部の移動ボタン（静的検査・2026-09-27）', () => {
   it('ボタンの飛び先はすべて画面の欄（SectionCard の id）と1対1・順番も画面と同じ', () => {
     const src = read('../src/pages/KartePage.tsx')

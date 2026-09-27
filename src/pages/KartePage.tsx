@@ -32,6 +32,7 @@ import {
   fmtWeightDiff,
   latestWeightRow,
   MSG_WEIGHT_NO_RECORDS,
+  MSG_WEIGHT_UNLINKED,
   MSG_WEIGHT_NONE_IN_RANGE,
   MSG_WEIGHT_UNCONFIGURED,
   weightAppHref,
@@ -1031,7 +1032,7 @@ type WeightState =
   | { status: 'loading' }
   | { status: 'unconfigured' }
   | { status: 'error'; message: string }
-  | { status: 'ready'; list: WeightEntry[] }
+  | { status: 'ready'; list: WeightEntry[]; linked: number }
 
 /** 体重のグラフ（バイタルと同じ日付軸。測定日にだけ点＝欠測日は線でつながない既存の作法のまま） */
 function buildWeightPanel(list: WeightEntry[], fromIso: string, toIso: string): PanelSpec {
@@ -1139,7 +1140,7 @@ function WeightSection({ state, fromIso, toIso, sourceId, onReload }: WeightSect
         ) : latest === null ? (
           <p className="text-base text-ink2">
             <span aria-hidden="true">ⓘ </span>
-            {MSG_WEIGHT_NO_RECORDS}
+            {state.status === 'ready' && state.linked === 0 ? MSG_WEIGHT_UNLINKED : MSG_WEIGHT_NO_RECORDS}
           </p>
         ) : (
           <>
@@ -2051,7 +2052,7 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
         if (cancelled || !aliveRef.current) return
         if (res === null) setWeight({ status: 'unconfigured' })
         else if (!res.ok) setWeight({ status: 'error', message: weightFailMessage(res.reason) })
-        else setWeight({ status: 'ready', list: res.byResident.get(residentId) ?? [] })
+        else setWeight({ status: 'ready', list: res.byResident.get(residentId) ?? [], linked: res.linked })
       })
       .catch(() => {
         if (cancelled || !aliveRef.current) return
