@@ -278,6 +278,26 @@ export function fmtWeightDiff(diff: number): { arrow: '↑' | '↓' | ''; text: 
   return { arrow: '', text: '±0.0', dir: 'same' }
 }
 
+/**
+ * その人の全記録のうち最新の1件（期間に関係なく出す・2026-09-27 チーフ追加修正）。
+ * 月1回の測定は既定の期間（2週）に入らないことが多く、期間内だけだと「測定なし」に見えるため。記録が無ければ null
+ */
+export function latestWeightRow(list: ReadonlyArray<WeightEntry>): WeightRow | null {
+  if (list.length === 0) return null
+  const sorted = list.slice().sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+  const entry = sorted[sorted.length - 1]
+  const prev = sorted.length > 1 ? sorted[sorted.length - 2] : null
+  const diff = prev ? Math.round((entry.weight - prev.weight) * 10) / 10 : null
+  return { entry, prev, diff }
+}
+
+/** 体重管理アプリにこの方の記録が1件も無い（照合できない場合も含む）時の文 */
+export const MSG_WEIGHT_NO_RECORDS =
+  '体重管理アプリにこの方の記録が見つかりません（体重管理アプリ側の入居者の紐づけを確認してください）'
+
+/** 記録はあるが表示期間内に無い時の文（最新の1行は別に出す） */
+export const MSG_WEIGHT_NONE_IN_RANGE = '表示期間内の測定はありません（最新は上の1行）'
+
 /** 1行の文（読み上げ・検証用）。例「9/14（日） 52.3kg（前回53.1kg・↓−0.8）」「…（前回なし）」 */
 export function weightLineText(row: WeightRow): string {
   const head = `${fmtDayLabel(row.entry.date)} ${fmtKg(row.entry.weight)}kg`

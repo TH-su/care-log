@@ -190,6 +190,35 @@ describe('weightClient 純ロジック', { skip: W === null ? TS_UNSUPPORTED : f
     assert.equal(W.weightLineText({ entry: e('2026-09-14', 52.3), prev: null, diff: null }), '9/14（月） 52.3kg（前回なし）')
   })
 
+  it('最新の1行は期間に関係なく全記録から（前回はその直前・1件だけなら前回なし・0件は null）', () => {
+    const list = [
+      { date: '2026-08-14', weight: 53.1, mode: 'normal' },
+      { date: '2026-06-14', weight: 53.5, mode: 'normal' },
+      { date: '2026-09-14', weight: 52.3, mode: 'chair' },
+    ]
+    const r = W.latestWeightRow(list)
+    assert.deepEqual([r.entry.date, r.entry.weight, r.entry.mode, r.prev.date, r.diff], ['2026-09-14', 52.3, 'chair', '2026-08-14', -0.8])
+    assert.equal(W.weightLineText(r), '9/14（月） 52.3kg（前回53.1kg・↓−0.8）')
+    // 期間（9/15〜9/28）に測定が無くても最新は出せる＝期間内の一覧だけが空
+    assert.deepEqual(W.weightRowsInRange(list, '2026-09-15', '2026-09-28'), [])
+    assert.equal(W.latestWeightRow(list).entry.date, '2026-09-14')
+    const one = W.latestWeightRow([{ date: '2026-09-14', weight: 50, mode: 'normal' }])
+    assert.equal(one.prev, null)
+    assert.equal(W.weightLineText(one), '9/14（月） 50.0kg（前回なし）')
+    assert.equal(W.latestWeightRow([]), null)
+  })
+
+  it('文言の出し分け: 記録なし（照合できない）と期間内なし', () => {
+    assert.equal(
+      W.MSG_WEIGHT_NO_RECORDS,
+      '体重管理アプリにこの方の記録が見つかりません（体重管理アプリ側の入居者の紐づけを確認してください）',
+    )
+    assert.equal(W.MSG_WEIGHT_NONE_IN_RANGE, '表示期間内の測定はありません（最新は上の1行）')
+    // 照合できない（masterId が合わない）→ その方の列は無い＝記録なしの文になる
+    const m = W.mapWeights(payload([{ residentId: 'w4', measuredOn: '2026-09-14', weight: 55 }]), CL)
+    assert.equal(W.latestWeightRow(m.get(1) ?? []), null)
+  })
+
   it('体重管理アプリを開くリンク: masterId だけを載せる（形の合わない id は一覧を開く）', () => {
     assert.equal(W.weightAppHref('M001'), '../care-tools/weight-record.html?masterId=M001')
     assert.equal(W.weightAppHref(' 17 '), '../care-tools/weight-record.html?masterId=17')
@@ -329,6 +358,16 @@ describe('体重の配線（静的検査）', () => {
     assert.deepEqual([...new Set(keys)], ['LS.karteRange'])
     assert.equal(/wtmgr_/.test(src), false)
     assert.equal(/console\./.test(src), false)
+  })
+
+  it('体重区画: 最新の1行を先に出し、記録なし／期間内なしの文を出し分ける（旧「期間を広げて」の文は出さない）', () => {
+    const src = read('../src/pages/KartePage.tsx')
+    const sec = src.slice(src.indexOf('function WeightSection'), src.indexOf('// 食事・水分の履歴表'))
+    assert.ok(sec.indexOf('latest === null ?') > 0)
+    assert.ok(sec.indexOf('MSG_WEIGHT_NO_RECORDS') > 0)
+    assert.ok(sec.indexOf('<WeightRowLine row={latest} />') < sec.indexOf('MSG_WEIGHT_NONE_IN_RANGE'))
+    assert.ok(sec.indexOf('MSG_WEIGHT_NONE_IN_RANGE') < sec.indexOf('rows.map((r) =>'))
+    assert.equal(sec.includes('この期間の体重の測定はありません'), false)
   })
 
   it('体重のパネルは既存4パネル（体温・血圧・脈拍・SpO2）の後ろに足す。期間では取り直さない', () => {

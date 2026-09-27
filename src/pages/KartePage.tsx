@@ -30,12 +30,15 @@ import {
   fetchWeights,
   fmtKg,
   fmtWeightDiff,
+  latestWeightRow,
+  MSG_WEIGHT_NO_RECORDS,
+  MSG_WEIGHT_NONE_IN_RANGE,
   MSG_WEIGHT_UNCONFIGURED,
   weightAppHref,
   weightFailMessage,
   weightRowsInRange,
 } from '../lib/weightClient'
-import type { WeightEntry } from '../lib/weightClient'
+import type { WeightEntry, WeightRow } from '../lib/weightClient'
 import {
   Chip,
   EmptyBlock,
@@ -1073,6 +1076,35 @@ const WEIGHT_DIFF_SR: Record<'up' | 'down' | 'same', string> = {
   same: '変化なし ',
 }
 
+/** 測定1行「M/D（曜） 52.3kg［車椅子］（前回53.1kg・↓−0.8）」（最新の1行と期間内の一覧で共用） */
+function WeightRowLine({ row: r }: { row: WeightRow }) {
+  const d = r.diff === null ? null : fmtWeightDiff(r.diff)
+  return (
+    <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-base text-ink">
+      <span className="tabular text-sm text-ink2">{fmtDayLabel(r.entry.date)}</span>
+      <span className="tabular font-bold">{fmtKg(r.entry.weight)}kg</span>
+      {r.entry.mode === 'chair' ? (
+        <span className="rounded-full border border-info bg-info-bg px-2 text-sm text-info">車椅子</span>
+      ) : null}
+      <span className="tabular text-sm text-ink2">
+        {r.prev === null || d === null ? (
+          '（前回なし）'
+        ) : (
+          <>
+            （前回{fmtKg(r.prev.weight)}kg・
+            <span className={`font-bold ${WEIGHT_DIFF_CLASS[d.dir]}`}>
+              <span className="sr-only">{WEIGHT_DIFF_SR[d.dir]}</span>
+              {d.arrow ? <span aria-hidden="true">{d.arrow}</span> : null}
+              {d.text}
+            </span>
+            ）
+          </>
+        )}
+      </span>
+    </p>
+  )
+}
+
 interface WeightSectionProps {
   state: WeightState
   fromIso: string
@@ -1087,6 +1119,8 @@ function WeightSection({ state, fromIso, toIso, sourceId, onReload }: WeightSect
     () => (state.status === 'ready' ? weightRowsInRange(state.list, fromIso, toIso) : []),
     [state, fromIso, toIso],
   )
+  // 最新の1行は期間に関係なく全記録から（月1回の測定は短い期間に入らないことが多いため）
+  const latest = useMemo(() => (state.status === 'ready' ? latestWeightRow(state.list) : null), [state])
   return (
     <SectionCard title="体重" className="mt-4">
       <p className="text-sm text-ink2">
@@ -1102,40 +1136,32 @@ function WeightSection({ state, fromIso, toIso, sourceId, onReload }: WeightSect
             <span aria-hidden="true">ⓘ </span>
             {MSG_WEIGHT_UNCONFIGURED}
           </p>
-        ) : rows.length === 0 ? (
-          <EmptyBlock message="この期間の体重の測定はありません。期間を広げてお試しください。" />
+        ) : latest === null ? (
+          <p className="text-base text-ink2">
+            <span aria-hidden="true">ⓘ </span>
+            {MSG_WEIGHT_NO_RECORDS}
+          </p>
         ) : (
-          <ul className="space-y-2">
-            {rows.map((r) => {
-              const d = r.diff === null ? null : fmtWeightDiff(r.diff)
-              return (
-                <li key={r.entry.date} className="rounded-md border border-border bg-surface p-3">
-                  <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-base text-ink">
-                    <span className="tabular text-sm text-ink2">{fmtDayLabel(r.entry.date)}</span>
-                    <span className="tabular font-bold">{fmtKg(r.entry.weight)}kg</span>
-                    {r.entry.mode === 'chair' ? (
-                      <span className="rounded-full border border-info bg-info-bg px-2 text-sm text-info">車椅子</span>
-                    ) : null}
-                    <span className="tabular text-sm text-ink2">
-                      {r.prev === null || d === null ? (
-                        '（前回なし）'
-                      ) : (
-                        <>
-                          （前回{fmtKg(r.prev.weight)}kg・
-                          <span className={`font-bold ${WEIGHT_DIFF_CLASS[d.dir]}`}>
-                            <span className="sr-only">{WEIGHT_DIFF_SR[d.dir]}</span>
-                            {d.arrow ? <span aria-hidden="true">{d.arrow}</span> : null}
-                            {d.text}
-                          </span>
-                          ）
-                        </>
-                      )}
-                    </span>
-                  </p>
-                </li>
-              )
-            })}
-          </ul>
+          <>
+            <div className="rounded-md border border-border-strong bg-surface2 p-3">
+              <h3 className="text-sm font-bold text-ink2">最新</h3>
+              <WeightRowLine row={latest} />
+            </div>
+            {rows.length === 0 ? (
+              <p className="mt-2 text-base text-ink2">{MSG_WEIGHT_NONE_IN_RANGE}</p>
+            ) : (
+              <>
+                <h3 className="mt-3 text-sm font-bold text-ink2">表示期間内の測定</h3>
+                <ul className="mt-2 space-y-2">
+                  {rows.map((r) => (
+                    <li key={r.entry.date} className="rounded-md border border-border bg-surface p-3">
+                      <WeightRowLine row={r} />
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </>
         )}
       </div>
       <div className="mt-3 flex flex-wrap gap-gap">
