@@ -116,11 +116,17 @@ export interface SectionCardProps {
   title?: string
   children: ReactNode
   className?: string
+  /** 画面内の移動ボタンの飛び先（指定した時だけ id と、移動後にフォーカスを受けるための tabIndex=-1 を付ける） */
+  id?: string
 }
 
-export function SectionCard({ title, children, className = '' }: SectionCardProps) {
+export function SectionCard({ title, children, className = '', id }: SectionCardProps) {
   return (
-    <section className={`rounded-lg border border-border bg-surface p-4 ${className}`}>
+    <section
+      id={id}
+      tabIndex={id ? -1 : undefined}
+      className={`rounded-lg border border-border bg-surface p-4 ${className}`}
+    >
       {title ? <h2 className="mb-2 text-lg font-bold text-ink">{title}</h2> : null}
       {children}
     </section>

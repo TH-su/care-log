@@ -232,6 +232,7 @@ describe('weightClient 取得（偽の GAS）', { skip: W === null ? TS_UNSUPPOR
   let calls = []
   beforeEach(() => {
     calls = []
+    W.clearWeightCache() // 試験ごとにメモリの体重を捨てる（前の試験の成功結果を持ち越さない）
   })
   afterEach(() => {
     globalThis.localStorage = realLS
@@ -332,12 +333,179 @@ describe('weightClient 取得（偽の GAS）', { skip: W === null ? TS_UNSUPPOR
     })
     assert.deepEqual(await W.fetchWeights(CL), { ok: false, reason: 'timeout' })
     assert.equal(writes, 0)
-    assert.equal(W.WEIGHT_TIMEOUT_MS, 25000)
+    assert.equal(W.WEIGHT_TIMEOUT_MS, 45000)
     for (const r of ['url', 'timeout', 'network', 'http', 'refused', 'format']) {
       const msg = W.weightFailMessage(r)
       assert.equal(typeof msg, 'string')
       assert.equal(msg.includes(DUMMY_TOKEN), false)
     }
+  })
+})
+
+describe('weightClient メモリ保持と取り直し（2026-09-27）', { skip: W === null ? TS_UNSUPPORTED : false }, () => {
+  let calls = []
+  let respond = null
+  beforeEach(() => {
+    calls = []
+    W.clearWeightCache()
+    installLS({ wtmgr_api_url: DUMMY_URL, wtmgr_api_token: DUMMY_TOKEN })
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url: String(url), init })
+      return respond(url, init)
+    }
+  })
+  afterEach(() => {
+    globalThis.localStorage = realLS
+    globalThis.fetch = realFetch
+    W.clearWeightCache()
+  })
+  const ok = (records) => ({ ok: true, status: 200, json: async () => payload(records) })
+  const RECS = [
+    { residentId: 'w1', measuredOn: '2026-08-14', weight: 53.1 },
+    { residentId: 'w2', measuredOn: '2026-09-14', weight: 61.2 },
+  ]
+
+  it('成功後は入居者を切り替えても通信しない（全員分を1回で取る）。WEIGHT_CACHE_MS は 10 分', async () => {
+    respond = () => ok(RECS)
+    const a = await W.fetchWeights([{ id: 1, source_id: 'M001' }])
+    const b = await W.fetchWeights([{ id: 2, source_id: 'M002' }])
+    assert.equal(calls.length, 1)
+    assert.deepEqual(a.byResident.get(1).map((e) => e.weight), [53.1])
+    assert.deepEqual(b.byResident.get(2).map((e) => e.weight), [61.2])
+    assert.equal(b.byResident.has(1), false) // 頼んだ人の分だけ返す
+    assert.equal(W.WEIGHT_CACHE_MS, 600000)
+    assert.equal(writes, 0) // メモリだけ（localStorage に書かない）
+  })
+
+  it('返した列を書き換えても、メモリの体重は変わらない', async () => {
+    respond = () => ok(RECS)
+    const a = await W.fetchWeights([{ id: 1, source_id: 'M001' }])
+    a.byResident.get(1)[0].weight = 999
+    const b = await W.fetchWeights([{ id: 1, source_id: 'M001' }])
+    assert.equal(b.byResident.get(1)[0].weight, 53.1)
+  })
+
+  it('force（再試行する）はメモリを使わず取り直す', async () => {
+    respond = () => ok(RECS)
+    await W.fetchWeights([{ id: 1, source_id: 'M001' }])
+    respond = () => ok([{ residentId: 'w1', measuredOn: '2026-09-20', weight: 52.0 }])
+    const r = await W.fetchWeights([{ id: 1, source_id: 'M001' }], { force: true })
+    assert.equal(calls.length, 2)
+    assert.deepEqual(r.byResident.get(1).map((e) => e.weight), [52.0])
+  })
+
+  it('失敗は保持しない（次の表示で取り直す）', async () => {
+    respond = () => ({ ok: false, status: 500, json: async () => ({}) })
+    assert.deepEqual(await W.fetchWeights([{ id: 1, source_id: 'M001' }]), { ok: false, reason: 'http' })
+    respond = () => ok(RECS)
+    const r = await W.fetchWeights([{ id: 1, source_id: 'M001' }])
+    assert.equal(r.ok, true)
+    assert.equal(calls.length, 2)
+  })
+
+  it('取得中に別の入居者を開いても、GAS へは1本しか投げない', async () => {
+    let release
+    const gate = new Promise((res) => {
+      release = res
+    })
+    respond = async () => {
+      await gate
+      return ok(RECS)
+    }
+    const pa = W.fetchWeights([{ id: 1, source_id: 'M001' }])
+    const pb = W.fetchWeights([{ id: 2, source_id: 'M002' }])
+    release()
+    const [a, b] = await Promise.all([pa, pb])
+    assert.equal(calls.length, 1)
+    assert.deepEqual(a.byResident.get(1).map((e) => e.weight), [53.1])
+    assert.deepEqual(b.byResident.get(2).map((e) => e.weight), [61.2])
+  })
+
+  it('接続先が変わったらメモリを使わない', async () => {
+    respond = () => ok(RECS)
+    await W.fetchWeights([{ id: 1, source_id: 'M001' }])
+    installLS({ wtmgr_api_url: 'https://script.google.com/macros/s/OTHER/exec', wtmgr_api_token: DUMMY_TOKEN })
+    await W.fetchWeights([{ id: 1, source_id: 'M001' }])
+    assert.equal(calls.length, 2)
+    assert.equal(calls[1].url, 'https://script.google.com/macros/s/OTHER/exec')
+  })
+
+  it('メモリに持つ形（parseWeightPayload）は番号と体重だけ（氏名・居室を持たない）', () => {
+    const snap = W.parseWeightPayload({
+      ok: true,
+      residents: [{ id: 'w1', masterId: 'M001', name: 'ダミー', room: '101' }],
+      records: [{ residentId: 'w1', measuredOn: '2026-09-14', weight: 52.3 }],
+    })
+    assert.deepEqual([...snap.widMids], [['w1', ['M001']]])
+    assert.deepEqual(snap.recs.map((r) => ({ wid: r.wid, e: r.e })), [
+      { wid: 'w1', e: { date: '2026-09-14', weight: 52.3, mode: 'normal' } },
+    ])
+    assert.equal(JSON.stringify(snap.recs).includes('ダミー'), false)
+  })
+
+  it('体重管理側で入居者 id が重なっても、一致した行で照合する（以前の mapWeights と同じ・レビュー指摘）', () => {
+    const p = {
+      ok: true,
+      residents: [
+        { id: 'w1', masterId: 'M001' },
+        { id: 'w1', masterId: 'M999' }, // care-log に居ない masterId が後ろにある
+      ],
+      records: [{ residentId: 'w1', measuredOn: '2026-09-14', weight: 52.3 }],
+    }
+    const m = W.mapWeights(p, [{ id: 1, source_id: 'M001' }])
+    assert.deepEqual(m.get(1).map((e) => e.weight), [52.3])
+  })
+})
+
+describe('カルテ上部の移動ボタン（静的検査・2026-09-27）', () => {
+  it('ボタンの飛び先はすべて画面の欄（SectionCard の id）と1対1・順番も画面と同じ', () => {
+    const src = read('../src/pages/KartePage.tsx')
+    const listSrc = src.slice(src.indexOf('export const KARTE_JUMPS'), src.indexOf('function findShellHeader'))
+    const ids = [...listSrc.matchAll(/id: '([^']+)'/g)].map((m) => m[1])
+    assert.equal(ids.length, 8)
+    const cards = [...src.matchAll(/<SectionCard [^>]*id="([^"]+)"/g)].map((m) => m[1])
+    assert.deepEqual(cards, ids)
+  })
+
+  it('ボタンの順番は、カルテが実際に欄を描く順（KarteDetail の JSX）と同じ', () => {
+    const src = read('../src/pages/KartePage.tsx')
+    const body = src.slice(src.indexOf('function KarteDetail('), src.indexOf('export function KartePage('))
+    const comps = ['<VitalsSection', '<WeightSection', '<MealsSection', '<NotesSection', '<BathSection', '<MedSection', '<IncidentSection', '<HistorySection']
+    const pos = comps.map((c) => body.indexOf(c))
+    assert.ok(pos.every((i, n) => i > 0 && (n === 0 || i > pos[n - 1])), JSON.stringify(pos))
+    // 各欄の関数が付けている id が、ボタンの並びと同じ順
+    const idOf = (fn) => {
+      const f = src.slice(src.indexOf(`function ${fn}(`))
+      return /<SectionCard [^>]*id="([^"]+)"/.exec(f)[1]
+    }
+    const ids = ['VitalsSection', 'WeightSection', 'MealsSection', 'NotesSection', 'BathSection', 'MedSection', 'IncidentSection', 'HistorySection'].map(idOf)
+    const listSrc = src.slice(src.indexOf('export const KARTE_JUMPS'), src.indexOf('function findShellHeader'))
+    assert.deepEqual(ids, [...listSrc.matchAll(/id: '([^']+)'/g)].map((m) => m[1]))
+  })
+
+  it('「再試行する」（weightTick）の時だけ force で取り直す配線', () => {
+    const src = read('../src/pages/KartePage.tsx')
+    assert.match(src, /const force = weightTick !== forcedWeightTickRef\.current\n\s*forcedWeightTickRef\.current = weightTick/)
+    assert.match(src, /fetchWeights\(\[\{ id: residentId, source_id: sourceId \}\], \{ force \}\)/)
+    assert.match(src, /onReload=\{\(\) => setWeightTick\(\(n\) => n \+ 1\)\}/)
+  })
+
+  it('固定バーの氏名は1行に削らない（truncate を付けない）', () => {
+    const src = read('../src/pages/KartePage.tsx')
+    const h1 = /<h1 className="([^"]*)">\{resident\.name\}<\/h1>/.exec(src)
+    assert.ok(h1)
+    assert.equal(/\btruncate\b/.test(h1[1]), false)
+    assert.match(h1[1], /break-words/)
+  })
+
+  it('氏名とボタンは sticky のバーに入り、印刷では固定しない', () => {
+    const src = read('../src/pages/KartePage.tsx')
+    const bar = src.slice(src.indexOf('ref={barRef}'), src.indexOf('<header className="mt-2">'))
+    assert.match(bar, /className="sticky /)
+    assert.match(bar, /print:static/)
+    assert.match(bar, /<h1 [^>]*>\{resident\.name\}<\/h1>/)
+    assert.match(bar, /<nav aria-label="カルテの欄へ移動"/)
+    assert.match(bar, /min-h-tap/)
   })
 })
 

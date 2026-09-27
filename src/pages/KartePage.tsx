@@ -1004,7 +1004,7 @@ function VitalsSection({ vitals, days, weightPanel }: VitalsSectionProps) {
   const hasAny = vitals.length > 0
 
   return (
-    <SectionCard title="バイタルの推移" className="mt-4">
+    <SectionCard title="バイタルの推移" className="mt-4" id="karte-vitals">
       <p className="text-sm text-ink2">
         しきい値の帯・基準線は数値を併記しています。記録がない日は線を切って表示します（間を結びません）。
         同じ日に複数回の記録がある場合は定時測定を優先して1日1点で表示します。
@@ -1122,13 +1122,13 @@ function WeightSection({ state, fromIso, toIso, sourceId, onReload }: WeightSect
   // 最新の1行は期間に関係なく全記録から（月1回の測定は短い期間に入らないことが多いため）
   const latest = useMemo(() => (state.status === 'ready' ? latestWeightRow(state.list) : null), [state])
   return (
-    <SectionCard title="体重" className="mt-4">
+    <SectionCard title="体重" className="mt-4" id="karte-weight">
       <p className="text-sm text-ink2">
         体重管理アプリで入力した体重です（この画面では読むだけです）。前回は、その測定の直前の測定です（表示期間より前も含みます）。
       </p>
       <div className="mt-2">
         {state.status === 'loading' ? (
-          <LoadingBlock label="体重を読み込み中です…" />
+          <LoadingBlock label="体重を読み込み中です…（体重管理アプリのサーバーが混んでいる時は30秒ほどかかります）" />
         ) : state.status === 'error' ? (
           <ErrorBlock message={state.message} onRetry={onReload} />
         ) : state.status === 'unconfigured' ? (
@@ -1276,7 +1276,7 @@ function MealsSection({ meals, fluids, outings, days }: MealsSectionProps) {
   }, [meals, fluids, outings, days])
 
   return (
-    <SectionCard title="食事・水分" className="mt-4">
+    <SectionCard title="食事・水分" className="mt-4" id="karte-meals">
       <p className="text-sm text-ink2">
         主食／副食は 0〜10 の数値です。▲ は低摂取（主+副が6以下）、— は記録なしを表します。
       </p>
@@ -1449,7 +1449,7 @@ function NotesSection({ notes, staffById }: NotesSectionProps) {
   }, [notes])
 
   return (
-    <SectionCard title="この方の申し送り" className="mt-4">
+    <SectionCard title="この方の申し送り" className="mt-4" id="karte-notes">
       {groups.length === 0 ? (
         <div className="mt-2">
           <EmptyBlock message="この期間の申し送りはありません。期間を広げてお試しください。" />
@@ -1498,7 +1498,7 @@ function BathSection({ baths, staffById }: BathSectionProps) {
     [baths],
   )
   return (
-    <SectionCard title="入浴（デイ）" className="mt-4">
+    <SectionCard title="入浴（デイ）" className="mt-4" id="karte-bath">
       {sorted.length === 0 ? (
         <div className="mt-2">
           <EmptyBlock message="この期間の入浴（デイ）の記録はありません。期間を広げてお試しください。" />
@@ -1559,7 +1559,7 @@ function MedSection({ meds }: MedSectionProps) {
     [meds],
   )
   return (
-    <SectionCard title="与薬" className="mt-4">
+    <SectionCard title="与薬" className="mt-4" id="karte-med">
       {sorted.length === 0 ? (
         <div className="mt-2">
           <EmptyBlock message="この期間の与薬の記録はありません。期間を広げてお試しください。" />
@@ -1620,7 +1620,7 @@ function IncidentSection({ incidents }: IncidentSectionProps) {
     [incidents],
   )
   return (
-    <SectionCard title="事故・ヒヤリ" className="mt-4">
+    <SectionCard title="事故・ヒヤリ" className="mt-4" id="karte-incident">
       {sorted.length === 0 ? (
         <div className="mt-2">
           <EmptyBlock message="この期間の事故・ヒヤリハットの記録はありません。期間を広げてお試しください。" />
@@ -1825,7 +1825,7 @@ function HistorySection({ residentId, staffById }: HistorySectionProps) {
   }, [more, oldest, residentId])
 
   return (
-    <SectionCard title="変更の記録" className="mt-4">
+    <SectionCard title="変更の記録" className="mt-4" id="karte-history">
       {state === 'loading' ? (
         <LoadingBlock label="変更の記録を読み込み中です…" />
       ) : state === 'error' ? (
@@ -1888,6 +1888,53 @@ interface KarteData {
 
 const EMPTY_KARTE: KarteData = { vitals: [], meals: [], fluids: [], notes: [], outings: [], baths: [], meds: [], incidents: [] }
 
+// ── 上部の固定バー（氏名＋各欄へ移動するボタン・2026-09-27 代表指示）──
+// 氏名とボタンはスクロールしても画面上部に残る。ボタンを押すとその欄の見出しがバーのすぐ下に来る位置まで動く。
+// 飛び先の id は各欄の SectionCard に付けてある（ここと1対1）。
+
+/** 移動ボタン（表示順＝画面の欄の順） */
+export const KARTE_JUMPS: ReadonlyArray<{ id: string; label: string }> = [
+  { id: 'karte-vitals', label: 'バイタル' },
+  { id: 'karte-weight', label: '体重' },
+  { id: 'karte-meals', label: '食事・水分' },
+  { id: 'karte-notes', label: '申し送り' },
+  { id: 'karte-bath', label: '入浴' },
+  { id: 'karte-med', label: '与薬' },
+  { id: 'karte-incident', label: '事故・ヒヤリ' },
+  { id: 'karte-history', label: '変更の記録' },
+]
+
+/** アプリ全体の固定ヘッダ（sticky/fixed の header）。カルテの固定バーはその下に貼る。見つからなければ null */
+function findShellHeader(): HTMLElement | null {
+  if (typeof document === 'undefined') return null
+  for (const el of Array.from(document.querySelectorAll('header'))) {
+    const pos = getComputedStyle(el).position
+    if (pos === 'sticky' || pos === 'fixed') return el
+  }
+  return null
+}
+
+/** 固定ヘッダの高さ（px）。測れなければ 0＝画面の最上部 */
+function measureShellHeaderH(): number {
+  const el = findShellHeader()
+  return el ? Math.round(el.getBoundingClientRect().height) : 0
+}
+
+/**
+ * 欄へ移動する。固定ヘッダ＋固定バーの高さぶん上に余白を取り、見出しが隠れないようにする。
+ * 動きを減らす設定の端末では一瞬で移動する。移動後はその欄へフォーカスを移す（読み上げで現在地が分かる）
+ */
+function jumpToSection(id: string, bar: HTMLElement | null): void {
+  if (typeof document === 'undefined' || typeof window === 'undefined') return
+  const el = document.getElementById(id)
+  if (!el) return
+  const offset = measureShellHeaderH() + (bar ? bar.getBoundingClientRect().height : 0) + 8
+  const top = Math.max(0, Math.round(el.getBoundingClientRect().top + window.scrollY - offset))
+  const reduce = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  window.scrollTo({ top, behavior: reduce ? 'auto' : 'smooth' })
+  el.focus({ preventScroll: true })
+}
+
 interface KarteDetailProps {
   residentId: number
   state: ResidentsState
@@ -1905,6 +1952,10 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
   const [weight, setWeight] = useState<WeightState>({ status: 'loading' })
   const [weightTick, setWeightTick] = useState(0)
   const aliveRef = useRef(true)
+  // 「再試行する」で増えた weightTick を一度だけ「取り直し」として使うための控え
+  const forcedWeightTickRef = useRef(0)
+  const barRef = useRef<HTMLDivElement | null>(null)
+  const [barTop, setBarTop] = useState(0)
 
   const toIso = todayIso()
   const fromIso = rangeFromIso(range, toIso)
@@ -1919,6 +1970,24 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
     aliveRef.current = true
     return () => {
       aliveRef.current = false
+    }
+  }, [])
+
+  // 固定バーを貼る位置（アプリの固定ヘッダの下）。画面幅・文字サイズでヘッダの高さが変わるため追従する
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const apply = () => setBarTop(measureShellHeaderH())
+    apply()
+    window.addEventListener('resize', apply)
+    let ro: ResizeObserver | null = null
+    const shell = findShellHeader()
+    if (shell && typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(apply)
+      ro.observe(shell)
+    }
+    return () => {
+      window.removeEventListener('resize', apply)
+      ro?.disconnect()
     }
   }, [])
 
@@ -1974,7 +2043,10 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
     if (sourceId === null) return
     let cancelled = false
     setWeight({ status: 'loading' })
-    fetchWeights([{ id: residentId, source_id: sourceId }])
+    // 「再試行する」の時だけ、メモリに持っている体重を使わず取り直す
+    const force = weightTick !== forcedWeightTickRef.current
+    forcedWeightTickRef.current = weightTick
+    fetchWeights([{ id: residentId, source_id: sourceId }], { force })
       .then((res) => {
         if (cancelled || !aliveRef.current) return
         if (res === null) setWeight({ status: 'unconfigured' })
@@ -2054,9 +2126,37 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
         <span aria-hidden="true">‹ </span>利用者一覧へ戻る
       </Link>
 
+      {/* 氏名と移動ボタン。スクロールしても上部に残る（アプリの固定ヘッダの下に貼る） */}
+      <div
+        ref={barRef}
+        className="sticky z-10 -mx-4 mt-2 border-b border-border bg-bg px-4 py-1 print:static"
+        style={{ top: barTop }}
+      >
+        {/* 氏名は削らない（取り違え防止）。幅が足りない時（文字を大きくした端末など）はボタンを次の行へ回す */}
+        <div className="flex flex-wrap items-center gap-x-2">
+          <h1 className="min-w-0 max-w-full break-words text-xl font-heavy text-ink">{resident.name}</h1>
+          <nav aria-label="カルテの欄へ移動" className="min-w-0 flex-1 basis-32 overflow-x-auto print:hidden sm:overflow-visible">
+            {/* スマホは横にスワイプ（バーを低く保つ）。PC 幅では折り返して全部見せる（マウスで横スクロールしにくいため）。
+                p-1.5 はフォーカス枠（外側に 5px）が横スクロールの枠で切れないための余白 */}
+            <ul className="flex gap-2 p-1.5 sm:flex-wrap">
+              {(loading || error ? KARTE_JUMPS.filter((j) => j.id === 'karte-history') : KARTE_JUMPS).map((j) => (
+                <li key={j.id} className="shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => jumpToSection(j.id, barRef.current)}
+                    className="inline-flex min-h-tap items-center whitespace-nowrap rounded-full border border-border-strong bg-surface px-3 text-sm text-link"
+                  >
+                    {j.label}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </nav>
+        </div>
+      </div>
+
       <header className="mt-2">
-        <h1 className="text-xl font-heavy text-ink">{resident.name}</h1>
-        <p className="mt-1 text-sm text-ink2">
+        <p className="text-sm text-ink2">
           {resident.kana ? <span>{resident.kana}　</span> : null}
           <span className="tabular">{resident.room ?? '居室未登録'}</span>
           {floor != null ? <span>　{floor}階</span> : null}
