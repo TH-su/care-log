@@ -1002,6 +1002,26 @@ main:has(.dsheet-frame) {
    下限は --tap-min（44px 固定）から作る（×9/11 = 36px）＝文字200% でも下限だけが大きくならない
    （rem で書くと 72px になり、かえって操作バーが高くなった＝実測）。文字・余白・間隔は rem のまま文字の大きさに付いてくる。
    折り返しの仕組み（上の .sheet-pickbar の規則）はそのまま効く。481px 以上の画面は何も変えない */
+/* 上部の操作を1行に並べた時の幅を測る写し（components/CollapsibleBar.tsx・見えない・押せない・高さを取らない・2026-09-29） */
+.collapse-bar-measure {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+  width: max-content;
+}
+.collapse-bar-measure *,
+.collapse-bar-measure > div {
+  flex-wrap: nowrap !important;
+  max-width: none !important;
+}
+.collapse-bar-measure > div {
+  width: max-content;
+}
+
 @media (max-width: 480px) {
   .sheet-pickbar button,
   .sheet-bar-fit button,

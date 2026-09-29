@@ -47,6 +47,7 @@ import { getActorId, touchActivity } from '../lib/actor'
 import { addDays, fmtDayLabel, fmtTimeHM, todayIso, toHalfWidth } from '../lib/format'
 import { isLowIntake, LS, MEAL_SLOT_LABEL, MEAL_STATUS_LABEL, SHEET_DAYS } from '../lib/types'
 import type { FluidIntake, Meal, MealSlot, MealStatus, Resident, SheetDays } from '../lib/types'
+import { CollapsibleBar } from '../components/CollapsibleBar'
 import {
   EmptyBlock,
   ErrorBlock,
@@ -2097,6 +2098,37 @@ export function MealsSheetPage({
 
   // ── 描画 ──
 
+  /** 期間の表示（畳んだ形が1行に収まらない時は短くする） */
+  const periodLabel = `${fmtDayLabel(fromIso)} 〜 ${fmtDayLabel(toIso)}`
+  const md = (iso: string): string => `${Number(iso.slice(5, 7))}/${Number(iso.slice(8, 10))}`
+  // 1行に収まらない時は、期間の終わりの日だけ（「〜9/29」）にする（期間の始まりは表の見出しに出ている）
+  const periodLabelShort = fromIso === toIso ? md(toIso) : `〜${md(toIso)}`
+  /** 期間送り（‹ 期間 ›）。開いた形と畳んだ形で同じもの */
+  const periodNav = (label: string, compact = false) => (
+    <>
+      {/* 読み込み中の連打は、空欄のまま期間だけ進む＝取り違えのもとになるので止める */}
+      <button
+        type="button"
+        aria-label={`前の${days}日分を表示`}
+        disabled={loading}
+        onClick={() => shiftPeriod(-1)}
+        className={`min-h-tap min-w-tap rounded border border-border-strong text-base text-ink disabled:opacity-60 ${compact ? 'px-0' : ''}`}
+      >
+        <span aria-hidden="true">‹</span>
+      </button>
+      <span className="tabular text-base text-ink">{label}</span>
+      <button
+        type="button"
+        aria-label={`次の${days}日分を表示`}
+        disabled={toIso >= today || loading}
+        onClick={() => shiftPeriod(1)}
+        className={`min-h-tap min-w-tap rounded border border-border-strong text-base text-ink disabled:opacity-60 ${compact ? 'px-0' : ''}`}
+      >
+        <span aria-hidden="true">›</span>
+      </button>
+    </>
+  )
+
   return (
     // 外側の余白は詰める（2026-08-29 指示）。表に回る高さを増やすため p-4 → px-3 py-2
     <div className="flex flex-col gap-2 px-3 py-2">
@@ -2105,60 +2137,47 @@ export function MealsSheetPage({
             表の高さ上限（.sheet-frame-fit）が自動で広がり、縦スクロールが減る。
             ボタンの高さ 44px は変えない＝手袋・片手でも押せる大きさは保つ。
             見出し（フロア／日数）は画面が狭い時だけ隠す（sm 未満）＝ボタンの文字で用は足りる */}
-        <div className="sheet-pickbar">
-          <div className="sheet-pickbar-group">
-            <SegmentPicker
-              options={floorOptions}
-              value={floor}
-              onChange={onChangeFloor}
-              ariaLabel="フロアを選ぶ"
-            />
-          </div>
+        {/* 狭い画面・1行に収まらない時は畳める（2026-09-29 本人指示「バイタル・食事一覧も畳む作りに」）。畳んだ形に残すのは
+            いちばん使う期間送り（‹ 期間 ›）だけ。読み込み中・保存できない・食い違いの表示はこの操作の外にある（畳んでも隠れない） */}
+        <CollapsibleBar
+          storageKey={LS.mealsBarOpen}
+          openLabel="フロア・日数・倍率の操作を開く"
+          closeLabel="フロア・日数・倍率の操作を畳む"
+          collapsed={(compact) => periodNav(compact ? periodLabelShort : periodLabel, compact)}
+          full={() => (
+            <div className="sheet-pickbar">
+              <div className="sheet-pickbar-group">
+                <SegmentPicker
+                  options={floorOptions}
+                  value={floor}
+                  onChange={onChangeFloor}
+                  ariaLabel="フロアを選ぶ"
+                />
+              </div>
 
-          <div className="sheet-pickbar-group">
-            <SegmentPicker
-              options={DAYS_OPTIONS}
-              value={String(days)}
-              onChange={onChangeDays}
-              ariaLabel="横に並べる日数を選ぶ"
-            />
-          </div>
+              <div className="sheet-pickbar-group">
+                <SegmentPicker
+                  options={DAYS_OPTIONS}
+                  value={String(days)}
+                  onChange={onChangeDays}
+                  ariaLabel="横に並べる日数を選ぶ"
+                />
+              </div>
 
-          <div className="sheet-pickbar-group">
-            {/* 読み込み中の連打は、空欄のまま期間だけ進む＝取り違えのもとになるので止める */}
-            <button
-              type="button"
-              aria-label={`前の${days}日分を表示`}
-              disabled={loading}
-              onClick={() => shiftPeriod(-1)}
-              className="min-h-tap min-w-tap rounded border border-border-strong text-base text-ink disabled:opacity-60"
-            >
-              <span aria-hidden="true">‹</span>
-            </button>
-            <span className="tabular text-base text-ink">
-              {fmtDayLabel(fromIso)} 〜 {fmtDayLabel(toIso)}
-            </span>
-            <button
-              type="button"
-              aria-label={`次の${days}日分を表示`}
-              disabled={toIso >= today || loading}
-              onClick={() => shiftPeriod(1)}
-              className="min-h-tap min-w-tap rounded border border-border-strong text-base text-ink disabled:opacity-60"
-            >
-              <span aria-hidden="true">›</span>
-            </button>
-          </div>
+              <div className="sheet-pickbar-group">{periodNav(periodLabel)}</div>
 
-          <ZoomBar compact />
+              <ZoomBar compact />
 
-          <button
-            type="button"
-            onClick={onReload}
-            className="min-h-tap shrink-0 rounded border border-border-strong px-3 text-base text-ink"
-          >
-            最新
-          </button>
-        </div>
+              <button
+                type="button"
+                onClick={onReload}
+                className="min-h-tap shrink-0 rounded border border-border-strong px-3 text-base text-ink"
+              >
+                最新
+              </button>
+            </div>
+          )}
+        />
 
         {/* 読み込み中だけ出す（表は残したまま知らせる）。
             期間を送ると取得が終わるまで全セルが空欄になるので、

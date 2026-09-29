@@ -751,6 +751,14 @@ export const LS = {
   zoom: 'cl_zoom',
   /** 一覧に横並びする日数（1/4/7/11） */
   sheetDays: 'cl_sheetDays',
+  /**
+   * 日報の上部の操作（前後日・日付・表示・倍率）を開いているか（'1'＝開いた形／'0'＝畳んだ形・2026-09-29）。
+   * 畳めるのは狭い画面か1行に収まらない時だけ。端末ごとの UI 状態（業務データは持たない）。未設定＝畳める時は畳む
+   */
+  dailyBarOpen: 'cl_dailyBarOpen',
+  /** バイタル一覧・食事一覧の上部の操作を開いているか（'1'／'0'・画面ごとに別・dailyBarOpen と同じ扱い） */
+  vitalsBarOpen: 'cl_vitalsBarOpen',
+  mealsBarOpen: 'cl_mealsBarOpen',
   /** 一覧で表示中のフロア（1/2/all） */
   sheetFloor: 'cl_sheetFloor',
   /**

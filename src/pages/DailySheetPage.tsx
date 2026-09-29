@@ -124,6 +124,7 @@ import type {
 import { followUpEdits, overlayNote, pendingNoteText, pendingSig, shouldSendBody } from '../lib/noteEdit'
 import type { DraftFields } from '../lib/noteEdit'
 import { UnsentNotes } from '../components/UnsentNotes'
+import { CollapsibleBar } from '../components/CollapsibleBar'
 import { NoteHistoryDialog } from '../components/NoteHistoryDialog'
 import { focusOf, useCellPresence } from '../hooks/useCellPresence'
 import type { CellPresence } from '../hooks/useCellPresence'
@@ -2297,8 +2298,8 @@ export function DailySheetPage({
 
   return (
     <div className="space-y-4">
-      {/* 日付バー（前後日・カレンダー・表示単位・表示倍率） */}
-      <DateBar day={day} unit={unit} onGo={goDay} onUnit={goUnit} />
+      {/* 日付バー（前後日・カレンダー・表示単位・表示倍率）。狭い画面・1行に収まらない時は畳める（2026-09-29） */}
+      <DailyTopBar day={day} unit={unit} onGo={goDay} onUnit={goUnit} />
 
       {phase === 'error' && everReady && (
         <div className="flex flex-wrap items-center gap-gap rounded-md border border-danger bg-danger-bg p-3">
@@ -5085,6 +5086,65 @@ function CompareVitalButtons({ ctx, rowKey, name }: { ctx: SheetCtx; rowKey: str
 // ══════════════════════════════════════════════════════════════
 
 /**
+ * 日報の上部の操作（2026-09-29 本人指示「上部の操作を畳む作りも進めて」・チーフ裁定）。畳む仕組みは共通の器
+ * （components/CollapsibleBar.tsx）。畳んだ形は〔‹〕〔日付（押すとカレンダー）〕〔›〕〔表示 ▾〕の1行、開いた形は
+ * 今の操作の並びのまま＋〔畳む ▴〕。開閉は LS.dailyBarOpen に持つ。1行に収まらない時は日付を「9/29」に縮める
+ */
+function DailyTopBar({
+  day,
+  unit,
+  onGo,
+  onUnit,
+}: {
+  day: string
+  unit: SheetUnit
+  onGo: (iso: string) => void
+  onUnit: (unit: SheetUnit) => void
+}) {
+  return (
+    <CollapsibleBar
+      storageKey={LS.dailyBarOpen}
+      full={() => <DateBar day={day} unit={unit} onGo={onGo} onUnit={onUnit} />}
+      collapsed={(compact) => <CollapsedDateBar day={day} onGo={onGo} compact={compact} />}
+      openLabel="表示と倍率の操作を開く"
+      closeLabel="表示と倍率の操作を畳む"
+    />
+  )
+}
+
+/** 畳んだ形の上部の操作（1行）：〔‹〕〔日付（押すとカレンダー）〕〔›〕。compact＝1行に収まらない時の短い日付（「9/29」） */
+function CollapsedDateBar({ day, onGo, compact }: { day: string; onGo: (iso: string) => void; compact: boolean }) {
+  // 短い形では左右の余白を外す（幅は 44px の下限＝押す大きさは変えない）
+  const arrow = `min-h-tap min-w-tap shrink-0 rounded-md border border-border-strong text-base text-ink ${compact ? 'px-0' : 'px-3'}`
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => onGo(addDays(day, -1))}
+        aria-label="前の日を見る"
+        className={arrow}
+      >
+        <span aria-hidden="true">‹</span>
+      </button>
+      <DayPicker
+        day={day}
+        onPick={onGo}
+        text={compact ? `${Number(day.slice(5, 7))}/${Number(day.slice(8, 10))}` : fmtSheetDayShort(day)}
+        small={compact}
+      />
+      <button
+        type="button"
+        onClick={() => onGo(addDays(day, 1))}
+        aria-label="次の日を見る"
+        className={arrow}
+      >
+        <span aria-hidden="true">›</span>
+      </button>
+    </>
+  )
+}
+
+/**
  * 日付バー（シートの外・44px の操作領域）。
  * 1〜31 の横並びボタンは撤去した（指示1）。日にちはカレンダー（input[type=date]）で選ぶ。
  * ここに置く日付欄は「スクロールしなくても日を移せる」ための入口で、
@@ -5208,11 +5268,17 @@ function DayPicker({
   day,
   onPick,
   head = false,
+  text,
+  small = false,
 }: {
   day: string
   onPick: (iso: string) => void
   /** 1日ぶんの枠の左上（旧・施設名セル）に置く形。セルいっぱいに広げ、平日は橙を敷く */
   head?: boolean
+  /** 見せる文字（省略＝「26年8月28日(金)」。畳んだ上部の操作では「8/28(金)」） */
+  text?: string
+  /** 畳んだ上部の操作の短い形（文字を本文の大きさに・左右の余白を詰める） */
+  small?: boolean
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const tone = weekendClass(day)
@@ -5234,10 +5300,10 @@ function DayPicker({
   }
 
   return (
-    <label className={`dsheet-date ${head ? 'dsheet-date-head' : ''} ${tone}`}>
+    <label className={`dsheet-date ${head ? 'dsheet-date-head' : ''} ${small ? '!px-[2px]' : ''} ${tone}`}>
       {/* 平日は今までどおり text-ink。土日は .sheet-sat / .sheet-sun が文字色も持つので重ねない */}
-      <span aria-hidden="true" className={`text-lg font-bold tabular ${tone === '' ? 'text-ink' : tone}`}>
-        {fmtSheetDay(day)}
+      <span aria-hidden="true" className={`${small ? 'text-base' : 'text-lg'} font-bold tabular ${tone === '' ? 'text-ink' : tone}`}>
+        {text ?? fmtSheetDay(day)}
       </span>
       <input
         ref={inputRef}

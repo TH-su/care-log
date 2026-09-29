@@ -65,6 +65,7 @@ import {
   VITAL_RANGE,
 } from '../lib/types'
 import type { Level, Resident, SheetDays, Vital } from '../lib/types'
+import { CollapsibleBar } from '../components/CollapsibleBar'
 import { getActorId } from '../lib/actor'
 import {
   ConfirmDialog,
@@ -1727,6 +1728,10 @@ export function VitalsSheetPage({
 
   const periodLabel =
     days === 1 ? fmtDayLabel(anchor) : `${fmtDayLabel(fromIso)}〜${fmtDayLabel(anchor)}`
+  /** 畳んだ形が1行に収まらない時の短い期間 */
+  const md = (iso: string): string => `${Number(iso.slice(5, 7))}/${Number(iso.slice(8, 10))}`
+  // 1行に収まらない時は、期間の終わりの日だけ（「〜9/29」）にする（期間の始まりは表の見出しに出ている）
+  const periodLabelShort = days === 1 ? md(anchor) : `〜${md(anchor)}`
 
   // ── 表示用の集計 ───────────────────────────────────────────
 
@@ -1759,6 +1764,63 @@ export function VitalsSheetPage({
     return <ErrorBlock message={error} onRetry={() => void load()} />
   }
 
+  /** 期間送り（‹ 期間 ›）。開いた形と畳んだ形で同じもの（畳んだ形は短い期間の文字にもなる） */
+  const periodNav = (label: string, compact = false) => (
+    <>
+      {/* 読み込み中の連打は、表示が空欄のまま期間だけ進む＝取り違えのもとになるので止める */}
+      <button
+        type="button"
+        onClick={goOlder}
+        disabled={loading}
+        aria-label="前の期間を表示する"
+        className={`min-h-tap min-w-tap rounded border text-base ${compact ? 'px-0' : 'px-3'} ${
+          loading
+            ? 'border-border bg-surface2 text-ink3'
+            : 'border-border-strong bg-surface text-ink'
+        }`}
+      >
+        <span aria-hidden="true">‹</span>
+        <span className="sr-only">前の期間</span>
+      </button>
+      <span className="tabular text-base text-ink" aria-live="polite">
+        {label}
+      </span>
+      <button
+        type="button"
+        onClick={goNewer}
+        disabled={atNewest || loading}
+        aria-label="次の期間を表示する"
+        className={`min-h-tap min-w-tap rounded border text-base ${compact ? 'px-0' : 'px-3'} ${
+          atNewest || loading
+            ? 'border-border bg-surface2 text-ink3'
+            : 'border-border-strong bg-surface text-ink'
+        }`}
+      >
+        <span aria-hidden="true">›</span>
+        <span className="sr-only">次の期間</span>
+      </button>
+    </>
+  )
+  /** 保存状況（未送信・保存中・保存済み）。畳んでも隠さない（畳めない時は今と同じく操作の行の末尾） */
+  // 同じ行の末尾に置く＝行を増やさない。画面が狭い時は折り返して2行目に来る（消さない＝保存できたかは必ず見せる）
+  const statusLine = (
+    <p
+      role="status"
+      aria-live="polite"
+      className={
+        loading
+          ? 'text-base text-ink2'
+          : pending > 0
+            ? 'text-base font-bold text-warn'
+            : savingCount > 0
+              ? 'text-base text-ink2'
+              : 'text-base text-ok'
+      }
+    >
+      {statusText}
+    </p>
+  )
+
   return (
     <div className="pb-4">
       {/* ── 操作バー ── */}
@@ -1772,92 +1834,53 @@ export function VitalsSheetPage({
             食事一覧と同じ仕組み。高さ 44px は変えない＝押しやすさは落とさない。
             見出し（フロア／横に並べる日数）はこの行に入れると横幅が足りなくなるため付けない
             （ボタンの文字だけで何の切替か分かる。読み上げ名は ariaLabel が持つ） */}
-        <div className="sheet-pickbar">
-          {floorOptions.length > 1 ? (
-            <div className="sheet-pickbar-group">
-              <SegmentPicker
-                options={floorOptions}
-                value={floor}
-                onChange={(v) => {
-                  setFloor(v)
-                  writeFloor(v)
-                }}
-                ariaLabel="フロアを選ぶ"
-              />
+        {/* 狭い画面・1行に収まらない時は畳める（2026-09-29 本人指示「バイタル・食事一覧も畳む作りに」）。畳んだ形に残すのは
+            いちばん使う期間送り（‹ 期間 ›）だけ。保存状況（未送信など）は畳んでも隠さない（persistent） */}
+        <CollapsibleBar
+          storageKey={LS.vitalsBarOpen}
+          openLabel="フロア・日数・倍率の操作を開く"
+          closeLabel="フロア・日数・倍率の操作を畳む"
+          collapsed={(compact) => periodNav(compact ? periodLabelShort : periodLabel, compact)}
+          persistent={statusLine}
+          full={(extra) => (
+            <div className="sheet-pickbar">
+              {floorOptions.length > 1 ? (
+                <div className="sheet-pickbar-group">
+                  <SegmentPicker
+                    options={floorOptions}
+                    value={floor}
+                    onChange={(v) => {
+                      setFloor(v)
+                      writeFloor(v)
+                    }}
+                    ariaLabel="フロアを選ぶ"
+                  />
+                </div>
+              ) : null}
+
+              <div className="sheet-pickbar-group">
+                <SegmentPicker
+                  options={SHEET_DAYS.map((d) => ({ value: String(d), label: `${d}日` }))}
+                  value={String(days)}
+                  onChange={(v) => {
+                    const n = Number(v)
+                    if (!(SHEET_DAYS as readonly number[]).includes(n)) return
+                    guardWindow(addDays(anchor, -(n - 1)), anchor, () => {
+                      setDays(n as SheetDays)
+                      writeDays(n as SheetDays)
+                    })
+                  }}
+                  ariaLabel="横に並べる日数を選ぶ"
+                />
+              </div>
+
+              <div className="flex items-center gap-gap">{periodNav(periodLabel)}</div>
+
+              <ZoomBar compact />
+              {extra}
             </div>
-          ) : null}
-
-          <div className="sheet-pickbar-group">
-            <SegmentPicker
-              options={SHEET_DAYS.map((d) => ({ value: String(d), label: `${d}日` }))}
-              value={String(days)}
-              onChange={(v) => {
-                const n = Number(v)
-                if (!(SHEET_DAYS as readonly number[]).includes(n)) return
-                guardWindow(addDays(anchor, -(n - 1)), anchor, () => {
-                  setDays(n as SheetDays)
-                  writeDays(n as SheetDays)
-                })
-              }}
-              ariaLabel="横に並べる日数を選ぶ"
-            />
-          </div>
-
-          <div className="flex items-center gap-gap">
-            {/* 読み込み中の連打は、表示が空欄のまま期間だけ進む＝取り違えのもとになるので止める */}
-            <button
-              type="button"
-              onClick={goOlder}
-              disabled={loading}
-              aria-label="前の期間を表示する"
-              className={`min-h-tap min-w-tap rounded border px-3 text-base ${
-                loading
-                  ? 'border-border bg-surface2 text-ink3'
-                  : 'border-border-strong bg-surface text-ink'
-              }`}
-            >
-              <span aria-hidden="true">‹</span>
-              <span className="sr-only">前の期間</span>
-            </button>
-            <span className="tabular text-base text-ink" aria-live="polite">
-              {periodLabel}
-            </span>
-            <button
-              type="button"
-              onClick={goNewer}
-              disabled={atNewest || loading}
-              aria-label="次の期間を表示する"
-              className={`min-h-tap min-w-tap rounded border px-3 text-base ${
-                atNewest || loading
-                  ? 'border-border bg-surface2 text-ink3'
-                  : 'border-border-strong bg-surface text-ink'
-              }`}
-            >
-              <span aria-hidden="true">›</span>
-              <span className="sr-only">次の期間</span>
-            </button>
-          </div>
-
-          <ZoomBar compact />
-
-          {/* 保存状況（未送信・保存中・保存済み）。同じ行の末尾に置く＝行を増やさない。
-              画面が狭い時は折り返して2行目に来る（消さない＝保存できたかは必ず見せる） */}
-          <p
-            role="status"
-            aria-live="polite"
-            className={
-              loading
-                ? 'text-base text-ink2'
-                : pending > 0
-                  ? 'text-base font-bold text-warn'
-                  : savingCount > 0
-                    ? 'text-base text-ink2'
-                    : 'text-base text-ok'
-            }
-          >
-            {statusText}
-          </p>
-        </div>
+          )}
+        />
 
         {gateUnknown ? (
           // 観測できていない＝「スプシ期間」と決めつけない。通信エラーとして再確認の導線を出す
