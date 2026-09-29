@@ -422,6 +422,19 @@ export const NOTE_CONTRACT_CASES = [
     },
   },
   {
+    name: '記入者を消す（reporter_id を null に・2026-09-29 記入者の削除）',
+    edits: { reporter_id: { value: null, base: 1 } },
+    editor: 2,
+    expect: {
+      status: 'applied',
+      applied: ['reporter_id'],
+      settled: [],
+      conflicts: [],
+      row: { reporter_id: null },
+      after: { revDelta: 1, history: 1 },
+    },
+  },
+  {
     name: '継続の終了（ended_at・ended_by）',
     row: { ongoing: true },
     edits: { ended_at: { value: '2026-11-02T03:00:00Z', base: null }, ended_by: { value: 1, base: null } },

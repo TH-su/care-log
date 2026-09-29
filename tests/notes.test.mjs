@@ -1018,6 +1018,41 @@ if (DB === null) {
       assert.match(src, /const otherDirty = hasHeldVitals \|\| hasOtherDraftContent/)
     })
 
+    it('記入者: 日報の空き行・新しい行は記入者を空欄で始める（どの帯も）・本文が空の控えの自動の記入者は読まない', () => {
+      const src = read('pages/DailySheetPage.tsx')
+      const calls = src.split('\n').filter((l) => l.includes('emptyNoteDraft(') && !l.includes('function emptyNoteDraft'))
+      assert.ok(calls.length >= 3, `呼び出しが見つからない: ${JSON.stringify(calls)}`)
+      for (const l of calls) assert.match(l, /emptyNoteDraft\(.*, null\)/, `記入者に既定値を入れている: ${l.trim()}`)
+      assert.match(src, /const reporterId = body\.trim\(\) === '' && !reporterPicked \? null : readReporter/)
+    })
+
+    it('記入者: 〔記入者を消す〕は申し送りの記入者を選ぶ時だけ出し、書きかけは空に・保存済みは送信待ち経由で null を送る', () => {
+      const ui = read('components/ui.tsx')
+      const picker = ui.slice(ui.indexOf('export function StaffPickerModal('), ui.indexOf('export function StaffPickerModal(') + 3000)
+      assert.match(picker, /\{onClear \? \(/, '外す操作のボタンを onClear の有無で出し分けていない')
+      assert.match(picker, /className="mb-2 min-h-tap w-full/, 'タップ領域（min-h-tap）が無い')
+      const src = read('pages/DailySheetPage.tsx')
+      assert.match(src, /onClear=\{staffPick\?\.for === 'noteReporter' \? onClearReporter : undefined\}/)
+      const clear = src.slice(src.indexOf('const onClearReporter = useCallback('), src.indexOf('const onClearReporter = useCallback(') + 900)
+      assert.match(clear, /patchDraftOrRegistration\(target\.key, \{ reporterId: null, reporterPicked: false \}\)/)
+      assert.match(clear, /updateNoteCell\(note, \{ reporter_id: null \}\)/)
+      for (const other of ['MedRecordPage', 'BathRecordPage', 'IncidentFormPage', 'MedSlotsPage', 'NoteFormPage']) {
+        const o = read(`pages/${other}.tsx`)
+        assert.doesNotMatch(o.slice(o.indexOf('<StaffPickerModal'), o.indexOf('<StaffPickerModal') + 600), /onClear=/, `${other} の選択画面に外す操作を出している`)
+      }
+    })
+
+    it('記入者: 保存済みの行の記入者を空にする変更（null）は、送信待ち → apply_note_edits でサーバーも null になる', async () => {
+      const srv = noteServer()
+      const row = srv.seed({ ...regBase, body: '記入者を消す行', reporter_id: 1 })
+      DB.__testHooks.setClient(srv.client)
+      await DB.saveNoteEdits({ id: row.id }, { reporter_id: { value: null, base: 1 } })
+      await DB.flushQueue(true)
+      await settle()
+      assert.equal(srv.db.notes.find((n) => n.id === row.id).reporter_id, null)
+      assert.equal(DB.listUnsentNotes().length, 0)
+    })
+
     it('F1: 送信待ちの登録の行は、画面の一言が無くても（再読み込みの後も）送信待ち・止まった印を出す', () => {
       const src = read('pages/DailySheetPage.tsx')
       assert.match(src, /<StatusText status=\{ctx\.status\[rowKey\] \?\? \(note \? undefined : registrationMark\(draft\)\)\} \/>/)

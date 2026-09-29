@@ -605,6 +605,13 @@ export interface StaffPickerModalProps {
   /** 省略時は閉じられない（起動時の必須選択に使う） */
   onClose?: () => void
   title?: string
+  /**
+   * 選んである職員を外す操作（例: 申し送りの記入者を空欄にする）。渡した時だけ一覧の先頭にボタンを出す
+   * （出勤者など、外す操作の無い用途では渡さない）
+   */
+  onClear?: () => void
+  /** 外す操作のボタンの文言（onClear を渡す時。既定「選んだ職員を外す」） */
+  clearLabel?: string
 }
 
 export function StaffPickerModal({
@@ -613,6 +620,8 @@ export function StaffPickerModal({
   onPick,
   onClose,
   title = '記録する職員を選ぶ',
+  onClear,
+  clearLabel = '選んだ職員を外す',
 }: StaffPickerModalProps) {
   const [q, setQ] = useState('')
   const fieldId = useId()
@@ -645,6 +654,16 @@ export function StaffPickerModal({
       </div>
       <FilterField id={fieldId} value={q} onChange={setQ} />
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
+        {onClear ? (
+          <button
+            type="button"
+            onClick={onClear}
+            className="mb-2 min-h-tap w-full rounded border border-border-strong bg-surface px-3 text-left text-base text-ink"
+          >
+            <span aria-hidden="true">✕ </span>
+            {clearLabel}
+          </button>
+        ) : null}
         {staff.length === 0 ? (
           <EmptyBlock message="職員の一覧がまだありません。設定タブでマスタ同期を実行してください。" />
         ) : list.length === 0 ? (

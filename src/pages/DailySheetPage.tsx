@@ -913,6 +913,11 @@ interface NoteDraft {
    */
   firstSent?: NoteFirstSent
   /**
+   * 記入者を本人が選んだ印（2026-09-29）。本文が空の書きかけを控えから戻す時、この印の無い記入者は読まない
+   * （前の版が空き行に自動で入れた操作者と見分ける）。旧版の読み手は知らない欄として読み飛ばす
+   */
+  reporterPicked?: boolean
+  /**
    * 送信待ちの登録の状態（syncRegistrationRows が送信待ちの実際から写す）。行の一言を再読み込みの後も出すため（F1）。
    * 省略＝送信待ち
    */
@@ -1284,8 +1289,12 @@ function readNoteDraft(v: unknown): NoteDraft | null {
   if (body === null) return null
   if (typeof o.after16 !== 'boolean' || typeof o.targetPicked !== 'boolean') return null
   const residentId = asIdOrNull(o.residentId)
-  const reporterId = asIdOrNull(o.reporterId)
-  if (residentId === undefined || reporterId === undefined) return null
+  const readReporter = asIdOrNull(o.reporterId)
+  if (residentId === undefined || readReporter === undefined) return null
+  // 本文が空の書きかけの記入者は、本人が選んだ印（reporterPicked）が無ければ読まない（前の版が空き行に自動で入れた
+  // 操作者＝本人が選んだ値ではない。本文がある書きかけは本人が選んだ可能性があるので、そのまま戻す・2026-09-29 本人裁定）
+  const reporterPicked = o.reporterPicked === true
+  const reporterId = body.trim() === '' && !reporterPicked ? null : readReporter
   const rawColor = o.color
   const color: NoteColor | null | undefined =
     rawColor === null
@@ -1307,6 +1316,7 @@ function readNoteDraft(v: unknown): NoteDraft | null {
     // 控えに残るのは未送信の行だけ（locked の行は書き出していない）
     locked: false,
   }
+  if (reporterPicked && reporterId !== null) out.reporterPicked = true
   // 前に登録を試みた冪等キー（確定し直す時に同じキーで送る＝届いていれば二重にならない・R5-1/R5-2）
   if (typeof o.ck === 'string' && /^[\w.:-]{1,100}$/.test(o.ck)) {
     out.ck = o.ck
@@ -3088,12 +3098,10 @@ function DaySheet({
         return
       }
       const key = nextKey('nd')
-      setNoteDrafts((prev) => [
-        ...prev,
-        emptyNoteDraft(key, shift, after16, shift === 'night' ? null : actorId),
-      ])
+      // 記入者は空欄で始める（本人が選ぶまで自分を入れない・2026-09-29 本人裁定）
+      setNoteDrafts((prev) => [...prev, emptyNoteDraft(key, shift, after16, null)])
     },
-    [actorId, blockedReason, enabled, nextKey, show],
+    [blockedReason, enabled, nextKey, show],
   )
 
   const patchNoteDraft = useCallback((key: string, patch: Partial<NoteDraft>) => {
@@ -3219,7 +3227,7 @@ function DaySheet({
       if (value === '') return
       const snap = seenDraftsRef.current.get(key)
       const asDraft = (): void => {
-        const src = snap ?? emptyNoteDraft(key, 'day', false, actorId)
+        const src = snap ?? emptyNoteDraft(key, 'day', false, null)
         // 送信待ちの登録の行を書きかけとして残す時は、別の行・別の印にする（登録の行と取り違えない）
         const fresh = src.locked
         const draft: NoteDraft = {
@@ -4474,7 +4482,7 @@ function DaySheet({
         // 控え（ref）から読む（onPickResident と同じ）
         const draft = noteDraftsRef.current.find((d) => d.key === target.key)
         if (draft) {
-          patchDraftOrRegistration(target.key, { reporterId: id })
+          patchDraftOrRegistration(target.key, { reporterId: id, reporterPicked: true })
           return
         }
         const note = notesRef.current.find((n) => `n${n.id}` === target.key)
@@ -4485,6 +4493,24 @@ function DaySheet({
     },
     [addAttendance, patchDraftOrRegistration, show, staffPick, updateNoteCell],
   )
+
+  /**
+   * 〔記入者を消す〕（申し送りの記入者を選ぶ時だけ出す・2026-09-29 本人裁定）。書きかけは記入者を空に、
+   * 保存済みの行は記入者を空にする変更を送信待ち → apply_note_edits で送る（選ぶ時と同じ経路）
+   */
+  const onClearReporter = useCallback(() => {
+    const target = staffPick
+    setStaffPick(null)
+    if (!target || target.for !== 'noteReporter') return
+    const draft = noteDraftsRef.current.find((d) => d.key === target.key)
+    if (draft) {
+      patchDraftOrRegistration(target.key, { reporterId: null, reporterPicked: false })
+      return
+    }
+    const note = notesRef.current.find((n) => `n${n.id}` === target.key)
+    if (note) void updateNoteCell(note, { reporter_id: null })
+    else show(MSG_PICK_LOST)
+  }, [patchDraftOrRegistration, show, staffPick, updateNoteCell])
 
   // ── 表示用の仕分け ─────────────────────────────────────────
 
@@ -4574,8 +4600,8 @@ function DaySheet({
     const fill = (shift: Shift, after16: boolean) => {
       const have = noteDrafts.filter((d) => d.shift === shift && d.after16 === after16).length
       for (let i = have; i < MIN_ROWS.note; i++) {
-        // 記入者の既定は操作者（夜勤は現行運用どおり空のまま）
-        add.push(emptyNoteDraft(nextKey('nd'), shift, after16, shift === 'night' ? null : actorId))
+        // 記入者は空欄で始める（どの帯も。本人が選ぶまで自分を入れない・2026-09-29 本人裁定）
+        add.push(emptyNoteDraft(nextKey('nd'), shift, after16, null))
       }
     }
     fill('day', false)
@@ -4584,7 +4610,7 @@ function DaySheet({
     fill('night', false)
     if (add.length === 0) return
     setNoteDrafts((prev) => [...prev, ...add])
-  }, [phase, actorId, noteDrafts, nextKey])
+  }, [phase, noteDrafts, nextKey])
 
   const vitalConflictIds = useMemo(() => {
     const out: Record<string, { id: number; mode: HeldVital['mode'] }[]> = {}
@@ -4889,6 +4915,9 @@ function DaySheet({
         }
         onPick={onPickStaff}
         onClose={() => setStaffPick(null)}
+        // 〔記入者を消す〕は申し送りの記入者を選ぶ時だけ（出勤者・施設長には出さない）
+        onClear={staffPick?.for === 'noteReporter' ? onClearReporter : undefined}
+        clearLabel="記入者を消す"
         title={
           staffPick?.for === 'attendance'
             ? staffPick.role === 'manager'
