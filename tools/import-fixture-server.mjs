@@ -12,6 +12,8 @@
 //       ?action=___state&v=2 / v=3 で切り替える。
 //       v3 は「移行元の行番号がずれて墓標が付き、あとで元に戻る」実運用の形の再現
 //       （2026-08-28 の日勤1件で実際に起きた）。
+//       v4（v3 の後に移行元で行が消え・1件訂正された）・v5（v4 の後に移行元の氏名表記が変わり
+//       vitals のキーだけ変わった）は、アプリで直した取込行の保護（2026-09-29 C3）の検証用。
 //
 // 制御口（テスト専用・token 不要。___state と同じ用途）:
 //   ?action=___ping&fails=..&skipped=..&lastTick=..&skippedStreak=..
@@ -68,6 +70,20 @@ function eventsV3() {
   return eventsV2().concat(eventsV1().filter((e) => e.key === 'k5'))
 }
 
+/**
+ * v4: v3 から k1（アプリで触っていない行＝取り消しの対照）と k6（テストでアプリから直す行）が消え、
+ *     k8 の本文が移行元で訂正される（アプリで触っていない行＝書き戻しの対照）。
+ */
+function eventsV4() {
+  const out = []
+  for (const e of eventsV3()) {
+    if (e.key === 'k1' || e.key === 'k6') continue
+    if (e.key === 'k8') out.push({ ...e, body: '夕方に売店へ（移行元で訂正）' })
+    else out.push(e)
+  }
+  return out
+}
+
 function vitalsRows(state) {
   const base = [
     // 居室移動日に同一人が2タブへ載るケース（移行元キーは タブ名 で別行・こちらは同じ枠）。
@@ -77,7 +93,7 @@ function vitalsRows(state) {
     // DBの numeric(3,1) で丸められる小数（修正前は毎回 update が走り続けた）
     { date: D3, name: '利用者01', room: '101', tab: 'バイタル1階', temp: 36.55, sysBP: 120.4, diaBP: null, pulse: null, spo2: null, flags: '' },
   ]
-  return [
+  const rows = [
     { date: D1, name: '利用者01', room: '101', tab: 'バイタル1階', temp: 36.5, sysBP: 120, diaBP: 70, pulse: 72, spo2: 97, flags: '' },
     { date: D1, name: '利用者02', room: '102', tab: 'バイタル1階', temp: 38.2, sysBP: null, diaBP: null, pulse: 88, spo2: 95, flags: '' },
     { date: D1, name: '利用者04', room: '104', tab: 'バイタル1階', temp: null, sysBP: null, diaBP: null, pulse: null, spo2: null, flags: '' }, // 空行→取込対象外
@@ -87,10 +103,21 @@ function vitalsRows(state) {
     { date: D2, name: '利用者02', room: '102', tab: 'バイタル1階', temp: 37.0, sysBP: null, diaBP: null, pulse: null, spo2: null, flags: '' }, // アプリ入力と衝突→native_skip
     ...base,
   ]
+  let out = rows
+  // v4〜: 利用者02 の 6/1 が移行元から消える（テストでアプリから直す行）
+  if (state >= 4) out = out.filter((r) => !(r.date === D1 && r.name === '利用者02'))
+  // v5: 名寄せ表で利用者04 に入っていた「未知利用者99」の行が、移行元で正しい氏名「利用者04」に直る
+  //     （値は同じ・キーだけ変わる＝同じ枠に別キーの候補が来る）
+  if (state >= 5) {
+    out = out
+      .filter((r) => !(r.date === D1 && r.name === '未知利用者99'))
+      .map((r) => (r.date === D1 && r.name === '利用者04' ? { ...r, temp: 36.0 } : r))
+  }
+  return out
 }
 
 function mealsRows(state) {
-  return [
+  const rows = [
     // v1 は朝も昼も値あり。v2 は**昼だけ値を消した**（行は生きている）。
     // 修正前はここで昼の行が「移行元から消えた」と誤認され soft delete されていた
     // v3 は v2 の続き（昼の値を消したまま）＝ v2 で入れた安全装置がそのまま効くか見る
@@ -101,6 +128,8 @@ function mealsRows(state) {
     { date: D1, name: '利用者03', room: '103', bMain: 5, bSide: 5, lMain: null, lSide: null, dMain: null, dSide: null, flags: '' },
     { date: D2, name: '利用者01', room: '101', bMain: null, bSide: null, lMain: 9, lSide: 9, dMain: null, dSide: null, flags: '' },
   ]
+  // v4〜: 利用者03 の 6/1 が移行元から消える（テストでアプリから直す行）
+  return state >= 4 ? rows.filter((r) => !(r.date === D1 && r.name === '利用者03')) : rows
 }
 
 function after16Days(state, from, to) {
@@ -161,7 +190,7 @@ export function startFixture(port = 0) {
     }
     if (action === '___state') {
       const v = Number(u.searchParams.get('v'))
-      state = v === 2 ? 2 : v === 3 ? 3 : 1
+      state = [2, 3, 4, 5].includes(v) ? v : 1
       return json({ ok: true, state })
     }
     if (action === '___ping') {
@@ -185,7 +214,7 @@ export function startFixture(port = 0) {
       return json({ ok: true, role: 'viewer', ver: VER, lastTick: new Date().toISOString(), ingestedDays: '3', ...pingOverride })
     }
     if (action === 'events') {
-      const evs = inRange(state === 1 ? eventsV1() : state === 3 ? eventsV3() : eventsV2(), from, to)
+      const evs = inRange(state === 1 ? eventsV1() : state === 3 ? eventsV3() : state >= 4 ? eventsV4() : eventsV2(), from, to)
       const ingested = [D1, D2, D3].filter((d) => d >= from && d <= to)
       return json({ ok: true, from, to, events: evs, ledger: [], ingestedDates: ingested, lastTick: '', lastFails: '' })
     }

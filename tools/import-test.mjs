@@ -20,6 +20,8 @@
 //    9. after16 が後から取れた日の再判定（false 確定でない行だけが直る）
 //   10. 移行元に戻ってきた行の復活（取込が消した行だけ戻す。職員が消した記録は戻さない）
 //   11. 集約GASの失敗情報（ping）の検査と警告（取込は止めず終了コードも変えない）
+//   12. アプリで直した取込行を戻さない・取り消さない・復活で上書きしない（2026-09-29 C3。notes/vitals/meals）
+//   13. 移行元でキーだけ変わっても、アプリで直した行が押さえている枠へ入れず窓が落ちない
 // =====================================================================
 
 import { spawnSync, spawn } from 'node:child_process'
@@ -107,7 +109,11 @@ async function main() {
   psql(DB_URL, 'create schema if not exists extensions')
   psql(DB_URL, 'create extension if not exists pg_trgm with schema extensions')
   psql(DB_URL, 'create publication supabase_realtime') // 0001 が set table する前提
-  for (const f of ['0001_init.sql', '0002_timeline_rpc.sql', '0003_sheet_ui.sql', '0004_vitals_client_key.sql', '0005_meals_sheet_fluids.sql', '0006_staff_manual.sql', '0007_resident_note_alias.sql', '0008_import_tombstone_mark.sql']) {
+  // 0010 の record_history.changed_by_uid の既定値は Supabase の auth.uid()。素の PostgreSQL 用に同じ意味の代役を置く
+  // （request.jwt.claim.sub が入っている接続＝ログイン中の端末＝アプリからの変更として記録される）
+  psql(DB_URL, 'create schema if not exists auth')
+  psql(DB_URL, "create or replace function auth.uid() returns uuid language sql stable as $$ select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $$")
+  for (const f of ['0001_init.sql', '0002_timeline_rpc.sql', '0003_sheet_ui.sql', '0004_vitals_client_key.sql', '0005_meals_sheet_fluids.sql', '0006_staff_manual.sql', '0007_resident_note_alias.sql', '0008_import_tombstone_mark.sql', '0009_manager_staff_id.sql', '0010_record_history.sql']) {
     psql(DB_URL, join(ROOT, 'supabase', 'migrations', f), true)
   }
 
@@ -313,6 +319,114 @@ async function main() {
     await fetch(`${fx.url}?action=___ping&reset=1`)
     r = await runImporter(env, [...argsBase])
     ok('異常が無い時は警告を出さない', !r.stdout.includes('▲ 集約GAS'), r.stdout)
+
+    console.log('── 11. アプリで直した取込行を戻さない・取り消さない（v4・C3）──')
+    // アプリからの変更＝ログイン中の端末（auth.uid() が入る）。uid は合成値
+    const APP_UID = '00000000-0000-4000-8000-000000000001'
+    const asApp = async (sql, params) => {
+      await db.query('begin')
+      try {
+        await db.query(`select set_config('request.jwt.claim.sub', $1, true)`, [APP_UID])
+        await db.query(sql, params)
+        await db.query('commit')
+      } catch (e) {
+        await db.query('rollback')
+        throw e
+      }
+    }
+    const staff01 = (await one(`select id from staff where name = '職員01'`)).id
+    const vKey = (d, n) => `vt:${d}|${n}`
+    // notes: edited_by を書く通常の更新／edited_by が空の更新（操作者不明＝record_history だけで分かる）
+    await asApp(`update notes set body = 'アプリで直した本文k2', edited_by = $1 where import_key = 'ev:k2'`, [staff01])
+    await asApp(`update notes set body = 'アプリで直した本文k3' where import_key = 'ev:k3'`)
+    await asApp(`update notes set color = 'blue' where import_key = 'ev:k6'`) // v4 で移行元から消える
+    // 修正前の取込が付けた損傷の再現: アプリで直した後に、取込が墓標を付けて edited_by を空にした行（k5 は v4 にも居る）
+    await asApp(`update notes set body = 'アプリで直した本文k5', edited_by = $1 where import_key = 'ev:k5'`, [staff01])
+    await db.query(`update notes set deleted_at = now(), import_tombstoned_at = now(), edited_by = null where import_key = 'ev:k5'`)
+    // vitals / meals（apply_cell_edits は取込行も id・枠で書き換える＝同じ形）
+    await asApp(`update vitals set temp = 36.9, edited_by = $1 where import_key = $2`, [staff01, vKey('2026-06-01', '利用者01')])
+    await asApp(`update vitals set pulse = 90 where import_key = $1`, [vKey('2026-06-01', '利用者02')]) // v4 で移行元から消える
+    await asApp(`update vitals set temp = 36.3, edited_by = $1 where import_key = $2`, [staff01, vKey('2026-06-01', '未知利用者99')]) // v5 でキーが変わる
+    await asApp(`update meals set main_amount = 3 where import_key = 'ml:2026-06-01|利用者03#breakfast'`) // v4 で移行元から消える
+    await asApp(`update meals set main_amount = 6, edited_by = $1 where import_key = 'ml:2026-06-02|利用者01#lunch'`, [staff01])
+    ok('前提: アプリの変更が changed_by_uid つきで記録されている',
+      (await num(`select count(*)::int as n from record_history where changed_by_uid is not null`)) === 9)
+
+    await fetch(`${fx.url}?action=___state&v=4`)
+    r = await runImporter(env, [...argsBase, '--execute'])
+    ok('v4 の実行が正常終了する', r.status === 0, r.stdout + r.stderr)
+    {
+      const k2 = await one(`select body, deleted_at from notes where import_key = 'ev:k2'`)
+      ok('★notes: アプリで直した本文を移行元の本文へ戻さない（edited_by あり）', k2.body === 'アプリで直した本文k2' && k2.deleted_at == null, JSON.stringify(k2))
+      const k3 = await one(`select body from notes where import_key = 'ev:k3'`)
+      ok('★notes: edited_by が空でも record_history でアプリの変更と分かれば戻さない', k3.body === 'アプリで直した本文k3', JSON.stringify(k3))
+      const k6 = await one(`select deleted_at, color from notes where import_key = 'ev:k6'`)
+      ok('★notes: 移行元で消えてもアプリで直した行は取り消さない', k6.deleted_at == null && k6.color === 'blue', JSON.stringify(k6))
+      const k5 = await one(`select body, deleted_at from notes where import_key = 'ev:k5'`)
+      ok('★notes: アプリで直した後に取込が消した行は、移行元に居ても復活・上書きしない', k5.body === 'アプリで直した本文k5' && k5.deleted_at != null, JSON.stringify(k5))
+      // 対照: アプリで触っていない取込行は従来どおり追従する
+      const k1 = await one(`select deleted_at from notes where import_key = 'ev:k1'`)
+      ok('対照: アプリで触っていない行は移行元で消えれば取り消される', k1.deleted_at != null, JSON.stringify(k1))
+      const k8 = await one(`select body from notes where import_key = 'ev:k8'`)
+      ok('対照: アプリで触っていない行は移行元の訂正が反映される', k8.body === '夕方に売店へ（移行元で訂正）', JSON.stringify(k8))
+
+      const v01 = await one(`select temp from vitals where import_key = $1`, [vKey('2026-06-01', '利用者01')])
+      ok('★vitals: アプリで直した値を移行元の値へ戻さない', Number(v01.temp) === 36.9, JSON.stringify(v01))
+      const v02 = await one(`select pulse, deleted_at from vitals where import_key = $1`, [vKey('2026-06-01', '利用者02')])
+      ok('★vitals: 移行元で消えてもアプリで直した行は取り消さない', v02.deleted_at == null && Number(v02.pulse) === 90, JSON.stringify(v02))
+      const m03 = await one(`select main_amount, deleted_at from meals where import_key = 'ml:2026-06-01|利用者03#breakfast'`)
+      ok('★meals: 移行元で消えてもアプリで直した行は取り消さない', m03.deleted_at == null && Number(m03.main_amount) === 3, JSON.stringify(m03))
+      const m01 = await one(`select main_amount from meals where import_key = 'ml:2026-06-02|利用者01#lunch'`)
+      ok('★meals: アプリで直した値を移行元の値へ戻さない', Number(m01.main_amount) === 6, JSON.stringify(m01))
+
+      const rows = (await db.query(`select source, day::text, src_rows, inserted, updated, skipped, native_skip, unmatched from import_days order by source, day`)).rows
+      for (const row of rows) {
+        ok(`恒等式が成立（v4・${row.source} ${row.day}）`,
+          row.src_rows === row.inserted + row.updated + row.skipped + row.native_skip + row.unmatched, JSON.stringify(row))
+      }
+      const e1 = rows.find((x) => x.source === 'events' && x.day === '2026-06-01')
+      ok('events 6/1: アプリで直した3行（k2・k3・k5）が native_skip', e1.native_skip === 3 && e1.updated === 0, JSON.stringify(e1))
+      const e2 = rows.find((x) => x.source === 'events' && x.day === '2026-06-02')
+      ok('events 6/2: 触っていない k8 は updated', e2.updated === 1 && e2.native_skip === 0, JSON.stringify(e2))
+      const m1 = rows.find((x) => x.source === 'measures' && x.day === '2026-06-01')
+      ok('measures 6/1: アプリで直した vitals 2行が native_skip', m1.native_skip === 2 && m1.updated === 0, JSON.stringify(m1))
+      const m2 = rows.find((x) => x.source === 'measures' && x.day === '2026-06-02')
+      ok('measures 6/2: アプリ入力1＋アプリで直した食1が native_skip', m2.native_skip === 2 && m2.updated === 0, JSON.stringify(m2))
+      ok('保護の件数が報告に出る',
+        r.stdout.includes('アプリで直した取込行の保護: 戻さなかった 6 件 / 移行元で消えても残した notes 1 / vitals 1 / meals 1'), r.stdout)
+      ok('対照の取り消しは追従の件数に出る', /移行元で消えた行への追従: notes 1 \/ vitals 0 \/ meals 0/.test(r.stdout), r.stdout)
+    }
+
+    console.log('── 12. v4 後の再実行も冪等・保護は続く ──')
+    r = await runImporter(env, [...argsBase, '--execute'])
+    {
+      const t = parseTotals(r.stdout)
+      ok('再実行で追加0・更新0', t.events?.ins === 0 && t.events?.upd === 0 && t.measures?.ins === 0 && t.measures?.upd === 0, r.stdout)
+      ok('2度目もアプリで直した本文のまま', (await one(`select body from notes where import_key = 'ev:k2'`)).body === 'アプリで直した本文k2')
+      ok('2度目も取り消さない', (await one(`select deleted_at from notes where import_key = 'ev:k6'`)).deleted_at == null)
+    }
+
+    console.log('── 13. 移行元でキーだけ変わった枠（v5）──')
+    await fetch(`${fx.url}?action=___state&v=5`)
+    r = await runImporter(env, [...argsBase, '--execute'])
+    ok('v5 の実行が正常終了する（枠の取り合いで窓が落ちない）', r.status === 0, r.stdout + r.stderr)
+    {
+      const live = (await db.query(
+        `select v.import_key, v.temp from vitals v join residents r2 on r2.id = v.resident_id
+          where r2.source_id = 'R04' and v.measured_on = '2026-06-01' and v.kind = 'routine' and v.deleted_at is null`,
+      )).rows
+      ok('★枠の行はアプリで直した1行のまま（取り消さず・新キーを重ねない）',
+        live.length === 1 && live[0].import_key === vKey('2026-06-01', '未知利用者99') && Number(live[0].temp) === 36.3, JSON.stringify(live))
+      const m1 = await one(`select src_rows, inserted, updated, skipped, native_skip, unmatched from import_days where source = 'measures' and day = '2026-06-01'`)
+      ok('measures 6/1: 新キーの候補は native_skip（恒等式も成立）',
+        m1.native_skip === 2 && m1.src_rows === m1.inserted + m1.updated + m1.skipped + m1.native_skip + m1.unmatched, JSON.stringify(m1))
+    }
+    r = await runImporter(env, [...argsBase, '--execute'])
+    {
+      const t = parseTotals(r.stdout)
+      ok('v5 の再実行も正常終了・追加0・更新0',
+        r.status === 0 && t.events?.ins === 0 && t.events?.upd === 0 && t.measures?.ins === 0 && t.measures?.upd === 0, r.stdout + r.stderr)
+    }
 
     // 報告ファイルが書かれていること（氏名を含むのでリポジトリ外に置く仕様）
     const reports = readdirSync(reportDir).filter((f) => f.endsWith('.md'))

@@ -27,6 +27,7 @@
 //   取込対象行数 = inserted + updated + skipped + native_skip + unmatched
 //     skipped     = 変更なし ＋ こちら側で削除済み（墓標）＋ 形式不正
 //     native_skip = 同じ枠にアプリ入力（import_key無し）の行が既にある → 触らない
+//                   ＋ アプリで直した取込行に差分が来た → 戻さない（下の「アプリで直した取込行」）
 //     unmatched   = 利用者を特定できない → 取り込まない（名寄せ表で後から再実行できる）
 //   ※「取込対象行数」= 空行（全値null・flags無し）を除いた行数。食事は1食=1行に展開後。
 //     import_days.src_rows にはこの値を記録する。
@@ -36,11 +37,21 @@
 //   なので構造的に触れない。vitals/meals は同じ枠（利用者×日×食）にアプリ入力行が
 //   あれば native_skip として飛ばす。
 //
+// アプリで直した取込行（2026-09-29 本人裁定 C3「アプリで触った行は取込が戻さない」）:
+//   取込行（import_key あり）でも、職員がアプリで一度でも触った行は取込の持ち物から外す。
+//   判定は「edited_by が null でない」または「record_history にその行の履歴があり
+//   changed_by_uid が null でない（ログイン中の端末＝アプリからの変更）」。
+//   該当行には 差分の書き戻し・墓標からの復活・移行元で消えた時の取り消し のどれも行わない。
+//   差分の書き戻しを見送った件数は native_skip（内訳 app_protected）、取り消しを見送った件数は
+//   恒等式の外（reconcileKept）で数える。notes・vitals・meals の3表とも同じ規則。
+//   ★アプリの更新経路（apply_cell_edits・申し送りの更新）は取込行も枠や id で書き換えるため、
+//     これが無いと毎時の取込が職員の訂正を移行元の値へ戻していた。
+//
 // 移行元側の削除への追従（source 正本の原則）:
 //   移行元は行を消さず墓標（deletedAt）を立て、APIは墓標行を**返さない**。
 //   そのため「取込済みの日」について、こちらの取込行のうち今回のAPI応答に無い key の行へ
 //   soft delete（deleted_at）を付ける。恒等式の外側で数え、報告に明記する。
-//   ★アプリ入力（import_key null）の行はこの対象にならない。
+//   ★アプリ入力（import_key null）の行と、アプリで直した取込行はこの対象にならない。
 //
 // after16（日勤の16時区切り）:
 //   1日につき区切りの行番号1つを apiAfter16 から取り、events の row との大小で判定する。
@@ -651,9 +662,12 @@ function sameValue(a, b, col) {
 async function applyCandidates(db, opts) {
   const { table, candidates: rawCandidates, compareCols, insertCols, execute, nativeCheck, frameOf } = opts
   // revived は updated の内訳（恒等式には updated として入る＝式は変わらない）
-  const counts = { inserted: 0, updated: 0, unchanged: 0, tomb_skip: 0, native_skip: 0, dup_skip: 0, revived: 0 }
+  // app_protected は native_skip の内訳（アプリで直した取込行に差分が来ても戻さなかった件数）
+  const counts = { inserted: 0, updated: 0, unchanged: 0, tomb_skip: 0, native_skip: 0, dup_skip: 0, revived: 0, app_protected: 0 }
   const keys = rawCandidates.map((c) => c.row.import_key)
   const existing = await selectExisting(db, table, compareCols, keys)
+  // アプリで直した取込行（C3）。id は node-postgres が文字列で返すので String で揃えて引く
+  const appTouched = await selectAppTouched(db, table, [...existing.values()].map((r) => r.id))
 
   /**
    * 同じ枠（利用者×日、食事は＋食）に候補が2件以上来たら1件に絞る。
@@ -741,6 +755,14 @@ async function applyCandidates(db, opts) {
         counts.tomb_skip++
         continue
       }
+      // アプリで直した後に取込が付けた墓標（C3 修正前の取込が付けたもの）は、復活させず触らない。
+      // 復活させると移行元の値で職員の訂正を上書きするため。残っている行の扱いは人が決める
+      // （点検 SQL で「アプリの変更の後に取込の変更」が来た行を洗い出す）
+      if (appTouched.has(String(ex.id))) {
+        counts.native_skip++
+        counts.app_protected++
+        continue
+      }
       const revDiff = colsToCompare.filter((col) => !sameValue(ex[col], c.row[col], col))
       toUpdate.push({ id: ex.id, row: c.row, diff: revDiff, revive: true })
       counts.updated++
@@ -751,6 +773,12 @@ async function applyCandidates(db, opts) {
     const diff = colsToCompare.filter((col) => !sameValue(ex[col], c.row[col], col))
     if (diff.length === 0) {
       counts.unchanged++
+      continue
+    }
+    // アプリで直した取込行は移行元の値へ戻さない（C3）
+    if (appTouched.has(String(ex.id))) {
+      counts.native_skip++
+      counts.app_protected++
       continue
     }
     toUpdate.push({ id: ex.id, row: c.row, diff, revive: false })
@@ -795,15 +823,24 @@ async function applyCandidates(db, opts) {
       // edited_by を残すと、取込の変更がその職員の操作として記録されるため明示的に空にする
       if (await hasEditedBy(db, table)) sets.push('edited_by = null')
       params.push(u.id)
-      await db.query(`update ${table} set ${sets.join(', ')} where id = $${n} and ${guard}`, params)
+      // SELECT から UPDATE までの間に職員がアプリで触った時も戻さない（0行更新で素通りする）
+      const appGuard = await appTouchedCond(db, table, table)
+      await db.query(`update ${table} set ${sets.join(', ')} where id = $${n} and ${guard} and not ${appGuard}`, params)
     }
   }
   return counts
 }
 
-/** vitals: 同じ（利用者×日×定時）をアプリ入力が先に持っていれば native_skip */
+/**
+ * vitals: 同じ（利用者×日×定時）をアプリ入力が先に持っていれば native_skip。
+ * アプリで直した取込行（別の import_key）が枠を持っている時も同じ扱い（C3）。
+ * ★移行元でキーが変わった時（氏名表記の訂正等）、旧キーのアプリで直した行は取り消さずに残すので、
+ *   ここで枠を「取られている」としないと新キーの INSERT が uq_vitals_routine_day に当たり、
+ *   窓ごと rollback が毎回続く。
+ */
 async function nativeCheckVitals(db, candidates) {
   const taken = new Set()
+  const touched = await appTouchedCond(db, 'vitals', 'v')
   for (let i = 0; i < candidates.length; i += BATCH) {
     const chunk = candidates.slice(i, i + BATCH)
     const r = await db.query(
@@ -811,7 +848,7 @@ async function nativeCheckVitals(db, candidates) {
          from vitals v
          join unnest($1::bigint[], $2::date[]) as t(rid, mon)
            on v.resident_id = t.rid and v.measured_on = t.mon
-        where v.kind = 'routine' and v.deleted_at is null and v.import_key is null`,
+        where v.kind = 'routine' and v.deleted_at is null and (v.import_key is null or ${touched})`,
       [chunk.map((c) => c.row.resident_id), chunk.map((c) => c.row.measured_on)],
     )
     const hit = new Set(r.rows.map((x) => `${x.resident_id}|${x.measured_on}`))
@@ -822,9 +859,10 @@ async function nativeCheckVitals(db, candidates) {
   return taken
 }
 
-/** meals: 同じ（利用者×日×食）をアプリ入力が先に持っていれば native_skip */
+/** meals: 同じ（利用者×日×食）をアプリ入力（またはアプリで直した取込行）が先に持っていれば native_skip（vitals と同じ理由） */
 async function nativeCheckMeals(db, candidates) {
   const taken = new Set()
+  const touched = await appTouchedCond(db, 'meals', 'm')
   for (let i = 0; i < candidates.length; i += BATCH) {
     const chunk = candidates.slice(i, i + BATCH)
     const r = await db.query(
@@ -832,7 +870,7 @@ async function nativeCheckMeals(db, candidates) {
          from meals m
          join unnest($1::bigint[], $2::date[], $3::text[]) as t(rid, mon, slot)
            on m.resident_id = t.rid and m.meal_on = t.mon and m.meal_slot = t.slot
-        where m.deleted_at is null and m.import_key is null`,
+        where m.deleted_at is null and (m.import_key is null or ${touched})`,
       [
         chunk.map((c) => c.row.resident_id),
         chunk.map((c) => c.row.meal_on),
@@ -865,8 +903,76 @@ async function hasEditedBy(db, table) {
 }
 
 /**
+ * 変更の記録（record_history・0010）をこの接続で読めるか。1回だけ調べる。
+ * 表が無い DB（0010 未適用）は false。表があっても、この接続のロールに select 権限が無い・
+ * RLS で行が見えない（所有者でも BYPASSRLS でもない）時は false にして警告を1回出す
+ * （★読めないまま exists を投げると、権限エラーで窓ごと rollback が毎回続く／
+ *   RLS で黙って0件になり保護が効かない、のどちらかになるため）。
+ * その場合のアプリで直した行の判定は edited_by だけで行う。
+ */
+let historyReadable = null
+async function hasHistory(db) {
+  if (historyReadable != null) return historyReadable
+  const r = await db.query(
+    `select c.relrowsecurity as rls, c.relforcerowsecurity as force_rls,
+            pg_has_role(current_user, c.relowner, 'USAGE') as owner,
+            (ro.rolsuper or ro.rolbypassrls) as bypass,
+            has_table_privilege(current_user, c.oid, 'SELECT') as can_select
+       from pg_class c
+       join pg_roles ro on ro.rolname = current_user
+      where c.oid = to_regclass('public.record_history')`,
+  )
+  const x = r.rows[0]
+  if (x == null) {
+    historyReadable = false // 0010 未適用
+  } else {
+    historyReadable = x.can_select === true && (x.rls !== true || x.bypass === true || (x.owner === true && x.force_rls !== true))
+    if (!historyReadable) {
+      console.log('▲ 変更の記録（record_history）をこの接続では読めません。アプリで直した取込行の判定は edited_by だけで行います')
+    }
+  }
+  return historyReadable
+}
+
+/**
+ * 「アプリで直した取込行」の条件式（SQL 断片）。alias はその表の別名（update では表名）。
+ *   ・edited_by が null でない（アプリは更新・削除のたびに操作した職員を書く）
+ *   ・record_history にその行の履歴があり changed_by_uid が null でない
+ *     （ログイン中の端末＝アプリからの変更。操作者が分からず edited_by を null で送った更新や、
+ *       あとで取込が edited_by を空にした行もここで拾える。idx_record_history_row が効く）
+ * 判定材料が無い DB（0010 未適用）では 'false'＝従来どおり。table は内部の定数だけを渡す。
+ */
+async function appTouchedCond(db, table, alias) {
+  const parts = []
+  if (await hasEditedBy(db, table)) parts.push(`${alias}.edited_by is not null`)
+  if (await hasHistory(db)) {
+    parts.push(
+      `exists (select 1 from record_history h
+                where h.table_name = '${table}' and h.row_id = ${alias}.id and h.changed_by_uid is not null)`,
+    )
+  }
+  return parts.length > 0 ? `(${parts.join(' or ')})` : 'false'
+}
+
+/** ids のうちアプリで直した取込行の id（文字列）の集合 */
+async function selectAppTouched(db, table, ids) {
+  const out = new Set()
+  if (ids.length === 0) return out
+  const cond = await appTouchedCond(db, table, 't')
+  if (cond === 'false') return out
+  for (let i = 0; i < ids.length; i += BATCH) {
+    const chunk = ids.slice(i, i + BATCH)
+    const r = await db.query(`select t.id from ${table} t where t.id = any($1::bigint[]) and ${cond}`, [chunk])
+    for (const row of r.rows) out.add(String(row.id))
+  }
+  return out
+}
+
+/**
  * 移行元の削除への追従: 取込済みの日の取込行のうち、今回の応答に key が無いものへ
- * soft delete を付ける。恒等式の外。返り値は消した件数。
+ * soft delete を付ける。恒等式の外。
+ * アプリで直した取込行は取り消さない（C3）。
+ * 返り値: { tombstoned: 消した件数, kept: アプリで直した行なので消さずに残した件数 }
  */
 async function reconcileTombstones(db, table, dateCol, prefix, day, liveKeys, execute, extraWhere = '') {
   const r = await db.query(
@@ -875,18 +981,22 @@ async function reconcileTombstones(db, table, dateCol, prefix, day, liveKeys, ex
     [day, `${prefix}%`],
   )
   const gone = r.rows.filter((row) => !liveKeys.has(row.import_key))
-  if (execute && gone.length > 0) {
+  const touched = await selectAppTouched(db, table, gone.map((g) => g.id))
+  const target = gone.filter((g) => !touched.has(String(g.id)))
+  if (execute && target.length > 0) {
     // ★「取込が付けた墓標」であることを残す。これが無いと、移行元に行が戻った時に
     //   職員の削除と区別できず復活させられない（2026-09-01 追加）
     // 変更の記録（0010）: 取込が付けた取り消しは「変えた職員」を空（null）にする（上の update と同じ理由）
     const editedBy = (await hasEditedBy(db, table)) ? ', edited_by = null' : ''
+    // SELECT から UPDATE までの間に職員がアプリで触った行も消さない
+    const appGuard = await appTouchedCond(db, table, table)
     await db.query(
       `update ${table} set deleted_at = now(), import_tombstoned_at = now()${editedBy}
-        where id = any($1) and deleted_at is null`,
-      [gone.map((g) => g.id)],
+        where id = any($1) and deleted_at is null and not ${appGuard}`,
+      [target.map((g) => g.id)],
     )
   }
-  return gone.length
+  return { tombstoned: target.length, kept: gone.length - target.length }
 }
 
 // ---------------------------------------------------------------------
@@ -938,6 +1048,8 @@ async function main() {
     unmatchedReporters: new Map(),
     after16Unknown: [],
     reconciled: { notes: 0, vitals: 0, meals: 0 },
+    /** 移行元で消えたが、アプリで直した取込行なので取り消さずに残した件数（C3・恒等式の外） */
+    reconcileKept: { notes: 0, vitals: 0, meals: 0 },
     emptyVitalsRows: 0,
     /** 同じ枠に移行元の行が2つ以上あって1件に絞った記録（移行元の掃除が要る合図） */
     duplicateFrames: [],
@@ -1062,6 +1174,7 @@ async function main() {
       const snapshot = {
         days: JSON.parse(JSON.stringify(report.days)),
         reconciled: { ...report.reconciled },
+        reconcileKept: { ...report.reconcileKept },
         duplicateFrames: report.duplicateFrames.length,
         unmatchedNames: new Map(report.unmatchedNames),
         unmatchedReporters: new Map(report.unmatchedReporters),
@@ -1083,7 +1196,11 @@ async function main() {
           //   窓ごと落ちる（2026-08-29 レビューで検出）。
           //   生存集合はこの日の全 key（unmatched/invalid/empty も含む＝照合が壊れた時に消さない）
           const liveKeys = new Set(built.map((b) => b.key))
-          report.reconciled.notes += await reconcileTombstones(db, 'notes', 'note_on', KEY_EV, day, liveKeys, args.execute)
+          {
+            const rt = await reconcileTombstones(db, 'notes', 'note_on', KEY_EV, day, liveKeys, args.execute)
+            report.reconciled.notes += rt.tombstoned
+            report.reconcileKept.notes += rt.kept
+          }
 
           const c = await applyCandidates(db, {
             table: 'notes',
@@ -1134,10 +1251,14 @@ async function main() {
           const vLive = new Set(vBuilt.map((b) => b.key))
           const mLive = new Set(mBuilt.map((b) => b.key))
           if (vitalDates.has(day)) {
-            report.reconciled.vitals += await reconcileTombstones(db, 'vitals', 'measured_on', KEY_VT, day, vLive, args.execute, "and kind = 'routine'")
+            const rt = await reconcileTombstones(db, 'vitals', 'measured_on', KEY_VT, day, vLive, args.execute, "and kind = 'routine'")
+            report.reconciled.vitals += rt.tombstoned
+            report.reconcileKept.vitals += rt.kept
           }
           if (mealDates.has(day)) {
-            report.reconciled.meals += await reconcileTombstones(db, 'meals', 'meal_on', KEY_ML, day, mLive, args.execute)
+            const rt = await reconcileTombstones(db, 'meals', 'meal_on', KEY_ML, day, mLive, args.execute)
+            report.reconciled.meals += rt.tombstoned
+            report.reconcileKept.meals += rt.kept
           }
 
           const onDup = (kept, dropped) =>
@@ -1174,7 +1295,7 @@ async function main() {
           const idOk = srcRows === inserted + updated + skipped + nativeSkip + unmatched
           if (!idOk) throw new Error(`恒等式が破れました（measures ${day}: src=${srcRows} ins=${inserted} upd=${updated} skip=${skipped} native=${nativeSkip} unm=${unmatched}）`)
           report.days[day] = report.days[day] ?? {}
-          report.days[day].measures = { srcRows, inserted, updated, skipped, native_skip: nativeSkip, unmatched, revived: cv.revived + cm.revived, vitals: cv, meals: cm }
+          report.days[day].measures = { srcRows, inserted, updated, skipped, native_skip: nativeSkip, unmatched, revived: cv.revived + cm.revived, app_protected: cv.app_protected + cm.app_protected, vitals: cv, meals: cm }
           if (args.execute) {
             await db.query(
               `insert into import_days (source, day, src_rows, inserted, updated, skipped, native_skip, unmatched)
@@ -1194,6 +1315,7 @@ async function main() {
         // DBを巻き戻したので報告の計上も巻き戻す（報告とDBを食い違わせない）
         report.days = snapshot.days
         report.reconciled = snapshot.reconciled
+        report.reconcileKept = snapshot.reconcileKept
         report.duplicateFrames.length = snapshot.duplicateFrames
         report.unmatchedNames = snapshot.unmatchedNames
         report.unmatchedReporters = snapshot.unmatchedReporters
@@ -1213,7 +1335,7 @@ async function main() {
   // --- 報告 ---
   const totals = { events: zero(), measures: zero() }
   function zero() {
-    return { srcRows: 0, inserted: 0, updated: 0, skipped: 0, native_skip: 0, unmatched: 0, revived: 0 }
+    return { srcRows: 0, inserted: 0, updated: 0, skipped: 0, native_skip: 0, unmatched: 0, revived: 0, app_protected: 0 }
   }
   for (const d of Object.values(report.days)) {
     for (const src of ['events', 'measures']) {
@@ -1300,6 +1422,16 @@ async function main() {
     // 取込が消した行が移行元に戻ってきて復活した件数。0 なら出さない（普段は静かにする）
     const rev = (totals.events?.revived ?? 0) + (totals.measures?.revived ?? 0)
     if (rev > 0) console.log(`  移行元に戻った行の復活: ${rev} 件（取込が消した行のみ。職員が消した記録は戻しません）`)
+  }
+  {
+    // アプリで直した取込行を守った件数（C3）。0 なら出さない
+    const prot = (totals.events?.app_protected ?? 0) + (totals.measures?.app_protected ?? 0)
+    const k = report.reconcileKept
+    if (prot + k.notes + k.vitals + k.meals > 0) {
+      console.log(
+        `  アプリで直した取込行の保護: 戻さなかった ${prot} 件 / 移行元で消えても残した notes ${k.notes} / vitals ${k.vitals} / meals ${k.meals}`,
+      )
+    }
   }
   if (report.errors.length > 0) {
     console.log(`  ▲ 取り込めなかった窓: ${report.errors.length} 件（報告ファイル参照）`)
@@ -1422,6 +1554,19 @@ function renderMd(report, totals) {
     L.push('')
     L.push(`notes ${rec.notes} / vitals ${rec.vitals} / meals ${rec.meals}`)
     L.push('')
+  }
+  {
+    const prot = (totals.events?.app_protected ?? 0) + (totals.measures?.app_protected ?? 0)
+    const k = report.reconcileKept
+    if (prot + k.notes + k.vitals + k.meals > 0) {
+      L.push('## アプリで直した取込行の保護（移行元の値へ戻さない・取り消さない）')
+      L.push('')
+      L.push('職員がアプリで一度でも直した取込行は、移行元の値で上書きせず、移行元で消えても取り消していません。')
+      L.push('')
+      L.push(`- 移行元と値が違ったが戻さなかった: ${prot} 件（合計表の「アプリ入力保護」に含む）`)
+      L.push(`- 移行元で消えたが残した: notes ${k.notes} / vitals ${k.vitals} / meals ${k.meals}`)
+      L.push('')
+    }
   }
   if (report.errors.length > 0) {
     L.push('## 取り込めなかった窓（rollback 済み・再実行で取り直せる）')
