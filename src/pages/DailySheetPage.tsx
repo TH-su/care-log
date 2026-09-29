@@ -5624,14 +5624,14 @@ function OutingBlock({
             {/* 空欄のままの行には案内も取り消しも出さない（実物と同じ「ただの空行」にする）。
                 書き始めた行・送信待ちの行にだけ、次にどうすればよいかを1行で添える */}
             {dirty && (
-              <p className="flex flex-wrap items-center gap-gap px-1 text-ink2">
+              <p className="flex flex-wrap items-center gap-gap px-1 text-ink2 print:!static print:!max-w-none" style={NARROW_STICKY}>
                 {d.locked ? (
-                  <span className="flex-1 text-warn">
+                  <span className="flex-auto text-warn">
                     <span aria-hidden="true">▲ </span>
                     {MSG_LOCKED_DELETE}
                   </span>
                 ) : !ready ? (
-                  <span className="flex-1">
+                  <span className="flex-auto">
                     <span aria-hidden="true">ⓘ </span>
                     氏名と、行き先・時刻・付添のいずれかを記入すると「登録」を押せます（押すまで保存しません）
                   </span>
@@ -5974,14 +5974,14 @@ function FeverBlock({
             </Row>
             {/* 空欄のままの行には案内も取り消しも出さない（実物と同じ「ただの空行」にする） */}
             {dirty && (
-              <p className="flex flex-wrap items-center gap-gap px-1 text-ink2">
+              <p className="flex flex-wrap items-center gap-gap px-1 text-ink2 print:!static print:!max-w-none" style={NARROW_STICKY}>
                 {d.locked ? (
-                  <span className="flex-1 text-warn">
+                  <span className="flex-auto text-warn">
                     <span aria-hidden="true">▲ </span>
                     {MSG_LOCKED_DELETE}
                   </span>
                 ) : (
-                  <span className="flex-1">
+                  <span className="flex-auto">
                     <span aria-hidden="true">ⓘ </span>
                     {d.residentId == null
                       ? '氏名を選び、1回目の値を入れると保存します'
@@ -6193,14 +6193,14 @@ function SymptomBlock({
             </Row>
             {/* 空欄のままの行には案内も取り消しも出さない（実物と同じ「ただの空行」にする） */}
             {dirty && (
-              <p className="flex flex-wrap items-center gap-gap px-1 text-ink2">
+              <p className="flex flex-wrap items-center gap-gap px-1 text-ink2 print:!static print:!max-w-none" style={NARROW_STICKY}>
                 {d.locked ? (
-                  <span className="flex-1 text-warn">
+                  <span className="flex-auto text-warn">
                     <span aria-hidden="true">▲ </span>
                     {MSG_LOCKED_DELETE}
                   </span>
                 ) : d.residentId == null ? (
-                  <span className="flex-1">
+                  <span className="flex-auto">
                     <span aria-hidden="true">ⓘ </span>氏名を選び、症状か値を入れると保存します
                   </span>
                 ) : null}
