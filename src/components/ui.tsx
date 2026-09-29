@@ -475,13 +475,15 @@ export function useToast(): { toast: ReactNode; show: (msg: string, undo?: () =>
           aria-live="polite"
           className={
             state
-              ? 'pointer-events-auto flex w-full max-w-md items-center gap-gap rounded-lg border border-border-strong bg-surface p-3'
+              ? 'pointer-events-auto flex w-full max-w-md flex-wrap items-center gap-gap rounded-lg border border-border-strong bg-surface p-3'
               : ''
           }
         >
           {state ? (
             <>
-              <span className="flex-1 text-base text-ink">{state.msg}</span>
+              {/* 本文は最低でも約10文字分（入りきらなければ1行いっぱい）の幅を持つ。狭い画面・大きい文字では
+                  ボタンが次の行へ回り、本文が1文字ずつ縦に並ばない。広い画面では従来どおり1行に並ぶ */}
+              <span className="min-w-[min(10em,100%)] flex-1 text-base text-ink">{state.msg}</span>
               {state.undo ? (
                 <button
                   type="button"
