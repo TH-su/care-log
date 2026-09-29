@@ -25,7 +25,7 @@ import {
   StaffPickerModal,
   useToast,
 } from '../components/ui'
-import { resolveActor, touchActivity } from '../lib/actor'
+import { touchActivity } from '../lib/actor'
 import {
   DbError,
   fetchResidents,
@@ -458,8 +458,8 @@ export function NoteFormPage() {
 
         if (!initedRef.current) {
           initedRef.current = true
-          const actor = resolveActor(safeS)
-          const base = defaultForm(actor?.id ?? null, new Date())
+          // 記入者は空欄で始める（本人が選ぶまで操作者を入れない・2026-09-29 本人裁定）
+          const base = defaultForm(null, new Date())
           const saved = loadDraft()
           const draft = saved?.form ?? null
           if (saved) setRestoreAge(draftAgeLabel(saved.at, Date.now()))
@@ -473,7 +473,8 @@ export function NoteFormPage() {
               ...draft,
               targetPicked: draft.targetPicked && residentOk,
               residentId: residentOk ? draft.residentId : null,
-              reporterId: reporterOk ? draft.reporterId : base.reporterId,
+              // 名簿に無い（退職・削除された）職員は、操作者に置き換えず空にする（本人が選び直す・2026-09-29 本人裁定）
+              reporterId: reporterOk ? draft.reporterId : null,
             })
             setRestorePrompt(true)
           } else {
@@ -608,10 +609,10 @@ export function NoteFormPage() {
     clearDraft()
     setErrors({})
     setFormError(null)
-    setForm(defaultForm(resolveActor(staff)?.id ?? null, new Date()))
+    setForm(defaultForm(null, new Date())) // 記入者は空欄に戻す（2026-09-29 本人裁定）
     setPhraseUndo([]) // 破棄した本文へ「1つ戻す」で戻れないようにする
     show('書きかけを破棄しました')
-  }, [staff, show])
+  }, [show])
 
   /** 入力解禁フラグだけを取り直す（フラグを観測できなかった時の再確認） */
   const refreshGate = useCallback(async () => {
@@ -756,9 +757,10 @@ export function NoteFormPage() {
           return
         }
         clearDraft() // 送信済み（端末に残せた退避を含む）＝下書きの役目は終わり（§6.5）
-        // 続けて書けるように、日付・勤務帯・記入者は残し、対象と内容だけ初期化する
+        // 続けて書けるように、日付・勤務帯は残し、対象と内容を初期化する。記入者は空欄に戻す（前の記入者を
+        // 引き継がない＝勝手に入らない・2026-09-29 本人裁定）
         setForm({
-          ...defaultForm(form.reporterId, now),
+          ...defaultForm(null, now),
           noteOn: form.noteOn,
           shift: form.shift,
         })

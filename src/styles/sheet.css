@@ -881,6 +881,48 @@
 .sheet-dense {
   --sheet-hit-pad: 0px;
 }
+/* 日報では拡張量が 0 なので、当たり判定の疑似要素は要素と同じ大きさ＝働いていない。
+   1日10日表示で約2,900個の絶対配置の箱になり、iPhone の描画の前処理（PrePaint）を重くしていたので出さない
+   （当たり判定は要素そのもので変わらない・2026-09-29 実測）。.sheet-table（バイタル一覧・食事一覧）は変えない */
+.sheet-dense .sheet-hit::before {
+  content: none;
+}
+
+/* 日報の画面では、main の下余白を「画面下のメインナビの高さ＋小さな余白」にする（B1 の余白・2026-09-29）。
+   --dsheet-below は日報が実測して書く（ナビの高さは文字の大きさ・安全域で変わる）。枠の高さの上限
+   （.sheet-frame-fit）はこの下余白を差し引くので、表が画面の下端（ナビの上）まで広がる。
+   日報の枠（.dsheet-frame）がある時だけ＝バイタル一覧など他の画面の余白は変えない */
+main:has(.dsheet-frame) {
+  padding-bottom: var(--dsheet-below, 6rem);
+}
+
+/* 画面の外にある日の表の中身は描画を省く（E・2026-09-29）。入れ物（.dsheet-body）は日ごとの表の中身だけを包み、
+   日付の行（上に貼り付く）・日の上の窓（選択画面・確認・〔くらべて選ぶ〕）はこの外に置く。
+   行の中から開く窓（詳細）と色の一覧は入れ物の中にあるので、開いている間はこの入れ物の省略を外す
+   （content-visibility: auto は封じ込め（contain）を伴い、固定配置の窓の基準が入れ物になって切り取られるため）。
+   iOS 18 未満など対応しない環境では無視されるだけ＝従来どおり全部を描く。印刷では全部を描く */
+.dsheet-body {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 2000px;
+}
+.dsheet-body:has([role='dialog']),
+.dsheet-body:has([aria-expanded='true']) {
+  content-visibility: visible;
+}
+@media print {
+  .dsheet-body {
+    content-visibility: visible;
+  }
+}
+
+/* 日報の印刷では、下部のメインナビ（fixed）を紙に出さない（2026-09-29 B1）。日報が枠の中でスクロールするように
+   なって画面がスクロールしなくなり、固定のナビが各ページの下端に重なって最後の行を隠すようになったため。
+   日報の画面を印刷する時だけ（section.dsheet-day がある時）に限る＝他の画面の印刷は変えない */
+@media print {
+  body:has(section.dsheet-day) nav[aria-label='メインナビゲーション'] {
+    display: none;
+  }
+}
 
 /* ── フロアの切れ目（食事一覧・2026-08-29 指示）────────────────
    「全」表示のとき、1階と2階がひと続きに見えて取り違えのもとになる。

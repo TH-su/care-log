@@ -53,7 +53,7 @@
 //     各セルは幅を持つ入れ物で包んでから SheetCell を置く。
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, MutableRefObject, ReactNode } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
 import {
   ConfirmDialog,
   ErrorBlock,
@@ -359,6 +359,12 @@ const LEAVE_NOTES_BODY =
 
 /** 未保存の下書きの種類（'notes'＝申し送りの書きかけだけ／'input'＝バイタル・外出などの入力がある） */
 type DirtyKind = 'notes' | 'input'
+
+/** 表の枠の下端と画面下のメインナビの間の余白（px・B1 の余白） */
+const FRAME_BOTTOM_GAP_PX = 8
+
+/** 位置合わせ（scrollToDay）の直後に届くスクロールを自分のものとみなす時間（ms・次のフレームまで＋余裕） */
+const SELF_SCROLL_GRACE_MS = 120
 
 /** 送信待ちの登録が拒否・競合で止まった行の一言（一覧で選ぶよう案内する。F1） */
 const MSG_REG_STOPPED =
@@ -1567,6 +1573,8 @@ function HeadCell({ width, grow = false, children }: { width?: string; grow?: bo
  *   書いてあり、1行に切り詰めると対処手順が画面から消える
  * - 折り返す幅は日報の枠の内幅（NARROW_STICKY）。器は表の行の幅なので、狭い画面・大きい文字では
  *   枠の外まで1行で伸びて横スクロールが要った（375px・文字200%）。印刷では従来どおり行の幅で折り返す
+ * - sticky にするのは文言がある時だけ（空の行まで sticky にすると、iPhone の WebKit では行の数だけ合成レイヤーが
+ *   でき、横スクロールが重くなる＝実測で sticky 要素 11→506・2026-09-29）。空の時は高さ0の常設の読み上げ枠のまま
  */
 function StatusText({ status }: { status?: RowStatus }) {
   const cls = !status
@@ -1581,7 +1589,7 @@ function StatusText({ status }: { status?: RowStatus }) {
       role="status"
       aria-live="polite"
       className={`block whitespace-normal break-words print:!static print:!max-w-none ${cls}`}
-      style={NARROW_STICKY}
+      style={status ? NARROW_STICKY : undefined}
     >
       {status ? status.text : ''}
     </span>
@@ -1830,79 +1838,6 @@ interface DaySheetProps {
  * （利用者・職員・施設名・入力解禁フラグ・変更通知・トースト・取得のキャッシュ）。
  * 1日ぶんの中身と保存は DaySheet が持つ＝10日表示でも1日表示でも同じ部品を並べるだけになる。
  */
-/**
- * 日付の行（DayHeader の1段目・data-day-bar）を、その日の枠（section.dsheet-day）を縦にスクロールしている間、
- * アプリのヘッダの下端に貼り付ける（2026-09-24 本人指示「日付の行はスクロールに付いて動き、常に上部に表示され、
- * 次の日付に切り替わる際に非表示になる」）。
- * - シートは横スクロールの枠（SheetFrame・overflow-x:auto）の中にあり、overflow-x が auto だと overflow-y も auto になる。
- *   枠そのものは縦にスクロールしない（ページが縦にスクロールする）ので、CSS の position: sticky（top）は枠を基準にして
- *   一度も効かない（実測: 枠の scrollHeight = clientHeight）。そのため縦だけこの関数で位置を決める（横は CSS の sticky）
- * - 位置 = max(0, ヘッダの下端 − 行の本来の位置)。ただし行が自分の日の枠の下端を越えない＝次の日の枠が上がると押し出される
- * - 動かすのは transform（--day-bar-y）だけ＝行の高さ・他の行の位置は変えない。印刷の前には元の位置へ戻す
- */
-function useDayBarPin(dayElsRef: MutableRefObject<Map<string, HTMLElement>>, days: string[]) {
-  useEffect(() => {
-    let raf = 0
-    /** 上に固定されたアプリのヘッダの下端（無ければ画面の上端） */
-    const topLine = (): number => {
-      for (const h of document.querySelectorAll('header')) {
-        const pos = getComputedStyle(h).position
-        if (pos === 'sticky' || pos === 'fixed') return Math.max(0, h.getBoundingClientRect().bottom)
-      }
-      return 0
-    }
-    const setY = (bar: HTMLElement, y: number) => {
-      if (Number(bar.dataset.pinY ?? 0) === y) return
-      bar.dataset.pinY = String(y)
-      if (y === 0) bar.style.removeProperty('--day-bar-y')
-      else bar.style.setProperty('--day-bar-y', `${y}px`)
-    }
-    const pin = () => {
-      raf = 0
-      const line = topLine()
-      for (const sec of dayElsRef.current.values()) {
-        const bar = sec.querySelector<HTMLElement>('[data-day-bar]')
-        if (!bar) continue
-        const cur = Number(bar.dataset.pinY ?? 0)
-        const natural = bar.getBoundingClientRect().top - cur
-        const s = sec.getBoundingClientRect()
-        const bottom = s.bottom - (parseFloat(getComputedStyle(sec).borderBottomWidth) || 0)
-        const max = Math.max(0, bottom - natural - bar.offsetHeight)
-        setY(bar, Math.round(Math.max(0, Math.min(line - natural, max)) * 100) / 100)
-      }
-    }
-    const schedule = () => {
-      if (raf === 0) raf = window.requestAnimationFrame(pin)
-    }
-    const reset = () => {
-      for (const sec of dayElsRef.current.values()) {
-        const bar = sec.querySelector<HTMLElement>('[data-day-bar]')
-        if (bar) setY(bar, 0)
-      }
-    }
-    schedule()
-    window.addEventListener('scroll', schedule, { passive: true })
-    window.addEventListener('resize', schedule)
-    window.addEventListener('beforeprint', reset)
-    window.addEventListener('afterprint', schedule)
-    // 日の中身の読み込み・行の増減で枠の高さが変わった時も測り直す
-    let ro: ResizeObserver | null = null
-    if (typeof ResizeObserver !== 'undefined') {
-      ro = new ResizeObserver(schedule)
-      for (const sec of dayElsRef.current.values()) ro.observe(sec)
-    }
-    return () => {
-      if (raf !== 0) window.cancelAnimationFrame(raf)
-      window.removeEventListener('scroll', schedule)
-      window.removeEventListener('resize', schedule)
-      window.removeEventListener('beforeprint', reset)
-      window.removeEventListener('afterprint', schedule)
-      ro?.disconnect()
-    }
-    // 表示する日が変わると枠が作り直される＝見張り直す
-  }, [dayElsRef, days])
-}
-
 export function DailySheetPage({
   residents: propResidents,
   staff: propStaff,
@@ -2187,6 +2122,32 @@ export function DailySheetPage({
    * 右端が枠の外に出ない。枠は表の中身の親（SheetFrame が children をそのまま置く）
    */
   const sheetViewCleanupRef = useRef<(() => void) | null>(null)
+  // 表の枠の下端を、画面下のメインナビの上端まで広げる（B1 の余白・2026-09-29）。ナビの高さ（文字の大きさ・
+  // iPhone の下端の安全域で変わる）を測って --dsheet-below に書き、sheet.css が日報の画面だけ main の下余白に使う
+  // ＝枠の高さの上限（sheet-frame-fit）が、その下余白を差し引いて画面いっぱいになる。ナビが無い広い画面は余白だけ
+  useEffect(() => {
+    const root = document.documentElement
+    const bottomNav = (): HTMLElement | null =>
+      [...document.querySelectorAll<HTMLElement>('nav[aria-label="メインナビゲーション"]')].find((n) => {
+        const cs = window.getComputedStyle(n)
+        return cs.display !== 'none' && cs.position === 'fixed' && n.getBoundingClientRect().top > window.innerHeight / 2
+      }) ?? null
+    const write = () => {
+      const nav = bottomNav()
+      const next = `${Math.round((nav === null ? 0 : nav.getBoundingClientRect().height) + FRAME_BOTTOM_GAP_PX)}px`
+      if (root.style.getPropertyValue('--dsheet-below') !== next) root.style.setProperty('--dsheet-below', next)
+    }
+    write()
+    const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(write) : null
+    for (const n of document.querySelectorAll('nav[aria-label="メインナビゲーション"]')) ro?.observe(n)
+    window.addEventListener('resize', write)
+    return () => {
+      ro?.disconnect()
+      window.removeEventListener('resize', write)
+      root.style.removeProperty('--dsheet-below')
+    }
+  }, [])
+
   const measureSheetView = useCallback((inner: HTMLDivElement | null) => {
     sheetViewCleanupRef.current?.()
     sheetViewCleanupRef.current = null
@@ -2212,13 +2173,16 @@ export function DailySheetPage({
    */
   const pendingScrollRef = useRef<{ day: string; until: number } | null>(null)
 
-  // 日付の行をスクロールに付いて上に残す（各日の枠の中だけ・次の日の枠が上がると押し出す）
-  useDayBarPin(dayElsRef, visibleDays)
+
+  /** 自分の位置合わせで起きたスクロールを、利用者のスクロールと取り違えないための期限（performance.now の値） */
+  const selfScrollUntilRef = useRef(0)
 
   const scrollToDay = useCallback((iso: string) => {
     const el = dayElsRef.current.get(iso)
     if (!el) return
     try {
+      // この直後のスクロール（次のフレームで届く）は自分のもの＝位置合わせを打ち切らない
+      selfScrollUntilRef.current = performance.now() + SELF_SCROLL_GRACE_MS
       el.scrollIntoView({ block: 'start', inline: 'nearest' })
     } catch {
       // 位置合わせに失敗しても内容は表示されている（画面を落とさない）
@@ -2234,15 +2198,25 @@ export function DailySheetPage({
     return () => window.cancelAnimationFrame(raf)
   }, [day, unit, everReady, scrollToDay])
 
+  // 利用者が自分でスクロールしたら位置合わせを打ち切る（2026-09-29 作り替え）。以前は window に wheel・touchmove を
+  // 付けていたが、touchmove の受け手があると iPhone ではスクロール中の指の動きのたびに主スレッドで当たり判定
+  // （HitTest）が走り、縦のスクロールが重くなっていた。代わりに、画面に触れた（pointerdown）時と、自分の位置合わせの
+  // 直後を除くスクロールで打ち切る（どちらも1回の操作で数回しか来ない）
   useEffect(() => {
     const cancel = () => {
       pendingScrollRef.current = null
     }
-    window.addEventListener('wheel', cancel, { passive: true })
-    window.addEventListener('touchmove', cancel, { passive: true })
+    const onScroll = () => {
+      if (pendingScrollRef.current === null) return
+      if (performance.now() < selfScrollUntilRef.current) return // 自分の位置合わせのスクロール
+      cancel()
+    }
+    window.addEventListener('pointerdown', cancel, { passive: true })
+    // 日報は枠（SheetFrame）の中でスクロールする＝枠のスクロールは window へ上がってこないので、捕捉の段階で受ける
+    window.addEventListener('scroll', onScroll, { passive: true, capture: true })
     return () => {
-      window.removeEventListener('wheel', cancel)
-      window.removeEventListener('touchmove', cancel)
+      window.removeEventListener('pointerdown', cancel)
+      window.removeEventListener('scroll', onScroll, { capture: true })
     }
   }, [])
 
@@ -2387,64 +2361,72 @@ export function DailySheetPage({
         </div>
       )}
 
-      {/* 他の端末が入力中のバイタルの欄の要約（誰が・どこを）。無い時も1行の高さを取る＝出ても表を押し下げない */}
-      <PresenceSummary
-        text={presence.summary((p) => {
-          if (p.cell.table !== 'vitals' || !visibleDays.includes(p.day)) return null
-          const kind = p.cell.kind
-          if (kind !== 'observation' && kind !== 'symptom') return null
-          const r = residents.find((x) => x.id === p.residentId)
-          const when = p.day === day ? '' : ` ${fmtSheetDay(p.day)}`
-          const word = DAILY_VITAL_WORD[p.cell.field] ?? ''
-          return `${residentName(r, p.residentId)}${when} ${kind === 'observation' ? '発熱者' : '他症状者'} ${word}`.trim()
-        })}
-      />
+      {/* 要約の行と表の枠は間を詰めて1つにまとめる（B1 の余白・2026-09-29。上の操作の行との間も半分に）。
+          表の見える高さを増やすため。要約の行は無い時も1行の高さを取る（出ても表を押し下げない＝従来どおり） */}
+      <div className="!mt-2 space-y-1">
+        {/* 他の端末が入力中のバイタルの欄の要約（誰が・どこを）。無い時も1行の高さを取る＝出ても表を押し下げない */}
+        <PresenceSummary
+          text={presence.summary((p) => {
+            if (p.cell.table !== 'vitals' || !visibleDays.includes(p.day)) return null
+            const kind = p.cell.kind
+            if (kind !== 'observation' && kind !== 'symptom') return null
+            const r = residents.find((x) => x.id === p.residentId)
+            const when = p.day === day ? '' : ` ${fmtSheetDay(p.day)}`
+            const word = DAILY_VITAL_WORD[p.cell.field] ?? ''
+            return `${residentName(r, p.residentId)}${when} ${kind === 'observation' ? '発熱者' : '他症状者'} ${word}`.trim()
+          })}
+        />
 
-      <SheetFrame>
-        {/* 器の幅は「画面幅」か「固定列の合計（SHEET_MIN_W）」の広い方で決める。
-            w-max（＝width: max-content）にすると器の幅が中身の最大コンテンツ幅になり、
-            申し送りの長文1件でシート全体が横に伸びて本文が1行のまま折り返さなくなる
-            （sheet-contracts.md §5「長文は行が伸びる（clamp しない）」が成立しない）。
-            狭い画面では固定列の合計まで SheetFrame 側が横スクロールする。
-            sheet-dense＝「行が縦に連続する場所」の印。sheet.css がこの中の
-            当たり判定の拡張量（--sheet-hit-pad）を 0 にする＝隣接行の誤タップを防ぐ */}
-        <div className="sheet-dense" ref={measureSheetView} style={{ minWidth: SHEET_MIN_W }}>
-          {visibleDays.map((d) => (
-            <section
-              key={d}
-              ref={(el) => {
-                if (el) dayElsRef.current.set(d, el)
-                else dayElsRef.current.delete(d)
-              }}
-              aria-label={`${fmtSheetDay(d)} の日報`}
-              aria-current={d === day ? 'date' : undefined}
-              className="dsheet-day"
-            >
-              <DaySheet
-                day={d}
-                residents={residents}
-                staff={staff}
-                actorId={actorId}
-                enabled={enabled}
-                blockedReason={blockedReason}
-                cellsMissing={cellsMissing}
-                notesMissing={notesMissing}
-                reloadToken={reload}
-                loadDay={loadDay}
-                onWrite={handleWrite}
-                onDirty={handleDirty}
-                onComposing={handleComposing}
-                othersHere={othersHere.filter((o) => o.day === d)}
-                presence={presence}
-                managerStaffId={managerStaffId}
-                onLoaded={handleLoaded}
-                onPickDay={goDay}
-                show={show}
-              />
-            </section>
-          ))}
-        </div>
-      </SheetFrame>
+        {/* 日報の表は枠の中で縦にも横にもスクロールする（2026-09-29 本人承認 B1・バイタル一覧と同じ sheet-frame-fit）。
+            枠が縦のスクロールの器になるので、日付の行は CSS の sticky（top: 0）で枠の上に残る＝スクロールのたびに
+            位置を計算し直す処理が要らない（iPhone で縦のスクロールが重かった原因）。印刷では高さの上限だけを外し、
+            従来どおり全部の行を紙へ流す（横の扱いは従来の枠のまま＝紙の見た目・改ページを変えない） */}
+        <SheetFrame className="dsheet-frame sheet-frame-fit print:!max-h-none">
+          {/* 器の幅は「画面幅」か「固定列の合計（SHEET_MIN_W）」の広い方で決める。
+              w-max（＝width: max-content）にすると器の幅が中身の最大コンテンツ幅になり、
+              申し送りの長文1件でシート全体が横に伸びて本文が1行のまま折り返さなくなる
+              （sheet-contracts.md §5「長文は行が伸びる（clamp しない）」が成立しない）。
+              狭い画面では固定列の合計まで SheetFrame 側が横スクロールする。
+              sheet-dense＝「行が縦に連続する場所」の印。sheet.css がこの中の
+              当たり判定の拡張量（--sheet-hit-pad）を 0 にする＝隣接行の誤タップを防ぐ */}
+          <div className="sheet-dense" ref={measureSheetView} style={{ minWidth: SHEET_MIN_W }}>
+            {visibleDays.map((d) => (
+              <section
+                key={d}
+                ref={(el) => {
+                  if (el) dayElsRef.current.set(d, el)
+                  else dayElsRef.current.delete(d)
+                }}
+                aria-label={`${fmtSheetDay(d)} の日報`}
+                aria-current={d === day ? 'date' : undefined}
+                className="dsheet-day"
+              >
+                <DaySheet
+                  day={d}
+                  residents={residents}
+                  staff={staff}
+                  actorId={actorId}
+                  enabled={enabled}
+                  blockedReason={blockedReason}
+                  cellsMissing={cellsMissing}
+                  notesMissing={notesMissing}
+                  reloadToken={reload}
+                  loadDay={loadDay}
+                  onWrite={handleWrite}
+                  onDirty={handleDirty}
+                  onComposing={handleComposing}
+                  othersHere={othersHere.filter((o) => o.day === d)}
+                  presence={presence}
+                  managerStaffId={managerStaffId}
+                  onLoaded={handleLoaded}
+                  onPickDay={goDay}
+                  show={show}
+                />
+              </section>
+            ))}
+          </div>
+        </SheetFrame>
+      </div>
 
       <ConfirmDialog
         open={confirm !== null}
@@ -4736,160 +4718,164 @@ function DaySheet({
         onChanged={refreshPendingNotes}
       />
 
-      {/* 3状態。失敗したのは**この日だけ**で、他の日は読めたまま残る（部分表示） */}
-      {phase === 'loading' && <LoadingBlock label={`${fmtSheetDay(day)}の日報を読み込んでいます…`} />}
-      {phase === 'error' && (
-        <ErrorBlock message={ERR_LOAD} onRetry={() => setReload((n) => n + 1)} />
-      )}
+      {/* 日の表の中身だけの入れ物（画面の外にある日は描画を省く＝sheet.css の .dsheet-body・E）。
+          日付の行・この日の上の窓（選択画面・確認・〔くらべて選ぶ〕）はこの外に置く */}
+      <div className="dsheet-body">
+        {/* 3状態。失敗したのは**この日だけ**で、他の日は読めたまま残る（部分表示） */}
+        {phase === 'loading' && <LoadingBlock label={`${fmtSheetDay(day)}の日報を読み込んでいます…`} />}
+        {phase === 'error' && (
+          <ErrorBlock message={ERR_LOAD} onRetry={() => setReload((n) => n + 1)} />
+        )}
 
-      {phase === 'ready' && (
-        <>
-          <OutingBlock
-            ctx={ctx}
-            kind="outing"
-            rows={outRows}
-            drafts={outingDrafts.filter((d) => d.kind === 'outing')}
-            onAdd={() => addOutingDraft('outing')}
-            onPatchDraft={patchOutingDraft}
-            onRemoveDraft={removeOutingDraft}
-            onSaveDraft={saveOutingDraft}
-            onCommitEnd={commitOutingEnd}
-          />
+        {phase === 'ready' && (
+          <>
+            <OutingBlock
+              ctx={ctx}
+              kind="outing"
+              rows={outRows}
+              drafts={outingDrafts.filter((d) => d.kind === 'outing')}
+              onAdd={() => addOutingDraft('outing')}
+              onPatchDraft={patchOutingDraft}
+              onRemoveDraft={removeOutingDraft}
+              onSaveDraft={saveOutingDraft}
+              onCommitEnd={commitOutingEnd}
+            />
 
-          <OutingBlock
-            ctx={ctx}
-            kind="overnight"
-            rows={stayRows}
-            drafts={outingDrafts.filter((d) => d.kind === 'overnight')}
-            onAdd={() => addOutingDraft('overnight')}
-            onPatchDraft={patchOutingDraft}
-            onRemoveDraft={removeOutingDraft}
-            onSaveDraft={saveOutingDraft}
-            onCommitEnd={commitOutingEnd}
-          />
+            <OutingBlock
+              ctx={ctx}
+              kind="overnight"
+              rows={stayRows}
+              drafts={outingDrafts.filter((d) => d.kind === 'overnight')}
+              onAdd={() => addOutingDraft('overnight')}
+              onPatchDraft={patchOutingDraft}
+              onRemoveDraft={removeOutingDraft}
+              onSaveDraft={saveOutingDraft}
+              onCommitEnd={commitOutingEnd}
+            />
 
-          <FeverBlock
-            ctx={vitalCtx}
-            rows={feverRows}
-            drafts={vitalDrafts.filter((d) => d.kind === 'observation')}
-            onAdd={() => addVitalDraft('observation')}
-            onPatchDraft={patchVitalDraft}
-            onRemoveDraft={removeVitalDraft}
-            onInsert={insertVitalRow}
-            onUpdate={updateVitalCell}
-          />
+            <FeverBlock
+              ctx={vitalCtx}
+              rows={feverRows}
+              drafts={vitalDrafts.filter((d) => d.kind === 'observation')}
+              onAdd={() => addVitalDraft('observation')}
+              onPatchDraft={patchVitalDraft}
+              onRemoveDraft={removeVitalDraft}
+              onInsert={insertVitalRow}
+              onUpdate={updateVitalCell}
+            />
 
-          <SymptomBlock
-            ctx={vitalCtx}
-            rows={symptomRows}
-            drafts={vitalDrafts.filter((d) => d.kind === 'symptom')}
-            onAdd={() => addVitalDraft('symptom')}
-            onPatchDraft={patchVitalDraft}
-            onRemoveDraft={removeVitalDraft}
-            onInsert={insertVitalRow}
-            onUpdate={updateVitalCell}
-          />
+            <SymptomBlock
+              ctx={vitalCtx}
+              rows={symptomRows}
+              drafts={vitalDrafts.filter((d) => d.kind === 'symptom')}
+              onAdd={() => addVitalDraft('symptom')}
+              onPatchDraft={patchVitalDraft}
+              onRemoveDraft={removeVitalDraft}
+              onInsert={insertVitalRow}
+              onUpdate={updateVitalCell}
+            />
 
-          <NoteBlock
-            ctx={ctx}
-            title="日勤申し送り"
-            tone="note"
-            rows={dayNotes}
-            drafts={noteDrafts.filter((d) => d.shift === 'day' && !d.after16)}
-            showReporter
-            actorId={actorId}
-            expanded={expanded}
-            onToggleExpand={(k) => setExpanded((cur) => (cur === k ? null : k))}
-            onAdd={() => addNoteDraft('day', false)}
-            onCommitBody={commitNoteBody}
-            onAbandonBody={abandonNoteBody}
-            onPatchDraft={patchDraftOrRegistration}
-            onUpdateNote={updateNoteCell}
-            onDelete={deleteNoteRow}
-            onMarkRead={markNoteRead}
-            pending={pendingNotes}
-            onResolve={openNoteResolve}
-            onHistory={openNoteHistory}
-          />
+            <NoteBlock
+              ctx={ctx}
+              title="日勤申し送り"
+              tone="note"
+              rows={dayNotes}
+              drafts={noteDrafts.filter((d) => d.shift === 'day' && !d.after16)}
+              showReporter
+              actorId={actorId}
+              expanded={expanded}
+              onToggleExpand={(k) => setExpanded((cur) => (cur === k ? null : k))}
+              onAdd={() => addNoteDraft('day', false)}
+              onCommitBody={commitNoteBody}
+              onAbandonBody={abandonNoteBody}
+              onPatchDraft={patchDraftOrRegistration}
+              onUpdateNote={updateNoteCell}
+              onDelete={deleteNoteRow}
+              onMarkRead={markNoteRead}
+              pending={pendingNotes}
+              onResolve={openNoteResolve}
+              onHistory={openNoteHistory}
+            />
 
-          {/* 現行スプシの黒帯。ここから下は after16=true の記録 */}
-          <div
-            className="flex items-center bg-ink px-1 font-bold text-bg"
-            style={{ minHeight: 'var(--sheet-row-h-note)' }}
-          >
-            ↓16時以降の記録
-          </div>
+            {/* 現行スプシの黒帯。ここから下は after16=true の記録 */}
+            <div
+              className="flex items-center bg-ink px-1 font-bold text-bg"
+              style={{ minHeight: 'var(--sheet-row-h-note)' }}
+            >
+              ↓16時以降の記録
+            </div>
 
-          <NoteBlock
-            ctx={ctx}
-            title="日勤申し送り（16時以降）"
-            tone="note"
-            rows={lateNotes}
-            drafts={noteDrafts.filter((d) => d.shift === 'day' && d.after16)}
-            showReporter
-            actorId={actorId}
-            expanded={expanded}
-            onToggleExpand={(k) => setExpanded((cur) => (cur === k ? null : k))}
-            onAdd={() => addNoteDraft('day', true)}
-            onCommitBody={commitNoteBody}
-            onAbandonBody={abandonNoteBody}
-            onPatchDraft={patchDraftOrRegistration}
-            onUpdateNote={updateNoteCell}
-            onDelete={deleteNoteRow}
-            onMarkRead={markNoteRead}
-            pending={pendingNotes}
-            onResolve={openNoteResolve}
-            onHistory={openNoteHistory}
-          />
+            <NoteBlock
+              ctx={ctx}
+              title="日勤申し送り（16時以降）"
+              tone="note"
+              rows={lateNotes}
+              drafts={noteDrafts.filter((d) => d.shift === 'day' && d.after16)}
+              showReporter
+              actorId={actorId}
+              expanded={expanded}
+              onToggleExpand={(k) => setExpanded((cur) => (cur === k ? null : k))}
+              onAdd={() => addNoteDraft('day', true)}
+              onCommitBody={commitNoteBody}
+              onAbandonBody={abandonNoteBody}
+              onPatchDraft={patchDraftOrRegistration}
+              onUpdateNote={updateNoteCell}
+              onDelete={deleteNoteRow}
+              onMarkRead={markNoteRead}
+              pending={pendingNotes}
+              onResolve={openNoteResolve}
+              onHistory={openNoteHistory}
+            />
 
-          {/* デイサービスは日勤・夜勤の申し送りと運営主体が違うので、上下に余白を入れて
-              前後の欄から離す（2026-08-28 指示）。余白は日が変わる切れ目より狭い12px */}
-          <NoteBlock
-            ctx={ctx}
-            className="dsheet-gap-block"
-            title="デイサービス"
-            tone="care"
-            rows={careNotes}
-            drafts={noteDrafts.filter((d) => d.shift === 'daycare')}
-            showReporter
-            actorId={actorId}
-            expanded={expanded}
-            onToggleExpand={(k) => setExpanded((cur) => (cur === k ? null : k))}
-            onAdd={() => addNoteDraft('daycare', false)}
-            onCommitBody={commitNoteBody}
-            onAbandonBody={abandonNoteBody}
-            onPatchDraft={patchDraftOrRegistration}
-            onUpdateNote={updateNoteCell}
-            onDelete={deleteNoteRow}
-            onMarkRead={markNoteRead}
-            pending={pendingNotes}
-            onResolve={openNoteResolve}
-            onHistory={openNoteHistory}
-          />
+            {/* デイサービスは日勤・夜勤の申し送りと運営主体が違うので、上下に余白を入れて
+                前後の欄から離す（2026-08-28 指示）。余白は日が変わる切れ目より狭い12px */}
+            <NoteBlock
+              ctx={ctx}
+              className="dsheet-gap-block"
+              title="デイサービス"
+              tone="care"
+              rows={careNotes}
+              drafts={noteDrafts.filter((d) => d.shift === 'daycare')}
+              showReporter
+              actorId={actorId}
+              expanded={expanded}
+              onToggleExpand={(k) => setExpanded((cur) => (cur === k ? null : k))}
+              onAdd={() => addNoteDraft('daycare', false)}
+              onCommitBody={commitNoteBody}
+              onAbandonBody={abandonNoteBody}
+              onPatchDraft={patchDraftOrRegistration}
+              onUpdateNote={updateNoteCell}
+              onDelete={deleteNoteRow}
+              onMarkRead={markNoteRead}
+              pending={pendingNotes}
+              onResolve={openNoteResolve}
+              onHistory={openNoteHistory}
+            />
 
-          <NoteBlock
-            ctx={ctx}
-            title="夜勤申し送り"
-            tone="night"
-            rows={nightNotes}
-            drafts={noteDrafts.filter((d) => d.shift === 'night')}
-            showReporter={false}
-            actorId={actorId}
-            expanded={expanded}
-            onToggleExpand={(k) => setExpanded((cur) => (cur === k ? null : k))}
-            onAdd={() => addNoteDraft('night', false)}
-            onCommitBody={commitNoteBody}
-            onAbandonBody={abandonNoteBody}
-            onPatchDraft={patchDraftOrRegistration}
-            onUpdateNote={updateNoteCell}
-            onDelete={deleteNoteRow}
-            onMarkRead={markNoteRead}
-            pending={pendingNotes}
-            onResolve={openNoteResolve}
-            onHistory={openNoteHistory}
-          />
-        </>
-      )}
+            <NoteBlock
+              ctx={ctx}
+              title="夜勤申し送り"
+              tone="night"
+              rows={nightNotes}
+              drafts={noteDrafts.filter((d) => d.shift === 'night')}
+              showReporter={false}
+              actorId={actorId}
+              expanded={expanded}
+              onToggleExpand={(k) => setExpanded((cur) => (cur === k ? null : k))}
+              onAdd={() => addNoteDraft('night', false)}
+              onCommitBody={commitNoteBody}
+              onAbandonBody={abandonNoteBody}
+              onPatchDraft={patchDraftOrRegistration}
+              onUpdateNote={updateNoteCell}
+              onDelete={deleteNoteRow}
+              onMarkRead={markNoteRead}
+              pending={pendingNotes}
+              onResolve={openNoteResolve}
+              onHistory={openNoteHistory}
+            />
+          </>
+        )}
+      </div>
 
       <ResidentPickerModal
         open={residentPick !== null}
@@ -5345,19 +5331,20 @@ function DayHeader({
   const managerName =
     manager === null ? null : staffName(ctx.staffById.get(manager.staff_id), manager.staff_id)
   return (
-    <div className="border-b border-border-strong">
+    <>
       {/* 1段目: 左＝日付（2026-08-31 指示。旧・施設名セルの位置。平日は橙・土日は水色/赤）、
           右＝施設長のとなりに出勤者が横1行（指示6）。
           施設名と「日勤・夜勤日報」はここから外し、施設名は画面最上部の「日報」の右へ移した
           （各日ごとに繰り返す情報ではなく、日付を置くほうがこの位置の役に立つ） */}
-      {/* 日付の行はスクロールしても画面の上（アプリのヘッダの下）に残り、次の日の枠が上がってくると押し出される
-          （2026-09-24 本人指示）。縦の位置は親（DailySheetPage の useDayBarPin）が --day-bar-y で動かす。
-          シートは横スクロールの枠（SheetFrame）の中にあり、枠が縦の sticky の基準になってしまうため CSS の sticky では貼り付かない。
-          背景を持たせて下の行を透かさない。重なりはアプリのヘッダ（z-20）より下・表の中の印（z-10）より上 */}
+      {/* 日付の行はスクロールしても枠の上に残り、次の日の枠が上がってくると押し出される（2026-09-24 本人指示）。
+          2026-09-29（B1）から日報の表は枠の中でスクロールするので、CSS の sticky（top: 0）で貼り付く。包含ブロックは
+          その日の枠（section.dsheet-day）＝この行の親をその日の枠にするため、ヘッダは入れ物を作らずに並べる（下の太線は
+          2段目以降の入れ物が持つ）。背景を持たせて下の行を透かさない。重なりは表の中の印（z-10）より上。
+          横に動かしても日付のセルは左に残る（下の sticky left-0。この行の中の重なりで行の他のセルより上） */}
       <div
         data-day-bar=""
-        className="relative flex flex-wrap items-stretch bg-surface"
-        style={{ transform: 'translateY(var(--day-bar-y, 0))', zIndex: 15 }}
+        className="sticky top-0 flex flex-wrap items-stretch bg-surface"
+        style={{ zIndex: 15 }}
       >
         <div
           // 横スクロールしても日付は左に残す（横の sticky は枠の中で効く）。背景で下を透かさない
@@ -5403,40 +5390,42 @@ function DayHeader({
           />
         </div>
       </div>
-      <StatusText status={ctx.status.attendance} />
+      <div className="border-b border-border-strong">
+        <StatusText status={ctx.status.attendance} />
 
-      {/* 2段目: 記録が1件も無い日の一言だけ。日付は1段目へ移したので、
-          記録のある日はこの行ごと出さない（行数を減らす・2026-08-31 指示） */}
-      {othersHere.length > 0 && (
-        <p aria-live="polite" className="px-1 py-1 text-warn">
-          <span aria-hidden="true">▲ </span>
-          {(() => {
-            // 同じ職員は1つにまとめ、記録する職員を選んでいない端末は「別の端末（2台）」のように台数でまとめる（2026-09-23）
-            const names = presenceWhoNames(othersHere, (id) => staffName(ctx.staffById.get(id), id)).join('・')
-            const who = names === '' ? `他 ${othersHere.length} 名` : names
-            const targets = othersHere
-              .map((o) => (o.residentId === null ? null : ctx.residentById.get(o.residentId)))
-              .filter((r): r is Resident => r != null)
-              .map((r) => noteDisplayName(r))
-              .filter((n, i, all) => all.indexOf(n) === i)
-            return targets.length > 0
-              ? `${who}が、いま${targets.join('・')}の申し送りを書いています`
-              : `${who}が、いまこの日の申し送りを書いています`
-          })()}
-        </p>
-      )}
-      {(empty || importDay === null) && importDay !== undefined && (
-        <p className={`px-1 py-1 ${importDay === null ? 'text-warn' : 'text-ink2'}`}>
-          <span aria-hidden="true">{importDay === null ? '▲ ' : '— '}</span>
-          {importDay === null
-            ? 'この日はまだ取り込まれていません（スプレッドシートに記録があっても、ここにはまだ出ていません）'
-            : `この日の記録はまだありません（空いている行にそのまま記入できます）／最終取込 ${fmtStamp(importDay.imported_at)}`}
-        </p>
-      )}
-      {!empty && importDay != null && (
-        <p className="px-1 py-1 text-ink2">最終取込 {fmtStamp(importDay.imported_at)}</p>
-      )}
-    </div>
+        {/* 2段目: 記録が1件も無い日の一言だけ。日付は1段目へ移したので、
+            記録のある日はこの行ごと出さない（行数を減らす・2026-08-31 指示） */}
+        {othersHere.length > 0 && (
+          <p aria-live="polite" className="px-1 py-1 text-warn">
+            <span aria-hidden="true">▲ </span>
+            {(() => {
+              // 同じ職員は1つにまとめ、記録する職員を選んでいない端末は「別の端末（2台）」のように台数でまとめる（2026-09-23）
+              const names = presenceWhoNames(othersHere, (id) => staffName(ctx.staffById.get(id), id)).join('・')
+              const who = names === '' ? `他 ${othersHere.length} 名` : names
+              const targets = othersHere
+                .map((o) => (o.residentId === null ? null : ctx.residentById.get(o.residentId)))
+                .filter((r): r is Resident => r != null)
+                .map((r) => noteDisplayName(r))
+                .filter((n, i, all) => all.indexOf(n) === i)
+              return targets.length > 0
+                ? `${who}が、いま${targets.join('・')}の申し送りを書いています`
+                : `${who}が、いまこの日の申し送りを書いています`
+            })()}
+          </p>
+        )}
+        {(empty || importDay === null) && importDay !== undefined && (
+          <p className={`px-1 py-1 ${importDay === null ? 'text-warn' : 'text-ink2'}`}>
+            <span aria-hidden="true">{importDay === null ? '▲ ' : '— '}</span>
+            {importDay === null
+              ? 'この日はまだ取り込まれていません（スプレッドシートに記録があっても、ここにはまだ出ていません）'
+              : `この日の記録はまだありません（空いている行にそのまま記入できます）／最終取込 ${fmtStamp(importDay.imported_at)}`}
+          </p>
+        )}
+        {!empty && importDay != null && (
+          <p className="px-1 py-1 text-ink2">最終取込 {fmtStamp(importDay.imported_at)}</p>
+        )}
+      </div>
+    </>
   )
 }
 

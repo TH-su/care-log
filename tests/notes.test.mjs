@@ -1053,6 +1053,44 @@ if (DB === null) {
       assert.equal(DB.listUnsentNotes().length, 0)
     })
 
+    it('記入者: 申し送りフォームも記入者を空欄で始め、送った後・破棄の後も空に戻し、名簿に無い職員を操作者に置き換えない', () => {
+      const src = read('pages/NoteFormPage.tsx')
+      const calls = src.split('\n').filter((l) => l.includes('defaultForm(') && !l.includes('function defaultForm'))
+      assert.ok(calls.length >= 3, JSON.stringify(calls))
+      for (const l of calls) assert.match(l, /defaultForm\(null, /, `記入者に既定値を入れている: ${l.trim()}`)
+      assert.match(src, /reporterId: reporterOk \? draft\.reporterId : null/)
+      assert.match(src, /記入者が選ばれていません。記入者を選んでください。/, '必須の検査を外した')
+    })
+
+    it('iPhone の重さ（A・C・D・B1）: 空の一言は sticky にしない・wheel/touchmove を付けない・日付行は CSS の sticky・当たり判定の疑似要素を日報で出さない', () => {
+      const src = read('pages/DailySheetPage.tsx')
+      assert.match(src, /style=\{status \? NARROW_STICKY : undefined\}/, 'A: 空の一言まで sticky')
+      assert.doesNotMatch(src, /addEventListener\('(wheel|touchmove)'/, 'C: wheel・touchmove の受け手が残っている')
+      assert.match(src, /addEventListener\('scroll', onScroll, \{ passive: true, capture: true \}\)/)
+      assert.doesNotMatch(src, /useDayBarPin|--day-bar-y/, 'B1: スクロールのたびに位置を計算する日付行の固定が残っている')
+      assert.match(src, /<SheetFrame className="(dsheet-frame )?sheet-frame-fit print:!max-h-none">/)
+      assert.match(src, /data-day-bar=""\n\s+className="sticky top-0 /)
+      const css = read('styles/sheet.css')
+      assert.match(css, /\.sheet-dense \.sheet-hit::before \{\n\s+content: none;/, 'D')
+      assert.match(css, /body:has\(section\.dsheet-day\) nav\[aria-label='メインナビゲーション'\]/)
+    })
+
+    it('B1 の余白・E（案2）: 枠は画面下のナビの上まで・画面外の日の表の中身だけ描画を省き、窓・日付の行は入れ物の外（行の中の窓が開いている間は省略を外す）', () => {
+      const src = read('pages/DailySheetPage.tsx')
+      assert.match(src, /<SheetFrame className="dsheet-frame sheet-frame-fit print:!max-h-none">/)
+      assert.match(src, /root\.style\.setProperty\('--dsheet-below', next\)/)
+      const day = src.slice(src.indexOf('<div className="dsheet-body">'), src.indexOf('<ResidentPickerModal'))
+      assert.ok(day.length > 0, '日の表の中身の入れ物が無い')
+      for (const outside of ['<DayHeader', '<ResidentPickerModal', '<StaffPickerModal', '<ConfirmDialog', '<NoteConflictResolver', '<ConflictResolver', '<NoteHistoryDialog']) {
+        assert.ok(!day.includes(outside), `${outside} が入れ物の中にある`)
+      }
+      const css = read('styles/sheet.css')
+      assert.match(css, /\.dsheet-body \{\n\s+content-visibility: auto;\n\s+contain-intrinsic-size: auto 2000px;/)
+      assert.match(css, /\.dsheet-body:has\(\[role='dialog'\]\),\n\.dsheet-body:has\(\[aria-expanded='true'\]\) \{\n\s+content-visibility: visible;/)
+      assert.match(css, /@media print \{\n\s+\.dsheet-body \{\n\s+content-visibility: visible;/)
+      assert.match(css, /main:has\(\.dsheet-frame\) \{\n\s+padding-bottom: var\(--dsheet-below, 6rem\);/)
+    })
+
     it('F1: 送信待ちの登録の行は、画面の一言が無くても（再読み込みの後も）送信待ち・止まった印を出す', () => {
       const src = read('pages/DailySheetPage.tsx')
       assert.match(src, /<StatusText status=\{ctx\.status\[rowKey\] \?\? \(note \? undefined : registrationMark\(draft\)\)\} \/>/)
