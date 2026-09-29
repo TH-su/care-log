@@ -1,12 +1,13 @@
 // 申し送りフォーム（docs/design/ui-design.md §6「入力UX・申し送りフォーム」／§6.5「下書きの保持規則」）。
 // 勤務帯（現在時刻から自動初期値）・対象（利用者 or スタッフ全体）・職種タグ・重要度・継続フラグ（期限日付き）・
-// 本文・記入者（操作者を初期値）を1画面で受け、登録後は8秒のUndo（softDeleteNote）で取り消せるようにする。
+// 本文・記入者（操作者を初期値）を1画面で受け、登録後は8秒のUndo（deleteNote＝登録した本文のままの時だけ取り消す）で取り消せるようにする。
 //
 // この画面の規律:
 //   - supabase へは触れず db.ts の関数だけを呼ぶ（contracts.md §共通規律）
 //   - 入力封鎖中（native_input_enabled=false）は導線を隠さずディセーブル＋理由文。
 //     送信直前にもフラグを取り直す（ui-design.md §0.5 の二重ガード。最終強制は RLS/DB 側）
-//   - 下書き cl_draftNote は「データ保護レイヤー」。1件のみ・24時間期限・送信成功／明示破棄で即削除（§6.5）。
+//   - 下書き cl_draftNote は「データ保護レイヤー」。タブごとに1件・送信成功／明示破棄で即削除（§6.5）。
+//     2026-09-29: 24時間の期限で黙って消すのはやめた（古い書きかけは「〇日前の書きかけ」と出して戻す）
 //     送信できずキューへ退避した場合は「端末に残せたことを観測できた時」だけ消す（保全ゲートの後ろ）
 //   - 個人情報を console・UI状態キー（cl_view 等）に出さない。コード・placeholder に実名を書かない
 //   - 破壊的操作（下書きの破棄・登録の取り消し）は確認ダイアログ or Undo を挟む
@@ -34,10 +35,25 @@ import {
   joinNotePresence,
   insertNote,
   isQueuePersisted,
-  softDeleteNote,
+  deleteNote,
+  isNoteRpcMissing,
+  noteDeleted,
 } from '../lib/db'
 import { addDays, fmtDayLabel, fmtTimeHM, todayIso } from '../lib/format'
 import { appendPhrase, NOTE_PHRASE_CATEGORIES, PHRASE_BLANK } from '../lib/notePhrases'
+import {
+  adoptDraftRows,
+  DRAFT_TAB_ID,
+  draftAgeLabel,
+  goneMarksFor,
+  legacyDraftId,
+  markDraftsGone,
+  newDraftId,
+  parseDraftFile,
+  unionDraftRows,
+  writeTabRows,
+} from '../lib/noteDrafts'
+import type { DraftFile, DraftOrigin, DraftRow } from '../lib/noteDrafts'
 import { IMPORTANCE_LABEL, LS, noteDisplayName, ROLE_TAGS, SHIFT_LABEL } from '../lib/types'
 import type { PresenceHere } from '../lib/db'
 import { presenceOnDay, presenceWhoNames } from '../lib/presence'
@@ -48,14 +64,15 @@ import type { Importance, Note, Resident, Shift, Staff } from '../lib/types'
 /** 入力封鎖中（切替日D前）の理由文。ui-design.md §0.5 の定型文をそのまま使う */
 const BLOCKED_REASON = '現在はスプレッドシートで記録する期間です（アプリ入力の開始日は施設で決定します）'
 
-/** 下書きの期限。超過分は開いた時点で自動削除する（§6.5） */
-const DRAFT_TTL_MS = 24 * 60 * 60 * 1000
-
 /** 送信待ちにしたのに端末へ残せなかった時の案内（下書き・入力欄はどちらも消さない） */
 const NOT_PERSISTED_REASON =
   '送信できませんでした。この端末にも保存できていません（保存領域の空きが不足している可能性があります）。入力はこの画面に残していますので、電波が戻るまでこの画面を閉じないでください。長引く場合は本文を控えてから管理者に連絡してください。'
 
 /** 取り消しを送信待ちに退避した時の案内（入力内容はフォームへ戻したうえで出す） */
+/** 取り消しを送信待ちにしたが、サーバー側の更新（0017）待ちで送れない時の案内 */
+const MSG_UNDO_WAITING_SERVER =
+  'サーバー側の更新待ちのため、取り消しをこの端末に保存しました（送信待ち）。更新されると自動で取り消します（それまではタイムラインに残ります）。入力内容はフォームに戻しました。'
+
 const MSG_UNDO_QUEUED =
   '通信できないため、取り消しを送信待ちにしました。電波が戻ると自動で取り消します（それまではタイムラインに残ります）。入力内容はフォームに戻しました。'
 
@@ -170,71 +187,149 @@ function errText(err: unknown): string {
 // 本文・対象は業務データのため UI状態キー（cl_view 等）とは別レイヤーで扱う（ui-design.md §6.5）。
 // 保存・読取・削除はすべて try/catch で囲み、localStorage が使えない環境でも入力を続けられるようにする。
 
-function clearDraft(): void {
-  try {
-    window.localStorage.removeItem(LS.draftNote)
-  } catch {
-    // 消せなくても次回読取の期限判定・ホワイトリスト照合で弾かれる
+// 2026-09-29（申し送りを消さない作り替え M3・L1）: 同じ端末の別のタブで食い合わないよう、タブごとに分けて持つ
+// （src/lib/noteDrafts.ts）。読み込みは全タブの和集合（いちばん新しい書きかけを戻す）、消すのは自分のタブの分だけ。
+// 24時間で黙って消すのはやめ、古い書きかけは「〇日前の書きかけ」と出して戻す（破棄した時だけ消える）。
+// 旧版が読む中身（v:1・トップレベルのフォームの値）も書き続ける（旧版へ戻しても「期限切れ」で消されにくいよう savedAt は今）
+
+/** 控えの形式の版（旧版と同じ 1 のまま。タブごとの分は tabs・gone に足した） */
+const DRAFT_VERSION = 1
+
+/** このタブの書きかけの行の印（復元した書きかけにも新しい印を振る） */
+let draftDid = newDraftId()
+/** 復元した（引き継いだ）書きかけの元の行（noteDrafts.ts の DraftRow.from） */
+let draftFrom: DraftOrigin[] | undefined
+
+/** 最後に書いた中身（中身が同じ間は時刻を進めない＝「〇日前の書きかけ」を保つ） */
+let lastDraft: { json: string; at: number } | null = null
+
+
+/** 控えの1行の中身（フォームの値）を検める。本文の無い書きかけは戻さない */
+function readForm(_kind: string, x: unknown): FormState | null {
+  if (x === null || typeof x !== 'object') return null
+  const rec = x as Record<string, unknown>
+  const body = typeof rec.body === 'string' ? rec.body : ''
+  if (body.trim() === '') return null
+  const noteOn = isoDateOr(rec.noteOn, todayIso())
+  const tags = Array.isArray(rec.roleTags)
+    ? rec.roleTags.filter(
+        (t): t is string => typeof t === 'string' && (ROLE_TAGS as readonly string[]).includes(t),
+      )
+    : []
+  return {
+    noteOn,
+    shift: isShift(rec.shift) ? rec.shift : autoShift(new Date()),
+    targetPicked: rec.targetPicked === true,
+    residentId: posInt(rec.residentId),
+    roleTags: Array.from(new Set(tags)),
+    importance: isImportance(rec.importance) ? rec.importance : 'normal',
+    ongoing: rec.ongoing === true,
+    endedOn: isoDateOr(rec.endedOn, ''),
+    body,
+    reporterId: posInt(rec.reporterId),
   }
 }
 
-function saveDraft(f: FormState): void {
-  try {
-    window.localStorage.setItem(LS.draftNote, JSON.stringify({ v: 1, savedAt: Date.now(), ...f }))
-  } catch {
-    // 保存できなくても入力は続けられる（下書きが無いだけ）
-  }
+/** 旧版の控え（tabs の無い v:1。トップレベルにフォームの値）を1行へ読み替える */
+function legacyForm(o: Record<string, unknown>): DraftRow<FormState>[] {
+  const f = readForm('form', o)
+  if (f === null) return []
+  const at = typeof o.savedAt === 'number' && Number.isFinite(o.savedAt) ? o.savedAt : 0
+  return [{ did: legacyDraftId('form', 0, f), at, kind: 'form', data: f }]
 }
 
-/** 期限内かつ既知の値だけを復元する。期限切れ・壊れた値はその場で削除して null */
-function loadDraft(): FormState | null {
+/** 控えを読む（無い・読めない＝null。読めない原文は従来どおり消す） */
+function readDraftFile(): DraftFile<FormState> | null {
   let raw: string | null = null
   try {
     raw = window.localStorage.getItem(LS.draftNote)
   } catch {
     return null
   }
-  if (raw === null) return null
+  if (raw === null || raw === '') return null
   try {
     const o: unknown = JSON.parse(raw)
-    if (o === null || typeof o !== 'object') {
-      clearDraft()
+    if (o === null || typeof o !== 'object' || Array.isArray(o)) {
+      window.localStorage.removeItem(LS.draftNote)
       return null
     }
-    const rec = o as Record<string, unknown>
-    const savedAt = typeof rec.savedAt === 'number' && Number.isFinite(rec.savedAt) ? rec.savedAt : 0
-    // 端末時計が進んでいる場合（savedAt が未来）は期限切れ扱いにしない＝書きかけを消さない側へ倒す
-    if (Date.now() - savedAt >= DRAFT_TTL_MS) {
-      clearDraft()
-      return null
-    }
-    const body = typeof rec.body === 'string' ? rec.body : ''
-    if (body.trim() === '') {
-      clearDraft() // 本文の無い下書きは復元しない（意味のない復元ダイアログを出さない）
-      return null
-    }
-    const noteOn = isoDateOr(rec.noteOn, todayIso())
-    const tags = Array.isArray(rec.roleTags)
-      ? rec.roleTags.filter(
-          (t): t is string => typeof t === 'string' && (ROLE_TAGS as readonly string[]).includes(t),
-        )
-      : []
-    return {
-      noteOn,
-      shift: isShift(rec.shift) ? rec.shift : autoShift(new Date()),
-      targetPicked: rec.targetPicked === true,
-      residentId: posInt(rec.residentId),
-      roleTags: Array.from(new Set(tags)),
-      importance: isImportance(rec.importance) ? rec.importance : 'normal',
-      ongoing: rec.ongoing === true,
-      endedOn: isoDateOr(rec.endedOn, ''),
-      body,
-      reporterId: posInt(rec.reporterId),
-    }
+    return parseDraftFile(o as Record<string, unknown>, readForm, legacyForm)
   } catch {
-    clearDraft()
+    try {
+      window.localStorage.removeItem(LS.draftNote)
+    } catch {
+      // 消せなくても次回の読取で弾かれる
+    }
     return null
   }
+}
+
+/**
+ * 控えを書く（自分のタブの分を rows にする。前に書いた行が無くなったら印を付けて他のタブから復活させない）。
+ * gone＝ほかに印を付ける行（送信できた・破棄した書きかけ）
+ */
+function writeDraftFile(rows: DraftRow<FormState>[], gone: readonly DraftOrigin[] = []): void {
+  const now = Date.now()
+  const file = readDraftFile()
+  const keep = new Set(rows.map((r) => r.did))
+  const removed = (file?.tabs[DRAFT_TAB_ID]?.rows ?? []).filter((r) => !keep.has(r.did))
+  const drop = [...goneMarksFor(removed, now), ...gone]
+  const next = writeTabRows(markDraftsGone(file, drop, now), DRAFT_TAB_ID, rows, now)
+  const union = unionDraftRows(next)
+  try {
+    if (union.length === 0 && Object.keys(next.gone).length === 0) {
+      window.localStorage.removeItem(LS.draftNote)
+      return
+    }
+    const newest = union.length > 0 ? union[union.length - 1].data : null
+    window.localStorage.setItem(
+      LS.draftNote,
+      JSON.stringify({ v: DRAFT_VERSION, savedAt: now, ...(newest ?? {}), tabs: next.tabs, gone: next.gone }),
+    )
+  } catch {
+    // 保存できなくても入力は続けられる（下書きが無いだけ）
+  }
+}
+
+/**
+ * このタブの書きかけを消す（送信できた・破棄した・本文を空にした）。他のタブの書きかけは残す。
+ * 控えに無い（まだ書いていない）時は何もしない
+ */
+function clearDraft(): void {
+  const file = readDraftFile()
+  if (file === null) return
+  const mine = file.tabs[DRAFT_TAB_ID]?.rows.length ?? 0
+  if (mine === 0 && draftFrom === undefined) return
+  // 自分の行と、引き継いだ元の行の「引き継いだ時の版」に印を付ける（元のタブがその後に直した入力は外さない）
+  writeDraftFile([], goneMarksFor([{ did: draftDid, at: Date.now(), kind: 'form', data: null, from: draftFrom }], Date.now()))
+  draftDid = newDraftId() // 次の書きかけは別の行
+  draftFrom = undefined
+  lastDraft = null
+}
+
+function saveDraft(f: FormState): void {
+  const json = JSON.stringify(f)
+  const at = lastDraft !== null && lastDraft.json === json ? lastDraft.at : Date.now()
+  lastDraft = { json, at }
+  writeDraftFile([{ did: draftDid, at, kind: 'form', data: f, ...(draftFrom !== undefined ? { from: draftFrom } : {}) }])
+}
+
+/**
+ * 端末に残った書きかけのうち、いちばん新しいものを戻す（全タブの和集合）。期限では消さない（L1）。
+ * 戻した書きかけは、このタブの書きかけとして引き継ぐ（新しい行の印・元をたどれる）。at＝最後に直した時刻（「〇日前の書きかけ」用）
+ */
+function loadDraft(): { form: FormState; at: number } | null {
+  const file = readDraftFile()
+  if (file === null) return null
+  const rows = unionDraftRows(file)
+  const newest = rows.length > 0 ? rows[rows.length - 1] : null
+  if (newest === null) return null
+  // このタブの行として引き継ぐ（新しい印。元の行の印は共有しない＝元のタブが後から直した入力を消さない）
+  const [row] = adoptDraftRows([newest])
+  draftDid = row.did
+  draftFrom = row.from
+  lastDraft = { json: JSON.stringify(row.data), at: row.at }
+  return { form: row.data, at: row.at }
 }
 
 // ── 定型句の場面（cl_notePhraseCat・UI状態）──────────────────
@@ -291,6 +386,8 @@ export function NoteFormPage() {
   const [residentPicker, setResidentPicker] = useState(false)
   const [staffPicker, setStaffPicker] = useState(false)
   const [restorePrompt, setRestorePrompt] = useState(false)
+  /** 戻した書きかけが1日以上前なら「〇日前の書きかけ」（L1。黙って消さずに出す） */
+  const [restoreAge, setRestoreAge] = useState<string | null>(null)
 
   /** 定型句: 選んでいる場面の id（最後に選んだ場面を復元） */
   const [phraseCat, setPhraseCat] = useState<string>(loadPhraseCat)
@@ -363,7 +460,9 @@ export function NoteFormPage() {
           initedRef.current = true
           const actor = resolveActor(safeS)
           const base = defaultForm(actor?.id ?? null, new Date())
-          const draft = loadDraft()
+          const saved = loadDraft()
+          const draft = saved?.form ?? null
+          if (saved) setRestoreAge(draftAgeLabel(saved.at, Date.now()))
           if (draft) {
             // 下書きの参照先が今のマスタに無い場合は選び直させる（誤帰属の記録を作らない）
             const residentOk =
@@ -556,10 +655,14 @@ export function NoteFormPage() {
       try {
         // 取り消したのは登録した本人（この画面で選んだ記入者）。端末の既定の操作者ではなく
         // その記入者を「最後に書き換えた職員」として変更の記録に残す
-        const res = await softDeleteNote(note.id, note.rev, { editedBy: note.reporter_id })
-        if (res === 'conflict') {
+        // 取り消すのは登録した本文のままの時だけ（2026-09-29。ほかの端末が直していたら取り消さない＝直した本文を消さない）
+        const res = await deleteNote({ id: note.id }, note.body, {
+          editedBy: note.reporter_id,
+          meta: { note_on: note.note_on, shift: note.shift, resident_id: note.resident_id, after16: note.after16 },
+        })
+        if (res !== 'queued' && !noteDeleted(res)) {
           setFormError(
-            '取り消せませんでした（ほかの端末が同じ記録を更新しています）。タイムラインで内容を確認してから削除してください。',
+            '取り消せませんでした（ほかの端末が同じ記録を更新しています）。取り消しは端末に残し、日報の「送れていない申し送り」から選べるようにしました。',
           )
           return
         }
@@ -567,8 +670,9 @@ export function NoteFormPage() {
         setPhraseUndo([]) // 取り消しで戻した本文に対して「1つ戻す」を残さない
         setErrors({})
         if (res === 'queued') {
-          // 取り消しはキューへ退避済み。サーバー上の記録はまだ残っているので「取り消しました」とは言わない
-          show(MSG_UNDO_QUEUED)
+          // 取り消しはキューへ退避済み。サーバー上の記録はまだ残っているので「取り消しました」とは言わない。
+          // サーバー側の更新（0017）待ちの時は、通信断ではなくその旨を伝える（修正依頼2）
+          show(isNoteRpcMissing() ? MSG_UNDO_WAITING_SERVER : MSG_UNDO_QUEUED)
           return
         }
         show('登録を取り消しました。入力内容をフォームに戻しました。')
@@ -1233,7 +1337,7 @@ export function NoteFormPage() {
       {/* 書きかけの復元（§6.5）。破棄は取り消せないので確認を1回はさむ＝このダイアログ */}
       <ConfirmDialog
         open={restorePrompt}
-        title="書きかけを復元しました"
+        title={restoreAge === null ? '書きかけを復元しました' : `${restoreAge}を復元しました`}
         body="前回の入力が残っていたので画面に戻しました。このまま続けるときは「キャンセル」、消してよいときは「破棄する」を押してください。破棄した書きかけは元に戻せません。"
         confirmLabel="破棄する"
         danger

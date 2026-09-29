@@ -23,16 +23,25 @@ import {
 import { useTimeline } from '../hooks/useTimeline'
 import {
   DbError,
-  endOngoingNote,
+  deleteNote,
   fetchNoteReaders,
+  isNoteRpcMissing,
   fetchResidents,
   fetchStaff,
   getNativeInputEnabled,
   markRead,
+  noteDeleted,
+  pendingNoteRows,
+  queueSubscribe,
+  saveNoteEdits,
   setOutingEnd,
-  softDeleteNote,
-  updateNote,
 } from '../lib/db'
+import type { CellSaveResult, NoteMeta, PendingNoteRow, Queued } from '../lib/db'
+import { NoteConflictResolver } from '../components/ConflictResolver'
+import type { NoteConflictTarget } from '../components/ConflictResolver'
+import { NoteHistoryDialog } from '../components/NoteHistoryDialog'
+import { overlayNote, pendingNoteText, pendingSig } from '../lib/noteEdit'
+import { registerUnsaved } from '../lib/leaveGuard'
 import { getActorId, touchActivity } from '../lib/actor'
 import { fmtDayLabel, fmtTimeHM } from '../lib/format'
 import {
@@ -80,13 +89,37 @@ const BLOCKED_REASON = '現在はスプレッドシートで記録する期間�
 /** 申し送りへの操作（継続終了・削除・本文の訂正）の結果 */
 type NoteActionResult = { ok: true } | { ok: false; message: string }
 
-const ERR_NOTE_CONFLICT =
-  '他の端末で先に更新されました。入力は消えていません。画面を再読み込みして最新の内容を確認してから、もう一度お試しください'
 const ERR_NOTE_ACTION =
   '操作できませんでした（通信エラー）。電波状態を確認して、もう一度お試しください。記録は変わっていません'
 const ERR_NOTE_EMPTY = '本文が空です。内容を入力してから保存してください'
 /** 通信できずに db.ts の送信キューへ退避した時の一言（入力・表示は消さない） */
 const MSG_QUEUED = '通信できないため送信待ちにしました。電波が戻ると自動で送信します'
+/**
+ * 他の端末が先に変えていて止まった時の一言（2026-09-29。入力は端末の送信待ちに「競合」として残り、
+ * カードの下の〔くらべて選ぶ〕で選ぶ。再読み込み・画面移動でも消えない）
+ */
+const MSG_HELD =
+  '他の端末で先に変更されていたため、保存を止めました。入力はこの端末に残っています。カードの下の「くらべて選ぶ」で選んでください'
+
+/**
+ * 申し送りを送信待ちにした時の一言。サーバー側の更新（0017）待ちの時はそう伝える（通信断とは言わない・修正依頼2）
+ */
+function queuedText(): string {
+  return isNoteRpcMissing()
+    ? '保存済みの申し送りの変更は、サーバー側の更新待ちのためこの端末に保存しました（送信待ち）。更新されると自動で送ります'
+    : MSG_QUEUED
+}
+
+/** 送信待ちに添える控え（どの日・区分・対象の行か） */
+function noteMetaOf(n: Note): NoteMeta {
+  return { note_on: n.note_on, shift: n.shift, resident_id: n.resident_id, after16: n.after16 }
+}
+
+/** 欄ごとの保存の結果を、この画面の一言に直す（止まった＝競合は入力が端末に残ることを伝える） */
+function heldOrOk(res: CellSaveResult<Note> | Queued): 'queued' | 'held' | 'ok' {
+  if (res === 'queued') return 'queued'
+  return res.conflicts.length > 0 || res.held === true ? 'held' : 'ok'
+}
 const NO_ACTOR_REASON = '記録する職員が選ばれていません。設定タブの「記録する職員」から選んでください'
 
 /** 参照の同一性を保つための空配列（React.memo の無効化を防ぐ） */
@@ -330,11 +363,17 @@ export function TimelinePage({
   const handleEndOngoing = useCallback(
     async (note: Note): Promise<NoteActionResult> => {
       try {
-        const res = await endOngoingNote(note.id, note.rev, actorId)
-        if (res === 'conflict') return { ok: false, message: ERR_NOTE_CONFLICT }
-        if (res === 'queued') {
+        // 継続の終了（ended_at・ended_by）も欄ごとの判定（2026-09-29）。基準はいま画面に出ているサーバーの期限
+        const res = await saveNoteEdits(
+          { id: note.id },
+          { ended_at: { value: new Date().toISOString(), base: note.ended_at }, ended_by: { value: actorId } },
+          { meta: noteMetaOf(note) },
+        )
+        const r = heldOrOk(res)
+        if (r === 'held') return { ok: false, message: MSG_HELD }
+        if (r === 'queued') {
           // 送信待ちへ退避。サーバーはまだ変わっていないので取り直さない（行は次の送信成功で終了表示になる）
-          showRef.current(MSG_QUEUED)
+          showRef.current(queuedText())
           return { ok: true }
         }
         touchActivity()
@@ -350,12 +389,14 @@ export function TimelinePage({
 
   /** 申し送りの削除（論理削除。記録は消さずに非表示へ）。確認ダイアログの後ろでのみ呼ぶ */
   const handleDeleteNote = useCallback(
-    async (note: Note): Promise<NoteActionResult> => {
+    async (note: Note, seenBody: string): Promise<NoteActionResult> => {
       try {
-        const res = await softDeleteNote(note.id, note.rev)
-        if (res === 'conflict') return { ok: false, message: ERR_NOTE_CONFLICT }
+        // 取り消すのは「見た本文」のままの時だけ（他の端末が直していたら取り消さずに止める）。
+        // 見た本文は確認を開いた時の本文（確認の間に自動の取り直しで新しくなった本文を基準にしない＝修正依頼4）
+        const res = await deleteNote({ id: note.id }, seenBody, { meta: noteMetaOf(note) })
+        if (res !== 'queued' && !noteDeleted(res)) return { ok: false, message: MSG_HELD }
         if (res === 'queued') {
-          showRef.current(MSG_QUEUED)
+          showRef.current(queuedText())
           return { ok: true }
         }
         touchActivity()
@@ -369,15 +410,24 @@ export function TimelinePage({
     [failure],
   )
 
-  /** 申し送り本文の訂正。body だけを送り、他の項目はサーバーの値を温存する（部分更新） */
+  /**
+   * 申し送り本文の訂正。body だけを送り、他の項目はサーバーの値を温存する（部分更新）。
+   * base＝本文を直し始めた時の本文（C2。自動の取り直しで rev・本文が新しくなっても、基準は変えない。
+   * 他の端末が先に直していればサーバーが書かずに止め、入力は端末の送信待ちに「競合」として残る）
+   */
   const handleUpdateNoteBody = useCallback(
-    async (note: Note, body: string): Promise<NoteActionResult> => {
+    async (note: Note, body: string, base: string): Promise<NoteActionResult> => {
       if (body.trim() === '') return { ok: false, message: ERR_NOTE_EMPTY }
       try {
-        const res = await updateNote(note.id, note.rev, { body })
-        if (res === 'conflict') return { ok: false, message: ERR_NOTE_CONFLICT }
-        if (res === 'queued') {
-          showRef.current(MSG_QUEUED)
+        const res = await saveNoteEdits({ id: note.id }, { body: { value: body, base } }, { meta: noteMetaOf(note) })
+        const r = heldOrOk(res)
+        if (r === 'held') {
+          // 入力は端末に残した（カードの下に〔くらべて選ぶ〕が出る）。編集欄は閉じてよい
+          showRef.current(MSG_HELD)
+          return { ok: true }
+        }
+        if (r === 'queued') {
+          showRef.current(queuedText())
           return { ok: true }
         }
         touchActivity()
@@ -415,6 +465,43 @@ export function TimelinePage({
       }
     },
     [],
+  )
+
+  // ── 申し送りの送信待ち・止まった変更（2026-09-29。端末の cl_sendQueue2 が正本） ──
+  // 未送信件数の通知のたびに引き直し、カードに重ねて出す。送れた（送信待ちから消えた）行があれば取り直す（H2）
+  const [pendingNotes, setPendingNotes] = useState<Map<number, PendingNoteRow>>(() => pendingNoteRows())
+  const pendingNotesRef = useRef(pendingNotes)
+  useEffect(
+    () =>
+      queueSubscribe(() => {
+        const next = pendingNoteRows()
+        if (pendingSig(next) === pendingSig(pendingNotesRef.current)) return // 変わっていない
+        const cleared = [...pendingNotesRef.current.keys()].some((id) => !next.has(id))
+        pendingNotesRef.current = next
+        setPendingNotes(next)
+        if (cleared) refreshRef.current()
+      }),
+    [],
+  )
+  // 止まっている（競合・拒否）申し送りは、画面を離れる時の確認に数える
+  useEffect(
+    () => registerUnsaved(() => [...pendingNoteRows().values()].some((p) => p.state !== 'pending'), 'notes'),
+    [],
+  )
+  const [resolveNote, setResolveNote] = useState<NoteConflictTarget | null>(null)
+  const [historyNote, setHistoryNote] = useState<{ id: number; label: string } | null>(null)
+  const noteLabel = useCallback(
+    (note: Note) =>
+      note.resident_id == null ? 'スタッフへ（全体）' : noteTargetName(residentById.get(note.resident_id), note.resident_id),
+    [residentById],
+  )
+  const handleResolveNote = useCallback(
+    (note: Note) => setResolveNote({ id: note.id, label: `${fmtDayLabel(note.note_on)}・${noteLabel(note)}` }),
+    [noteLabel],
+  )
+  const handleNoteHistory = useCallback(
+    (note: Note) => setHistoryNote({ id: note.id, label: noteLabel(note) }),
+    [noteLabel],
   )
 
   // 日付ヘッダの貼り付け位置（シェルヘッダの高さぶん下げる）。
@@ -555,6 +642,9 @@ export function TimelinePage({
           onDeleteNote={handleDeleteNote}
           onUpdateNoteBody={handleUpdateNoteBody}
           onNotify={notify}
+          pendingNotes={pendingNotes}
+          onResolveNote={handleResolveNote}
+          onNoteHistory={handleNoteHistory}
         />
       ))}
 
@@ -578,6 +668,27 @@ export function TimelinePage({
       {!hasMore && days.length > 0 && (
         <p className="mt-3 text-center text-sm text-ink3">これ以上さかのぼる記録はありません</p>
       )}
+
+      <NoteConflictResolver
+        target={resolveNote}
+        actorId={actorId}
+        staff={staffProp ?? loadedStaff ?? undefined}
+        residentName={(id) => (id === null ? 'スタッフへ（全体）' : noteTargetName(residentById.get(id), id))}
+        onClose={() => setResolveNote(null)}
+        onResolved={() => {
+          setResolveNote(null)
+          const next = pendingNoteRows()
+          pendingNotesRef.current = next
+          setPendingNotes(next)
+          refresh()
+        }}
+      />
+      <NoteHistoryDialog
+        noteId={historyNote?.id ?? null}
+        label={historyNote?.label ?? ''}
+        staffName={(id) => staffById.get(id) ?? null}
+        onClose={() => setHistoryNote(null)}
+      />
 
       {toast}
     </div>
@@ -606,9 +717,13 @@ interface DaySectionProps {
     endAt: string | null,
   ) => Promise<'ok' | 'conflict' | 'error' | 'queued'>
   onEndOngoing: (note: Note) => Promise<NoteActionResult>
-  onDeleteNote: (note: Note) => Promise<NoteActionResult>
-  onUpdateNoteBody: (note: Note, body: string) => Promise<NoteActionResult>
+  onDeleteNote: (note: Note, seenBody: string) => Promise<NoteActionResult>
+  onUpdateNoteBody: (note: Note, body: string, base: string) => Promise<NoteActionResult>
   onNotify: (message: string) => void
+  /** 申し送りの送信待ち・止まった変更（行 id → 送信待ち） */
+  pendingNotes: Map<number, PendingNoteRow>
+  onResolveNote: (note: Note) => void
+  onNoteHistory: (note: Note) => void
 }
 
 // 展開・既読の状態は「その日」の中に閉じ込める。
@@ -629,6 +744,9 @@ const DaySection = memo(function DaySection(props: DaySectionProps) {
     onDeleteNote,
     onUpdateNoteBody,
     onNotify,
+    pendingNotes,
+    onResolveNote,
+    onNoteHistory,
   } = props
 
   const iso = day.day
@@ -877,6 +995,9 @@ const DaySection = memo(function DaySection(props: DaySectionProps) {
                       onOpenKarte={onOpenKarte}
                       onDeleteNote={onDeleteNote}
                       onUpdateNoteBody={onUpdateNoteBody}
+                      pending={pendingNotes.get(n.id) ?? null}
+                      onResolve={onResolveNote}
+                      onHistory={onNoteHistory}
                     />
                   </li>
                 ))}
@@ -1006,8 +1127,12 @@ interface NoteCardProps {
   onToggleExpand: (note: Note) => void
   onMarkRead: (note: Note) => void
   onOpenKarte: (residentId: number) => void
-  onDeleteNote: (note: Note) => Promise<NoteActionResult>
-  onUpdateNoteBody: (note: Note, body: string) => Promise<NoteActionResult>
+  onDeleteNote: (note: Note, seenBody: string) => Promise<NoteActionResult>
+  onUpdateNoteBody: (note: Note, body: string, base: string) => Promise<NoteActionResult>
+  /** この申し送りの送信待ち・止まった変更（無ければ null） */
+  pending: PendingNoteRow | null
+  onResolve: (note: Note) => void
+  onHistory: (note: Note) => void
 }
 
 function NoteCard({
@@ -1024,7 +1149,12 @@ function NoteCard({
   onOpenKarte,
   onDeleteNote,
   onUpdateNoteBody,
+  pending,
+  onResolve,
+  onHistory,
 }: NoteCardProps) {
+  // 画面に出すのは送信待ちの値を重ねた行（送信待ちの本文を出す）。保存の基準はサーバーの生の値（note）
+  const shown = overlayNote(note, pending?.values)
   const unread = actorId != null && !read
   const readCount = (note.read_count ?? 0) + (locallyRead && note.my_read !== true ? 1 : 0)
   const bodyId = `cl-note-${note.id}-body`
@@ -1034,7 +1164,14 @@ function NoteCard({
 
   // 訂正・削除の状態（展開中だけ操作できる。入力封鎖中・操作者未選択はディセーブル）
   const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState(note.body)
+  const [draft, setDraft] = useState(shown.body)
+  /**
+   * 本文を直し始めた時の本文（サーバーの生の値・C2）。自動の取り直しで note が新しくなっても変えない
+   * （保存を押した時の note を基準にすると、その間に他の端末が直した本文を黙って上書きしてしまう）
+   */
+  const editBaseRef = useRef(note.body)
+  /** 削除の確認を開いた時の本文（サーバーの生の値・修正依頼4）。確認の間の自動の取り直しで変えない */
+  const deleteBaseRef = useRef(note.body)
   const [asking, setAsking] = useState(false)
   const [busy, setBusy] = useState(false)
   const [rowError, setRowError] = useState<string | null>(null)
@@ -1045,7 +1182,7 @@ function NoteCard({
   async function submitBody() {
     setBusy(true)
     setRowError(null)
-    const res = await onUpdateNoteBody(note, draft)
+    const res = await onUpdateNoteBody(note, draft, editBaseRef.current)
     setBusy(false)
     if (res.ok) {
       setEditing(false)
@@ -1057,7 +1194,7 @@ function NoteCard({
   async function submitDelete() {
     setBusy(true)
     setRowError(null)
-    const res = await onDeleteNote(note)
+    const res = await onDeleteNote(note, deleteBaseRef.current)
     setBusy(false)
     if (!res.ok) setRowError(res.message)
   }
@@ -1105,7 +1242,7 @@ function NoteCard({
         aria-controls={bodyId}
       >
         <span id={bodyId} className={`block text-lg text-ink ${expanded ? '' : 'clamp-2'}`}>
-          {note.body}
+          {shown.body}
         </span>
         <span className="mt-1 block text-sm text-link">
           {expanded ? '本文を閉じる' : '本文をすべて表示'}
@@ -1146,6 +1283,24 @@ function NoteCard({
           ))}
       </div>
 
+      {/* 送信待ち・止まっている変更の印（2026-09-29）。止まっている時は〔くらべて選ぶ〕 */}
+      {pending ? (
+        <div className="mt-1 flex flex-wrap items-center gap-gap">
+          <span className={`text-sm ${pending.state === 'pending' ? 'text-ink' : 'font-bold text-danger'}`}>
+            {pendingNoteText(pending.state, Object.prototype.hasOwnProperty.call(pending.values, 'deleted_at'), isNoteRpcMissing())}
+          </span>
+          {pending.state !== 'pending' ? (
+            <button
+              type="button"
+              className="min-h-tap rounded-md border border-primary px-3 text-base font-bold text-primary"
+              onClick={() => onResolve(note)}
+            >
+              くらべて選ぶ
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
       {/* 4行目: 訂正・削除（本文を開いている時だけ出す。どちらも1タップでは実行しない） */}
       {expanded && (
         <div className="mt-2 border-t border-border pt-2">
@@ -1175,7 +1330,7 @@ function NoteCard({
                   className="min-h-tap rounded-md border border-border-strong px-3 text-base text-ink"
                   onClick={() => {
                     setEditing(false)
-                    setDraft(note.body)
+                    setDraft(shown.body)
                     setRowError(null)
                   }}
                   disabled={busy}
@@ -1190,7 +1345,9 @@ function NoteCard({
                 type="button"
                 className="min-h-tap rounded-md border border-border-strong px-3 text-base text-link disabled:text-ink3"
                 onClick={() => {
-                  setDraft(note.body)
+                  // 直し始めた時に見ていた本文を控える（基準。送信待ちの本文があればそれ＝続きの入力として重なる・第3巡）
+                  editBaseRef.current = shown.body
+                  setDraft(shown.body)
                   setEditing(true)
                   setRowError(null)
                 }}
@@ -1199,11 +1356,21 @@ function NoteCard({
               >
                 本文を直す
               </button>
+              <button
+                type="button"
+                className="min-h-tap rounded-md border border-border-strong px-3 text-base text-link"
+                onClick={() => onHistory(note)}
+              >
+                変更の記録
+              </button>
               {/* 破壊的操作は塗りつぶしにせず枠線ボタン＋確認ダイアログ */}
               <button
                 type="button"
                 className="min-h-tap rounded-md border border-danger px-3 text-base font-bold text-danger disabled:border-border disabled:text-ink3"
-                onClick={() => setAsking(true)}
+                onClick={() => {
+                  deleteBaseRef.current = note.body
+                  setAsking(true)
+                }}
                 disabled={!canEdit || busy}
                 title={disabledReason}
               >

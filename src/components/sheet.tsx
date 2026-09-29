@@ -401,6 +401,11 @@ export interface SheetCellProps {
    * （入った時に配った欄そのものを取り消すため、終わりの側で欄を組み立て直さない）
    */
   onEditStart?: () => (() => void) | void
+  /**
+   * 確定しないまま編集が終わる時（セルが画面から外れる・編集できなくなる）に、打ちかけの文字を渡す（2026-09-29）。
+   * 渡さない画面は従来どおり（打ちかけは確定しない）。値が編集を始めた時と同じなら呼ばない
+   */
+  onAbandon?: (value: string, meta: { base: string }) => void
 }
 
 /**
@@ -424,6 +429,7 @@ export function SheetCell({
   groupEnd = false,
   busy = null,
   onEditStart,
+  onAbandon,
 }: SheetCellProps) {
   const text = value ?? ''
   const editable = typeof onCommit === 'function'
@@ -441,6 +447,11 @@ export function SheetCell({
   const busyId = useId()
   const editStartRef = useRef(onEditStart)
   editStartRef.current = onEditStart
+  /** 打ちかけを渡す先と、いまの編集状態・打ちかけ（外れる時・編集できなくなる時に読む） */
+  const abandonRef = useRef(onAbandon)
+  abandonRef.current = onAbandon
+  const editingRawRef = useRef(false)
+  const draftRef = useRef('')
 
   /** textarea を内容の高さに合わせる（長文は行が伸びる） */
   const autoGrow = useCallback(() => {
@@ -465,10 +476,27 @@ export function SheetCell({
     autoGrow()
   }, [isEditing, autoGrow])
 
-  // 編集中に入力封鎖へ切り替わった（onCommit が外れた）場合は編集状態を残さない
+  editingRawRef.current = editing
+  draftRef.current = draft
+  // 編集中に入力封鎖へ切り替わった（onCommit が外れた）場合は編集状態を残さない。
+  // 打ちかけがあれば渡す（送信待ちに退避した行など、編集できなくなった行の打ちかけを捨てない）
   useEffect(() => {
-    if (!editable) setEditing(false)
+    if (editable) return
+    if (editingRawRef.current && !skipBlurRef.current && draftRef.current !== startRef.current) {
+      abandonRef.current?.(draftRef.current, { base: startRef.current })
+    }
+    setEditing(false)
   }, [editable])
+
+  // 編集中にセルが画面から外れる（行が置き換わる等）時も、打ちかけがあれば渡す
+  useEffect(
+    () => () => {
+      if (editingRawRef.current && !skipBlurRef.current && draftRef.current !== startRef.current) {
+        abandonRef.current?.(draftRef.current, { base: startRef.current })
+      }
+    },
+    [],
+  )
 
   // 編集の始まり・終わりを画面へ伝える（Presence）。編集中に消えた時も「終わった」を伝える
   useEffect(() => {

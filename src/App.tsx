@@ -42,7 +42,9 @@ import {
   cancelBlocked,
   hasUnsavedInput,
   LEAVE_BODY,
+  LEAVE_BODY_NOTES,
   LEAVE_TITLE,
+  unsavedOnlyNotes,
   markAccepted,
   onBlockedNavigation,
   proceedBlocked,
@@ -999,7 +1001,8 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
       <ui.ConfirmDialog
         open={leaveTo !== null}
         title={LEAVE_TITLE}
-        body={LEAVE_BODY}
+        // 止まっているのが送れていない申し送りだけなら、事実どおり「端末に残る」と出す（2026-09-29）
+        body={leaveTo !== null && unsavedOnlyNotes() ? LEAVE_BODY_NOTES : LEAVE_BODY}
         confirmLabel="移動する"
         danger
         onConfirm={() => {

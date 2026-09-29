@@ -94,19 +94,49 @@ import {
   saveAttendance,
   saveVitalEdits,
   setOutingEnd,
-  softDeleteNote,
   isSelfWrite,
   subscribeChanges,
-  updateNoteFields,
+  deleteNote,
+  fetchNoteRows,
+  noteDeleted,
+  NOTES_PENDING_REASON,
+  listUnsentNotes,
+  stageNoteEdits,
+  pendingNoteCkRows,
+  isNoteRpcMissing,
+  pendingNoteRows,
+  queueSubscribe,
+  saveNoteEdits,
 } from '../lib/db'
-import type { CellEditInput, DailyReport, PendingCellRow, PresenceHere, VitalCellField } from '../lib/db'
+import type {
+  CellEditInput,
+  DailyReport,
+  NoteEditField,
+  QueuedNoteInsert,
+  NoteFirstSent,
+  NoteMeta,
+  NoteTarget,
+  PendingCellRow,
+  PendingNoteRow,
+  PresenceHere,
+  VitalCellField,
+} from '../lib/db'
+import { followUpEdits, overlayNote, pendingNoteText, pendingSig, shouldSendBody } from '../lib/noteEdit'
+import type { DraftFields } from '../lib/noteEdit'
+import { UnsentNotes } from '../components/UnsentNotes'
+import { NoteHistoryDialog } from '../components/NoteHistoryDialog'
 import { focusOf, useCellPresence } from '../hooks/useCellPresence'
 import type { CellPresence } from '../hooks/useCellPresence'
 import { notePresence, presenceWhoNames } from '../lib/presence'
 import type { CellTarget } from '../lib/presence'
 import { PresenceSummary, RowBusyMark } from '../components/presence'
-import { ConflictResolver, focusAfterResolve } from '../components/ConflictResolver'
-import type { ConflictResolution, ConflictTarget } from '../components/ConflictResolver'
+import { ConflictResolver, focusAfterResolve, NoteConflictResolver } from '../components/ConflictResolver'
+import type {
+  ConflictResolution,
+  ConflictTarget,
+  NoteConflictResolution,
+  NoteConflictTarget,
+} from '../components/ConflictResolver'
 import {
   CELLS_PENDING_REASON,
   fmtTimeValue,
@@ -132,6 +162,19 @@ import {
 import type { Edits } from '../lib/rowSync'
 import type { ConflictColumn, VitalField } from '../lib/conflict'
 import { registerUnsaved } from '../lib/leaveGuard'
+import {
+  adoptDraftRows,
+  DRAFT_TAB_ID,
+  draftAgeLabel,
+  goneMarksFor,
+  legacyDraftId,
+  markDraftsGone,
+  newDraftId,
+  parseDraftFile,
+  unionDraftRows,
+  writeTabRows,
+} from '../lib/noteDrafts'
+import type { DraftFile, DraftOrigin, DraftRow } from '../lib/noteDrafts'
 import { getActorId, touchActivity } from '../lib/actor'
 import { addDays, fmtTimeHM, normalizeVitalInput, todayIso, toHalfWidth } from '../lib/format'
 import {
@@ -309,6 +352,9 @@ const MSG_EMPTY_VITAL =
  * 「取り消したのに後から出てくる」を作らないため（消去は保全ゲートの後ろ）。
  */
 const MSG_LOCKED_DELETE = '送信待ちのため取り消せません。送信が終わってから、行の削除をしてください'
+/** 送信待ちの登録が拒否・競合で止まった行の一言（一覧で選ぶよう案内する。F1） */
+const MSG_REG_STOPPED =
+  '▲ 登録できなかった申し送りです。上の「送れていない申し送り」で「新しい行として登録」か「取り下げ」を選んでください'
 /**
  * ピッカーで選んだのに、その行が画面から無くなっていた時の案内。
  * 黙って捨てると「対象を選んだのに空欄のまま」になるため、理由と次の行動を必ず出す。
@@ -422,6 +468,39 @@ function residentName(r: Resident | undefined, id: number | null): string {
 function noteTargetName(r: Resident | undefined, id: number | null): string {
   if (r) return noteDisplayName(r)
   return id == null ? '' : `利用者ID ${id}`
+}
+
+/**
+ * 表の幅が画面より広い時（狭い画面）でも、行の下の一言・送れていない申し送りの一覧が画面の中に収まるようにする
+ * （横にずらしても左端に留め、幅を画面に収める。広い画面では幅いっぱいのまま＝見た目は変わらない）
+ */
+const NARROW_STICKY: CSSProperties = {
+  position: 'sticky',
+  left: 0,
+  // 幅は日報の枠（表の表示領域）に収める（--dsheet-view-w は枠の実測の内幅。左のナビがある広い画面・大きい文字でも
+  // 右端が枠の外に出ない＝F3）。実測が無い時は従来の画面幅基準
+  maxWidth: 'calc(var(--dsheet-view-w, calc(100vw - 12px)) - 4px)',
+}
+
+/** 保存済みの申し送りで直せる欄（送った欄だけ書き、他はサーバーの値を温存する） */
+type NotePatch = Partial<
+  Pick<Note, 'body' | 'resident_id' | 'importance' | 'color' | 'after16' | 'occurred_at' | 'reporter_id' | 'role_tags' | 'shift'>
+>
+
+/** 送信待ちの登録の行に、登録後の変更（notes#ck:<ck>）の値を重ねる（同じなら元の行のまま） */
+function overlayDraft<T extends DraftFields>(d: T, v: Record<string, unknown>): T {
+  const next = { ...d }
+  if (typeof v.body === 'string') next.body = v.body
+  if ('resident_id' in v) next.residentId = (v.resident_id as number | null) ?? null
+  if ('reporter_id' in v) next.reporterId = (v.reporter_id as number | null) ?? null
+  if ('color' in v) next.color = (v.color as NoteColor | null) ?? null
+  const same = next.body === d.body && next.residentId === d.residentId && next.reporterId === d.reporterId && next.color === d.color
+  return same ? d : next
+}
+
+/** 送信待ちに添える控え（どの日・区分・対象の行か。「送れていない申し送り」の一覧・〔新しい行として…〕に使う） */
+function noteMetaOf(n: Note): NoteMeta {
+  return { note_on: n.note_on, shift: n.shift, resident_id: n.resident_id, after16: n.after16 }
 }
 
 function staffName(s: Staff | undefined, id: number | null): string {
@@ -811,6 +890,32 @@ interface NoteDraft {
   color: NoteColor | null
   /** 送信待ちに退避した行。同じ内容を二重に登録しないため編集を止める */
   locked: boolean
+  /** 書きかけの行の印（端末の控え cl_dailyDraft の中で、別のタブの同じ行と見分ける・2026-09-29） */
+  did?: string
+  /** 別のタブの書きかけを引き継いだ時の元の行（noteDrafts.ts の DraftRow.from） */
+  from?: DraftOrigin[]
+  /**
+   * 送信待ちの登録の行（locked）の登録の冪等キー（2026-09-29 第3巡）。この行へ加えた変更は notes#ck:<ck> に積み、
+   * 登録の op の中身は書き換えない。端末の控え（cl_dailyDraft）には書かない（登録は cl_sendQueue にある）
+   */
+  ck?: string
+  /**
+   * その冪等キー（ck）で最初に送った登録の中身（本文・対象・記入者・色）。ck と一緒に控えへ残し、確定し直す時に
+   * 基準として渡す（再読み込みの後も自分どうしで競合しない・R6-3）。旧版の読み手は知らない欄として読み飛ばす
+   */
+  firstSent?: NoteFirstSent
+  /**
+   * 送信待ちの登録の状態（syncRegistrationRows が送信待ちの実際から写す）。行の一言を再読み込みの後も出すため（F1）。
+   * 省略＝送信待ち
+   */
+  regState?: 'pending' | 'conflict' | 'rejected'
+}
+
+/** 送信待ちの登録の行の一言（再読み込みの後も、登録の送信待ちの実際から出す。F1） */
+function registrationMark(draft: NoteDraft | null | undefined): RowStatus | undefined {
+  if (!draft || !draft.locked || draft.ck === undefined) return undefined
+  if (draft.regState === 'rejected' || draft.regState === 'conflict') return { tone: 'danger', text: MSG_REG_STOPPED }
+  return { tone: 'warn', text: MSG_QUEUED }
 }
 
 interface VitalSetInput {
@@ -866,6 +971,10 @@ interface VitalDraft {
   sets: VitalSetInput[]
   symptom: string
   locked: boolean
+  /** 書きかけの行の印（NoteDraft.did と同じ） */
+  did?: string
+  /** 別のタブの書きかけを引き継いだ時の元の行（noteDrafts.ts の DraftRow.from） */
+  from?: DraftOrigin[]
 }
 
 interface OutingDraft {
@@ -877,6 +986,10 @@ interface OutingDraft {
   endText: string
   companion: string
   locked: boolean
+  /** 書きかけの行の印（NoteDraft.did と同じ） */
+  did?: string
+  /** 別のタブの書きかけを引き継いだ時の元の行（noteDrafts.ts の DraftRow.from） */
+  from?: DraftOrigin[]
 }
 
 // ── 空の入力行を作る（「＋行」と、固定行数の補充から呼ぶ）──────
@@ -891,6 +1004,7 @@ function emptyOutingDraft(key: string, kind: OutingKind): OutingDraft {
     endText: '',
     companion: '',
     locked: false,
+    did: newDraftId(),
   }
 }
 
@@ -903,6 +1017,7 @@ function emptyVitalDraft(key: string, kind: 'observation' | 'symptom'): VitalDra
     sets: kind === 'observation' ? [emptySet(), emptySet(), emptySet()] : [emptySet()],
     symptom: '',
     locked: false,
+    did: newDraftId(),
   }
 }
 
@@ -922,6 +1037,7 @@ function emptyNoteDraft(
     reporterId,
     color: null,
     locked: false,
+    did: newDraftId(),
   }
 }
 
@@ -936,21 +1052,19 @@ function emptyNoteDraft(
 //   ・持つのは 利用者ID・記入者ID・色・打った文字だけ。**氏名は持たない**
 //   ・送信待ちに退避済み（locked）の行と、登録の応答待ちの行は控えを残さない
 //     ＝復元しても二重登録にならない
-//   ・24時間で失効。壊れた値・未知の値・別の形式は消して既定（空の行）から始める
+//   ・壊れた値・未知の形式は消して既定（空の行）から始める
 //   ・端末の保存が使えない（容量超過・プライベートモード）時も入力は続けられる＝失敗は無視する
+//   ・2026-09-29（申し送りを消さない作り替え M3・L1）: 同じ端末の別のタブで食い合わないよう、タブごとに分けて持つ
+//     （src/lib/noteDrafts.ts）。読み込みは全タブの和集合、書き換えるのは自分のタブの分だけ。登録できた・取り消した
+//     行は印（gone）を付けて他のタブの控えから復活させない。24時間で黙って消すのはやめ、古い書きかけは
+//     「〇日前の書きかけ」と行に出して残す（行の削除＝破棄した時だけ消える）。旧版が読む中身（v:1 の notes/vitals/
+//     outings）も和集合で書き続ける（旧版へ戻しても「形が違う」で消されない）
 
-/** 控えの形式の版。読めない版は復元せずに消す */
+/** 控えの形式の版（旧版と同じ 1 のまま。タブごとの分は tabs・gone に足した） */
 const DAILY_DRAFT_VERSION = 1
-/** 控えを残す期限（24時間）。古い日の書きかけを後から現在の日に見せない */
-const DAILY_DRAFT_TTL_MS = 24 * 60 * 60 * 1000
 
-interface DailyDraftFile {
-  v: number
-  savedAt: number
-  notes: NoteDraft[]
-  vitals: VitalDraft[]
-  outings: OutingDraft[]
-}
+/** 行の種類（控えの中の kind） */
+type DailyDraftKind = 'note' | 'vital' | 'outing'
 
 /** 控えは日ごとに分ける（`cl_dailyDraft:YYYY-MM-DD`） */
 function dailyDraftKey(day: string): string {
@@ -965,6 +1079,88 @@ function removeDailyDraft(day: string): void {
   }
 }
 
+/** このタブが前回書いた行の中身（行の印 → 中身の JSON と、その中身になった時刻）。中身が変わった行だけ時刻を進める */
+const dailyWritten = new Map<string, { json: string; at: number }>()
+
+/** 控えに書く中身（画面のキー・送信待ちの印を除く） */
+function draftData<T extends { key: string; did?: string; from?: DraftOrigin[]; locked: boolean }>(
+  d: T,
+): Omit<T, 'key' | 'did' | 'from'> {
+  const { key: _key, did: _did, from: _from, ...rest } = d
+  return rest
+}
+
+function noteHasInput(d: NoteDraft): boolean {
+  return d.body.trim() !== '' || d.targetPicked
+}
+
+function vitalHasInput(d: VitalDraft): boolean {
+  return (
+    d.residentId !== null ||
+    d.symptom.trim() !== '' ||
+    d.sets.some((s) => s.at || s.temp || s.spo2 || s.bp || s.pulse)
+  )
+}
+
+function outingHasInput(d: OutingDraft): boolean {
+  return (
+    d.residentId !== null ||
+    d.place.trim() !== '' ||
+    d.startAt !== '' ||
+    d.endText !== '' ||
+    d.companion.trim() !== ''
+  )
+}
+
+/** 控えの1行の中身を検める（読めない行は null） */
+function readDailyData(kind: string, x: unknown): NoteDraft | VitalDraft | OutingDraft | null {
+  if (kind === 'note') return readNoteDraft(x)
+  if (kind === 'vital') return readVitalDraft(x)
+  if (kind === 'outing') return readOutingDraft(x)
+  return null
+}
+
+/** 旧版の控え（tabs の無い v:1）を行へ読み替える（行の印は中身から決まる＝同じ控えは同じ印） */
+function legacyDailyRows(o: Record<string, unknown>): DraftRow<NoteDraft | VitalDraft | OutingDraft>[] {
+  const at = typeof o.savedAt === 'number' && Number.isFinite(o.savedAt) ? o.savedAt : 0
+  const out: DraftRow<NoteDraft | VitalDraft | OutingDraft>[] = []
+  const add = (kind: DailyDraftKind, list: unknown): void => {
+    if (!Array.isArray(list)) return
+    list.forEach((x, i) => {
+      const data = readDailyData(kind, x)
+      if (data !== null) out.push({ did: legacyDraftId(kind, i, x), at, kind, data })
+    })
+  }
+  add('note', o.notes)
+  add('vital', o.vitals)
+  add('outing', o.outings)
+  return out
+}
+
+/** 控えの原文を読む（無い＝null。読めない・別の形式は消して null＝従来どおり） */
+function readDailyFile(day: string): DraftFile<NoteDraft | VitalDraft | OutingDraft> | null {
+  let raw: string | null = null
+  try {
+    raw = window.localStorage.getItem(dailyDraftKey(day))
+  } catch {
+    return null
+  }
+  if (raw === null || raw === '') return null
+  let parsed: unknown = null
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    removeDailyDraft(day)
+    return null
+  }
+  const o = asRecord(parsed)
+  if (o === null || o.v !== DAILY_DRAFT_VERSION) {
+    removeDailyDraft(day)
+    return null
+  }
+  return parseDraftFile(o, readDailyData, legacyDailyRows)
+}
+
 /**
  * 送信待ちに退避済み（locked）の行だけは保存しない（送信キューに既に載っており、
  * 復元すると二重登録になる）。
@@ -973,25 +1169,84 @@ function removeDailyDraft(day: string): void {
  *   再読み込みされると、控えから外していた場合は本文が無言で消える。
  *   サーバーに届いていた場合は復元した下書きが保存済みの行と**並んで見える**ので、
  *   職員が目で気づいて取り消せる（重複 ＞ 無言消失。multi-device-sync 原則5）。
+ * 2026-09-29: 書き換えるのは自分のタブの分だけ。前に書いた行が無くなった（登録できた・取り消した・送信待ちへ移った）
+ * 時は印を付けて、他のタブの控えから復活させない。入力の無い空行は控えに残さない
  */
 function writeDailyDraft(
   day: string,
   notes: NoteDraft[],
   vitals: VitalDraft[],
   outings: OutingDraft[],
-): void {
-  const keep = (d: { locked: boolean }): boolean => !d.locked
-  const file: DailyDraftFile = {
+): boolean {
+  const now = Date.now()
+  const rows: DraftRow<NoteDraft | VitalDraft | OutingDraft>[] = []
+  const add = <T extends NoteDraft | VitalDraft | OutingDraft>(kind: DailyDraftKind, d: T, has: boolean): void => {
+    // 送信待ちの行は書かない（登録は送信キュー、登録後の変更は cl_sendQueue2 の notes#ck:<ck> にある）
+    if (d.locked || !has || d.did === undefined) return
+    const data = draftData(d) as unknown as NoteDraft | VitalDraft | OutingDraft
+    const json = JSON.stringify(data)
+    const prev = dailyWritten.get(d.did)
+    const at = prev !== undefined && prev.json === json ? prev.at : now
+    dailyWritten.set(d.did, { json, at })
+    rows.push(d.from !== undefined ? { did: d.did, at, kind, data, from: d.from } : { did: d.did, at, kind, data })
+  }
+  for (const d of notes) add('note', d, noteHasInput(d))
+  for (const d of vitals) add('vital', d, vitalHasInput(d))
+  for (const d of outings) add('outing', d, outingHasInput(d))
+  const file = readDailyFile(day)
+  const keep = new Set(rows.map((r) => r.did))
+  // このタブから無くなった行（登録できた・取り消した・送信待ちへ移った）と、その行が引き継いだ元の版に印を付ける
+  const removed = (file?.tabs[DRAFT_TAB_ID]?.rows ?? []).filter((r) => !keep.has(r.did))
+  const next = writeTabRows(markDraftsGone(file, goneMarksFor(removed, now), now), DRAFT_TAB_ID, rows, now)
+  return writeDailyFile(day, next, now)
+}
+
+/** 控えのタブ（行が画面から外れた後の入力を残す場所。このタブの書き戻しでは消えない＝和集合で次に開いた時に戻る） */
+const KEPT_TAB_ID = `${DRAFT_TAB_ID}-kept`
+
+/**
+ * 画面から外れた（日付を送った・行が置き換わった）後に届いた申し送りの入力を、その日の書きかけの控えへ直接残す
+ * （第5巡・捨てる分岐をゼロにする）。画面の状態を通さないので、書きかけを持つ画面が閉じた後でも残せる。
+ * 同じ印（did）の行は新しい版で置き換える（元の行の版より新しいので、和集合ではこちらが出る）。残せた時 true
+ */
+function keepNoteDraftRow(day: string, draft: NoteDraft): boolean {
+  const now = Date.now()
+  const did = draft.did ?? newDraftId()
+  // 冪等キー（ck）は残す＝この書きかけを確定し直しても同じキーで送る（届いていれば二重にならない・R5-1/R5-2）
+  const data = draftData({ ...draft, locked: false, regState: undefined }) as unknown as NoteDraft
+  const file = readDailyFile(day)
+  const kept = (file?.tabs[KEPT_TAB_ID]?.rows ?? []).filter((r) => r.did !== did)
+  const row: DraftRow<NoteDraft | VitalDraft | OutingDraft> =
+    draft.from !== undefined ? { did, at: now, kind: 'note', data, from: draft.from } : { did, at: now, kind: 'note', data }
+  return writeDailyFile(day, writeTabRows(file, KEPT_TAB_ID, [...kept, row], now), now)
+}
+
+/** 控えのファイルを書く（和集合を旧版の読み手の形にも写す）。読み直して確かめ、残せた時 true */
+function writeDailyFile(day: string, next: DraftFile<NoteDraft | VitalDraft | OutingDraft>, now: number): boolean {
+  const union = unionDraftRows(next)
+  if (union.length === 0 && Object.keys(next.gone).length === 0) {
+    removeDailyDraft(day)
+    return true
+  }
+  const pick = (kind: DailyDraftKind): unknown[] => union.filter((r) => r.kind === kind).map((r) => r.data)
+  const out = {
     v: DAILY_DRAFT_VERSION,
-    savedAt: Date.now(),
-    notes: notes.filter(keep),
-    vitals: vitals.filter(keep),
-    outings: outings.filter(keep),
+    // 旧版は savedAt から24時間で消すので、書くたびに今の時刻にする（旧版へ戻しても書きかけを消させない）
+    savedAt: now,
+    notes: pick('note'),
+    vitals: pick('vital'),
+    outings: pick('outing'),
+    tabs: next.tabs,
+    gone: next.gone,
   }
   try {
-    window.localStorage.setItem(dailyDraftKey(day), JSON.stringify(file))
+    const json = JSON.stringify(out)
+    window.localStorage.setItem(dailyDraftKey(day), json)
+    // 読み直して確かめる（残せたかを呼び手へ返す）
+    return window.localStorage.getItem(dailyDraftKey(day)) === json
   } catch {
     // 容量超過・保存が使えない端末。控えが残らなくても画面の入力はそのまま続けられる
+    return false
   }
 }
 
@@ -1031,7 +1286,7 @@ function readNoteDraft(v: unknown): NoteDraft | null {
         ? (rawColor as NoteColor)
         : undefined
   if (color === undefined) return null
-  return {
+  const out: NoteDraft = {
     // キーは復元する画面で採り直す（控えのキーは、その画面が新しく採るキーと衝突しうる）
     key: '',
     shift: shift as Shift,
@@ -1044,6 +1299,22 @@ function readNoteDraft(v: unknown): NoteDraft | null {
     // 控えに残るのは未送信の行だけ（locked の行は書き出していない）
     locked: false,
   }
+  // 前に登録を試みた冪等キー（確定し直す時に同じキーで送る＝届いていれば二重にならない・R5-1/R5-2）
+  if (typeof o.ck === 'string' && /^[\w.:-]{1,100}$/.test(o.ck)) {
+    out.ck = o.ck
+    // その冪等キーで最初に送った中身（知っている形の欄だけ読む・R6-3）
+    const fs = asRecord(o.firstSent)
+    if (fs !== null) {
+      const f: NoteFirstSent = {}
+      if (typeof fs.body === 'string' && fs.body.length <= 10000) f.body = fs.body
+      if (fs.resident_id === null || (typeof fs.resident_id === 'number' && Number.isInteger(fs.resident_id))) f.resident_id = fs.resident_id
+      if (fs.reporter_id === null || (typeof fs.reporter_id === 'number' && Number.isInteger(fs.reporter_id))) f.reporter_id = fs.reporter_id
+      if (fs.color === null || typeof fs.color === 'string') f.color = fs.color
+      if (Object.keys(f).length > 0) out.firstSent = f
+    }
+  }
+  // 前の版が書いた「確かめ待ち」の印（verifyKey 等）は読まない＝普通の書きかけとして戻す（消さない）
+  return out
 }
 
 function readVitalSet(v: unknown): VitalSetInput | null {
@@ -1103,58 +1374,43 @@ function readOutingDraft(v: unknown): OutingDraft | null {
   }
 }
 
-/**
- * 端末に残した控えを読む。
- * 壊れた値・期限切れ・別の形式は**消して null を返す**（壊れた控えで画面が開けなくなるのを防ぐ）。
- * 行ごとに形が違うものは、その行だけ落として残りを戻す（読めるものは戻す）。
- */
-function readDailyDraft(
-  day: string,
-): { notes: NoteDraft[]; vitals: VitalDraft[]; outings: OutingDraft[] } | null {
-  let raw: string | null = null
-  try {
-    raw = window.localStorage.getItem(dailyDraftKey(day))
-  } catch {
-    return null
-  }
-  if (raw === null || raw === '') return null
-
-  let parsed: unknown = null
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
-    removeDailyDraft(day)
-    return null
-  }
-  const o = asRecord(parsed)
-  if (o === null || o.v !== DAILY_DRAFT_VERSION) {
-    removeDailyDraft(day)
-    return null
-  }
-  const savedAt = typeof o.savedAt === 'number' && Number.isFinite(o.savedAt) ? o.savedAt : null
-  // 端末の時計が大きくずれた控え（未来の日時）も期限切れと同じに扱う
-  if (savedAt === null || Math.abs(Date.now() - savedAt) > DAILY_DRAFT_TTL_MS) {
-    removeDailyDraft(day)
-    return null
-  }
-
-  const list = <T,>(v: unknown, read: (x: unknown) => T | null): T[] =>
-    Array.isArray(v) ? v.map(read).filter((x): x is T => x !== null) : []
-  const notes = list(o.notes, readNoteDraft)
-  const vitals = list(o.vitals, readVitalDraft)
-  const outings = list(o.outings, readOutingDraft)
-  if (notes.length === 0 && vitals.length === 0 && outings.length === 0) {
-    removeDailyDraft(day)
-    return null
-  }
-  return { notes, vitals, outings }
+/** 復元した書きかけの行の「〇日前の書きかけ」の印（1日未満は null） */
+interface RestoredDrafts {
+  notes: NoteDraft[]
+  vitals: VitalDraft[]
+  outings: OutingDraft[]
+  /** 行の印 → 最後に直した時刻（「〇日前の書きかけ」を出すため） */
+  ages: Map<string, number>
 }
 
 /**
- * 端末に残っている控えのうち、期限切れ・読めない・別の形式のものを消す（画面を開いた時に1度）。
- * 控えは日ごとのキーなので、readDailyDraft（その日を開いた時）だけでは、
- * 別の日へ移って二度と開かない日の書きかけが期限を過ぎても端末に残り続ける。
- * 共有端末に打ちかけの文字を残さないため、表示中の日に関わらず走査して消す。
+ * 端末に残した控えを読む（全タブの和集合）。
+ * 壊れた値・別の形式は**消して null を返す**（壊れた控えで画面が開けなくなるのを防ぐ）。
+ * 行ごとに形が違うものは、その行だけ落として残りを戻す（読めるものは戻す）。
+ * 2026-09-29: 期限（24時間）では消さない（L1）。読んだ行はこのタブの行として引き継ぐ（中身が同じ間は時刻を進めない）
+ */
+function readDailyDraft(day: string): RestoredDrafts | null {
+  const file = readDailyFile(day)
+  if (file === null) return null
+  // このタブの行として引き継ぐ（新しい印を振る。元の行には印を付けない＝元のタブが後から直した入力を消さない）
+  const rows = adoptDraftRows(unionDraftRows(file))
+  if (rows.length === 0) return null
+  const out: RestoredDrafts = { notes: [], vitals: [], outings: [], ages: new Map() }
+  for (const r of rows) {
+    const d = { ...r.data, did: r.did, from: r.from }
+    dailyWritten.set(r.did, { json: JSON.stringify(draftData(d)), at: r.at })
+    out.ages.set(r.did, r.at)
+    if (r.kind === 'note') out.notes.push(d as NoteDraft)
+    else if (r.kind === 'vital') out.vitals.push(d as VitalDraft)
+    else if (r.kind === 'outing') out.outings.push(d as OutingDraft)
+  }
+  return out
+}
+
+/**
+ * 端末に残っている控えのうち、読めない・別の形式のものを消す（画面を開いた時に1度）。
+ * 2026-09-29: 期限（24時間）で消すのはやめた（L1。古い書きかけは「〇日前の書きかけ」と出して残し、
+ * 利用者が行を削除＝破棄した時だけ消す）。読めない控えは復元にも使えないので従来どおり消す
  */
 function sweepDailyDrafts(): void {
   try {
@@ -1171,13 +1427,7 @@ function sweepDailyDrafts(): void {
         continue
       }
       const o = asRecord(parsed)
-      if (o === null || o.v !== DAILY_DRAFT_VERSION) {
-        stale.push(key)
-        continue
-      }
-      const savedAt = typeof o.savedAt === 'number' && Number.isFinite(o.savedAt) ? o.savedAt : null
-      // 端末の時計が大きくずれた控え（未来の日時）も期限切れと同じに扱う（readDailyDraft と同じ判定）
-      if (savedAt === null || Math.abs(Date.now() - savedAt) > DAILY_DRAFT_TTL_MS) stale.push(key)
+      if (o === null || o.v !== DAILY_DRAFT_VERSION) stale.push(key)
     }
     for (const key of stale) {
       window.localStorage.removeItem(key)
@@ -1297,6 +1547,8 @@ function HeadCell({ width, grow = false, children }: { width?: string; grow?: bo
  *   role="status" は要素ごと現れた時の読み上げが保証されないため）
  * - 折り返す（truncate しない）。競合・保存失敗の文は「次にどうすればよいか」まで
  *   書いてあり、1行に切り詰めると対処手順が画面から消える
+ * - 折り返す幅は日報の枠の内幅（NARROW_STICKY）。器は表の行の幅なので、狭い画面・大きい文字では
+ *   枠の外まで1行で伸びて横スクロールが要った（375px・文字200%）。印刷では従来どおり行の幅で折り返す
  */
 function StatusText({ status }: { status?: RowStatus }) {
   const cls = !status
@@ -1307,7 +1559,12 @@ function StatusText({ status }: { status?: RowStatus }) {
         ? 'text-warn'
         : 'text-ok'
   return (
-    <span role="status" aria-live="polite" className={`block whitespace-normal break-words ${cls}`}>
+    <span
+      role="status"
+      aria-live="polite"
+      className={`block whitespace-normal break-words print:!static print:!max-w-none ${cls}`}
+      style={NARROW_STICKY}
+    >
       {status ? status.text : ''}
     </span>
   )
@@ -1517,6 +1774,8 @@ interface DaySheetProps {
   blockedReason: string
   /** サーバーに欄ごとの保存の仕組み（0011）がまだ無い＝サーバー側の更新待ち（バイタルの入力だけを止める） */
   cellsMissing: boolean
+  /** 保存済みの申し送りを直す仕組み（0017）がまだ無い（保存済みの申し送りの変更だけを止める。新規登録は止めない） */
+  notesMissing: boolean
   /** 「最新に更新」で増える。増えるとこの日を取り直す（下書きは消さない） */
   reloadToken: number
   /** 1日ぶんの日報を取る（取得済みならキャッシュから返る） */
@@ -1648,6 +1907,7 @@ export function DailySheetPage({
   const [gateUnknown, setGateUnknown] = useState(false)
   /** サーバーに欄ごとの保存の仕組み（0011）がまだ無い＝サーバー側の更新待ち（バイタルの入力だけを止める） */
   const [cellsMissing, setCellsMissing] = useState(false)
+  const [notesMissing, setNotesMissing] = useState(false)
   const [stale, setStale] = useState(false)
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
   /**
@@ -1696,6 +1956,7 @@ export function DailySheetPage({
         setEnabled(gate.value === true)
         setGateUnknown(!gate.observed)
         setCellsMissing(gate.cells === 'missing')
+        setNotesMissing(gate.notes === 'missing')
         const mgrId = Number(mgr)
         setManagerStaffId(Number.isInteger(mgrId) && mgrId > 0 ? mgrId : null)
         setStale(false)
@@ -1898,6 +2159,31 @@ export function DailySheetPage({
 
   // ── 選んだ日へスクロール（指示3）────────────────────────
   const dayElsRef = useRef(new Map<string, HTMLElement>())
+
+  /**
+   * 日報の枠（SheetFrame＝表の横スクロールの領域）の内幅を測り、表の中身へ --dsheet-view-w で渡す（F3）。
+   * 送れていない申し送り・行の下の送信待ちの印（NARROW_STICKY）の最大幅に使う＝左のナビがある広い画面・大きい文字でも
+   * 右端が枠の外に出ない。枠は表の中身の親（SheetFrame が children をそのまま置く）
+   */
+  const sheetViewCleanupRef = useRef<(() => void) | null>(null)
+  const measureSheetView = useCallback((inner: HTMLDivElement | null) => {
+    sheetViewCleanupRef.current?.()
+    sheetViewCleanupRef.current = null
+    const frame = inner?.parentElement
+    if (!inner || !frame) return
+    const write = () => {
+      const next = `${Math.max(0, frame.clientWidth)}px`
+      if (inner.style.getPropertyValue('--dsheet-view-w') !== next) inner.style.setProperty('--dsheet-view-w', next)
+    }
+    write()
+    const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(write) : null
+    ro?.observe(frame)
+    window.addEventListener('resize', write)
+    sheetViewCleanupRef.current = () => {
+      ro?.disconnect()
+      window.removeEventListener('resize', write)
+    }
+  }, [])
   /**
    * 位置合わせの目的地と期限。日ごとの取得が終わるたびに高さが変わるので、
    * 期限内は取得完了のたびに位置を取り直す。利用者が自分でスクロールしたら打ち切る
@@ -2048,6 +2334,12 @@ export function DailySheetPage({
           {CELLS_PENDING_REASON}
         </p>
       )}
+      {enabled && !gateUnknown && notesMissing && (
+        <p className="rounded-md border border-warn bg-warn-bg p-3 text-base text-ink">
+          <span aria-hidden="true">▲ </span>
+          {NOTES_PENDING_REASON}
+        </p>
+      )}
       {stale && (
         <div className="flex flex-wrap items-center gap-gap rounded-md border border-info bg-info-bg p-3">
           <p className="flex-1 text-base text-ink">
@@ -2089,7 +2381,7 @@ export function DailySheetPage({
             狭い画面では固定列の合計まで SheetFrame 側が横スクロールする。
             sheet-dense＝「行が縦に連続する場所」の印。sheet.css がこの中の
             当たり判定の拡張量（--sheet-hit-pad）を 0 にする＝隣接行の誤タップを防ぐ */}
-        <div className="sheet-dense" style={{ minWidth: SHEET_MIN_W }}>
+        <div className="sheet-dense" ref={measureSheetView} style={{ minWidth: SHEET_MIN_W }}>
           {visibleDays.map((d) => (
             <section
               key={d}
@@ -2109,6 +2401,7 @@ export function DailySheetPage({
                 enabled={enabled}
                 blockedReason={blockedReason}
                 cellsMissing={cellsMissing}
+                notesMissing={notesMissing}
                 reloadToken={reload}
                 loadDay={loadDay}
                 onWrite={handleWrite}
@@ -2168,6 +2461,19 @@ function DaySheet({
   const [reload, setReload] = useState(0)
 
   const [notes, setNotes] = useState<Note[]>([])
+  /** サーバーの行の最新（基準に使う。保存の応答を待たずに次の保存が読むので ref にも持つ） */
+  const notesRef = useRef<Note[]>([])
+  notesRef.current = notes
+  /**
+   * 申し送りの送信待ち・止まった変更（行 id → 送信待ち。2026-09-29）。端末（cl_sendQueue2）が正本で、
+   * 未送信件数の通知のたびに引き直す。画面は notes にこの値を重ねて出す
+   */
+  const [pendingNotes, setPendingNotes] = useState<Map<number, PendingNoteRow>>(() => pendingNoteRows())
+  const pendingNotesRef = useRef(pendingNotes)
+  /** くらべて選ぶ画面で開いている申し送り（null＝閉じている） */
+  const [resolveNote, setResolveNote] = useState<NoteConflictTarget | null>(null)
+  /** 変更の記録を開いている申し送り */
+  const [historyNote, setHistoryNote] = useState<{ id: number; label: string } | null>(null)
   const [observations, setObservations] = useState<Vital[]>([])
   const [symptoms, setSymptoms] = useState<Vital[]>([])
   const [outings, setOutings] = useState<Outing[]>([])
@@ -2176,6 +2482,17 @@ function DaySheet({
   const [attendance, setAttendance] = useState<Attendance[]>([])
 
   const [noteDrafts, setNoteDrafts] = useState<NoteDraft[]>([])
+  /** 登録の応答が来た時の書きかけ（応答待ちの間に直した欄を捨てない＝M1） */
+  const noteDraftsRef = useRef<NoteDraft[]>([])
+  noteDraftsRef.current = noteDrafts
+  /** 登録できた書きかけの行 → 登録できた行の id（行が置き換わる時の打ちかけの行き先） */
+  const savedFromDraftRef = useRef(new Map<string, { id: number; meta: NoteMeta; body: string }>())
+  /**
+   * この画面で見た書きかけの行（行キー → 最後の版）。行が画面から外れた後に届いた入力の宛先（登録の冪等キー）と、
+   * 書きかけとして残す時の日・区分・対象を知るため（第5巡・捨てる分岐をゼロにする）
+   */
+  const seenDraftsRef = useRef(new Map<string, NoteDraft>())
+  for (const d of noteDrafts) seenDraftsRef.current.set(d.key, d)
   const [vitalDrafts, setVitalDrafts] = useState<VitalDraft[]>([])
   const [outingDrafts, setOutingDrafts] = useState<OutingDraft[]>([])
 
@@ -2301,7 +2618,15 @@ function DaySheet({
     setNoteDrafts((prev) => (prev.length === 0 ? notes : prev))
     setVitalDrafts((prev) => (prev.length === 0 ? vitals : prev))
     setOutingDrafts((prev) => (prev.length === 0 ? outings : prev))
-  }, [day, nextKey])
+    // 1日以上前の書きかけは、その行に「〇日前の書きかけ」と出す（黙って消さない・L1。不要なら行を削除して破棄する）
+    const now = Date.now()
+    for (const d of [...notes, ...vitals, ...outings]) {
+      const label = d.did === undefined ? null : draftAgeLabel(saved.ages.get(d.did) ?? 0, now)
+      if (label !== null) {
+        setRowStatus(d.key, { tone: 'warn', text: `▲ ${label}です（まだ保存されていません）。不要なら行を削除すると破棄します` })
+      }
+    }
+  }, [day, nextKey, setRowStatus])
 
   // ── 読み込み ───────────────────────────────────────────────
 
@@ -2321,6 +2646,9 @@ function DaySheet({
             .slice()
             .sort((a, b) => (a.occurred_at ?? '').localeCompare(b.occurred_at ?? '') || a.id - b.id),
         )
+        // 申し送りの送信待ちを引き直す（読み直した行に、送信待ちの本文を重ねて出す＝M2）
+        pendingNotesRef.current = pendingNoteRows()
+        setPendingNotes(pendingNotesRef.current)
         // 保存・くらべて選ぶの直後に、それより前の取り置き（古い rev）で描き直さない（指摘 L2・全画面共通の防御）
         const newer = (v: Vital): Vital => {
           const saved = savedVitalRef.current.get(v.id)
@@ -2364,6 +2692,8 @@ function DaySheet({
         // setPhase('ready') と同じ更新にまとめる＝空行の補充より先に下書きが入り、
         // 復元した行のぶんまで空行が増えない（補充は「保存済み＋下書き」の数で決まる）
         restoreDrafts()
+        // 送信待ちの登録（再読み込み前に登録した分・他のタブの分）を、この日の行として出す（第3巡）
+        syncRegistrationRef.current?.()
         setPhase('ready')
       } catch {
         if (!alive || !aliveRef.current) return
@@ -2429,6 +2759,98 @@ function DaySheet({
     },
     [blockedReason, enabled, setRowStatus],
   )
+
+  /**
+   * 保存済みの申し送りの編集の可否（封鎖中は書かせない）。サーバー側の更新待ち（0017 が無い）の間も入力は捨てず、
+   * 送信待ちに積んで保存する（修正依頼2。関数が入り次第 db.ts が送る）
+   */
+  const guardNote = guard
+
+  /**
+   * 申し送りの送信待ちを引き直す。送れた（送信待ちから消えた）この日の行は、サーバーから読み直して画面を最新にする
+   * （H2。送った後も古い値のまま次の編集の基準にしない）
+   */
+  /** 送信待ちの登録の行のそろえ直し（下で定義。毎回の描画の最新を呼ぶ） */
+  const syncRegistrationRef = useRef<(() => void) | null>(null)
+  const refreshPendingNotes = useCallback(() => {
+    syncRegistrationRef.current?.()
+    const next = pendingNoteRows()
+    const prev = pendingNotesRef.current
+    if (pendingSig(next) === pendingSig(prev)) return // 変わっていない（件数の通知は頻繁に来る）
+    const cleared = [...prev.keys()].filter((id) => !next.has(id) && notesRef.current.some((n) => n.id === id))
+    pendingNotesRef.current = next
+    setPendingNotes(next)
+    if (cleared.length === 0) return
+    void fetchNoteRows(cleared)
+      .then((rows) => {
+        if (!aliveRef.current) return
+        const got = new Map(rows.map((r) => [r.id, r]))
+        setNotes((cur) =>
+          cur
+            // 読み直して見つからない＝取り消された（自分の削除が届いた・他の端末が消した）
+            .filter((n) => !cleared.includes(n.id) || got.has(n.id))
+            .map((n) => got.get(n.id) ?? n),
+        )
+      })
+      .catch(() => {
+        // 読み直せなかった。次の〔最新に更新〕で直る（送れた値はサーバーにある）
+      })
+  }, [])
+
+  useEffect(() => queueSubscribe(() => refreshPendingNotes()), [refreshPendingNotes])
+
+  /**
+   * 送信待ちの登録の行（書きかけの行・locked・ck）を送信待ちの実際にそろえる（2026-09-29 第3巡）。
+   * ・この日の送信待ちの登録（cl_sendQueue の insert。他のタブ・前の起動の分も）を行として出す（再読み込み後も出る）
+   * ・登録が送れた（送信待ちから消えた）行は外して、この日を読み直す（登録できた行と、登録後の変更の重ね表示へ切り替える）
+   * ・登録後の変更（notes#ck:<ck>）を行に重ねる
+   */
+  const syncRegistrationRows = (): void => {
+    const unsent = listUnsentNotes()
+    const inserts = new Map<string, QueuedNoteInsert>()
+    for (const u of unsent) if (u.kind === 'insert') inserts.set(u.op.qid, u.op)
+    const ckRows = pendingNoteCkRows()
+    let landed = false
+    setNoteDrafts((prev) => {
+      let changed = false
+      const out: NoteDraft[] = []
+      for (const d of prev) {
+        if (d.locked && d.ck !== undefined && !inserts.has(d.ck)) {
+          changed = true
+          landed = true
+          continue
+        }
+        const ckv = d.locked && d.ck !== undefined ? ckRows.get(d.ck)?.values : undefined
+        let next = ckv !== undefined ? overlayDraft(d, ckv) : d
+        // 登録の送信待ちの状態を写す（行の一言を再読み込みの後も出す・F1）
+        const st = d.locked && d.ck !== undefined ? inserts.get(d.ck)?.state : undefined
+        if (st !== undefined && (next.regState ?? 'pending') !== st) next = { ...next, regState: st }
+        if (next !== d) changed = true
+        out.push(next)
+      }
+      for (const op of inserts.values()) {
+        if (op.note_on !== day || out.some((d) => d.ck === op.qid) || op.shift === null) continue
+        changed = true
+        out.push({
+          key: nextKey('nd'),
+          shift: op.shift,
+          after16: op.after16,
+          residentId: op.resident_id,
+          targetPicked: true,
+          body: op.body,
+          reporterId: op.reporter_id,
+          color: op.color,
+          locked: true,
+          ck: op.qid,
+          regState: op.state,
+          did: newDraftId(),
+        })
+      }
+      return changed ? out : prev
+    })
+    if (landed) setReload((n) => n + 1)
+  }
+  syncRegistrationRef.current = syncRegistrationRows
 
   /** バイタルの編集の可否。封鎖中に加え、サーバー側の更新待ち（0011 が無い）の間も書かせない（理由は行に出す） */
   const guardVital = useCallback(
@@ -2502,12 +2924,9 @@ function DaySheet({
    */
   useEffect(() => {
     if (restoredDayRef.current !== day) return
-    if (!hasDraftContent) {
-      removeDailyDraft(day)
-      return
-    }
+    // 書きかけが無くなった時も、消すのは自分のタブの分だけ（他のタブの書きかけは残す・2026-09-29 M3）
     writeDailyDraft(day, noteDrafts, vitalDrafts, outingDrafts)
-  }, [day, hasDraftContent, noteDrafts, vitalDrafts, outingDrafts])
+  }, [day, noteDrafts, vitalDrafts, outingDrafts])
 
   useEffect(
     () => () => {
@@ -2654,6 +3073,10 @@ function DaySheet({
   )
 
   const patchNoteDraft = useCallback((key: string, patch: Partial<NoteDraft>) => {
+    // 控え（ref）も同時に直す＝描画を待たずに、次の確定・応答の後の積み直しがこの値を読む（第4巡 R4-1・二重登録の防止）
+    noteDraftsRef.current = noteDraftsRef.current.map((d) => (d.key === key ? { ...d, ...patch } : d))
+    const seen = seenDraftsRef.current.get(key)
+    if (seen !== undefined) seenDraftsRef.current.set(key, { ...seen, ...patch })
     setNoteDrafts((prev) => prev.map((d) => (d.key === key ? { ...d, ...patch } : d)))
   }, [])
 
@@ -2677,34 +3100,226 @@ function DaySheet({
     )
   }, [])
 
-  /** 保存済みの申し送りの部分更新（送った項目だけ書き、他は温存する） */
+  /**
+   * 保存済みの申し送りの部分更新（送った項目だけ書き、他は温存する）。
+   * 2026-09-29（C1・M2）: rev 照合ではなく送信待ち → apply_note_edits（欄ごとの判定）。基準は「編集を始めた時に
+   * 見ていた値」（bases で渡せる。省くと画面に出している値＝サーバーの行に送信待ちの値を重ねた値。第4巡 R4-4）。競合した入力は
+   * 端末（送信待ちの「競合」）に残り、行の下の〔くらべて選ぶ〕で選ぶ（再読み込み・画面移動でも消えない）
+   */
   const updateNoteCell = useCallback(
-    async (note: Note, patch: Parameters<typeof updateNoteFields>[2], optimistic: Partial<Note>) => {
+    async (note: Note, patch: NotePatch, bases?: Partial<Record<keyof NotePatch, unknown>>) => {
       const key = `n${note.id}`
-      if (!guard(key)) return
+      if (!guardNote(key)) return
       setRowStatus(key, null)
+      const rawNote = notesRef.current.find((n) => n.id === note.id) ?? note
+      const raw = rawNote as unknown as Record<string, unknown>
+      // 見ていた値＝画面に出していた値（送信待ちの値を重ねた値）。送信待ちがあれば続きの入力として重なり、別のタブの入力と
+      // 食い違う時は db.ts が分けて持つ（第3巡）。送信待ちが無い欄はサーバーの値そのもの
+      const shown = overlayNote(rawNote, pendingNotesRef.current.get(note.id)?.values) as unknown as Record<string, unknown>
+      const edits: CellEditInput<NoteEditField> = {}
+      for (const [f, v] of Object.entries(patch)) {
+        if (v === undefined) continue
+        const b = bases !== undefined && Object.prototype.hasOwnProperty.call(bases, f) ? bases[f as keyof NotePatch] : shown[f]
+        edits[f as NoteEditField] = { value: v, base: b ?? null }
+      }
       try {
         // 抑制の印は送る前に付ける（応答後だと、自分の書き込み由来の変更通知に反応して
         // 「他の端末で記録が更新されました」と誤って案内してしまう）
         markSelfWrite()
-        const res = await updateNoteFields(note.id, note.rev, patch)
-        if (res === 'conflict') {
-          setRowStatus(key, { tone: 'danger', text: `▲ ${ERR_CONFLICT}` })
-          return
-        }
+        const res = await saveNoteEdits({ id: note.id }, edits, { meta: noteMetaOf(raw as unknown as Note) })
+        refreshPendingNotes()
         if (res === 'queued') {
-          // 入力どおりに表示したまま送信待ちにする（値を巻き戻さない）
-          patchNote(note.id, optimistic)
-          setRowStatus(key, { tone: 'warn', text: MSG_QUEUED })
+          // 送信待ちの値は行に重ねて出す（値を巻き戻さない）。印は行の下の帯が出す
           return
         }
-        patchNote(note.id, res)
+        if (res.row !== null) patchNote(note.id, res.row)
+        if (res.conflicts.length > 0 || res.held === true) return // 行の下の帯が〔くらべて選ぶ〕を出す
         saveOk(key)
       } catch (err) {
         setRowStatus(key, { tone: 'danger', text: `▲ ${errText(err)}` })
       }
     },
-    [guard, markSelfWrite, patchNote, saveOk, setRowStatus],
+    [guardNote, markSelfWrite, patchNote, refreshPendingNotes, saveOk, setRowStatus],
+  )
+
+  /**
+   * 送信待ちの登録（冪等キー ck）の行へ加えた変更を、送信待ち（notes#ck:<ck>）に積む（2026-09-29 第3巡・チーフ裁定）。
+   * 登録の op の中身は書き換えない。基準は見ていた値（初めての変更なら登録で送った値）。積めた（端末に残せた）時 true
+   */
+  const stageIntoRegistration = useCallback(
+    async (key: string, ck: string, follow: Record<string, { value: unknown; base: unknown }>): Promise<boolean> => {
+      const edits: CellEditInput<NoteEditField> = {}
+      for (const [f, e] of Object.entries(follow)) edits[f as NoteEditField] = { value: e.value, base: e.base }
+      const draft = noteDraftsRef.current.find((d) => d.key === key)
+      const meta: NoteMeta | undefined = draft
+        ? { note_on: day, shift: draft.shift, resident_id: draft.residentId, after16: draft.after16 }
+        : undefined
+      const ok = await stageNoteEdits({ clientKey: ck }, edits, meta ? { meta } : undefined)
+      refreshPendingNotes()
+      return ok
+    },
+    [day, refreshPendingNotes],
+  )
+
+  /**
+   * 送信待ちの登録の行（書きかけの行・locked・ck あり）を直す（本文・対象・記入者・色）。画面の書きかけにも写す（出している値）
+   */
+  const editRegistrationRow = useCallback(
+    (draft: NoteDraft, patch: NotePatch, seen: Partial<Record<keyof NotePatch, unknown>>) => {
+      const ck = draft.ck
+      if (ck === undefined) return
+      const follow: Record<string, { value: unknown; base: unknown }> = {}
+      for (const [f, v] of Object.entries(patch)) follow[f] = { value: v, base: (seen as Record<string, unknown>)[f] ?? null }
+      void stageIntoRegistration(draft.key, ck, follow).then((ok) => {
+        if (!aliveRef.current) return
+        const dp: Partial<NoteDraft> = {}
+        if (patch.body !== undefined) dp.body = patch.body
+        if (patch.resident_id !== undefined) dp.residentId = patch.resident_id
+        if (patch.reporter_id !== undefined) dp.reporterId = patch.reporter_id
+        if (patch.color !== undefined) dp.color = patch.color
+        patchNoteDraft(draft.key, dp)
+        setRowStatus(draft.key, { tone: 'warn', text: ok ? MSG_QUEUED : MSG_NOT_PERSISTED })
+      })
+    },
+    [patchNoteDraft, setRowStatus, stageIntoRegistration],
+  )
+
+  /**
+   * 行・書きかけが画面に無い時（登録できて置き換わった・日付を送って画面から外れた）に届いた申し送りの本文を捨てない
+   * （第5巡・捨てる分岐をゼロにする）。宛先: 登録できた行 → notes#<id>／送信待ちの登録 → notes#ck:<ck>／
+   * 保存済みの行 n<id> → notes#<id>／分からない・積めなかった → 書きかけ（画面が開いていれば行に、あわせてその日の控えに）
+   */
+  const keepNoteBody = useCallback(
+    (key: string, text: string, base: string | undefined): void => {
+      const value = text.trim()
+      if (value === '') return
+      const snap = seenDraftsRef.current.get(key)
+      const asDraft = (): void => {
+        const src = snap ?? emptyNoteDraft(key, 'day', false, actorId)
+        // 送信待ちの登録の行を書きかけとして残す時は、別の行・別の印にする（登録の行と取り違えない）
+        const fresh = src.locked
+        const draft: NoteDraft = {
+          ...src,
+          key: fresh ? nextKey('nd') : src.key,
+          did: fresh || src.did === undefined ? newDraftId() : src.did,
+          body: value,
+          locked: false,
+          ck: undefined,
+          firstSent: undefined,
+          regState: undefined,
+        }
+        if (aliveRef.current) {
+          noteDraftsRef.current = [...noteDraftsRef.current.filter((d) => d.key !== draft.key), draft]
+          setNoteDrafts((prev) => [...prev.filter((d) => d.key !== draft.key), draft])
+        }
+        // 画面の状態を通さずに、その日の控えへも残す（画面が閉じる途中でも残る）
+        keepNoteDraftRow(day, draft)
+      }
+      const stage = (target: NoteTarget, b: unknown, meta: NoteMeta | undefined): void => {
+        if (typeof b === 'string' && b.trim() === value) return // 直していない
+        void stageNoteEdits(target, { body: { value, base: b ?? null } }, meta ? { meta } : undefined)
+          .then((ok) => {
+            refreshPendingNotes()
+            if (!ok) asDraft() // 端末に残せなかった: 書きかけとして残す
+          })
+          .catch(() => asDraft())
+      }
+      const saved = savedFromDraftRef.current.get(key)
+      if (saved !== undefined) {
+        stage({ id: saved.id }, base ?? saved.body, saved.meta)
+        return
+      }
+      if (snap !== undefined && snap.locked && snap.ck !== undefined) {
+        const meta: NoteMeta = { note_on: day, shift: snap.shift, resident_id: snap.residentId, after16: snap.after16 }
+        stage({ clientKey: snap.ck }, (base ?? snap.body).trim(), meta)
+        return
+      }
+      const m = /^n(\d+)$/.exec(key)
+      if (m !== null) {
+        stage({ id: Number(m[1]) }, base, undefined)
+        return
+      }
+      asDraft()
+    },
+    [actorId, day, nextKey, refreshPendingNotes],
+  )
+
+  /**
+   * 確定しないまま編集が終わった本文（行が置き換わった・画面から外れた）を捨てない（修正依頼7。SheetCell の onAbandon）。
+   * 登録できた行 → notes#<id>／送信待ちの登録の行 → notes#ck:<ck>／まだ送っていない書きかけ → 書きかけ
+   */
+  const abandonNoteBody = useCallback(
+    (key: string, value: string, base: string) => {
+      const text = value.trim()
+      if (text === '') return
+      const saved = savedFromDraftRef.current.get(key)
+      if (saved !== undefined) {
+        // 登録できて行が置き換わった: 登録できた行への変更として送る（基準は登録した本文）
+        const note = notesRef.current.find((n) => n.id === saved.id)
+        if (note) {
+          if (shouldSendBody(value, note.body, pendingNotesRef.current.get(note.id)?.values)) {
+            void updateNoteCell(note, { body: text }, { body: note.body })
+          }
+          return
+        }
+        keepNoteBody(key, text, saved.body) // 行が画面に無い: 登録できた行（notes#<id>）へ積む（第5巡）
+        return
+      }
+      const draft = noteDraftsRef.current.find((d) => d.key === key)
+      if (draft) {
+        if (draft.locked && draft.ck !== undefined) {
+          // 基準は trim 済みにそろえる（登録で送った値と同じ形。第4巡 R4-3）
+          if (text !== draft.body.trim()) editRegistrationRow(draft, { body: text }, { body: base.trim() })
+          return
+        }
+        if (!draft.locked) {
+          patchNoteDraft(key, { body: value })
+          // 画面が閉じる途中でも残す（書きかけの控えの書き戻しは、画面が閉じると走らない・第5巡）。登録の応答待ちの行は
+          // 除く（応答の後の積み直しが持つ）。登録が拒否された行の冪等キー（ck）は残す＝確定し直しても同じキーで送る（R5-1）
+          if (!savingRef.current.has(key)) keepNoteDraftRow(day, { ...draft, body: value })
+          return
+        }
+        if (text !== draft.body.trim()) keepNoteBody(key, text, base) // 宛先の無い送信待ちの行: 書きかけとして残す
+        return
+      }
+      const note = notesRef.current.find((n) => `n${n.id}` === key)
+      // 比べる相手は画面に出している本文（送信待ちの本文を重ねた値・L1。commitNoteBody と同じ）
+      if (note) {
+        if (shouldSendBody(value, note.body, pendingNotesRef.current.get(note.id)?.values)) {
+          void updateNoteCell(note, { body: text }, { body: base })
+        }
+        return
+      }
+      keepNoteBody(key, text, base) // 行が画面に無い（第5巡）
+    },
+    [day, editRegistrationRow, keepNoteBody, patchNoteDraft, updateNoteCell],
+  )
+
+  /** 書きかけの行を直す（送信待ちの登録の行なら登録後の変更として積む） */
+  const patchDraftOrRegistration = useCallback(
+    (key: string, patch: Partial<NoteDraft>) => {
+      const d = noteDraftsRef.current.find((x) => x.key === key)
+      if (d?.locked === true && d.ck !== undefined) {
+        const np: NotePatch = {}
+        const seen: Partial<Record<keyof NotePatch, unknown>> = {}
+        if (patch.color !== undefined) {
+          np.color = patch.color
+          seen.color = d.color
+        }
+        if (patch.residentId !== undefined) {
+          np.resident_id = patch.residentId
+          seen.resident_id = d.residentId
+        }
+        if (patch.reporterId !== undefined) {
+          np.reporter_id = patch.reporterId
+          seen.reporter_id = d.reporterId
+        }
+        if (Object.keys(np).length > 0) editRegistrationRow(d, np, seen)
+        return
+      }
+      patchNoteDraft(key, patch)
+    },
+    [editRegistrationRow, patchNoteDraft],
   )
 
   /** 下書き行の保存（本文が入った時点で1回だけ insert する） */
@@ -2715,12 +3330,69 @@ function DaySheet({
       // 応答待ちの間に同じ行から2回目を送らない（同じ内容の行が2本できるのを防ぐ）。
       // 受け付けない時は理由を出す（入力は下書きに残っている）
       if (savingRef.current.has(key)) {
+        // 応答待ち（登録・登録後の変更を積む間）の入力は書きかけに入れる（patchNoteDraft は控え（ref）も同時に直す＝
+        // 応答の後の積み直しがこの値を読める。第4巡 R4-1）
         patchNoteDraft(key, { body })
         setRowStatus(key, { tone: 'warn', text: MSG_BUSY })
         return
       }
       savingRef.current.add(key)
       setRowStatus(key, null)
+      // 登録の冪等キー（登録を押した後の変更は notes#ck:<ck> に積む＝登録の op の中身は書き換えない・第3巡）
+      // 前に同じ行で登録を試みた冪等キー（拒否・応答なしの後に戻った書きかけ）があれば同じキーで送る＝届いていれば
+      // 二重に登録しない（R5-1/R5-2）
+      const ck = draft.ck ?? newClientKey()
+      // 確定した本文を書きかけにも入れておく（応答待ちの間も行に本文を出し、失敗した時もこの本文から続けられる。
+      // 応答待ちの間に直した本文は、この後の書きかけに入る＝応答の後はクロージャの古い本文で上書きしない）
+      // その冪等キーで最初に送った中身（食い違いの基準）。初めて送るキーならこの中身、前に送ったキーなら控えが持つ値
+      // （書きかけの控えに ck と一緒に残し、戻した書きかけを確定し直す時に渡す＝自分どうしで競合しない・R6-3）
+      const firstSent: NoteFirstSent | undefined =
+        draft.ck !== undefined
+          ? draft.firstSent
+          : { body: body.trim(), resident_id: draft.residentId, reporter_id: draft.reporterId, color: draft.color }
+      patchNoteDraft(key, { body, ck, firstSent })
+      /** 登録で送った欄（応答待ちの間に直した欄の見分けと、登録後の変更の基準に使う） */
+      const sentFields = {
+        body: body.trim(),
+        residentId: draft.residentId,
+        targetPicked: draft.targetPicked,
+        reporterId: draft.reporterId,
+        color: draft.color,
+      }
+      const sentAsRow = {
+        body: sentFields.body,
+        resident_id: sentFields.residentId,
+        reporter_id: sentFields.reporterId,
+        color: sentFields.color,
+      }
+      /**
+       * 応答の後、書きかけのいまと「登録で送った値（landed）」の差分を宛先へ積む（第4巡 R4-1）。積む（await）間に同じ行へ
+       * 確定した入力（応答待ちの印で書きかけにだけ入る）も拾うため、読み直して差分が無くなるまで積む。一度積んだ欄を
+       * 登録で送った値へ戻した時は、その値を積む。積めなかった（端末に残せなかった）時 false
+       */
+      const stageUntilSettled = async (
+        stage: (edits: Record<string, { value: unknown; base: unknown }>) => Promise<boolean>,
+        landed: Pick<Note, 'body' | 'resident_id' | 'reporter_id' | 'color'>,
+      ): Promise<boolean> => {
+        const landedRec = landed as unknown as Record<string, unknown>
+        const same = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
+        const staged: Record<string, unknown> = {}
+        for (let round = 0; round < 10; round += 1) {
+          const now = noteDraftsRef.current.find((d) => d.key === key)
+          const follow = now === undefined ? {} : followUpEdits(sentFields, now, landed)
+          const edits: Record<string, { value: unknown; base: unknown }> = {}
+          for (const [f, e] of Object.entries(follow)) {
+            if (!(f in staged) || !same(staged[f], e.value)) edits[f] = { value: e.value, base: e.base }
+          }
+          for (const f of Object.keys(staged)) {
+            if (!(f in follow) && !same(staged[f], landedRec[f])) edits[f] = { value: landedRec[f] ?? null, base: landedRec[f] ?? null }
+          }
+          if (Object.keys(edits).length === 0) return true
+          if (!(await stage(edits))) return false
+          for (const [f, e] of Object.entries(edits)) staged[f] = e.value
+        }
+        return false // 打ち続けて差分が収まらない: 書きかけを外さない（呼び手が送信待ちの登録の行として残す）
+      }
       try {
         markSelfWrite() // 送る前に印を付ける（自分の書き込みで「他の端末で更新」を出さない）
         const res = await insertNote({
@@ -2739,15 +3411,41 @@ function DaySheet({
           reporter_id: draft.reporterId,
           color: draft.color,
           after16: draft.after16,
-        })
+        }, { clientKey: ck, ...(draft.ck !== undefined ? { firstSent: draft.firstSent ?? null } : {}) })
+        // 応答待ちの間に直した本文・対象・記入者・色（M1）。書きかけの値はクロージャの古い本文ではなく、いまの書きかけから
         if (res === 'queued') {
-          patchNoteDraft(key, { body: body.trim(), locked: true })
-          setRowStatus(key, {
-            tone: 'warn',
-            text: isQueuePersisted() ? MSG_QUEUED : MSG_NOT_PERSISTED,
-          })
+          // 登録は送信待ち（op は書き換えない）。応答待ちの間の変更は notes#ck:<ck> に積む（基準＝登録で送った値）。
+          // 積めたと確かめてから、行を「送信待ちの登録の行」にする（外す→積むの順を作らない）
+          const ok = await stageUntilSettled((edits) => stageIntoRegistration(key, ck, edits), sentAsRow)
+          if (!ok) {
+            // 積み切れなかった（端末に残せなかった）: 最後の値を書きかけの控えにも残してから送信待ちの登録の行にする
+            // （同じ冪等キーを持たせる＝戻して確定し直しても、登録が届いていれば二重にならない・R5-2）
+            const cur = noteDraftsRef.current.find((d) => d.key === key)
+            // 新しい印（did）で残す＝この後に付く「登録済み」の印に覆われない（元の行とは別の行として戻る。重複は許す・R6-2）
+            if (cur !== undefined) keepNoteDraftRow(day, { ...cur, ck, did: newDraftId() })
+          }
+          patchNoteDraft(key, { locked: true, ck })
+          setRowStatus(key, { tone: 'warn', text: ok && isQueuePersisted() ? MSG_QUEUED : MSG_NOT_PERSISTED })
           return
         }
+        // 登録できた: 応答待ちの間に直した欄は、登録できた行への変更として積み（残せたと確かめてから）書きかけを外す
+        const okLanded = await stageUntilSettled(async (follow) => {
+          const edits: CellEditInput<NoteEditField> = {}
+          for (const [f, e] of Object.entries(follow)) edits[f as NoteEditField] = { value: e.value, base: e.base }
+          const ok = await stageNoteEdits({ id: res.id }, edits, { meta: noteMetaOf(res) })
+          refreshPendingNotes()
+          return ok
+        }, res)
+        if (!okLanded) {
+          // 端末に残せなかった: 書きかけは外さない（登録はできているので、同じ登録を二度しないよう送信待ちの登録の行にする）
+          patchNoteDraft(key, { locked: true, ck })
+          setRowStatus(key, { tone: 'warn', text: MSG_NOT_PERSISTED })
+          return
+        }
+        // 行が n<id> の行へ置き換わる時に打ちかけていた本文は、この行への変更として送る（修正依頼7・abandonNoteBody）
+        savedFromDraftRef.current.set(key, { id: res.id, meta: noteMetaOf(res), body: res.body })
+        // 控え（ref）からも同時に外す＝描画の前に同じ行で確定しても、外した書きかけから二度目の登録をしない
+        noteDraftsRef.current = noteDraftsRef.current.filter((d) => d.key !== key)
         setNoteDrafts((prev) => prev.filter((d) => d.key !== key))
         if (!stillOnDay(day)) {
           // 応答を待つ間に日付を送られた。保存はできているので、今の画面には足さずに伝える
@@ -2755,13 +3453,19 @@ function DaySheet({
           return
         }
         // 同じ id が既に入っていれば入れ替える（再読込と行き違っても行が2つにならない）
+        notesRef.current = [...notesRef.current.filter((n) => n.id !== res.id), res]
         setNotes((prev) => [...prev.filter((n) => n.id !== res.id), res])
         // 保存中に開いたままのピッカーを、保存済みの行のキーへ移す（選択を取りこぼさない）
         rebindPick(key, `n${res.id}`)
         saveOk(`n${res.id}`)
       } catch (err) {
-        patchNoteDraft(key, { body })
+        // 書きかけには確定した本文と、応答待ちの間に直した値が入っている（クロージャの古い本文で上書きしない）
         setRowStatus(key, { tone: 'danger', text: `▲ ${errText(err)}` })
+        // 画面が閉じた後の拒否: 書きかけの控えの書き戻しは走らないので、その日の控えへ直接残す（第5巡）
+        if (!aliveRef.current) {
+          const cur = noteDraftsRef.current.find((d) => d.key === key)
+          if (cur !== undefined) keepNoteDraftRow(day, cur)
+        }
       } finally {
         savingRef.current.delete(key)
       }
@@ -2772,18 +3476,30 @@ function DaySheet({
       markSelfWrite,
       patchNoteDraft,
       rebindPick,
+      refreshPendingNotes,
       saveOk,
       setRowStatus,
       show,
+      stageIntoRegistration,
       stillOnDay,
     ],
   )
 
   const commitNoteBody = useCallback(
-    (key: string, value: string) => {
-      const draft = noteDrafts.find((d) => d.key === key)
+    (key: string, value: string, base?: string) => {
+      // 書きかけ・行は控え（ref）から読む（描画の時点の値を読むと、登録の応答の直後・描画の前の確定で、外した書きかけから
+      // 二度目の登録をしてしまう）
+      const draft = noteDraftsRef.current.find((d) => d.key === key)
       if (draft) {
-        if (draft.locked) return
+        if (draft.locked) {
+          // 送信待ちの登録の行: 登録後の変更として積む（登録の op は書き換えない・第3巡）
+          // 基準は見ていた値を前後の空白を除いて比べる形にそろえる（登録で送った値・積んだ値は trim 済み。第4巡 R4-3）
+          if (value.trim() !== '' && value.trim() !== draft.body.trim()) {
+            if (draft.ck !== undefined) editRegistrationRow(draft, { body: value.trim() }, { body: (base ?? draft.body).trim() })
+            else keepNoteBody(key, value, base) // 宛先の無い送信待ちの行: 書きかけとして残す（第5巡）
+          }
+          return
+        }
         if (value.trim() === '') {
           patchNoteDraft(key, { body: value })
           return
@@ -2791,16 +3507,26 @@ function DaySheet({
         void saveNoteDraft(draft, value)
         return
       }
-      const note = notes.find((n) => `n${n.id}` === key)
-      if (!note) return
+      // 書きかけが登録できて外れた直後（行がまだ n<id> に描き替わる前）の確定は、登録できた行への変更にする
+      // （abandonNoteBody と同じ。二度目の登録にも、入力の取りこぼしにもしない）
+      const saved = savedFromDraftRef.current.get(key)
+      const note = notesRef.current.find((n) => (saved !== undefined ? n.id === saved.id : `n${n.id}` === key))
+      if (!note) {
+        // 行が画面に無い（日付を送った・読み直しで外れた）: 宛先へ積む。分からなければ書きかけに残す（第5巡）
+        keepNoteBody(key, value, base ?? saved?.body)
+        return
+      }
       if (value.trim() === '') {
         setRowStatus(key, { tone: 'danger', text: `▲ ${ERR_EMPTY_BODY}` })
         return
       }
-      if (value.trim() === note.body) return
-      void updateNoteCell(note, { body: value.trim() }, { body: value.trim() })
+      // 比べる相手は画面に出している本文（送信待ちの本文を重ねた値＝修正依頼5）。元の本文へ打ち直した時も送る
+      // （送信待ちの本文を元の本文で置き換える。サーバーが元の本文のままなら、サーバー側で「もう載っている」になる）
+      if (!shouldSendBody(value, note.body, pendingNotesRef.current.get(note.id)?.values)) return
+      // 基準は編集を始めた時の本文（SheetCell が渡す）。送信待ちがあれば、その基準（先勝ち）を db.ts が保つ
+      void updateNoteCell(note, { body: value.trim() }, base === undefined ? undefined : { body: base })
     },
-    [noteDrafts, notes, patchNoteDraft, saveNoteDraft, setRowStatus, updateNoteCell],
+    [editRegistrationRow, keepNoteBody, patchNoteDraft, saveNoteDraft, setRowStatus, updateNoteCell],
   )
 
   const deleteNoteRow = useCallback(
@@ -2816,13 +3542,13 @@ function DaySheet({
         setRowStatus(key, null)
         // 書きかけを取り消した時は戻せるようにする（1タップで入力を失わせない）
         if (draft.body.trim() !== '') {
-          show('入力中の行を取り消しました', () => setNoteDrafts((prev) => [...prev, draft]))
+          show('入力中の行を取り消しました', () => setNoteDrafts((prev) => [...prev, { ...draft, did: newDraftId() }]))
         }
         return
       }
       const note = notes.find((n) => `n${n.id}` === key)
       if (!note) return
-      if (!guard(key)) return
+      if (!guardNote(key)) return
       askConfirm({
         title: 'この行を削除しますか',
         body: '削除すると一覧から消えます（記録は復元できません）。よろしければ「削除する」を押してください。',
@@ -2832,12 +3558,17 @@ function DaySheet({
           void (async () => {
             try {
               markSelfWrite() // 送る前に印を付ける（自分の書き込みで「他の端末で更新」を出さない）
-              const res = await softDeleteNote(note.id, note.rev)
-              if (res === 'conflict') {
-                setRowStatus(key, { tone: 'danger', text: `▲ ${ERR_CONFLICT}` })
+              // 取り消すのは「見た本文」のままの時だけ（サーバーが判定。他の端末が直していたら取り消さない）
+              const raw = notesRef.current.find((n) => n.id === note.id) ?? note
+              const res = await deleteNote({ id: note.id }, raw.body, { meta: noteMetaOf(raw) })
+              refreshPendingNotes()
+              if (res !== 'queued' && !noteDeleted(res)) {
+                // 止まった削除は行の下の帯が〔くらべて選ぶ〕を出す（直された本文を黙って消さない）。
+                // 行はいまのサーバーの本文に描き直す（削除しようとした時に見ていた本文のままにしない）
+                if (res.row !== null) patchNote(note.id, res.row)
                 return
               }
-              setNotes((prev) => prev.filter((n) => n.id !== note.id))
+              if (res !== 'queued') setNotes((prev) => prev.filter((n) => n.id !== note.id))
               setExpanded(null)
               // 送信待ちに退避した削除も一覧からは外す（押した操作のとおりに見せる）。
               // 行が無くなるので一言は行ではなくトーストで出す（電波が戻れば自動で送られる）
@@ -2849,7 +3580,7 @@ function DaySheet({
         },
       })
     },
-    [askConfirm, guard, markSelfWrite, noteDrafts, notes, setRowStatus, show],
+    [askConfirm, guardNote, markSelfWrite, noteDrafts, notes, patchNote, refreshPendingNotes, setRowStatus, show],
   )
 
   const markNoteRead = useCallback(
@@ -2915,7 +3646,7 @@ function DaySheet({
       const dirty =
         draft.symptom.trim() !== '' ||
         draft.sets.some((s) => s.at || s.temp || s.spo2 || s.bp || s.pulse)
-      if (dirty) show('入力中の行を取り消しました', () => setVitalDrafts((prev) => [...prev, draft]))
+      if (dirty) show('入力中の行を取り消しました', () => setVitalDrafts((prev) => [...prev, { ...draft, did: newDraftId() }]))
     },
     [setRowStatus, show, vitalDrafts],
   )
@@ -3545,7 +4276,7 @@ function DaySheet({
         draft.startAt !== '' ||
         draft.endText !== '' ||
         draft.companion.trim() !== ''
-      if (dirty) show('入力中の行を取り消しました', () => setOutingDrafts((prev) => [...prev, draft]))
+      if (dirty) show('入力中の行を取り消しました', () => setOutingDrafts((prev) => [...prev, { ...draft, did: newDraftId() }]))
     },
     [outingDrafts, setRowStatus, show],
   )
@@ -3674,13 +4405,14 @@ function DaySheet({
       setResidentPick(null)
       if (!target) return
       if (target.for === 'noteTarget') {
-        const draft = noteDrafts.find((d) => d.key === target.key)
+        // 控え（ref）から読む（描画の前に書きかけが登録できた行へ置き換わっていても、行き先を取り違えない）
+        const draft = noteDraftsRef.current.find((d) => d.key === target.key)
         if (draft) {
-          patchNoteDraft(target.key, { residentId: id, targetPicked: true })
+          patchDraftOrRegistration(target.key, { residentId: id, targetPicked: true })
           return
         }
-        const note = notes.find((n) => `n${n.id}` === target.key)
-        if (note) void updateNoteCell(note, { resident_id: id }, { resident_id: id })
+        const note = notesRef.current.find((n) => `n${n.id}` === target.key)
+        if (note) void updateNoteCell(note, { resident_id: id })
         // 行き先が見つからない（開いている間に行が保存・削除された）。黙って捨てない
         else show(MSG_PICK_LOST)
         return
@@ -3696,9 +4428,7 @@ function DaySheet({
       }
     },
     [
-      noteDrafts,
-      notes,
-      patchNoteDraft,
+      patchDraftOrRegistration,
       patchOutingDraft,
       patchVitalDraft,
       residentPick,
@@ -3717,26 +4447,43 @@ function DaySheet({
         return
       }
       if (target.for === 'noteReporter') {
-        const draft = noteDrafts.find((d) => d.key === target.key)
+        // 控え（ref）から読む（onPickResident と同じ）
+        const draft = noteDraftsRef.current.find((d) => d.key === target.key)
         if (draft) {
-          patchNoteDraft(target.key, { reporterId: id })
+          patchDraftOrRegistration(target.key, { reporterId: id })
           return
         }
-        const note = notes.find((n) => `n${n.id}` === target.key)
-        if (note) void updateNoteCell(note, { reporter_id: id }, { reporter_id: id })
+        const note = notesRef.current.find((n) => `n${n.id}` === target.key)
+        if (note) void updateNoteCell(note, { reporter_id: id })
         // 行き先が見つからない（開いている間に行が保存・削除された）。黙って捨てない
         else show(MSG_PICK_LOST)
       }
     },
-    [addAttendance, noteDrafts, notes, patchNoteDraft, show, staffPick, updateNoteCell],
+    [addAttendance, patchDraftOrRegistration, show, staffPick, updateNoteCell],
   )
 
   // ── 表示用の仕分け ─────────────────────────────────────────
 
-  const dayNotes = useMemo(() => notes.filter((n) => n.shift === 'day' && !n.after16), [notes])
-  const lateNotes = useMemo(() => notes.filter((n) => n.shift === 'day' && n.after16), [notes])
-  const careNotes = useMemo(() => notes.filter((n) => n.shift === 'daycare'), [notes])
-  const nightNotes = useMemo(() => notes.filter((n) => n.shift === 'night'), [notes])
+  /**
+   * 画面に出す申し送り＝サーバーの行に送信待ちの値を重ねたもの（2026-09-29・M2。〔最新に更新〕・再読み込みの後も
+   * 送信待ちの本文を出す）。notes（サーバーの生の値）は基準に使うので書き換えない。
+   * 送信待ちの削除（止まっていないもの）は押した操作のとおり一覧から外す（止まった削除は印つきで残す）
+   */
+  const shownNotes = useMemo(
+    () =>
+      notes
+        .filter((n) => {
+          const p = pendingNotes.get(n.id)
+          return !(p && p.state === 'pending' && Object.prototype.hasOwnProperty.call(p.values, 'deleted_at'))
+        })
+        .map((n) => overlayNote(n, pendingNotes.get(n.id)?.values)),
+    [notes, pendingNotes],
+  )
+  const dayNotes = useMemo(() => shownNotes.filter((n) => n.shift === 'day' && !n.after16), [shownNotes])
+  const lateNotes = useMemo(() => shownNotes.filter((n) => n.shift === 'day' && n.after16), [shownNotes])
+  const careNotes = useMemo(() => shownNotes.filter((n) => n.shift === 'daycare'), [shownNotes])
+  const nightNotes = useMemo(() => shownNotes.filter((n) => n.shift === 'night'), [shownNotes])
+  const noteIdSet = useMemo(() => new Set(notes.map((n) => n.id)), [notes])
 
   const feverRows = useMemo(
     () => buildFeverRows(observations, residentOrder),
@@ -3827,6 +4574,41 @@ function DaySheet({
     return out
   }, [vitalConflicts])
 
+  /** 申し送りの対象の表示名（全体連絡は「スタッフへ（全体）」） */
+  const noteTargetLabel = useCallback(
+    (id: number | null): string => (id === null ? 'スタッフへ（全体）' : noteTargetName(residentById.get(id), id)),
+    [residentById],
+  )
+  const openNoteResolve = useCallback(
+    (note: Note) => setResolveNote({ id: note.id, label: `${fmtSheetDay(day)}・${noteTargetLabel(note.resident_id)}` }),
+    [day, noteTargetLabel],
+  )
+  const openNoteHistory = useCallback(
+    (note: Note) => setHistoryNote({ id: note.id, label: noteTargetLabel(note.resident_id) }),
+    [noteTargetLabel],
+  )
+  /** くらべて選んだ・一覧で選んだ後: 送信待ちを引き直し、その行を読み直す */
+  const onNoteResolved = useCallback(
+    (r: NoteConflictResolution) => {
+      const id = resolveNote?.id ?? null
+      setResolveNote(null)
+      refreshPendingNotes()
+      if (id === null) return
+      setRowStatus(`n${id}`, null)
+      if (r.latest !== null) patchNote(id, r.latest)
+      void fetchNoteRows([id])
+        .then((rows) => {
+          if (!aliveRef.current) return
+          const row = rows[0]
+          if (row) patchNote(id, row)
+          else if (!r.queued) setNotes((cur) => cur.filter((n) => n.id !== id))
+        })
+        .catch(() => undefined)
+      focusAfterResolve(`cl-note-row-${day}-${id}`)
+    },
+    [day, patchNote, refreshPendingNotes, resolveNote, setRowStatus],
+  )
+
   const ctx: SheetCtx = {
     day,
     residentById,
@@ -3891,6 +4673,17 @@ function DaySheet({
           }
           removeAttendance(staffId)
         }}
+      />
+
+      {/* 送れていない申し送り（この日の分。1件も無い時は何も出さない＝見た目は変わらない・2026-09-29 H1） */}
+      <UnsentNotes
+        style={NARROW_STICKY}
+        day={day}
+        noteIds={noteIdSet}
+        actorId={actorId}
+        staff={staff}
+        residentName={noteTargetLabel}
+        onChanged={refreshPendingNotes}
       />
 
       {/* 3状態。失敗したのは**この日だけ**で、他の日は読めたまま残る（部分表示） */}
@@ -3959,10 +4752,14 @@ function DaySheet({
             onToggleExpand={(k) => setExpanded((cur) => (cur === k ? null : k))}
             onAdd={() => addNoteDraft('day', false)}
             onCommitBody={commitNoteBody}
-            onPatchDraft={patchNoteDraft}
+            onAbandonBody={abandonNoteBody}
+            onPatchDraft={patchDraftOrRegistration}
             onUpdateNote={updateNoteCell}
             onDelete={deleteNoteRow}
             onMarkRead={markNoteRead}
+            pending={pendingNotes}
+            onResolve={openNoteResolve}
+            onHistory={openNoteHistory}
           />
 
           {/* 現行スプシの黒帯。ここから下は after16=true の記録 */}
@@ -3985,10 +4782,14 @@ function DaySheet({
             onToggleExpand={(k) => setExpanded((cur) => (cur === k ? null : k))}
             onAdd={() => addNoteDraft('day', true)}
             onCommitBody={commitNoteBody}
-            onPatchDraft={patchNoteDraft}
+            onAbandonBody={abandonNoteBody}
+            onPatchDraft={patchDraftOrRegistration}
             onUpdateNote={updateNoteCell}
             onDelete={deleteNoteRow}
             onMarkRead={markNoteRead}
+            pending={pendingNotes}
+            onResolve={openNoteResolve}
+            onHistory={openNoteHistory}
           />
 
           {/* デイサービスは日勤・夜勤の申し送りと運営主体が違うので、上下に余白を入れて
@@ -4006,10 +4807,14 @@ function DaySheet({
             onToggleExpand={(k) => setExpanded((cur) => (cur === k ? null : k))}
             onAdd={() => addNoteDraft('daycare', false)}
             onCommitBody={commitNoteBody}
-            onPatchDraft={patchNoteDraft}
+            onAbandonBody={abandonNoteBody}
+            onPatchDraft={patchDraftOrRegistration}
             onUpdateNote={updateNoteCell}
             onDelete={deleteNoteRow}
             onMarkRead={markNoteRead}
+            pending={pendingNotes}
+            onResolve={openNoteResolve}
+            onHistory={openNoteHistory}
           />
 
           <NoteBlock
@@ -4024,10 +4829,14 @@ function DaySheet({
             onToggleExpand={(k) => setExpanded((cur) => (cur === k ? null : k))}
             onAdd={() => addNoteDraft('night', false)}
             onCommitBody={commitNoteBody}
-            onPatchDraft={patchNoteDraft}
+            onAbandonBody={abandonNoteBody}
+            onPatchDraft={patchDraftOrRegistration}
             onUpdateNote={updateNoteCell}
             onDelete={deleteNoteRow}
             onMarkRead={markNoteRead}
+            pending={pendingNotes}
+            onResolve={openNoteResolve}
+            onHistory={openNoteHistory}
           />
         </>
       )}
@@ -4099,6 +4908,20 @@ function DaySheet({
         }
         onClose={() => setCompareVitalId(null)}
         onResolved={onVitalResolved}
+      />
+      <NoteConflictResolver
+        target={resolveNote}
+        actorId={actorId}
+        staff={staff}
+        residentName={noteTargetLabel}
+        onClose={() => setResolveNote(null)}
+        onResolved={onNoteResolved}
+      />
+      <NoteHistoryDialog
+        noteId={historyNote?.id ?? null}
+        label={historyNote?.label ?? ''}
+        staffName={(id) => staffById.get(id)?.name ?? null}
+        onClose={() => setHistoryNote(null)}
       />
     </>
   )
@@ -5392,15 +6215,20 @@ interface NoteBlockProps {
   expanded: string | null
   onToggleExpand: (key: string) => void
   onAdd: () => void
-  onCommitBody: (key: string, value: string) => void
+  /** base＝編集を始めた時の本文（SheetCell が渡す） */
+  onCommitBody: (key: string, value: string, base?: string) => void
+  /** 確定しないまま編集が終わった本文（捨てない） */
+  onAbandonBody: (key: string, value: string, base: string) => void
   onPatchDraft: (key: string, patch: Partial<NoteDraft>) => void
-  onUpdateNote: (
-    note: Note,
-    patch: Parameters<typeof updateNoteFields>[2],
-    optimistic: Partial<Note>,
-  ) => Promise<void>
+  onUpdateNote: (note: Note, patch: NotePatch, bases?: Partial<Record<keyof NotePatch, unknown>>) => Promise<void>
   onDelete: (key: string) => void
   onMarkRead: (note: Note) => void
+  /** 送信待ち・止まっている申し送り（行 id → 送信待ち）。行の下に印と〔くらべて選ぶ〕を出す */
+  pending: Map<number, PendingNoteRow>
+  /** 止まっている申し送りを〔くらべて選ぶ〕で開く */
+  onResolve: (note: Note) => void
+  /** 申し送り1件の変更の記録を開く */
+  onHistory: (note: Note) => void
   /** 枠の外側の余白を足したい時だけ渡す（デイサービス欄の .dsheet-gap-block） */
   className?: string
 }
@@ -5417,10 +6245,14 @@ function NoteBlock({
   onToggleExpand,
   onAdd,
   onCommitBody,
+  onAbandonBody,
   onPatchDraft,
   onUpdateNote,
   onDelete,
   onMarkRead,
+  pending,
+  onResolve,
+  onHistory,
   className = '',
 }: NoteBlockProps) {
   const count = rows.length
@@ -5454,10 +6286,14 @@ function NoteBlock({
           expanded={expanded === `n${note.id}`}
           onToggleExpand={onToggleExpand}
           onCommitBody={onCommitBody}
+          onAbandonBody={onAbandonBody}
           onPatchDraft={onPatchDraft}
           onUpdateNote={onUpdateNote}
           onDelete={onDelete}
           onMarkRead={onMarkRead}
+          pending={pending}
+          onResolve={onResolve}
+          onHistory={onHistory}
         />
       ))}
 
@@ -5475,10 +6311,14 @@ function NoteBlock({
           expanded={expanded === d.key}
           onToggleExpand={onToggleExpand}
           onCommitBody={onCommitBody}
+          onAbandonBody={onAbandonBody}
           onPatchDraft={onPatchDraft}
           onUpdateNote={onUpdateNote}
           onDelete={onDelete}
           onMarkRead={onMarkRead}
+          pending={pending}
+          onResolve={onResolve}
+          onHistory={onHistory}
         />
       ))}
     </section>
@@ -5510,12 +6350,19 @@ function NoteRow({
   expanded,
   onToggleExpand,
   onCommitBody,
+  onAbandonBody,
   onPatchDraft,
   onUpdateNote,
   onDelete,
   onMarkRead,
+  pending,
+  onResolve,
+  onHistory,
 }: NoteRowProps) {
-  const disabled = ctx.disabled || (draft?.locked ?? false)
+  // 送信待ちの登録の行（ck あり）は直せる（変更は notes#ck:<ck> に積む）。それ以外の送信待ちの行は直せない
+  const disabled = ctx.disabled || (draft?.locked === true && draft.ck === undefined)
+  /** この行の送信待ち・止まった変更（保存済みの行だけ） */
+  const pend = note ? pending.get(note.id) : undefined
   const color = note ? note.color : (draft?.color ?? null)
   const residentId = note ? note.resident_id : (draft?.residentId ?? null)
   const targetPicked = note !== null || (draft?.targetPicked ?? false)
@@ -5533,7 +6380,7 @@ function NoteRow({
   const reporterText = reporterId === null ? '' : staffName(ctx.staffById.get(reporterId), reporterId)
 
   const setColor = (c: NoteColor | null) => {
-    if (note) void onUpdateNote(note, { color: c }, { color: c })
+    if (note) void onUpdateNote(note, { color: c })
     else if (draft) onPatchDraft(draft.key, { color: c })
   }
 
@@ -5545,7 +6392,12 @@ function NoteRow({
   return (
     // 行の色（NoteColor）を選んである行は、その色をそのまま敷く（指示8の機能を維持）。
     // 色の無い行だけ1行おきの縞を敷く＝意味のある色が縞に負けない（指示16）
-    <div className={color ? NOTE_COLOR_CLASS[color] : alt ? 'sheet-alt' : undefined}>
+    <div
+      className={color ? NOTE_COLOR_CLASS[color] : alt ? 'sheet-alt' : undefined}
+      // くらべて選んだ後のフォーカスの戻り先（〔くらべて選ぶ〕は解決すると消えるため）
+      id={note ? `cl-note-row-${ctx.day}-${note.id}` : undefined}
+      tabIndex={note ? -1 : undefined}
+    >
       <Row>
         <PickerCell
           width="var(--w-target)"
@@ -5569,7 +6421,9 @@ function NoteRow({
         <Cell grow pad={false} className={night ? 'dsheet-night-body' : ''}>
           <SheetCell
             value={body}
-            onCommit={disabled ? undefined : (v) => onCommitBody(rowKey, v)}
+            onCommit={disabled ? undefined : (v, m) => onCommitBody(rowKey, v, m.base)}
+            // 確定しないまま行が置き換わる・送信待ちで編集できなくなる時の打ちかけを捨てない（修正依頼7）
+            onAbandon={(v, m) => onAbandonBody(rowKey, v, m.base)}
             width="100%"
             align="left"
             multiline
@@ -5614,7 +6468,28 @@ function NoteRow({
         </Cell>
       </Row>
 
-      <StatusText status={ctx.status[rowKey]} />
+      {/* 送信待ちの登録の行は、画面の一言が無くても送信待ち・止まった印を出す（再読み込みの後も同じ・F1） */}
+      <StatusText status={ctx.status[rowKey] ?? (note ? undefined : registrationMark(draft))} />
+
+      {/* 送信待ち・止まっている変更の印（2026-09-29。送信待ちの本文は行に重ねて出している）。
+          止まっている時は〔くらべて選ぶ〕を出す。何も無い行には何も出さない（見た目を変えない） */}
+      {note && pend ? (
+        // 狭い画面でも印と〔くらべて選ぶ〕が画面の中に入るよう、横にずらしても左端に留め、幅を画面に収める
+        <div className="flex flex-wrap items-center gap-gap px-1 py-1 print:hidden" style={NARROW_STICKY}>
+          <span className={`text-sm ${pend.state === 'pending' ? 'text-ink' : 'font-bold text-danger'}`}>
+            {pendingNoteText(pend.state, Object.prototype.hasOwnProperty.call(pend.values, 'deleted_at'), isNoteRpcMissing())}
+          </span>
+          {pend.state !== 'pending' ? (
+            <button
+              type="button"
+              onClick={() => onResolve(note)}
+              className="min-h-tap rounded border border-primary bg-surface px-3 text-base font-bold text-primary"
+            >
+              くらべて選ぶ
+            </button>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* 詳細は行の下に開かず、浮いた窓（フロートウィンドウ）で出す（2026-08-31 指示）。
           行の下に敷いていた時は下の行と地続きに見え、開いたことが分からなかった */}
@@ -5631,6 +6506,7 @@ function NoteRow({
           onUpdateNote={onUpdateNote}
           onDelete={onDelete}
           onMarkRead={onMarkRead}
+          onHistory={onHistory}
         />
       )}
     </div>
@@ -5667,6 +6543,7 @@ function NoteDetailModal({
   onUpdateNote,
   onDelete,
   onMarkRead,
+  onHistory,
 }: {
   onClose: () => void
   ctx: SheetCtx
@@ -5684,6 +6561,7 @@ function NoteDetailModal({
   onUpdateNote: NoteRowProps['onUpdateNote']
   onDelete: (key: string) => void
   onMarkRead: (n: Note) => void
+  onHistory: (n: Note) => void
 }) {
   const readCount = note?.read_count ?? 0
   const who = targetText === '' ? '対象は未選択' : targetText
@@ -5736,7 +6614,7 @@ function NoteDetailModal({
                   }))}
                   onChange={(v) => {
                     const imp = v as Importance
-                    void onUpdateNote(note, { importance: imp }, { importance: imp })
+                    void onUpdateNote(note, { importance: imp })
                   }}
                 />
               </div>
@@ -5757,7 +6635,7 @@ function NoteDetailModal({
                       const next = on
                         ? note.role_tags.filter((t) => t !== tag)
                         : [...note.role_tags, tag]
-                      void onUpdateNote(note, { role_tags: next }, { role_tags: next })
+                      void onUpdateNote(note, { role_tags: next })
                     }}
                     className={`min-h-tap shrink-0 rounded-full border px-2 text-sm ${
                       on ? 'border-primary bg-primary font-bold text-primary-ink' : 'border-border text-ink'
@@ -5796,6 +6674,17 @@ function NoteDetailModal({
                 <span aria-hidden="true">▲ </span>この行を削除
               </button>
               {note.color && <span className="text-sm text-ink2">色: {NOTE_COLOR_LABEL[note.color]}</span>}
+              {/* この申し送りの変更の記録（2026-09-29・H4。窓を閉じてから開く＝窓を2枚重ねない） */}
+              <button
+                type="button"
+                onClick={() => {
+                  onClose()
+                  onHistory(note)
+                }}
+                className={`${DETAIL_BTN} border-border-strong text-link`}
+              >
+                変更の記録
+              </button>
             </div>
           </div>
         ) : (

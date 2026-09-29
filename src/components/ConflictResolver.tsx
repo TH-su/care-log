@@ -1,5 +1,6 @@
 // 食い違いの解決画面（くらべて選ぶ）。5画面（バイタル一覧・バイタル一括・食事一覧・食事一括・
 // 日報のバイタル欄）が共通で使う。各画面で重複実装しない。
+// 申し送り（日報・タイムライン・送れていない申し送りの一覧）は下の NoteConflictResolver（2026-09-29）。
 //
 // 流れ:
 // - 開いた時にサーバーの最新の1行を取り直す（db.ts の fetchLatestVital / fetchLatestMeal）
@@ -22,19 +23,46 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   DbError,
+  deleteNote,
+  discardPendingNote,
   discardPendingRow,
   fetchLatestMeal,
+  fetchLatestNote,
   fetchLatestVital,
   fetchStaff,
+  insertNoteAsNew,
   newClientKey,
+  noteAsNewKey,
+  pendingNoteRow,
   pendingRow,
+  resolveNoteMeta,
   saveMealEdits,
+  saveNoteEdits,
   saveVitalEdits,
 } from '../lib/db'
-import type { CellEditInput, LatestRow, MealTarget, VitalTarget } from '../lib/db'
+import type {
+  CellEditInput,
+  LatestRow,
+  MealTarget,
+  NoteEditField,
+  NoteMeta,
+  PendingNoteRow,
+  VitalTarget,
+} from '../lib/db'
 import { fmtDayLabel, todayIso } from '../lib/format'
-import { MEAL_SLOT_LABEL } from '../lib/types'
-import type { Meal, MealSlot, MealStatus, Staff, Vital, VitalKind } from '../lib/types'
+import { IMPORTANCE_LABEL, MEAL_SLOT_LABEL, NOTE_COLOR_LABEL, SHIFT_LABEL } from '../lib/types'
+import type {
+  Importance,
+  Meal,
+  MealSlot,
+  MealStatus,
+  Note,
+  NoteColor,
+  Shift,
+  Staff,
+  Vital,
+  VitalKind,
+} from '../lib/types'
 import {
   MEAL_FIELDS,
   MEAL_FIELD_NAME,
@@ -739,6 +767,478 @@ export function ConflictResolver({
           {busy ? '閉じる（保存中は押せません）' : '閉じる（入力は残します）'}
         </button>
       </div>
+      </div>
+    </ModalShell>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════
+// 申し送りのくらべて選ぶ（2026-09-29・申し送りを消さない作り替え 段B-3）
+// ══════════════════════════════════════════════════════════════
+//
+// 日報・タイムライン・送れていない申し送りの一覧が共通で使う。
+// 「あなたの本文」は送信待ち（db.ts の pendingNoteRow＝端末に保存済み。再読み込み・画面移動・アプリの終了でも消えない）
+// から読み、「先の本文」は開いた時にサーバーの最新を取り直す（fetchLatestNote）。
+//   〔自分の本文で直す〕       … 基準を取り直した最新の値にして送り直す（rebase）。前の本文は変更の記録に残る
+//   〔新しい行として両方残す〕 … 同じ日・区分・対象に、自分を記入者として新しい行で登録（冪等キーを固定）。
+//                                登録できた（送信待ちに確保できた）後で、元の行の「あなたの本文」を外す
+//   〔先の本文を残す〕         … 「あなたの本文は保存されません」と示してから、あなたの入力を取り下げる
+//   先の行が取り消されていた（missing）時は〔新しい行として保存〕〔取り下げる〕
+
+const NOTE_FIELD_NAME: Record<string, string> = {
+  body: '本文',
+  resident_id: '対象',
+  importance: '重要度',
+  color: '色',
+  after16: '16時以降',
+  occurred_at: '時刻',
+  reporter_id: '記入者',
+  role_tags: '職種タグ',
+  shift: '勤務帯',
+  ongoing: '継続',
+  ended_at: '継続の終了',
+  ended_by: '継続を終了した職員',
+}
+
+/** くらべる申し送り（行 id と、見出しに出す対象名） */
+export interface NoteConflictTarget {
+  id: number
+  /** 別のタブの入力と分けて持った入力（送信待ちの notes#<id>!<fork>）を選ぶ時の印 */
+  fork?: string
+  /** 見出しに出す対象（利用者の表示名・「スタッフへ（全体）」） */
+  label: string
+}
+
+export interface NoteConflictResolution {
+  /** mine＝自分の本文で直した／both＝新しい行として残した／theirs＝取り下げた／reload＝食い違いが無かった */
+  choice: 'mine' | 'both' | 'theirs' | 'reload'
+  /** 選んだ後のいまの行（取り消された・送信待ちの時は null） */
+  latest: Note | null
+  queued: boolean
+}
+
+export interface NoteConflictResolverProps {
+  target: NoteConflictTarget | null
+  /** この端末の操作者（〔新しい行として…〕の記入者） */
+  actorId: number | null
+  staff?: Staff[]
+  /** 利用者の表示名（対象の食い違いを出す時に使う。無ければ「利用者ID n」） */
+  residentName?: (id: number | null) => string
+  onClose: () => void
+  onResolved: (r: NoteConflictResolution) => void
+}
+
+/** くらべる送信待ちの指し方（分けて持った入力なら fork つき） */
+function noteTargetOf(t: NoteConflictTarget): { id: number; fork?: string } {
+  return t.fork === undefined ? { id: t.id } : { id: t.id, fork: t.fork }
+}
+
+function noteValueText(
+  f: string,
+  v: unknown,
+  staff: Staff[] | null,
+  residentName?: (id: number | null) => string,
+): string {
+  if (v === null || v === undefined || v === '') return '未入力'
+  switch (f) {
+    case 'body':
+      return String(v)
+    case 'resident_id':
+      return residentName ? residentName(typeof v === 'number' ? v : null) : `利用者ID ${String(v)}`
+    case 'reporter_id':
+    case 'ended_by':
+      return staff?.find((s) => s.id === v)?.name ?? `職員ID ${String(v)}`
+    case 'importance':
+      return IMPORTANCE_LABEL[v as Importance] ?? String(v)
+    case 'color':
+      return NOTE_COLOR_LABEL[v as NoteColor] ?? String(v)
+    case 'shift':
+      return SHIFT_LABEL[v as Shift] ?? String(v)
+    case 'after16':
+    case 'ongoing':
+      return v === true ? 'はい' : 'いいえ'
+    case 'role_tags':
+      return Array.isArray(v) && v.length > 0 ? v.join('・') : 'なし'
+    case 'occurred_at':
+      return fmtTimeValue(v)
+    case 'ended_at':
+      return fmtStamp(String(v)) || String(v)
+  }
+  return String(v)
+}
+
+export function NoteConflictResolver({
+  target,
+  actorId,
+  staff,
+  residentName,
+  onClose,
+  onResolved,
+}: NoteConflictResolverProps) {
+  const open = target !== null
+  const [phase, setPhase] = useState<Phase>('loading')
+  const [latest, setLatest] = useState<LatestRow<Note> | null>(null)
+  const [mine, setMine] = useState<PendingNoteRow | null>(null)
+  const [meta, setMeta] = useState<NoteMeta | null>(null)
+  const [staffList, setStaffList] = useState<Staff[] | null>(staff ?? null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
+  /** 取り下げの確認中（「あなたの本文は保存されません」を出してから取り下げる） */
+  const [askDrop, setAskDrop] = useState(false)
+  const aliveRef = useRef(true)
+  const genRef = useRef(0)
+  const headingRef = useRef<HTMLHeadingElement>(null)
+  const uid = useId()
+  const targetRef = useRef(target)
+  targetRef.current = target
+  const staffRef = useRef(staff)
+  staffRef.current = staff
+  const targetKey = target === null ? '' : `${target.id}!${target.fork ?? ''}`
+
+  useEffect(() => {
+    aliveRef.current = true
+    return () => {
+      aliveRef.current = false
+    }
+  }, [])
+
+  const load = useCallback(async () => {
+    const t = targetRef.current
+    if (t === null) return
+    const gen = ++genRef.current
+    setPhase('loading')
+    setActionError(null)
+    setAskDrop(false)
+    setMine(pendingNoteRow(noteTargetOf(t)))
+    try {
+      const [row, names, m] = await Promise.all([
+        fetchLatestNote(t.id),
+        staffRef.current ? Promise.resolve(staffRef.current) : fetchStaff().catch(() => null),
+        resolveNoteMeta(t.id).catch(() => null),
+      ])
+      if (gen !== genRef.current || !aliveRef.current) return
+      setLatest(row)
+      setStaffList(names)
+      setMeta(m)
+      setMine(pendingNoteRow(noteTargetOf(t)))
+      setPhase('ready')
+    } catch {
+      if (gen !== genRef.current || !aliveRef.current) return
+      setPhase('error')
+    }
+  }, [])
+
+  useEffect(() => {
+    if (targetKey === '') return
+    setNotice(null)
+    setLatest(null)
+    void load()
+  }, [targetKey, load])
+
+  const busy = phase === 'busy'
+  const deleting = mine !== null && Object.prototype.hasOwnProperty.call(mine.values, 'deleted_at')
+  const mineBody = mine !== null && typeof mine.values.body === 'string' ? mine.values.body : null
+  const fields = mine === null ? [] : Object.keys(mine.values).filter((f) => f !== 'deleted_at')
+  const latestRow = latest?.row as unknown as Record<string, unknown> | undefined
+  const who = latest === null ? '' : recorderName(latest.editedBy, latest.row.reporter_id, staffList)
+  const stamp = latest === null ? '' : fmtStamp(latest.updatedAt)
+  const fmtV = (f: string, v: unknown): string => noteValueText(f, v, staffList, residentName)
+
+  const again = useCallback(() => {
+    setNotice(MSG_AGAIN)
+    void load()
+  }, [load])
+
+  /** 〔自分の本文で直す〕（取り消しの時は〔それでも削除する〕）。基準は取り直した最新の値 */
+  const chooseMine = useCallback(async () => {
+    if (target === null || latest === null || mine === null) return
+    setPhase('busy')
+    setActionError(null)
+    try {
+      const row = latest.row as unknown as Record<string, unknown>
+      let res
+      if (deleting) {
+        res = await deleteNote(noteTargetOf(target), latest.row.body, { rebase: true })
+      } else {
+        const edits: CellEditInput<NoteEditField> = {}
+        for (const f of fields) edits[f as NoteEditField] = { value: mine.values[f], base: row[f] ?? null }
+        res = await saveNoteEdits(noteTargetOf(target), edits, { rebase: true })
+      }
+      if (!aliveRef.current) return
+      if (res === 'queued') {
+        onResolved({ choice: 'mine', latest: null, queued: true })
+        return
+      }
+      if (res.conflicts.length > 0 || res.held === true) {
+        again()
+        return
+      }
+      onResolved({ choice: 'mine', latest: res.row, queued: false })
+    } catch (e) {
+      if (!aliveRef.current) return
+      setActionError(errText(e, '保存できませんでした。入力は消えていません。もう一度お試しください。'))
+      setPhase('ready')
+    }
+  }, [again, deleting, fields, latest, mine, onResolved, target])
+
+  /** 〔新しい行として両方残す〕〔新しい行として保存〕 */
+  const chooseBoth = useCallback(async () => {
+    if (target === null || mine === null || mineBody === null) return
+    const m = meta ?? (latest === null ? null : { note_on: latest.row.note_on, shift: latest.row.shift, resident_id: latest.row.resident_id, after16: latest.row.after16 })
+    if (m === null) return
+    setPhase('busy')
+    setActionError(null)
+    try {
+      const key = noteAsNewKey(target.id, mine.vers.body ?? '')
+      const res = await insertNoteAsNew({ key, meta: m, body: mineBody, reporterId: actorId })
+      // 登録できた・送信待ちに確保できた後で、元の行の「あなたの本文」（開いた時に見せた版）を外す
+      await discardPendingNote(noteTargetOf(target), ['body'], pickVers(mine.vers, ['body']))
+      if (!aliveRef.current) return
+      onResolved({ choice: 'both', latest: latest?.row ?? null, queued: res === 'queued' })
+    } catch (e) {
+      if (!aliveRef.current) return
+      setActionError(errText(e, '登録できませんでした。入力は消えていません。もう一度お試しください。'))
+      setPhase('ready')
+    }
+  }, [actorId, latest, meta, mine, mineBody, onResolved, target])
+
+  /** 〔先の本文を残す〕〔取り下げる〕（確認の後） */
+  const chooseDrop = useCallback(async () => {
+    if (target === null || mine === null) return
+    setPhase('busy')
+    setActionError(null)
+    try {
+      await discardPendingNote(noteTargetOf(target), undefined, mine.vers)
+      if (!aliveRef.current) return
+      onResolved({ choice: 'theirs', latest: latest?.row ?? null, queued: false })
+    } catch (e) {
+      if (!aliveRef.current) return
+      setActionError(errText(e, '取り下げられませんでした。もう一度お試しください。'))
+      setPhase('ready')
+    }
+  }, [latest, mine, onResolved, target])
+
+  const missing = latest === null
+  const canNew = mineBody !== null && !deleting && (meta !== null || latest !== null)
+  const idMine = `${uid}-nmine`
+  const idBoth = `${uid}-nboth`
+  const idDrop = `${uid}-ndrop`
+  const btn =
+    'min-h-tap w-full rounded border bg-surface px-4 text-left text-base font-bold disabled:border-border disabled:text-ink3'
+
+  return (
+    <ModalShell
+      open={open}
+      label="申し送りをくらべて選ぶ"
+      onClose={busy ? undefined : onClose}
+      initialFocus={headingRef}
+      fitVisualViewport
+    >
+      <div className="overflow-y-auto">
+        <div className="p-4">
+          <h2 ref={headingRef} tabIndex={-1} className="text-lg font-bold text-ink">
+            申し送りをくらべて選ぶ
+          </h2>
+          <p className="mt-1 text-base text-ink2">{target?.label ?? ''}</p>
+
+          <div role="status" aria-live="polite">
+            {notice ? (
+              <p className="mt-3 rounded border border-warn bg-warn-bg p-3 text-base text-ink">
+                <span aria-hidden="true">▲ </span>
+                {notice}
+              </p>
+            ) : null}
+            {phase === 'loading' ? <p className="mt-3 text-base text-ink2">最新の記録を読み込んでいます…</p> : null}
+            {busy ? <p className="mt-3 text-base text-ink2">保存しています…</p> : null}
+          </div>
+
+          {phase === 'error' ? (
+            <div role="alert" className="mt-3 rounded border border-danger bg-danger-bg p-3">
+              <p className="text-base text-ink">
+                <span aria-hidden="true">▲ </span>
+                {MSG_LOAD_FAILED}
+              </p>
+              <button
+                type="button"
+                onClick={() => void load()}
+                className="mt-2 min-h-tap rounded border border-primary bg-surface px-4 text-base font-bold text-primary"
+              >
+                もう一度
+              </button>
+            </div>
+          ) : null}
+
+          {actionError ? (
+            <p role="alert" className="mt-3 rounded border border-danger bg-danger-bg p-3 text-base text-ink">
+              <span aria-hidden="true">▲ </span>
+              {actionError}
+            </p>
+          ) : null}
+
+          {(phase === 'ready' || busy) && mine === null ? (
+            <div className="mt-3">
+              <p className="text-base text-ink">
+                <span aria-hidden="true">✓ </span>
+                この申し送りに止まっている入力はありません（送り終えたか、取り下げられています）。
+              </p>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => onResolved({ choice: 'reload', latest: latest?.row ?? null, queued: false })}
+                className="mt-3 min-h-tap w-full rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink"
+              >
+                最新を読み込む
+              </button>
+            </div>
+          ) : null}
+
+          {(phase === 'ready' || busy) && mine !== null ? (
+            <>
+              <div className="mt-4 rounded border border-border bg-surface2 p-3">
+                <p className="text-base font-bold text-ink">先の内容</p>
+                {missing ? (
+                  <p className="mt-1 text-base text-ink">
+                    <span aria-hidden="true">▲ </span>
+                    この申し送りは、ほかの端末で削除されています。
+                  </p>
+                ) : (
+                  <>
+                    <p className="mt-1 text-sm text-ink2">
+                      {who}
+                      {stamp ? `・${stamp}` : ''}
+                    </p>
+                    <p className="mt-1 whitespace-pre-wrap break-words text-base text-ink">{latest.row.body}</p>
+                    {fields
+                      .filter((f) => f !== 'body')
+                      .map((f) => (
+                        <p key={f} className="mt-1 text-base text-ink">
+                          {NOTE_FIELD_NAME[f] ?? f}：<span className="font-bold">{fmtV(f, latestRow?.[f] ?? null)}</span>
+                        </p>
+                      ))}
+                  </>
+                )}
+              </div>
+              <div className="mt-2 rounded border border-primary bg-surface p-3">
+                <p className="text-base font-bold text-ink">あなたの入力（この端末に保存されています）</p>
+                {deleting ? (
+                  <p className="mt-1 text-base text-ink">
+                    <span aria-hidden="true">▲ </span>
+                    この申し送りを削除しようとしました。削除した後に、ほかの端末で本文が直されています。
+                  </p>
+                ) : null}
+                {mineBody !== null ? (
+                  <p className="mt-1 whitespace-pre-wrap break-words text-base text-ink">{mineBody}</p>
+                ) : null}
+                {fields
+                  .filter((f) => f !== 'body')
+                  .map((f) => (
+                    <p key={f} className="mt-1 text-base text-ink">
+                      {NOTE_FIELD_NAME[f] ?? f}：<span className="font-bold">{fmtV(f, mine.values[f])}</span>
+                    </p>
+                  ))}
+              </div>
+
+              {askDrop ? (
+                <div role="alert" className="mt-4 rounded border border-danger bg-danger-bg p-3">
+                  <p className="text-base font-bold text-ink">
+                    <span aria-hidden="true">▲ </span>
+                    あなたの{mineBody !== null ? '本文' : '入力'}は保存されません。取り下げてよろしいですか。
+                  </p>
+                  <div className="mt-2 flex flex-col gap-gap">
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void chooseDrop()}
+                      className={`${btn} border-danger text-danger`}
+                    >
+                      取り下げる（あなたの{mineBody !== null ? '本文' : '入力'}は保存されません）
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => setAskDrop(false)}
+                      className={`${btn} border-border-strong text-ink`}
+                    >
+                      やめる（入力は残します）
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <h3 className="mt-4 text-base font-bold text-ink">どうしますか</h3>
+                  <div className="mt-2 flex flex-col gap-gap">
+                    {!missing ? (
+                      <div>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => void chooseMine()}
+                          aria-describedby={idMine}
+                          className={`${btn} border-primary text-primary`}
+                        >
+                          {deleting ? 'それでも削除する' : '自分の本文で直す'}
+                        </button>
+                        <p id={idMine} className="mt-1 text-sm text-ink2">
+                          {deleting
+                            ? '直された後の本文ごと削除します。削除した記録は変更の記録に残ります。'
+                            : 'あなたの入力で書き直します。先の内容は変更の記録に残ります。'}
+                        </p>
+                      </div>
+                    ) : null}
+                    {!deleting ? (
+                      <div>
+                        <button
+                          type="button"
+                          disabled={busy || !canNew}
+                          onClick={() => void chooseBoth()}
+                          aria-describedby={idBoth}
+                          className={`${btn} border-border-strong text-ink`}
+                        >
+                          {missing ? '新しい行として保存' : '新しい行として両方残す'}
+                        </button>
+                        <p id={idBoth} className="mt-1 text-sm text-ink2">
+                          {canNew
+                            ? '同じ日・同じ区分・同じ対象に、あなたを記入者として新しい行で登録します（先の内容はそのまま）。'
+                            : mineBody === null
+                              ? '本文の入力が無いため、新しい行にはできません。'
+                              : 'どの日の申し送りかを確かめられないため、新しい行にできません。通信状況を確認して「もう一度」を押してください。'}
+                        </p>
+                      </div>
+                    ) : null}
+                    <div>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => setAskDrop(true)}
+                        aria-describedby={idDrop}
+                        className={`${btn} border-border-strong text-ink`}
+                      >
+                        {missing || deleting ? '取り下げる' : '先の本文を残す'}
+                      </button>
+                      <p id={idDrop} className="mt-1 text-sm text-ink2">
+                        あなたの{mineBody !== null ? '本文' : '入力'}は保存されません（押すと確認が出ます）。
+                      </p>
+                    </div>
+                  </div>
+                </>
+              )}
+            </>
+          ) : null}
+        </div>
+
+        <div className="flex flex-wrap justify-end gap-gap border-t border-border p-4">
+          <p className="w-full text-sm text-ink2">
+            閉じても、あなたの入力はこの端末に残ります（「送れていない申し送り」からいつでも選び直せます）。
+          </p>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="min-h-tap rounded border border-border-strong px-4 text-base text-ink disabled:border-border disabled:text-ink3"
+          >
+            {busy ? '閉じる（保存中は押せません）' : '閉じる（入力は残します）'}
+          </button>
+        </div>
       </div>
     </ModalShell>
   )

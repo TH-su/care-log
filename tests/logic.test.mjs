@@ -613,7 +613,7 @@ function registerDbTests() {
   describe('getNativeInputGate（入力解禁フラグ）', () => {
     it('サーバー値を観測できない時は observed:false・value:false（封鎖と区別できる）', async () => {
       const gate = await DB.getNativeInputGate()
-      assert.deepEqual(gate, { value: false, observed: false, cells: 'unknown' })
+      assert.deepEqual(gate, { value: false, observed: false, cells: 'unknown', notes: 'unknown' })
     })
 
     it('getNativeInputEnabled は gate.value と同じ値を返す（互換）', async () => {
@@ -646,24 +646,27 @@ function registerDbTests() {
       await DB.__testHooks.restartQueue()
     })
 
-    /** 他の端末が先に書いた申し送りの行（本文は記号だけ） */
-    const noteRow = (over = {}) => ({ id: 30, note_on: '2026-09-01', shift: 'day', body: '本文', resident_id: null, deleted_at: null, rev: 1, ...over })
+    /**
+     * 他の端末が先に書いた外出の行（2026-09-29: 申し送りの変更は apply_note_edits へ移ったので、rev 照合の旧経路の
+     * edited_by は外出の帰着記入で確かめる。水分・入浴・服薬・事故も同じ updateRow / updateNow を通る）
+     */
+    const noteRow = (over = {}) => ({ id: 30, resident_id: 1, kind: 'outing', start_on: '2026-09-01', end_on: null, end_at: null, deleted_at: null, rev: 1, ...over })
 
     it('操作者が分かる時は更新に edited_by を添える', async () => {
       const srv = oneRowServer(noteRow())
       DB.__testHooks.setClient(srv.client)
       DB.setEditor(3)
-      const res = await DB.updateNote(30, 1, { body: '本文B' })
-      assert.equal(res.body, '本文B')
+      const res = await DB.setOutingEnd(30, 1, '2026-09-02', '10:00')
+      assert.equal(res.end_on, '2026-09-02')
       const updates = srv.calls.filter((q) => q.action === 'update')
-      assert.deepEqual(updates[0].payload, { body: '本文B', edited_by: 3 })
+      assert.deepEqual(updates[0].payload, { end_on: '2026-09-02', end_at: '10:00', edited_by: 3 })
     })
 
     it('★操作者が分からない更新でも edited_by:null を送る（前の人を「変えた職員」に残さない・再審 指摘4）', async () => {
       const srv = oneRowServer(noteRow({ edited_by: 3 }))
       DB.__testHooks.setClient(srv.client)
       DB.setEditor(null)
-      await DB.updateNote(30, 1, { body: '本文B' })
+      await DB.setOutingEnd(30, 1, '2026-09-02', '10:00')
       const updates = srv.calls.filter((q) => q.action === 'update')
       assert.equal('edited_by' in updates[0].payload, true)
       assert.equal(updates[0].payload.edited_by, null)
@@ -675,7 +678,7 @@ function registerDbTests() {
         const srv = oneRowServer(noteRow())
         DB.__testHooks.setClient(srv.client)
         DB.setEditor(bad)
-        await DB.updateNote(30, 1, { body: '本文B' })
+        await DB.setOutingEnd(30, 1, '2026-09-02', '10:00')
         const updates = srv.calls.filter((q) => q.action === 'update')
         assert.equal(updates[0].payload.edited_by, null, `setEditor(${bad})`)
       }
@@ -692,12 +695,12 @@ function registerDbTests() {
       const srv = oneRowServer(noteRow(), { missingEditedBy: true })
       DB.__testHooks.setClient(srv.client)
       DB.setEditor(null)
-      const res = await DB.updateNote(30, 1, { body: '本文B' })
-      assert.equal(res.body, '本文B')
+      const res = await DB.setOutingEnd(30, 1, '2026-09-02', '10:00')
+      assert.equal(res.end_on, '2026-09-02')
       const updates = srv.calls.filter((q) => q.action === 'update')
       assert.equal(updates.length, 2)
       assert.equal(updates[0].payload.edited_by, null)
-      assert.deepEqual(updates[1].payload, { body: '本文B' })
+      assert.deepEqual(updates[1].payload, { end_on: '2026-09-02', end_at: '10:00' })
     })
 
     it('削除（soft delete）にも edited_by を添える', async () => {
@@ -715,25 +718,25 @@ function registerDbTests() {
       const srv = oneRowServer(noteRow(), { missingEditedBy: true })
       DB.__testHooks.setClient(srv.client)
       DB.setEditor(3)
-      const res = await DB.updateNote(30, 1, { body: '本文B' })
-      assert.equal(res.body, '本文B')
+      const res = await DB.setOutingEnd(30, 1, '2026-09-02', '10:00')
+      assert.equal(res.end_on, '2026-09-02')
       const updates = srv.calls.filter((q) => q.action === 'update')
       assert.equal(updates.length, 2)
       assert.equal(updates[0].payload.edited_by, 3)
-      assert.deepEqual(updates[1].payload, { body: '本文B' })
+      assert.deepEqual(updates[1].payload, { end_on: '2026-09-02', end_at: '10:00' })
     })
 
     it('★列が無いと分かった後は、同じ起動中は edited_by を付けない（毎回失敗→再送にしない）', async () => {
       const srv = oneRowServer(noteRow(), { missingEditedBy: true })
       DB.__testHooks.setClient(srv.client)
       DB.setEditor(3)
-      await DB.updateNote(30, 1, { body: '本文B' })
+      await DB.setOutingEnd(30, 1, '2026-09-02', '10:00')
       const before = srv.calls.filter((q) => q.action === 'update').length
-      const res = await DB.updateNote(30, 2, { importance: 'important' })
-      assert.equal(res.importance, 'important')
+      const res = await DB.setOutingEnd(30, 2, '2026-09-03', '11:00')
+      assert.equal(res.end_on, '2026-09-03')
       const after = srv.calls.filter((q) => q.action === 'update').slice(before)
       assert.equal(after.length, 1)
-      assert.deepEqual(after[0].payload, { importance: 'important' })
+      assert.deepEqual(after[0].payload, { end_on: '2026-09-03', end_at: '11:00' })
     })
 
     it('Postgres の undefined_column（42703）でも同じく送り直す', async () => {
@@ -741,13 +744,13 @@ function registerDbTests() {
         if (q.action === 'update' && 'edited_by' in q.payload) {
           return { data: null, error: { code: '42703', message: 'column "edited_by" does not exist' }, status: 400 }
         }
-        if (q.action === 'update') return { data: noteRow({ body: '本文B', rev: 2 }), error: null, status: 200 }
+        if (q.action === 'update') return { data: noteRow({ end_on: '2026-09-02', end_at: '10:00', rev: 2 }), error: null, status: 200 }
         return { data: null, error: null, status: 200 }
       })
       DB.__testHooks.setClient(fake.client)
       DB.setEditor(3)
-      const res = await DB.updateNote(30, 1, { body: '本文B' })
-      assert.equal(res.body, '本文B')
+      const res = await DB.setOutingEnd(30, 1, '2026-09-02', '10:00')
+      assert.equal(res.end_on, '2026-09-02')
       assert.equal(fake.calls.filter((q) => q.action === 'update').length, 2)
     })
 
@@ -758,7 +761,7 @@ function registerDbTests() {
       })
       DB.__testHooks.setClient(fake.client)
       DB.setEditor(3)
-      await assert.rejects(() => DB.updateNote(30, 1, { body: '本文B' }))
+      await assert.rejects(() => DB.setOutingEnd(30, 1, '2026-09-02', '10:00'))
       assert.equal(fake.calls.filter((q) => q.action === 'update').length, 1)
     })
 
@@ -779,7 +782,7 @@ function registerDbTests() {
       })
       DB.__testHooks.setClient(fake.client)
       DB.setEditor(3)
-      const res = await DB.updateNote(30, 1, { body: '本文B' })
+      const res = await DB.setOutingEnd(30, 1, '2026-09-02', '10:00')
       assert.equal(res, 'queued')
       const saved = storedQueue()
       assert.equal(saved.ops.length, 1)
@@ -792,8 +795,8 @@ function registerDbTests() {
       const resent = fake.calls.slice(sentBefore).filter((q) => q.action === 'update')
       assert.equal(resent.length, 2)
       assert.equal(resent[0].payload.edited_by, 3)
-      assert.deepEqual(resent[1].payload, { body: '本文B' })
-      assert.equal(state.row.body, '本文B')
+      assert.deepEqual(resent[1].payload, { end_on: '2026-09-02', end_at: '10:00' })
+      assert.equal(state.row.end_on, '2026-09-02')
       assert.equal(DB.queuePending(), 0, '送れたのにキューに残っている')
     })
   })
@@ -892,7 +895,8 @@ function registerDbTests() {
         [
           ['gte', 'record_day', '2026-09-01'],
           ['lte', 'record_day', '2026-09-07'],
-          ['eq', 'resident_id', 1],
+          // 対象を付け替えた記録も元の利用者の側から辿る（2026-09-29・H4）
+          ['or', 'resident_id.eq.1,old_row->>resident_id.eq.1'],
         ],
       )
     })
@@ -938,37 +942,37 @@ function registerDbTests() {
     })
 
     it('editedBy を渡すと、端末の既定の操作者ではなくその職員を送る', async () => {
-      const srv = oneRowServer({ id: 30, note_on: '2026-09-01', shift: 'day', body: '本文', deleted_at: null, rev: 1 })
+      const srv = oneRowServer({ id: 30, resident_id: 1, kind: 'outing', start_on: '2026-09-01', end_on: null, end_at: null, deleted_at: null, rev: 1 })
       DB.__testHooks.setClient(srv.client)
       DB.setEditor(3)
-      await DB.updateNote(30, 1, { body: '本文B' }, { editedBy: 7 })
+      await DB.setOutingEnd(30, 1, '2026-09-02', '10:00', { editedBy: 7 })
       assert.equal(srv.calls.find((q) => q.action === 'update').payload.edited_by, 7)
     })
 
     it('editedBy が null・不正値なら端末の既定の操作者に戻る', async () => {
       for (const bad of [null, 0, -1]) {
-        const srv = oneRowServer({ id: 30, note_on: '2026-09-01', shift: 'day', body: '本文', deleted_at: null, rev: 1 })
+        const srv = oneRowServer({ id: 30, resident_id: 1, kind: 'outing', start_on: '2026-09-01', end_on: null, end_at: null, deleted_at: null, rev: 1 })
         DB.__testHooks.setClient(srv.client)
         DB.setEditor(3)
-        await DB.updateNote(30, 1, { body: '本文B' }, { editedBy: bad })
+        await DB.setOutingEnd(30, 1, '2026-09-02', '10:00', { editedBy: bad })
         assert.equal(srv.calls.find((q) => q.action === 'update').payload.edited_by, 3, `editedBy=${bad}`)
       }
     })
 
     it('既存の呼び出し（第4引数なし）はそのまま動く', async () => {
-      const srv = oneRowServer({ id: 30, note_on: '2026-09-01', shift: 'day', body: '本文', deleted_at: null, rev: 1 })
+      const srv = oneRowServer({ id: 30, resident_id: 1, kind: 'outing', start_on: '2026-09-01', end_on: null, end_at: null, deleted_at: null, rev: 1 })
       DB.__testHooks.setClient(srv.client)
       DB.setEditor(3)
-      const res = await DB.updateNote(30, 1, { body: '本文B' })
-      assert.equal(res.body, '本文B')
+      const res = await DB.setOutingEnd(30, 1, '2026-09-02', '10:00')
+      assert.equal(res.end_on, '2026-09-02')
       assert.equal(srv.calls.find((q) => q.action === 'update').payload.edited_by, 3)
     })
 
-    it('申し送りの取り消し（softDeleteNote）にも記入者を渡せる', async () => {
-      const srv = oneRowServer({ id: 40, note_on: '2026-09-01', shift: 'day', body: 'x', rev: 1 })
+    it('取り消し（soft delete）にも記入者を渡せる（申し送りの取り消しは notes.test.mjs の deleteNote）', async () => {
+      const srv = oneRowServer({ id: 40, resident_id: 1, taken_on: '2026-09-01', amount_ml: 100, rev: 1 })
       DB.__testHooks.setClient(srv.client)
       DB.setEditor(3)
-      const res = await DB.softDeleteNote(40, 1, { editedBy: 9 })
+      const res = await DB.softDeleteFluid(40, 1, { editedBy: 9 })
       assert.equal(res, true)
       assert.equal(srv.calls.find((q) => q.action === 'update').payload.edited_by, 9)
     })
@@ -1193,44 +1197,11 @@ function registerDbTests() {
   const ROUTINE = { routine: true, residentId: 1, day: '2026-09-01' }
   const LUNCH = { residentId: 1, day: '2026-09-01', slot: 'lunch' }
 
-  describe('★I1 範囲の限定: 申し送り・外出・水分は Q1〜Q3 の外（HEAD と同じ送り方・再送・競合）', () => {
+  // 2026-09-29: 申し送りの既にある行の変更・取り消しは、バイタル・食事と同じ送信待ち（notes#<id>）→ apply_note_edits
+  // へ移した（tests/notes.test.mjs）。ここに残るのは rev 照合の旧経路のままの外出・水分
+  describe('★I1 範囲の限定: 外出・水分は Q1〜Q3 の外（HEAD と同じ送り方・再送・競合）', () => {
     afterEach(async () => {
       await drainRows()
-    })
-
-    it('★H2: 申し送りに止まった op があっても、後の更新は直接送られて届く（止まった op に吸い込まない）', async () => {
-      DB.__testHooks.setClient(offline().client)
-      assert.equal(await DB.updateNote(30, 1, { body: '本文A' }), 'queued')
-      // 他の端末が先に書いた（rev 2）→ 申し送りは欄ごとの判定をしない（HEAD と同じ）ので止まる
-      const srv = oneRowServer({ id: 30, note_on: '2026-09-01', shift: 'day', body: '本文X', deleted_at: null, rev: 2 })
-      DB.__testHooks.setClient(srv.client)
-      await DB.flushQueue(true)
-      assert.equal(storedQueue().ops.filter((o) => o.blocked === 'conflict').length, 1, '（前提）止まった op')
-      const res = await DB.updateNote(30, 2, { body: '本文B' })
-      assert.equal(typeof res, 'object', `直接送られていない: ${String(res)}`)
-      assert.equal(srv.state.row.body, '本文B')
-    })
-
-    it('申し送りの退避の後の更新・取り消しも、HEAD と同じく直接送る（後ろへ積まない）', async () => {
-      DB.__testHooks.setClient(offline().client)
-      assert.equal(await DB.updateNote(30, 1, { body: '本文A' }), 'queued')
-      const srv = oneRowServer({ id: 30, body: '本文X', deleted_at: null, rev: 1 })
-      DB.__testHooks.setClient(srv.client)
-      const res = await DB.softDeleteNote(30, 1)
-      assert.equal(res, true, '取り消しを退避の後ろへ積んだ')
-      assert.equal(srv.calls.filter((q) => q.action === 'update').length, 1)
-    })
-
-    it('申し送りの止まった op の後ろにある op は、HEAD と同じくまとめずに送る', async () => {
-      const blocked = { qid: 'nB', table: 'notes', kind: 'update', rowId: 30, rev: 1, payload: { body: '本文A' }, blocked: 'conflict', at: 1, tries: 1, nextAt: 0 }
-      const later = { qid: 'nP', table: 'notes', kind: 'update', rowId: 30, rev: 2, payload: { importance: 'high' }, at: 2, tries: 0, nextAt: 0 }
-      setQueueRaw(JSON.stringify({ ops: [blocked, later] }))
-      await DB.__testHooks.restartQueue()
-      const srv = oneRowServer({ id: 30, note_on: '2026-09-01', shift: 'day', body: '本文X', deleted_at: null, rev: 2 })
-      DB.__testHooks.setClient(srv.client)
-      await DB.flushQueue(true)
-      assert.equal(srv.state.row.importance, 'high', '申し送りの op を止まった op へまとめた')
-      assert.deepEqual(storedQueue().ops.map((o) => o.qid), ['nB'])
     })
 
     it('外出の帰着記入（updateNow）も、退避があっても直接送る', async () => {
@@ -1240,17 +1211,6 @@ function registerDbTests() {
       DB.__testHooks.setClient(srv.client)
       const res = await DB.setOutingEnd(40, 1, '2026-09-01', '11:00')
       assert.equal(typeof res, 'object', `直接送られていない: ${String(res)}`)
-    })
-
-    it('申し送りの退避は、基準を持っていても rev 不一致なら HEAD と同じく競合で止める（欄ごとの判定をしない）', async () => {
-      DB.__testHooks.setClient(offline().client)
-      assert.equal(await DB.updateNote(30, 1, { body: '本文A' }, { bases: { body: '本文' } }), 'queued')
-      const srv = oneRowServer({ id: 30, body: '本文', importance: 'high', deleted_at: null, rev: 2 })
-      DB.__testHooks.setClient(srv.client)
-      await DB.flushQueue(true)
-      assert.equal(srv.state.row.body, '本文', '申し送りを欄ごとに判定して送った')
-      assert.equal(srv.calls.filter((q) => q.action === 'select').length, 0, '申し送りで読み直した')
-      assert.equal(storedQueue().ops[0].blocked, 'conflict')
     })
   })
 
@@ -1821,7 +1781,9 @@ function registerDbTests() {
     it('★#1 旧ビルド（HEAD）へ戻して読み書きされても、バイタル・食事の送信待ちと退避 op が消えない', async () => {
       DB.__testHooks.setClient(offline().client)
       assert.equal(await DB.saveVitalEdits(ROUTINE, { temp: { value: 37.2, base: null } }), 'queued')
-      assert.equal(await DB.updateNote(30, 1, { body: '本文A' }), 'queued')
+      assert.equal(await DB.setOutingEnd(30, 1, '2026-09-01', '10:00'), 'queued')
+      // 申し送りの変更（2026-09-29 から cl_sendQueue2 の notes#<id>）も、旧ビルドの読み書きで消えない
+      assert.equal(await DB.saveNoteEdits({ id: 31 }, { body: { value: '本文A', base: '本文O' } }), 'queued')
       // 旧ビルドで起動 → 読んで書き戻す（その間に食事を1件積んだ）
       headRoundTrip()
       headRoundTrip([mealOp('h1', 5)])
@@ -1829,7 +1791,9 @@ function registerDbTests() {
       await DB.__testHooks.restartQueue()
       assert.equal(DB.pendingRow('vitals', ROUTINE)?.values.temp, 37.2, 'バイタルの送信待ちが消えた')
       assert.equal(DB.pendingRow('meals', LUNCH)?.values.main_amount, 5, '旧ビルドで積んだ食事が移っていない')
-      assert.ok(storedQueue().ops.some((o) => o.table === 'notes'), '申し送りの退避 op が消えた')
+      assert.ok(storedQueue().ops.some((o) => o.table === 'outings'), '外出の退避 op が消えた')
+      assert.equal(DB.pendingNoteRow(31)?.values.body, '本文A', '申し送りの送信待ちが消えた')
+      await DB.discardPendingNote(31) // この偽のサーバーは申し送りの関数を持たない（申し送りの送信は notes.test.mjs）
       const srv = cellServer()
       DB.__testHooks.setClient(srv.client)
       await DB.flushQueue(true)
@@ -1840,11 +1804,11 @@ function registerDbTests() {
     it('★#1 cl_sendQueue は HEAD の形（{ ops }）のまま。バイタル・食事は LS.sendQueue2（cl_sendQueue2）に置く', async () => {
       DB.__testHooks.setClient(offline().client)
       await DB.saveVitalEdits(ROUTINE, { temp: { value: 37.2, base: null } })
-      await DB.updateNote(30, 1, { body: '本文A' })
+      await DB.setOutingEnd(30, 1, '2026-09-01', '10:00')
       assert.equal(T.LS.sendQueue2, 'cl_sendQueue2')
       const box1 = JSON.parse(lsStore.get('cl_sendQueue'))
       assert.deepEqual(Object.keys(box1).filter((k) => k !== 'brokenRaw'), ['ops'], `HEAD の形ではない: ${Object.keys(box1)}`)
-      assert.deepEqual(box1.ops.map((o) => o.table), ['notes'])
+      assert.deepEqual(box1.ops.map((o) => o.table), ['outings'])
       const box2 = JSON.parse(lsStore.get('cl_sendQueue2') ?? 'null')
       assert.ok(box2 && box2.rows['vitals@1|2026-09-01|routine'], 'バイタルが cl_sendQueue2 に無い')
     })
@@ -1959,7 +1923,7 @@ function registerDbTests() {
       }
       try {
         DB.__testHooks.setClient(offline().client)
-        assert.equal(await DB.updateNote(30, 1, { body: '本文A' }), 'queued')
+        assert.equal(await DB.setOutingEnd(30, 1, '2026-09-01', '10:00'), 'queued')
       } finally {
         delete locks.request
       }
@@ -2090,7 +2054,7 @@ function registerDbTests() {
         tab: 'tMID',
         at: 1,
       }
-      const note = { qid: 'n9', table: 'notes', kind: 'update', rowId: 30, rev: 1, payload: { body: '本文' }, at: 1, tries: 0, nextAt: 0 }
+      const note = { qid: 'n9', table: 'outings', kind: 'update', rowId: 30, rev: 1, payload: { end_at: '10:00' }, at: 1, tries: 0, nextAt: 0 }
       setQueueRaw(JSON.stringify({ ver: 2, rows: { 'vitals@1|2026-09-01|routine': row }, legacyOps: [note] }))
       await DB.__testHooks.restartQueue()
       const box1 = JSON.parse(lsStore.get('cl_sendQueue'))

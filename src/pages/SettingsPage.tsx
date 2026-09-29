@@ -34,10 +34,11 @@ import {
   setResidentNoteAlias,
 } from '../lib/db'
 import { getActorId, setActorId as persistActorId, touchActivity } from '../lib/actor'
-import { hasNoteAlias, LS, NOTE_ALIAS_MAX, validateNoteAlias } from '../lib/types'
+import { hasNoteAlias, LS, NOTE_ALIAS_MAX, noteDisplayName, validateNoteAlias } from '../lib/types'
 import type { ImportDay, Resident, Staff } from '../lib/types'
 import type { SyncResult } from '../lib/gasClient'
 import { addDays, fmtDayLabel, todayIso } from '../lib/format'
+import { UnsentNotes } from '../components/UnsentNotes'
 import {
   Chip,
   ConfirmDialog,
@@ -1200,6 +1201,16 @@ export function SettingsPage() {
             </>
           )}
         </p>
+        {/* 送れていない申し送り（本文つきの一覧。1件も無い時は何も出さない・2026-09-29 H1） */}
+        <UnsentNotes
+          actorId={actorId}
+          staff={staffList ?? undefined}
+          residentName={(id) => {
+            if (id === null) return 'スタッフへ（全体）'
+            const r = (residents ?? []).find((x) => x.id === id)
+            return r ? noteDisplayName(r) : `利用者ID ${id}`
+          }}
+        />
         {queueBroken ? (
           <div className="mt-3">
             <ErrorBlock message="未送信データの一部を読み取れませんでした。この端末で入力した記録が送信されていない可能性があります。内容は消していませんので、管理者に連絡してください。" />

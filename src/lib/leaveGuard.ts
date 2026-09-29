@@ -11,23 +11,45 @@
 // 業務データは持たない（「あるか・ないか」を返す関数を持つだけ）。
 
 type Source = () => boolean
+/**
+ * 止まっている入力の種類。input＝画面の中（メモリ）にしか無い入力（離れると消える）／
+ * notes＝送れていない申し送り（端末の送信待ちに残る。離れても消えない・2026-09-29）
+ */
+export type UnsavedKind = 'input' | 'notes'
 
-const sources = new Map<number, Source>()
+const sources = new Map<number, { fn: Source; kind: UnsavedKind }>()
 let seq = 0
 
 /** 「止まっている入力があるか」を返す関数を登録する。戻り値で解除する（画面を閉じる時に必ず呼ぶ） */
-export function registerUnsaved(fn: Source): () => void {
+export function registerUnsaved(fn: Source, kind: UnsavedKind = 'input'): () => void {
   seq += 1
   const id = seq
-  sources.set(id, fn)
+  sources.set(id, { fn, kind })
   return () => {
     sources.delete(id)
   }
 }
 
+/** 止まっているのが送れていない申し送りだけか（画面の中にしか無い入力は無い）。確認の文言の出し分けに使う */
+export function unsavedOnlyNotes(): boolean {
+  let notes = false
+  for (const { fn, kind } of sources.values()) {
+    let on = true
+    try {
+      on = fn()
+    } catch {
+      on = true
+    }
+    if (!on) continue
+    if (kind !== 'notes') return false
+    notes = true
+  }
+  return notes
+}
+
 /** いずれかの画面に、競合・未保存で止まっている入力があるか */
 export function hasUnsavedInput(): boolean {
-  for (const fn of sources.values()) {
+  for (const { fn } of sources.values()) {
     try {
       if (fn()) return true
     } catch {
@@ -62,6 +84,12 @@ export function attachBeforeUnload(): () => void {
 export const LEAVE_TITLE = '未保存の入力があります'
 export const LEAVE_BODY =
   '他の端末の値と食い違って止まっている入力、またはまだ保存していない入力があります。この画面を離れると、その入力は破棄されます。移動してよろしいですか。'
+/**
+ * 止まっているのが送れていない申し送りだけの時の文言（申し送りの入力は端末に残るので「破棄されます」とは言わない・
+ * 2026-09-29。バイタル・食事などの文言は上の LEAVE_BODY のまま）
+ */
+export const LEAVE_BODY_NOTES =
+  '他の端末の変更と食い違って止まっている申し送りがあります。送れていない申し送りはこの端末に残ります。あとで「送れていない申し送り」から選んで送れます。移動してよろしいですか。'
 
 // ── ブラウザの戻る・進む・スワイプで戻る・アドレスの書き換え（HashRouter のまま止める） ─────
 //

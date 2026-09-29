@@ -10,16 +10,19 @@
 //   ・バイタル・食事は RPC apply_cell_edits（0011）で欄ごとに書く（2026-09-23 フェーズ2'）。判定（いまの値＝
 //     あなたの値なら済み／基準のままなら書く／それ以外は競合）はサーバーが行ロックの下で行い、端末は判定しない。
 //     定時以外のバイタルの新しい行は端末生成の冪等キー client_key で1行に収める。
+//   ・申し送りの既にある行の変更・取り消しは RPC apply_note_edits（0017）で欄ごとに書く（2026-09-29 本人承認）。
+//     バイタル・食事と同じ送信待ち（cl_sendQueue2 の rows、行キー notes#<id>）を通し、競合した入力は端末に残す。
 //   ・水分・申し送り・外出は HEAD（c592dad）の送り方のまま: insert は端末生成の冪等キー client_key を必ず付け、
-//     23505 なら「既に届いている」証拠として既存行を読み直し、二重登録を作らない。
+//     23505 なら「既に届いている」証拠として既存行を読み直し、二重登録を作らない（申し送りは新規登録だけがこの経路）。
 //   ・物理削除はしない（soft delete = deleted_at のみ）。
-//   ・水分・申し送り・外出の更新は rev 照合（.eq('rev', rev)）。0行 = 競合 → 'conflict' を返し、
+//   ・水分・外出の更新は rev 照合（.eq('rev', rev)）。0行 = 競合 → 'conflict' を返し、
 //     呼び出し側の入力は消さない。
 //   ・通信失敗・認証切れの書込は永続キュー（localStorage cl_sendQueue／バイタル・食事は cl_sendQueue2）へ退避し 'queued' を返す。
 //     キューから消すのは「サーバーに載ったことを観測できた時」だけ（multi-device-sync 原則6・8）。
 //     業務データを置く localStorage は cl_sendQueue / cl_sendQueue2 / cl_draftNote / cl_dailyDraft:<日付> の
-//     4キーだけ（cl_dailyDraft は日報の書きかけ＝2026-09-02 追加。24時間で失効させる。cl_sendQueue2 はバイタル・食事の
-//     送信待ち＝2026-09-23 第3段 #1。旧ビルドへ戻しても消えないよう cl_sendQueue から分けた）。読めなく
+//     4キーだけ（cl_dailyDraft は日報の書きかけ＝2026-09-02 追加。2026-09-29 からタブごとに分けて持ち、期限では消さない。
+//     cl_sendQueue2 はバイタル・食事・申し送りの変更の送信待ち＝2026-09-23 第3段 #1。旧ビルドへ戻しても消えないよう
+//     cl_sendQueue から分けた）。読めなく
 //     なったキューの原文も別キーを作らず、読んだキューの中（brokenRaw）へ畳んで保持する。
 //   ・console に応答本文・氏名・記録本文を出さない（件数など非個人情報のみ）。
 //
@@ -257,6 +260,10 @@ const MSG = {
     '受け取ったデータを読み取れませんでした。画面を再読み込みしてください。続く場合は管理者に連絡してください。',
   cellsPending:
     'サーバー側の更新待ちのため、バイタル・食事はまだ保存できません。管理者に連絡してください。入力は消えていません。',
+  notesPending:
+    'サーバー側の更新待ちのため、保存済みの申し送りの変更はこの端末に保存して送信待ちにしています。サーバーが更新されると自動で送ります（新しい申し送りの登録はそのまま送れます）。',
+  notKept:
+    'この端末に控えを残せませんでした（保存領域の不足など）。入力は画面に残っています。この画面を閉じずに、もう一度お試しください。',
 } as const
 
 function serverMsg(action: '読み込め' | '保存でき' | '操作でき', code: string): string {
@@ -812,6 +819,11 @@ let queueBroken = false
 let queueBrokenRaw: string | null = null
 /** cl_sendQueue2 の中の読めなかった原文。cl_sendQueue2 の brokenRaw として持ち続ける */
 let cellBrokenRaw: string | null = null
+/**
+ * cl_sendQueue2 の brokenRaw から外した行（救い出して rows へ戻した行・利用者が取り下げた行）。
+ * 保存先の古い原文を読み直しても brokenRaw へ戻さない（この起動の間）
+ */
+const droppedBroken = new Set<string>()
 /** 旧キーからの移行待ち。現行キーへ書けたことを観測してからだけ旧キーを消す */
 let legacyBrokenPending = false
 /** 起動時に cl_sendQueue から cl_sendQueue2 へ移す分があった（書き戻して移す） */
@@ -878,6 +890,22 @@ function rawOf(row: unknown): string {
  * where＝どのキーの brokenRaw に持つか（読めなかった原文は、読んだキーの中に残す）
  */
 function keepBroken(chunks: string[], where: 'queue' | 'cells' = 'queue'): void {
+  if (where === 'cells') {
+    // cl_sendQueue2 の原文は1行ずつの集まりとして持つ（2026-09-29。旧ビルドが畳んだ申し送りの行を救い出した後、
+    // 救い出した行・利用者が取り下げた行を、保存先の古い原文から戻さないため）
+    const have = cellBrokenRaw === null ? [] : cellBrokenRaw.split('\n')
+    const set = new Set(have)
+    for (const c of chunks) {
+      for (const line of c.split('\n')) {
+        if (line === '' || set.has(line) || droppedBroken.has(line)) continue
+        set.add(line)
+        have.push(line)
+      }
+    }
+    cellBrokenRaw = have.length === 0 ? null : have.join('\n')
+    if (cellBrokenRaw !== null) queueBroken = true
+    return
+  }
   for (const c of chunks) {
     if (c === '') continue
     const cur = where === 'queue' ? queueBrokenRaw : cellBrokenRaw
@@ -931,8 +959,63 @@ function parseQueueOps(rawOps: unknown, requireQid: boolean): { ops: QueueOp[]; 
 //   欄の版の先頭にはタブの印が付く。保存先に載ったことを観測した版が後で消えていたら、
 //   他のタブが送り終えたとみなして、このタブのメモリからも外す（二重に送り続けない）。
 
-/** 欄ごとの送信待ちを持つ表 */
+/** 欄ごとの送信待ちを持つ表（RPC apply_cell_edits で送る表） */
 export type CellTable = 'vitals' | 'meals'
+/**
+ * 送信待ち（cl_sendQueue2 の rows）に載る表。申し送り（notes）は 2026-09-29 に加えた（RPC apply_note_edits・0017）。
+ * 申し送りの行キーは notes#<id>（既にある行の変更・取り消しだけ。新規登録は従来の insert・client_key の経路）
+ */
+type RowTable = CellTable | 'notes'
+/** 申し送りで送れる欄（0017 apply_note_edits の許可リストから取り消し deleted_at を除いたもの） */
+export type NoteEditField =
+  | 'body'
+  | 'resident_id'
+  | 'importance'
+  | 'color'
+  | 'after16'
+  | 'occurred_at'
+  | 'reporter_id'
+  | 'role_tags'
+  | 'shift'
+  | 'ongoing'
+  | 'ended_at'
+  | 'ended_by'
+/** 0017 の許可リスト（取り消し deleted_at を含む。deleted_at の基準は「見た本文」） */
+const NOTE_CELL_FIELDS: readonly string[] = [
+  'body',
+  'resident_id',
+  'importance',
+  'color',
+  'after16',
+  'occurred_at',
+  'reporter_id',
+  'role_tags',
+  'shift',
+  'ongoing',
+  'ended_at',
+  'ended_by',
+  'deleted_at',
+]
+/** 申し送りの行の指し方（既にある行の id） */
+export type NoteTarget =
+  /** 既にある行（id）。fork は別のタブの入力と食い違った時に分けて持つ入力の印（下の「分けて持つ」） */
+  | { id: number; fork?: string }
+  /**
+   * 送信待ち・応答待ちの登録（冪等キー client_key）の行（2026-09-29 第3巡 チーフ裁定）。登録の op の中身は二度と
+   * 書き換えず、登録を押した後にその行へ加えた変更はすべて notes#ck:<client_key> に積む（基準＝登録で送った値）。
+   * 登録が届いた後に client_key で行を見つけ、notes#<id> と同じく apply_note_edits で送る
+   */
+  | { clientKey: string; fork?: string }
+/**
+ * 送信待ちの申し送りの控え（どの日・どの区分・どの対象の行か）。「送れていない申し送り」の一覧で日ごとに出す・
+ * 〔新しい行として登録〕で同じ日・同じ区分・同じ対象に作るために、保存の時に画面が渡す。本文は持たない（本文は欄の値）
+ */
+export interface NoteMeta {
+  note_on: string
+  shift: Shift
+  resident_id: number | null
+  after16: boolean
+}
 /** バイタルで送れる欄（0011 apply_cell_edits の許可リストと同じ） */
 export type VitalCellField = 'temp' | 'sys_bp' | 'dia_bp' | 'pulse' | 'spo2' | 'measured_at' | 'note' | 'symptom'
 /** 食事で送れる欄（0011 apply_cell_edits の許可リストと同じ） */
@@ -950,9 +1033,10 @@ const VITAL_CELL_FIELDS: readonly VitalCellField[] = [
 ]
 const MEAL_CELL_FIELDS: readonly MealCellField[] = ['main_amount', 'side_amount', 'status', 'note']
 /** 空いていれば埋める付随の欄（判定には使わない） */
-const CELL_FILL_KEYS: Record<CellTable, readonly string[]> = {
+const CELL_FILL_KEYS: Record<RowTable, readonly string[]> = {
   vitals: ['measured_at', 'recorded_by'],
   meals: ['recorded_by'],
+  notes: [],
 }
 /** 冪等キー（client_key）で1行に収める種別（定時は自然キー） */
 const KEYLESS_KINDS: readonly VitalKind[] = ['recheck', 'observation', 'symptom']
@@ -988,7 +1072,8 @@ export interface CellConflict {
   reason: 'changed' | 'missing'
 }
 
-type CellValue = number | string | null
+/** 欄の値（申し送りの区切り・継続は真偽、職種タグは文字の配列） */
+type CellValue = number | string | boolean | string[] | null
 
 /** 送信待ちの1欄 */
 interface CellEdit {
@@ -1005,7 +1090,7 @@ type CellState = 'pending' | 'conflict' | 'rejected'
 
 /** 送信待ちの1行（localStorage の rows に入る形） */
 interface CellEntry {
-  table: CellTable
+  table: RowTable
   /** RPC の p_key そのもの */
   key: Record<string, string | number>
   edits: Record<string, CellEdit>
@@ -1026,6 +1111,14 @@ interface CellEntry {
    * 行 id のまま残し（未送信に数え続ける）、次からは読まない
    */
   bindChecked?: true
+  /**
+   * 申し送り: 旧ビルドが rev 照合で退避した変更（cl_sendQueue の notes の update）を読み替えた行の、その時の rev。
+   * 基準（編集を始めた時の値）を持たないので、送る直前に1行読み、rev が同じなら「いまの値＝基準」として基準を埋める
+   * （rev が違えば基準は分からないまま送る＝サーバーは空の欄だけ書き、本文は競合で止める）
+   */
+  baseRev?: number
+  /** 申し送り: どの日・区分・対象の行か（画面が保存の時に渡す控え。旧形式から読み替えた行には無い） */
+  meta?: NoteMeta
   state: CellState
   conflicts?: CellConflict[]
   tries: number
@@ -1142,8 +1235,13 @@ function isCellTable(t: unknown): t is CellTable {
   return t === 'vitals' || t === 'meals'
 }
 
-function cellFieldsOf(table: CellTable): readonly string[] {
-  return table === 'vitals' ? VITAL_CELL_FIELDS : MEAL_CELL_FIELDS
+/** 送信待ちに載る表か（バイタル・食事・申し送り） */
+function isRowTable(t: unknown): t is RowTable {
+  return isCellTable(t) || t === 'notes'
+}
+
+function cellFieldsOf(table: RowTable): readonly string[] {
+  return table === 'vitals' ? VITAL_CELL_FIELDS : table === 'meals' ? MEAL_CELL_FIELDS : NOTE_CELL_FIELDS
 }
 
 /** 小数 digits 桁に四捨五入する（0.5 は 0 から遠い側＝Postgres の numeric と同じ）。指数表記で2進数の誤差を避ける */
@@ -1189,20 +1287,64 @@ function cellValueOf(field: string, v: unknown): CellValue | undefined {
     case 'note':
     case 'symptom':
       return typeof v === 'string' ? v : undefined
+    // ── 申し送り（0017。欄の名前はバイタル・食事と重ならない） ──
+    case 'body':
+      return typeof v === 'string' ? v : undefined
+    case 'resident_id':
+    case 'reporter_id':
+    case 'ended_by':
+      return idNum(v) ?? undefined
+    case 'importance':
+      return oneOf(v, IMPORTANCES) ?? undefined
+    case 'color':
+      return oneOf(v, NOTE_COLORS) ?? undefined
+    case 'shift':
+      return oneOf(v, SHIFTS) ?? undefined
+    case 'after16':
+    case 'ongoing':
+      return typeof v === 'boolean' ? v : undefined
+    case 'occurred_at': {
+      if (typeof v !== 'string') return undefined
+      const m = CELL_TIME_RE.exec(v.trim())
+      if (!m) return undefined
+      const h = Number(m[1])
+      if (h > 23 || Number(m[2]) > 59 || (m[3] !== undefined && Number(m[3]) > 59)) return undefined
+      const sec = m[3] !== undefined && m[3] !== '00' ? `:${m[3]}` : ''
+      return `${String(h).padStart(2, '0')}:${m[2]}${sec}`
+    }
+    case 'role_tags':
+      return Array.isArray(v) && v.every((t) => typeof t === 'string') ? [...(v as string[])] : undefined
+    case 'ended_at':
+    case 'deleted_at':
+      return typeof v === 'string' && !Number.isNaN(Date.parse(v)) ? v : undefined
   }
   return undefined
 }
 
-/** 保存先から読んだ値（数値・文字列・null だけを受ける） */
+/** 保存先から読んだ値（数値・文字列・真偽・文字の配列・null だけを受ける） */
 function storedCellValue(v: unknown): CellValue | undefined {
   if (v === null) return null
   if (typeof v === 'number') return Number.isFinite(v) ? v : undefined
-  if (typeof v === 'string') return v
+  if (typeof v === 'string' || typeof v === 'boolean') return v
+  if (Array.isArray(v) && v.every((t) => typeof t === 'string')) return [...(v as string[])]
   return undefined
 }
 
 /** 行の指し方を RPC の p_key へ。読めなければ null */
-function keyOfTarget(table: CellTable, target: VitalTarget | MealTarget): Record<string, string | number> | null {
+function keyOfTarget(
+  table: RowTable,
+  target: VitalTarget | MealTarget | NoteTarget,
+): Record<string, string | number> | null {
+  if (table === 'notes') {
+    // 申し送りは既にある行の id か、送信待ちの登録の冪等キーで指す（新規登録そのものはこの経路を通らない）
+    const t = target as NoteTarget
+    const fork: Record<string, string> = typeof t.fork === 'string' && t.fork !== '' ? { fork: t.fork } : {}
+    if ('clientKey' in t) {
+      return typeof t.clientKey === 'string' && t.clientKey !== '' ? { client_key: t.clientKey, ...fork } : null
+    }
+    const id = idNum(t.id)
+    return id === null ? null : { id, ...fork }
+  }
   if (table === 'meals') {
     const t = target as MealTarget
     const resident = idNum(t.residentId)
@@ -1228,7 +1370,12 @@ function keyOfTarget(table: CellTable, target: VitalTarget | MealTarget): Record
 }
 
 /** 保存先から読んだ p_key を検め直す（受信データを信じない）。読めなければ null */
-function normalizeCellKey(table: CellTable, key: Record<string, unknown>): Record<string, string | number> | null {
+function normalizeCellKey(table: RowTable, key: Record<string, unknown>): Record<string, string | number> | null {
+  if (table === 'notes') {
+    const fork = str(key.fork) ?? undefined
+    if (Object.prototype.hasOwnProperty.call(key, 'id')) return keyOfTarget('notes', { id: idNum(key.id) ?? 0, fork })
+    return keyOfTarget('notes', { clientKey: str(key.client_key) ?? '', fork })
+  }
   const id = idNum(key.id)
   if (Object.prototype.hasOwnProperty.call(key, 'id')) return id === null ? null : { id }
   if (table === 'meals') {
@@ -1268,8 +1415,15 @@ function pairDrop(e: CellEntry, drop: Set<string>, onlyVers?: Map<string, string
   return out
 }
 
-/** 行キー（設計書: vitals@<利用者>|<日付>|routine ／ meals@<利用者>|<日付>|<食事枠> ／ vitals~<client_key> ／ vitals#<id>） */
-function cellRowKey(table: CellTable, key: Record<string, string | number>): string {
+/**
+ * 行キー（設計書: vitals@<利用者>|<日付>|routine ／ meals@<利用者>|<日付>|<食事枠> ／ vitals~<client_key> ／ vitals#<id> ／
+ * 申し送り notes#<id>）
+ */
+function cellRowKey(table: RowTable, key: Record<string, string | number>): string {
+  if (table === 'notes') {
+    const base = key.id !== undefined ? `notes#${key.id}` : `notes#ck:${key.client_key}`
+    return key.fork !== undefined ? `${base}!${key.fork}` : base
+  }
   if (key.id !== undefined) return `${table}#${key.id}`
   if (table === 'meals') return `meals@${key.resident_id}|${key.meal_on}|${key.meal_slot}`
   if (key.client_key !== undefined) return `vitals~${key.client_key}`
@@ -1279,7 +1433,7 @@ function cellRowKey(table: CellTable, key: Record<string, string | number>): str
 /** 保存先から読んだ1行を検め直す。読めない行は null（原文を brokenRaw に残す）・欄の無い行は 'empty' */
 function normalizeCellEntry(raw: unknown): { rowKey: string; entry: CellEntry } | null | 'empty' {
   const r = asRecord(raw)
-  if (r === null || !isCellTable(r.table)) return null
+  if (r === null || !isRowTable(r.table)) return null
   const table = r.table
   const keyRec = asRecord(r.key)
   const key = keyRec === null ? null : normalizeCellKey(table, keyRec)
@@ -1326,6 +1480,12 @@ function normalizeCellEntry(raw: unknown): { rowKey: string; entry: CellEntry } 
   if (rid !== null) entry.rowId = rid
   if (r.bound === true) entry.bound = true
   if (r.bindChecked === true) entry.bindChecked = true
+  if (table === 'notes') {
+    const br = num(r.baseRev)
+    if (br !== null) entry.baseRev = br
+    const meta = normalizeNoteMeta(r.meta)
+    if (meta !== null) entry.meta = meta
+  }
   if (Array.isArray(r.conflicts)) {
     const cs: CellConflict[] = []
     for (const c of r.conflicts) {
@@ -1338,6 +1498,56 @@ function normalizeCellEntry(raw: unknown): { rowKey: string; entry: CellEntry } 
     if (cs.length > 0) entry.conflicts = cs
   }
   return { rowKey: cellRowKey(table, key), entry }
+}
+
+/** 申し送りの控え（日・区分・対象）を検め直す。読めなければ null（控えが無いだけで、送信待ちそのものは読む） */
+function normalizeNoteMeta(v: unknown): NoteMeta | null {
+  const m = asRecord(v)
+  if (m === null) return null
+  const day = dateStr(m.note_on)
+  const shift = oneOf(m.shift, SHIFTS)
+  if (day === null || shift === null) return null
+  return { note_on: day, shift, resident_id: idNum(m.resident_id), after16: bool(m.after16, false) }
+}
+
+/**
+ * 旧ビルドが rev 照合で退避した申し送りの変更（cl_sendQueue の notes の update）を、送信待ちの1行（notes#<id>）へ
+ * 読み替える（2026-09-29）。基準は分からない（キー無し）。退避した時の rev を baseRev に持ち、送る直前に1行読んで
+ * rev が同じなら「いまの値＝基準」として埋める。止まっていた op（blocked）はその状態のまま（一覧から選び直せる）。
+ * 送れない欄がある op は null（原文を brokenRaw に残す＝消さない）
+ */
+function convertLegacyNoteOp(r: Record<string, unknown>, verTag: string): { rowKey: string; entry: CellEntry } | null {
+  const payload = asRecord(r.payload)
+  const rowId = idNum(r.rowId)
+  const rev = num(r.rev)
+  if (payload === null || r.kind !== 'update' || rowId === null || rev === null) return null
+  const at = num(r.at) ?? 0
+  const edits: Record<string, CellEdit> = {}
+  for (const [k, v] of Object.entries(payload)) {
+    if (k === 'edited_by' || k === 'read_count' || k === 'my_read') continue
+    if (!NOTE_CELL_FIELDS.includes(k)) return null
+    const value = cellValueOf(k, v)
+    if (value === undefined) return null
+    if (k === 'body' && (value === null || (typeof value === 'string' && value.trim() === ''))) return null
+    edits[k] = { value, at, ver: `v1.${verTag}.${k}.${valueTag(value)}` }
+  }
+  if (Object.keys(edits).length === 0) return null
+  const key = { id: rowId }
+  const entry: CellEntry = {
+    table: 'notes',
+    key,
+    edits,
+    fill: {},
+    editor: idNum(payload.edited_by),
+    baseRev: rev,
+    state: r.blocked === 'conflict' ? 'conflict' : r.blocked === 'rejected' ? 'rejected' : 'pending',
+    tries: 0,
+    nextAt: 0,
+    tab: '',
+    at,
+    bound: true,
+  }
+  return { rowKey: cellRowKey('notes', key), entry }
 }
 
 /**
@@ -1489,6 +1699,37 @@ interface Store2 {
   /** 読めなかった原文（cl_sendQueue2 の brokenRaw へ畳む） */
   dropped: string[]
   brokenRaw: string | null
+  /**
+   * brokenRaw の中の申し送りの行のうち、同じ行キーの送信待ちと中身が食い違うため rows へ戻さなかったもの
+   * （brokenRaw に残したまま、「送れていない申し送り」に別の本文として出す＝両方の本文を残す）
+   */
+  collided: { rowKey: string; entry: CellEntry; raw: string }[]
+}
+
+/**
+ * 旧ビルドへ戻した時に畳まれた申し送りの行を救い出す（2026-09-29・ロールバック互換）。
+ * 旧ビルドは cl_sendQueue2 の rows の notes#<id> を読めずに brokenRaw へ畳み、rows から外して書き戻す。
+ * その1行（JSON）を読み直して送信待ちの行に戻す。読めない・申し送りでない行は null（brokenRaw に残す）
+ */
+function rescueBrokenLine(line: string): { rowKey: string; entry: CellEntry } | null {
+  let v: unknown
+  try {
+    v = JSON.parse(line)
+  } catch {
+    return null
+  }
+  if (asRecord(v)?.table !== 'notes') return null
+  const n = normalizeCellEntry(v)
+  return n === null || n === 'empty' ? null : n
+}
+
+/** 救い出した行を、同じ行キーの送信待ちへ重ねられるか（同じ欄に違う値が無い＝どちらの入力も失わない） */
+function rescueFits(prev: CellEntry, next: CellEntry): boolean {
+  for (const [f, e] of Object.entries(next.edits)) {
+    const cur = prev.edits[f]
+    if (cur !== undefined && JSON.stringify(cur.value) !== JSON.stringify(e.value)) return false
+  }
+  return true
 }
 
 /**
@@ -1512,7 +1753,27 @@ function parseStore1(raw: string, requireQid: boolean): Store1 {
       if (prev === undefined) cells.set(n.rowKey, n.entry)
       else mergeConverted(prev, n.entry)
     }
-    const legacy = parseQueueOps(box.legacyOps, requireQid)
+    // 申し送りの変更（update）は送信待ちの行へ読み替える（2026-09-29。下の HEAD の形と同じ扱い）
+    const legacyRaw2: unknown[] = []
+    if (Array.isArray(box.legacyOps)) {
+      box.legacyOps.forEach((row, i) => {
+        const r = asRecord(row)
+        if (r === null || r.table !== 'notes' || r.kind !== 'update') {
+          legacyRaw2.push(row)
+          return
+        }
+        const qid = str(r.qid)
+        const c = requireQid && qid === null ? null : convertLegacyNoteOp(r, qid ?? `m${i}`)
+        if (c === null) {
+          dropped.push(rawOf(r))
+          return
+        }
+        const prev = cells.get(c.rowKey)
+        if (prev === undefined) cells.set(c.rowKey, c.entry)
+        else mergeConverted(prev, c.entry)
+      })
+    }
+    const legacy = parseQueueOps(legacyRaw2, requireQid)
     return { legacy: legacy.ops, cells, migrating: true, dropped: dropped.concat(legacy.dropped), brokenRaw: str(box.brokenRaw) }
   }
   // HEAD の形（op の配列／{ ops, brokenRaw, done }）。done（送り終えた・解決した op の印）の op は読み込まない
@@ -1532,6 +1793,8 @@ function parseStore1(raw: string, requireQid: boolean): Store1 {
       const qid = str(r?.qid)
       if (qid !== null && done.has(qid)) return
       if (r !== null && isCellTable(r.table) && (r.kind === 'insert' || r.kind === 'update')) cellRaw.push({ r, i })
+      // 申し送りの変更（update）も送信待ちの行へ読み替える（2026-09-29。新規登録 insert は従来の退避 op のまま）
+      else if (r !== null && r.table === 'notes' && r.kind === 'update') cellRaw.push({ r, i })
       else legacyRaw.push(row)
     })
   }
@@ -1543,7 +1806,7 @@ function parseStore1(raw: string, requireQid: boolean): Store1 {
       dropped.push(rawOf(r))
       continue
     }
-    const c = convertLegacyCellOp(r, qid ?? `n${i}`)
+    const c = r.table === 'notes' ? convertLegacyNoteOp(r, qid ?? `n${i}`) : convertLegacyCellOp(r, qid ?? `n${i}`)
     if (c === null) {
       dropped.push(rawOf(r))
       continue
@@ -1579,7 +1842,41 @@ function parseStore2(raw: string): Store2 {
     if (prev === undefined) rows.set(n.rowKey, n.entry)
     else mergeConverted(prev, n.entry)
   }
-  return { rows, done: normalizeDone(box.done), dropped, brokenRaw: str(box.brokenRaw) }
+  // 旧ビルドが畳んだ申し送りの行を rows へ戻す（戻した行は brokenRaw から外す。書き戻しは1回の setItem で、
+  // rows に入った中身ごと読み直して確かめる＝persistUnderLock。書けなければ保存先の原文はそのまま残る）
+  const collided: Store2['collided'] = []
+  const remaining: string[] = []
+  const br = str(box.brokenRaw)
+  if (br !== null) {
+    for (const line of br.split('\n')) {
+      if (line === '' || droppedBroken.has(line)) continue
+      const r = rescueBrokenLine(line)
+      if (r === null) {
+        remaining.push(line)
+        continue
+      }
+      const prev = rows.get(r.rowKey)
+      if (prev === undefined) {
+        rows.set(r.rowKey, r.entry)
+        continue
+      }
+      if (rescueFits(prev, r.entry)) {
+        for (const [f, e] of Object.entries(r.entry.edits)) if (prev.edits[f] === undefined) prev.edits[f] = e
+        if (prev.meta === undefined && r.entry.meta !== undefined) prev.meta = r.entry.meta
+        continue
+      }
+      // 同じ欄に違う値がある: どちらも捨てない（救い出した方は brokenRaw に残し、一覧に別の本文として出す）
+      remaining.push(line)
+      collided.push({ ...r, raw: line })
+    }
+  }
+  return {
+    rows,
+    done: normalizeDone(box.done),
+    dropped,
+    brokenRaw: remaining.length === 0 ? null : remaining.join('\n'),
+    collided,
+  }
 }
 
 function getRaw(key: string): string | null {
@@ -1697,6 +1994,11 @@ function mergeCellEntry(
   if (rowId !== undefined) out.rowId = rowId
   if (m?.bound === true || s?.bound === true) out.bound = true
   if (m?.bindChecked === true || s?.bindChecked === true) out.bindChecked = true
+  // 申し送りの控え・読み替えた時の rev は、どちらか一方にあれば残す（基準を埋め終えた方＝baseRev を外した方が新しい
+  // 時はそちらに従う）
+  const noteMeta = meta.meta ?? m?.meta ?? s?.meta
+  if (noteMeta !== undefined) out.meta = noteMeta
+  if (meta.baseRev === undefined) delete out.baseRev
   if (out.conflicts !== undefined) {
     const cs = out.conflicts.filter((c) => c.field in edits)
     if (cs.length > 0) out.conflicts = cs
@@ -1810,6 +2112,8 @@ function loadQueue(): void {
       console.warn('未送信データの読み込みに失敗しました（内容は表示しません）')
     }
   }
+  // 旧ビルドが畳んだ申し送りを救い出したら、書き戻して brokenRaw から外す（書けたと確かめるまで保存先は元のまま）
+  if (r2 !== null && r2BrokenBefore(r2) !== null && cellBrokenRaw !== r2BrokenBefore(r2)) convertedOnLoad = true
   // 旧版が別キーへ退避していた原文を引き継ぐ（現行キーへ書けてから旧キーを消す）
   try {
     const legacy = localStorage.getItem(LEGACY_BROKEN_KEY)
@@ -1820,6 +2124,15 @@ function loadQueue(): void {
     }
   } catch {
     // 参照できない環境では引き継がない（旧キーの値はそのまま残る＝消さない）
+  }
+}
+
+/** 保存先の cl_sendQueue2 の brokenRaw（そのまま。救い出しで変わったかの見分けに使う） */
+function r2BrokenBefore(r2: string): string | null {
+  try {
+    return str(asRecord(JSON.parse(r2))?.brokenRaw)
+  } catch {
+    return null
   }
 }
 
@@ -1885,6 +2198,8 @@ function persistUnderLock(): void {
     }
   }
   if (ok1 && ok2) convertedOnLoad = false
+  // 読めなかった原文が残っているか（救い出して外した後は「読み取れませんでした」を出し続けない）
+  queueBroken = queueBrokenRaw !== null || cellBrokenRaw !== null || legacyBrokenPending
   // 保存できなくてもメモリ上のキューは維持する（この起動中は再送できる）
   queuePersisted = ok1 && ok2
   notifyQueue()
@@ -2149,6 +2464,10 @@ async function runFlush(force: boolean, waitMs: number): Promise<void> {
       await bindStoppedIdRows(sb)
       await sendDueCells(sb, force)
       await sendDueOps(sb, force)
+      // 送信待ちの登録が送れた後の、その登録への変更（notes#ck:）を同じ送信の中で送る
+      if ([...cellRows.values()].some((c) => c.table === 'notes' && c.key.client_key !== undefined && c.state === 'pending')) {
+        await sendDueCells(sb, force)
+      }
     }, waitMs)
   } catch {
     // 接続先未設定・クライアント初期化失敗・ロックを取れなかった。キューはそのまま保持する
@@ -2306,6 +2625,8 @@ async function sendQueuedOp(sb: SupabaseClient, op: QueueOp): Promise<SendResult
     const res = (await sb.from(op.table).insert(op.payload).select(cols).maybeSingle()) as Res<unknown>
     if (res.error === null) {
       markSelfRow(op.table, res.data, num(asRecord(res.data)?.rev)) // 版が確定した
+      const sentCk = str(op.payload.client_key)
+      if (op.table === 'notes' && sentCk !== null && sentCk !== '') rememberNoteSent(sentCk, op.payload)
       return 'sent'
     }
     if (isAuthFail(res)) {
@@ -2319,6 +2640,21 @@ async function sendQueuedOp(sb: SupabaseClient, op: QueueOp): Promise<SendResult
         // 端末が付けた冪等キーの衝突＝この op は既にサーバーへ届いている（二重送信）。
         // 届いていることを読んで確かめられた時だけキューから外す（削除済みでも「届いた」証拠）。
         // 読めなければ消さずに再試行へ回す（観測できない消去はしない＝原則8）
+        // 申し送りの登録の op の中身は書き換えない（第3巡の不変条件）。登録後の変更は notes#ck:<client_key> にあり、
+        // この後に client_key で行を見つけて送る＝ここで比べ直す物は無い
+        if (op.table === 'notes') {
+          // 申し送り: 届いていた行と、この op の中身が食い違う欄は、登録できた行への変更として積んでから外す（R6(A)・R6-1）
+          const landedNote = await findByKey(sb, 'notes', ck, NOTE_COLS, true)
+          if (landedNote === null) return 'retry'
+          const row = normalizeNote(landedNote.row)
+          if (row === null) return 'retry'
+          // 基準はこのタブが記録した「この冪等キーで最初に送った中身」。確かめられない時は null（偽の競合は許すが、
+          // 黙って外さない＝別のタブが同じキーで積んだ op の中身を消さない・R6-1 の安全網）
+          const key = str(op.payload.client_key) ?? ''
+          const ok = await stageNoteDupDiff(row, op.payload, firstSentNote.get(key))
+          if (!ok) return 'retry' // 積めなければ外さない
+          return 'sent'
+        }
         const landed = await findByKey(sb, op.table, ck, 'id,rev', true)
         if (landed !== null) return 'sent'
         // 先に載っていたのが自動の記録（0015 の cron・auto=true）なら、その行をこの手動の記録で上書きする（チーフ指摘5）。
@@ -2473,6 +2809,26 @@ function clientKeyOf(payload: Record<string, unknown>): Record<string, unknown> 
  * includeDeleted=true は「その行が届いているか」だけを見る用途（client_key の衝突確認）。
  * 削除済みでも「届いた」ことに変わりはないので、退避 op を消してよい判断材料になる。
  */
+/**
+ * 冪等キーなどで1行を探す。見つかった＝行、無い＝'none'、読めなかった（通信・権限）＝'error'（L2。「無い」と取り違えない）
+ */
+async function findByKeyResult(
+  sb: SupabaseClient,
+  table: QueueTable,
+  key: Record<string, unknown>,
+  cols: string,
+): Promise<{ id: number; rev: number; row: unknown } | 'none' | 'error'> {
+  let q = sb.from(table).select(cols).limit(1)
+  for (const [k, v] of Object.entries(key)) q = q.eq(k, v as never)
+  const res = (await q.maybeSingle()) as Res<unknown>
+  if (res.error !== null) return 'error'
+  if (res.data === null) return 'none'
+  const r = asRecord(res.data)
+  const id = idNum(r?.id)
+  const rev = num(r?.rev)
+  return id !== null && rev !== null ? { id, rev, row: res.data } : 'error'
+}
+
 async function findByKey(
   sb: SupabaseClient,
   table: QueueTable,
@@ -2722,6 +3078,51 @@ async function probeCellRpc(): Promise<'ready' | 'missing' | null> {
   return run
 }
 
+// 申し送りの変更・取り消しに使う RPC（0017 apply_note_edits）の有無。考え方は apply_cell_edits と同じ
+let noteRpcState: 'ready' | 'missing' | null = null
+let noteRpcCheckedAt = 0
+let noteProbeInFlight: Promise<'ready' | 'missing' | null> | null = null
+
+function markNoteRpc(state: 'ready' | 'missing'): void {
+  noteRpcState = state
+  noteRpcCheckedAt = Date.now()
+}
+
+/** apply_note_edits の有無を問い合わせる（p_id=null。何も書かない）。同時に呼ばれた分は1回にまとめる */
+async function probeNoteRpc(): Promise<'ready' | 'missing' | null> {
+  if (noteProbeInFlight !== null) return noteProbeInFlight
+  const run = (async (): Promise<'ready' | 'missing' | null> => {
+    try {
+      const sb = await getClient()
+      const res = (await sb.rpc('apply_note_edits', { p_id: null, p_edits: {} })) as Res<unknown>
+      if (res.error !== null) {
+        if (!isMissingRpc(res)) return null
+        markNoteRpc('missing')
+        return 'missing'
+      }
+      const state = asRecord(res.data)?.status === 'probe' ? 'ready' : 'missing'
+      const was = noteRpcState
+      markNoteRpc(state)
+      // サーバー側の更新（0017）が入った: 待たせていた申し送りの送信待ちをすぐ送る
+      if (was === 'missing' && state === 'ready') void flushQueue(true)
+      return state
+    } catch {
+      return null
+    } finally {
+      noteProbeInFlight = null
+    }
+  })()
+  noteProbeInFlight = run
+  return run
+}
+
+async function noteRpcForGate(): Promise<'ready' | 'missing' | 'unknown'> {
+  if (noteRpcState === 'ready' && Date.now() - noteRpcCheckedAt < GATE_TTL_MS) return 'ready'
+  const c = await probeNoteRpc()
+  if (c !== null) return c
+  return noteRpcState ?? 'unknown'
+}
+
 /** 入力解禁の確認と一緒に使う。直近に「使える」を観測していれば問い合わせない */
 async function cellRpcForGate(): Promise<'ready' | 'missing' | 'unknown'> {
   if (cellRpcState === 'ready' && Date.now() - cellRpcCheckedAt < GATE_TTL_MS) return 'ready'
@@ -2739,6 +3140,11 @@ export interface NativeInputGate {
    * （バイタル・食事の入力を止めて理由を出す）／unknown＝確かめられない（通信エラー）
    */
   cells: 'ready' | 'missing' | 'unknown'
+  /**
+   * 保存済みの申し送りの変更・取り消しに使う RPC（0017）: ready＝使える／missing＝サーバー側の更新待ち
+   * （保存済みの申し送りの変更を止めて理由を出す。新しい申し送りの登録は止めない）／unknown＝確かめられない
+   */
+  notes: 'ready' | 'missing' | 'unknown'
 }
 
 /**
@@ -2749,11 +3155,11 @@ export interface NativeInputGate {
  * 同時に 0011 の有無も確かめる（cells）。申し送り・水分・外出の入力は cells に関係なく value で決める。
  */
 export async function getNativeInputGate(): Promise<NativeInputGate> {
-  const [v, cells] = await Promise.all([refreshGate(), cellRpcForGate()])
-  if (v !== null) return { value: v, observed: true, cells }
+  const [v, cells, notes] = await Promise.all([refreshGate(), cellRpcForGate(), noteRpcForGate()])
+  if (v !== null) return { value: v, observed: true, cells, notes }
   // 取り直せなかった。この起動中に一度でも観測できていれば、その値を使う（観測済み扱い）
-  if (gateValue !== null) return { value: gateValue, observed: true, cells }
-  return { value: false, observed: false, cells }
+  if (gateValue !== null) return { value: gateValue, observed: true, cells, notes }
+  return { value: false, observed: false, cells, notes }
 }
 
 /**
@@ -2794,6 +3200,25 @@ async function assertCellWritable(): Promise<void> {
   }
   if (cellRpcState === 'missing' && fresh) throw new DbError('blocked', MSG.cellsPending)
   if ((await probeCellRpc()) === 'missing') throw new DbError('blocked', MSG.cellsPending)
+}
+
+/**
+ * 保存済みの申し送りの変更・取り消しの入口ガード。入力解禁に加えて、0017 が当たっていない DB では
+ * 「サーバー側の更新待ち」で止める（rev 照合の旧経路へ落とさない）。確かめられない時は止めない（送信待ちに積む）
+ */
+async function assertNoteWritable(): Promise<void> {
+  await assertWritable()
+  // 0017 が無い DB でも入力は捨てない（2026-09-29 修正依頼2）: 送信待ち（notes#<id>）に積んで保存し、関数が入り次第送る。
+  // 関数の有無は背景で確かめ直す（送る時にも関数が無ければ、消さずに間隔を空けて送り直す）
+  if (noteRpcState !== 'ready' || Date.now() - noteRpcCheckedAt >= GATE_TTL_MS) void probeNoteRpc()
+}
+
+/** 保存済みの申し送りの変更を送れない理由（0017 が無い DB）。送信待ちの行に添える */
+export const NOTES_PENDING_REASON: string = MSG.notesPending
+
+/** 申し送りの関数（0017）が無いと観測している（送信待ちは端末に残して、関数が入り次第送る） */
+export function isNoteRpcMissing(): boolean {
+  return noteRpcState === 'missing'
 }
 
 // ── 種類ごとの入力解禁（2026-09-26 追加・入浴／服薬／事故） ─────────────────────
@@ -3323,6 +3748,8 @@ async function insertRow<T>(
   table: LegacyTable,
   payload: Record<string, unknown>,
   normalize: (row: unknown) => T | null,
+  /** 冪等キーで「既に届いている」行を返す前に呼ぶ（送った中身と食い違う欄を残すため。例外で成功扱いを止める・R6(A)） */
+  onDuplicate?: (row: T) => Promise<void>,
 ): Promise<T | Queued> {
   await writeGate(table)
   const sb = await getClient()
@@ -3342,6 +3769,7 @@ async function insertRow<T>(
         // 新しい行を作らず、載っている行をそのまま返す。読めなければ退避して次の再送で確かめる
         const landed = await findByKey(sb, table, ck, cols, true)
         const row = landed === null ? null : normalize(landed.row)
+        if (row !== null && onDuplicate !== undefined) await onDuplicate(row)
         return row ?? enqueue({ table, kind: 'insert', payload })
       }
       // 自然キーを持たない表は冪等キーでしか 23505 にならない。万一来た時は従来どおりの例外
@@ -3516,6 +3944,10 @@ export interface CellSaveOpts {
    * 「行が無い」で戻すため。rebase も兼ねる（止まった行を送る状態へ戻す）
    */
   asNew?: boolean
+  /** 申し送り: どの日・区分・対象の行か（「送れていない申し送り」の一覧・〔新しい行として登録〕に使う控え） */
+  meta?: NoteMeta
+  /** 送信待ちに積むだけで、送信の結果を待たない（stageNoteEdits） */
+  stageOnly?: boolean
 }
 
 /** saveVitalEdits / saveMealEdits の結果（オンラインで送れた時） */
@@ -3556,7 +3988,7 @@ const cellOutcomes = new Map<string, CellOutcome>()
 const CELL_STATUSES = ['applied', 'partial', 'conflict', 'noop'] as const
 const CELL_REASONS = ['changed', 'missing'] as const
 
-function parseCellResult(table: CellTable, data: unknown): CellResult | null {
+function parseCellResult(table: RowTable, data: unknown): CellResult | null {
   const r = asRecord(data)
   if (r === null || r.version !== 1) return null
   const status = oneOf(r.status, CELL_STATUSES)
@@ -3595,7 +4027,20 @@ async function sendCellRow(sb: SupabaseClient, firstKey: string): Promise<'ok' |
   let rowKey = firstKey
   let e = cellRows.get(rowKey)
   if (e === undefined || e.state !== 'pending') return 'ok'
-  if (e.key.id !== undefined && (e.table === 'meals' || e.bound !== true)) {
+  if (e.table === 'notes' && e.key.client_key !== undefined) {
+    // 送信待ちの登録への変更（notes#ck:<client_key>）: 登録が届いて行が分かってから、その行の変更として送る
+    const bound = await bindNoteClientKey(sb, rowKey, e)
+    if (bound === null) return 'ok' // まだ届いていない・確かめられない（消さずに待つ）
+    rowKey = bound
+    e = cellRows.get(rowKey)
+    if (e === undefined || e.state !== 'pending') return 'ok'
+  }
+  if (e.table === 'notes') {
+    // 旧ビルドの退避を読み替えた申し送り: 送る直前に1行読み、rev が同じなら基準を埋める（読むだけ・書かない）
+    if (e.baseRev !== undefined && (await fillNoteBase(sb, e)) === 'offline') return 'offline'
+    e = cellRows.get(rowKey)
+    if (e === undefined || e.state !== 'pending') return 'ok'
+  } else if (e.key.id !== undefined && (e.table === 'meals' || e.bound !== true)) {
     const bound = await bindIdKey(sb, rowKey, e)
     if (bound === 'offline') return 'offline'
     if (bound === null) return 'ok'
@@ -3611,14 +4056,18 @@ async function sendCellRow(sb: SupabaseClient, firstKey: string): Promise<'ok' |
     pEdits[f] = Object.prototype.hasOwnProperty.call(ed, 'base') ? { value: ed.value, base: ed.base } : { value: ed.value }
   }
   const table = e.table
-  const res = (await sb.rpc('apply_cell_edits', {
-    p_table: table,
-    p_key: e.key,
-    p_edits: pEdits,
-    p_fill: e.fill,
-    p_editor: e.editor,
-    p_client_key: e.clientKey ?? null,
-  })) as Res<unknown>
+  const res = (
+    table === 'notes'
+      ? await sb.rpc('apply_note_edits', { p_id: e.key.id, p_edits: pEdits, p_editor: e.editor })
+      : await sb.rpc('apply_cell_edits', {
+          p_table: table,
+          p_key: e.key,
+          p_edits: pEdits,
+          p_fill: e.fill,
+          p_editor: e.editor,
+          p_client_key: e.clientKey ?? null,
+        })
+  ) as Res<unknown>
   const cur = cellRows.get(rowKey)
   if (res.error !== null) {
     const retry = (): 'offline' => {
@@ -3636,6 +4085,12 @@ async function sendCellRow(sb: SupabaseClient, firstKey: string): Promise<'ok' |
     if (isTransient(res)) return retry()
     // 関数がまだ無い: 旧経路へ落とさず、消さずに待つ（入力は「サーバー側の更新待ち」で止まる）
     if (isMissingRpc(res)) {
+      if (table === 'notes') {
+        // 申し送りの関数（0017）がまだ無い: 送信待ちに残して間隔を空けて送り直す（その間もバイタル・食事は送る）
+        markNoteRpc('missing')
+        retry()
+        return 'ok'
+      }
       markCellRpc('missing')
       return retry()
     }
@@ -3660,7 +4115,8 @@ async function sendCellRow(sb: SupabaseClient, firstKey: string): Promise<'ok' |
     cellOutcomes.set(rowKey, { seq, kind: 'queued' })
     return 'ok'
   }
-  markCellRpc('ready')
+  if (table === 'notes') markNoteRpc('ready')
+  else markCellRpc('ready')
   // 書けた＝この版の変更通知は自分が出したもの（書かなかった時の版は他の端末の変更なので覚えない）
   if (result.applied.length > 0 && result.row !== null) markSelfRow(table, result.row, num(result.row.rev))
   applyCellResponse(rowKey, sent, result)
@@ -3697,7 +4153,8 @@ function applyCellResponse(rowKey: string, sent: Map<string, CellEdit>, result: 
     if (cur.ver === was.ver) {
       delete e.edits[f]
     } else {
-      const srv = result.row === null ? undefined : cellValueOf(f, result.row[f])
+      const srv =
+        result.row === null ? undefined : f === 'deleted_at' ? cellValueOf('body', result.row.body) : cellValueOf(f, result.row[f])
       e.edits[f] = { ...cur, base: srv === undefined ? was.value : srv }
     }
   }
@@ -3835,6 +4292,122 @@ async function bindIdKey(
   return nextKey
 }
 
+/** その冪等キーの申し送りの登録が、まだ送信待ち（このタブ・同じ端末の他のタブの cl_sendQueue）に残っているか */
+function noteInsertQueued(clientKey: string): QueueOp | null {
+  const mine = queue.find((o) => o.qid === clientKey && o.table === 'notes' && o.kind === 'insert')
+  if (mine !== undefined) return mine
+  if (sentQids.has(clientKey)) return null
+  return readStoresQuiet().s1?.legacy.find((o) => o.qid === clientKey && o.table === 'notes' && o.kind === 'insert') ?? null
+}
+
+/**
+ * 送信待ちの登録への変更（notes#ck:<client_key>・分けて持つ入力を含む）を、登録が届いた行（notes#<id>）へ付け替える
+ * （2026-09-29 第3巡）。登録がまだ送信待ちに残っている・届いた行が見つからない・読めない時は付け替えずに待つ（null。消さない）。
+ * 付け替える時は、同じ行の送信待ち（notes#<id>）へ重ねる（値は後の方・基準は先の方＝登録で送った値）
+ */
+async function bindNoteClientKey(sb: SupabaseClient, rowKey: string, e: CellEntry): Promise<string | null> {
+  const ck = String(e.key.client_key)
+  if (noteInsertQueued(ck) !== null) return null // 登録を先に送る（登録が送れた後の送信で付け替える）
+  const found = await findByKeyResult(sb, 'notes', { client_key: ck }, 'id,rev')
+  if (found === 'error') {
+    // 読めない: 間隔を空けて確かめ直す（消さない）
+    e.tries += 1
+    e.nextAt = Date.now() + backoff(e.tries)
+    return null
+  }
+  if (found === 'none') {
+    // 登録が送信待ち（このタブ・保存先）にもサーバーにも無い＝送り先の登録が無くなった（取り下げた・別の新しい行として
+    // 登録した。第4巡 R4-2）。自動では送らず「止まっている」件にして照会を止める（消さない。一覧の〔新しい行として登録〕
+    // 〔取り下げ〕で回収する。この行へ新しい入力が積まれた時だけ、もう一度確かめる）
+    await withWriteLock(() => {
+      refreshCells()
+      const cur = cellRows.get(rowKey)
+      if (cur !== undefined && cur.state === 'pending') {
+        cur.state = 'rejected'
+        cur.tries += 1
+        cur.at = Date.now()
+      }
+      persistUnderLock()
+    })
+    return null
+  }
+  const key: Record<string, string | number> = { id: found.id }
+  if (e.key.fork !== undefined) key.fork = e.key.fork
+  const nextKey = cellRowKey('notes', key)
+  let out = nextKey
+  await withWriteLock(() => {
+    refreshCells()
+    const cur = cellRows.get(rowKey)
+    if (cur === undefined) {
+      out = nextKey
+      persistUnderLock()
+      return
+    }
+    const now = Date.now()
+    const target = cellRows.get(nextKey)
+    const moved: CellEntry = { ...cur, key, edits: target ? { ...target.edits } : {}, at: now, tab: tabId }
+    if (target?.meta !== undefined && moved.meta === undefined) moved.meta = target.meta
+    for (const [f, ed] of Object.entries(cur.edits)) {
+      markDone(rowKey, f, ed)
+      const prev = moved.edits[f]
+      const next: CellEdit = { value: ed.value, at: ed.at, ver: newCellVer() }
+      // 基準は先の方（同じ行に先に積んであった入力の基準＝その人が見ていた値。無ければ登録で送った値）
+      const baseFrom = prev !== undefined && Object.prototype.hasOwnProperty.call(prev, 'base') ? prev : ed
+      if (Object.prototype.hasOwnProperty.call(baseFrom, 'base')) next.base = baseFrom.base
+      if (prev !== undefined) markDone(nextKey, f, prev)
+      moved.edits[f] = prev !== undefined && prev.at > ed.at ? { ...prev, ver: newCellVer() } : next
+    }
+    if (target !== undefined && (target.state === 'conflict' || target.state === 'rejected')) {
+      moved.state = target.state
+      if (target.conflicts !== undefined) moved.conflicts = target.conflicts
+    }
+    cellRows.delete(rowKey)
+    cellRows.set(nextKey, moved)
+    persistUnderLock()
+  })
+  return out
+}
+
+/**
+ * 旧ビルドが rev 照合で退避した申し送りの変更（baseRev つき）に、送る直前に基準を埋める（読むだけ）。
+ * いまの行の rev が退避した時の rev と同じ＝退避した後に誰も書いていない＝いまの値がその時に見ていた値。
+ * rev が違う・行が無い・取り消された時は基準を埋めない（基準が分からないまま送る＝サーバーは空の欄だけ書き、
+ * 本文は競合で止める＝黙って上書きしない）。どちらでも baseRev は外す（次からは読まない）。
+ * 通信できなければ 'offline'（baseRev を残して次の送信で読み直す）
+ */
+async function fillNoteBase(sb: SupabaseClient, e: CellEntry): Promise<'ok' | 'offline'> {
+  const res = (await sb
+    .from('notes')
+    .select(`${NOTE_COLS},deleted_at`)
+    .eq('id', e.key.id as number)
+    .limit(1)
+    .maybeSingle()) as Res<unknown>
+  if (res.error !== null) {
+    if (isAuthFail(res)) fireAuthExpired()
+    if (isAuthFail(res) || isTransient(res)) {
+      e.tries += 1
+      e.nextAt = Date.now() + backoff(e.tries)
+      return 'offline'
+    }
+    // 読めない（権限など）: 基準は分からないまま送る（サーバーが欄ごとに裁く）
+    delete e.baseRev
+    return 'ok'
+  }
+  const row = asRecord(res.data)
+  if (row !== null && row.deleted_at === null && num(row.rev) === e.baseRev) {
+    for (const [f, ed] of Object.entries(e.edits)) {
+      if (Object.prototype.hasOwnProperty.call(ed, 'base')) continue
+      // 取り消しの基準は「その時に見ていた本文」
+      const b = f === 'deleted_at' ? cellValueOf('body', row.body) : cellValueOf(f, row[f])
+      if (b !== undefined) e.edits[f] = { ...ed, base: b }
+    }
+  }
+  delete e.baseRev
+  e.at = Date.now()
+  await persistQueueLocked()
+  return 'ok'
+}
+
 /**
  * 止まった（競合・拒否）行 id の行を、読み取りだけで自然キーへ付け替える（第4段 F1。書込はしない）。
  * 旧ビルドで止まった食事・定時バイタルの op は、読み替えると行 id のまま残り、送られないので送る前の付け替えも走らず、
@@ -3843,6 +4416,7 @@ async function bindIdKey(
  */
 async function bindStoppedIdRows(sb: SupabaseClient): Promise<void> {
   for (const [rowKey, e] of [...cellRows.entries()]) {
+    if (e.table === 'notes') continue // 申し送りは行 id のまま（自然キーを持たない）
     if (e.state === 'pending' || e.key.id === undefined || e.bindChecked === true) continue
     if (e.table === 'vitals' && e.bound === true) continue
     if ((await bindIdKey(sb, rowKey, e, { readOnly: true })) === 'offline') break
@@ -3853,7 +4427,7 @@ async function bindStoppedIdRows(sb: SupabaseClient): Promise<void> {
  * 行 id で指した行の、冪等キーで作った同じ行の控え（#6）。1つの記録の行キーは作られた時の形（vitals~ck）のまま
  * 変えないので、画面が行 id で指しても、見る・送る・取り下げるのはこの控え。無ければ null
  */
-function aliasRowKey(table: CellTable, key: Record<string, string | number>, rows: Map<string, CellEntry>): string | null {
+function aliasRowKey(table: RowTable, key: Record<string, string | number>, rows: Map<string, CellEntry>): string | null {
   if (table !== 'vitals' || typeof key.id !== 'number') return null
   for (const [k, e] of rows) if (e.clientKey !== undefined && e.rowId === key.id) return k
   return null
@@ -3871,12 +4445,13 @@ interface CellSaveInternal {
 }
 
 async function saveCellEditsInternal(
-  table: CellTable,
-  target: VitalTarget | MealTarget,
+  table: RowTable,
+  target: VitalTarget | MealTarget | NoteTarget,
   sendEdits: CellEditInput<string>,
   opts?: CellSaveOpts,
 ): Promise<CellSaveInternal> {
-  await assertCellWritable()
+  if (table === 'notes') await assertNoteWritable()
+  else await assertCellWritable()
   const key0 = keyOfTarget(table, target)
   if (key0 === null) throw new DbError('server', MSG.broken)
   let key: Record<string, string | number> = key0
@@ -3889,12 +4464,17 @@ async function saveCellEditsInternal(
     if (ed === undefined) continue
     const value = fields.includes(f) ? cellValueOf(f, ed.value) : undefined
     if (value === undefined) throw new DbError('server', MSG.broken)
+    // 申し送りの本文を空にする編集は送信待ちへ入れない（0001 の check と同じ。入力は画面に残る）
+    if (table === 'notes' && f === 'body' && (value === null || (typeof value === 'string' && value.trim() === ''))) {
+      throw new DbError('server', MSG.emptyBody)
+    }
     // 新しい行として保存: 空にする欄は送らない・基準は空（F4）
     if (asNew && value === null) continue
     const item: { f: string; value: CellValue; base?: CellValue } = asNew ? { f, value, base: null } : { f, value }
     // 基準が無い・読めない（rowSync の「基準不明」の印を含む）時は、基準を持たない＝サーバーは空の時だけ書く
     if (!asNew && Object.prototype.hasOwnProperty.call(ed, 'base') && ed.base !== undefined && typeof ed.base !== 'symbol') {
-      const b = cellValueOf(f, ed.base)
+      // 申し送りの取り消し（deleted_at）の基準は「見た本文」
+      const b = table === 'notes' && f === 'deleted_at' ? cellValueOf('body', ed.base) : cellValueOf(f, ed.base)
       if (b !== undefined) item.base = b
     }
     incoming.push(item)
@@ -3970,7 +4550,20 @@ async function saveCellEditsInternal(
       }
     }
     for (const it of incoming) before.set(it.f, e.edits[it.f])
+    // 申し送り: 別のタブ（前の起動を含む）が入れた送信待ちの値を見ないまま打った入力は、同じ欄に重ねず分けて持つ
+    // （2026-09-29 第3巡。後の入力が先の入力を黙って消さない＝分けた方は送ると競合になり〔くらべて選ぶ〕に出る）。
+    // 見ていた値（画面が渡す基準＝送信待ちを重ねて出していた値）が、いまの送信待ちの値と同じなら続きの入力として重ねる
+    const forks: { f: string; value: CellValue; base?: CellValue }[] = []
+    if (table === 'notes' && opts?.rebase !== true && !asNew) {
+      for (const it of incoming) {
+        const cur = e.edits[it.f]
+        if (cur === undefined || it.base === undefined) continue
+        const sameAsSeen = JSON.stringify(cur.value) === JSON.stringify(it.base)
+        if (!sameAsSeen && verParts(cur.ver).tab !== tabId) forks.push(it)
+      }
+    }
     for (const it of incoming) {
+      if (forks.includes(it)) continue
       const cur = e.edits[it.f]
       const ver = newCellVer()
       const ed: CellEdit = { value: it.value, at: now, ver }
@@ -3986,6 +4579,10 @@ async function saveCellEditsInternal(
       vers.set(it.f, ver)
     }
     for (const [k, v] of Object.entries(fill)) if (e.fill[k] === undefined || e.fill[k] === null) e.fill[k] = v
+    if (table === 'notes' && opts?.meta !== undefined) {
+      const meta = normalizeNoteMeta(opts.meta)
+      if (meta !== null) e.meta = meta
+    }
     e.editor = editor
     if (opts?.rebase === true || asNew || e.state === 'rejected') {
       // 〔くらべて選ぶ〕で選んだ・拒否された後の新しい入力は、送る状態へ戻す
@@ -3996,7 +4593,32 @@ async function saveCellEditsInternal(
     e.nextAt = 0
     e.at = now
     e.tab = tabId
-    cellRows.set(rowKey, e)
+    if (Object.keys(e.edits).length > 0) cellRows.set(rowKey, e)
+    if (forks.length > 0) {
+      // 分けて持つ入力（行キー <元の行キー>!<印>）。送る先は同じ行、基準は見ていた値
+      const forkId = newCellVer().replace('.', '-')
+      const fkey: Record<string, string | number> = { ...key, fork: forkId }
+      const fe: CellEntry = {
+        table,
+        key: fkey,
+        edits: {},
+        fill: {},
+        editor,
+        state: 'pending',
+        tries: 0,
+        nextAt: 0,
+        tab: tabId,
+        at: now,
+        bound: true,
+      }
+      if (e.meta !== undefined) fe.meta = e.meta
+      for (const it of forks) {
+        const ed: CellEdit = { value: it.value, at: now, ver: newCellVer() }
+        if (it.base !== undefined) ed.base = it.base
+        fe.edits[it.f] = ed
+      }
+      cellRows.set(cellRowKey(table, fkey), fe)
+    }
     cellRecordSeq += 1
     mySeq = cellRecordSeq
     held = e.state === 'conflict'
@@ -4004,7 +4626,11 @@ async function saveCellEditsInternal(
   })
   armRetryTimer()
   let outcome: CellSaveInternal['outcome']
-  if (held) {
+  if (opts?.stageOnly === true) {
+    // 積むだけ（送るのは背景の送信に任せる）。端末に残せたかは呼び手が isQueuePersisted で確かめる
+    void flushQueue()
+    outcome = { kind: 'queued' }
+  } else if (held) {
     // 競合で止まっている行へまとめた。〔くらべて選ぶ〕で選ぶまで送らない（送信キューの規約 I6 と同じ）
     outcome = { kind: 'result', held: true, result: heldResult(cellRows.get(rowKey)) }
   } else if (knownOffline()) {
@@ -4080,7 +4706,7 @@ function heldResult(e: CellEntry | undefined): CellResult {
 
 /** 保存を送り終えた後の、その行の結果（送れなかった・他のタブが送った時もここで決める） */
 async function outcomeFor(
-  table: CellTable,
+  table: RowTable,
   key: Record<string, string | number>,
   rowKey: string,
   mySeq: number,
@@ -4107,12 +4733,16 @@ async function outcomeFor(
 
 /** いまの1行（何も書かない呼び出し。行ロックの下で読む）。読めなければ undefined・行が無ければ null */
 async function readCellRow(
-  table: CellTable,
+  table: RowTable,
   key: Record<string, string | number>,
 ): Promise<Record<string, unknown> | null | undefined> {
   try {
     const sb = await getClient()
-    const res = (await sb.rpc('apply_cell_edits', { p_table: table, p_key: key, p_edits: {} })) as Res<unknown>
+    const res = (
+      table === 'notes'
+        ? await sb.rpc('apply_note_edits', { p_id: key.id, p_edits: {} })
+        : await sb.rpc('apply_cell_edits', { p_table: table, p_key: key, p_edits: {} })
+    ) as Res<unknown>
     if (res.error !== null) return undefined
     const r = parseCellResult(table, res.data)
     return r === null ? undefined : r.row
@@ -4163,7 +4793,7 @@ export async function saveMealEdits(
 
 /** 送信待ち・止まっている1行（画面の重ね表示と〔くらべて選ぶ〕の「あなたの入力」に使う） */
 export interface PendingCellRow {
-  table: CellTable
+  table: CellTable | 'notes'
   /** 行を特定する値（RPC の p_key） */
   key: Record<string, string | number>
   /** 送信待ち・止まっている欄の値 */
@@ -4258,6 +4888,418 @@ export async function discardPendingRow(
   armRetryTimer()
 }
 
+// ── 申し送りの変更・取り消し（送信待ち pending store → RPC apply_note_edits・0017） ──────────────
+//
+// 2026-09-29（本人承認）: 既にある申し送りの変更（本文・対象・記入者・色・重要度・職種タグ・区切り・継続の終了）と
+// 取り消しは、バイタル・食事と同じ送信待ち（cl_sendQueue2 の rows、行キー notes#<id>）へ書いてから
+// apply_note_edits で送る。判定（いまの値＝あなたの値なら済み／基準のままなら書く／それ以外は競合）はサーバーが
+// 行ロックの下で行う。競合した本文は送信待ちに「競合」として残り（再読み込み・画面移動・アプリ終了でも消えない）、
+// 〔くらべて選ぶ〕で選ぶまで送らない。rev 照合の旧経路（updateRow）へは落とさない。
+// 新規登録（insert・client_key）は従来の経路のまま（insertNote）。
+
+/**
+ * 申し送り1件の欄を保存する（経路は1本: 送信待ちへ書く → すぐ送る → その行の結果を待つ）。
+ * ・sendEdits の base は「その欄を直し始めた時に画面に出ていたサーバーの生の値」（送信待ちの重ね表示の値ではない）
+ * ・通信できない時は 'queued'。止まっている行（conflict）へは rebase しない限りまとめるだけ（held: true）
+ * ・サーバーに拒否された時は DbError（送信待ちには rejected として残る）
+ * ・opts.meta（日・区分・対象）は「送れていない申し送り」の一覧と〔新しい行として登録〕に使う控え
+ */
+export async function saveNoteEdits(
+  target: NoteTarget,
+  sendEdits: CellEditInput<NoteEditField>,
+  opts?: CellSaveOpts,
+): Promise<CellSaveResult<Note> | Queued> {
+  return publicOutcome(await saveCellEditsInternal('notes', target, sendEdits, opts), normalizeNote)
+}
+
+/**
+ * 申し送り1件を取り消す（soft delete）。seenBody＝取り消すと決めた時に画面に出ていたサーバーの本文（生の値）。
+ * サーバーは、いまの本文がそれと同じ時だけ取り消す（見ていない本文を消さない）。食い違えば競合として送信待ちに残る。
+ * 書けた（applied）・既に取り消されていた（settled）時は row が null
+ */
+export async function deleteNote(
+  target: NoteTarget,
+  seenBody: string,
+  opts?: CellSaveOpts,
+): Promise<CellSaveResult<Note> | Queued> {
+  const edits: CellEditInput<string> = { deleted_at: { value: new Date().toISOString(), base: seenBody } }
+  return publicOutcome(await saveCellEditsInternal('notes', target, edits, opts), normalizeNote)
+}
+
+/** 取り消しが済んだ（書けた・既に取り消されていた）か */
+export function noteDeleted(r: CellSaveResult<Note>): boolean {
+  return r.applied.includes('deleted_at') || r.settled.includes('deleted_at')
+}
+
+/** 送信待ち・止まっている申し送り1件（画面の重ね表示・〔くらべて選ぶ〕の「あなたの入力」） */
+export interface PendingNoteRow extends PendingCellRow {
+  /** 行 id（送信待ちの登録への変更＝ck の時は 0） */
+  id: number
+  /** 送信待ちの登録への変更（notes#ck:<client_key>）の冪等キー */
+  ck?: string
+  /** 別のタブの入力と分けて持つ入力の印（notes#…!<fork>） */
+  fork?: string
+  /** この送信待ちを指す（saveNoteEdits・discardPendingNote にそのまま渡す） */
+  target: NoteTarget
+  /** どの日・区分・対象の行か（旧形式から読み替えた行には無い） */
+  meta: NoteMeta | null
+}
+
+function pendingNoteViewOf(e: CellEntry): PendingNoteRow | null {
+  if (e.table !== 'notes') return null
+  const fork = e.key.fork === undefined ? undefined : String(e.key.fork)
+  const id = idNum(e.key.id)
+  if (id !== null) {
+    const target: NoteTarget = fork === undefined ? { id } : { id, fork }
+    return { ...pendingViewOf(e), id, target, meta: e.meta ?? null, ...(fork !== undefined ? { fork } : {}) }
+  }
+  const ck = str(e.key.client_key)
+  if (ck === null) return null
+  const target: NoteTarget = fork === undefined ? { clientKey: ck } : { clientKey: ck, fork }
+  return { ...pendingViewOf(e), id: 0, ck, target, meta: e.meta ?? null, ...(fork !== undefined ? { fork } : {}) }
+}
+
+function noteTargetOf(t: number | NoteTarget): NoteTarget {
+  return typeof t === 'number' ? { id: t } : t
+}
+
+/** その申し送り（行 id・送信待ちの登録の冪等キー）の送信待ち（このタブ＋同じ端末の他のタブの控え）。無ければ null */
+export function pendingNoteRow(target: number | NoteTarget): PendingNoteRow | null {
+  const key = keyOfTarget('notes', noteTargetOf(target))
+  if (key === null) return null
+  const e = currentCellRows().get(cellRowKey('notes', key))
+  return e === undefined ? null : pendingNoteViewOf(e)
+}
+
+/** 送信待ち・止まっている申し送りの全件（行 id → 送信待ち。画面に重ねる本体だけ＝分けて持つ入力・登録への変更は除く） */
+export function pendingNoteRows(): Map<number, PendingNoteRow> {
+  const out = new Map<number, PendingNoteRow>()
+  for (const e of currentCellRows().values()) {
+    const v = e.table === 'notes' ? pendingNoteViewOf(e) : null
+    if (v !== null && v.ck === undefined && v.fork === undefined) out.set(v.id, v)
+  }
+  return out
+}
+
+/** 送信待ちの登録への変更（冪等キー → 送信待ち。送信待ちの登録の行に重ねて出す本体だけ） */
+export function pendingNoteCkRows(): Map<string, PendingNoteRow> {
+  const out = new Map<string, PendingNoteRow>()
+  for (const e of currentCellRows().values()) {
+    const v = e.table === 'notes' ? pendingNoteViewOf(e) : null
+    if (v !== null && v.ck !== undefined && v.fork === undefined) out.set(v.ck, v)
+  }
+  return out
+}
+
+/**
+ * 申し送りの送信待ちを取り下げる（〔先の本文を残す〕〔取り下げる〕など、利用者の明示的な取り下げだけで使う）。
+ * vers（pendingNoteRow の vers＝画面が見た版）を渡すと、その版のままの欄だけを外す（見た後に打ち直した値は外さない）
+ */
+export async function discardPendingNote(
+  target: number | NoteTarget,
+  fields?: readonly string[],
+  vers?: Record<string, string>,
+): Promise<void> {
+  const key = keyOfTarget('notes', noteTargetOf(target))
+  if (key === null) return
+  const onlyVers = vers === undefined ? undefined : new Map(Object.entries(vers))
+  await withWriteLock(() => {
+    refreshCells()
+    dropCellFields(cellRowKey('notes', key), fields, onlyVers)
+    persistUnderLock()
+  })
+  armRetryTimer()
+}
+
+/**
+ * 申し送り1件の欄を送信待ちに積むだけ（送信は背景に任せ、結果を待たない・2026-09-29 第3巡）。
+ * 端末に残せた（読み直して確かめた）時 true。書きかけ・画面の控えを外すのは、true を受けてから（外す→積むの順を作らない）
+ */
+export async function stageNoteEdits(
+  target: NoteTarget,
+  sendEdits: CellEditInput<NoteEditField>,
+  opts?: CellSaveOpts,
+): Promise<boolean> {
+  await saveCellEditsInternal('notes', target, sendEdits, { ...opts, stageOnly: true })
+  return queuePersisted
+}
+
+/** 登録を待っている申し送り（cl_sendQueue の notes の insert） */
+export interface QueuedNoteInsert {
+  qid: string
+  /** pending＝送信待ち（電波が戻れば送る）／rejected＝サーバーに受け付けられず自動の再送を止めた／conflict＝止まった */
+  state: 'pending' | 'conflict' | 'rejected'
+  note_on: string | null
+  shift: Shift | null
+  resident_id: number | null
+  body: string
+  reporter_id: number | null
+  after16: boolean
+  /** 色（登録で送った値に、登録後の変更を重ねた値） */
+  color: NoteColor | null
+  /** 登録後の変更（notes#ck:<qid>）。body などは、この値を重ねて出している */
+  changes: PendingNoteRow | null
+}
+
+/** 送れていない申し送りの一覧の1件 */
+export type UnsentNote =
+  | { kind: 'edit'; row: PendingNoteRow }
+  | { kind: 'insert'; op: QueuedNoteInsert }
+  /**
+   * 旧ビルドへ戻した間に畳まれた申し送りの入力のうち、同じ申し送りへの別の入力と食い違うため送信待ちへ戻さなかったもの
+   * （両方の本文を残す。〔新しい行として登録〕か〔取り下げ〕を選ぶ）。raw＝保存先の原文の1行
+   */
+  | { kind: 'rescued'; row: PendingNoteRow; raw: string }
+
+/**
+ * 送れていない申し送りの一覧（H1・L2）。送信待ち・止まった変更（cl_sendQueue2 の notes#<id>。旧ビルドが
+ * cl_sendQueue に積んだ変更は起動時に読み替え済み）と、登録を待っている・拒否で止まった新規登録（cl_sendQueue の
+ * notes の insert。同じ端末の他のタブが積んだ分も含む）。読むだけ（保存先は書き換えない）
+ */
+export function listUnsentNotes(): UnsentNote[] {
+  const out: UnsentNote[] = []
+  const seen = new Set<string>()
+  const { s1 } = readStoresQuiet()
+  const ops = [...queue, ...(s1?.legacy ?? [])]
+  const ckRows = pendingNoteCkRows()
+  const insertCks = new Set<string>()
+  for (const op of ops) {
+    if (op.table !== 'notes' || op.kind !== 'insert' || seen.has(op.qid) || sentQids.has(op.qid)) continue
+    seen.add(op.qid)
+    insertCks.add(op.qid)
+    // 登録の中身に、登録後の変更（notes#ck:<qid>）を重ねて出す（登録の op そのものは書き換えない）
+    const changes = ckRows.get(op.qid) ?? null
+    const p = { ...op.payload, ...(changes?.values ?? {}) }
+    out.push({
+      kind: 'insert',
+      op: {
+        qid: op.qid,
+        state: op.blocked ?? 'pending',
+        note_on: dateStr(p.note_on),
+        shift: oneOf(p.shift, SHIFTS),
+        resident_id: idNum(p.resident_id),
+        body: str(p.body) ?? '',
+        reporter_id: idNum(p.reporter_id),
+        after16: bool(p.after16, false),
+        color: oneOf(p.color, NOTE_COLORS),
+        changes,
+      },
+    })
+  }
+  for (const e of currentCellRows().values()) {
+    const row = e.table === 'notes' ? pendingNoteViewOf(e) : null
+    if (row === null) continue
+    // 登録がまだ送信待ちにある変更は、上の登録の行に重ねて出した（別の行にしない）
+    if (row.ck !== undefined && row.fork === undefined && insertCks.has(row.ck)) continue
+    out.push({ kind: 'edit', row })
+  }
+  const { s2 } = readStoresQuiet()
+  for (const c of s2?.collided ?? []) {
+    if (droppedBroken.has(c.raw)) continue
+    const row = pendingNoteViewOf(c.entry)
+    if (row !== null) out.push({ kind: 'rescued', row, raw: c.raw })
+  }
+  return out
+}
+
+/**
+ * 旧ビルドへ戻した間に畳まれて、食い違いのため戻さなかった申し送りの入力（kind='rescued'）を保存先から外す。
+ * 〔新しい行として登録〕で登録できた後、または利用者が「あなたの本文は保存されません」を確かめて取り下げた後にだけ呼ぶ
+ */
+export async function dropRescuedNote(raw: string): Promise<void> {
+  droppedBroken.add(raw)
+  await withWriteLock(() => {
+    if (cellBrokenRaw !== null) {
+      const rest = cellBrokenRaw.split('\n').filter((l) => l !== '' && l !== raw)
+      cellBrokenRaw = rest.length === 0 ? null : rest.join('\n')
+    }
+    persistUnderLock()
+  })
+}
+
+/**
+ * 冪等キーで登録した申し送り（届いていれば行・無ければ null・読めなければ undefined＝届いたか分からない。L2）。
+ * 取り消された行も「届いた」証拠として探す（取り消されていれば、登録後の変更は送信待ちで「行が無い」になり一覧に出る）
+ */
+export async function findNoteByClientKey(clientKey: string): Promise<Note | null | undefined> {
+  try {
+    const sb = await getClient()
+    const found = await findByKeyResult(sb, 'notes', { client_key: clientKey }, NOTE_COLS)
+    if (found === 'error') return undefined
+    if (found === 'none') return null
+    return normalizeNote(found.row) ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 登録を待っている申し送り（新規登録の退避 op）を取り下げる。利用者が「あなたの本文は保存されません」を確かめた
+ * 後にだけ呼ぶ。このタブの退避から外し、保存先に残っている他のタブの控えからも復活させない。
+ * shownVers＝一覧で見せた登録後の変更（notes#ck:<qid>）の版（QueuedNoteInsert.changes.vers）。見せた版の欄だけを外す
+ * （見せた後に積まれた変更と、分けて持つ入力 !<印> は外さない＝送り先の無い変更として「止まっている」件に出る。第4巡 R4-2）
+ */
+export async function discardQueuedNoteInsert(qid: string, shownVers?: Record<string, string>): Promise<void> {
+  queue = queue.filter((o) => o.qid !== qid)
+  sentQids.add(qid)
+  await persistQueueLocked()
+  if (shownVers !== undefined && Object.keys(shownVers).length > 0) await discardPendingNote({ clientKey: qid }, undefined, shownVers)
+  armRetryTimer()
+}
+
+/**
+ * 登録後の変更のうち分けて持つ入力（notes#ck:<from>!<印>）を、別の登録（冪等キー to）への変更へ移す（第4巡 R4-2）。
+ * 登録を新しい行として出し直した時に使う。送る先は新しい行（届けば notes#<id>!<印>）、基準はその人が見ていた値のまま
+ * （新しい行の本文と食い違えば〔くらべて選ぶ〕に出る＝消さない）
+ */
+async function moveNoteCkForks(from: string, to: string): Promise<void> {
+  await withWriteLock(() => {
+    refreshCells()
+    const now = Date.now()
+    for (const [rowKey, e] of [...cellRows.entries()]) {
+      if (e.table !== 'notes' || e.key.client_key !== from || e.key.fork === undefined) continue
+      const key: Record<string, string | number> = { client_key: to, fork: e.key.fork }
+      const nextKey = cellRowKey('notes', key)
+      if (cellRows.has(nextKey)) continue
+      const edits: Record<string, CellEdit> = {}
+      for (const [f, ed] of Object.entries(e.edits)) {
+        markDone(rowKey, f, ed) // 他のタブの古い控えから元の行キーで復活させない
+        edits[f] = { ...ed, ver: newCellVer() }
+      }
+      const moved: CellEntry = { ...e, key, edits, state: 'pending', tries: 0, nextAt: 0, at: now, tab: tabId }
+      delete moved.conflicts
+      cellRows.delete(rowKey)
+      cellRows.set(nextKey, moved)
+    }
+    persistUnderLock()
+  })
+}
+
+/**
+ * 登録できなかった（拒否で止まった）申し送りを、登録の中身＋登録後の変更を合わせた本文で新しい行として登録する
+ * （2026-09-29 第3巡）。冪等キーは元の登録から決める（押し直しても1行）。登録できた・送信待ちに残せた後で、
+ * 分けて持つ入力（別のタブの入力）を新しい行への変更へ移し、元の登録と、合わせた版の変更を取り下げる
+ * （残せなければ取り下げない。合わせた後に積まれた変更は外さない＝送り先の無い変更として一覧に出る。第4巡 R4-2）
+ */
+export async function registerQueuedInsertAsNew(qid: string): Promise<Note | Queued> {
+  const op = noteInsertQueued(qid)
+  if (op === null) throw new DbError('server', MSG.broken)
+  const changes = pendingNoteRow({ clientKey: qid })
+  const newKey = `nr-${qid}`
+  const payload: Record<string, unknown> = { ...op.payload, ...(changes?.values ?? {}), client_key: newKey }
+  delete payload.deleted_at
+  if (str(payload.body)?.trim() === '' || str(payload.body) === null) throw new DbError('server', MSG.emptyBody)
+  const res = await insertRow('notes', payload, normalizeNote)
+  if (res === 'queued' && !isQueuePersisted()) return res
+  await moveNoteCkForks(qid, newKey)
+  await discardQueuedNoteInsert(qid, changes?.vers ?? {})
+  return res
+}
+
+/**
+ * 登録を待っている申し送りを、いま送り直す（〔新しい行として登録〕）。止まっていた op（拒否）も送る状態へ戻す。
+ * 同じ冪等キー（client_key）で送るので、既に届いていれば二重登録にならない。
+ * 返り値: 'sent'＝届いた／'queued'＝まだ届いていない（送信待ちに残る）
+ */
+export async function resendQueuedNoteInsert(qid: string): Promise<'sent' | 'queued'> {
+  await assertWritable()
+  let op = queue.find((o) => o.qid === qid)
+  if (op === undefined) {
+    // 同じ端末の他のタブが積んだ分: このタブの退避へ引き取って送る（同じ冪等キーなので二重に送っても1行）
+    const other = readStoresQuiet().s1?.legacy.find((o) => o.qid === qid)
+    if (other === undefined) return 'sent'
+    op = { ...other }
+    queue.push(op)
+  }
+  delete op.blocked
+  op.tries = 0
+  op.nextAt = 0
+  await persistQueueLocked()
+  await flushQueue(true)
+  return queue.some((o) => o.qid === qid) ? 'queued' : 'sent'
+}
+
+/**
+ * 〔新しい行として残す〕〔新しい行として保存〕: 同じ日・同じ区分・同じ対象に、あなたの本文を新しい行として登録する。
+ * key は冪等キー（その競合1件ごとに固定＝押し直しても1行に収まる）。記入者は reporterId（この端末の操作者）
+ */
+export async function insertNoteAsNew(p: {
+  key: string
+  meta: NoteMeta
+  body: string
+  reporterId: number | null
+}): Promise<Note | Queued> {
+  if (p.body.trim() === '') throw new DbError('server', MSG.emptyBody)
+  const payload: Record<string, unknown> = {
+    note_on: p.meta.note_on,
+    shift: p.meta.shift,
+    facility: null,
+    category: null,
+    resident_id: p.meta.resident_id,
+    role_tags: [],
+    importance: 'normal',
+    body: p.body.trim(),
+    occurred_at: null,
+    ongoing: false,
+    ended_at: null,
+    reporter_id: p.reporterId,
+    color: null,
+    after16: p.meta.after16,
+    client_key: p.key,
+  }
+  return insertRow('notes', payload, normalizeNote)
+}
+
+/**
+ * 送信待ちの1件の、冪等キー（〔新しい行として…〕用）。行 id と、その時の本文の版から決める
+ * （同じ競合で押し直しても同じキー＝二重登録にならない。本文を打ち直せば別のキー）
+ */
+export function noteAsNewKey(id: number, ver: string): string {
+  return `nn${id}-${valueTag(ver)}`
+}
+
+/**
+ * 申し送り1件の日・区分・対象（〔新しい行として…〕の行き先）。送信待ちの控え → いまの行 → 変更の記録（取り消された
+ * 行の元の値）の順に探す。どれでも分からなければ null（その時は登録できない理由を出す）
+ */
+export async function resolveNoteMeta(id: number): Promise<NoteMeta | null> {
+  const p = pendingNoteRow(id)
+  if (p?.meta) return p.meta
+  const latest = await fetchLatestNote(id).catch(() => null)
+  if (latest !== null) {
+    const n = latest.row
+    return { note_on: n.note_on, shift: n.shift, resident_id: n.resident_id, after16: n.after16 }
+  }
+  const hist = await fetchNoteHistory(id).catch(() => null)
+  if (hist?.available) {
+    for (const e of hist.entries) {
+      const m = normalizeNoteMeta(e.old_row)
+      if (m !== null) return m
+    }
+  }
+  return null
+}
+
+/** 申し送り1件の最新（〔くらべて選ぶ〕の「先の本文・記入者・時刻」）。取り消されている・無い時は null */
+export async function fetchLatestNote(id: number): Promise<LatestRow<Note> | null> {
+  return fetchLatestRow('notes', { id }, normalizeNote)
+}
+
+/** 申し送りを行 id でまとめて読み直す（送信待ちが送れた後に画面のその行を最新にする＝H2）。取り消された行は返らない */
+export async function fetchNoteRows(ids: readonly number[]): Promise<Note[]> {
+  const want = [...new Set(ids.filter((x) => Number.isInteger(x) && x > 0))].slice(0, READ_LOOKUP_ROWS)
+  if (want.length === 0) return []
+  const sb = await getClient()
+  const res = (await sb
+    .from('notes')
+    .select(NOTE_COLS)
+    .in('id', want)
+    .is('deleted_at', null)
+    .limit(want.length)) as Res<unknown>
+  if (res.error !== null) throw readError(res)
+  return list(res.data, normalizeNote, want.length)
+}
+
 // ── 水分 ─────────────────────────────────────────────────────────────────────
 
 export async function insertFluid(f: Omit<FluidIntake, 'id' | 'rev'>): Promise<FluidIntake | Queued> {
@@ -4274,49 +5316,122 @@ export async function softDeleteFluid(
 
 // ── 申し送り ─────────────────────────────────────────────────────────────────
 
+/** 登録で送った欄のうち、登録の後に書きかけで直せる欄の値（「その冪等キーで最初に送った中身」を画面の控えに持つ形・R6-3） */
+export type NoteFirstSent = Partial<Record<'body' | 'resident_id' | 'reporter_id' | 'color', unknown>>
+
+/**
+ * 申し送りの新規登録。opts.clientKey を渡すと、その冪等キーで送る（画面が同じ行の登録を後から直す＝
+ * 登録後の変更 notes#ck:<client_key> を届いた行へ結び付けるため。省くと新しいキー）。
+ * opts.firstSent＝その冪等キーで最初に送った中身（戻した書きかけを確定し直す時に画面が渡す。null＝分からない）。
+ * 同じ冪等キーの登録は Web Lock で1本ずつ（別のタブで同時に確定しても、送信待ちを確かめる→送る→積むが重ならない・R6-1）
+ */
 export async function insertNote(
   n: Omit<Note, 'id' | 'rev' | 'read_count' | 'my_read'>,
+  opts?: { clientKey?: string; firstSent?: NoteFirstSent | null },
 ): Promise<Note | Queued> {
   if (n.body.trim() === '') throw new DbError('server', MSG.emptyBody)
-  return insertRow('notes', withClientKey(n as unknown as Record<string, unknown>), normalizeNote)
+  const given = opts?.clientKey
+  const payload =
+    typeof given === 'string' && given !== ''
+      ? { ...cleanPayload(n as unknown as Record<string, unknown>), client_key: given }
+      : withClientKey(n as unknown as Record<string, unknown>)
+  const ckRaw = str(payload.client_key)
+  if (ckRaw === null || ckRaw === '') return insertRow('notes', payload, normalizeNote)
+  const ck = ckRaw
+  const run = (): Promise<Note | Queued> => insertNoteUnderKey(payload, ck, opts?.firstSent)
+  const locks = webLocks()
+  if (locks === null) return run()
+  return (await locks.request(`${NOTE_REG_LOCK}:${ck}`, run)) as Note | Queued
 }
 
-export async function updateNote(
-  id: number,
-  rev: number,
-  patch: Partial<Omit<Note, 'id' | 'rev'>>,
-  opts?: WriteOpts,
-): Promise<Note | Conflict | Queued> {
-  if (patch.body !== undefined && patch.body.trim() === '') throw new DbError('server', MSG.emptyBody)
-  const clean = cleanPayload(patch as Record<string, unknown>)
-  delete clean.read_count // 集計値はサーバー側の畳み込み。書き戻さない
-  delete clean.my_read
-  return updateRow('notes', id, rev, clean, normalizeNote, opts)
+/** 同じ冪等キーの申し送りの登録を1本ずつにする Web Lock の名前（後ろに冪等キーを付ける） */
+const NOTE_REG_LOCK = 'cl_noteRegister'
+
+async function insertNoteUnderKey(
+  payload: Record<string, unknown>,
+  ck: string,
+  givenFirst: NoteFirstSent | null | undefined,
+): Promise<Note | Queued> {
+  const queued = noteInsertQueued(ck)
+  // この冪等キーで最初に送った中身（食い違いの基準）: 画面が渡した値（null＝分からない）→ このタブの記録 →
+  // どれも無く送信待ちにも無い＝このキーで初めて送る＝この中身
+  let first: Record<string, unknown> | undefined =
+    givenFirst !== undefined ? (givenFirst ?? undefined) : firstSentNote.get(ck)
+  const assumed = givenFirst === undefined && first === undefined && queued === null
+  if (assumed) first = payload
+  if (first !== undefined) rememberNoteSent(ck, first)
+  if (queued !== null) {
+    // 同じ冪等キーの登録が送信待ちに残っている（戻した書きかけを確定し直した・別のタブが先に確定した）: 登録を二重に
+    // 積まず（同じ qid の op が2本並ぶと、先の op が届いた時に後の op ごと外れる）、その op と食い違う欄を登録への変更
+    // （notes#ck:）に積む。基準は最初に送った中身（分からなければ null＝空欄なら書く・それ以外は競合＝黙って上書きしない。
+    // 別のタブの登録を見ていない入力は〔くらべて選ぶ〕に出る・R6(B)・R6-1）
+    const edits: CellEditInput<NoteEditField> = {}
+    for (const f of NOTE_REG_FIELDS) {
+      const v = payload[f] ?? null
+      if (sameValue(v, queued.payload[f])) continue
+      edits[f] = { value: v, base: first !== undefined ? (first[f] ?? null) : null }
+    }
+    if (Object.keys(edits).length > 0) {
+      const ok = await stageNoteEdits({ clientKey: ck }, edits, { meta: noteMetaOfPayload(payload) })
+      if (!ok) throw new DbError('server', MSG.notKept)
+    }
+    return QUEUED
+  }
+  return insertRow('notes', payload, normalizeNote, async (landed) => {
+    // 同じ冪等キーの登録が既に届いていた（R6(A)）: 送った中身と食い違う欄を、登録できた行への変更として積む。
+    // 基準は最初に送った中身（分からなければ null）。初めて送るとみなしていたのに届いていた＝前にこのキーで送った
+    // 中身は分からない（基準 null）。積めなければ成功にしない（書きかけを外させない）
+    if (assumed) firstSentNote.delete(ck)
+    if (!(await stageNoteDupDiff(landed, payload, assumed ? undefined : first))) throw new DbError('server', MSG.notKept)
+  })
 }
 
-export async function softDeleteNote(
-  id: number,
-  rev: number,
-  opts?: WriteOpts,
-): Promise<true | Conflict | Queued> {
-  return softDelete('notes', id, rev, opts)
+/** 登録の後に書きかけで直せる欄（同じ冪等キーの登録どうしの食い違いを比べる欄・R6） */
+const NOTE_REG_FIELDS = ['body', 'resident_id', 'reporter_id', 'color'] as const
+/** この端末が冪等キーごとに最初に送った登録の中身（食い違いの基準に使う。メモリだけ・R6） */
+const firstSentNote = new Map<string, Record<string, unknown>>()
+function rememberNoteSent(ck: string, payload: Record<string, unknown>): void {
+  if (!firstSentNote.has(ck)) firstSentNote.set(ck, payload)
+}
+function sameValue(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
+}
+function noteMetaOfPayload(p: Record<string, unknown>): NoteMeta {
+  return {
+    note_on: dateStr(p.note_on) ?? '',
+    shift: oneOf(p.shift, SHIFTS) ?? 'day',
+    resident_id: idNum(p.resident_id),
+    after16: bool(p.after16, false),
+  }
 }
 
 /**
- * 継続申し送りを終了する。ended_at と ended_by（終了させた職員）だけを書く部分更新。
- * ongoing フラグは触らない（過去日のピン留めは「その日時点で有効だった継続」＝
- * note_on ≦ 対象日 ≦ ended_at で判定する契約。qa-verification [low/both] の裁定）。
- * endedBy は操作者が分からない場合 null（列は 0001_init.sql から null 許容）。
+ * 同じ冪等キーで届いていた行（landed）と、送った登録の中身（payload）が食い違う欄を、登録できた行への変更
+ * （notes#<id>）として積む（R6(A)）。基準は first（この端末が最初に送った中身）の値、無ければ null。
+ * first の値のままの欄はこの端末の変更ではない（届いた後に他の端末が直した）ので積まない。積めなかった時 false
  */
-export async function endOngoingNote(
-  id: number,
-  rev: number,
-  endedBy: number | null,
-  opts?: WriteOpts,
-): Promise<Note | Conflict | Queued> {
-  const patch = { ended_at: new Date().toISOString(), ended_by: idNum(endedBy) }
-  return updateNow('notes', id, rev, patch, normalizeNote, opts)
+async function stageNoteDupDiff(
+  landed: Note,
+  payload: Record<string, unknown>,
+  first: Record<string, unknown> | undefined,
+): Promise<boolean> {
+  const row = landed as unknown as Record<string, unknown>
+  const edits: CellEditInput<NoteEditField> = {}
+  for (const f of NOTE_REG_FIELDS) {
+    if (!(f in payload)) continue
+    const v = payload[f] ?? null
+    if (sameValue(v, row[f])) continue
+    const b = first !== undefined ? (first[f] ?? null) : null
+    if (first !== undefined && sameValue(v, b)) continue
+    edits[f] = { value: v, base: b }
+  }
+  if (Object.keys(edits).length === 0) return true
+  return stageNoteEdits({ id: landed.id }, edits, { meta: noteMetaOfPayload(row) })
 }
+
+// 既にある申し送りの変更・取り消し・継続の終了は、上の「申し送りの変更・取り消し」（saveNoteEdits・deleteNote＝
+// 送信待ち → apply_note_edits）だけで行う（2026-09-29。rev 照合の updateNote・updateNoteFields・softDeleteNote・
+// endOngoingNote は廃止＝画面から旧経路へ落とさない）
 
 // ── 外出・外泊 ───────────────────────────────────────────────────────────────
 
@@ -6133,62 +7248,6 @@ export async function fetchMealsSheet(
   }
 }
 
-/** updateNoteFields が書き込んでよい項目（これ以外は送らない＝サーバーの値を温存する） */
-type NoteFieldPatch = Partial<
-  Pick<
-    Note,
-    | 'body'
-    | 'resident_id'
-    | 'importance'
-    | 'color'
-    | 'after16'
-    | 'occurred_at'
-    | 'reporter_id'
-    | 'role_tags'
-    | 'shift'
-  >
->
-
-/**
- * 申し送りの部分更新（セル直接編集用）。
- * 渡された項目だけを書き、渡していない項目はサーバーの値を温存する（multi-device-sync 原則3）。
- * rev 照合で 0行 なら 'conflict'（呼び出し側の入力は消さない）。通信失敗は永続キューへ退避して 'queued'。
- */
-export async function updateNoteFields(
-  id: number,
-  rev: number,
-  patch: NoteFieldPatch,
-  opts?: WriteOpts,
-): Promise<Note | Conflict | Queued> {
-  const src = patch as Record<string, unknown>
-  const payload: Record<string, unknown> = {}
-  const has = (k: string): boolean => Object.prototype.hasOwnProperty.call(src, k) && src[k] !== undefined
-
-  if (has('body')) {
-    const body = str(src.body)
-    // 空文字での上書きは DB 側の check でも拒否される。手前で理由を出して入力を残す
-    if (body === null || body.trim() === '') throw new DbError('server', MSG.emptyBody)
-    payload.body = body
-  }
-  if (has('resident_id')) payload.resident_id = idNum(src.resident_id) // 不正値は「全体連絡」= null
-  if (has('importance')) payload.importance = oneOf(src.importance, IMPORTANCES) ?? 'normal'
-  if (has('color')) {
-    const color = src.color === null ? null : oneOf(src.color, NOTE_COLORS)
-    if (color === null && src.color !== null) throw new DbError('server', SHEET_MSG.badColor)
-    payload.color = color // null = 色なし（明示的な消去）
-  }
-  if (has('after16')) payload.after16 = bool(src.after16, false)
-  if (has('occurred_at')) payload.occurred_at = str(src.occurred_at)
-  if (has('reporter_id')) payload.reporter_id = idNum(src.reporter_id)
-  if (has('role_tags')) payload.role_tags = strArray(src.role_tags)
-  if (has('shift')) {
-    const shift = oneOf(src.shift, SHIFTS)
-    if (shift !== null) payload.shift = shift // 未知の値は送らない（現在のシフトを温存する）
-  }
-
-  return updateRow('notes', id, rev, payload, normalizeNote, opts)
-}
-
 /**
  * 出勤者の登録（rows に有る人を追加・更新し、**baseline に有って rows に無い人だけ**取り消す）。
  * **その日の一覧を丸ごと置き換えるのではない**（rows=[] は「baseline の人を全員取り消す」であって
@@ -6398,7 +7457,7 @@ export interface LatestRow<T> {
  * 付けずに取り直す（取得そのものは失敗させない）。見つからなければ null。
  */
 async function fetchLatestRow<T>(
-  table: 'vitals' | 'meals',
+  table: 'vitals' | 'meals' | 'notes',
   filters: Record<string, unknown>,
   normalize: (row: unknown) => T | null,
 ): Promise<LatestRow<T> | null> {
@@ -6539,23 +7598,61 @@ export async function fetchRecordHistory(p: {
   assertDay(p.toIso)
   const cap = Math.min(Math.max(1, Math.floor(p.limit ?? HISTORY_ROWS)), MAX_ROWS)
   const sb = await getClient()
-  let q = sb
-    .from('record_history')
-    .select(HISTORY_COLS)
-    .gte('record_day', p.fromIso)
-    .lte('record_day', p.toIso)
-  if (p.residentId === null) q = q.is('resident_id', null)
-  else if (p.residentId !== undefined) q = q.eq('resident_id', p.residentId)
-  const res = (await q
-    .order('record_day', { ascending: false })
-    .order('changed_at', { ascending: false })
-    .order('id', { ascending: false })
-    .limit(cap)) as Res<unknown>
+  const rid = p.residentId === null || p.residentId === undefined ? null : idNum(p.residentId)
+  if (p.residentId !== null && p.residentId !== undefined && rid === null) throw new DbError('server', MSG.broken)
+  const run = async (withOldRow: boolean): Promise<Res<unknown>> => {
+    let q = sb
+      .from('record_history')
+      .select(HISTORY_COLS)
+      .gte('record_day', p.fromIso)
+      .lte('record_day', p.toIso)
+    if (p.residentId === null) q = q.is('resident_id', null)
+    else if (rid !== null) {
+      // 対象を付け替えた記録（申し送りの対象を別の方へ直した等）も、元の利用者の側から辿れるよう、
+      // 変更前の行（old_row）の resident_id でも引く（2026-09-29・H4。0017 の索引 idx_record_history_old_resident）
+      q = withOldRow ? q.or(`resident_id.eq.${rid},old_row->>resident_id.eq.${rid}`) : q.eq('resident_id', rid)
+    }
+    return (await q
+      .order('record_day', { ascending: false })
+      .order('changed_at', { ascending: false })
+      .order('id', { ascending: false })
+      .limit(cap)) as Res<unknown>
+  }
+  let res = await run(true)
+  // old_row の条件を受け付けないサーバー（PostgREST の構文の食い違い＝PGRST100 等の 400）では、従来の条件で引き直す
+  // （変更の記録の欄そのものを失敗させない）
+  if (res.error !== null && rid !== null && res.status === 400 && !isMissingTable(res)) res = await run(false)
   if (res.error !== null) {
     if (isMissingTable(res)) return { available: false }
     throw readError(res)
   }
   return { available: true, entries: list(res.data, normalizeHistory, cap) }
+}
+
+/** 申し送り1件の変更の記録の上限（1件の申し送りがこれを超えて書き換えられる運用は無い想定） */
+const NOTE_HISTORY_ROWS = 200
+
+/**
+ * 申し送り1件の変更の記録（新しい変更が先・2026-09-29・H4）。table_name='notes' と行 id で引く
+ * （idx_record_history_row）。全体連絡（利用者なし）の申し送りも同じ。表が無い時は { available: false }
+ */
+export async function fetchNoteHistory(noteId: number): Promise<RecordHistoryResult> {
+  const id = idNum(noteId)
+  if (id === null) throw new DbError('server', MSG.broken)
+  const sb = await getClient()
+  const res = (await sb
+    .from('record_history')
+    .select(HISTORY_COLS)
+    .eq('table_name', 'notes')
+    .eq('row_id', id)
+    .order('changed_at', { ascending: false })
+    .order('id', { ascending: false })
+    .limit(NOTE_HISTORY_ROWS)) as Res<unknown>
+  if (res.error !== null) {
+    if (isMissingTable(res)) return { available: false }
+    throw readError(res)
+  }
+  return { available: true, entries: list(res.data, normalizeHistory, NOTE_HISTORY_ROWS) }
 }
 
 /** 差分に出さない列（版・更新時刻・触った人は毎回変わる／raw_flags は取込の内部控え） */
@@ -6627,6 +7724,7 @@ export const __testHooks = import.meta.env?.PROD === true ? undefined : {
     sb: SupabaseClient | null,
     opts?: {
       cellRpc?: 'ready' | 'missing' | null
+      noteRpc?: 'ready' | 'missing' | null
       kinds?: Partial<Record<InputKind, boolean | null>>
       native?: boolean | null
     },
@@ -6649,6 +7747,10 @@ export const __testHooks = import.meta.env?.PROD === true ? undefined : {
     const state = opts?.cellRpc === undefined ? 'ready' : opts.cellRpc
     cellRpcState = sb === null ? null : state
     cellRpcCheckedAt = sb === null || state === null ? 0 : Date.now()
+    // 0017（申し送りの apply_note_edits）の有無も同じ既定（観測済みで使える）
+    const nstate = opts?.noteRpc === undefined ? 'ready' : opts.noteRpc
+    noteRpcState = sb === null ? null : nstate
+    noteRpcCheckedAt = sb === null || nstate === null ? 0 : Date.now()
   },
   /** 「次の起動」を再現する: メモリ上のキュー・送信待ちを捨て、localStorage から読み直す（起動時の読み替えも行う） */
   async restartQueue(): Promise<void> {
@@ -6656,6 +7758,7 @@ export const __testHooks = import.meta.env?.PROD === true ? undefined : {
     cellRows = new Map()
     doneMarks = []
     sentQids.clear()
+    firstSentNote.clear()
     cellOutcomes.clear()
     pendingFlush = null
     flushTail = Promise.resolve()
