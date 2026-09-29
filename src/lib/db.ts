@@ -293,6 +293,31 @@ function isTransient(res: Res<unknown>): boolean {
   return res.status === 0 || res.status === 429 || (res.status >= 500 && res.status <= 599)
 }
 
+/**
+ * 1回の問い合わせに応答待ちの上限を付ける（その問い合わせだけ。クライアント全体の fetch には付けない）。
+ * 上限を過ぎたら中断を頼み（abortSignal が使える時）、通信断と同じ応答（status 0）を返す＝呼び手の既存の安全側
+ * （一時エラー→送信待ちへ退避）に乗せる。ms を省くと待ち続ける
+ */
+async function withTimeout(
+  run: (signal: AbortSignal | null) => PromiseLike<Res<unknown>>,
+  ms: number | undefined,
+): Promise<Res<unknown>> {
+  if (ms === undefined || !(ms > 0) || typeof AbortController !== 'function') return await run(null)
+  const ctrl = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const timedOut = new Promise<Res<unknown>>((resolve) => {
+    timer = setTimeout(() => {
+      ctrl.abort()
+      resolve({ data: null, error: { message: 'timeout', code: '' }, status: 0 } as unknown as Res<unknown>)
+    }, ms)
+  })
+  try {
+    return await Promise.race([Promise.resolve(run(ctrl.signal)), timedOut])
+  } finally {
+    if (timer !== null) clearTimeout(timer)
+  }
+}
+
 /** 一意制約違反（他端末が先に同じ行を作った・既に届いている証拠） */
 function isUniqueViolation(res: Res<unknown>): boolean {
   return errCode(res) === '23505' || res.status === 409
@@ -3750,11 +3775,26 @@ async function insertRow<T>(
   normalize: (row: unknown) => T | null,
   /** 冪等キーで「既に届いている」行を返す前に呼ぶ（送った中身と食い違う欄を残すため。例外で成功扱いを止める・R6(A)） */
   onDuplicate?: (row: T) => Promise<void>,
+  /**
+   * 応答を待つ上限（ms）。過ぎたら送信を打ち切り、通信断と同じ扱い（status 0＝一時エラー）で送信待ちへ退避する
+   * （同じ冪等キーで送り直す＝後から届いていても1行に収まる・L7-1）。省くと待ち続ける（従来どおり）
+   */
+  timeoutMs?: number,
 ): Promise<T | Queued> {
   await writeGate(table)
   const sb = await getClient()
   const cols = colsOf(table)
-  const res = (await sb.from(table).insert(payload).select(cols).maybeSingle()) as Res<unknown>
+  const res = await withTimeout(
+    (signal) => {
+      const q = sb.from(table).insert(payload).select(cols) as unknown as {
+        abortSignal?: (s: AbortSignal) => unknown
+        maybeSingle: () => PromiseLike<unknown>
+      }
+      const withSignal = signal !== null && typeof q.abortSignal === 'function' ? (q.abortSignal(signal) as typeof q) : q
+      return withSignal.maybeSingle() as PromiseLike<Res<unknown>>
+    },
+    timeoutMs,
+  )
 
   if (res.error !== null) {
     if (isAuthFail(res)) {
@@ -5378,13 +5418,17 @@ async function insertNoteUnderKey(
     return QUEUED
   }
   return insertRow('notes', payload, normalizeNote, async (landed) => {
+    // （応答待ちの上限は下の noteInsertTimeoutMs。過ぎたら送信待ちへ退避＝この登録ロックを握り続けない・L7-1）
     // 同じ冪等キーの登録が既に届いていた（R6(A)）: 送った中身と食い違う欄を、登録できた行への変更として積む。
     // 基準は最初に送った中身（分からなければ null）。初めて送るとみなしていたのに届いていた＝前にこのキーで送った
     // 中身は分からない（基準 null）。積めなければ成功にしない（書きかけを外させない）
     if (assumed) firstSentNote.delete(ck)
     if (!(await stageNoteDupDiff(landed, payload, assumed ? undefined : first))) throw new DbError('server', MSG.notKept)
-  })
+  }, noteInsertTimeoutMs)
 }
+
+/** 登録ロックの中の申し送りの登録の、応答を待つ上限（ms・L7-1）。テストだけが __testHooks で短くする */
+let noteInsertTimeoutMs = 20_000
 
 /** 登録の後に書きかけで直せる欄（同じ冪等キーの登録どうしの食い違いを比べる欄・R6） */
 const NOTE_REG_FIELDS = ['body', 'resident_id', 'reporter_id', 'color'] as const
@@ -7720,6 +7764,10 @@ export const __testHooks = import.meta.env?.PROD === true ? undefined : {
    * null＝未観測で、書く前に app_settings へ問い合わせる）。native は native_input_enabled の観測値（既定 true。
    * null＝未観測＝取得に失敗した時の画面を再現する）
    */
+  /** 申し送りの登録の応答待ちの上限（ms）を変える（既定 20 秒・L7-1） */
+  setNoteInsertTimeout(ms: number): void {
+    noteInsertTimeoutMs = ms
+  },
   setClient(
     sb: SupabaseClient | null,
     opts?: {
@@ -7759,6 +7807,7 @@ export const __testHooks = import.meta.env?.PROD === true ? undefined : {
     doneMarks = []
     sentQids.clear()
     firstSentNote.clear()
+    noteInsertTimeoutMs = 20_000
     cellOutcomes.clear()
     pendingFlush = null
     flushTail = Promise.resolve()

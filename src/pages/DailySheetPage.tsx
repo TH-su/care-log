@@ -352,6 +352,14 @@ const MSG_EMPTY_VITAL =
  * 「取り消したのに後から出てくる」を作らないため（消去は保全ゲートの後ろ）。
  */
 const MSG_LOCKED_DELETE = '送信待ちのため取り消せません。送信が終わってから、行の削除をしてください'
+/** 日付・表示を切り替える前の確認で、書きかけが申し送りだけの時の文言（控えに残って戻ると表示される＝事実どおり） */
+const LEAVE_NOTES_TITLE = '書きかけの申し送りがあります'
+const LEAVE_NOTES_BODY =
+  '書きかけの申し送りは、この端末に残ります（この日に戻ると表示されます）。表示を切り替えてよろしいですか。'
+
+/** 未保存の下書きの種類（'notes'＝申し送りの書きかけだけ／'input'＝バイタル・外出などの入力がある） */
+type DirtyKind = 'notes' | 'input'
+
 /** 送信待ちの登録が拒否・競合で止まった行の一言（一覧で選ぶよう案内する。F1） */
 const MSG_REG_STOPPED =
   '▲ 登録できなかった申し送りです。上の「送れていない申し送り」で「新しい行として登録」か「取り下げ」を選んでください'
@@ -1782,8 +1790,11 @@ interface DaySheetProps {
   loadDay: (day: string) => Promise<DailyReport>
   /** 自分がこの日へ書き込んだ（変更通知の抑制＋取り置きの破棄） */
   onWrite: (day: string) => void
-  /** 未保存の下書きの有無を親へ伝える（日を移る前の確認に使う） */
-  onDirty: (day: string, dirty: boolean) => void
+  /**
+   * 未保存の下書きの有無を親へ伝える（日を移る前の確認に使う）。'notes'＝書きかけは申し送りだけ（端末の控えに残り、
+   * 戻ると表示される）／'input'＝バイタル・外出などの入力がある（従来の確認の文言）／false＝無し
+   */
+  onDirty: (day: string, dirty: DirtyKind | false) => void
   /**
    * この日で申し送りを書きかけている（対象を選んだ・本文を打ち始めた）ことを親へ伝える。
    * 親はこれを Presence として配り、他の端末の「いま書いている場所」を受け取る。
@@ -2152,8 +2163,8 @@ export function DailySheetPage({
   }, [])
 
   // ── 未保存の下書きを持つ日（画面から外れる前に確認する）──────
-  const dirtyRef = useRef(new Map<string, boolean>())
-  const handleDirty = useCallback((dayIso: string, dirty: boolean) => {
+  const dirtyRef = useRef(new Map<string, DirtyKind | false>())
+  const handleDirty = useCallback((dayIso: string, dirty: DirtyKind | false) => {
     dirtyRef.current.set(dayIso, dirty)
   }, [])
 
@@ -2245,13 +2256,19 @@ export function DailySheetPage({
 
   // ── 日付・表示単位の移動（未保存の下書きがあれば確認する）────
   const askLeave = useCallback((leaving: string[], apply: () => void) => {
-    if (!leaving.some((d) => dirtyRef.current.get(d) === true)) {
+    const kinds = leaving.map((d) => dirtyRef.current.get(d) ?? false).filter((k): k is DirtyKind => k !== false)
+    if (kinds.length === 0) {
       apply()
       return
     }
+    // 書きかけが申し送りだけの時は事実どおりに伝える（端末の控えに残り、その日に戻ると表示される）。
+    // バイタル・外出などの入力がある時は従来の文言のまま
+    const notesOnly = kinds.every((k) => k === 'notes')
     setConfirm({
-      title: '未保存の入力があります',
-      body: '保存していない行があります。表示を切り替えると、その入力は破棄されます。切り替えてよろしいですか。',
+      title: notesOnly ? LEAVE_NOTES_TITLE : '未保存の入力があります',
+      body: notesOnly
+        ? LEAVE_NOTES_BODY
+        : '保存していない行があります。表示を切り替えると、その入力は破棄されます。切り替えてよろしいですか。',
       confirmLabel: '切り替える',
       onConfirm: () => {
         setConfirm(null)
@@ -2869,8 +2886,13 @@ function DaySheet({
 
   // ── 未保存の下書き（親が日付・表示単位の切替前に確認する）─────
 
-  const hasDraftContent = useMemo(() => {
-    const noteDirty = noteDrafts.some((d) => d.body.trim() !== '' || d.targetPicked)
+  // 書きかけの申し送りがあるか（日付を切り替える時の確認の文言を出し分ける）
+  const hasNoteDraftContent = useMemo(
+    () => noteDrafts.some((d) => d.body.trim() !== '' || d.targetPicked),
+    [noteDrafts],
+  )
+  // 申し送り以外（バイタル・外出）の書きかけがあるか
+  const hasOtherDraftContent = useMemo(() => {
     const vitalDirty = vitalDrafts.some(
       (d) =>
         d.residentId !== null ||
@@ -2885,18 +2907,20 @@ function DaySheet({
         d.endText !== '' ||
         d.companion.trim() !== '',
     )
-    return noteDirty || vitalDirty || outingDirty
-  }, [noteDrafts, vitalDrafts, outingDrafts])
+    return vitalDirty || outingDirty
+  }, [vitalDrafts, outingDrafts])
 
   // 書きかけの有無を親へ伝える。枠から外れる時（別の区切りへ移る・1日表示へ切り替える）は
   // 親が確認ダイアログを出す。外れた時に「書きかけ無し」へ戻す（後片付け）
   // 競合・未保存で止まっているバイタルの入力も「書きかけ」として数える（端末には残らないので、
   // 日付・表示単位を切り替える前の確認＝askLeave の対象にする。端末の控え（cl_dailyDraft）の
-  // 置き直しは従来どおり hasDraftContent だけで決める）
+  // 置き直しは従来どおり書きかけの有無だけで決める）
   const hasHeldVitals = Object.keys(vitalConflicts).length > 0
   useEffect(() => {
-    onDirty(day, hasDraftContent || hasHeldVitals)
-  }, [day, hasDraftContent, hasHeldVitals, onDirty])
+    // 申し送りの書きかけだけ＝'notes'（端末の控えに残る）。それ以外の入力がある・止まっているバイタルがある＝'input'
+    const otherDirty = hasHeldVitals || hasOtherDraftContent
+    onDirty(day, otherDirty ? 'input' : hasNoteDraftContent ? 'notes' : false)
+  }, [day, hasNoteDraftContent, hasOtherDraftContent, hasHeldVitals, onDirty])
 
   /**
    * いまこの日で書いている対象を親へ伝える（Presence の中身）。

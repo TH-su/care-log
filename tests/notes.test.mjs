@@ -991,6 +991,33 @@ if (DB === null) {
       assert.match(src, /out\.firstSent = /, '控えから「最初に送った中身」を読み戻していない')
     })
 
+    it('★L7-1: 登録の応答が返らない時は上限で打ち切って送信待ちへ退避し、後から届いていても同じ冪等キーで1行・本文は消えない', async () => {
+      let release = null
+      const held = new Promise((r) => { release = r })
+      let holding = true
+      const srv = noteServer({ hold: async () => { if (holding) await held } })
+      DB.__testHooks.setClient(srv.client)
+      DB.__testHooks.setNoteInsertTimeout?.(150)
+      const call = DB.insertNote({ ...regBase, body: '本文T（応答が返らない）' }, { clientKey: 'ck-to' })
+      const res = await Promise.race([call, new Promise((r) => setTimeout(() => r('応答待ちのまま'), 1500))])
+      assert.equal(res, 'queued', `上限で打ち切られていない（${res}）`)
+      holding = false
+      release() // 打ち切った後に、最初の登録が届く
+      await settle()
+      await DB.flushQueue(true)
+      await settle()
+      assert.deepEqual(srv.db.notes.map((n) => n.body), ['本文T（応答が返らない）'])
+      assert.equal(DB.listUnsentNotes().length, 0)
+    })
+
+    it('日付を切り替える前の確認: 書きかけが申し送りだけの時は「この端末に残ります（戻ると表示されます）」の趣旨・それ以外は従来の文言', () => {
+      const src = read('pages/DailySheetPage.tsx')
+      assert.match(src, /書きかけの申し送りは、この端末に残ります（この日に戻ると表示されます）/)
+      assert.match(src, /'保存していない行があります。表示を切り替えると、その入力は破棄されます。切り替えてよろしいですか。'/, '従来の文言を変えた')
+      assert.match(src, /onDirty\(day, otherDirty \? 'input' : hasNoteDraftContent \? 'notes' : false\)/)
+      assert.match(src, /const otherDirty = hasHeldVitals \|\| hasOtherDraftContent/)
+    })
+
     it('F1: 送信待ちの登録の行は、画面の一言が無くても（再読み込みの後も）送信待ち・止まった印を出す', () => {
       const src = read('pages/DailySheetPage.tsx')
       assert.match(src, /<StatusText status=\{ctx\.status\[rowKey\] \?\? \(note \? undefined : registrationMark\(draft\)\)\} \/>/)
