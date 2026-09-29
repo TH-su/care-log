@@ -10,9 +10,9 @@
      import './styles/sheet.css' で読み込む（確認済み）。
 
    ▼ 倍率
-     ZoomBar が --sheet-zoom を 1 / 1.25 / 1.5 のいずれかに書き換える
-     （LS.zoom の 100/125/150 を 100 で割った値。既知値以外は 1 へフォールバックすること）。
-     **書き換え先は document.documentElement だけ**（sheet.tsx の applyZoom）。
+     ZoomBar・枠のピンチが --sheet-zoom を 0.75〜2 に書き換える（LS.zoom の 75〜200（5 刻み）を 100 で割った値。
+     ボタンは 100/125/150/200、ピンチは既定値の ±3 以内で既定値に吸着・2026-09-29。範囲外・壊れた値は 1 へ戻す＝lib/zoom.ts）。
+     **書き換え先は document.documentElement だけ**（lib/zoom.ts の applyZoom）。
      下の「.sheet-frame」側の算出は、この class を付けた枠を作った場合に備えた予備であって、
      現状 SheetFrame は付けていない＝フレームに直接 --sheet-zoom を設定する経路は無い。
      **契約名（--sheet-font・--sheet-row-h・--w-* 等）は倍率適用済みの値**なので、

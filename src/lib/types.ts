@@ -746,7 +746,8 @@ export const LS = {
    */
   staffGasUrl: 'cl_staffGasUrl',
   staffGasToken: 'cl_staffGasToken',
-  /** 表示倍率（100/125/150）。スプシと同じ文字サイズを既定にしつつ、端末ごとに拡大できる */
+  /** 表示倍率（75〜200 の 5 刻み。ボタンは 100/125/150/200、枠のピンチでボタン以外の値にもなる・読み書きは lib/zoom.ts）。
+   *  スプシと同じ文字サイズを既定にしつつ、端末ごとに拡大できる */
   zoom: 'cl_zoom',
   /** 一覧に横並びする日数（1/4/7/11） */
   sheetDays: 'cl_sheetDays',
@@ -778,6 +779,8 @@ export const LS = {
  * 22px ピッチのまま全行に 44px を配ることは幾何学的に不可能（隣の行から奪うことになる）なので、
  * 「スプシと同じ密度（100%）」と「手袋でも押せる密度（200%）」を職員が選べる形にした。
  */
+// ボタンに並べる値。ピンチではこの間の 5% 刻みと 75% にもなる（lib/zoom.ts・2026-09-29）＝倍率をこの4つに
+// 限った前提で書かない（値の照合・計算は lib/zoom.ts の範囲で行う）
 export const ZOOM_STEPS = [100, 125, 150, 200] as const
 export type Zoom = (typeof ZOOM_STEPS)[number]
 

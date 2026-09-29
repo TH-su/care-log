@@ -12,44 +12,27 @@
 // - 空の確定（値を消す操作）はそのまま onCommit('') として渡す。取り消し手段（Undo）は
 //   呼び出し側が用意する（contracts.md「破壊的操作は確認 or Undo」）
 
-import { Children, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import {
+  Children,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react'
 // DOM の KeyboardEvent（document のリスナー）と混ざらないよう React 側は別名で受ける
-import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
-import { LEVEL_MARK, LS, NOTE_COLOR_LABEL, ZOOM_STEPS } from '../lib/types'
-import type { Level, NoteColor, Zoom } from '../lib/types'
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, ReactNode, RefObject } from 'react'
+import { LEVEL_MARK, NOTE_COLOR_LABEL, ZOOM_STEPS } from '../lib/types'
+import type { Level, NoteColor } from '../lib/types'
+import { applyZoom, DEFAULT_ZOOM, getZoom, readZoom, setZoom, snapZoom, subscribeZoom, ZOOM_MAX, ZOOM_MIN } from '../lib/zoom'
 import type { BusyText } from '../lib/presence'
 import { BUSY_RING, BusyMark } from './presence'
 
 // ══════════════════════════════════════════════════════════════
-// 表示倍率（LS.zoom ↔ documentElement の --sheet-zoom）
+// 表示倍率（LS.zoom ↔ documentElement の --sheet-zoom）。読み書き・丸め・購読は lib/zoom.ts
 // ══════════════════════════════════════════════════════════════
-
-/** 不正値・未保存のフォールバック先（スプシ完全一致＝13px 基準） */
-const DEFAULT_ZOOM: Zoom = 100
-
-/** 保存済みの倍率を既知値照合で読む（未知値・壊れた値・参照不能は 100% へ） */
-function readZoom(): Zoom {
-  try {
-    const n = Number(window.localStorage.getItem(LS.zoom))
-    return (ZOOM_STEPS as readonly number[]).includes(n) ? (n as Zoom) : DEFAULT_ZOOM
-  } catch {
-    return DEFAULT_ZOOM // プライベートモード等で参照できない場合も表示は続ける
-  }
-}
-
-/** 端末ごとの表示設定として保存する（UI状態のみ・業務データは保存しない） */
-function writeZoom(z: Zoom): void {
-  try {
-    window.localStorage.setItem(LS.zoom, String(z))
-  } catch {
-    // 保存できなくても当セッションの表示は成立させる（安全側フォールバック）
-  }
-}
-
-/** sheet.css が calc で参照する倍率（1 / 1.25 / 1.5）を documentElement に反映する */
-function applyZoom(z: Zoom): void {
-  document.documentElement.style.setProperty('--sheet-zoom', String(z / 100))
-}
 
 // ══════════════════════════════════════════════════════════════
 // 一覧の表示条件（日数・フロア）の保存 — 画面ごとに別の値を持つ
@@ -176,6 +159,9 @@ export function SheetFrame({ children, className = '' }: SheetFrameProps) {
     applyZoom(readZoom())
   }, [])
 
+  // 2本指のピンチ・トラックパッドのピンチで倍率を変える（2026-09-29）
+  usePinchZoom(ref)
+
   /**
    * 高さ上限（sheet.css の .sheet-frame-fit）に使う実測値を書き戻す。
    * 上に積まれる UI の高さは画面ごと・文字サイズごと・折り返しごとに違うため、
@@ -228,11 +214,164 @@ export function SheetFrame({ children, className = '' }: SheetFrameProps) {
       aria-label="シート表（横にスクロールできます）"
       tabIndex={0}
       className={`w-full overflow-auto overscroll-x-contain ${className}`}
-      style={{ fontSize: 'var(--sheet-font)' }}
+      // 枠の中では指でのページ全体の拡大を起こさない（2本指は枠の倍率の変更に使う）。枠の外のページ拡大
+      // （見えにくい人の拡大）は奪わない＝この枠の中だけ
+      style={{ fontSize: 'var(--sheet-font)', touchAction: 'pan-x pan-y' }}
     >
       {children}
     </div>
   )
+}
+
+/** トラックパッドのピンチ（ctrl+wheel）が止まってから倍率を確定するまでの待ち（ms） */
+const WHEEL_COMMIT_MS = 150
+
+/** Safari の GestureEvent（型定義に無いので必要な分だけ） */
+type SafariGestureEvent = Event & { scale: number; clientX: number; clientY: number }
+
+/**
+ * 枠の中のピンチで表示倍率を変える（日報・バイタル一覧・食事一覧の共通の枠・2026-09-29）。
+ * 性能の約束（2026-09-29 の軽量化で外した「常時の touchmove」を戻さない）:
+ * - touchstart は passive で受ける。指が2本になった時だけ touchmove を付け、指が離れたら外す
+ * - ピンチの途中は枠の中身に CSS の transform: scale で見た目だけを出す（rAF で間引く・React は描き直さない）
+ * - 指を離した時に1回だけ倍率を確定して transform を外す（--sheet-zoom を書くだけ＝打ちかけの入力はそのまま）
+ * - 2本指の真ん中にあった内容が、確定の後も同じ位置に来るよう枠のスクロール位置を合わせる
+ * - Mac のトラックパッドは Chrome が ctrl+wheel、Safari が gesture 系で来る。どちらも枠でだけ受けてページの拡大を止める。
+ *   wheel の受け手は ctrl でない時（普通のスクロール）はすぐ返す。確定は止まってから WHEEL_COMMIT_MS 後
+ */
+function usePinchZoom(ref: RefObject<HTMLDivElement>): void {
+  useEffect(() => {
+    const el = ref.current
+    if (el === null) return
+    /** 指で触れる端末（iPhone）。Safari はタッチのピンチでも gesture 系を出すので、そちらは止めるだけにする */
+    const hasTouch = typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0
+    let session: { z0: number; scale: number; cx: number; cy: number; ox: number; oy: number; content: HTMLElement } | null = null
+    let raf = 0
+    let wheelTimer: ReturnType<typeof setTimeout> | null = null
+    let dist0 = 0
+
+    const begin = (cx: number, cy: number): void => {
+      const content = el.firstElementChild
+      if (!(content instanceof HTMLElement)) return
+      const r = content.getBoundingClientRect()
+      const ox = cx - r.left
+      const oy = cy - r.top
+      content.style.transformOrigin = `${ox}px ${oy}px`
+      content.style.willChange = 'transform'
+      session = { z0: getZoom(), scale: 1, cx, cy, ox, oy, content }
+    }
+    const preview = (scale: number): void => {
+      if (session === null) return
+      // 見た目も範囲の外へは出さない（確定した時に戻って見えないように）
+      session.scale = Math.min(ZOOM_MAX / session.z0, Math.max(ZOOM_MIN / session.z0, scale))
+      if (raf !== 0) return
+      raf = window.requestAnimationFrame(() => {
+        raf = 0
+        if (session !== null) session.content.style.transform = `scale(${session.scale})`
+      })
+    }
+    const commit = (): void => {
+      const s = session
+      session = null
+      if (raf !== 0) window.cancelAnimationFrame(raf)
+      raf = 0
+      if (s === null) return
+      s.content.style.removeProperty('transform')
+      s.content.style.removeProperty('transform-origin')
+      s.content.style.removeProperty('will-change')
+      const target = setZoom(snapZoom(s.z0 * s.scale))
+      if (target === s.z0) return
+      // 真ん中にあった内容（倍率を掛ける前の位置 × 倍率の比）を、指の真ん中の位置へ戻す
+      const ratio = target / s.z0
+      const r = s.content.getBoundingClientRect()
+      const dx = r.left + s.ox * ratio - s.cx
+      const dy = r.top + s.oy * ratio - s.cy
+      el.scrollLeft += dx
+      if (el.scrollHeight > el.clientHeight + 1) el.scrollTop += dy
+      else window.scrollBy(0, dy)
+    }
+
+    // ── タッチ（iPhone） ──
+    const distance = (t: TouchList): number => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY)
+    const onTouchMove = (e: TouchEvent): void => {
+      if (e.touches.length < 2 || session === null) return
+      e.preventDefault() // ピンチの間は枠を動かさない（2本指の平行移動でスクロールさせない）
+      preview(distance(e.touches) / dist0)
+    }
+    const detach = (): void => {
+      el.removeEventListener('touchmove', onTouchMove)
+      el.removeEventListener('touchend', onTouchEnd)
+      el.removeEventListener('touchcancel', onTouchEnd)
+    }
+    function onTouchEnd(e: TouchEvent): void {
+      if (e.touches.length >= 2) return
+      detach()
+      commit()
+    }
+    const onTouchStart = (e: TouchEvent): void => {
+      if (e.touches.length !== 2 || session !== null) return
+      dist0 = distance(e.touches) || 1
+      begin((e.touches[0].clientX + e.touches[1].clientX) / 2, (e.touches[0].clientY + e.touches[1].clientY) / 2)
+      if (session === null) return
+      // 指が2本の間だけ受ける（常時の touchmove は付けない）
+      el.addEventListener('touchmove', onTouchMove, { passive: false })
+      el.addEventListener('touchend', onTouchEnd)
+      el.addEventListener('touchcancel', onTouchEnd)
+    }
+
+    // ── トラックパッド（Chrome・Edge は ctrl+wheel） ──
+    const onWheel = (e: WheelEvent): void => {
+      if (!e.ctrlKey) return // 普通のスクロールには何もしない
+      e.preventDefault() // ページ全体の拡大にしない
+      if (session === null) begin(e.clientX, e.clientY)
+      if (session === null) return
+      preview(session.scale * Math.exp(-e.deltaY / 100))
+      if (wheelTimer !== null) clearTimeout(wheelTimer)
+      wheelTimer = setTimeout(() => {
+        wheelTimer = null
+        commit()
+      }, WHEEL_COMMIT_MS)
+    }
+
+    // ── Safari の gesture 系（Mac のトラックパッド。iPhone ではページの拡大を止めるだけ） ──
+    const onGestureStart = (e: Event): void => {
+      e.preventDefault()
+      if (hasTouch || session !== null) return
+      const g = e as SafariGestureEvent
+      begin(g.clientX, g.clientY)
+    }
+    const onGestureChange = (e: Event): void => {
+      e.preventDefault()
+      if (hasTouch || session === null) return
+      preview((e as SafariGestureEvent).scale)
+    }
+    const onGestureEnd = (e: Event): void => {
+      e.preventDefault()
+      if (hasTouch) return
+      commit()
+    }
+
+    el.addEventListener('touchstart', onTouchStart, { passive: true })
+    el.addEventListener('wheel', onWheel, { passive: false })
+    el.addEventListener('gesturestart', onGestureStart)
+    el.addEventListener('gesturechange', onGestureChange)
+    el.addEventListener('gestureend', onGestureEnd)
+    return () => {
+      detach()
+      el.removeEventListener('touchstart', onTouchStart)
+      el.removeEventListener('wheel', onWheel)
+      el.removeEventListener('gesturestart', onGestureStart)
+      el.removeEventListener('gesturechange', onGestureChange)
+      el.removeEventListener('gestureend', onGestureEnd)
+      if (wheelTimer !== null) clearTimeout(wheelTimer)
+      if (raf !== 0) window.cancelAnimationFrame(raf)
+      if (session !== null) {
+        session.content.style.removeProperty('transform')
+        session.content.style.removeProperty('transform-origin')
+        session.content.style.removeProperty('will-change')
+      }
+    }
+  }, [ref])
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -240,8 +379,10 @@ export function SheetFrame({ children, className = '' }: SheetFrameProps) {
 // ══════════════════════════════════════════════════════════════
 
 /**
- * 表示倍率の切替（100/125/150%）。
+ * 表示倍率の切替（100/125/150/200%）。枠の中のピンチでも 75〜200%（5% 刻み）に変えられる（2026-09-29）。
  * 選択中は 枠色＋太字＋「✓」の3点で示す（色だけに頼らない・SegmentPicker と同じ作法）。
+ * 今の倍率がボタンの値でない時（ピンチで 135% にした等）は、どのボタンも選択中にせず、並びの後ろに今の倍率を
+ * 「✓135%」の形で出す（読み上げは「現在の表示倍率 135%」）。ピンチで変わった値にも追従する（lib/zoom.ts の store）
  * ヘッダの1要素として並ぶため、幅を伸ばさない（flex-1 にしない）。
  */
 /**
@@ -250,16 +391,17 @@ export function SheetFrame({ children, className = '' }: SheetFrameProps) {
  * 読み上げには role=group の aria-label「表示倍率」が残る。
  */
 export function ZoomBar({ compact = false }: { compact?: boolean } = {}) {
-  const [zoom, setZoom] = useState<Zoom>(readZoom)
+  const zoom = useSyncExternalStore(subscribeZoom, getZoom, () => DEFAULT_ZOOM)
 
   useEffect(() => {
     applyZoom(zoom)
   }, [zoom])
 
-  const pick = useCallback((z: Zoom) => {
+  const pick = useCallback((z: number) => {
     setZoom(z)
-    writeZoom(z)
   }, [])
+
+  const preset = (ZOOM_STEPS as readonly number[]).includes(zoom)
 
   return (
     <div role="group" aria-label="表示倍率" className="flex items-center gap-gap">
@@ -294,6 +436,15 @@ export function ZoomBar({ compact = false }: { compact?: boolean } = {}) {
           </button>
         )
       })}
+      {/* ピンチで変えたボタン以外の倍率（ボタンの値でない時だけ）。押す物ではないので枠線だけで示し、✓と太字を付ける */}
+      <span role="status" aria-live="polite" className="contents">
+        {preset ? null : (
+          <span className="tabular inline-flex min-h-tap items-center rounded border-2 border-primary px-2 text-sm font-bold text-ink">
+            <span className="sr-only">{`現在の表示倍率 ${zoom}%（ピンチで変えた倍率）`}</span>
+            <span aria-hidden="true">✓{zoom}%</span>
+          </span>
+        )}
+      </span>
     </div>
   )
 }
