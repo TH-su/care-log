@@ -13,6 +13,7 @@
 // - persistent（保存状況など、データ保全に関わる表示）は畳んでも隠さない。畳めない時は今と同じく操作の行の中に置く
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
+import { SHEET_REMEASURE_EVENT } from './sheet'
 import type { ReactNode } from 'react'
 
 /** 開閉の保存を既知値で読む（'1'＝開いた形・'0'＝畳んだ形・それ以外と未設定は null） */
@@ -67,7 +68,11 @@ export function CollapsibleBar({ storageKey, full, collapsed, persistent, openLa
 
   // 印刷の直前に畳まない形へ描き直す（印刷の割り付けより先に反映させるため同期で描く）
   useEffect(() => {
-    const before = () => flushSync(() => setPrinting(true))
+    const before = () => {
+      flushSync(() => setPrinting(true))
+      // 開いた形に描き直した高さで、表の枠（sheet-frame-fit）を測り直させる（紙を開閉の状態に左右させない）
+      window.dispatchEvent(new Event(SHEET_REMEASURE_EVENT))
+    }
     const after = () => setPrinting(false)
     window.addEventListener('beforeprint', before)
     window.addEventListener('afterprint', after)

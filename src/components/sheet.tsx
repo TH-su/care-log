@@ -107,6 +107,9 @@ export interface SheetFrameProps {
   className?: string
 }
 
+/** 表の枠の高さを同期で測り直す合図（上部の操作を印刷用に開いた形へ描き直した直後に CollapsibleBar が出す） */
+export const SHEET_REMEASURE_EVENT = 'cl-sheet-remeasure'
+
 /** 高さ上限を使う枠の目印（sheet.css の .sheet-frame-fit）。この枠だけ実測して変数を書き戻す */
 const FIT_CLASS = 'sheet-frame-fit'
 
@@ -196,11 +199,24 @@ export function SheetFrame({ children, className = '' }: SheetFrameProps) {
     ro?.observe(document.body)
     window.addEventListener('resize', schedule)
     window.addEventListener('orientationchange', schedule)
+    // 印刷の直前は同期で測り直す（上部の操作を畳んでいた画面でも、開いた形で測った高さで紙に出す＝どの開閉状態で
+    // 印刷しても同じ紙にする・2026-09-30）。上部の操作が開いた形に描き直した合図（SHEET_REMEASURE_EVENT）でも測る。
+    // 印刷の後は次の描画で測り直す（畳んだ形へ戻った高さ）
+    const measureNow = () => {
+      if (raf !== 0) window.cancelAnimationFrame(raf)
+      measure()
+    }
+    window.addEventListener('beforeprint', measureNow)
+    window.addEventListener(SHEET_REMEASURE_EVENT, measureNow)
+    window.addEventListener('afterprint', schedule)
     return () => {
       if (raf !== 0) window.cancelAnimationFrame(raf)
       ro?.disconnect()
       window.removeEventListener('resize', schedule)
       window.removeEventListener('orientationchange', schedule)
+      window.removeEventListener('beforeprint', measureNow)
+      window.removeEventListener(SHEET_REMEASURE_EVENT, measureNow)
+      window.removeEventListener('afterprint', schedule)
       // 変数を残さない（次に開く画面の暫定値を汚さない）
       el.style.removeProperty('--sheet-frame-top')
       el.style.removeProperty('--sheet-frame-below')

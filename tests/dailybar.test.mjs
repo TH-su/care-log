@@ -54,4 +54,11 @@ describe('画面上部の操作を畳む', () => {
     assert.match(meals, /storageKey=\{LS\.mealsBarOpen\}/)
     assert.match(meals, /collapsed=\{\(compact\) => periodNav\(/)
   })
+
+  it('印刷の直前に表の枠の高さを同期で測り直す（畳んだまま印刷しても開いた形と同じ紙にする）', () => {
+    const sheet = read('components/sheet.tsx')
+    assert.match(sheet, /addEventListener\('beforeprint', measureNow\)/)
+    assert.match(sheet, /addEventListener\(SHEET_REMEASURE_EVENT, measureNow\)/)
+    assert.match(bar(), /flushSync\(\(\) => setPrinting\(true\)\)\n\s+\/\/[^\n]*\n\s+window\.dispatchEvent\(new Event\(SHEET_REMEASURE_EVENT\)\)/)
+  })
 })

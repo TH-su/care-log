@@ -7748,6 +7748,17 @@ export function isQueuePersisted(): boolean {
   return (queue.length === 0 && cellRows.size === 0) || queuePersisted
 }
 
+/**
+ * 端末に残せていない申し送りがあるか（保存領域が一杯などで送信待ちを書き戻せず、このタブのメモリにだけある・L7-2）。
+ * このままタブを閉じると消えるので、画面は事実どおりに知らせ、離れる前の確認に数える
+ */
+export function hasUnpersistedNotes(): boolean {
+  if (queuePersisted) return false
+  if (queue.some((o) => o.table === 'notes')) return true
+  for (const e of cellRows.values()) if (e.table === 'notes') return true
+  return false
+}
+
 // ── テスト専用の差し込み口（裁定11: 1つにまとめる） ─────────────────────────────
 //
 // **tests/logic.test.mjs だけが使う。本番コードから呼ばないこと。**

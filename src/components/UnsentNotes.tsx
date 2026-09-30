@@ -14,6 +14,7 @@ import {
   DbError,
   discardPendingNote,
   discardQueuedNoteInsert,
+  hasUnpersistedNotes,
   dropRescuedNote,
   registerQueuedInsertAsNew,
   insertNoteAsNew,
@@ -117,6 +118,9 @@ export function UnsentNotes({ day, noteIds, actorId, staff, residentName, onChan
       registerUnsaved(() => listUnsentNotes().some(isStopped), 'notes'),
     [],
   )
+  // 端末に残せていない申し送り（保存領域が一杯など）は、閉じると消える。「端末に残ります」とは言わない種類
+  // （input＝従来の「破棄されます」の確認）で数える（L7-2）
+  useEffect(() => registerUnsaved(() => hasUnpersistedNotes(), 'input'), [])
 
   const done = useCallback(() => {
     refresh()
@@ -210,7 +214,8 @@ export function UnsentNotes({ day, noteIds, actorId, staff, residentName, onChan
     [done],
   )
 
-  if (items.length === 0 && resolve === null) return null
+  const unpersisted = hasUnpersistedNotes()
+  if (items.length === 0 && resolve === null && !unpersisted) return null
   const stopped = items.filter(isStopped).length
   const listId = `${uid}-list`
   const btn = 'min-h-tap rounded border px-3 text-base disabled:border-border disabled:text-ink3'
@@ -221,6 +226,13 @@ export function UnsentNotes({ day, noteIds, actorId, staff, residentName, onChan
       className="my-2 rounded border border-warn bg-warn-bg px-3 py-2 text-ink print:hidden"
       style={style}
     >
+      {unpersisted ? (
+        // 保存領域が一杯などで、送れていない申し送りを端末に残せていない（このタブのメモリにだけある）。閉じると消える
+        <p role="alert" className="mb-2 text-base font-bold text-danger">
+          <span aria-hidden="true">▲ </span>
+          端末の保存領域が一杯のため、送れていない申し送りを端末に残せていません。この画面を閉じたり再読み込みしたりすると消えます。電波がつながると自動で送ります。
+        </p>
+      ) : null}
       <div className="flex flex-wrap items-center justify-between gap-gap">
         <p className="text-base font-bold">
           <span aria-hidden="true">▲ </span>

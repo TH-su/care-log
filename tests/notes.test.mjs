@@ -40,6 +40,12 @@ try {
   globalThis.localStorage = {
     getItem: (k) => (lsStore.has(k) ? lsStore.get(k) : null),
     setItem: (k, v) => {
+      // 端末の保存領域が一杯の状態を作る（L7-2）。書き込みは QuotaExceededError で失敗する
+      if (globalThis.__lsFull) {
+        const e = new Error('The quota has been exceeded.')
+        e.name = 'QuotaExceededError'
+        throw e
+      }
       lsStore.set(k, String(v))
     },
     removeItem: (k) => {
@@ -970,6 +976,49 @@ if (DB === null) {
       const all = [...server, ...kept]
       assert.ok(all.includes('本文X（タブ1）') && all.includes('本文Y（タブ2）'), `片方の本文が消えた: server=${JSON.stringify(server)} 端末=${JSON.stringify(kept)}`)
       DB2.__testHooks.setClient(null)
+    })
+
+    it('★L7-2: 端末の保存領域が一杯でも、同じ冪等キーの書きかけを2つのタブで同時に確定した両方の本文が、サーバーか〔くらべて選ぶ〕に残る（黙って消えない）', async () => {
+      const DB2 = await import(new URL('lib/db.ts?tab2full=' + Date.now(), SRC).href)
+      let off = true
+      const srv = noteServer({ offline: () => off })
+      DB.__testHooks.setClient(srv.client)
+      DB2.__testHooks.setClient(srv.client)
+      await DB2.__testHooks.restartQueue()
+      globalThis.__lsFull = true
+      try {
+        const both = await Promise.all([
+          DB.insertNote({ ...regBase, body: '本文P（タブ1・満杯）' }, { clientKey: 'ck-full', firstSent: null }).catch((e) => `err:${e.message}`),
+          DB2.insertNote({ ...regBase, body: '本文Q（タブ2・満杯）' }, { clientKey: 'ck-full', firstSent: null }).catch((e) => `err:${e.message}`),
+        ])
+        // 送る前: どちらのタブも、端末に残せていない申し送りがあると画面へ伝える（閉じると消えるため）
+        assert.equal(DB.hasUnpersistedNotes?.() ?? null, true, '保存できていない申し送りがあることを画面へ伝えていない（タブ1）')
+        assert.equal(DB2.hasUnpersistedNotes?.() ?? null, true, '保存できていない申し送りがあることを画面へ伝えていない（タブ2）')
+        off = false
+        for (let i = 0; i < 4; i++) {
+          await DB.flushQueue(true)
+          await DB2.flushQueue(true)
+          await settle()
+        }
+        const server = srv.db.notes.filter((n) => n.client_key === 'ck-full' || n.body.startsWith('本文')).map((n) => n.body)
+        const kept = [...DB.listUnsentNotes(), ...DB2.listUnsentNotes()].flatMap((u) => (u.kind === 'insert' ? [u.op.body] : [u.row.values.body]))
+        const all = [...server, ...kept]
+        assert.ok(all.includes('本文P（タブ1・満杯）') && all.includes('本文Q（タブ2・満杯）'), `片方の本文が消えた: 確定=${JSON.stringify(both)} server=${JSON.stringify(server)} 端末=${JSON.stringify(kept)}`)
+        // 保存領域が空いたら、メモリにだけあった分が端末に残る（残せたら警告は消える）
+        globalThis.__lsFull = false
+        for (let i = 0; i < 2; i++) {
+          await DB.flushQueue(true)
+          await DB2.flushQueue(true)
+          await settle()
+        }
+        const after = [...DB.listUnsentNotes(), ...DB2.listUnsentNotes()].flatMap((u) => (u.kind === 'insert' ? [u.op.body] : [u.row.values.body]))
+        const all2 = [...srv.db.notes.map((n) => n.body), ...after]
+        assert.ok(all2.includes('本文P（タブ1・満杯）') && all2.includes('本文Q（タブ2・満杯）'), `空いた後に片方が消えた: ${JSON.stringify(all2)}`)
+        assert.equal(DB2.hasUnpersistedNotes(), false, '空いた後も残せていない')
+      } finally {
+        globalThis.__lsFull = false
+        DB2.__testHooks.setClient(null)
+      }
     })
 
     it('★R6-3: 戻した書きかけが「その冪等キーで最初に送った中身」を持っていれば、既に届いていた登録への変更は自分どうしで競合しない', async () => {
