@@ -13,7 +13,8 @@
 //   ・締め時刻（med.ts の MED_DEADLINES）を過ぎた今日の未記録と、過去の日の未記録は「未」（赤枠＋文字）。
 //     今日の締め前の未記録は空欄。今日を表示している間は 60 秒ごとに締めを判定し直す
 //   ・朝・昼・夕・眠前は自動の時刻（med.ts の MED_AUTO_TIMES＝8:50・13:00・18:20・21:00）に DB 側（0015・0016 の cron）が「服用済み」で記録する
-//     （2026-09-27 代表指示）。自動の記録は「済（自動）」（色＋文字）。押すと状態の小窓で直せ、直すと手動の記録（記入者つき）になる。
+//     （2026-09-27 代表指示）。自動の記録も手で記録した「済」と同じ見た目で出す（「（自動）」は出さない・2026-10-01 代表指示）。
+//     押すと状態の小窓で直せ、直すと手動の記録（記入者つき）になる。
 //     自動の時間帯は、自動の時刻から15分過ぎても記録が無ければ「未」（入院・外泊などで自動にしなかった人・cron の失敗を
 //     見落とさない・チーフ指摘1）。眠前も 0016 で自動（21:00・「未」は 21:15 以降）。自動の記録は端末では作らない（この画面は表示と直すだけ）
 //   ・入院中かどうかは care-log の名簿（residents）が持っていないので、入院中の方のマスも通常どおり（「不在」で記録する）
@@ -62,7 +63,6 @@ import {
   medMissingAllowed,
   MED_AUTO_GRACE_MIN,
   MED_AUTO_SLOTS,
-  MED_AUTO_TIMES,
   MED_DEADLINES,
   MED_RECHECK_MS,
   minutesOfDay,
@@ -848,7 +848,7 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
               <div className="relative overflow-x-auto rounded-lg border border-border bg-surface">
                 <table className="w-full border-collapse">
                   <caption className="sr-only">
-                    与薬の実施（行＝入居者、列＝時間帯。— は服薬の設定なし、未は締めを過ぎても記録なし、自動は自動で入った記録）
+                    与薬の実施（行＝入居者、列＝時間帯。— は服薬の設定なし、未は締めを過ぎても記録なし）
                   </caption>
                   <thead>
                     <tr>
@@ -1057,12 +1057,11 @@ function MedCellButton({ name, slot, cell, pendingStatus, pending, busy, locked,
   const disabled = locked || busy || pending
   const incident = status !== null && isIncidentStatus(status)
   const missing = status === null && cell.kind === 'missing'
-  // 自動で入った記録（送信待ちにした入力があればそちらを見せる＝直した後は自動でない）
-  const auto = pendingStatus === null && cell.kind === 'record' && cell.record.auto
-  const time = pendingStatus === null && cell.kind === 'record' && !auto ? fmtClock(cell.record.created_at) : ''
+  // 自動で入った記録も手で記録したものと同じ見た目（「（自動）」・色の区別は出さない・2026-10-01 代表指示）
+  const time = pendingStatus === null && cell.kind === 'record' ? fmtClock(cell.record.created_at) : ''
   const srText =
     status !== null
-      ? `${name} ${label} ${MED_STATUS_LABEL[status]}${auto ? '（自動）' : ''}${time ? ` ${time}` : ''}${pending ? '（未送信）' : ''}`
+      ? `${name} ${label} ${MED_STATUS_LABEL[status]}${time ? ` ${time}` : ''}${pending ? '（未送信）' : ''}`
       : missing
         ? `${name} ${label} 未記録（時刻を過ぎています）。押すと状態を選んで記録`
         : `${name} ${label} 未記録。押すと服用済みで記録`
@@ -1070,9 +1069,7 @@ function MedCellButton({ name, slot, cell, pendingStatus, pending, busy, locked,
     ? 'border-2 border-danger bg-danger-bg text-danger font-bold'
     : missing
       ? 'border-2 border-danger bg-surface text-danger font-bold'
-      : auto
-        ? 'border border-info bg-info-bg text-ink font-bold'
-        : status === 'taken'
+      : status === 'taken'
         ? 'border border-ok bg-ok-bg text-ink font-bold'
         : status !== null
           ? 'border border-warn bg-warn-bg text-ink font-bold'
@@ -1087,12 +1084,6 @@ function MedCellButton({ name, slot, cell, pendingStatus, pending, busy, locked,
       className={`inline-flex min-h-tap w-full min-w-tap flex-col items-center justify-center rounded px-1 text-base disabled:opacity-60 ${tone}`}
     >
       <span aria-hidden="true">{status !== null ? MED_STATUS_MARK[status] : missing ? '未' : ''}</span>
-      {auto ? (
-        // 文字200%・狭い幅でも「（自動）」を1字ずつ折り返さない（はみ出す分は表の枠の中で横に送る）
-        <span aria-hidden="true" className="whitespace-nowrap text-xs font-normal text-info">
-          （自動）
-        </span>
-      ) : null}
       {time ? (
         <span aria-hidden="true" className="tabular text-xs font-normal text-ink2">
           {time}
@@ -1283,17 +1274,12 @@ function StatusDialog({ open, record, newSlot = null, name, locked, onCancel, on
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         <h2 className="text-lg font-bold text-ink">{title}</h2>
         {name ? <p className="mt-1 text-sm text-ink2">{name}</p> : null}
-        {record !== null && record.auto ? (
-          <p className="mt-1 text-sm text-info">
-            自動で「服用済み」になった記録です（{record.slot !== 'prn' ? (MED_AUTO_TIMES[record.slot] ?? '') : ''}）。
-            状態・備考を変えると、手動の記録（記入者つき）になります。
-          </p>
-        ) : record !== null && record.created_at !== null ? (
+        {record !== null && record.created_at !== null ? (
           <p className="mt-1 text-sm text-ink2">記録した時刻 {fmtClock(record.created_at)}</p>
         ) : isNew ? (
           <p className="mt-1 text-sm text-warn">
             <span aria-hidden="true">▲ </span>
-            記録がありません（自動で入らなかった方です）。状態を選んで保存してください（外泊・入院などは「不在」）。
+            記録がありません。状態を選んで保存してください（外泊・入院などは「不在」）。
           </p>
         ) : null}
         <div role="group" aria-label="状態" className="mt-3 grid grid-cols-1 gap-gap">

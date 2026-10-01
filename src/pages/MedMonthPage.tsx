@@ -3,7 +3,7 @@
 // 入居者を1人選んで、その月の与薬の実施を表にする（行＝日付、列＝朝・昼・夕・眠前・頓服）。
 // マス＝済（服用済み）／残（一部残し）／拒（拒否）／不（不在）／止（医師指示で中止）／落（落薬）／誤（誤薬）、
 // 締めを過ぎても記録の無いマスは「未」（その人の服薬の時間帯に設定がある列だけ・施設で記録を始めた日以降だけ）。頓服は回数。
-// 自動で入った記録（0015・0016 の cron・朝・昼・夕・眠前）は記号に「*」を添える（「済*」。凡例「*＝自動」）。
+// 自動で入った記録（0015・0016 の cron・朝・昼・夕・眠前）も手で記録したものと同じ記号で出す（「*」は付けない・2026-10-01 代表指示）。
 // 自動の時間帯（朝・昼・夕・眠前）の「未」は、自動の時刻から15分過ぎても記録が無いマス（与薬チェックの表と同じ・チーフ指摘1）。
 // 月の合計（状態ごとの件数・列ごとの記録と「未」の数・頓服の回数）を下に出す。
 // 印刷は既存の印刷部品（PrintArea）で A4 縦。「全員を印刷」は1人1ページ（改ページ）。
@@ -31,7 +31,7 @@ import {
 } from '../lib/med'
 import type { MedMonthMark, MedMonthTable } from '../lib/med'
 import { todayIso } from '../lib/format'
-import { AUTO_MARK, MED_SLOT_LABEL, MED_SLOTS, MED_STATUS_LABEL, MED_STATUS_MARK, MED_STATUSES } from '../lib/types'
+import { MED_SLOT_LABEL, MED_SLOTS, MED_STATUS_LABEL, MED_STATUS_MARK, MED_STATUSES } from '../lib/types'
 import type { MedAdmin, MedSlot, MedSlotsSetting, Resident } from '../lib/types'
 import { EmptyBlock, ErrorBlock, LoadingBlock, ResidentPickerModal, SectionCard } from '../components/ui'
 import { PrintArea } from '../components/print/PrintArea'
@@ -41,7 +41,7 @@ const WEEKDAY_CHAR = ['月', '火', '水', '木', '金', '土', '日']
 
 const ERR_LOAD = '与薬の月次表を読み込めませんでした。通信状態を確認して、再試行してください。'
 
-const LEGEND = `${MED_STATUSES.map((s) => `${MED_STATUS_MARK[s]}＝${MED_STATUS_LABEL[s]}`).join('　')}　${AUTO_MARK}＝自動`
+const LEGEND = MED_STATUSES.map((s) => `${MED_STATUS_MARK[s]}＝${MED_STATUS_LABEL[s]}`).join('　')
 
 /** 「未」の注記（画面と紙で同じ文）。startDay＝施設で記録を始めた日 */
 function missingNote(startDay: string | null): string {
@@ -56,17 +56,17 @@ function missingNote(startDay: string | null): string {
   return `「未」は${from}以降・現在の服薬の時間帯を当てはめた目安です（過去の設定の変更は反映されません）。今日は、${when}`
 }
 
-/** マスの文字。自動で入った記録は「*」を添える（「済*」） */
-function markText(m: MedMonthMark, auto = false): string {
+/** マスの文字（自動で入った記録も同じ記号） */
+function markText(m: MedMonthMark): string {
   if (m === null) return ''
   if (m === 'missing') return MED_MONTH_MISSING_MARK
-  return `${MED_STATUS_MARK[m]}${auto ? AUTO_MARK : ''}`
+  return MED_STATUS_MARK[m]
 }
 
-function markLabel(m: MedMonthMark, auto = false): string {
+function markLabel(m: MedMonthMark): string {
   if (m === null) return '記録なし'
   if (m === 'missing') return '未記録'
-  return `${MED_STATUS_LABEL[m]}${auto ? '（自動）' : ''}`
+  return MED_STATUS_LABEL[m]
 }
 
 /** 1人分の表と見出しに使う情報 */
@@ -467,8 +467,8 @@ function MonthTable({ sheet, variant }: SheetProps) {
                     key={s}
                     className={`${td} ${screen && (m === 'missing' || incident) ? 'bg-danger-bg font-bold text-danger' : ''} ${!screen && (m === 'missing' || incident) ? 'cl-print-strong' : ''}`}
                   >
-                    <span aria-hidden="true">{markText(m, d.autos[s])}</span>
-                    <span className="sr-only">{`${label} ${MED_SLOT_LABEL[s]} ${markLabel(m, d.autos[s])}`}</span>
+                    <span aria-hidden="true">{markText(m)}</span>
+                    <span className="sr-only">{`${label} ${MED_SLOT_LABEL[s]} ${markLabel(m)}`}</span>
                   </td>
                 )
               })}

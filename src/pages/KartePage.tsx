@@ -26,6 +26,7 @@ import {
 } from '../lib/historyView'
 import { addDays, fmtDayLabel, fmtTimeHM, isoDate, todayIso } from '../lib/format'
 import { typesText } from '../lib/incident'
+import { BATH_SHOWN_LABEL, bathShownOf } from '../lib/bath'
 import {
   fetchWeights,
   fmtKg,
@@ -50,8 +51,6 @@ import {
   SegmentPicker,
 } from '../components/ui'
 import {
-  BATH_CANCEL_REASON_LABEL,
-  BATH_RESULT_LABEL,
   IMPORTANCE_LABEL,
   INCIDENT_KIND_LABEL,
   INCIDENT_STATUS_LABEL,
@@ -1488,7 +1487,7 @@ interface BathSectionProps {
   staffById: Map<number, string>
 }
 
-/** 表示期間の入浴記録を日付の新しい順に（区分・中止の理由・備考・記入者） */
+/** 表示期間の入浴記録を日付の新しい順に（入浴した／入浴していない・備考・記入者。自動かどうかは出さない・2026-10-01 代表指示） */
 function BathSection({ baths, staffById }: BathSectionProps) {
   const sorted = useMemo(
     () =>
@@ -1510,17 +1509,13 @@ function BathSection({ baths, staffById }: BathSectionProps) {
             <li key={b.id} className="rounded-md border border-border bg-surface p-3">
               <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-base text-ink">
                 <span className="tabular text-sm text-ink2">{fmtDayLabel(b.bath_on)}</span>
-                <span className="font-bold">{BATH_RESULT_LABEL[b.result]}</span>
-                {b.auto ? <span className="rounded-full border border-info bg-info-bg px-2 text-sm text-info">自動</span> : null}
-                {b.result === 'cancel' && b.cancel_reason !== null ? (
-                  <span className="text-sm text-ink2">理由: {BATH_CANCEL_REASON_LABEL[b.cancel_reason]}</span>
-                ) : null}
+                <span className="font-bold">{BATH_SHOWN_LABEL[bathShownOf(b.result)]}</span>
               </p>
               {b.note !== null && b.note !== '' ? (
                 <p className="mt-1 whitespace-pre-wrap break-words text-sm text-ink">{b.note}</p>
               ) : null}
               <p className="mt-1 text-sm text-ink2">
-                記入者 {b.recorded_by === null ? (b.auto ? '自動' : '—') : (staffById.get(b.recorded_by) ?? '—')}
+                記入者 {b.recorded_by === null ? '—' : (staffById.get(b.recorded_by) ?? '—')}
               </p>
             </li>
           ))}
@@ -1582,7 +1577,6 @@ function MedSection({ meds }: MedSectionProps) {
                       {MED_STATUS_LABEL[m.status]}
                     </span>
                   )}
-                  {m.auto ? <span className="rounded-full border border-info bg-info-bg px-2 text-sm text-info">自動</span> : null}
                 </p>
                 {m.slot === 'prn' ? (
                   <p className="mt-1 break-words text-sm text-ink">
@@ -1695,7 +1689,9 @@ function HistoryItem({ entry, staffById }: { entry: RecordHistoryEntry; staffByI
   const changes = diffHistoryRow(entry.old_row, entry.new_row).filter((c) => {
     // 取り消し（deleted_at が入った）は見出しの「取り消し」で示すので、列の差分には重ねない
     if (entry.op === 'delete' && (c.column === 'deleted_at' || c.column === 'deleted_by')) return false
-    return historyColumnLabel(entry.table_name, c.column) !== null
+    if (historyColumnLabel(entry.table_name, c.column) === null) return false
+    // 表示が同じになる変更は出さない（入浴の区分は「入浴した／入浴していない」に丸めて出すため、全身浴→シャワー浴は同じ表示）
+    return fmtHistoryValue(entry.table_name, c.column, c.before, staffName) !== fmtHistoryValue(entry.table_name, c.column, c.after, staffName)
   })
   const who =
     entry.changed_by_staff === null ? null : (staffById.get(entry.changed_by_staff) ?? null)

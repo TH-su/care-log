@@ -121,7 +121,8 @@ bath_records ( id bigint identity PK, resident_id bigint not null references res
   bath_on date not null,                         -- 業務日付（JST）
   result text not null check (result in ('full','shower','partial','cancel','visit')),  -- 全身浴/シャワー浴/部分浴・清拭/中止/訪問介護で入浴（visit は 0016）
   cancel_reason text check (null または 'condition','refusal','facility','other'),  -- 体調不良/本人の拒否/事業所の都合/その他
-  --   check: result <> 'cancel' or cancel_reason is not null（中止は理由必須。「その他」の備考必須はアプリ側）
+  --   check: result <> 'cancel' or cancel_reason is not null（中止は理由必須）は 0018 で外した（2026-10-01・画面は「入浴した／入浴していない」だけで理由を選ばない）。
+  --   以前の記録の理由「その他」の備考必須はアプリ側
   note text, recorded_by bigint references staff(id), rev int default 1,
   created_at/updated_at, deleted_at, deleted_by, edited_by bigint references staff(id),
   client_key text unique )                       -- 全体unique（削除済みもキーを押さえる）

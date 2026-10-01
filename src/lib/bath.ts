@@ -13,9 +13,63 @@ import type { BathCancelReason, BathRecord, BathResult, Resident } from './types
 /**
  * 予定者が自動で「全身浴」になる時刻（日本時間・0015_auto_check.sql の cron と同じ。2026-09-27 代表指示）。
  * デイの休業日（12/31〜1/3 など・app_settings の daycare_closed_dates）は同じ時刻に「訪問介護で入浴」（visit）で入る（0016）。
- * 入浴しなかった方は職員が「チェックを外す」（中止＋理由）。画面の注記はこの値から作る（時刻を直書きしない）
+ * 入浴しなかった方は職員が「入浴していない」を押す（2026-10-01 代表指示・理由は選ばない）。画面の注記はこの値から作る（時刻を直書きしない）
  */
 export const BATH_AUTO_TIME = '12:30'
+
+// ── 画面の表示は「入浴した／入浴していない」の2つだけ（2026-10-01 代表指示） ──────────
+// DB の区分（全身浴・シャワー浴・部分浴・清拭・訪問介護で入浴・中止）はそのまま残し、画面・月次表・カルテでは
+// 中止＝入浴していない、それ以外＝入浴した と出す。自動で入った記録かどうかも画面には出さない。
+// 画面で「入浴した」を選んだ記録は自動の記録と同じ値で保存する: デイの営業日は全身浴（full）、休業日は訪問介護で入浴（visit）。
+// （休業日の判定は DB の private.care_auto_daycare_closed と同じ＝app_settings の daycare_closed_dates に 'YYYY-MM-DD' か 'MM-DD'）
+
+export type BathShown = 'bathed' | 'notBathed'
+/** 画面のボタンの並び（左→右） */
+export const BATH_SHOWN: readonly BathShown[] = ['bathed', 'notBathed']
+export const BATH_SHOWN_LABEL: Record<BathShown, string> = {
+  bathed: '入浴した',
+  notBathed: '入浴していない',
+}
+/** 月次表・印刷の1文字（白黒でも区別できるよう記号で持つ） */
+export const BATH_SHOWN_MARK: Record<BathShown, string> = {
+  bathed: '○',
+  notBathed: '×',
+}
+/** 画面で「入浴した」を選んだ時に保存する区分（デイの営業日） */
+export const BATH_RESULT_FOR_BATHED: BathResult = 'full'
+
+/** 休業日の設定が読めない時に使う値（0016 で入れた既定値と同じ） */
+export const DAYCARE_CLOSED_DEFAULT = '12-31,01-01,01-02,01-03'
+
+/**
+ * デイの休業日か（DB の private.care_auto_daycare_closed と同じ判定）。
+ * closedDates は app_settings の daycare_closed_dates（カンマ区切り・各項目の前後の空白は無視）。null は休業日なし
+ */
+export function isDaycareClosedOn(day: string, closedDates: string | null): boolean {
+  if (closedDates === null || !DAY_RE.test(day)) return false
+  const items = closedDates.split(',').map((v) => v.trim())
+  return items.includes(day) || items.includes(day.slice(5))
+}
+
+/** 画面で「入浴した」を選んだ時に保存する区分（休業日は訪問介護で入浴＝自動の記録と同じ） */
+export function resultForBathed(day: string, closedDates: string | null): BathResult {
+  return isDaycareClosedOn(day, closedDates) ? 'visit' : BATH_RESULT_FOR_BATHED
+}
+
+/**
+ * 備考だけを直す・同じ表示を押し直す時に送る中止の理由。以前の記録の理由「その他」は備考が必須なので、
+ * 備考を空にした時は理由も外す（理由は画面に出していないため、見えない理由で保存を止めない）
+ */
+export function keptCancelReason(record: BathRecord, note: string): BathCancelReason | null {
+  if (record.result !== 'cancel') return null
+  if (record.cancel_reason === 'other' && note.trim() === '') return null
+  return record.cancel_reason
+}
+
+/** DB の区分 → 画面の表示（中止だけが「入浴していない」） */
+export function bathShownOf(result: BathResult): BathShown {
+  return result === 'cancel' ? 'notBathed' : 'bathed'
+}
 
 // ── 日付・月 ────────────────────────────────────────────────────────────────
 
@@ -115,8 +169,8 @@ export type BathInputCheck = { ok: true } | { ok: false; message: string }
 /**
  * 保存前の検証。today は端末の今日（JST の業務日付）。
  * ・区分は5つのどれか ・未来の日付は不可
- * ・中止は理由が必須、中止以外は理由を持たない（null）
- * ・理由が「その他」の時は備考が必須（空白だけも不可）
+ * ・中止の理由は任意（2026-10-01 から画面では選ばない。0018 で DB の必須も外した）。中止以外は理由を持たない（null）
+ * ・理由が「その他」の時は備考が必須（空白だけも不可・以前の記録を直す時のため残す）
  */
 export function validateBathInput(v: BathInput, today: string): BathInputCheck {
   if (!DAY_RE.test(v.bath_on)) return { ok: false, message: '日付を読み取れませんでした。日付を選び直してください。' }
@@ -124,11 +178,11 @@ export function validateBathInput(v: BathInput, today: string): BathInputCheck {
     return { ok: false, message: '未来の日付には記録できません。日付を今日以前にしてください。' }
   }
   if (!(BATH_RESULTS as readonly string[]).includes(v.result)) {
-    return { ok: false, message: '区分（全身浴・シャワー浴・部分浴・清拭・訪問介護で入浴・中止）を選んでください。' }
+    return { ok: false, message: '「入浴した」か「入浴していない」を選んでください。' }
   }
   if (v.result === 'cancel') {
-    if (v.cancel_reason === null || !(BATH_CANCEL_REASONS as readonly string[]).includes(v.cancel_reason)) {
-      return { ok: false, message: '中止の理由を選んでください。' }
+    if (v.cancel_reason !== null && !(BATH_CANCEL_REASONS as readonly string[]).includes(v.cancel_reason)) {
+      return { ok: false, message: '中止の理由を読み取れませんでした。もう一度「入浴していない」を押してください。' }
     }
     if (v.cancel_reason === 'other' && (v.note ?? '').trim() === '') {
       return { ok: false, message: '理由が「その他」の時は、備考に内容を書いてください。' }

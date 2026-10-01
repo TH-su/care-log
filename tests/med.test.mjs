@@ -1332,16 +1332,16 @@ describe('★自動チェック（0015_auto_check.sql）の配線（静的検査
     }
     const med = read('../src/pages/MedRecordPage.tsx')
     assert.match(med, /\{fmtMedAutoTimes\(\)\} に自動で済みになります（例外は押して変更）。自動で入らなかった方（外泊・入院など）は『不在』等を押してください/)
-    assert.match(med, /（自動）/)
+    // 自動で入った記録も手で記録したものと同じ見た目（「（自動）」は出さない・2026-10-01 代表指示）
+    assert.equal(/（自動）|自動は自動で入った記録/.test(med.replace(/\/\/.*$/gm, '')), false)
     // 「未」のマスは状態の小窓（新しい記録）を開く・まだ時刻前の空欄は1回で服用済み
     assert.match(med, /else if \(action === 'choose'\) setNewFor\(\{ residentId: row\.residentId, slot \}\)/)
     assert.match(med, /if \(action === 'insert'\) void recordNew\(row\.residentId, slot\)/)
     const bath = read('../src/pages/BathRecordPage.tsx')
-    assert.match(bath, /\{BATH_AUTO_TIME\} に予定者は自動で全身浴になります。入浴しなかった方はチェックを外してください/)
-    assert.match(bath, /チェックを外す/)
-    assert.match(bath, /\{selected && auto \? '（自動）' : null\}/)
-    for (const p of ['../src/pages/BathMonthPage.tsx', '../src/pages/MedMonthPage.tsx']) {
-      assert.match(read(p), /\$\{AUTO_MARK\}＝自動/, p)
+    assert.match(bath, /\{BATH_AUTO_TIME\} に予定者は「入浴した」になります/)
+    for (const p of ['../src/pages/BathMonthPage.tsx', '../src/pages/MedMonthPage.tsx', '../src/pages/KartePage.tsx', '../src/pages/BathRecordPage.tsx']) {
+      const src = read(p).replace(/\/\/.*$/gm, '')
+      assert.equal(/AUTO_MARK|＝自動|（自動）|自動で記録|\.auto \?|b\.auto|m\.auto/.test(src), false, p)
     }
     assert.match(read('../src/lib/types.ts'), /export const AUTO_MARK = '\*'/)
   })
@@ -1441,15 +1441,13 @@ describe('★変更の記録（historyView）の auto の表示', async () => {
     it('変更の記録の表示', { skip: TS_UNSUPPORTED }, () => {})
     return
   }
-  it('列名は「記録の方法」・値は 自動／手動（入浴・与薬）', () => {
-    for (const t of ['bath_records', 'med_admin']) {
-      assert.equal(HV.historyColumnLabel(t, 'auto'), '記録の方法', t)
-      assert.equal(HV.fmtHistoryValue(t, 'auto', true, () => null), '自動', t)
-      assert.equal(HV.fmtHistoryValue(t, 'auto', false, () => null), '手動', t)
-    }
+  it('自動かどうか（auto）の列は変更の記録に出さない（入浴・与薬・2026-10-01 代表指示）', () => {
+    for (const t of ['bath_records', 'med_admin']) assert.equal(HV.historyColumnLabel(t, 'auto'), null, t)
   })
-  it('入浴の区分 visit は「訪問介護で入浴」・与薬の時間帯 bedtime は「眠前」（0016）', () => {
-    assert.equal(HV.fmtHistoryValue('bath_records', 'result', 'visit', () => null), '訪問介護で入浴')
+  it('入浴は「入浴した／入浴していない」で出す・与薬の時間帯 bedtime は「眠前」（0016）', () => {
+    assert.equal(HV.historyColumnLabel('bath_records', 'result'), '入浴')
+    assert.equal(HV.fmtHistoryValue('bath_records', 'result', 'visit', () => null), '入浴した')
+    assert.equal(HV.fmtHistoryValue('bath_records', 'result', 'cancel', () => null), '入浴していない')
     assert.equal(HV.fmtHistoryValue('med_admin', 'slot', 'bedtime', () => null), '眠前')
   })
 })

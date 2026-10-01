@@ -93,8 +93,8 @@ if (B === null) {
     it('全身浴・シャワー浴・部分浴は理由なしで通る', () => {
       for (const r of ['full', 'shower', 'partial']) assert.deepEqual(B.validateBathInput(ok({ result: r }), '2026-09-26'), { ok: true })
     })
-    it('中止は理由が必須・「その他」は備考が必須（空白だけも不可）', () => {
-      assert.equal(B.validateBathInput(ok({ result: 'cancel' }), '2026-09-26').ok, false)
+    it('中止（入浴していない）は理由なしで通る（2026-10-01）・以前の理由「その他」は備考が必須（空白だけも不可）', () => {
+      assert.deepEqual(B.validateBathInput(ok({ result: 'cancel' }), '2026-09-26'), { ok: true })
       assert.equal(B.validateBathInput(ok({ result: 'cancel', cancel_reason: 'refusal' }), '2026-09-26').ok, true)
       assert.equal(B.validateBathInput(ok({ result: 'cancel', cancel_reason: 'other' }), '2026-09-26').ok, false)
       assert.equal(B.validateBathInput(ok({ result: 'cancel', cancel_reason: 'other', note: '　 ' }), '2026-09-26').ok, false)
@@ -361,7 +361,7 @@ if (B === null) {
       assert.equal(B.validateBathInput(ok({ cancel_reason: 'condition' }), '2026-12-31').ok, false)
       const bad = B.validateBathInput(ok({ result: 'daycare' }), '2026-12-31')
       assert.equal(bad.ok, false)
-      assert.match(bad.message, /訪問介護で入浴/)
+      assert.match(bad.message, /「入浴した」か「入浴していない」/)
     })
     it('自動の visit も「チェックを外す」を出す・記録済みに数え「未」にしない', () => {
       const v = rec(1, 1, '2026-12-31', 'visit', { auto: true })
@@ -428,14 +428,57 @@ if (B === null) {
       // 2026-09-26 与薬チェックの追加で、与薬の旗（medLocked）が間に入った。入浴は bathLocked・その他は locked のまま
       assert.match(hub, /key === 'bath' \? bathLocked : key === 'med' \? medLocked : locked/)
     })
-    it('★訪問介護で入浴（0016）: 記録画面の注記・チェックを外す案内は元の区分・月次表の凡例と「訪問」列', () => {
+    it('★入浴は「入浴した／入浴していない」の2つだけ（2026-10-01）: 記録画面・月次表・カルテ', () => {
       const page = read('../src/pages/BathRecordPage.tsx')
-      assert.match(page, /休業日（12\/31〜1\/3 など）は \{BATH_AUTO_TIME\} に訪問介護での入浴として自動で記録されます/)
-      assert.match(page, /自動の「\{BATH_RESULT_LABEL\[uncheckFrom \?\? 'full'\]\}」を「中止」に変えます/)
+      assert.match(page, /\{BATH_SHOWN\.map\(\(r\) =>/)
+      assert.equal(/BATH_RESULTS\.map|CancelDialog|チェックを外す|（自動）|自動で記録/.test(page.replace(/\/\/.*$/gm, '')), false)
+      assert.match(page, /\{BATH_AUTO_TIME\} に予定者は「入浴した」になります。入浴しなかった方は「入浴していない」を押してください/)
       const month = read('../src/pages/BathMonthPage.tsx')
-      assert.match(month, /訪＝休業日に訪問介護で入浴（デイの加算対象外）/)
-      assert.match(month, /\{row\.totals\.visit\}/)
-      assert.match(month, />\s+訪問\s+<\/th>/)
+      assert.match(month, /BATH_SHOWN_MARK\[bathShownOf\(m\)\]/)
+      assert.match(month, />\s+入浴\s+<\/th>/)
+      assert.match(month, />\s+入浴なし\s+<\/th>/)
+      assert.equal(/AUTO_MARK|＝自動|全＋シ/.test(month), false)
+      const karte = read('../src/pages/KartePage.tsx')
+      assert.match(karte, /BATH_SHOWN_LABEL\[bathShownOf\(b\.result\)\]/)
+    })
+    it('休業日の判定は DB（care_auto_daycare_closed）と同じ・休業日の「入浴した」は訪問介護で入浴（visit）', () => {
+      assert.equal(B.isDaycareClosedOn('2026-12-31', B.DAYCARE_CLOSED_DEFAULT), true)
+      assert.equal(B.isDaycareClosedOn('2027-01-03', B.DAYCARE_CLOSED_DEFAULT), true)
+      assert.equal(B.isDaycareClosedOn('2027-01-04', B.DAYCARE_CLOSED_DEFAULT), false)
+      assert.equal(B.isDaycareClosedOn('2026-10-05', ' 2026-10-05 ,12-31'), true) // 年月日の指定・前後の空白
+      assert.equal(B.isDaycareClosedOn('2026-10-05', null), false)
+      assert.equal(B.isDaycareClosedOn('bad', '12-31'), false)
+      assert.equal(B.resultForBathed('2026-12-31', B.DAYCARE_CLOSED_DEFAULT), 'visit')
+      assert.equal(B.resultForBathed('2026-10-01', B.DAYCARE_CLOSED_DEFAULT), 'full')
+      assert.equal(B.DAYCARE_CLOSED_DEFAULT, '12-31,01-01,01-02,01-03')
+      const mig = read('../supabase/migrations/0016_auto_check2.sql')
+      assert.match(mig, new RegExp(`values \\('daycare_closed_dates', '${B.DAYCARE_CLOSED_DEFAULT}'\\)`))
+    })
+    it('備考だけを直す時の中止の理由: そのまま残す・以前の「その他」で備考を空にしたら理由を外す・中止以外は null', () => {
+      const r = (result, cancel_reason) => ({ id: 1, resident_id: 1, bath_on: '2026-09-30', result, cancel_reason, note: 'x', recorded_by: 1, rev: 1, auto: false })
+      assert.equal(B.keptCancelReason(r('cancel', 'refusal'), ''), 'refusal')
+      assert.equal(B.keptCancelReason(r('cancel', 'other'), '内容'), 'other')
+      assert.equal(B.keptCancelReason(r('cancel', 'other'), '　 '), null)
+      assert.equal(B.keptCancelReason(r('cancel', null), ''), null)
+      assert.equal(B.keptCancelReason(r('full', null), ''), null)
+      // 理由を外した値は保存前の検証を通る
+      assert.deepEqual(B.validateBathInput({ bath_on: '2026-09-30', result: 'cancel', cancel_reason: B.keptCancelReason(r('cancel', 'other'), ''), note: null }, '2026-09-30'), { ok: true })
+    })
+    it('画面の配線: 「入浴した」は resultForBathed（休業日は visit）・備考の保存と押し直しは keptCancelReason', () => {
+      const page = read('../src/pages/BathRecordPage.tsx')
+      assert.match(page, /if \(shown === 'bathed'\) void save\(row, resultForBathed\(day, closedDates\), null, noteOf\(row\)\)/)
+      assert.match(page, /else void save\(row, 'cancel', null, noteOf\(row\)\)/)
+      assert.equal((page.match(/keptCancelReason\(/g) ?? []).length, 2)
+      assert.match(page, /getAppSetting\('daycare_closed_dates'\)/)
+      const karte = read('../src/pages/KartePage.tsx')
+      assert.match(karte, /fmtHistoryValue\(entry\.table_name, c\.column, c\.before, staffName\) !== fmtHistoryValue\(entry\.table_name, c\.column, c\.after, staffName\)/)
+    })
+    it('表示の対応: 中止だけが「入浴していない」・ほかの区分（訪問介護で入浴を含む）は「入浴した」・記号は ○／×', () => {
+      for (const r of ['full', 'shower', 'partial', 'visit']) assert.equal(B.bathShownOf(r), 'bathed', r)
+      assert.equal(B.bathShownOf('cancel'), 'notBathed')
+      assert.deepEqual(B.BATH_SHOWN_LABEL, { bathed: '入浴した', notBathed: '入浴していない' })
+      assert.deepEqual(B.BATH_SHOWN_MARK, { bathed: '○', notBathed: '×' })
+      assert.equal(B.BATH_RESULT_FOR_BATHED, 'full')
     })
     it('月次表は表示中の月を保存しない（日付に紐づく状態＝原則11の既定。開くと常に今月）', () => {
       const page = read('../src/pages/BathMonthPage.tsx')

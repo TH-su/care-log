@@ -2468,15 +2468,17 @@ function registerDbTests() {
       assert.equal(srv.db.rows.length, 1)
     })
 
-    it('保存前の検証: 中止は理由必須・「その他」は備考必須・未来の日付は不可（1件も送らない）', async () => {
+    it('保存前の検証: 中止は理由なしで送れる（2026-10-01）・「その他」は備考必須・未来の日付は不可（送らない）', async () => {
       const srv = bathServer()
       DB.__testHooks.setClient(srv.client)
-      await assert.rejects(() => DB.insertBath(bathInput({ result: 'cancel' })))
       await assert.rejects(() => DB.insertBath(bathInput({ result: 'cancel', cancel_reason: 'other', note: ' ' })))
       await assert.rejects(() => DB.insertBath(bathInput({ bath_on: '2999-01-01' })))
       assert.equal(srv.calls.filter((q) => q.table === 'bath_records').length, 0)
       const ok = await DB.insertBath(bathInput({ result: 'cancel', cancel_reason: 'other', note: '内容' }))
       assert.equal(ok.cancel_reason, 'other')
+      const none = await DB.insertBath(bathInput({ resident_id: 2, result: 'cancel' }))
+      assert.equal(none.result, 'cancel')
+      assert.equal(none.cancel_reason, null)
     })
 
     it('★同じ人・同じ日に他の端末が先に記録していた（23505・自分のキーは無い）→ conflict（送信待ちに積まない）', async () => {
@@ -2857,6 +2859,15 @@ function registerDbTests() {
       const op = storedQueue().ops[0]
       assert.deepEqual([op.table, op.kind, op.rowId, op.rev], ['bath_records', 'update', 5, 3])
       assert.deepEqual(op.payload, { result: 'cancel', cancel_reason: 'condition', note: null, auto: false, recorded_by: 6, edited_by: 6 })
+    })
+
+    it('★「入浴していない」（理由なしの中止・2026-10-01）: 自動の行を直すと cancel_reason=null・auto=false・記入者を送る', async () => {
+      setQueueRaw(null)
+      DB.__testHooks.setClient(offline().client)
+      const cur = { id: 7, ...bathInput({ recorded_by: null }), rev: 1, auto: true }
+      assert.equal(await DB.updateBath(cur, { result: 'cancel', cancel_reason: null, note: null }, { editedBy: 6 }), 'queued')
+      const op = storedQueue().ops[0]
+      assert.deepEqual(op.payload, { result: 'cancel', cancel_reason: null, note: null, auto: false, recorded_by: 6, edited_by: 6 })
     })
   })
 

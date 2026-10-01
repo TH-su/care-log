@@ -2,9 +2,9 @@
 //
 // 行＝在籍の入居者のうち、その月に入浴の予定か記録がある人（居室順）。退居された方も、その月に記録があれば行に出す
 //   （加算の根拠を紙に残すため。行に「退居」と表示。予定だけで記録の無い退居者は出さない・2026-09-26 チーフ裁定）。列＝その月の1日〜月末。
-// マス＝全（全身浴）／シ（シャワー浴）／部（部分浴・清拭）／訪（訪問介護で入浴・デイの休業日・0016）／中（中止）／未（予定があったのに記録なし）。
-// 自動で入った記録（0015 の cron・12:30）は記号に「*」を添える（「全*」。凡例「*＝自動」・2026-09-27 代表指示）。
-// 右端に月合計（全＋シ＝入浴介助加算の対象の見込み、部、中、訪問＝加算の見込みに数えない）。A4 横1枚で印刷できる（PrintArea）。
+// マス＝○（入浴した）／×（入浴していない）／未（予定があったのに記録なし）（2026-10-01 代表指示で2つに。
+// DB の区分は全身浴・シャワー浴・部分浴・清拭・訪問介護で入浴が○、中止が×）。自動で入った記録かどうかは出さない（同日の代表指示）。
+// 右端に月合計（入浴・入浴なし）。A4 横1枚で印刷できる（PrintArea）。
 //
 // 規律:
 // - 取得は db.ts の fetchAllResidents / fetchBathMonth / fetchBathPlan / fetchBathFirstDay のみ（月の範囲・1行でだけ引く）
@@ -28,6 +28,9 @@ import {
 import {
   aggregateBathMonth,
   BATH_MONTH_MISSING_MARK,
+  BATH_SHOWN_LABEL,
+  BATH_SHOWN_MARK,
+  bathShownOf,
   fmtCopyStamp,
   fmtMonthLabel,
   isoWeekdayIndex,
@@ -38,7 +41,6 @@ import {
 } from '../lib/bath'
 import type { BathMonthMark, BathMonthTable } from '../lib/bath'
 import { todayIso } from '../lib/format'
-import { AUTO_MARK, BATH_RESULT_LABEL, BATH_RESULT_MARK } from '../lib/types'
 import type { BathRecord, Resident } from '../lib/types'
 import { EmptyBlock, ErrorBlock, LoadingBlock, SectionCard } from '../components/ui'
 import { PrintArea, PrintButton } from '../components/print/PrintArea'
@@ -55,7 +57,7 @@ function missingNote(startDay: string | null): string {
   return `「未」は${from}以降・予定は現在の週間計画を当てはめた目安（過去の予定の変更・入院期間は反映されません。今日より後の日と、現在入院中の方には付けません）。`
 }
 const NOTE_NO_PLAN =
-  '入浴予定（週間計画の写し）を取得できないため、「未」は表示していません。記録（全・シ・部・訪・中）はそのまま正しく表示しています。'
+  '入浴予定（週間計画の写し）を取得できないため、「未」は表示していません。記録（○・×）はそのまま正しく表示しています。'
 
 /** その月の中で、曜日ごとに最初に来る日（予定は曜日ベースなので7回だけ問い合わせればよい） */
 function firstDayPerWeekday(monthKey: string): Map<number, string> {
@@ -67,21 +69,21 @@ function firstDayPerWeekday(monthKey: string): Map<number, string> {
   return out
 }
 
-/** マスの文字。自動で入った記録は「*」を添える（「全*」） */
-function markText(m: BathMonthMark, auto = false): string {
+/** マスの文字（○＝入浴した／×＝入浴していない／未） */
+function markText(m: BathMonthMark): string {
   if (m === null) return ''
   if (m === 'missing') return BATH_MONTH_MISSING_MARK
-  return `${BATH_RESULT_MARK[m]}${auto ? AUTO_MARK : ''}`
+  return BATH_SHOWN_MARK[bathShownOf(m)]
 }
 
-function markLabel(m: BathMonthMark, auto = false): string {
+function markLabel(m: BathMonthMark): string {
   if (m === null) return '記録なし'
   if (m === 'missing') return '予定あり・記録なし'
-  return `${BATH_RESULT_LABEL[m]}${auto ? '（自動）' : ''}`
+  return BATH_SHOWN_LABEL[bathShownOf(m)]
 }
 
 /** 凡例（画面と紙で同じ文） */
-const LEGEND = `全＝全身浴　シ＝シャワー浴　部＝部分浴・清拭　訪＝休業日に訪問介護で入浴（デイの加算対象外）　中＝中止　未＝予定あり・記録なし　${AUTO_MARK}＝自動`
+const LEGEND = `${BATH_SHOWN_MARK.bathed}＝${BATH_SHOWN_LABEL.bathed}　${BATH_SHOWN_MARK.notBathed}＝${BATH_SHOWN_LABEL.notBathed}　未＝予定あり・記録なし`
 
 interface Loaded {
   month: string
@@ -250,9 +252,6 @@ export function BathMonthPage() {
         <p className="mt-2 text-sm text-ink2">
           {LEGEND}（未は今日まで）
         </p>
-        <p className="mt-1 text-sm text-ink2">
-          合計の「全＋シ」は入浴介助加算の対象の見込みです（部分浴・清拭は対象外の可能性があるため別に数えます・要確認）。
-        </p>
         <p className="mt-1 text-sm">
           <Link to="/record/bath" className="inline-flex min-h-tap items-center text-link">
             入浴の記録を開く<span aria-hidden="true"> ›</span>
@@ -345,16 +344,10 @@ function MonthTable({ table, residentById, variant }: MonthTableProps) {
             </th>
           ))}
           <th scope="col" rowSpan={2} className={`${th} ${screen ? '' : 'cl-print-strong'}`}>
-            全＋シ
+            入浴
           </th>
           <th scope="col" rowSpan={2} className={th}>
-            部
-          </th>
-          <th scope="col" rowSpan={2} className={th}>
-            中
-          </th>
-          <th scope="col" rowSpan={2} className={th}>
-            訪問
+            入浴なし
           </th>
         </tr>
         <tr>
@@ -386,14 +379,14 @@ function MonthTable({ table, residentById, variant }: MonthTableProps) {
                   key={table.days[i]}
                   className={`${td} ${screen && m === 'missing' ? 'bg-warn-bg font-bold text-warn' : ''}`}
                 >
-                  <span aria-hidden="true">{markText(m, row.autos[i])}</span>
-                  <span className="sr-only">{`${Number(table.days[i].slice(8, 10))}日 ${markLabel(m, row.autos[i])}`}</span>
+                  <span aria-hidden="true">{markText(m)}</span>
+                  <span className="sr-only">{`${Number(table.days[i].slice(8, 10))}日 ${markLabel(m)}`}</span>
                 </td>
               ))}
-              <td className={`${td} ${screen ? 'font-bold' : 'cl-print-strong'}`}>{row.totals.billable}</td>
-              <td className={td}>{row.totals.partial}</td>
+              <td className={`${td} ${screen ? 'font-bold' : 'cl-print-strong'}`}>
+                {row.totals.billable + row.totals.partial + row.totals.visit}
+              </td>
               <td className={td}>{row.totals.cancel}</td>
-              <td className={td}>{row.totals.visit}</td>
             </tr>
           )
         })}

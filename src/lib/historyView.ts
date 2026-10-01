@@ -4,7 +4,7 @@
 
 import {
   BATH_CANCEL_REASON_LABEL,
-  BATH_RESULT_LABEL,
+  BATH_RESULTS,
   IMPORTANCE_LABEL,
   INCIDENT_KIND_LABEL,
   INCIDENT_OFFICE_LABEL,
@@ -41,6 +41,7 @@ import type {
   Shift,
 } from './types.ts'
 import { fmtDayLabel, fmtTimeHM } from './format.ts'
+import { BATH_SHOWN_LABEL, bathShownOf } from './bath.ts'
 import { fmtMealValue, fmtVitalValue } from './conflict.ts'
 
 /** 記録の種類（表 → 画面の呼び名） */
@@ -127,7 +128,7 @@ const TABLE_LABEL: Record<string, Record<string, string>> = {
   },
   bath_records: {
     bath_on: '入浴日',
-    result: '区分',
+    result: '入浴',
     cancel_reason: '中止の理由',
     note: '備考',
     auto: '記録の方法',
@@ -243,6 +244,8 @@ const HIDDEN_COLS = new Set(['id', 'created_at', 'client_key', 'import_key'])
 /** 列の日本語名。出さない列は null */
 export function historyColumnLabel(table: string, column: string): string | null {
   if (HIDDEN_COLS.has(column)) return null
+  // 自動で入った記録かどうか（auto）は出さない（2026-10-01 代表指示。画面のどこにも「自動」を出さない）
+  if ((table === 'bath_records' || table === 'med_admin') && column === 'auto') return null
   return TABLE_LABEL[table]?.[column] ?? COMMON_LABEL[column] ?? column
 }
 
@@ -281,13 +284,12 @@ export function fmtHistoryValue(
   if (table === 'notes' && column === 'shift') return SHIFT_LABEL[v as Shift] ?? String(v)
   if (table === 'notes' && column === 'importance') return IMPORTANCE_LABEL[v as Importance] ?? String(v)
   if (table === 'notes' && column === 'color') return NOTE_COLOR_LABEL[v as NoteColor] ?? String(v)
-  if (table === 'bath_records' && column === 'result') return BATH_RESULT_LABEL[v as BathResult] ?? String(v)
+  // 入浴は「入浴した／入浴していない」だけを出す（2026-10-01 代表指示。区分の違いは出さない）
+  if (table === 'bath_records' && column === 'result') {
+    return (BATH_RESULTS as readonly string[]).includes(String(v)) ? BATH_SHOWN_LABEL[bathShownOf(v as BathResult)] : String(v)
+  }
   if (table === 'bath_records' && column === 'cancel_reason') {
     return BATH_CANCEL_REASON_LABEL[v as BathCancelReason] ?? String(v)
-  }
-  // 自動で入った記録の印（0015）。true＝自動（cron が作った）／false＝手動（職員が記録・直した）
-  if ((table === 'bath_records' || table === 'med_admin') && column === 'auto' && typeof v === 'boolean') {
-    return v ? '自動' : '手動'
   }
   if (table === 'med_admin' && column === 'slot') return MED_SLOT_LABEL[v as MedAdminSlot] ?? String(v)
   if (table === 'med_admin' && column === 'status') return MED_STATUS_LABEL[v as MedStatus] ?? String(v)
