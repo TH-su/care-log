@@ -1519,9 +1519,9 @@ function MealsSection({ meals, fluids, outings, days, printing }: MealsSectionPr
         ],
         bands: [],
         refs: [{ y: LOW_INTAKE_MAX, label: `低摂取${LOW_INTAKE_MAX}`, className: 'stroke-warn' }],
-        legend: '0〜20（主食0〜10＋副食0〜10）。外出・入院・拒食の食事は除く',
+        legend: '0〜20（主食0〜10＋副食0〜10）。拒食は0、外出・入院の食事は除く',
         alertWord: `低摂取（${LOW_INTAKE_MAX}以下）の日`,
-        caption: '主食＋副食の1食あたりの日平均（新しい日が上。外出・入院・拒食の食事は除く）',
+        caption: '主食＋副食の1食あたりの日平均（新しい日が上。拒食は0、外出・入院の食事は除く）',
       },
       {
         key: 'fluid',

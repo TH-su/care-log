@@ -287,11 +287,12 @@ export function mealDays(meals: Meal[], fluids: FluidIntake[]): Map<string, Meal
 export const MEAL_CHART_SLOTS: MealSlot[] = ['breakfast', 'lunch', 'dinner']
 
 /**
- * 1食の主食＋副食（0〜20）。外出・入院・拒食や、主食・副食とも未記入の食事は null（＝平均に入れない。
- * 表の「▲低摂取」の判定 isLowIntake と同じ扱い）
+ * 1食の主食＋副食（0〜20）。拒食は実際に食べていないので 0 として数える（2026-10-08 本人裁定：食べられなくなる傾向を線に出す）。
+ * 外出・入院や、主食・副食とも未記入の食事は null（＝平均に入れない）
  */
 export function mealIntake(m: Meal | undefined): number | null {
   if (!m) return null
+  if (m.status === 'refused') return 0
   if (m.status && m.status !== 'eaten') return null
   const main = typeof m.main_amount === 'number' && Number.isFinite(m.main_amount) ? m.main_amount : null
   const side = typeof m.side_amount === 'number' && Number.isFinite(m.side_amount) ? m.side_amount : null

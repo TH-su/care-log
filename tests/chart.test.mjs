@@ -235,13 +235,14 @@ describe('食事・水分の集計（表とグラフで同じ）', () => {
     assert.equal(byDay.get('2026-10-02').meals.size, 0)
   })
 
-  it('1食の主食＋副食は 0〜20。外出・入院・拒食・未記入は数えない', () => {
+  it('1食の主食＋副食は 0〜20。拒食は 0。外出・入院・未記入は数えない', () => {
     assert.ok(C, '部品が無い')
     assert.equal(C.mealIntake(meal(1, 'd', 'lunch', 3, 2)), 5)
     assert.equal(C.mealIntake(meal(1, 'd', 'lunch', null, 4)), 4)
     assert.equal(C.mealIntake(meal(1, 'd', 'lunch', 10, 10, null)), 20)
     assert.equal(C.mealIntake(meal(1, 'd', 'lunch', null, null)), null)
-    assert.equal(C.mealIntake(meal(1, 'd', 'lunch', 0, 0, 'refused')), null)
+    assert.equal(C.mealIntake(meal(1, 'd', 'lunch', 0, 0, 'refused')), 0)
+    assert.equal(C.mealIntake(meal(1, 'd', 'lunch', null, null, 'refused')), 0)
     assert.equal(C.mealIntake(meal(1, 'd', 'lunch', 5, 5, 'out')), null)
     assert.equal(C.mealIntake(undefined), null)
   })
