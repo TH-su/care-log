@@ -13,6 +13,8 @@
 // - console 出力を持たない（個人情報の漏出経路を作らない）
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import type { RefObject } from 'react'
+import { flushSync } from 'react-dom'
 import { Link, useParams } from 'react-router-dom'
 import { diffHistoryRow, fetchKarte, fetchRecordHistory, fetchResidents, fetchStaff } from '../lib/db'
 import type { RecordHistoryEntry } from '../lib/db'
@@ -27,6 +29,23 @@ import {
 import { addDays, fmtDayLabel, fmtTimeHM, isoDate, todayIso } from '../lib/format'
 import { typesText } from '../lib/incident'
 import { BATH_SHOWN_LABEL, bathShownOf } from '../lib/bath'
+import {
+  chartDomain,
+  chartHeight,
+  chartTicks,
+  CHART_H_MIN,
+  CHART_H_PRINT,
+  fluidSeries,
+  KARTE_AXES,
+  layoutAxisLabels,
+  LOW_INTAKE_MAX,
+  mealDays,
+  mealIntakeSeries,
+  offRangeSpeech,
+  offRangeText,
+  splitThresholds,
+} from '../lib/chart'
+import type { AxisSpec } from '../lib/chart'
 import {
   fetchWeights,
   fmtKg,
@@ -113,11 +132,32 @@ const DEFAULT_RANGE: RangeKey = '14d'
 const DAY_CAP = 400
 
 // グラフの寸法（CSS px と 1:1 の viewBox で描くため、44px ヒット領域が実寸になる）
-const CHART_H = 160
-const PAD_L = 48
+// 高さは画面の高さから決める（lib/chart.ts の chartHeight・200〜360px。印刷は今までと同じ 160px）。
+// 左・上・下の余白は文字の大きさに合わせて広げる（文字200%でも目盛・しきい値の数字が切れない）。文字100%では今までと同じ値
+const PAD_L_MIN = 48
 const PAD_R = 12
-const PAD_T = 12
-const PAD_B = 22
+const PAD_T_MIN = 12
+const PAD_B_MIN = 22
+/** 軸の文字（text-2xs）の大きさを測れない時の値（px） */
+const AXIS_FS_DEFAULT = 13
+/** 左の列の文字と縦軸の間（期間の最初の日の大きい点＝半径4.5px に文字が掛からない幅） */
+const AXIS_LABEL_GAP = 6
+/** 左の列でいちばん幅を取る文字（範囲外のしきい値「上151↑」）。この幅を実測して左の余白にする */
+const AXIS_PROBE_TEXT = '上151↑'
+/** 日付の文字でいちばん幅を取る形。期間の両端の日付が1行に並ぶかをこの幅で決める */
+const DATE_PROBE_TEXT = '12/31（水）'
+/** 曜日を省いた短い日付（幅の足りない時に使う）の最大幅の見本 */
+const DATE_SHORT_PROBE_TEXT = '12/31'
+/** 点の脇の記号の1文字の幅を測る見本（↑↓▲ は全角の幅で描かれる） */
+const MARK_PROBE_TEXT = '↑↑'
+/** 印刷の直前にグラフの幅を測り直させる合図（グラフの欄を今までの幅へ戻した後に出す） */
+const KARTE_REMEASURE_EVENT = 'cl-karte-remeasure'
+/** 文字の欄の幅（今までのカルテと同じ） */
+const LANE = 'mx-auto w-full max-w-2xl px-4'
+/** グラフの欄の幅（広い画面では画面幅まで広げる・最大 1152px。印刷は今までの幅） */
+const LANE_WIDE = 'mx-auto w-full max-w-6xl px-4 print:max-w-2xl'
+/** 広い画面（下のナビが消え、左の縦ナビになる幅）。グラフを1画面に2枚収める */
+const WIDE_QUERY = '(min-width: 1024px)'
 const CHART_MIN_W = 240
 const CHART_DEFAULT_W = 640
 const POINT_R = 3
@@ -243,6 +283,12 @@ function lineSegments(days: string[], values: Map<string, number>): { i: number;
 
 function fmtNum(v: number, digits: number): string {
   return v.toFixed(digits)
+}
+
+/** 曜日を省いた日付「9/25」（グラフの両端の日付が狭い画面で並ばない時だけ使う） */
+function fmtDayShort(iso: string): string {
+  const m = /^\d{4}-(\d{2})-(\d{2})$/.exec(iso)
+  return m ? `${Number(m[1])}/${Number(m[2])}` : fmtDayLabel(iso)
 }
 
 /** 外出・外泊がその日にかかっているか（帰着未定＝end_on null は開始日以降ずっと継続中とみなす） */
@@ -462,6 +508,10 @@ interface SeriesSpec {
   /** 2本目の系列は破線にして色以外でも区別できるようにする */
   dashed?: boolean
   level(v: number | null): Level
+  /** しきい値を外れた点の脇の記号（未指定は LEVEL_MARK の ↑↓。食事は表と同じ ▲） */
+  levelMark?: string
+  /** タップした値の表示で記号の代わりに出す言葉（未指定は levelMark／LEVEL_MARK） */
+  levelLabel?: string
 }
 
 interface BandSpec {
@@ -485,8 +535,8 @@ interface PanelSpec {
   title: string
   unit: string
   digits: number
-  /** 基準の表示範囲。実データがはみ出す場合は広げる */
-  base: [number, number]
+  /** 縦軸（記録の値に合わせて拡大する範囲・最小の幅・目盛の刻み。lib/chart.ts の KARTE_AXES） */
+  axis: AxisSpec
   series: SeriesSpec[]
   bands: BandSpec[]
   refs: RefLineSpec[]
@@ -495,38 +545,117 @@ interface PanelSpec {
   noLevels?: boolean
   /** 数値表の読み上げ用の説明（未指定はバイタルの既定文） */
   caption?: string
+  /** 読み上げの「しきい値を外れた記録」の言い換え（食事は「低摂取（6以下）の日」） */
+  alertWord?: string
 }
 
-/** コンテナ幅を実測する（viewBox を CSS px と 1:1 にしてヒット領域を実寸にするため） */
-function useElementWidth() {
+/** グラフを描く枠の実測値（幅・軸の文字の大きさ・左の列でいちばん長い文字の幅・画面の高さから決めたグラフの高さ） */
+interface ChartBox {
+  width: number
+  fs: number
+  labelW: number
+  /** 日付1つの幅（DATE_PROBE_TEXT） */
+  dateW: number
+  /** 曜日を省いた日付1つの幅（DATE_SHORT_PROBE_TEXT） */
+  dateShortW: number
+  /** 点の脇の記号1文字の幅 */
+  markCharW: number
+  h: number
+}
+
+/**
+ * コンテナ幅と軸の文字の大きさを実測する（viewBox を CSS px と 1:1 にしてヒット領域を実寸にするため）。
+ * 文字の大きさは枠の中に置いた見えない見本（AXIS_PROBE_TEXT・text-2xs）で測る（端末の文字サイズ設定に追従する）。
+ * グラフの高さも同じ時に測る（画面の回転・文字の大きさの変更で見本・枠・画面の大きさが変わった時）。
+ * 印刷の直前は KARTE_REMEASURE_EVENT で同期して測り直す（印刷の割り付けより先に今までの幅へ戻すため）
+ */
+function useChartBox() {
   const ref = useRef<HTMLDivElement>(null)
-  const [width, setWidth] = useState(CHART_DEFAULT_W)
+  const probeRef = useRef<HTMLSpanElement>(null)
+  const [box, setBox] = useState<ChartBox>({
+    width: CHART_DEFAULT_W,
+    fs: AXIS_FS_DEFAULT,
+    labelW: 0,
+    dateW: 0,
+    dateShortW: 0,
+    markCharW: AXIS_FS_DEFAULT,
+    h: CHART_H_MIN,
+  })
   useEffect(() => {
     const el = ref.current
     if (!el) return
     const update = () => {
       const w = Math.round(el.getBoundingClientRect().width)
-      setWidth(Math.max(CHART_MIN_W, w || CHART_DEFAULT_W))
+      const probe = probeRef.current
+      const fsRaw = probe ? parseFloat(getComputedStyle(probe).fontSize) : NaN
+      const fs = Number.isFinite(fsRaw) && fsRaw > 0 ? fsRaw : AXIS_FS_DEFAULT
+      const partW = (k: number) => {
+        const part = probe?.children[k]
+        return part ? Math.ceil(part.getBoundingClientRect().width) : 0
+      }
+      const next: ChartBox = {
+        width: Math.max(CHART_MIN_W, w || CHART_DEFAULT_W),
+        fs,
+        labelW: partW(0),
+        dateW: partW(1) || Math.ceil(fs * 5.5),
+        dateShortW: partW(3) || Math.ceil(fs * 3),
+        markCharW: partW(2) / 2 || fs,
+        h: measureChartH(document.querySelector<HTMLElement>('[data-karte-bar]')),
+      }
+      setBox((prev) =>
+        (Object.keys(next) as (keyof ChartBox)[]).every((k) => prev[k] === next[k]) ? prev : next,
+      )
     }
+    const updateNow = () => flushSync(update)
     update()
-    if (typeof ResizeObserver === 'undefined') {
-      window.addEventListener('resize', update)
-      return () => window.removeEventListener('resize', update)
+    window.addEventListener(KARTE_REMEASURE_EVENT, updateNow)
+    window.addEventListener('resize', update)
+    let ro: ResizeObserver | null = null
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(update)
+      ro.observe(el)
+      if (probeRef.current) ro.observe(probeRef.current)
+      // 氏名バー・アプリのヘッダの高さが変わった時（文字の大きさ・幅で折り返す）も高さを測り直す
+      const bar = document.querySelector<HTMLElement>('[data-karte-bar]')
+      if (bar) ro.observe(bar)
+      const shell = findShellHeader()
+      if (shell) ro.observe(shell)
     }
-    const ro = new ResizeObserver(update)
-    ro.observe(el)
-    return () => ro.disconnect()
+    return () => {
+      ro?.disconnect()
+      window.removeEventListener('resize', update)
+      window.removeEventListener(KARTE_REMEASURE_EVENT, updateNow)
+    }
   }, [])
-  return { ref, width }
+  return { ref, probeRef, box }
+}
+
+/** 軸の文字の大きさ・幅を測る見本（見えない・読み上げない・押せない）。並びは useChartBox の partW の番号と対応 */
+function AxisProbe({ probeRef }: { probeRef: RefObject<HTMLSpanElement> }) {
+  return (
+    <span
+      ref={probeRef}
+      aria-hidden="true"
+      className="pointer-events-none invisible absolute left-0 top-0 whitespace-nowrap text-2xs"
+    >
+      <span className="font-bold">{AXIS_PROBE_TEXT}</span>
+      <span>{DATE_PROBE_TEXT}</span>
+      <span>{MARK_PROBE_TEXT}</span>
+      <span>{DATE_SHORT_PROBE_TEXT}</span>
+    </span>
+  )
 }
 
 interface VitalChartProps {
   panel: PanelSpec
   days: string[]
-  width: number
+  box: ChartBox
+  /** グラフの高さ（px）。height と viewBox の両方に渡す */
+  height: number
 }
 
-function VitalChart({ panel, days, width }: VitalChartProps) {
+function VitalChart({ panel, days, box, height }: VitalChartProps) {
+  const { width, fs, labelW, dateW, dateShortW, markCharW } = box
   const [selected, setSelected] = useState<number | null>(null)
   const svgRef = useRef<SVGSVGElement>(null)
 
@@ -535,43 +664,86 @@ function VitalChart({ panel, days, width }: VitalChartProps) {
     setSelected(null)
   }, [panel.key, days.length])
 
-  const plotW = Math.max(1, width - PAD_L - PAD_R)
-  const plotH = CHART_H - PAD_T - PAD_B
+  // 余白は文字の大きさに合わせる（文字100%では今までの 48/12/22。左は「上151↑」の実測幅＋目盛との間隔）
+  const padL = Math.max(PAD_L_MIN, labelW + AXIS_LABEL_GAP + 2)
+  const padT = Math.max(PAD_T_MIN, Math.ceil(fs * 0.7) + 2)
+  const padB = Math.max(PAD_B_MIN, Math.ceil(fs * 1.25) + 2)
+  /** 左の列の文字1行ぶんの高さ（これより近い文字は並べない） */
+  const lineH = Math.ceil(fs * 1.2)
+  /** 文字の中心から並べる基準線までのずれ（text-2xs 13px で今までの +4） */
+  const baselineDy = Math.round(fs * 0.3)
+  const dateDy = Math.max(6, Math.ceil(fs * 0.35))
+  // 期間の両端の日付が1行に並ばない幅（文字を大きくした狭い画面）では曜日を省き、それでも並ばなければ終わりの日付を2行目に回す
+  const dateRoom = width - padL - PAD_R
+  const datesShort = dateRoom < dateW * 2 + 8
+  const datesTwoRows = datesShort && dateRoom < dateShortW * 2 + 8
+  const dateText = (iso: string) => (datesShort ? fmtDayShort(iso) : fmtDayLabel(iso))
+  const plotW = Math.max(1, width - padL - PAD_R)
+  const plotH = Math.max(1, height - padT - padB - (datesTwoRows ? lineH : 0))
   const n = days.length
 
+  // 縦軸は記録の値に合わせて拡大する（しきい値・帯は範囲に入れない。範囲外のしきい値は軸の端に「38.1↑」で示す）
   const domain = useMemo<[number, number]>(() => {
-    let lo = panel.base[0]
-    let hi = panel.base[1]
-    for (const s of panel.series) {
-      for (const v of s.values.values()) {
-        if (v < lo) lo = v
-        if (v > hi) hi = v
-      }
-    }
-    for (const b of panel.bands) {
-      if (b.labelAt < lo) lo = b.labelAt
-      if (b.labelAt > hi) hi = b.labelAt
-    }
-    for (const r of panel.refs) {
-      if (r.y < lo) lo = r.y
-      if (r.y > hi) hi = r.y
-    }
-    const margin = (hi - lo) * 0.08 || 1
-    return [lo - margin, hi + margin]
+    const vals: number[] = []
+    for (const s of panel.series) for (const v of s.values.values()) vals.push(v)
+    return chartDomain(vals, panel.axis)
   }, [panel])
 
   const x = useCallback(
-    (i: number) => (n <= 1 ? PAD_L + plotW / 2 : PAD_L + (i * plotW) / (n - 1)),
-    [n, plotW],
+    (i: number) => (n <= 1 ? padL + plotW / 2 : padL + (i * plotW) / (n - 1)),
+    [n, plotW, padL],
   )
   const y = useCallback(
     (v: number) => {
       const span = domain[1] - domain[0] || 1
-      const raw = PAD_T + (1 - (v - domain[0]) / span) * plotH
-      return Math.min(PAD_T + plotH, Math.max(PAD_T, raw))
+      const raw = padT + (1 - (v - domain[0]) / span) * plotH
+      return Math.min(padT + plotH, Math.max(padT, raw))
     },
-    [domain, plotH],
+    [domain, plotH, padT],
   )
+
+  /** しきい値（帯の端・基準線）を範囲の内と外に分ける */
+  const thresholds = useMemo(
+    () =>
+      splitThresholds(
+        [
+          ...panel.bands.map((b) => ({ value: b.labelAt, label: b.label })),
+          ...panel.refs.map((r) => ({ value: r.y, label: r.label })),
+        ],
+        domain,
+      ),
+    [panel, domain],
+  )
+
+  /** 目盛（区切りのよい値。文字が重なる間隔なら刻みを広げる） */
+  const ticks = useMemo(
+    () => chartTicks(domain, panel.axis.step, plotH, Math.max(28, lineH * 1.6)),
+    [domain, panel.axis.step, plotH, lineH],
+  )
+  const tickDigits = ticks.step < 1 ? 1 : 0
+
+  /**
+   * 左の列の文字の位置。しきい値の文字（範囲内は帯の端・基準線の高さ、範囲外は軸の上端・下端から内側へ積む）を
+   * 優先して全部出し、それに近い目盛の数字は出さない（重なりを作らない）
+   */
+  const axisLabels = useMemo(() => {
+    const fixed: { text: string; y: number }[] = []
+    for (const m of thresholds.inside) fixed.push({ text: m.label, y: y(m.value) })
+    thresholds.above.forEach((m, k) => fixed.push({ text: offRangeText(m.label, 'above'), y: padT + k * lineH }))
+    thresholds.below.forEach((m, k) => fixed.push({ text: offRangeText(m.label, 'below'), y: padT + plotH - k * lineH }))
+    const tickYs = ticks.values.map((v) => y(v))
+    const placed = layoutAxisLabels(
+      fixed.map((f) => f.y),
+      tickYs,
+      lineH,
+      padT,
+      padT + plotH,
+    )
+    return {
+      fixed: fixed.map((f, i) => ({ text: f.text, y: placed.fixed[i] })),
+      ticks: placed.ticks.map((i) => ({ text: fmtNum(ticks.values[i], tickDigits), y: tickYs[i] })),
+    }
+  }, [thresholds, ticks, tickDigits, y, padT, plotH, lineH])
 
   /** 記録がある日（タップで選べる日＝pickNearest の候補） */
   const filledIdx = useMemo(() => {
@@ -584,6 +756,40 @@ function VitalChart({ panel, days, width }: VitalChartProps) {
 
   const gap = n <= 1 ? plotW : plotW / (n - 1)
   const showMarks = gap >= MARK_MIN_GAP
+
+  /**
+   * 点の脇の記号（しきい値を外れた点）。隣の日の記号と重なるものは描かない（点の大きさ・色とタップした値・数値表で補う）。
+   * 左右の端の点は記号を枠の内側へ寄せ、上端に近い点は記号を点の下に置く（切れないように）
+   */
+  const marks = useMemo(() => {
+    const out: { key: string; x: number; y: number; text: string; cls: string }[] = []
+    if (!showMarks) return out
+    const boxes: [number, number, number, number][] = []
+    for (const s of panel.series) {
+      days.forEach((d, i) => {
+        const v = s.values.get(d)
+        if (v == null) return
+        const lv = s.level(v)
+        if (!lv) return
+        const text = s.levelMark ?? LEVEL_MARK[lv]
+        const w = Math.ceil(text.length * markCharW) + 2
+        const cx = Math.min(width - w / 2, Math.max(padL + w / 2, x(i)))
+        let base = y(v) - 7
+        if (base - fs < 0) base = y(v) + 7 + Math.ceil(fs * 0.8)
+        const b: [number, number, number, number] = [cx - w / 2, cx + w / 2, base - fs, base + fs * 0.25]
+        if (boxes.some((o) => o[0] < b[1] && b[0] < o[1] && o[2] < b[3] && b[2] < o[3])) return
+        boxes.push(b)
+        out.push({
+          key: `${s.label}-mk-${d}`,
+          x: cx,
+          y: base,
+          text,
+          cls: lv === 'danger-low' ? 'fill-info' : lv === 'danger-high' ? 'fill-danger' : 'fill-warn',
+        })
+      })
+    }
+    return out
+  }, [showMarks, panel, days, markCharW, width, padL, x, y, fs])
 
   /**
    * タップ位置にいちばん近いデータ点を選ぶ。
@@ -624,7 +830,7 @@ function VitalChart({ panel, days, width }: VitalChartProps) {
       const v = s.values.get(day)
       if (v == null) return `${s.label} —（未測定）`
       const lv = s.level(v)
-      return `${s.label} ${fmtNum(v, panel.digits)}${panel.unit}${lv ? ` ${LEVEL_MARK[lv]}` : ''}`
+      return `${s.label} ${fmtNum(v, panel.digits)}${panel.unit}${lv ? ` ${s.levelLabel ?? s.levelMark ?? LEVEL_MARK[lv]}` : ''}`
     })
     return `${fmtDayLabel(day)}　${parts.join('　')}`
   }, [selected, days, panel])
@@ -638,12 +844,14 @@ function VitalChart({ panel, days, width }: VitalChartProps) {
         const max = Math.max(...vals)
         const min = Math.min(...vals)
         const alerts = vals.filter((v) => s.level(v) != null).length
-        const tail = panel.noLevels ? '' : `、しきい値を外れた記録${alerts}件`
+        const tail = panel.noLevels ? '' : `、${panel.alertWord ?? 'しきい値を外れた記録'}${alerts}件`
         return `${s.label}は記録${vals.length}件、最高${fmtNum(max, panel.digits)}${panel.unit}、最低${fmtNum(min, panel.digits)}${panel.unit}${tail}。`
       })
       .join('')
-    return `${head}${body}詳しい数値はこの下の「数値の表を開く」で確認できます。`
-  }, [panel, days])
+    // 範囲外のしきい値は SVG の中の文字（role=img のため読み上げられない）と同じことを言葉で伝える
+    const off = offRangeSpeech(thresholds.above, thresholds.below)
+    return `${head}${body}${off}詳しい数値はこの下の「数値の表を開く」で確認できます。`
+  }, [panel, days, thresholds])
 
   return (
     <div>
@@ -652,62 +860,84 @@ function VitalChart({ panel, days, width }: VitalChartProps) {
         role="img"
         aria-label={ariaLabel}
         width={width}
-        height={CHART_H}
-        viewBox={`0 0 ${width} ${CHART_H}`}
+        height={height}
+        viewBox={`0 0 ${width} ${height}`}
         className="block"
         onClick={(e) => pickNearest(e.clientX)}
       >
-        {/* しきい値帯（半透明の面）＋帯端の数値ラベル */}
+        {/* しきい値帯（半透明の面）。表示範囲の外にはみ出す部分は切る（y が範囲の端で止まる） */}
         {panel.bands.map((b) => {
           const yTop = y(Math.max(b.hi, b.lo))
           const yBottom = y(Math.min(b.hi, b.lo))
           const h = Math.max(0, yBottom - yTop)
           if (h <= 0) return null
-          return (
-            <g key={`band-${b.label}`}>
-              <rect x={PAD_L} y={yTop} width={plotW} height={h} className={b.className} />
-              <text
-                x={PAD_L - 4}
-                y={y(b.labelAt) + 4}
-                textAnchor="end"
-                className="text-2xs fill-ink2"
-              >
-                {b.label}
-              </text>
-            </g>
-          )
+          return <rect key={`band-${b.label}`} x={padL} y={yTop} width={plotW} height={h} className={b.className} />
         })}
 
-        {/* しきい値の基準線（帯にすると別系列の正常値まで塗ってしまう指標に使う） */}
-        {panel.refs.map((r) => (
-          <g key={`ref-${r.label}`}>
+        {/* 目盛の線（区切りのよい値） */}
+        {ticks.values.map((v) => (
+          <line
+            key={`grid-${v}`}
+            x1={padL}
+            x2={padL + plotW}
+            y1={y(v)}
+            y2={y(v)}
+            className="stroke-1 stroke-border"
+          />
+        ))}
+
+        {/* しきい値の基準線（帯にすると別系列の正常値まで塗ってしまう指標に使う）。範囲外の線は描かず軸の端に数値で示す */}
+        {panel.refs
+          .filter((r) => r.y >= domain[0] && r.y <= domain[1])
+          .map((r) => (
             <line
-              x1={PAD_L}
-              x2={PAD_L + plotW}
+              key={`ref-${r.label}`}
+              x1={padL}
+              x2={padL + plotW}
               y1={y(r.y)}
               y2={y(r.y)}
               strokeDasharray="4 3"
               className={`stroke-1 ${r.className}`}
             />
-            <text x={PAD_L - 4} y={y(r.y) + 4} textAnchor="end" className="text-2xs fill-ink2">
-              {r.label}
-            </text>
-          </g>
+          ))}
+
+        {/* 左の列: しきい値の数値（範囲外は「38.1↑」「35.5↓」＝しきい値がその向きにある）と目盛の数値 */}
+        {axisLabels.fixed.map((l) => (
+          <text
+            key={`th-${l.text}`}
+            x={padL - AXIS_LABEL_GAP}
+            y={l.y + baselineDy}
+            textAnchor="end"
+            className="text-2xs font-bold fill-ink2"
+          >
+            {l.text}
+          </text>
+        ))}
+        {axisLabels.ticks.map((l) => (
+          <text
+            key={`tick-${l.text}`}
+            x={padL - AXIS_LABEL_GAP}
+            y={l.y + baselineDy}
+            textAnchor="end"
+            className="tabular text-2xs fill-ink2"
+          >
+            {l.text}
+          </text>
         ))}
 
         {/* 外枠（下辺・左辺） */}
         <line
-          x1={PAD_L}
-          x2={PAD_L + plotW}
-          y1={PAD_T + plotH}
-          y2={PAD_T + plotH}
+          x1={padL}
+          x2={padL + plotW}
+          y1={padT + plotH}
+          y2={padT + plotH}
           className="stroke-1 stroke-border"
         />
         <line
-          x1={PAD_L}
-          x2={PAD_L}
-          y1={PAD_T}
-          y2={PAD_T + plotH}
+          x1={padL}
+          x2={padL}
+          y1={padT}
+          y2={padT + plotH}
           className="stroke-1 stroke-border"
         />
 
@@ -716,8 +946,8 @@ function VitalChart({ panel, days, width }: VitalChartProps) {
           <line
             x1={x(selected)}
             x2={x(selected)}
-            y1={PAD_T}
-            y2={PAD_T + plotH}
+            y1={padT}
+            y2={padT + plotH}
             className="stroke-1 stroke-border-strong"
           />
         ) : null}
@@ -742,41 +972,40 @@ function VitalChart({ panel, days, width }: VitalChartProps) {
             if (v == null) return null
             const lv = s.level(v)
             return (
-              <g key={`${s.label}-pt-${d}`}>
-                <circle
-                  cx={x(i)}
-                  cy={y(v)}
-                  r={lv || selected === i ? POINT_R_ALERT : POINT_R}
-                  className={lv ? LEVEL_POINT_FILL[lv] : s.fillClass}
-                />
-                {lv && showMarks ? (
-                  <text
-                    x={x(i)}
-                    y={y(v) - 7}
-                    textAnchor="middle"
-                    className={`text-2xs ${lv === 'danger-low' ? 'fill-info' : lv === 'danger-high' ? 'fill-danger' : 'fill-warn'}`}
-                  >
-                    {LEVEL_MARK[lv]}
-                  </text>
-                ) : null}
-              </g>
+              <circle
+                key={`${s.label}-pt-${d}`}
+                cx={x(i)}
+                cy={y(v)}
+                r={lv || selected === i ? POINT_R_ALERT : POINT_R}
+                className={lv ? LEVEL_POINT_FILL[lv] : s.fillClass}
+              />
             )
           }),
         )}
+        {marks.map((m) => (
+          <text key={m.key} x={m.x} y={m.y} textAnchor="middle" className={`text-2xs ${m.cls}`}>
+            {m.text}
+          </text>
+        ))}
 
         {/* 期間の両端の日付 */}
         {days.length > 0 ? (
           <>
-            <text x={PAD_L} y={CHART_H - 6} textAnchor="start" className="text-2xs fill-ink3">
-              {fmtDayLabel(days[0])}
+            <text
+              x={padL}
+              y={height - dateDy - (datesTwoRows ? lineH : 0)}
+              textAnchor="start"
+              className="text-2xs fill-ink3"
+            >
+              {dateText(days[0])}
             </text>
             <text
-              x={PAD_L + plotW}
-              y={CHART_H - 6}
+              x={padL + plotW}
+              y={height - dateDy}
               textAnchor="end"
               className="text-2xs fill-ink3"
             >
-              {fmtDayLabel(days[days.length - 1])}
+              {dateText(days[days.length - 1])}
             </text>
           </>
         ) : null}
@@ -784,8 +1013,8 @@ function VitalChart({ panel, days, width }: VitalChartProps) {
         {/* タップ判定の受け皿（グラフ全面。押した位置から最も近いデータ点を選ぶ＝pickNearest）。
             日ごとに矩形を置くと期間が長いとき判定域が重なって隣の日を選んでしまうため、面で受ける */}
         <rect
-          x={PAD_L}
-          y={PAD_T}
+          x={padL}
+          y={padT}
           width={plotW}
           height={plotH}
           className="fill-transparent"
@@ -803,11 +1032,12 @@ function VitalChart({ panel, days, width }: VitalChartProps) {
 interface VitalPanelProps {
   panel: PanelSpec
   days: string[]
-  width: number
+  box: ChartBox
+  height: number
 }
 
 /** 1指標のパネル（見出し＋グラフ＋数値表フォールバック） */
-function VitalPanel({ panel, days, width }: VitalPanelProps) {
+function VitalPanel({ panel, days, box, height }: VitalPanelProps) {
   // 表は開いたときに組み立てる（1年表示×4パネルで数千ノードになるのを避ける）
   const [tableOpen, setTableOpen] = useState(false)
   const rows = useMemo(
@@ -819,7 +1049,7 @@ function VitalPanel({ panel, days, width }: VitalPanelProps) {
     <div className="mt-4 border-t border-border pt-3">
       <div className="flex flex-wrap items-baseline gap-gap">
         <h3 className="text-lg font-bold text-ink">{panel.title}</h3>
-        <span className="text-sm text-ink2">単位 {panel.unit}</span>
+        {panel.unit ? <span className="text-sm text-ink2">単位 {panel.unit}</span> : null}
         {panel.legend ? <span className="text-sm text-ink2">{panel.legend}</span> : null}
       </div>
       {rows.length === 0 ? (
@@ -829,7 +1059,7 @@ function VitalPanel({ panel, days, width }: VitalPanelProps) {
         </p>
       ) : (
         <>
-          <VitalChart panel={panel} days={days} width={width} />
+          <VitalChart panel={panel} days={days} box={box} height={height} />
           <details
             className="mt-2"
             onToggle={(e) => setTableOpen((e.currentTarget as HTMLDetailsElement).open)}
@@ -888,10 +1118,13 @@ interface VitalsSectionProps {
   days: string[]
   /** 体重のパネル（2026-09-27 追加）。既存4パネルの後ろに足すだけ。取得できていない時は null */
   weightPanel?: PanelSpec | null
+  /** 印刷中（グラフは今までと同じ高さ 160px で描く） */
+  printing: boolean
 }
 
-function VitalsSection({ vitals, days, weightPanel }: VitalsSectionProps) {
-  const { ref, width } = useElementWidth()
+function VitalsSection({ vitals, days, weightPanel, printing }: VitalsSectionProps) {
+  const { ref, probeRef, box } = useChartBox()
+  const chartH = printing ? CHART_H_PRINT : box.h
 
   const panels = useMemo<PanelSpec[]>(() => {
     const sorted = vitals.slice().sort(cmpVitalAsc)
@@ -906,7 +1139,7 @@ function VitalsSection({ vitals, days, weightPanel }: VitalsSectionProps) {
         title: '体温',
         unit: '℃',
         digits: 1,
-        base: [35, 39],
+        axis: KARTE_AXES.temp,
         series: [
           {
             label: '体温',
@@ -928,7 +1161,7 @@ function VitalsSection({ vitals, days, weightPanel }: VitalsSectionProps) {
         title: '血圧',
         unit: 'mmHg',
         digits: 0,
-        base: [40, 180],
+        axis: KARTE_AXES.bp,
         // 上下2線が同じ目盛りを共有するため、下の正常値まで塗ってしまう帯は使わず基準線にする。
         // 面で示すのは「上151以上＝どちらの系列でも危険高値」の領域だけ。
         series: [
@@ -961,7 +1194,7 @@ function VitalsSection({ vitals, days, weightPanel }: VitalsSectionProps) {
         title: '脈拍',
         unit: '回/分',
         digits: 0,
-        base: [40, 120],
+        axis: KARTE_AXES.pulse,
         series: [
           {
             label: '脈拍',
@@ -982,7 +1215,7 @@ function VitalsSection({ vitals, days, weightPanel }: VitalsSectionProps) {
         title: 'SpO2（経皮的動脈血酸素飽和度）',
         unit: '%',
         digits: 0,
-        base: [88, 100],
+        axis: KARTE_AXES.spo2,
         series: [
           {
             label: 'SpO2',
@@ -1009,15 +1242,16 @@ function VitalsSection({ vitals, days, weightPanel }: VitalsSectionProps) {
         しきい値の帯・基準線は数値を併記しています。記録がない日は線を切って表示します（間を結びません）。
         同じ日に複数回の記録がある場合は定時測定を優先して1日1点で表示します。
       </p>
-      <div ref={ref}>
+      <div ref={ref} className="relative">
+        <AxisProbe probeRef={probeRef} />
         {!hasAny ? (
           <div className="mt-3">
             <EmptyBlock message="この期間のバイタル記録はありません。期間を広げてお試しください。" />
           </div>
         ) : (
-          panels.map((p) => <VitalPanel key={p.key} panel={p} days={days} width={width} />)
+          panels.map((p) => <VitalPanel key={p.key} panel={p} days={days} box={box} height={chartH} />)
         )}
-        {weightPanel ? <VitalPanel panel={weightPanel} days={days} width={width} /> : null}
+        {weightPanel ? <VitalPanel panel={weightPanel} days={days} box={box} height={chartH} /> : null}
       </div>
     </SectionCard>
   )
@@ -1039,15 +1273,12 @@ function buildWeightPanel(list: WeightEntry[], fromIso: string, toIso: string): 
   for (const e of list) {
     if (e.date >= fromIso && e.date <= toIso) values.set(e.date, e.weight)
   }
-  const vals = Array.from(values.values())
-  const lo = vals.length > 0 ? Math.floor(Math.min(...vals)) - 2 : 40
-  const hi = vals.length > 0 ? Math.ceil(Math.max(...vals)) + 2 : 60
   return {
     key: 'weight',
     title: '体重',
     unit: 'kg',
     digits: 1,
-    base: [lo, hi],
+    axis: KARTE_AXES.weight,
     series: [
       {
         label: '体重',
@@ -1243,26 +1474,16 @@ interface MealsSectionProps {
   fluids: FluidIntake[]
   outings: Outing[]
   days: string[]
+  /** 印刷中（グラフは今までと同じ高さ 160px で描く） */
+  printing: boolean
 }
 
-function MealsSection({ meals, fluids, outings, days }: MealsSectionProps) {
+function MealsSection({ meals, fluids, outings, days, printing }: MealsSectionProps) {
+  const { ref, probeRef, box } = useChartBox()
+  const chartH = printing ? CHART_H_PRINT : box.h
+  // 日ごとの食事（同じ枠に複数行がある場合は id の大きい＝後から入った行）と水分の合計。表とグラフで同じ集計を使う
+  const byDay = useMemo(() => mealDays(meals, fluids), [meals, fluids])
   const rows = useMemo(() => {
-    const byDay = new Map<string, { meals: Map<MealSlot, Meal>; fluid: number | null }>()
-    for (const m of meals) {
-      if (typeof m.meal_on !== 'string') continue
-      const cell = byDay.get(m.meal_on) ?? { meals: new Map<MealSlot, Meal>(), fluid: null }
-      // 同じ枠に複数行がある場合は id の大きい（後から入った）行を採る
-      const prev = cell.meals.get(m.meal_slot)
-      if (!prev || m.id > prev.id) cell.meals.set(m.meal_slot, m)
-      byDay.set(m.meal_on, cell)
-    }
-    for (const f of fluids) {
-      if (typeof f.taken_on !== 'string') continue
-      const cell = byDay.get(f.taken_on) ?? { meals: new Map<MealSlot, Meal>(), fluid: null }
-      const add = typeof f.amount_ml === 'number' && Number.isFinite(f.amount_ml) ? f.amount_ml : 0
-      cell.fluid = (cell.fluid ?? 0) + add
-      byDay.set(f.taken_on, cell)
-    }
     // 記録がある日だけを新しい順に並べる（記録が無い日は行を作らない）
     return days
       .filter((d) => byDay.has(d) || outings.some((o) => outingCoversDay(o, d)))
@@ -1273,7 +1494,59 @@ function MealsSection({ meals, fluids, outings, days }: MealsSectionProps) {
         fluid: byDay.get(d)?.fluid ?? null,
         outings: outings.filter((o) => outingCoversDay(o, d)),
       }))
-  }, [meals, fluids, outings, days])
+  }, [byDay, outings, days])
+
+  // 食事・水分のグラフ（2026-10-08 追加。バイタルと同じ日付軸・同じ部品）。
+  // 主食＋副食は朝・昼・夕の1食あたりの日平均（1本の線で長い期間の傾向を読む。1食ごとの ▲低摂取 は下の表で見る）
+  const panels = useMemo<PanelSpec[]>(
+    () => [
+      {
+        key: 'meal',
+        title: '主食＋副食（1食あたりの日平均）',
+        unit: '',
+        digits: 1,
+        axis: KARTE_AXES.meal,
+        series: [
+          {
+            label: '主食＋副食',
+            values: mealIntakeSeries(byDay),
+            strokeClass: 'stroke-primary',
+            fillClass: 'fill-primary',
+            level: (v) => (v != null && v <= LOW_INTAKE_MAX ? 'warn-low' : null),
+            levelMark: '▲',
+            levelLabel: '▲低摂取',
+          },
+        ],
+        bands: [],
+        refs: [{ y: LOW_INTAKE_MAX, label: `低摂取${LOW_INTAKE_MAX}`, className: 'stroke-warn' }],
+        legend: '0〜20（主食0〜10＋副食0〜10）。外出・入院・拒食の食事は除く',
+        alertWord: `低摂取（${LOW_INTAKE_MAX}以下）の日`,
+        caption: '主食＋副食の1食あたりの日平均（新しい日が上。外出・入院・拒食の食事は除く）',
+      },
+      {
+        key: 'fluid',
+        title: '水分量',
+        unit: 'ml/日',
+        digits: 0,
+        axis: KARTE_AXES.fluid,
+        series: [
+          {
+            label: '水分',
+            values: fluidSeries(byDay),
+            strokeClass: 'stroke-primary',
+            fillClass: 'fill-primary',
+            level: () => null,
+          },
+        ],
+        bands: [],
+        refs: [],
+        legend: '1日の合計',
+        noLevels: true,
+        caption: '水分量の1日の合計（新しい日が上）',
+      },
+    ],
+    [byDay],
+  )
 
   return (
     <SectionCard title="食事・水分" className="mt-4" id="karte-meals">
@@ -1285,73 +1558,83 @@ function MealsSection({ meals, fluids, outings, days }: MealsSectionProps) {
           <EmptyBlock message="この期間の食事・水分の記録はありません。期間を広げてお試しください。" />
         </div>
       ) : (
-        <div className="mt-3 overflow-x-auto">
-          <table className="w-full border-collapse text-sm">
-            <caption className="sr-only">
-              食事（主食／副食）と水分量の履歴。新しい日が上。
-            </caption>
-            <thead>
-              <tr className="border-b border-border-strong text-ink2">
-                <th scope="col" className="py-2 pr-2 text-left font-bold">
-                  日付
-                </th>
-                {TABLE_SLOTS.map((s) => (
-                  <th key={s} scope="col" className="py-2 pr-2 text-right font-bold">
-                    {SLOT_HEAD[s]}
-                  </th>
-                ))}
-                <th scope="col" className="py-2 pr-2 text-right font-bold">
-                  水分(ml)
-                </th>
-                <th scope="col" className="py-2 text-left font-bold">
-                  外出・外泊
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => (
-                <tr key={r.day} className="border-b border-border">
-                  <th scope="row" className="py-2 pr-2 text-left font-normal text-ink">
-                    {fmtDayLabel(r.day)}
+        <>
+          <div ref={ref} className="relative">
+            <AxisProbe probeRef={probeRef} />
+            {panels.map((p) => (
+              <VitalPanel key={p.key} panel={p} days={days} box={box} height={chartH} />
+            ))}
+          </div>
+          {/* 表は今までの幅のまま（広い画面で列が間延びして行を追いにくくならないように） */}
+          <h3 className="mt-4 border-t border-border pt-3 text-lg font-bold text-ink">日ごとの記録</h3>
+          <div className="mt-2 max-w-2xl overflow-x-auto">
+            <table className="w-full border-collapse text-sm">
+              <caption className="sr-only">
+                食事（主食／副食）と水分量の履歴。新しい日が上。
+              </caption>
+              <thead>
+                <tr className="border-b border-border-strong text-ink2">
+                  <th scope="col" className="py-2 pr-2 text-left font-bold">
+                    日付
                   </th>
                   {TABLE_SLOTS.map((s) => (
-                    <td key={s} className="py-2 pr-2 text-right">
-                      <MealCell meal={r.meals.get(s)} />
-                    </td>
+                    <th key={s} scope="col" className="py-2 pr-2 text-right font-bold">
+                      {SLOT_HEAD[s]}
+                    </th>
                   ))}
-                  <td className="tabular py-2 pr-2 text-right text-ink">
-                    {r.fluid == null ? (
-                      <>
-                        <span className="sr-only">記録なし</span>
+                  <th scope="col" className="py-2 pr-2 text-right font-bold">
+                    水分(ml)
+                  </th>
+                  <th scope="col" className="py-2 text-left font-bold">
+                    外出・外泊
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.day} className="border-b border-border">
+                    <th scope="row" className="py-2 pr-2 text-left font-normal text-ink">
+                      {fmtDayLabel(r.day)}
+                    </th>
+                    {TABLE_SLOTS.map((s) => (
+                      <td key={s} className="py-2 pr-2 text-right">
+                        <MealCell meal={r.meals.get(s)} />
+                      </td>
+                    ))}
+                    <td className="tabular py-2 pr-2 text-right text-ink">
+                      {r.fluid == null ? (
+                        <>
+                          <span className="sr-only">記録なし</span>
+                          <span aria-hidden="true" className="text-ink3">
+                            —
+                          </span>
+                        </>
+                      ) : (
+                        r.fluid
+                      )}
+                    </td>
+                    <td className="py-2">
+                      {r.outings.length === 0 ? (
                         <span aria-hidden="true" className="text-ink3">
                           —
                         </span>
-                      </>
-                    ) : (
-                      r.fluid
-                    )}
-                  </td>
-                  <td className="py-2">
-                    {r.outings.length === 0 ? (
-                      <span aria-hidden="true" className="text-ink3">
-                        —
-                      </span>
-                    ) : (
-                      <span className="flex flex-wrap gap-gap">
-                        {r.outings.map((o) => (
-                          <Chip key={o.id} tone="info">
-                            {OUTING_KIND_LABEL[o.kind] ?? '外出'}
-                            {o.end_on == null ? '（帰着未定）' : ''}
-                          </Chip>
-                        ))}
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                      ) : (
+                        <span className="flex flex-wrap gap-gap">
+                          {r.outings.map((o) => (
+                            <Chip key={o.id} tone="info">
+                              {OUTING_KIND_LABEL[o.kind] ?? '外出'}
+                              {o.end_on == null ? '（帰着未定）' : ''}
+                            </Chip>
+                          ))}
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
     </SectionCard>
   )
@@ -1918,6 +2201,47 @@ function measureShellHeaderH(): number {
 }
 
 /**
+ * 画面下に固定されたナビ（狭い画面の下部タブ）の高さ（px）。無い・隠れている時は 0。
+ * 広い画面の左の縦ナビ（上から下まで固定）は数えない（画面の下半分に横長で貼られたものだけ）
+ */
+function measureBottomNavH(): number {
+  if (typeof document === 'undefined' || typeof window === 'undefined') return 0
+  let h = 0
+  for (const el of Array.from(document.querySelectorAll('nav'))) {
+    if (getComputedStyle(el).position !== 'fixed') continue
+    const r = el.getBoundingClientRect()
+    if (r.height <= 0 || r.bottom < window.innerHeight - 1) continue
+    if (r.top < window.innerHeight / 2 || r.width < window.innerWidth / 2) continue
+    h = Math.max(h, Math.round(window.innerHeight - r.top))
+  }
+  return h
+}
+
+/**
+ * グラフ1枚の高さ（画面の高さ − 上部の固定部分 − 下のナビ − グラフごとの見出しなど）。
+ * iPhone などは1画面に1枚、広い画面は2枚が収まる大きさ（lib/chart.ts の chartHeight で 200〜360px に収める）
+ */
+function measureChartH(bar: HTMLElement | null): number {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return CHART_H_MIN
+  const topH = measureShellHeaderH() + (bar ? Math.round(bar.getBoundingClientRect().height) : 0)
+  const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
+  // 見出し（text-lg）＋区切りの余白・線（mt-4・pt-3）＋タップした値の行（min-h-tap）＋数値表の開閉（min-h-tap＋mt-2）
+  const overheadH = Math.ceil(rem * 1.125 * 1.55 + 16 + 1 + 12 + 4 + 44 + 8 + 44)
+  const wide = typeof window.matchMedia === 'function' && window.matchMedia(WIDE_QUERY).matches
+  // 画面の高さはツールバーが出ている時の高さ（100svh）で測る。iPhone の Safari はスクロールでツールバーが隠れるたびに
+  // innerHeight が変わるため、それで測るとスクロール中にグラフが伸び縮みする
+  const vhEl = document.querySelector<HTMLElement>('[data-karte-vh]')
+  const svh = vhEl ? vhEl.getBoundingClientRect().height : 0
+  return chartHeight({
+    viewportH: svh > 0 ? svh : window.innerHeight,
+    topH,
+    bottomH: measureBottomNavH(),
+    overheadH,
+    perScreen: wide ? 2 : 1,
+  })
+}
+
+/**
  * 欄へ移動する。固定ヘッダ＋固定バーの高さぶん上に余白を取り、見出しが隠れないようにする。
  * 動きを減らす設定の端末では一瞬で移動する。移動後はその欄へフォーカスを移す（読み上げで現在地が分かる）
  */
@@ -1953,6 +2277,8 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
   const forcedWeightTickRef = useRef(0)
   const barRef = useRef<HTMLDivElement | null>(null)
   const [barTop, setBarTop] = useState(0)
+  /** 印刷中（グラフは今までと同じ 160px・今までの幅で描く＝紙の大きさを変えない） */
+  const [printing, setPrinting] = useState(false)
 
   const toIso = todayIso()
   const fromIso = rangeFromIso(range, toIso)
@@ -1987,6 +2313,24 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
       ro?.disconnect()
     }
   }, [])
+
+  // 印刷の直前に、グラフの欄を今までの幅・高さへ戻して描き直す（印刷の割り付けより先に反映させるため同期で描き、
+  // 幅を測り直させる）。紙のグラフは今までと同じ大きさ
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const before = () => {
+      flushSync(() => setPrinting(true))
+      window.dispatchEvent(new Event(KARTE_REMEASURE_EVENT))
+    }
+    const after = () => setPrinting(false)
+    window.addEventListener('beforeprint', before)
+    window.addEventListener('afterprint', after)
+    return () => {
+      window.removeEventListener('beforeprint', before)
+      window.removeEventListener('afterprint', after)
+    }
+  }, [])
+  const wideLane = printing ? LANE : LANE_WIDE
 
   // 期間の変更を保存する（UI状態のみ）
   const onRangeChange = useCallback((v: string) => {
@@ -2117,103 +2461,128 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
     )
   }
 
+  // 欄ごとに幅を決める（2026-10-08）: 文字の欄は今までの幅（LANE）、グラフの欄（バイタル・体重のグラフ・食事）だけ
+  // 広い画面で画面幅まで広げる（LANE_WIDE）。氏名バーは外側の枠いっぱいを親にして、ページの最後まで上部に残す
   return (
-    <div className="mx-auto w-full max-w-2xl p-4">
-      <Link to="/karte" className="inline-flex min-h-tap items-center text-base text-link">
-        <span aria-hidden="true">‹ </span>利用者一覧へ戻る
-      </Link>
+    <div className="w-full py-4">
+      {/* グラフの高さを決めるための画面の高さの物差し（100svh・見えない・読み上げない・押せない） */}
+      <div aria-hidden="true" data-karte-vh="" className="pointer-events-none invisible fixed left-0 top-0 h-svh w-0" />
+      <div className={LANE}>
+        <Link to="/karte" className="inline-flex min-h-tap items-center text-base text-link">
+          <span aria-hidden="true">‹ </span>利用者一覧へ戻る
+        </Link>
+      </div>
 
-      {/* 氏名と移動ボタン。スクロールしても上部に残る（アプリの固定ヘッダの下に貼る） */}
+      {/* 氏名と移動ボタン。スクロールしても上部に残る（アプリの固定ヘッダの下に貼る）。
+          中身の位置と幅（下線を含む）は今までと同じ。背景だけ画面幅に敷き、広げたグラフの欄がバーの両脇から透けて見えないようにする */}
       <div
         ref={barRef}
-        className="sticky z-10 -mx-4 mt-2 border-b border-border bg-bg px-4 py-1 print:static"
+        data-karte-bar=""
+        className="sticky z-10 mt-2 bg-bg print:static"
         style={{ top: barTop }}
       >
-        {/* 氏名は削らない（取り違え防止）。幅が足りない時（文字を大きくした端末など）はボタンを次の行へ回す */}
-        <div className="flex flex-wrap items-center gap-x-2">
-          <h1 className="min-w-0 max-w-full break-words text-xl font-heavy text-ink">{resident.name}</h1>
-          <nav aria-label="カルテの欄へ移動" className="min-w-0 flex-1 basis-32 overflow-x-auto print:hidden sm:overflow-visible">
-            {/* スマホは横にスワイプ（バーを低く保つ）。PC 幅では折り返して全部見せる（マウスで横スクロールしにくいため）。
-                p-1.5 はフォーカス枠（外側に 5px）が横スクロールの枠で切れないための余白 */}
-            <ul className="flex gap-2 p-1.5 sm:flex-wrap">
-              {(loading || error ? KARTE_JUMPS.filter((j) => j.id === 'karte-history') : KARTE_JUMPS).map((j) => (
-                <li key={j.id} className="shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => jumpToSection(j.id, barRef.current)}
-                    className="inline-flex min-h-tap items-center whitespace-nowrap rounded-full border border-border-strong bg-surface px-3 text-sm text-link"
-                  >
-                    {j.label}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </nav>
+        <div className="mx-auto max-w-2xl border-b border-border bg-bg px-4 py-1">
+          {/* 氏名は削らない（取り違え防止）。幅が足りない時（文字を大きくした端末など）はボタンを次の行へ回す */}
+          <div className="flex flex-wrap items-center gap-x-2">
+            <h1 className="min-w-0 max-w-full break-words text-xl font-heavy text-ink">{resident.name}</h1>
+            <nav aria-label="カルテの欄へ移動" className="min-w-0 flex-1 basis-32 overflow-x-auto print:hidden sm:overflow-visible">
+              {/* スマホは横にスワイプ（バーを低く保つ）。PC 幅では折り返して全部見せる（マウスで横スクロールしにくいため）。
+                  p-1.5 はフォーカス枠（外側に 5px）が横スクロールの枠で切れないための余白 */}
+              <ul className="flex gap-2 p-1.5 sm:flex-wrap">
+                {(loading || error ? KARTE_JUMPS.filter((j) => j.id === 'karte-history') : KARTE_JUMPS).map((j) => (
+                  <li key={j.id} className="shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => jumpToSection(j.id, barRef.current)}
+                      className="inline-flex min-h-tap items-center whitespace-nowrap rounded-full border border-border-strong bg-surface px-3 text-sm text-link"
+                    >
+                      {j.label}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </nav>
+          </div>
         </div>
       </div>
 
-      <header className="mt-2">
-        <p className="text-sm text-ink2">
-          {resident.kana ? <span>{resident.kana}　</span> : null}
-          <span className="tabular">{resident.room ?? '居室未登録'}</span>
-          {floor != null ? <span>　{floor}階</span> : null}
-        </p>
-        {resident.needs_review ? (
-          <p className="mt-1 text-sm text-warn">
-            <span aria-hidden="true">▲ </span>
-            マスタ同期で確認待ちの利用者です。設定タブで内容をご確認ください。
+      <div className={LANE}>
+        <header className="mt-2">
+          <p className="text-sm text-ink2">
+            {resident.kana ? <span>{resident.kana}　</span> : null}
+            <span className="tabular">{resident.room ?? '居室未登録'}</span>
+            {floor != null ? <span>　{floor}階</span> : null}
           </p>
-        ) : null}
-      </header>
+          {resident.needs_review ? (
+            <p className="mt-1 text-sm text-warn">
+              <span aria-hidden="true">▲ </span>
+              マスタ同期で確認待ちの利用者です。設定タブで内容をご確認ください。
+            </p>
+          ) : null}
+        </header>
 
-      <div className="mt-3">
-        <h2 className="text-sm text-ink2">表示する期間</h2>
-        <div className="mt-1">
-          <SegmentPicker
-            options={RANGE_OPTIONS}
-            value={range}
-            onChange={onRangeChange}
-            ariaLabel="表示する期間"
-          />
+        <div className="mt-3">
+          <h2 className="text-sm text-ink2">表示する期間</h2>
+          <div className="mt-1">
+            <SegmentPicker
+              options={RANGE_OPTIONS}
+              value={range}
+              onChange={onRangeChange}
+              ariaLabel="表示する期間"
+            />
+          </div>
+          <p className="tabular mt-1 text-sm text-ink3">
+            {fmtDayLabel(fromIso)} 〜 {fmtDayLabel(toIso)}
+          </p>
         </div>
-        <p className="tabular mt-1 text-sm text-ink3">
-          {fmtDayLabel(fromIso)} 〜 {fmtDayLabel(toIso)}
-        </p>
+
+        {loading ? (
+          <div className="mt-3">
+            <LoadingBlock label="カルテを読み込み中です…" />
+          </div>
+        ) : error ? (
+          <div className="mt-3">
+            <ErrorBlock message={error} onRetry={() => setTick((n) => n + 1)} />
+          </div>
+        ) : null}
       </div>
 
-      {loading ? (
-        <div className="mt-3">
-          <LoadingBlock label="カルテを読み込み中です…" />
-        </div>
-      ) : error ? (
-        <div className="mt-3">
-          <ErrorBlock message={error} onRetry={() => setTick((n) => n + 1)} />
-        </div>
-      ) : (
+      {loading || error ? null : (
         <>
-          <VitalsSection vitals={data.vitals} days={days} weightPanel={weightPanel} />
-          <WeightSection
-            state={weight}
-            fromIso={fromIso}
-            toIso={toIso}
-            sourceId={resident.source_id}
-            onReload={() => setWeightTick((n) => n + 1)}
-          />
-          <MealsSection
-            meals={data.meals}
-            fluids={data.fluids}
-            outings={data.outings}
-            days={days}
-          />
-          <NotesSection notes={data.notes} staffById={staffById} />
-          <BathSection baths={data.baths} staffById={staffById} />
-          <MedSection meds={data.meds} />
-          <IncidentSection incidents={data.incidents} />
+          <div className={wideLane}>
+            <VitalsSection vitals={data.vitals} days={days} weightPanel={weightPanel} printing={printing} />
+          </div>
+          <div className={LANE}>
+            <WeightSection
+              state={weight}
+              fromIso={fromIso}
+              toIso={toIso}
+              sourceId={resident.source_id}
+              onReload={() => setWeightTick((n) => n + 1)}
+            />
+          </div>
+          <div className={wideLane}>
+            <MealsSection
+              meals={data.meals}
+              fluids={data.fluids}
+              outings={data.outings}
+              days={days}
+              printing={printing}
+            />
+          </div>
+          <div className={LANE}>
+            <NotesSection notes={data.notes} staffById={staffById} />
+            <BathSection baths={data.baths} staffById={staffById} />
+            <MedSection meds={data.meds} />
+            <IncidentSection incidents={data.incidents} />
+          </div>
         </>
       )}
 
       {/* 変更の記録は別の取得。カルテ本体の読み込み・失敗に関係なく出す（表が無い時も他の欄は動く） */}
-      <HistorySection residentId={residentId} staffById={staffById} />
+      <div className={LANE}>
+        <HistorySection residentId={residentId} staffById={staffById} />
+      </div>
     </div>
   )
 }
