@@ -4798,9 +4798,9 @@ function DaySheet({
               onHistory={openNoteHistory}
             />
 
-            {/* 現行スプシの黒帯。ここから下は after16=true の記録 */}
+            {/* 現行スプシの黒帯。ここから下は after16=true の記録。画面では薄めのポップな茶色（2026-10-09 指示・sheet.css の .dsheet-late-band）、印刷は黒のまま */}
             <div
-              className="flex items-center bg-ink px-1 font-bold text-bg"
+              className="dsheet-late-band flex items-center px-1 font-bold"
               style={{ minHeight: 'var(--sheet-row-h-note)' }}
             >
               ↓16時以降の記録

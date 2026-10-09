@@ -665,6 +665,8 @@
   --dsheet-c-care-ink: #0b2e63; /* 濃い青 */
   --dsheet-c-night-bg: #1f3864; /* ネイビー（夜勤） */
   --dsheet-c-night-ink: #ffc4c7; /* 赤（ネイビーの上で読める明度に上げた赤） */
+  --dsheet-c-late-bg: #e8c39b; /* 薄めのポップな茶色（「↓16時以降の記録」の帯・2026-10-09 指示。黒から変更） */
+  --dsheet-c-late-ink: #3d2410; /* 濃い茶（コントラスト 8.7:1） */
 
   /* 土日の日付セル（2026-08-28 追加指示）。3画面（日報・バイタル・食事）で同じ色を使う。
      曜日は日付文字（土）（日）にも出るので、色は補助＝色だけで意味を伝えない */
@@ -693,6 +695,8 @@
   --dsheet-c-care-ink: #a6d9ee; /* 暗い面では「濃い青」を同じ意味の明るい青へ */
   --dsheet-c-night-bg: #0e1b33;
   --dsheet-c-night-ink: #ffb3b8;
+  --dsheet-c-late-bg: #5c3b20; /* 暗い面では落ち着いた茶色（コントラスト 8.2:1） */
+  --dsheet-c-late-ink: #fbe6cf;
   --dsheet-c-sat-bg: #17384c;
   --dsheet-c-sat-ink: #a6d9ee;
   --dsheet-c-sun-bg: #4a1d1d;
@@ -710,6 +714,8 @@
     --dsheet-c-care-ink: #a6d9ee;
     --dsheet-c-night-bg: #0e1b33;
     --dsheet-c-night-ink: #ffb3b8;
+    --dsheet-c-late-bg: #5c3b20;
+    --dsheet-c-late-ink: #fbe6cf;
     --dsheet-c-sat-bg: #17384c;
     --dsheet-c-sat-ink: #a6d9ee;
     --dsheet-c-sun-bg: #4a1d1d;
@@ -788,7 +794,7 @@
    画面だけに効かせる（印刷の見た目は変えない・原則2） */
 @media screen {
   .dsheet-sep-block {
-    margin-top: var(--sp-4); /* 16px */
+    margin-top: var(--sp-3); /* 12px（2026-10-09 に 16px から変更：デイの下の空きを上と同じ半分の高さにそろえる） */
     border-top: 3px solid var(--c-ink);
   }
 }
@@ -801,7 +807,7 @@
 @media screen {
   .dsheet-island {
     /* 左右は日の枠の線（2px）の内側 8px の位置のまま（日の枠の左右の線を各欄へ移したので、その分を足す） */
-    margin: var(--sp-5) calc(var(--sp-2) + var(--sheet-rule-bold)); /* 上下 24px・左右 8px＋2px */
+    margin: var(--sp-3) calc(var(--sp-2) + var(--sheet-rule-bold)); /* 上下 12px（2026-10-09 に 24px から半分へ）・左右 8px＋2px */
     border-top: 3px solid var(--c-ink);
     border-bottom: 3px solid var(--c-ink);
     border-left: var(--sheet-rule) solid var(--c-ink);
@@ -813,6 +819,19 @@
   /* デイの直前の欄（16時以降の申し送り）の下端も太線で閉じる */
   section:has(+ .dsheet-island) {
     border-bottom: 3px solid var(--c-ink);
+  }
+}
+
+/* 「↓16時以降の記録」の帯（2026-10-09 指示で黒から薄めのポップな茶色へ）。
+   印刷は従来どおり黒い帯のまま（画面だけ茶色・原則2） */
+.dsheet-late-band {
+  background: var(--c-ink);
+  color: var(--c-bg);
+}
+@media screen {
+  .dsheet-late-band {
+    background: var(--dsheet-c-late-bg);
+    color: var(--dsheet-c-late-ink);
   }
 }
 
