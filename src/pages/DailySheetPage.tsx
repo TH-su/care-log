@@ -52,7 +52,7 @@
 //   ※ SheetCell が描画する要素の種類（td/div）に依存しないよう、表は div の行で組み、
 //     各セルは幅を持つ入れ物で包んでから SheetCell を置く。
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import {
   ConfirmDialog,
@@ -98,6 +98,8 @@ import {
   isSelfWrite,
   subscribeChanges,
   deleteNote,
+  deleteVitalEntry,
+  MSG_VITAL_DELETE_OFFLINE,
   fetchNoteRows,
   noteDeleted,
   NOTES_PENDING_REASON,
@@ -354,6 +356,13 @@ const MSG_EMPTY_VITAL =
  * 「取り消したのに後から出てくる」を作らないため（消去は保全ゲートの後ろ）。
  */
 const MSG_LOCKED_DELETE = '送信待ちのため取り消せません。送信が終わってから、行の削除をしてください'
+
+/** 保存済みの発熱者・他症状者の測定を消せない時（未送信・未解決の入力がある）。2026-10-09 */
+const MSG_VITAL_DELETE_BUSY =
+  'この方の発熱者・他症状者の欄に、まだ送れていない入力（または食い違いの解決待ち）があります。送信が終わるか「くらべて選ぶ」を済ませてから削除してください'
+/** 消そうとした測定の値が、他の端末で直されていた時（消していない） */
+const MSG_VITAL_DELETE_CHANGED =
+  '他の端末で値が直されていたため、削除しませんでした。いまの値を表示しています。確かめてから、もう一度お試しください'
 /** 日付・表示を切り替える前の確認で、書きかけが申し送りだけの時の文言（控えに残って戻ると表示される＝事実どおり） */
 const LEAVE_NOTES_TITLE = '書きかけの申し送りがあります'
 const LEAVE_NOTES_BODY =
@@ -387,7 +396,7 @@ const FEVER_SETS = 3
  * 1列分（60px）ではしきい値の記号（↑↑ ↓↓）まで入らず truncate に食われる＝
  * 色だけで意味を伝えることになるため（sheet-contracts.md §8-8）。
  */
-const W_BP = 'calc(var(--w-sys) + var(--w-dia))'
+const W_BP = 'var(--dsheet-w-bp, calc(var(--w-sys) + var(--w-dia)))'
 
 /** 発熱者の1セット（時 KT SpO2 BP P）の幅。時と脈は同じ --w-pulse を使う */
 const W_FEVER_SET = `calc(var(--w-pulse) * 2 + var(--w-temp) + var(--w-spo2) + ${W_BP})`
@@ -398,7 +407,19 @@ const W_FEVER_SET = `calc(var(--w-pulse) * 2 + var(--w-temp) + var(--w-spo2) + $
  * 申し送りの長文でシート全体が横に伸びず、伸びるのは行の高さだけになる
  * （sheet-contracts.md §5「長文は行が伸びる（clamp しない）」）。
  */
-const SHEET_MIN_W = `calc(var(--w-block) + var(--w-name) + ${W_FEVER_SET} * ${FEVER_SETS} + var(--sheet-rule-bold) * 2)`
+const SHEET_MIN_W = `calc(var(--w-block) + var(--w-name) + ${W_FEVER_SET} * ${FEVER_SETS} + var(--sheet-rule-bold) * 2 + var(--dsheet-del-cols, 0px))`
+/**
+ * 発熱者の各回の後ろに足した「✕」の列（DelColCell・2026-10-09）の幅の合計。画面だけ器の最小幅に足す
+ * （足さないと、いちばん広い発熱者の行が器からはみ出し、.dsheet-body の content-visibility で切れて
+ * 3回目の血圧・脈まで届かなくなる）。印刷では 0（列も紙に出さない＝紙の幅・倍率は従来どおり）
+ */
+const SHEET_DEL_COLS_CLASS = '[--dsheet-del-cols:calc(var(--tap-min)*3)] print:[--dsheet-del-cols:0px]'
+/**
+ * 日報の画面だけ、血圧の列を 84px（倍率に追従）に縮める（2026-10-09 本人裁定「血圧の枠を左右に縮めて」）。
+ * 一番長い表示「300/200↑↑」の実測 83px（文字100%・余白と罫線込み）に 1px の余裕。文字200% は rem で一緒に広がる。
+ * バイタル一覧と共有の --w-sys・--w-dia には触らない（この器の中だけの変数）。印刷では従来の幅（--w-sys ＋ --w-dia）に戻す
+ */
+const SHEET_BP_W_CLASS = '[--dsheet-w-bp:calc(5.25rem*var(--sheet-zoom,1))] print:[--dsheet-w-bp:calc(var(--w-sys)+var(--w-dia))]'
 
 /**
  * ブロックごとに最初から出しておく空の入力行の数。
@@ -2422,7 +2443,7 @@ export function DailySheetPage({
               狭い画面では固定列の合計まで SheetFrame 側が横スクロールする。
               sheet-dense＝「行が縦に連続する場所」の印。sheet.css がこの中の
               当たり判定の拡張量（--sheet-hit-pad）を 0 にする＝隣接行の誤タップを防ぐ */}
-          <div className="sheet-dense" ref={measureSheetView} style={{ minWidth: SHEET_MIN_W }}>
+          <div className={`sheet-dense ${SHEET_DEL_COLS_CLASS} ${SHEET_BP_W_CLASS}`} ref={measureSheetView} style={{ minWidth: SHEET_MIN_W }}>
             {visibleDays.map((d) => (
               <section
                 key={d}
@@ -3961,6 +3982,84 @@ function DaySheet({
     [askConfirm, enqueueVitalSave, guardVital, setRowStatus, writeHeld],
   )
 
+  /**
+   * 保存済みの発熱者・他症状者の測定1件を消す（「✕」・2026-10-09 本人裁定「1回分ずつ消せるようにして」）。
+   * 確認ダイアログ → RPC delete_vital（0020）。見た8欄のままの時だけサーバーが取り消す（見ていない値を消さない）。
+   * 送信待ちには乗せない（db.ts の deleteVitalEntry の説明）。電波が無い・関数が無い時は消さずに一言を出す。
+   * その行（発熱者は同じ方の発熱者の行すべて）に未送信・未解決の入力がある間は消さない:
+   *   送信待ちの値を重ねた表示は「見た値」にならない・発熱者は id 順に3回ずつ束ねるので、1回分消すと後の回が
+   *   詰まり、控え（rowKey）と行が合わなくなる
+   */
+  const deleteSavedVital = useCallback(
+    (v: Vital, rowKey: string, what: string) => {
+      if (!guardVital(rowKey)) return
+      const busy = (): boolean => {
+        const held = Object.values(vitalConflictsRef.current)
+        if (v.kind === 'symptom') {
+          return vitalConflictsRef.current[v.id] !== undefined || pendingRow('vitals', vitalTargetOf(v.id)) !== null
+        }
+        return (
+          held.some((h) => h.base.kind === 'observation' && h.base.resident_id === v.resident_id) ||
+          observationsRef.current.some(
+            (o) => o.resident_id === v.resident_id && pendingRow('vitals', vitalTargetOf(o.id)) !== null,
+          )
+        )
+      }
+      if (busy()) {
+        setRowStatus(rowKey, { tone: 'warn', text: `▲ ${MSG_VITAL_DELETE_BUSY}` })
+        return
+      }
+      // 電波が無いと分かっている時は確認を出さずに止める（押しても何も消えない）
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        setRowStatus(rowKey, { tone: 'warn', text: `▲ ${MSG_VITAL_DELETE_OFFLINE}` })
+        return
+      }
+      askConfirm({
+        title: 'この測定を削除しますか',
+        body: `${what}の測定を削除します。削除すると一覧から消えます（記録は復元できません）。よろしければ「削除する」を押してください。`,
+        confirmLabel: '削除する',
+        onConfirm: () => {
+          setConfirm(null)
+          // 同じ行の保存と重ねない（行ごとの順番待ち）
+          void vitalQueue(String(v.id), async () => {
+            if (busy()) {
+              setRowStatus(rowKey, { tone: 'warn', text: `▲ ${MSG_VITAL_DELETE_BUSY}` })
+              return
+            }
+            try {
+              markSelfWrite() // 送る前に印を付ける（自分の書き込みで「他の端末で更新」を出さない）
+              const res = await deleteVitalEntry(v)
+              if (res.status === 'conflict' && res.reason === 'changed') {
+                // 他の端末が値を直していた: 消さずに、いまの値で描き直す
+                if (res.row !== null) {
+                  savedVitalRef.current.set(res.row.id, res.row)
+                  replaceVital(res.row)
+                }
+                setRowStatus(rowKey, { tone: 'danger', text: `▲ ${MSG_VITAL_DELETE_CHANGED}` })
+                return
+              }
+              const drop = (prev: Vital[]) => prev.filter((x) => x.id !== v.id)
+              if (v.kind === 'symptom') setSymptoms(drop)
+              else setObservations(drop)
+              savedVitalRef.current.delete(v.id)
+              setRowStatus(rowKey, null)
+              show(
+                res.status === 'applied'
+                  ? '削除しました'
+                  : res.status === 'settled'
+                    ? '他の端末で先に削除されていました'
+                    : 'この測定は見つかりませんでした（他の端末で削除された可能性があります）',
+              )
+            } catch (err) {
+              setRowStatus(rowKey, { tone: 'danger', text: `▲ ${errText(err)}` })
+            }
+          })
+        },
+      })
+    },
+    [askConfirm, guardVital, markSelfWrite, replaceVital, setRowStatus, show, vitalQueue],
+  )
+
   // 最新に更新した後の裁き（構造規約 R-E・共通の裁き reconcileOnLoad）:
   // ・食い違う欄が残れば競合のまま（控えの基準は書き換えない）
   // ・食い違いが無く未保存の欄が残れば「未保存」として控えを残し、〔保存し直す〕を出す
@@ -4840,6 +4939,7 @@ function DaySheet({
               onRemoveDraft={removeVitalDraft}
               onInsert={insertVitalRow}
               onUpdate={updateVitalCell}
+              onDeleteSaved={deleteSavedVital}
             />
 
             <SymptomBlock
@@ -4851,6 +4951,7 @@ function DaySheet({
               onRemoveDraft={removeVitalDraft}
               onInsert={insertVitalRow}
               onUpdate={updateVitalCell}
+              onDeleteSaved={deleteSavedVital}
             />
 
             <NoteBlock
@@ -6033,6 +6134,63 @@ function VitalSetCells({
   )
 }
 
+/** 保存済みの測定1件の「✕」（rowKey＝その行の一言の出し先、what＝ダイアログと読み上げに出す「◯◯さんの◯回目（時刻）」） */
+type DeleteSavedVitalFn = (v: Vital, rowKey: string, what: string) => void
+
+/**
+ * 測定1件の「✕」の列（発熱者は各回の後ろ・他症状者は値の後ろ）。見出し・書きかけの行は空きで列をそろえる。
+ * 幅は当たり判定の最小（--tap-min＝44px）。印刷には出さない（紙の列は従来どおり）
+ */
+function DelColCell({ children }: { children?: ReactNode }) {
+  return (
+    <Cell width="var(--tap-min)" pad={false} className="flex items-center print:hidden">
+      {children ?? null}
+    </Cell>
+  )
+}
+
+/**
+ * 発熱者の1回分（時刻〜「✕」）・他症状者の1組を太線で囲む入れ物（2026-10-09 本人裁定「1回目・2回目・3回目の区別が
+ * つきやすいよう、それぞれを太い罫線で囲って」）。線は日の枠と同じ太さ・色（--sheet-rule-bold・--c-ink2）。
+ * 線は上に重ねて描く（::after・押せない）＝列の幅を変えない（見出し・保存済み・書きかけで同じ位置にそろう）。
+ * 左の線は各回に、右の線は最後の回だけ（回と回の間を 4px にしない）。上の線は見出しの行、下の線は欄の最後の行。
+ * 画面だけ（印刷は従来どおり）
+ */
+function SetBox({
+  last = false,
+  top = false,
+  bottom = false,
+  children,
+}: {
+  last?: boolean
+  top?: boolean
+  bottom?: boolean
+  children: ReactNode
+}) {
+  const edges = `after:border-l-2${last ? ' after:border-r-2' : ''}${top ? ' after:border-t-2' : ''}${bottom ? ' after:border-b-2' : ''}`
+  return (
+    <div
+      className={`relative flex shrink-0 items-stretch after:pointer-events-none after:absolute after:inset-0 after:border-ink2 after:content-[''] print:after:hidden ${edges}`}
+    >
+      {children}
+    </div>
+  )
+}
+
+/** 発熱者の1回分の呼び名「◯◯さんの◯回目（10:00）」。◯回目はその方のその日の何件目か（3件ずつ1行に束ねる） */
+function feverWhat(name: string, rowKey: string, slot: number, v: Vital): string {
+  const group = Number(rowKey.slice(rowKey.lastIndexOf('-') + 1))
+  const nth = (Number.isFinite(group) ? group : 0) * FEVER_SETS + slot + 1
+  const at = fmtTimeHM(v.measured_at)
+  return `${name}さんの${nth}回目（${at === '' ? '時刻未記入' : at}）`
+}
+
+/** 他症状者の1件の呼び名「◯◯さんの他症状者（10:00）」 */
+function symptomWhat(name: string, v: Vital): string {
+  const at = fmtTimeHM(v.measured_at)
+  return `${name}さんの他症状者（${at === '' ? '時刻未記入' : at}）`
+}
+
 function FeverBlock({
   ctx,
   rows,
@@ -6042,6 +6200,7 @@ function FeverBlock({
   onRemoveDraft,
   onInsert,
   onUpdate,
+  onDeleteSaved,
 }: {
   ctx: SheetCtx
   rows: FeverRow[]
@@ -6052,6 +6211,8 @@ function FeverBlock({
   onRemoveDraft: (key: string) => void
   onInsert: InsertVitalFn
   onUpdate: UpdateVitalFn
+  /** 保存済みの測定1件の「✕」（確認ダイアログ → RPC delete_vital。what＝ダイアログに出す「◯◯さんの◯回目（時刻）」） */
+  onDeleteSaved: DeleteSavedVitalFn
 }) {
   const count = rows.length
   return (
@@ -6062,19 +6223,22 @@ function FeverBlock({
         <>
           <HeadCell width="var(--w-name)">氏名</HeadCell>
           {Array.from({ length: FEVER_SETS }, (_, i) => (
-            <Fragment key={i}>
+            <SetBox key={i} top last={i === FEVER_SETS - 1}>
               <HeadCell width="var(--w-pulse)">{`${i + 1}回目 時`}</HeadCell>
               <HeadCell width="var(--w-temp)">体温</HeadCell>
               <HeadCell width="var(--w-spo2)">SpO2</HeadCell>
               <HeadCell width={W_BP}>血圧</HeadCell>
               <HeadCell width="var(--w-pulse)">脈</HeadCell>
-            </Fragment>
+              <DelColCell />
+            </SetBox>
           ))}
         </>
       }
     >
       {rows.map((row, i) => {
         const name = residentName(ctx.residentById.get(row.residentId), row.residentId)
+        /** 欄の最後の行（各回の囲みの下の線を引く） */
+        const lastRow = drafts.length === 0 && i === rows.length - 1
         return (
           <div key={row.key}>
             {/* 1行おきの縞（指示16） */}
@@ -6093,21 +6257,31 @@ function FeverBlock({
                 </span>
               </Cell>
               {row.slots.map((v, i) => (
-                <VitalSetCells
-                  key={i}
-                  name={`${name} ${i + 1}回目`}
-                  vital={v}
-                  input={null}
-                  disabled={ctx.disabled}
-                  place={{ presence: ctx.presence, day: ctx.day, residentId: row.residentId, kind: 'observation', id: v?.id ?? null }}
-                  onError={(m) => ctx.setStatus(row.key, { tone: 'danger', text: m })}
-                  onCommit={(patch, clearing, label, basePatch) => {
-                    if (v) onUpdate(v, patch, row.key, clearing, label, basePatch)
-                    // 空き枠は「値が入った時」だけ行を作る（空欄の確定で空行を作らない）
-                    else if (hasVitalValue(patch))
-                      void onInsert(row.key, row.residentId, 'observation', patch, null)
-                  }}
-                />
+                <SetBox key={i} last={i === FEVER_SETS - 1} bottom={lastRow}>
+                  <VitalSetCells
+                    name={`${name} ${i + 1}回目`}
+                    vital={v}
+                    input={null}
+                    disabled={ctx.disabled}
+                    place={{ presence: ctx.presence, day: ctx.day, residentId: row.residentId, kind: 'observation', id: v?.id ?? null }}
+                    onError={(m) => ctx.setStatus(row.key, { tone: 'danger', text: m })}
+                    onCommit={(patch, clearing, label, basePatch) => {
+                      if (v) onUpdate(v, patch, row.key, clearing, label, basePatch)
+                      // 空き枠は「値が入った時」だけ行を作る（空欄の確定で空行を作らない）
+                      else if (hasVitalValue(patch))
+                        void onInsert(row.key, row.residentId, 'observation', patch, null)
+                    }}
+                  />
+                  {/* その回の測定だけを消す「✕」（2026-10-09 本人裁定・画面だけ）。空き枠には出さない */}
+                  <DelColCell>
+                    {v && !ctx.disabled ? (
+                      <RowDeleteButton
+                        label={`${feverWhat(name, row.key, i, v)}の測定を削除`}
+                        onClick={() => onDeleteSaved(v, row.key, feverWhat(name, row.key, i, v))}
+                      />
+                    ) : null}
+                  </DelColCell>
+                </SetBox>
               ))}
             </Row>
             <StatusText status={ctx.status[row.key]} />
@@ -6134,39 +6308,42 @@ function FeverBlock({
                 disabled={disabled}
                 onClick={() => ctx.openResident({ for: 'vitalTarget', key: d.key })}
                 // 空のまま足した行も消せるようにする（2026-10-09 指示。送信待ちの行は disabled なので出ない）。
-                // 保存済みの行の削除は未実装（0011 apply_cell_edits が deleted_at を受け付けない＝サーバー側の変更待ち）
+                // 保存済みの行は、各回の「✕」で1回分ずつ消す（deleteSavedVital・0020 delete_vital）
                 onDelete={() => onRemoveDraft(d.key)}
                 deleteLabel={rowDeleteLabel(name)}
                 deleteScreenOnly
               />
               {d.sets.map((s, i) => (
-                <VitalSetCells
-                  key={i}
-                  name={`${name === '' ? '未選択' : name} ${i + 1}回目`}
-                  vital={null}
-                  input={s}
-                  // 2回目以降は1回目を保存してから記入する（保存前に消えてしまう入力を作らない）
-                  disabled={disabled || i > 0}
-                  place={
-                    d.residentId == null
-                      ? undefined
-                      : { presence: ctx.presence, day: ctx.day, residentId: d.residentId, kind: 'observation', id: null }
-                  }
-                  onError={(m) => ctx.setStatus(d.key, { tone: 'danger', text: m })}
-                  onInput={(patch) =>
-                    onPatchDraft(d.key, {
-                      sets: d.sets.map((x, j) => (j === i ? { ...x, ...patch } : x)),
-                    })
-                  }
-                  onCommit={(patch) => {
-                    if (d.residentId == null) return
-                    // 同じ枠に先に入れてある値も一緒に送る（1セルずつ消えないように）
-                    const merged = { ...setToPatch(s), ...patch }
-                    // 値が1つも無ければ保存しない（空欄の確定で空行を作らない）
-                    if (!hasVitalValue(merged)) return
-                    void onInsert(d.key, d.residentId, 'observation', merged, d.key)
-                  }}
-                />
+                <SetBox key={i} last={i === FEVER_SETS - 1} bottom={di === drafts.length - 1}>
+                  <VitalSetCells
+                    name={`${name === '' ? '未選択' : name} ${i + 1}回目`}
+                    vital={null}
+                    input={s}
+                    // 2回目以降は1回目を保存してから記入する（保存前に消えてしまう入力を作らない）
+                    disabled={disabled || i > 0}
+                    place={
+                      d.residentId == null
+                        ? undefined
+                        : { presence: ctx.presence, day: ctx.day, residentId: d.residentId, kind: 'observation', id: null }
+                    }
+                    onError={(m) => ctx.setStatus(d.key, { tone: 'danger', text: m })}
+                    onInput={(patch) =>
+                      onPatchDraft(d.key, {
+                        sets: d.sets.map((x, j) => (j === i ? { ...x, ...patch } : x)),
+                      })
+                    }
+                    onCommit={(patch) => {
+                      if (d.residentId == null) return
+                      // 同じ枠に先に入れてある値も一緒に送る（1セルずつ消えないように）
+                      const merged = { ...setToPatch(s), ...patch }
+                      // 値が1つも無ければ保存しない（空欄の確定で空行を作らない）
+                      if (!hasVitalValue(merged)) return
+                      void onInsert(d.key, d.residentId, 'observation', merged, d.key)
+                    }}
+                  />
+                  {/* 保存済みの行の「✕」の列とそろえる空き（画面だけ） */}
+                  <DelColCell />
+                </SetBox>
               ))}
             </Row>
             {/* 空欄のままの行には案内も取り消しも出さない（実物と同じ「ただの空行」にする） */}
@@ -6217,6 +6394,7 @@ function SymptomBlock({
   onRemoveDraft,
   onInsert,
   onUpdate,
+  onDeleteSaved,
 }: {
   ctx: SheetCtx
   rows: Vital[]
@@ -6227,6 +6405,8 @@ function SymptomBlock({
   onRemoveDraft: (key: string) => void
   onInsert: InsertVitalFn
   onUpdate: UpdateVitalFn
+  /** 保存済みの測定1件の「✕」（確認ダイアログ → RPC delete_vital。what＝ダイアログに出す「◯◯さんの◯回目（時刻）」） */
+  onDeleteSaved: DeleteSavedVitalFn
 }) {
   const count = rows.length
   return (
@@ -6236,17 +6416,23 @@ function SymptomBlock({
       head={
         <>
           <HeadCell width="var(--w-name)">氏名</HeadCell>
-          <HeadCell width="var(--w-pulse)">時</HeadCell>
-          <HeadCell width="var(--w-temp)">体温</HeadCell>
-          <HeadCell width="var(--w-spo2)">SpO2</HeadCell>
-          <HeadCell width={W_BP}>血圧</HeadCell>
-          <HeadCell width="var(--w-pulse)">脈</HeadCell>
+          {/* 発熱者の各回と同じ形の囲み（1組だけでも、上の発熱者の1回目と列と線がそろう） */}
+          <SetBox top last>
+            <HeadCell width="var(--w-pulse)">時</HeadCell>
+            <HeadCell width="var(--w-temp)">体温</HeadCell>
+            <HeadCell width="var(--w-spo2)">SpO2</HeadCell>
+            <HeadCell width={W_BP}>血圧</HeadCell>
+            <HeadCell width="var(--w-pulse)">脈</HeadCell>
+            <DelColCell />
+          </SetBox>
           <HeadCell grow>症状</HeadCell>
         </>
       }
     >
       {rows.map((v, i) => {
         const key = `s${v.id}`
+        /** 欄の最後の行（囲みの下の線を引く） */
+        const lastRow = drafts.length === 0 && i === rows.length - 1
         const name = residentName(ctx.residentById.get(v.resident_id), v.resident_id)
         return (
           <div key={key}>
@@ -6265,17 +6451,28 @@ function SymptomBlock({
                   })()}
                 </span>
               </Cell>
-              <VitalSetCells
-                name={name}
-                vital={v}
-                input={null}
-                disabled={ctx.disabled}
-                place={{ presence: ctx.presence, day: ctx.day, residentId: v.resident_id, kind: 'symptom', id: v.id }}
-                onError={(m) => ctx.setStatus(key, { tone: 'danger', text: m })}
-                onCommit={(patch, clearing, label, basePatch) =>
-                  onUpdate(v, patch, key, clearing, label, basePatch)
-                }
-              />
+              <SetBox last bottom={lastRow}>
+                <VitalSetCells
+                  name={name}
+                  vital={v}
+                  input={null}
+                  disabled={ctx.disabled}
+                  place={{ presence: ctx.presence, day: ctx.day, residentId: v.resident_id, kind: 'symptom', id: v.id }}
+                  onError={(m) => ctx.setStatus(key, { tone: 'danger', text: m })}
+                  onCommit={(patch, clearing, label, basePatch) =>
+                    onUpdate(v, patch, key, clearing, label, basePatch)
+                  }
+                />
+                {/* この1件を消す「✕」（2026-10-09 本人裁定・画面だけ） */}
+                <DelColCell>
+                  {ctx.disabled ? null : (
+                    <RowDeleteButton
+                      label={`${symptomWhat(name, v)}の測定を削除`}
+                      onClick={() => onDeleteSaved(v, key, symptomWhat(name, v))}
+                    />
+                  )}
+                </DelColCell>
+              </SetBox>
               <Cell grow pad={false}>
                 <SheetCell
                   value={v.symptom ?? ''}
@@ -6334,35 +6531,39 @@ function SymptomBlock({
                 disabled={disabled}
                 onClick={() => ctx.openResident({ for: 'vitalTarget', key: d.key })}
                 // 空のまま足した行も消せるようにする（2026-10-09 指示。送信待ちの行は disabled なので出ない）。
-                // 保存済みの行の削除は未実装（0011 apply_cell_edits が deleted_at を受け付けない＝サーバー側の変更待ち）
+                // 保存済みの行は、各回の「✕」で1回分ずつ消す（deleteSavedVital・0020 delete_vital）
                 onDelete={() => onRemoveDraft(d.key)}
                 deleteLabel={rowDeleteLabel(name)}
                 deleteScreenOnly
               />
-              <VitalSetCells
-                name={name === '' ? '未選択' : name}
-                vital={null}
-                input={set}
-                disabled={disabled}
-                place={
-                  d.residentId == null
-                    ? undefined
-                    : { presence: ctx.presence, day: ctx.day, residentId: d.residentId, kind: 'symptom', id: null }
-                }
-                onError={(m) => ctx.setStatus(d.key, { tone: 'danger', text: m })}
-                onInput={(patch) => onPatchDraft(d.key, { sets: [{ ...set, ...patch }] })}
-                onCommit={(patch) => {
-                  if (d.residentId == null) return
-                  const merged = {
-                    ...setToPatch(set),
-                    ...patch,
-                    symptom: d.symptom.trim() === '' ? null : d.symptom.trim(),
+              <SetBox last bottom={di === drafts.length - 1}>
+                <VitalSetCells
+                  name={name === '' ? '未選択' : name}
+                  vital={null}
+                  input={set}
+                  disabled={disabled}
+                  place={
+                    d.residentId == null
+                      ? undefined
+                      : { presence: ctx.presence, day: ctx.day, residentId: d.residentId, kind: 'symptom', id: null }
                   }
-                  // 値も症状も無ければ保存しない（空欄の確定で空行を作らない）
-                  if (!hasVitalValue(merged)) return
-                  void onInsert(d.key, d.residentId, 'symptom', merged, d.key)
-                }}
-              />
+                  onError={(m) => ctx.setStatus(d.key, { tone: 'danger', text: m })}
+                  onInput={(patch) => onPatchDraft(d.key, { sets: [{ ...set, ...patch }] })}
+                  onCommit={(patch) => {
+                    if (d.residentId == null) return
+                    const merged = {
+                      ...setToPatch(set),
+                      ...patch,
+                      symptom: d.symptom.trim() === '' ? null : d.symptom.trim(),
+                    }
+                    // 値も症状も無ければ保存しない（空欄の確定で空行を作らない）
+                    if (!hasVitalValue(merged)) return
+                    void onInsert(d.key, d.residentId, 'symptom', merged, d.key)
+                  }}
+                />
+                {/* 保存済みの行の「✕」の列とそろえる空き（画面だけ） */}
+                <DelColCell />
+              </SetBox>
               <Cell grow pad={false}>
                 <SheetCell
                   value={d.symptom}

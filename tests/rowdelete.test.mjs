@@ -70,18 +70,19 @@ describe('外出者・外泊者・発熱者・他症状者の行の「✕」', (
     }
   })
 
-  it('発熱者・他症状者: 保存済みの行には「✕」を出さない（サーバーが deleted_at を受け付けるまで）', () => {
+  it('発熱者・他症状者: 保存済みの行の削除は行ごとではなく1回分ずつ（0020 delete_vital・tests/vitaldelete.test.mjs）', () => {
+    // 2026-10-09 本人裁定で「1回分ずつ消せるように」へ変わった。行全体を消す PickerCell の onDelete は保存済みの行に付けない
+    // （0011 の許可リストは広げず、取り消しは 0020 の専用関数で行う）
     const src = read('pages/DailySheetPage.tsx')
     for (const name of ['FeverBlock', 'SymptomBlock']) {
       const { saved } = parts(fnSrc(src, name))
-      assert.doesNotMatch(saved, /onDelete|RowDeleteButton/, `${name} の保存済みの行に削除が出ている`)
+      assert.doesNotMatch(saved, /onDelete=\{/, `${name} の保存済みの行に行ごとの削除が出ている`)
+      assert.match(saved, /<RowDeleteButton[\s\S]*?onClick=\{\(\) => onDeleteSaved\(v, /, `${name} の保存済みの行に1回分の「✕」が無い`)
     }
-    // 0011 の許可リストに deleted_at が無い＝保存済みのバイタルは送信待ち＋CAS の経路で消せない。
-    // ここが変わったら（migration を足したら）保存済みの行の「✕」を実装し、このテストを直す
     const mig = readFileSync(new URL('0011_apply_cell_edits.sql', MIG), 'utf8')
     const f = mig.match(/c_vital_fields\s+constant text\[\] := array\[([^\]]*)\]/)
     assert.ok(f, '0011 の c_vital_fields が読めない')
-    assert.doesNotMatch(f[1], /deleted_at/)
+    assert.doesNotMatch(f[1], /deleted_at/, '0011 を広げない（取り消しは 0020 の専用関数）')
   })
 
   it('外出・外泊の削除: 書きかけは取り消し・保存済みは確認ダイアログ → rev 照合の soft delete（競合なら消さない）', () => {

@@ -4831,6 +4831,67 @@ export async function saveMealEdits(
   return publicOutcome(await saveCellEditsInternal('meals', target, sendEdits, opts), normalizeMeal)
 }
 
+// ── 発熱者・他症状者の測定1件の取り消し（RPC delete_vital・0020・2026-10-09 本人裁定） ──────────
+//
+// 送信待ち（cl_sendQueue2）には乗せない。電波が無い時は消さずに止める（安全側）。理由:
+//   ・取り消しの前提は「行全体（8欄）を見たまま」で、送信待ちの欄ごとの {値, 基準} とは判定の単位が違う
+//   ・乗せるには 0011 の作り直し・送信待ちの中核（申し送りの消失対策と共有）・〔くらべて選ぶ〕の欄単位の画面を
+//     すべて変えることになる
+// 判定（見た値のままなら取り消す・食い違えば取り消さない）は 0020 が行ロックの下で行う。
+
+export const MSG_VITAL_DELETE_PENDING =
+  'サーバー側の更新待ちのため、保存済みの測定はまだ削除できません。記録は消していません。管理者に連絡してください。'
+export const MSG_VITAL_DELETE_OFFLINE =
+  '削除できませんでした（通信エラー）。記録は消していません。電波状態を確認して、つながってからもう一度お試しください。'
+
+/** 取り消しの結果。conflict の時の row は「いまの行」（missing＝行が見当たらない時は null） */
+export type VitalDeleteResult =
+  | { status: 'applied' | 'settled'; row: null }
+  | { status: 'conflict'; reason: 'changed' | 'missing'; row: Vital | null }
+
+/**
+ * 発熱者・他症状者の測定1件を取り消す（soft delete）。seen＝取り消すと決めた時に画面に出ていたサーバーの生の値。
+ * サーバーは、いまの8欄がそれと同じ時だけ取り消す（見ていない値を消さない）。
+ * 通信できない・関数が無い・拒否された時は DbError（何も消えていない）
+ */
+export async function deleteVitalEntry(
+  seen: Pick<Vital, 'id' | 'rev' | VitalCellField>,
+  opts?: WriteOpts,
+): Promise<VitalDeleteResult> {
+  await assertWritable()
+  const sb = await getClient()
+  const id = seen.id
+  const p_seen: Record<string, unknown> = {}
+  for (const f of VITAL_CELL_FIELDS) p_seen[f] = seen[f] ?? null
+  // 自分の取り消しは rev + 1 になる（応答より先に届く変更通知を「他の端末の変更」として扱わない）
+  markSelfRow('vitals', { id }, seen.rev + 1)
+  let res: Res<unknown>
+  try {
+    res = (await sb.rpc('delete_vital', { p_id: id, p_seen, p_editor: idNum(opts?.editedBy) ?? editorId })) as Res<unknown>
+  } catch {
+    throw new DbError('network', MSG_VITAL_DELETE_OFFLINE)
+  }
+  if (res.error !== null) {
+    if (isMissingRpc(res)) throw new DbError('server', MSG_VITAL_DELETE_PENDING)
+    if (isAuthFail(res)) {
+      fireAuthExpired()
+      throw new DbError('auth', MSG.authWrite)
+    }
+    if (isTransient(res)) throw new DbError('network', MSG_VITAL_DELETE_OFFLINE)
+    throw new DbError('server', serverMsg('操作でき', errCode(res)))
+  }
+  const r = asRecord(res.data)
+  const status = r?.status
+  if (status === 'applied' || status === 'settled') return { status, row: null }
+  if (status === 'conflict') {
+    const reason = r?.reason === 'missing' ? 'missing' : 'changed'
+    const row = r?.row == null ? null : normalizeVital(r.row)
+    return { status: 'conflict', reason, row }
+  }
+  // 応答の形が違う＝同じ名前の別の関数（版が合わない）。消えたかどうか分からないので読み直しを促す
+  throw new DbError('server', MSG.broken)
+}
+
 /** 送信待ち・止まっている1行（画面の重ね表示と〔くらべて選ぶ〕の「あなたの入力」に使う） */
 export interface PendingCellRow {
   table: CellTable | 'notes'
