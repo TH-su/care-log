@@ -800,7 +800,8 @@
    画面だけ・印刷は変えない */
 @media screen {
   .dsheet-island {
-    margin: var(--sp-5) var(--sp-2); /* 上下 24px・左右 8px */
+    /* 左右は日の枠の線（2px）の内側 8px の位置のまま（日の枠の左右の線を各欄へ移したので、その分を足す） */
+    margin: var(--sp-5) calc(var(--sp-2) + var(--sheet-rule-bold)); /* 上下 24px・左右 8px＋2px */
     border-top: 3px solid var(--c-ink);
     border-bottom: 3px solid var(--c-ink);
     border-left: var(--sheet-rule) solid var(--c-ink);
@@ -812,6 +813,23 @@
   /* デイの直前の欄（16時以降の申し送り）の下端も太線で閉じる */
   section:has(+ .dsheet-island) {
     border-bottom: 3px solid var(--c-ink);
+  }
+}
+
+/* 16時以降の欄・デイ・夜勤の欄が、空きの部分で日の枠の左右の縦線によってつながって見えないようにする
+   （2026-10-09 指示）。日の枠（.dsheet-day）の左右の線をやめ、同じ線を各欄（見出しの2行と表の中の各欄）に持たせる。
+   デイの上下の空き（余白）は線を持つ欄が無いので、縦線が途切れる。位置・太さ・色は従来の日の枠の線と同じ。
+   デイの欄は自分の左右の細線のまま。表の中身の入れ物（.dsheet-body）は封じ込めで外側を描けないため、子が線を持つ。
+   画面だけ・印刷は変えない */
+@media screen {
+  .dsheet-day {
+    border-left: none;
+    border-right: none;
+  }
+  .dsheet-frame-row,
+  .dsheet-body > :not(.dsheet-island) {
+    border-left: var(--sheet-rule-bold) solid var(--c-ink2);
+    border-right: var(--sheet-rule-bold) solid var(--c-ink2);
   }
 }
 

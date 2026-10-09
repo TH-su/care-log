@@ -1118,7 +1118,7 @@ if (DB === null) {
       assert.match(src, /addEventListener\('scroll', onScroll, \{ passive: true, capture: true \}\)/)
       assert.doesNotMatch(src, /useDayBarPin|--day-bar-y/, 'B1: スクロールのたびに位置を計算する日付行の固定が残っている')
       assert.match(src, /<SheetFrame className="(dsheet-frame )?sheet-frame-fit print:!max-h-none">/)
-      assert.match(src, /data-day-bar=""\n\s+className="sticky top-0 /)
+      assert.match(src, /data-day-bar=""\n\s+className="(?:dsheet-frame-row )?sticky top-0 /)
       const css = read('styles/sheet.css')
       assert.match(css, /\.sheet-dense \.sheet-hit::before \{\n\s+content: none;/, 'D')
       assert.match(css, /body:has\(section\.dsheet-day\) nav\[aria-label='メインナビゲーション'\]/)

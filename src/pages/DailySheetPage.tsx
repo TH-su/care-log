@@ -5411,7 +5411,7 @@ function DayHeader({
           横に動かしても日付のセルは左に残る（下の sticky left-0。この行の中の重なりで行の他のセルより上） */}
       <div
         data-day-bar=""
-        className="sticky top-0 flex flex-wrap items-stretch bg-surface"
+        className="dsheet-frame-row sticky top-0 flex flex-wrap items-stretch bg-surface"
         style={{ zIndex: 15 }}
       >
         <div
@@ -5458,7 +5458,7 @@ function DayHeader({
           />
         </div>
       </div>
-      <div className="border-b border-border-strong">
+      <div className="dsheet-frame-row border-b border-border-strong">
         <StatusText status={ctx.status.attendance} />
 
         {/* 2段目: 記録が1件も無い日の一言だけ。日付は1段目へ移したので、
