@@ -793,15 +793,25 @@
   }
 }
 
-/* デイサービス欄だけを「浮島」にする（2026-10-09 指示）。上下の欄から余白で切り離し、
-   四辺を濃く太い罫線（3px）で囲んで、影で少し浮かせる。余白 24px は日の切れ目（32px）より狭いまま。
-   左右も少し内側へ寄せて、日の枠から離れて見えるようにする。
-   overflow は付けない（付けると行の左固定〔sticky〕が効かなくなる）。画面だけ・印刷は変えない */
+/* デイサービス欄だけを、上の申し送り欄・下の夜勤申し送り欄から少し離して置く（2026-10-09 指示。
+   実物のスプシと同じ形：上の欄の下端に太線→1行ぶんの空き→デイの上端に太線・見出しの下に太線→
+   デイの下端に太線→1行ぶんの空き→夜勤の上端に太線）。幅は左右 8px 内側へ寄せたまま（同日の指示で据え置き）。
+   余白 24px は日の切れ目（32px）より狭いまま。影は付けない。overflow も付けない（付けると行の左固定が効かない）。
+   画面だけ・印刷は変えない */
 @media screen {
   .dsheet-island {
     margin: var(--sp-5) var(--sp-2); /* 上下 24px・左右 8px */
-    border: 3px solid var(--c-ink);
-    box-shadow: 0 2px 8px rgb(0 0 0 / 0.18);
+    border-top: 3px solid var(--c-ink);
+    border-bottom: 3px solid var(--c-ink);
+    border-left: var(--sheet-rule) solid var(--c-ink);
+    border-right: var(--sheet-rule) solid var(--c-ink);
+  }
+  .dsheet-island .dsheet-title-care {
+    border-bottom: 3px solid var(--c-ink);
+  }
+  /* デイの直前の欄（16時以降の申し送り）の下端も太線で閉じる */
+  section:has(+ .dsheet-island) {
+    border-bottom: 3px solid var(--c-ink);
   }
 }
 

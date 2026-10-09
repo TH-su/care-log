@@ -11,13 +11,16 @@ const SRC = process.env.CL_SEP_SRC
 const read = (p) => readFileSync(new URL(p, SRC), 'utf8')
 
 describe('デイサービス・夜勤の区切り', () => {
-  it('デイサービス欄の浮島は画面だけ・四辺を 3px で囲み・上下 24px 離す・overflow を付けない', () => {
+  it('デイサービス欄は画面だけ・上下 24px 離す・上下端と見出しの下を 3px の太線・直前の欄の下端も太線・影と overflow は付けない', () => {
     const css = read('styles/sheet.css')
-    const m = css.match(/@media screen \{\s*\.dsheet-island \{([^}]*)\}/)
+    const m = css.match(/@media screen \{\s*\.dsheet-island \{([^}]*)\}([\s\S]*?)\n\}/)
     assert.ok(m, '.dsheet-island が @media screen の中に無い')
     assert.match(m[1], /margin:\s*var\(--sp-5\) var\(--sp-2\)/, '上下 24px・左右 8px でない')
-    assert.match(m[1], /border:\s*3px solid var\(--c-ink\)/, '四辺の罫線が 3px・濃い色でない')
-    assert.doesNotMatch(m[1], /overflow/, 'overflow を付けると行の左固定が効かなくなる')
+    assert.match(m[1], /border-top:\s*3px solid var\(--c-ink\)/, '上端の太線が無い')
+    assert.match(m[1], /border-bottom:\s*3px solid var\(--c-ink\)/, '下端の太線が無い')
+    assert.doesNotMatch(m[1], /overflow|box-shadow/, '影・overflow を付けない')
+    assert.match(m[2], /\.dsheet-island \.dsheet-title-care \{\s*border-bottom:\s*3px solid var\(--c-ink\)/, '見出しの下の太線が無い')
+    assert.match(m[2], /section:has\(\+ \.dsheet-island\) \{\s*border-bottom:\s*3px solid var\(--c-ink\)/, '直前の欄の下端の太線が無い')
   })
   it('デイサービス欄と夜勤申し送り欄に区切りの class が付いている', () => {
     const src = read('pages/DailySheetPage.tsx')
