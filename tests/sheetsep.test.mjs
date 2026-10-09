@@ -44,12 +44,24 @@ describe('デイサービス・夜勤の区切り', () => {
     const src = read('pages/DailySheetPage.tsx')
     assert.equal((src.match(/dsheet-frame-row/g) ?? []).length, 2, '見出しの2行に dsheet-frame-row が無い')
   })
-  it('「↓16時以降の記録」の帯は画面では薄めの茶色（ライト・ダーク両方で定義）・印刷は黒のまま', () => {
+  it('「↓16時以降の記録」の帯は画面では出さない・印刷は黒のまま', () => {
     const src = read('pages/DailySheetPage.tsx')
     assert.match(src, /className="dsheet-late-band flex items-center px-1 font-bold"/, '帯に dsheet-late-band が無い')
-    assert.doesNotMatch(src, /bg-ink px-1 font-bold text-bg/, '帯が黒のまま')
     const css = read('styles/sheet.css')
-    assert.equal((css.match(/--dsheet-c-late-bg:/g) ?? []).length, 3, 'ライト・ダーク（設定）・ダーク（OS 追従）の3か所で色を定義していない')
-    assert.match(css, /\.dsheet-late-band \{\s*background:\s*var\(--c-ink\);\s*color:\s*var\(--c-bg\);\s*\}\s*@media screen \{\s*\.dsheet-late-band \{\s*background:\s*var\(--dsheet-c-late-bg\);\s*color:\s*var\(--dsheet-c-late-ink\)/, '画面だけ茶色・印刷は黒の指定になっていない')
+    assert.match(css, /\.dsheet-late-band \{\s*background:\s*var\(--c-ink\);\s*color:\s*var\(--c-bg\);\s*\}\s*@media screen \{\s*\.dsheet-late-band \{\s*display:\s*none;/, '画面で消し・印刷は黒の指定になっていない')
+  })
+  it('申し送りの時間帯のタイトル帯は画面でスクロールに付いて残る（日付の行の下・欄が終わると押し出される）', () => {
+    const src = read('pages/DailySheetPage.tsx')
+    assert.match(src, /className=\{`dsheet-note-title flex/, 'タイトル帯に dsheet-note-title が無い')
+    assert.match(src, /setProperty\('--dsheet-daybar-h'/, '日付の行の高さを書いていない')
+    const css = read('styles/sheet.css')
+    assert.match(css, /@media screen \{\s*\.dsheet-note-title \{\s*position:\s*sticky;\s*top:\s*var\(--dsheet-daybar-h, 0px\);/, 'タイトル帯が sticky になっていない')
+  })
+  it('デイ欄の左右の線はほかの欄の外側の線と同じ太さ・色', () => {
+    const css = read('styles/sheet.css')
+    const m = css.match(/@media screen \{\s*\.dsheet-island \{([^}]*)\}/)
+    assert.ok(m)
+    assert.match(m[1], /border-left:\s*var\(--sheet-rule-bold\) solid var\(--c-ink2\)/)
+    assert.match(m[1], /border-right:\s*var\(--sheet-rule-bold\) solid var\(--c-ink2\)/)
   })
 })

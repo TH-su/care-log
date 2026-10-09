@@ -1749,7 +1749,8 @@ function NoteTitleBand({
 }) {
   return (
     <div
-      className={`flex flex-wrap items-center gap-1 px-1 font-bold ${NOTE_TONE_CLASS[tone]}`}
+      // dsheet-note-title: スクロールしても日付の行の下に残り、欄が終わると押し出される（sheet.css・2026-10-09 指示）
+      className={`dsheet-note-title flex flex-wrap items-center gap-1 px-1 font-bold ${NOTE_TONE_CLASS[tone]}`}
       style={{ minHeight: 'var(--sheet-row-h-note)' }}
     >
       <span className="tabular">{fmtSheetDayShort(day)}</span>
@@ -4798,7 +4799,7 @@ function DaySheet({
               onHistory={openNoteHistory}
             />
 
-            {/* 現行スプシの黒帯。ここから下は after16=true の記録。画面では薄めのポップな茶色（2026-10-09 指示・sheet.css の .dsheet-late-band）、印刷は黒のまま */}
+            {/* 現行スプシの黒帯。ここから下は after16=true の記録。画面では出さない（2026-10-09 指示・sheet.css の .dsheet-late-band）、印刷は黒のまま */}
             <div
               className="dsheet-late-band flex items-center px-1 font-bold"
               style={{ minHeight: 'var(--sheet-row-h-note)' }}
@@ -5398,6 +5399,21 @@ function DayHeader({
 }) {
   const managerName =
     manager === null ? null : staffName(ctx.staffById.get(manager.staff_id), manager.staff_id)
+  // 日付の行の高さを測って、その日の枠（section.dsheet-day）に --dsheet-daybar-h として書く。
+  // 申し送りのタイトル帯はこの高さの位置に貼り付く（sheet.css の .dsheet-note-title・2026-10-09 指示）。
+  // 文字の大きさ・倍率・出勤者の数で行の高さが変わるので ResizeObserver で追う
+  const dayBarRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const bar = dayBarRef.current
+    const frame = bar?.parentElement
+    if (!bar || !frame) return
+    const apply = () => frame.style.setProperty('--dsheet-daybar-h', `${Math.round(bar.getBoundingClientRect().height)}px`)
+    apply()
+    if (typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(apply)
+    ro.observe(bar)
+    return () => ro.disconnect()
+  }, [])
   return (
     <>
       {/* 1段目: 左＝日付（2026-08-31 指示。旧・施設名セルの位置。平日は橙・土日は水色/赤）、
@@ -5410,6 +5426,7 @@ function DayHeader({
           2段目以降の入れ物が持つ）。背景を持たせて下の行を透かさない。重なりは表の中の印（z-10）より上。
           横に動かしても日付のセルは左に残る（下の sticky left-0。この行の中の重なりで行の他のセルより上） */}
       <div
+        ref={dayBarRef}
         data-day-bar=""
         className="dsheet-frame-row sticky top-0 flex flex-wrap items-stretch bg-surface"
         style={{ zIndex: 15 }}
