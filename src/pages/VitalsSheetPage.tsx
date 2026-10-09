@@ -2016,7 +2016,7 @@ export function VitalsSheetPage({
                   scope="col"
                   rowSpan={2}
                   style={{ width: W_NAME, minWidth: W_NAME, left: W_ROOM, top: 0 }}
-                  className={`${CELL_BASE} sticky z-30 bg-surface2 text-left font-bold text-ink2`}
+                  className={`${CELL_BASE} sheet-fix-end sticky z-30 bg-surface2 text-left font-bold text-ink2`}
                 >
                   入居者名
                 </th>
@@ -2233,7 +2233,7 @@ function FragmentRow({
           id={nameCellId(row.rowId)}
           tabIndex={-1}
           style={{ width: W_NAME, minWidth: W_NAME, maxWidth: W_NAME, left: W_ROOM }}
-          className={`${CELL_BASE} sticky z-10 ${rowBg} text-left text-ink`}
+          className={`${CELL_BASE} sheet-fix-end sticky z-10 ${rowBg} text-left text-ink`}
         >
           {isRoutine ? (
             // 氏名の右に「再検」ボタン。押すとこの入居者の直下に再検欄が1本増える。

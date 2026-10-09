@@ -2368,7 +2368,7 @@ export function MealsSheetPage({
                   scope="col"
                   rowSpan={3}
                   style={{ width: W_NAME, minWidth: W_NAME, left: W_ROOM, top: 0 }}
-                  className={`${CELL_BASE} sticky z-30 bg-surface2 text-left font-bold text-ink2`}
+                  className={`${CELL_BASE} sheet-fix-end sticky z-30 bg-surface2 text-left font-bold text-ink2`}
                 >
                   入居者
                 </th>
@@ -2423,7 +2423,7 @@ export function MealsSheetPage({
               <tr style={{ height: HEAD_H }}>
                 {dayList.map((d) => (
                   <Fragment key={d}>
-                    {SLOTS.map((s, i) => (
+                    {SLOTS.map((s) => (
                       <Fragment key={s}>
                         <th
                           scope="col"
@@ -2438,9 +2438,8 @@ export function MealsSheetPage({
                         <th
                           scope="col"
                           style={{ width: W_MEAL, minWidth: W_MEAL, top: HEAD_H2 }}
-                          // 3段目に水分列は無い（上の段が rowSpan で覆う）ので、
-                          // この段の日の切れ目は「夕の副食」＝各日の最後の列に付ける
-                          className={`${CELL_BASE} ${i === SLOTS.length - 1 ? DAY_END : ''} sticky z-20 bg-surface2 font-normal text-ink2`}
+                          // 日の切れ目の太線は、2・3段目をまたぐ「水分」の見出しが持つ（2026-10-09：ここ〔夕の副食〕に付けると夕と水分の間に線が出ていた）
+                          className={`${CELL_BASE} sticky z-20 bg-surface2 font-normal text-ink2`}
                         >
                           <span aria-hidden="true">副</span>
                           <span className="sr-only">
@@ -2477,7 +2476,7 @@ export function MealsSheetPage({
                   </th>
                   <td
                     style={{ width: W_NAME, minWidth: W_NAME, maxWidth: W_NAME, left: W_ROOM }}
-                    className={`${CELL_BASE} sticky z-10 truncate ${altClass(rowIndex) || 'bg-surface'} px-1 text-ink`}
+                    className={`${CELL_BASE} sheet-fix-end sticky z-10 truncate ${altClass(rowIndex) || 'bg-surface'} px-1 text-ink`}
                   >
                     {r.name}
                     {/* 他の端末がこの方の食事を入力中（「✎」・読み上げは「入力中: 職員B」）。欄が画面外でも気づけるように */}

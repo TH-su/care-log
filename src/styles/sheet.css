@@ -353,6 +353,15 @@
 .sheet-group-end {
   border-right-color: var(--c-border-strong);
 }
+/* バイタル一覧・食事一覧で1日ごとの区切りを分かりやすくする（2026-10-09 指示）：
+   日の最後の列の右罫線と、左固定の氏名列の右罫線（最初の日の左端）を太く濃くして、1日ずつ囲って見せる。
+   日報の表（.dsheet-*）には使っていない class なので日報は変わらない。画面だけ（印刷は変えない・原則2） */
+@media screen {
+  .sheet-table .sheet-group-end,
+  .sheet-table .sheet-fix-end {
+    border-right: var(--sheet-rule-bold) solid var(--c-ink2);
+  }
+}
 
 /* ── 列幅（実測値 × 倍率）───────────────────────────── */
 .sheet-w-room {
