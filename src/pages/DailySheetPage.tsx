@@ -413,7 +413,9 @@ const SHEET_MIN_W = `calc(var(--w-block) + var(--w-name) + ${W_FEVER_SET} * ${FE
  * （足さないと、いちばん広い発熱者の行が器からはみ出し、.dsheet-body の content-visibility で切れて
  * 3回目の血圧・脈まで届かなくなる）。印刷では 0（列も紙に出さない＝紙の幅・倍率は従来どおり）
  */
-const SHEET_DEL_COLS_CLASS = '[--dsheet-del-cols:calc(var(--tap-min)*3)] print:[--dsheet-del-cols:0px]'
+/** 「✕」の列の幅（2026-10-09 本人指示「幅は狭くてもよいので、少しでも他の列に余力を振って」で 44px→24px×倍率） */
+const DEL_COL_W = 'calc(1.5rem * var(--sheet-zoom, 1))'
+const SHEET_DEL_COLS_CLASS = '[--dsheet-del-cols:calc(1.5rem*var(--sheet-zoom,1)*3)] print:[--dsheet-del-cols:0px]'
 /**
  * 日報の画面だけ、血圧の列を 84px（倍率に追従）に縮める（2026-10-09 本人裁定「血圧の枠を左右に縮めて」）。
  * 一番長い表示「300/200↑↑」の実測 83px（文字100%・余白と罫線込み）に 1px の余裕。文字200% は rem で一緒に広がる。
@@ -6139,11 +6141,11 @@ type DeleteSavedVitalFn = (v: Vital, rowKey: string, what: string) => void
 
 /**
  * 測定1件の「✕」の列（発熱者は各回の後ろ・他症状者は値の後ろ）。見出し・書きかけの行は空きで列をそろえる。
- * 幅は当たり判定の最小（--tap-min＝44px）。印刷には出さない（紙の列は従来どおり）
+ * 幅は 24px×倍率（2026-10-09 本人指示で 44px から狭め、空いた幅を他の列へ回した）。印刷には出さない（紙の列は従来どおり）
  */
 function DelColCell({ children }: { children?: ReactNode }) {
   return (
-    <Cell width="var(--tap-min)" pad={false} className="flex items-center print:hidden">
+    <Cell width={DEL_COL_W} pad={false} className="dsheet-delcol flex items-center justify-center print:hidden">
       {children ?? null}
     </Cell>
   )

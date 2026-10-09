@@ -251,6 +251,27 @@
   /* 縦の当たり判定はこの表では従来どおり下方向へ広げる（0 に落とすのは日報の .sheet-dense だけ） */
 }
 
+/* 日報の発熱者・他症状者の「✕」の列（24px×倍率）の中のボタンは、ボタン共通の最小幅（44px）を外して列いっぱいに置く
+   （2026-10-09 本人指示「幅は狭くてもよい」）。押せる範囲は列の幅×行の高さ */
+.dsheet-delcol button {
+  min-width: 0;
+  width: 100%;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+/* バイタル一覧・食事一覧：表の上端の線は、スクロールしても上に残る見出しの1段目が持つ（2026-10-09 指示）。
+   表（table）の上の線（border-t）はスクロールで流れて、上に残った見出しの上の線が消えていたため。
+   見出しの幅・高さを変えないよう、線は内側の影（inset）で描く。画面だけ（印刷は変えない） */
+@media screen {
+  .sheet-table {
+    border-top-width: 0;
+  }
+  .sheet-table > thead > tr:first-child > th {
+    box-shadow: inset 0 1px 0 var(--c-border);
+  }
+}
+
 /* 申し送りのように本文列を伸ばす表（横方向は画面幅いっぱい） */
 .sheet-table-fluid {
   width: 100%;
@@ -883,6 +904,12 @@
   .dsheet-day {
     border-left: none;
     border-right: none;
+    /* 上の太線は日付の行（スクロールしても上に残る sticky の行）に持たせる。日の枠が持つと、
+       スクロールで枠の上端が流れて、上に残った日付の行の上の線が消えていた（2026-10-09 指示） */
+    border-top: none;
+  }
+  .dsheet-day > [data-day-bar] {
+    border-top: var(--sheet-rule-bold) solid var(--c-ink2);
   }
   .dsheet-frame-row,
   .dsheet-body > :not(.dsheet-island) {

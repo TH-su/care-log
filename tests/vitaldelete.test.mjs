@@ -86,15 +86,19 @@ describe('日報の発熱者・他症状者の「✕」（1回分ずつ）', () 
     assert.match(drafts, /<DelColCell \/>\s*<\/SetBox>\s*<Cell grow pad=\{false\}>/)
   })
 
-  it('「✕」の列は 44px（--tap-min）・印刷に出さない', () => {
-    const d = fnSrc(read('pages/DailySheetPage.tsx'), 'DelColCell')
-    assert.match(d, /<Cell width="var\(--tap-min\)" pad=\{false\} className="flex items-center print:hidden">/)
+  it('「✕」の列は 24px×倍率（2026-10-09 本人指示で狭めた）・中のボタンは共通の最小幅を外す・印刷に出さない', () => {
+    const src = read('pages/DailySheetPage.tsx')
+    assert.match(src, /const DEL_COL_W = 'calc\(1\.5rem \* var\(--sheet-zoom, 1\)\)'/)
+    const d = fnSrc(src, 'DelColCell')
+    assert.match(d, /<Cell width=\{DEL_COL_W\} pad=\{false\} className="dsheet-delcol flex items-center justify-center print:hidden">/)
+    const css = read('styles/sheet.css')
+    assert.match(css, /\.dsheet-delcol button \{\s*min-width:\s*0;/)
   })
 
   it('器の最小幅に「✕」の列3本ぶんを画面だけ足す（足さないと発熱者の行が器からはみ出して切れる）・印刷は 0', () => {
     const src = read('pages/DailySheetPage.tsx')
     assert.match(src, /const SHEET_MIN_W = `calc\([^`]*\+ var\(--dsheet-del-cols, 0px\)\)`/)
-    assert.match(src, /const SHEET_DEL_COLS_CLASS = '\[--dsheet-del-cols:calc\(var\(--tap-min\)\*3\)\] print:\[--dsheet-del-cols:0px\]'/)
+    assert.match(src, /const SHEET_DEL_COLS_CLASS = '\[--dsheet-del-cols:calc\(1\.5rem\*var\(--sheet-zoom,1\)\*3\)\] print:\[--dsheet-del-cols:0px\]'/)
     assert.match(src, /<div className=\{`sheet-dense \$\{SHEET_DEL_COLS_CLASS\} \$\{SHEET_BP_W_CLASS\}`\} ref=\{measureSheetView\} style=\{\{ minWidth: SHEET_MIN_W \}\}>/)
   })
 

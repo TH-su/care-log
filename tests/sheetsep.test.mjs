@@ -72,4 +72,9 @@ describe('デイサービス・夜勤の区切り', () => {
     assert.match(css, /@media screen \{\s*\.dsheet-late-block \.dsheet-head \{\s*display:\s*none;\s*\}[\s\S]*?\.dsheet-add-btn,\s*\.dsheet-note-title \.dsheet-add-btn \{\s*background:\s*var\(--dsheet-add-bg\);\s*color:\s*var\(--dsheet-add-ink\);\s*border:\s*2px solid var\(--dsheet-add-ink\);/, '画面だけの指定になっていない')
     assert.equal((css.match(/--dsheet-add-bg:/g) ?? []).length, 3, 'ライト・ダーク（設定）・ダーク（OS 追従）の3か所で色を定義していない')
   })
+  it('スクロール中も一番上の太線を残す：日報は日付の行（sticky）が上の線を持ち、一覧は見出しの1段目が持つ（画面だけ）', () => {
+    const css = read('styles/sheet.css')
+    assert.match(css, /border-top:\s*none;\s*\}\s*\.dsheet-day > \[data-day-bar\] \{\s*border-top:\s*var\(--sheet-rule-bold\) solid var\(--c-ink2\);/)
+    assert.match(css, /@media screen \{\s*\.sheet-table \{\s*border-top-width:\s*0;\s*\}\s*\.sheet-table > thead > tr:first-child > th \{\s*box-shadow:\s*inset 0 1px 0 var\(--c-border\);/)
+  })
 })
