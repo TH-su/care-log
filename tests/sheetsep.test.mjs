@@ -64,4 +64,12 @@ describe('デイサービス・夜勤の区切り', () => {
     assert.match(m[1], /border-left:\s*var\(--sheet-rule-bold\) solid var\(--c-ink2\)/)
     assert.match(m[1], /border-right:\s*var\(--sheet-rule-bold\) solid var\(--c-ink2\)/)
   })
+  it('16時以降の欄は列の見出し行を画面で出さない・〔＋行〕は白地・太枠・影で目立たせる（画面だけ）', () => {
+    const src = read('pages/DailySheetPage.tsx')
+    assert.match(src, /className="dsheet-late-block"\s*\n\s*title="日勤申し送り（16時以降）"/, '16時以降の欄に dsheet-late-block が無い')
+    assert.match(src, /sheet-dense-btn dsheet-add-btn/, '〔＋行〕に dsheet-add-btn が無い')
+    const css = read('styles/sheet.css')
+    assert.match(css, /@media screen \{\s*\.dsheet-late-block \.dsheet-head \{\s*display:\s*none;\s*\}[\s\S]*?\.dsheet-add-btn,\s*\.dsheet-note-title \.dsheet-add-btn \{\s*background:\s*var\(--dsheet-add-bg\);\s*color:\s*var\(--dsheet-add-ink\);\s*border:\s*2px solid var\(--dsheet-add-ink\);/, '画面だけの指定になっていない')
+    assert.equal((css.match(/--dsheet-add-bg:/g) ?? []).length, 3, 'ライト・ダーク（設定）・ダーク（OS 追従）の3か所で色を定義していない')
+  })
 })

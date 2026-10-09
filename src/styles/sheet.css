@@ -665,6 +665,8 @@
   --dsheet-c-care-ink: #0b2e63; /* 濃い青 */
   --dsheet-c-night-bg: #1f3864; /* ネイビー（夜勤） */
   --dsheet-c-night-ink: #ffc4c7; /* 赤（ネイビーの上で読める明度に上げた赤） */
+  --dsheet-add-bg: #ffffff; /* 〔＋行〕ボタン（2026-10-09 指示で目立つ形に）＝白地 */
+  --dsheet-add-ink: #0b5365; /* 文字と枠＝主色（白地とのコントラスト 8.5:1） */
 
   /* 土日の日付セル（2026-08-28 追加指示）。3画面（日報・バイタル・食事）で同じ色を使う。
      曜日は日付文字（土）（日）にも出るので、色は補助＝色だけで意味を伝えない */
@@ -693,6 +695,8 @@
   --dsheet-c-care-ink: #a6d9ee; /* 暗い面では「濃い青」を同じ意味の明るい青へ */
   --dsheet-c-night-bg: #0e1b33;
   --dsheet-c-night-ink: #ffb3b8;
+  --dsheet-add-bg: #e9f6fa; /* 暗い面でも浮いて見える明るい地 */
+  --dsheet-add-ink: #0b4252;
   --dsheet-c-sat-bg: #17384c;
   --dsheet-c-sat-ink: #a6d9ee;
   --dsheet-c-sun-bg: #4a1d1d;
@@ -710,6 +714,8 @@
     --dsheet-c-care-ink: #a6d9ee;
     --dsheet-c-night-bg: #0e1b33;
     --dsheet-c-night-ink: #ffb3b8;
+    --dsheet-add-bg: #e9f6fa;
+    --dsheet-add-ink: #0b4252;
     --dsheet-c-sat-bg: #17384c;
     --dsheet-c-sat-ink: #a6d9ee;
     --dsheet-c-sun-bg: #4a1d1d;
@@ -826,6 +832,24 @@
 @media screen {
   .dsheet-late-band {
     display: none;
+  }
+}
+
+/* 16時以降の欄は列の見出し行（対象・内容・記入者・色・詳細）を画面では出さない（2026-10-09 指示）。
+   〔＋行〕ボタンは白地・太い枠・影でボタンと分かる形にする（特に夜勤のネイビーの帯の上で埋もれていた・同日指示）。
+   どちらも画面だけ（印刷は変えない） */
+@media screen {
+  .dsheet-late-block .dsheet-head {
+    display: none;
+  }
+  /* 帯の中のボタンは帯の文字色を継ぐ規則（.dsheet-title-* button { color: inherit }）より強くする。
+     白地の上に帯の文字色（夜勤のピンク等）が乗ると読めないため */
+  .dsheet-add-btn,
+  .dsheet-note-title .dsheet-add-btn {
+    background: var(--dsheet-add-bg);
+    color: var(--dsheet-add-ink);
+    border: 2px solid var(--dsheet-add-ink);
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.35);
   }
 }
 

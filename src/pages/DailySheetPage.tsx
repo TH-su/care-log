@@ -1669,7 +1669,8 @@ function AddRowButton({ label, onClick }: { label: string; onClick: () => void }
       type="button"
       onClick={onClick}
       aria-label={label}
-      className={`${CELL_HIT} sheet-dense-btn shrink-0 rounded-sm border border-primary px-1 font-bold text-primary`}
+      // dsheet-add-btn: 画面では白地・太枠・影でボタンと分かる形にする（特に夜勤の濃い帯の上・2026-10-09 指示・sheet.css）
+      className={`${CELL_HIT} sheet-dense-btn dsheet-add-btn shrink-0 rounded-sm border border-primary px-1 font-bold text-primary`}
     >
       ＋行
     </button>
@@ -4807,8 +4808,10 @@ function DaySheet({
               ↓16時以降の記録
             </div>
 
+            {/* dsheet-late-block: 16時以降の欄は列の見出し行（対象・内容…）を画面では出さない（2026-10-09 指示。真上の日勤の欄と同じ列） */}
             <NoteBlock
               ctx={ctx}
+              className="dsheet-late-block"
               title="日勤申し送り（16時以降）"
               tone="note"
               rows={lateNotes}
