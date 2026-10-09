@@ -94,6 +94,7 @@ import {
   saveAttendance,
   saveVitalEdits,
   setOutingEnd,
+  softDeleteOuting,
   isSelfWrite,
   subscribeChanges,
   deleteNote,
@@ -1607,6 +1608,7 @@ function PickerCell({
   onClick,
   onDelete,
   deleteLabel,
+  deleteScreenOnly = false,
 }: {
   width?: string
   grow?: boolean
@@ -1622,6 +1624,11 @@ function PickerCell({
    */
   onDelete?: () => void
   deleteLabel?: string
+  /**
+   * 「✕」を紙に出さない（2026-10-09 外出者・外泊者・発熱者・他症状者の行に足した分）。
+   * 申し送りの対象欄の「✕」は従来どおり（印刷の見た目を変えないため省略＝false）
+   */
+  deleteScreenOnly?: boolean
 }) {
   return (
     // 余白はこの中のボタン（px-1）だけが持つ。入れ物にも取ると中身が 8px ずれて
@@ -1649,13 +1656,36 @@ function PickerCell({
           onClick={onDelete}
           aria-label={deleteLabel ?? 'この行を削除'}
           style={ROW_BTN_STYLE}
-          className={`${CELL_HIT} shrink-0 rounded-sm px-1 text-ink2`}
+          className={`${CELL_HIT} shrink-0 rounded-sm px-1 text-ink2${deleteScreenOnly ? ' print:hidden' : ''}`}
         >
           <span aria-hidden="true">✕</span>
         </button>
       ) : null}
     </Cell>
   )
+}
+
+/**
+ * 保存済みの外出・外泊の行を消す「✕」（氏名欄の右端）。PickerCell の「✕」と同じ見た目・当たり判定にそろえる。
+ * 保存済みの行は対象を選び直せない（保存後の項目更新 API が無い）ので、氏名はボタンにせず文字のまま出す
+ */
+function RowDeleteButton({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      style={ROW_BTN_STYLE}
+      className={`${CELL_HIT} shrink-0 rounded-sm px-1 text-ink2 print:hidden`}
+    >
+      <span aria-hidden="true">✕</span>
+    </button>
+  )
+}
+
+/** 外出者・外泊者・発熱者・他症状者の行の「✕」の読み上げ名（2026-10-09 指示。氏名があれば「◯◯さんの」を添える） */
+function rowDeleteLabel(name: string): string {
+  return name === '' ? 'この行を削除' : `${name}さんのこの行を削除`
 }
 
 /**
@@ -4414,6 +4444,49 @@ function DaySheet({
     [day, guard, markSelfWrite, saveOk, setRowStatus],
   )
 
+  /**
+   * 外出・外泊の行を消す（氏名欄の「✕」・2026-10-09 指示。申し送りの deleteNoteRow と同じ作法）。
+   * 書きかけ（空の行を含む）は取り消し（removeOutingDraft＝送信待ちの行は消さない）。
+   * 保存済みは確認ダイアログを挟み、rev 照合の soft delete で消す（読んだ後に他の端末が直していれば消さない）
+   */
+  const deleteOutingRow = useCallback(
+    (key: string) => {
+      if (outingDrafts.some((d) => d.key === key)) {
+        removeOutingDraft(key)
+        return
+      }
+      const o = outings.find((x) => `o${x.id}` === key)
+      if (!o) return
+      if (!guard(key)) return
+      askConfirm({
+        title: 'この行を削除しますか',
+        body: '削除すると一覧から消えます（記録は復元できません）。よろしければ「削除する」を押してください。',
+        confirmLabel: '削除する',
+        onConfirm: () => {
+          setConfirm(null)
+          void (async () => {
+            try {
+              markSelfWrite() // 送る前に印を付ける（自分の書き込みで「他の端末で更新」を出さない）
+              const res = await softDeleteOuting(o.id, o.rev)
+              if (res === 'conflict') {
+                // 他の端末が先に直した（帰着の記入など）。消さずに知らせる
+                setRowStatus(key, { tone: 'danger', text: `▲ ${ERR_CONFLICT}` })
+                return
+              }
+              // 送信待ちに退避した削除も一覧からは外す（押した操作のとおりに見せる。電波が戻れば自動で送られる）
+              setOutings((prev) => prev.filter((x) => x.id !== o.id))
+              setRowStatus(key, null)
+              show(res === 'queued' ? MSG_QUEUED : '削除しました')
+            } catch (err) {
+              setRowStatus(key, { tone: 'danger', text: `▲ ${errText(err)}` })
+            }
+          })()
+        },
+      })
+    },
+    [askConfirm, guard, markSelfWrite, outingDrafts, outings, removeOutingDraft, setRowStatus, show],
+  )
+
   // ── ピッカーの結果を配る ───────────────────────────────────
 
   const onPickResident = useCallback(
@@ -4740,6 +4813,7 @@ function DaySheet({
               onAdd={() => addOutingDraft('outing')}
               onPatchDraft={patchOutingDraft}
               onRemoveDraft={removeOutingDraft}
+              onDeleteRow={deleteOutingRow}
               onSaveDraft={saveOutingDraft}
               onCommitEnd={commitOutingEnd}
             />
@@ -4752,6 +4826,7 @@ function DaySheet({
               onAdd={() => addOutingDraft('overnight')}
               onPatchDraft={patchOutingDraft}
               onRemoveDraft={removeOutingDraft}
+              onDeleteRow={deleteOutingRow}
               onSaveDraft={saveOutingDraft}
               onCommitEnd={commitOutingEnd}
             />
@@ -5529,6 +5604,7 @@ function OutingBlock({
   onAdd,
   onPatchDraft,
   onRemoveDraft,
+  onDeleteRow,
   onSaveDraft,
   onCommitEnd,
 }: {
@@ -5540,6 +5616,8 @@ function OutingBlock({
   onPatchDraft: (key: string, patch: Partial<OutingDraft>) => void
   /** 追加した行の取り消し（未保存の行のみ） */
   onRemoveDraft: (key: string) => void
+  /** 行の「✕」（氏名欄の右端）。書きかけは取り消し・保存済みは確認ダイアログを挟んで削除（deleteOutingRow） */
+  onDeleteRow: (key: string) => void
   onSaveDraft: (draft: OutingDraft) => Promise<void>
   onCommitEnd: (o: Outing, raw: string) => void
 }) {
@@ -5577,8 +5655,12 @@ function OutingBlock({
             {/* 1行おきの縞（指示16）。保存済みの行 → 追加した行 の並び順で数える */}
             <Row className={altClass(i)}>
               <LeadCell text={i === 0 ? `${count}名` : ''} />
-              <Cell width="var(--w-name)" className="flex items-center">
-                <span className="truncate font-bold">{name}</span>
+              {/* 余白は文字の側と「✕」（px-1）だけが持つ（PickerCell と同じ並び・左端を列見出しとそろえる） */}
+              <Cell width="var(--w-name)" pad={false} className="flex items-center">
+                <span className="min-w-0 flex-1 truncate px-1 font-bold">{name}</span>
+                {ctx.disabled ? null : (
+                  <RowDeleteButton label={rowDeleteLabel(name)} onClick={() => onDeleteRow(key)} />
+                )}
               </Cell>
               <Cell grow className="flex items-center">
                 <span className="truncate">{o.note ?? ''}</span>
@@ -5657,6 +5739,10 @@ function OutingBlock({
                 label={name === '' ? '対象の利用者を選ぶ' : `対象 ${name}。押すと選び直します`}
                 disabled={disabled}
                 onClick={() => ctx.openResident({ for: 'outingTarget', key: d.key })}
+                // 空のまま足した行も消せるようにする（2026-10-09 指示。送信待ちの行は disabled なので出ない）
+                onDelete={() => onDeleteRow(d.key)}
+                deleteLabel={rowDeleteLabel(name)}
+                deleteScreenOnly
               />
               <Cell grow pad={false}>
                 <SheetCell
@@ -6047,6 +6133,11 @@ function FeverBlock({
                 label={name === '' ? '対象の利用者を選ぶ' : `対象 ${name}。押すと選び直します`}
                 disabled={disabled}
                 onClick={() => ctx.openResident({ for: 'vitalTarget', key: d.key })}
+                // 空のまま足した行も消せるようにする（2026-10-09 指示。送信待ちの行は disabled なので出ない）。
+                // 保存済みの行の削除は未実装（0011 apply_cell_edits が deleted_at を受け付けない＝サーバー側の変更待ち）
+                onDelete={() => onRemoveDraft(d.key)}
+                deleteLabel={rowDeleteLabel(name)}
+                deleteScreenOnly
               />
               {d.sets.map((s, i) => (
                 <VitalSetCells
@@ -6242,6 +6333,11 @@ function SymptomBlock({
                 label={name === '' ? '対象の利用者を選ぶ' : `対象 ${name}。押すと選び直します`}
                 disabled={disabled}
                 onClick={() => ctx.openResident({ for: 'vitalTarget', key: d.key })}
+                // 空のまま足した行も消せるようにする（2026-10-09 指示。送信待ちの行は disabled なので出ない）。
+                // 保存済みの行の削除は未実装（0011 apply_cell_edits が deleted_at を受け付けない＝サーバー側の変更待ち）
+                onDelete={() => onRemoveDraft(d.key)}
+                deleteLabel={rowDeleteLabel(name)}
+                deleteScreenOnly
               />
               <VitalSetCells
                 name={name === '' ? '未選択' : name}

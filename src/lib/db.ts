@@ -5494,6 +5494,14 @@ export async function setOutingEnd(
   return updateNow('outings', id, rev, { end_on: endOn, end_at: endAt }, normalizeOuting, opts)
 }
 
+/**
+ * 外出・外泊1件の削除（soft delete・2026-10-09 日報の行の「✕」）。水分・入浴と同じ経路（rev 照合・送信待ち・edited_by）。
+ * 読んだ後に他の端末が直していれば 'conflict'（黙って消さない）。旧行は 0010 のトリガが record_history に op='delete' で残す
+ */
+export async function softDeleteOuting(id: number, rev: number, opts?: WriteOpts): Promise<true | Conflict | Queued> {
+  return softDelete('outings', id, rev, opts)
+}
+
 // ── 入浴記録（デイ・2026-09-26 追加・0012_bath_records.sql） ─────────────────────
 //
 // 書き方は水分・申し送り・外出と同じ経路（client_key・rev 照合・送信待ち・edited_by・soft delete）。
