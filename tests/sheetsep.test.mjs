@@ -11,9 +11,17 @@ const SRC = process.env.CL_SEP_SRC
 const read = (p) => readFileSync(new URL(p, SRC), 'utf8')
 
 describe('デイサービス・夜勤の区切り', () => {
+  it('デイサービス欄の浮島は画面だけ・四辺を 3px で囲み・上下 24px 離す・overflow を付けない', () => {
+    const css = read('styles/sheet.css')
+    const m = css.match(/@media screen \{\s*\.dsheet-island \{([^}]*)\}/)
+    assert.ok(m, '.dsheet-island が @media screen の中に無い')
+    assert.match(m[1], /margin:\s*var\(--sp-5\) var\(--sp-2\)/, '上下 24px・左右 8px でない')
+    assert.match(m[1], /border:\s*3px solid var\(--c-ink\)/, '四辺の罫線が 3px・濃い色でない')
+    assert.doesNotMatch(m[1], /overflow/, 'overflow を付けると行の左固定が効かなくなる')
+  })
   it('デイサービス欄と夜勤申し送り欄に区切りの class が付いている', () => {
     const src = read('pages/DailySheetPage.tsx')
-    assert.match(src, /className="dsheet-gap-block dsheet-sep-block"\s*\n\s*title="デイサービス"/, 'デイサービス欄に区切りが無い')
+    assert.match(src, /className="dsheet-gap-block dsheet-island"\s*\n\s*title="デイサービス"/, 'デイサービス欄が浮島になっていない')
     assert.match(src, /className="dsheet-sep-block"\s*\n\s*title="夜勤申し送り"/, '夜勤申し送り欄に区切りが無い')
   })
   it('区切りは画面だけ（印刷は変えない）・日の切れ目より狭い余白・日の枠より太い罫線', () => {
