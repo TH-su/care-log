@@ -1142,6 +1142,21 @@ export function VitalsSheetPage({
     return out
   }, [visibleResidents, recheckRows])
 
+  /**
+   * 「全」表示で階が変わる入居者の最初の行（定時の行）→「◯階」。その行の上に太線を引く
+   * （2026-10-09 指示・食事一覧の .msheet-floor-start と同じ）。1つの階だけを出している時は変わり目が無いので空
+   */
+  const floorStartRows = useMemo(() => {
+    const out = new Map<string, string>()
+    let prev: string | null = null
+    for (const r of visibleResidents) {
+      const f = floorOf(r.room)
+      if (prev !== null && f !== prev) out.set(`r${r.id}`, f === FLOOR_OTHER ? '居室未設定' : `${f}階`)
+      prev = f
+    }
+    return out
+  }, [visibleResidents])
+
   /** 「再検」ボタン: その入居者の直下に再検欄を1本足す（画面内の状態・保存しない） */
   const addRecheckRow = useCallback(
     (residentId: number) => {
@@ -2061,6 +2076,7 @@ export function VitalsSheetPage({
                   <FragmentRow
                     key={row.rowId}
                     row={row}
+                    floorStart={floorStartRows.get(row.rowId) ?? null}
                     name={name}
                     room={room}
                     isRoutine={isRoutine}
@@ -2149,6 +2165,8 @@ interface FragmentRowProps {
   isRoutine: boolean
   /** 1行おきの縞（薄いグレー）を敷く行 */
   alt: boolean
+  /** 「全」表示で階が変わる入居者の最初の行（上に太線を引く・食事一覧と同じ .msheet-floor-start）。読み上げ用の文字も添える */
+  floorStart?: string | null
   dayList: string[]
   recs: Map<string, Rec>
   editable: boolean
@@ -2177,6 +2195,7 @@ function FragmentRow({
   room,
   isRoutine,
   alt,
+  floorStart = null,
   dayList,
   recs,
   editable,
@@ -2199,12 +2218,14 @@ function FragmentRow({
   const rowBusy = isRoutine ? presence.rowBusy('vitals', dayList, row.residentId, SHEET_KINDS) : null
   return (
     <>
-      <tr style={{ height: ROW_H }} className={rowBg}>
+      <tr style={{ height: ROW_H }} className={`${rowBg} ${floorStart ? 'msheet-floor-start' : ''}`}>
         <th
           scope="row"
           style={{ width: W_ROOM, minWidth: W_ROOM, left: 0 }}
           className={`${CELL_BASE} tabular sticky z-10 ${rowBg} text-center font-normal text-ink2`}
         >
+          {/* 階の切れ目は太線で示すが、線は読み上げに乗らないので変わり目の行だけ文字で添える（食事一覧と同じ） */}
+          {floorStart ? <span className="sr-only">ここから{floorStart}</span> : null}
           {isRoutine ? (room ?? '—') : ''}
         </th>
         <td
