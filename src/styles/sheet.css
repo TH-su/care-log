@@ -782,6 +782,17 @@
   margin-bottom: var(--sp-3);
 }
 
+/* デイサービス欄と夜勤申し送り欄の上を、ほかの欄より少し広く離し、濃く太い罫線で区切る
+   （2026-10-09 指示）。罫線は日の枠（2px）より太い 3px・本文と同じ濃い色。
+   余白 16px は日の切れ目（32px）より狭いまま＝余白の序列は変えない。
+   画面だけに効かせる（印刷の見た目は変えない・原則2） */
+@media screen {
+  .dsheet-sep-block {
+    margin-top: var(--sp-4); /* 16px */
+    border-top: 3px solid var(--c-ink);
+  }
+}
+
 /* ブロックの見出し行（外出者・外泊者・発熱者・他症状者）＝黒枠・太線 */
 .dsheet-head {
   border-bottom: var(--sheet-rule-bold) solid var(--c-ink2);

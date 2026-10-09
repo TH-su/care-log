@@ -4832,7 +4832,7 @@ function DaySheet({
                 前後の欄から離す（2026-08-28 指示）。余白は日が変わる切れ目より狭い12px */}
             <NoteBlock
               ctx={ctx}
-              className="dsheet-gap-block"
+              className="dsheet-gap-block dsheet-sep-block"
               title="デイサービス"
               tone="care"
               rows={careNotes}
@@ -4853,8 +4853,10 @@ function DaySheet({
               onHistory={openNoteHistory}
             />
 
+            {/* 夜勤申し送りもデイサービスの下から少し離し、濃く太い罫線で区切る（2026-10-09 指示） */}
             <NoteBlock
               ctx={ctx}
+              className="dsheet-sep-block"
               title="夜勤申し送り"
               tone="night"
               rows={nightNotes}
@@ -6337,7 +6339,7 @@ interface NoteBlockProps {
   onResolve: (note: Note) => void
   /** 申し送り1件の変更の記録を開く */
   onHistory: (note: Note) => void
-  /** 枠の外側の余白を足したい時だけ渡す（デイサービス欄の .dsheet-gap-block） */
+  /** 枠の外側の余白・区切り線を足したい時だけ渡す（デイサービス欄の .dsheet-gap-block、デイ・夜勤の .dsheet-sep-block） */
   className?: string
 }
 
