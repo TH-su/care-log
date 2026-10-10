@@ -46,6 +46,7 @@ import { overlayNote, pendingNoteText, pendingSig } from '../lib/noteEdit'
 import { registerUnsaved } from '../lib/leaveGuard'
 import { getActorId, touchActivity } from '../lib/actor'
 import { fmtDayLabel, fmtTimeHM } from '../lib/format'
+import { fmtRecordTime, noteIsNextMorning, timeSortKey } from '../lib/nextMorning'
 import {
   IMPORTANCE_LABEL,
   MEAL_SLOT_LABEL,
@@ -132,6 +133,16 @@ function queuedText(): string {
 }
 
 /** 送信待ちに添える控え（どの日・区分・対象の行か） */
+/**
+ * 申し送りの時刻の昇順（時刻なしは先頭＝従来どおり）。夜勤明けに前日の夜勤の欄へ書いた申し送り（「翌」）は、
+ * その日の夜の記録の後ろ（F34・2026-10-10 本人裁定。規則は nextMorning.ts）
+ */
+function noteTimeCmp(a: Note, b: Note): number {
+  return (timeSortKey(a.occurred_at, noteIsNextMorning(a)) ?? '').localeCompare(
+    timeSortKey(b.occurred_at, noteIsNextMorning(b)) ?? '',
+  )
+}
+
 function noteMetaOf(n: Note): NoteMeta {
   return { note_on: n.note_on, shift: n.shift, resident_id: n.resident_id, after16: n.after16 }
 }
@@ -898,7 +909,7 @@ const DaySection = memo(function DaySection(props: DaySectionProps) {
     const ongoingIds = new Set(day.pinned.map((n) => n.id))
     const criticals = day.notes
       .filter((n) => n.importance === 'critical' && !ongoingIds.has(n.id))
-      .sort((a, b) => (a.occurred_at ?? '').localeCompare(b.occurred_at ?? '') || a.id - b.id)
+      .sort((a, b) => noteTimeCmp(a, b) || a.id - b.id)
     return [
       ...day.pinned.map((note) => ({ note, ongoing: true })),
       ...criticals.map((note) => ({ note, ongoing: false })),
@@ -908,7 +919,7 @@ const DaySection = memo(function DaySection(props: DaySectionProps) {
   // 勤務帯ごとの申し送り（時刻→id の安定順）
   const notesByShift = useMemo(() => {
     const sorted = day.notes.slice().sort((a, b) => {
-      const t = (a.occurred_at ?? '').localeCompare(b.occurred_at ?? '')
+      const t = noteTimeCmp(a, b)
       return t !== 0 ? t : a.id - b.id
     })
     return SHIFT_ORDER.map((shift) => ({
@@ -1277,7 +1288,7 @@ function NoteCard({
     >
       {/* 1行目: 時刻・対象・職種タグ・重要度 */}
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-sm text-ink2 tabular">{fmtTimeHM(note.occurred_at) || '—'}</span>
+        <span className="text-sm text-ink2 tabular">{fmtRecordTime(note.occurred_at, noteIsNextMorning(note)) || '—'}</span>
         {note.resident_id == null ? (
           <span className="text-base text-info">
             <span aria-hidden="true">ⓘ </span>スタッフへ

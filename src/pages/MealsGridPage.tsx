@@ -41,6 +41,7 @@ import {
 import type { ChangeInfo, PendingCellRow } from '../lib/db'
 import { getActorId, touchActivity } from '../lib/actor'
 import { fmtDayLabel, toHalfWidth, todayIso } from '../lib/format'
+import { recordTimeFor } from '../lib/nextMorning'
 import { MEAL_SLOT_LABEL, MEAL_STATUS_LABEL, OUTING_KIND_LABEL } from '../lib/types'
 import type { FluidIntake, Meal, MealSlot, MealStatus, Outing, Resident } from '../lib/types'
 import {
@@ -240,20 +241,15 @@ function serverFluidMl(rows: FluidIntake[], residentId: number): number {
   return sum
 }
 
-/** 'HH:MM'（端末ローカル時刻＝JST運用） */
-function nowTimeHM(d: Date): string {
-  const h = String(d.getHours()).padStart(2, '0')
-  const m = String(d.getMinutes()).padStart(2, '0')
-  return `${h}:${m}`
-}
-
 /**
- * 新しい水分の記録に入れる時刻。表示中の日が今日の時だけ今の時刻（食事一覧・日報と同じ式＝F18・F34）。
- * 日付をまたいで開いたままの前日の画面で、前日の記録に今朝の時刻が入る（日付は昨日・時刻は今朝）のを防ぐ。
- * 0時〜朝の記録は暦の日付（当日）に載せる決まり（2026-10-10 本人回答）なので、前日の記録の時刻は空にする
+ * 新しい水分の記録に入れる時刻（食事一覧・日報・申し送りと同じ規則＝F18・F34。規則は nextMorning.ts）。
+ * ・表示中の日が今日: 今の時刻
+ * ・前日の列に、夜勤明け（9時）より前に書いた: 今の時刻（2026-10-10 本人裁定。帰属は暦の日付のまま、画面では
+ *   「翌」を付けてその日の夜の記録の後ろに並べる）
+ * ・それ以外の過去日（前日の列に9時以降に書いた等）: 空（日付は昨日・時刻は今朝、という記録を作らない）
  */
 export function takenAtFor(day: string): string | null {
-  return day === todayIso() ? nowTimeHM(new Date()) : null
+  return recordTimeFor(day)
 }
 
 /** 選んでいた階を読む（UI状態だけ。壊れた値・未知の形は null＝既定へ。一覧にあるかの照合は画面側で行う） */

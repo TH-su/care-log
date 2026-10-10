@@ -186,6 +186,7 @@ import {
 import type { DraftFile, DraftOrigin, DraftRow } from '../lib/noteDrafts'
 import { getActorId, touchActivity } from '../lib/actor'
 import { addDays, fmtTimeHM, normalizeVitalInput, todayIso, toHalfWidth } from '../lib/format'
+import { noteIsNextMorning, noteTimeFor, recordTimeFor, timeSortKey } from '../lib/nextMorning'
 import {
   IMPORTANCE_LABEL,
   LS,
@@ -397,26 +398,6 @@ function createOutingBus(): OutingBus {
   }
 }
 
-/** 夜勤明けの時刻（この時刻より前は、前日の夜勤の続き）。申し送りフォームの勤務帯の既定（9時から日勤）と同じ仮置き */
-const NIGHT_END_HOUR = 9
-
-/**
- * 申し送りに入れる時刻（F34・2026-10-10）。帰属は暦の日付のまま（本人回答: 0時〜朝の記録は当日の日報）。
- * ・その日の欄（記録日＝今日）: 今の時刻
- * ・前日の夜勤の欄に、夜勤明け（NIGHT_END_HOUR）より前に書いた: 今の時刻（以前は時刻が空になり、夜勤の続きの記録の
- *   時刻が分からなくなっていた）
- * ・それ以外の過去日: 空（誤った時刻を残さない＝従来どおり）
- * 申し送りフォーム（NoteFormPage の noteOccurredAt）と同じ規則（試験で本体が同じことを確かめる）
- */
-function noteOccurredAt(day: string, shift: Shift, now: Date): string | null {
-  const iso = (d: Date): string => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
-  const hm = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`
-  if (day === iso(now)) return hm
-  const yesterday = iso(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1))
-  if (shift === 'night' && day === yesterday && now.getHours() < NIGHT_END_HOUR) return hm
-  return null
-}
-
 /**
  * 名前を引く表に使う一覧（F48）。在籍を問わない全員（all）に、在籍者の一覧（active）を重ねる
  * （全員の一覧を読めない・読む前は在籍者だけ＝従来どおり。在籍者は新しく読んだ方を優先する）
@@ -459,6 +440,8 @@ const ERR_NO_ACTOR = '記録する職員が選ばれていません。設定タ�
 const MSG_QUEUED = '⚠ 未送信（電波が戻ると自動で送信します）'
 const MSG_NOT_PERSISTED =
   '▲ 送信待ちにしましたが端末に控えを残せませんでした。この画面を閉じずに電波の回復をお待ちください'
+/** 送信待ちにした直後の一言。端末に控えを残せていない時は「自動で送信します」と言い切らない（F01） */
+const queuedMsg = (): string => (isQueuePersisted() ? MSG_QUEUED : MSG_NOT_PERSISTED)
 /**
  * 保存が成功した行の一言（旧 MSG_SAVED「✓ 保存しました」）は**出さない**（2026-08-28 指示10）。
  * 1行ごとに出すと行間が空いて実物の密度にならないため。
@@ -612,12 +595,6 @@ const NO_STAFF: Staff[] = []
 
 function pad2(n: number): string {
   return String(n).padStart(2, '0')
-}
-
-/** 端末ローカルの現在時刻 HH:MM（既存の記録画面と同じ扱い） */
-function nowHM(): string {
-  const d = new Date()
-  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`
 }
 
 /** 利用者の表示名。マスタ未取得時も氏名を作らず ID 表記に落とす */
@@ -3211,7 +3188,13 @@ function DaySheet({
         setNotes(
           safeNotes
             .slice()
-            .sort((a, b) => (a.occurred_at ?? '').localeCompare(b.occurred_at ?? '') || a.id - b.id),
+            // 夜勤明けに前日の夜勤の欄へ書いた申し送り（「翌」）は、その日の夜の記録の後ろ（F34）
+            .sort(
+              (a, b) =>
+                (timeSortKey(a.occurred_at, noteIsNextMorning(a)) ?? '').localeCompare(
+                  timeSortKey(b.occurred_at, noteIsNextMorning(b)) ?? '',
+                ) || a.id - b.id,
+            ),
         )
         // 申し送りの送信待ちを引き直す（読み直した行に、送信待ちの本文を重ねて出す＝M2）
         pendingNotesRef.current = pendingNoteRows()
@@ -3572,7 +3555,7 @@ function DaySheet({
         // 送信待ちに退避した時も画面は操作したとおりにする（巻き戻すと「選んだのに消えた」になる）。
         // 電波が戻れば同じ内容が自動で送られる＝この行に未送信の一言を残しておく
         applyAttendance(next)
-        if (res === 'queued') setRowStatus('attendance', { tone: 'warn', text: MSG_QUEUED })
+        if (res === 'queued') setRowStatus('attendance', { tone: 'warn', text: queuedMsg() })
         if (undoLabel !== null) {
           show(undoLabel, () => {
             // 戻す操作も同じ列に並べる（戻した内容が、後から届いた保存で上書きされないように）。
@@ -4011,7 +3994,9 @@ function DaySheet({
           body: body.trim(),
           // 記録日が今日のとき（と、前日の夜勤の欄に夜勤明けより前に書いた時）だけ現在時刻を入れる
           // （それ以外の過去日に誤った時刻を残さない・F34）
-          occurred_at: noteOccurredAt(day, draft.shift, new Date()),
+          // 申し送りに入れる時刻（F34・2026-10-10 本人裁定）。帰属は暦の日付のまま。前日の夜勤の欄に夜勤明けより前に
+          // 書いた時は今の時刻（画面では「翌」を付けて夜の記録の後ろに並べる）。規則は nextMorning.ts（フォームと同じ関数）
+          occurred_at: noteTimeFor(day, draft.shift, new Date()),
           ongoing: false,
           ended_at: null,
           reporter_id: draft.reporterId,
@@ -4179,7 +4164,7 @@ function DaySheet({
               setExpanded(null)
               // 送信待ちに退避した削除も一覧からは外す（押した操作のとおりに見せる）。
               // 行が無くなるので一言は行ではなくトーストで出す（電波が戻れば自動で送られる）
-              show(res === 'queued' ? MSG_QUEUED : '削除しました')
+              show(res === 'queued' ? queuedMsg() : '削除しました')
             } catch (err) {
               setRowStatus(key, { tone: 'danger', text: `▲ ${errText(err)}` })
             }
@@ -4369,7 +4354,7 @@ function DaySheet({
           if (cur && hasEdits(remain)) rest[id] = { ...cur, base: after, edits: remain }
           else delete rest[id]
           writeHeld(rest)
-          setRowStatus(c.rowKey, { tone: 'warn', text: MSG_QUEUED })
+          setRowStatus(c.rowKey, { tone: 'warn', text: queuedMsg() })
           return
         }
         if (res.held === true) {
@@ -4710,13 +4695,9 @@ function DaySheet({
         const fields = heldFields(c)
         const vals = valuesForBoth(fields, editValues(c.edits)) as Record<string, unknown>
         if (Object.keys(vals).length === 0) return
-        // 時刻は利用者が入れた時刻があればそれを使う。無ければ今日の分は今の時刻・過去日は空（両方残すと同じ）
-        const at =
-          typeof vals.measured_at === 'string'
-            ? vals.measured_at
-            : c.base.measured_on === todayIso()
-              ? nowHM()
-              : null
+        // 時刻は利用者が入れた時刻があればそれを使う。無ければ今日の分は今の時刻・前日の分は夜勤明けより前だけ今の
+        // 時刻（「翌」・F34）・それ以外の過去日は空（両方残すと同じ。規則は nextMorning.ts）
+        const at = typeof vals.measured_at === 'string' ? vals.measured_at : recordTimeFor(c.base.measured_on)
         const edits: CellEditInput<VitalCellField> = {}
         for (const f of VITAL_FIELDS) if (typeof vals[f] === 'number') edits[f] = { value: vals[f], base: null }
         if (at !== null) edits.measured_at = { value: at, base: null }
@@ -4745,7 +4726,7 @@ function DaySheet({
           delete rest[id]
           writeHeld(rest) // 保存成功・送信待ちへ渡し終えた（R-D）
           if (res === 'queued') {
-            show(MSG_QUEUED)
+            show(queuedMsg())
             return
           }
           setReload((n) => n + 1)
@@ -4831,7 +4812,7 @@ function DaySheet({
       // 〔くらべて選ぶ〕が消えるので、フォーカスをその行の氏名へ移す（body へ落とさない）
       focusAfterResolve(vitalNameId(day, c.rowKey))
       if (r.queued) {
-        setRowStatus(c.rowKey, { tone: 'warn', text: MSG_QUEUED })
+        setRowStatus(c.rowKey, { tone: 'warn', text: queuedMsg() })
         return
       }
       setRowStatus(c.rowKey, null)
@@ -5082,7 +5063,7 @@ function DaySheet({
             setOutings((prev) => prev.map((x) => (x.id === o.id ? shown : x)))
             // 同じ画面の他の日（外泊の続きの日）にも同じ値を配る（F65。版は変えない＝送信待ちと同じ版）
             onOutingChanged({ before: o, after: shown })
-            setRowStatus(key, { tone: 'warn', text: MSG_QUEUED })
+            setRowStatus(key, { tone: 'warn', text: queuedMsg() })
             return
           }
           setOutings((prev) => prev.map((x) => (x.id === o.id ? res : x)))
@@ -5132,7 +5113,7 @@ function DaySheet({
               // 同じ画面の他の日（外泊の続きの日）からも外す（F65）
               onOutingChanged({ before: o, after: null })
               setRowStatus(key, null)
-              show(res === 'queued' ? MSG_QUEUED : '削除しました')
+              show(res === 'queued' ? queuedMsg() : '削除しました')
             } catch (err) {
               setRowStatus(key, { tone: 'danger', text: `▲ ${errText(err)}` })
             }

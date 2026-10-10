@@ -169,8 +169,21 @@
   - 追加（2026-09-26）: `cl_view` の既知値に `incident`（/incident＝事故・ヒヤリハット 一覧。/incident/new・/incident/:id も一覧の配下）・
     `incidentSummary`（/incident/summary＝委員会用の月次集計）。一覧の期間・区分・状態、集計の月、入力中の値は保存しない（開くと常に直近3か月・全て／今月）
   - 追加（2026-09-26）: `cl_notePhraseCat`（申し送りの定型句で最後に選んだ場面 id＝body/meal/excretion/night/skin/fall/medical/meds/family/notice。正本は `src/lib/notePhrases.ts`。既知値照合・不正/未知は先頭の場面 body。キー定数は凍結の types.ts に足さず NoteFormPage.tsx に置く）
+  - 2026-10-10 改訂（F68）: `cl_recordTab` を実装した（それまでは許可リストに載っているだけで使っていなかった）。/record/<vitals|meals|note|outing> にいる間はその名前を書き、
+    記録ハブ（/record）とそれ以外の /record/*（入浴・与薬）では消す。起動時に読み切り、**ベースURLで開いて `cl_view` が 'record' の時だけ** /record/<画面> へ戻す
+    （URL が第一は変えない）。許可リスト外・不正値は記録ハブのまま。入浴・与薬は従来どおり記録ハブへ戻る（入れるかは本人確認）。キーは types.ts の既存の `LS.recordTab`。実装は App.tsx の readRecordTab・recordTabOf
+  - 追加（2026-10-10・F68）: `cl_mealsGridFloor`（食事一括 /record/meals で選んでいる階。値は階の数字 '1' '2' … か 'other'＝居室未設定）。
+    照合は `/^[0-9a-z]{1,8}$/`、壊れた値・未知の形は既定へ。復元した値が今の一覧の階に無ければ先頭の階へ戻す。食事一覧の `cl_sheetFloor`（「全」がある）とは
+    選べる値が違うので別キー。キー定数は凍結の types.ts に足さず MealsGridPage.tsx（`MEALS_FLOOR_KEY`）に置く（`cl_notePhraseCat` と同じ前例）。日付・入力値は保存しない
+- **運用の控え（別枠・2026-10-10 追加・F50）**: `cl_masterSyncOkAt`／`cl_masterSyncTryAt`（名簿の自動同期で、最後に名簿が新しいと確かめた時刻・最後に試みた時刻。
+  epoch ms の数値だけ・氏名や合言葉は置かない）。UI状態でも業務データでもなく、自動同期の間隔（60分・失敗後10分）の判定だけに使う。読めない・書けない時は同期を続ける。
+  実装は src/lib/gasClient.ts（types.ts の LS には足していない）
+- **localStorage ではない名前（混同しないための注記・2026-10-10）**: `cl_sendQueue_flush`・`cl_sendQueue_write`・`cl_tab_<タブの印>`（F03）・`cl_masterSync`（F50）は
+  Web Locks の名前、`cl_note_presence` は Realtime のチャンネル名、`cl_changes_*`・`cl_bath_*`・`cl_med_*`・`cl_incident_*` は購読のチャンネル名。端末に値は残らない
 - **操作者キー（別枠・#1）**: `cl_staffId`（staff_id 数値のみ・氏名なし）。復元は**固定リストでなく staff スナップショットとの動的照合**（不在・無効は操作者ピッカーへ）。業務データに紐づく状態だが操作主体の同定に必須のため、**理由を添えてスコープ例外として承認時に確定**（原則11の但し書きに準拠）。
 - **データ保護キー（別枠・#4）**: `cl_sendQueue`／`cl_sendQueue2`（バイタル・食事の送信待ち・2026-09-23 追加）／`cl_draftNote`（§6.5の保持規則に従う。UI状態復元には使わない）。
+  - 2026-10-10 改訂: `cl_dailyDraft:<日付>`（日報の書きかけ・§6.5）もこの枠。`cl_sendQueue2` の done は、送り終えた・取り下げた退避 op の墓標（行キー `op:<qid>`・8日・500件。F05）も持つ。
+    別の版の控え（書きかけの `v` が 1 以外・この版が知らない表の op）は消さずに原文のまま残す（F27・F30。concurrent-entry.md §9.2・§10.1）
 - **保存しない**: 選択中利用者・表示中日付・検索語・カード展開状態・氏名等（§6.5のキーを除く）。Supabase Auth セッションはSDK標準の保管に従う（kitchen-app前例踏襲・UI状態キーとは別レイヤー）。
 
 ---

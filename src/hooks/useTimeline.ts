@@ -11,6 +11,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetchTimelineChunk, isSelfWrite, subscribeChanges } from '../lib/db'
+import { fluidIsNextMorning, noteIsNextMorning, timeSortKey, vitalIsNextMorning } from '../lib/nextMorning'
 import { addDays, isoDate, todayIso } from '../lib/format'
 import type {
   DayData,
@@ -193,10 +194,23 @@ function assembleDays(fromIso: string, toIso: string, chunk: TimelineChunk | nul
   }
 
   for (const d of days) {
-    d.notes.sort((a, b) => cmpTime(a.occurred_at, b.occurred_at) || a.id - b.id)
-    d.vitals.sort((a, b) => cmpTime(a.measured_at, b.measured_at) || a.id - b.id)
+    // 夜勤明けに前日の欄へ書いた記録（「翌」）は、その日の夜の記録の後ろ（F34・規則は nextMorning.ts）
+    d.notes.sort(
+      (a, b) =>
+        cmpTime(timeSortKey(a.occurred_at, noteIsNextMorning(a)), timeSortKey(b.occurred_at, noteIsNextMorning(b))) ||
+        a.id - b.id,
+    )
+    d.vitals.sort(
+      (a, b) =>
+        cmpTime(timeSortKey(a.measured_at, vitalIsNextMorning(a)), timeSortKey(b.measured_at, vitalIsNextMorning(b))) ||
+        a.id - b.id,
+    )
     d.meals.sort((a, b) => slotOrder(a.meal_slot) - slotOrder(b.meal_slot) || a.id - b.id)
-    d.fluids.sort((a, b) => cmpTime(a.taken_at, b.taken_at) || a.id - b.id)
+    d.fluids.sort(
+      (a, b) =>
+        cmpTime(timeSortKey(a.taken_at, fluidIsNextMorning(a)), timeSortKey(b.taken_at, fluidIsNextMorning(b))) ||
+        a.id - b.id,
+    )
     d.outings.sort((a, b) => cmpTime(a.start_at, b.start_at) || a.id - b.id)
   }
   return days

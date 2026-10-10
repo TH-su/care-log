@@ -404,13 +404,35 @@ if (VG === null) {
       }
     })
 
-    it('新しい行の測定時刻・水分の時刻は、表示中の日が今日の時だけ今の時刻（前日の行に今朝の時刻を入れない）', () => {
-      const today = FMT.todayIso()
-      const yesterday = FMT.addDays(today, -1)
-      assert.match(VG.measuredAtFor(today), /^\d{2}:\d{2}$/)
-      assert.equal(VG.measuredAtFor(yesterday), null)
-      assert.match(MG.takenAtFor(today), /^\d{2}:\d{2}$/)
-      assert.equal(MG.takenAtFor(yesterday), null)
+    it('新しい行の測定時刻・水分の時刻は、今日は今の時刻・前日は夜勤明け（9時）より前だけ今の時刻（前日の行に昼の時刻を入れない・F34）', () => {
+      // 2026-10-10 本人裁定（F34）: 夜勤明けに前日の列へ書き足した記録は書いた時刻を入れ、画面では「翌」を付ける。
+      // 9時以降に前日の列へ書いた記録は従来どおり時刻なし。端末の時計を差し替えて確かめる（実行する時刻に依らない）
+      const RealDate = Date
+      const clockAt = (h) => {
+        const t = new RealDate(2026, 9, 9, h, 0).getTime()
+        return class extends RealDate {
+          constructor(...a) {
+            if (a.length === 0) super(t)
+            else super(...a)
+          }
+          static now() {
+            return t
+          }
+        }
+      }
+      try {
+        globalThis.Date = clockAt(12)
+        assert.equal(VG.measuredAtFor('2026-10-09'), '12:00')
+        assert.equal(VG.measuredAtFor('2026-10-08'), null)
+        assert.equal(MG.takenAtFor('2026-10-09'), '12:00')
+        assert.equal(MG.takenAtFor('2026-10-08'), null)
+        globalThis.Date = clockAt(2)
+        assert.equal(VG.measuredAtFor('2026-10-08'), '02:00')
+        assert.equal(MG.takenAtFor('2026-10-08'), '02:00')
+        assert.equal(VG.measuredAtFor('2026-10-07'), null)
+      } finally {
+        globalThis.Date = RealDate
+      }
       const vg = code('pages/VitalsGridPage.tsx')
       assert.doesNotMatch(vg, /measured_at: nowHM\(\)/, '無条件に今の時刻を入れている')
       assert.equal((vg.match(/measured_at: measuredAtFor\(day\)/g) ?? []).length, 2)
@@ -514,10 +536,14 @@ if (VG === null) {
       }
     })
 
-    it('F34: 一覧2画面の前日の欄の時刻は空のまま（0時〜朝の記録は暦の日付に載せる決まり。前日の欄に今の時刻を入れない）', () => {
+    it('F34: 4画面の新しい記録の時刻は共通の規則（前日の列は夜勤明けより前だけ今の時刻＝「翌」・2026-10-10 本人裁定）', () => {
+      // 以前は「前日の列は空のまま」を見張っていた。裁定で、夜勤明けに前日の列へ書き足した記録は書いた時刻を入れ、
+      // 画面では「翌」を付けて夜の記録の後ろに並べることになった（振る舞いの試験は tests/next-morning-f34.test.mjs）
       const vs = code('pages/VitalsSheetPage.tsx')
-      assert.equal((vs.match(/measured_at: rec\.day === today \? nowHM\(\) : null/g) ?? []).length, 2)
-      assert.match(code('pages/MealsSheetPage.tsx'), /taken_at: day === todayIso\(\) \? nowTimeHM\(new Date\(\)\) : null/)
+      assert.equal((vs.match(/measured_at: recordTimeFor\(rec\.day\)/g) ?? []).length, 2)
+      assert.match(code('pages/MealsSheetPage.tsx'), /taken_at: recordTimeFor\(day\),/)
+      assert.match(code('pages/VitalsGridPage.tsx'), /return recordTimeFor\(day\)/)
+      assert.match(code('pages/MealsGridPage.tsx'), /return recordTimeFor\(day\)/)
     })
 
     it('F46: 4画面は記録者（actorId）を描くたびに App から受け取り直す（設定タブ・記録者の部品の切替が App から届けばそのまま効く）', () => {

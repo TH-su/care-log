@@ -282,38 +282,36 @@ describe('★F18 日付をまたいで開いたままの画面', () => {
 })
 
 // ══════════════════════════════════════════════════════════════
-describe('★F34 前日の夜勤の欄に夜勤明けより前に書いた時も時刻を残す（帰属は暦の日付のまま）', () => {
-  const D = evalDecls(daily, ['const NIGHT_END_HOUR', 'function noteOccurredAt('], { pad2 })
-  const nowHM = (d) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}`
-  const F = evalDecls(form, ['const NIGHT_END_HOUR', 'function noteOccurredAt('], { pad2, nowHM })
+describe('★F34 前日の夜勤の欄に夜勤明けより前に書いた時も時刻を残す（帰属は暦の日付のまま・画面では「翌」）', () => {
+  // 2026-10-10 本人裁定で、日報とフォームの規則は src/lib/nextMorning.ts の noteTimeFor 1か所にまとめた
+  // （バイタル・水分と同じ規則。「翌」の表示・並びの試験は tests/next-morning-f34.test.mjs）
   const at = (h, m = 0) => new Date(2026, 7, 28, h, m) // 端末の現地時刻 2026-08-28
-
-  for (const [name, fn] of [['日報', D.noteOccurredAt], ['申し送りフォーム', F.noteOccurredAt]]) {
-    it(`${name}: 今日は今の時刻・前日の夜勤は 0:00〜8:59 だけ今の時刻・それ以外の過去日は空`, () => {
-      assert.equal(fn('2026-08-28', 'night', at(2)), '02:00')
-      assert.equal(fn('2026-08-28', 'day', at(23, 59)), '23:59')
-      assert.equal(fn('2026-08-27', 'night', at(0, 0)), '00:00')
-      assert.equal(fn('2026-08-27', 'night', at(8, 59)), '08:59')
-      assert.equal(fn('2026-08-27', 'night', at(9, 0)), null)
-      assert.equal(fn('2026-08-27', 'day', at(2)), null)
-      assert.equal(fn('2026-08-27', 'daycare', at(2)), null)
-      assert.equal(fn('2026-08-26', 'night', at(2)), null)
-    })
-  }
-  it('日報とフォームは同じ規則（時刻の境目と月をまたぐ日で突き合わせる）', () => {
-    const cases = []
-    for (const day of ['2026-08-31', '2026-09-01', '2026-08-30']) {
-      for (const shift of ['day', 'daycare', 'night']) {
-        for (const h of [0, 1, 8, 9, 15, 16, 23]) cases.push([day, shift, new Date(2026, 8, 1, h, 30)])
-      }
-    }
-    for (const [day, shift, now] of cases) assert.equal(D.noteOccurredAt(day, shift, now), F.noteOccurredAt(day, shift, now))
+  it('日報・フォーム共通: 今日は今の時刻・前日の夜勤は 0:00〜8:59 だけ今の時刻・それ以外の過去日は空', async () => {
+    const { noteTimeFor: fn } = await import(new URL('lib/nextMorning.ts', SRC).href)
+    assert.equal(fn('2026-08-28', 'night', at(2)), '02:00')
+    assert.equal(fn('2026-08-28', 'day', at(23, 59)), '23:59')
+    assert.equal(fn('2026-08-27', 'night', at(0, 0)), '00:00')
+    assert.equal(fn('2026-08-27', 'night', at(8, 59)), '08:59')
+    assert.equal(fn('2026-08-27', 'night', at(9, 0)), null)
+    assert.equal(fn('2026-08-27', 'day', at(2)), null)
+    assert.equal(fn('2026-08-27', 'daycare', at(2)), null)
+    assert.equal(fn('2026-08-26', 'night', at(2)), null)
+    // 月をまたぐ日
+    assert.equal(fn('2026-08-31', 'night', new Date(2026, 8, 1, 1, 30)), '01:30')
   })
-  it('配線: 日報の登録・フォームの登録が同じ関数で時刻を決める（記録日が今日の時だけの式は残っていない）', () => {
-    assert.match(daily, /occurred_at: noteOccurredAt\(day, draft\.shift, new Date\(\)\)/)
+  it('配線: 日報の登録・フォームの登録が同じ関数で時刻を決める（記録日が今日の時だけの式・規則の写しは残っていない）', () => {
+    assert.match(daily, /occurred_at: noteTimeFor\(day, draft\.shift, new Date\(\)\)/)
     assert.doesNotMatch(daily, /occurred_at: day === todayIso\(\) \? nowHM\(\) : null/)
-    assert.match(form, /const occurredAt = noteOccurredAt\(form\.noteOn, form\.shift, now\)/)
+    assert.match(form, /const occurredAt = noteTimeFor\(form\.noteOn, form\.shift, now\)/)
     assert.match(form, /occurred_at: occurredAt,/)
+    for (const s of [daily, form]) assert.doesNotMatch(s, /function noteOccurredAt\(/)
+  })
+  it('並び: 日報の申し送りは「翌」をその日の夜の記録の後ろに置く（時刻なしは従来どおり先頭）', () => {
+    const at0 = daily.indexOf('const safeNotes = Array.isArray(report?.notes)')
+    assert.ok(at0 > 0)
+    const sortSrc = daily.slice(at0, daily.indexOf('pendingNotesRef.current = pendingNoteRows()', at0))
+    assert.match(sortSrc, /\(timeSortKey\(a\.occurred_at, noteIsNextMorning\(a\)\) \?\? ''\)\.localeCompare\(/)
+    assert.match(sortSrc, /timeSortKey\(b\.occurred_at, noteIsNextMorning\(b\)\) \?\? ''/)
   })
 })
 

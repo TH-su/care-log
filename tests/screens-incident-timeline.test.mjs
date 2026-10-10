@@ -372,7 +372,7 @@ describe('外出・外泊の入力（OutingFormPage・F62・F56・F61）', () =>
 
   it('F62: 登録の失敗は DbError の理由をそのまま出し、それ以外も「通信状態を確認」と決めつけない（入力は残す）', () => {
     const body = between(src, 'async function handleSubmit(', 'if (loadError)')
-    assert.match(body, /catch \(e\) \{\s*setSubmitError\(e instanceof DbError \? e\.message : SUBMIT_ERROR_UNKNOWN\)/)
+    assert.match(body, /catch \(e\) \{\s*(\/\/[^\n]*\n\s*)?setSubmitError\(e instanceof DbError \? `\$\{e\.message\}　入力した内容はそのまま残っています。` : SUBMIT_ERROR_UNKNOWN\)/)
     assert.doesNotMatch(raw, /登録できませんでした。通信状態を確認して/)
     // 端末に残せなかった分岐は catch より前のまま
     assert.ok(body.indexOf('NOT_PERSISTED_REASON') < body.indexOf('catch (e)'))

@@ -41,6 +41,7 @@ import {
 } from '../lib/db'
 import type { CellSaveResult, ChangeInfo, PendingCellRow, VitalTarget } from '../lib/db'
 import { addDays, fmtDayLabel, normalizeVitalInput, todayIso } from '../lib/format'
+import { recordTimeFor } from '../lib/nextMorning'
 import {
   diaBpLevel,
   LS,
@@ -282,19 +283,15 @@ function bufOf(saved: Record<Field, number | null>): Record<Field, string> {
   return out
 }
 
-/** 端末ローカルの現在時刻 HH:MM（measured_at 用。業務日付と同じくクライアント明示指定） */
-function nowHM(): string {
-  const d = new Date()
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-}
-
 /**
- * 新しい行に入れる測定時刻。表示中の日が今日の時だけ今の時刻（バイタル一覧・日報と同じ式＝F18・F34）。
- * 日付をまたいで開いたままの前日の画面で、前日の行に今朝の時刻が入る（日付は昨日・時刻は今朝）のを防ぐ。
- * 0時〜朝の記録は暦の日付（当日）に載せる決まり（2026-10-10 本人回答）なので、前日の行の時刻は空にする
+ * 新しい行に入れる測定時刻（バイタル一覧・日報・申し送りと同じ規則＝F18・F34。規則は nextMorning.ts）。
+ * ・表示中の日が今日: 今の時刻
+ * ・前日の列に、夜勤明け（9時）より前に書いた: 今の時刻（2026-10-10 本人裁定。帰属は暦の日付のまま、画面では
+ *   「翌」を付けてその日の夜の記録の後ろに並べる）
+ * ・それ以外の過去日（前日の列に9時以降に書いた等）: 空（日付は昨日・時刻は今朝、という記録を作らない）
  */
 export function measuredAtFor(day: string): string | null {
-  return day === todayIso() ? nowHM() : null
+  return recordTimeFor(day)
 }
 
 /**

@@ -50,7 +50,8 @@ import type {
   PendingNoteRow,
   VitalTarget,
 } from '../lib/db'
-import { fmtDayLabel, todayIso } from '../lib/format'
+import { fmtDayLabel } from '../lib/format'
+import { recordTimeFor } from '../lib/nextMorning'
 import { IMPORTANCE_LABEL, MEAL_SLOT_LABEL, NOTE_COLOR_LABEL, SHIFT_LABEL } from '../lib/types'
 import type {
   Importance,
@@ -177,11 +178,6 @@ export function focusAfterResolve(id: string): void {
       if (el) el.focus()
     })
   })
-}
-
-function nowHM(): string {
-  const d = new Date()
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
 function errText(e: unknown, fallback: string): string {
@@ -499,9 +495,10 @@ export function ConflictResolver({
             if (k === 'symptom' && bothKind !== 'symptom') continue
             edits[k] = { value: v, base: null }
           }
-          // 時刻は、利用者が入れた時刻があればそれを使う（欄として送る）。無ければ今日の分は今の時刻・過去日は空
+          // 時刻は、利用者が入れた時刻があればそれを使う（欄として送る）。無ければ今日の分は今の時刻・前日の分は
+          // 夜勤明けより前だけ今の時刻（「翌」・F34）・それ以外の過去日は空（一覧・一括と同じ規則＝nextMorning.ts）
           const fill = {
-            measured_at: typeof vals.measured_at === 'string' ? null : target.day === todayIso() ? nowHM() : null,
+            measured_at: typeof vals.measured_at === 'string' ? null : recordTimeFor(target.day),
             recorded_by: actorId,
           }
           bothTarget = {

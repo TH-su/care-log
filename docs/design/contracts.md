@@ -3,6 +3,10 @@
 L0承認済み。詳細設計の正本: `docs/PLAN.md`・`docs/design/db-design.md`・`docs/design/ui-design.md`・`docs/design/qa-verification.md`。
 **実装済み・変更禁止**: `src/lib/types.ts` / `src/lib/format.ts` / `src/lib/supabase.ts` / `src/main.tsx` / `src/index.css` / `src/styles/tokens.css` / `tailwind.config.js` / 各種設定ファイル。
 契約の変更が必要になったら、実装せず「積み残し」として報告する。
+（2026-10-10 改訂: 多端末運用の監査の直しで、凍結ファイルに**追加だけ**を行った（既存の定義・関数は不変）。
+`types.ts` は `Note.ended_by?: number | null`（省略可・F08。列を返さない経路では付かない＝分からない）の1項目、
+`format.ts` は `isJstDevice`・`deviceTimeZoneLabel`・`deviceTimeZoneWarning`（端末の時間帯が日本時間でない時の帯の文・F36）の3つの export。
+`supabase.ts` は変えていない（F58 は db.ts の側だけで塞いだ）。`vite.config.ts` は版の印の焼き込みのため名前付きの export を足した＝下の「アプリの版」）
 
 ## 共通規律
 
@@ -43,7 +47,20 @@ isSupabaseConfigured(): boolean                  // 接続先（.env）が設定
 fetchResidents(): Promise<Resident[]>            // active・room昇順
 fetchAllResidents(): Promise<Resident[]>         // 退居された方も含む全員・居室昇順（申し送りでの表示名の重複判定用）
 setResidentNoteAlias(id: number, alias: string | null): Promise<Resident | Queued>  // 申し送りでの表示名
+                                                 // 2026-10-10 改訂（F71）: 第3引数 base?: string | null を足した＝画面が見ていた変更前の表示名
+                                                 // （サーバーから読んだ値を渡す。送信待ちの間に自分で置き換えた値ではない）。退避した分を送り直す時、
+                                                 // いまの表示名が base と違えば送らずに止める（止まった op は listStoppedOps に出る）。省略＝分からない
 fetchStaff(): Promise<Staff[]>                   // active・name昇順
+// ── 2026-10-10 改訂: 職員名簿（F47・F48・F50） ──
+fetchAllStaff(): Promise<Staff[]>                // 退職者も含む全員・氏名昇順（60秒の控え）。過去の記録の記入者名・出勤者名の引き当てと記入者検索に使う。
+                                                 // 記入者・出勤者を選ぶ候補や記録者の既定の照合には使わない（それは fetchStaff）
+notifyMastersChanged(): void                     // 名簿が変わった（かもしれない）合図。マスタ同期・名簿の氏名の採用の後と、画面の「最新に更新」から呼ぶ
+subscribeMastersChanged(fn: () => void): () => void   // 上の合図を受ける（戻り値で外す）
+sameStaffRoster(a: readonly Staff[] | null, b: readonly Staff[] | null): boolean   // id・氏名・在籍の並びが同じか（同じなら新しい配列を渡さない）
+watchStaffRoster(base: Staff[] | null, onChange: (next: Staff[]) => void): () => void
+                                                 // App の名簿（在籍のみ）を新しく保つ。合図・画面復帰（RESYNC と同じ時）・電波復帰で取り直し、
+                                                 // 中身が変わった時だけ onChange。失敗は何も呼ばない（今の名簿を残す＝入力中の画面を消さない）
+fetchLastMasterSync(): Promise<{ residents: string | null; staff: string | null }>   // master_sync_log の最新の時刻（設定画面の「最終同期」・自動同期の間隔）
 fetchTimelineChunk(fromIso: string, toIso: string, staffId: number | null): Promise<TimelineChunk>  // RPC timeline_chunk
 fetchKarte(residentId: number, fromIso: string, toIso: string):
   Promise<{ vitals: Vital[]; meals: Meal[]; fluids: FluidIntake[]; notes: Note[]; outings: Outing[]; baths: BathRecord[]; meds: MedAdmin[]; incidents: Incident[] }>
@@ -72,8 +89,16 @@ insertNote(n: Omit<Note, 'id' | 'rev' | 'read_count' | 'my_read'>): Promise<Note
 updateNote(id: number, rev: number, patch: Partial<Omit<Note, 'id' | 'rev'>>, opts?: WriteOpts): Promise<Note | Conflict | Queued>
 softDeleteNote(id: number, rev: number, opts?: WriteOpts): Promise<true | Conflict | Queued>
 endOngoingNote(id: number, rev: number, endedBy: number | null, opts?: WriteOpts): Promise<Note | Conflict | Queued>  // ended_by に操作者を書く
+// 2026-10-10 改訂（db.ts の export と照合）: 上の updateNote・softDeleteNote・endOngoingNote は 2026-09-29 に廃止済みで db.ts に無い。
+// 保存済みの申し送りの変更・取り消しは次の2つ（RPC apply_note_edits・設計の正本は concurrent-entry.md §9）
+saveNoteEdits(target: NoteTarget, sendEdits: CellEditInput<NoteEditField>, opts?: CellSaveOpts): Promise<CellSaveResult<Note> | Queued>
+                                                               // 2026-10-10（F08）: 終了済みと見ている継続へ重ねた終了は送らず status:'noop'（最初の終了を正）
+deleteNote(target: NoteTarget, seen: string | NoteSeenRow, opts?: CellSaveOpts): Promise<CellSaveResult<Note> | Queued>
+                                                               // seen＝見た本文（従来）か見た行（F09・0027。本文・対象・重要度・色・継続・終了時刻を照らす）
 insertOuting(o: Omit<Outing, 'id' | 'rev'>): Promise<Outing | Queued>
 setOutingEnd(id: number, rev: number, endOn: string, endAt: string | null, opts?: WriteOpts): Promise<Outing | Conflict | Queued>  // 部分更新・他項目を送らない
+fetchOutingsOn(residentId: number, dayIso: string): Promise<Outing[]>   // 2026-10-10 追加（F56）: その日その方に在る外出・外泊（日報の外出者と同じ条件）。
+                                                               // 外出の登録画面の参考表示だけに使う（保存は止めない）
 setEditor(id: number | null): void                             // 更新系で edited_by として送る操作者（App が確定・切替のたびに呼ぶ）
 
 markRead(noteId: number, staffId: number): Promise<void>       // 明示操作からのみ呼ぶ。通信断はキュー（kind:'read'）へ退避し例外を投げない
@@ -86,11 +111,22 @@ checkClientBuild(): Promise<boolean>                           // min_client_bui
 isClientBuildOutdated(): boolean                               // この起動中に古い版と観測したか（観測したら戻さない＝値を下げた時は再読み込みで戻る）
 onClientBuildOutdated(fn: () => void): () => void              // 古い版と分かった時の受け口（App が受け皿 OutdatedPanel を出す）
                                                                // 古い版と分かったら、書込の入口は OUTDATED_REASON で止め、送信待ちは送らない（端末に残す）
+                                                               // 2026-10-10 改訂（F61）: 戻り値に任意の forbidden?: true（このアカウントが許可リストに無い・無効。
+                                                               // value=false・observed=false。画面は封鎖でも通信エラーでもなく FORBIDDEN_REASON を出し、再試行を出さない）。
+                                                               // 戻り値には cells・notes（RPC 0011・0017 の有無 'ready'|'missing'|'unknown'）も入る
+FORBIDDEN_REASON: string                                       // 2026-10-10 追加: 許可リスト外の案内文（F61）
+OUTDATED_REASON: string                                        // 2026-10-10 追加: 古い版の案内文（F28③）
 getNativeInputEnabled(): Promise<boolean>                      // 互換用。gate.value を返す（既定 false）
 getAppSetting(key: string): Promise<string | null>
 
 subscribeChanges(cb: (table: string, info?: ChangeInfo) => void): () => void
                                                                // Realtime。第2引数は変更行（DELETE は row=null）。受信値は型検査・表示ウィンドウ外は無視
+                                                               // 2026-10-10 改訂（F14）: ChangeInfo = { event, row, resync?: ResyncReason }。event='RESYNC'（row=null）は
+                                                               // 「切れていた間の変更が分からない＝取り直して」の合図で、表ごとに流す。resync は
+                                                               // 'reconnect'（購読がつながり直した）／'resume'（30秒以上隠れていた後に画面へ戻った・ページがキャッシュから戻った）／
+                                                               // 'online'（電波が戻った）。subscribeBathChanges・subscribeMedChanges・subscribeIncidentChanges も同じ合図を流す。
+                                                               // 自前の復帰処理を持つ画面は resume・online を捨ててよい（concurrent-entry.md §10.3）
+                                                               // 2026-10-10 改訂（F10）: 応答を待つ間に届いた自分の行の通知は預かり（最大30秒）、書けたと分かってから印を付けて渡す
 isSelfWrite(table: string, row: unknown): boolean             // 自分の書込の通知か（行単位で見分ける）
 isSeenRev(seenRev: number | null, row: unknown): boolean
 joinPresence(self: PresenceHere | null, onChange: (others: PresenceHere[]) => void):
@@ -105,6 +141,28 @@ flushQueue(force?: boolean): Promise<void>                     // 成功観測�
 onNetworkBack(): void                                          // 電波が戻った時の再送（待ち時間が残っていても送る）
 isQueueBroken(): boolean                                       // localStorage の未送信データが壊れていて読めなかったか
 isQueuePersisted(): boolean                                    // 退避した書込を端末に残せているか（false＝メモリ上だけ）
+// ── 2026-10-10 追加: 送信待ちの見え方と、止まった op の操作（F01・F02・F05・F27・F31・F37・F71） ──
+hasUnpersistedQueue(): boolean                                 // 端末に残せていない送信待ちがあるか（全ての表。保存領域が一杯でメモリにだけある）。
+                                                               // true の間、'queued' を受けた画面は「電波が戻ると自動で送信します」と言わず MSG_NOT_PERSISTED を出し、
+                                                               // 入力を消さない。App が leaveGuard に kind='input' で1回だけ登録し、ヘッダの未送信表示に「端末に残せていません」を添える
+queueUnreadableCount(): number                                 // この版では送れない未送信の件数（読めない原文 brokenRaw＋新しい版のタブが積んだ op・行。読むだけ）。
+                                                               // 0 でない時、App は「この端末に別の版の画面のタブが開いています…」の帯を出す（F27③）
+listStoppedOps(): StoppedOp[]                                  // 止まっている（自動では送らない）退避 op の一覧（このタブ＋同じ端末の他のタブの控え・読むだけ）。
+                                                               // 申し送りの登録は listUnsentNotes（UnsentNotes）が出すので除く
+                                                               // StoppedOp = { qid, table, kind: 'insert'|'update'|'read'|'attendance'|'alias', state: 'conflict'|'rejected',
+                                                               //   rowId, rev, payload（送ろうとした中身の写し）, errCode, at }
+fetchQueuedOpTarget(qid: string): Promise<Record<string, unknown> | null | undefined>
+                                                               // 止まった op の送り先のいまの行（くらべて見せる用）。update は行（取り消し済みも deleted_at 付き）、
+                                                               // 自然キーで止まった追加（入浴・与薬の時間帯・服薬の時間帯）は先に記録された相手の行、表示名は { id, note_alias }、
+                                                               // それ以外は null。読めなければ undefined
+resendQueuedOp(qid: string, seen?: { rev?: number; alias?: string | null; id?: number }):
+  Promise<'sent' | 'queued' | 'conflict' | 'rejected' | 'missing'>
+                                                               // 人の選択でもう一度送る（1回だけ。また止まれば止まる）。conflict の update は見せた行の rev を、
+                                                               // 表示名は見せた値を alias に、自然キーで止まった追加は相手の行の { id, rev } を渡す
+                                                               // （〔自分の内容で直す〕＝その版の上にだけ書く）。渡さなければ送らずに 'conflict'（見せていない変更を上書きしない）
+discardQueuedOp(qid: string): Promise<'dropped' | 'sent' | 'missing'>
+                                                               // 取り下げ（墓標を付けて、このタブ・同じ端末の他のタブ・次の起動から外す）。他のタブが送信中なら送信ロックを待つ。
+                                                               // 'sent'＝既に送り終えていた（取り下げられない＝既に登録された）。画面は中身を見せた確認の後にだけ呼ぶ
 onAuthExpired(cb: () => void): void                            // 401検知→キュー保全のまま再ログインへ
 fetchRecordHistory(p: { residentId?: number | null; fromIso: string; toIso: string; limit?: number }):
   Promise<RecordHistoryResult>                                 // 変更の記録（0010 未適用なら available:false）
@@ -112,6 +170,7 @@ diffHistoryRow(oldRow: unknown, newRow: unknown): { column: string; before: unkn
 
 // ── 入浴（デイ）・種類ごとの入力解禁（2026-09-26 追加・代表承認の契約改訂。既存の定義は変えない） ──
 getKindInputGate(kind: InputKind): Promise<{ value: boolean; observed: boolean }>  // app_settings.input_enabled_<kind>（bath/med/incident）
+                                                               // 2026-10-10 改訂: 戻り値に任意の forbidden?: true（F61）・outdated?: true（F28③）。意味は getNativeInputGate と同じ
 kindBlockedMessage(kind: InputKind): string                    // 封鎖中の理由文（入浴:「入浴の記録はまだ使い始めていません（開始日に解禁します）」）
 fetchBathDay(dayIso: string): Promise<BathRecord[]>            // その日の入浴記録（削除済みを除く）
 fetchBathMonth(monthKey: string): Promise<BathRecord[]>        // 'yyyy-MM' の月の入浴記録。取り切れない時は例外（黙って切らない）
@@ -139,6 +198,8 @@ fetchMedFirstDay(): Promise<string | null>                     // 施設全体�
 setMedSlots(residentId: number, slots: readonly MedSlot[], note: string | null, current: MedSlotsSetting | null, opts?: WriteOpts):
   Promise<MedSlotsSetting | Conflict | Queued>                 // current が null なら insert（client_key）、あれば rev 照合 update。upsert は使わない
                                                                // 2026-10-10（F29）: update は変えた列だけ（slots・note）を送る（備考だけを直す古い版が、新しい版の時間帯を消さない）
+                                                               // 2026-10-10（F54）: 画面は編集を始めた時の版（baseRev）で送り、競合・読み直しの後は med.ts の
+                                                               // rebaseMedSlotsDraft({ base, draft, latest }) で下書きを最新の上に当て直す（備考が食い違えば選ばせる）
 insertMedAdmin(m: Omit<MedAdmin, 'id' | 'rev' | 'created_at'>): Promise<MedAdmin | Conflict | Queued>
                                                                // client_key 付き。1人1日1時間帯1件の 23505（自分のキーでない）は 'conflict'
 updateMedAdmin(current: MedAdmin, patch: Partial<Pick<MedAdmin, 'status' | 'note' | 'given_at' | 'prn_drug' | 'prn_reason' | 'prn_effect'>>,
@@ -183,6 +244,11 @@ subscribeIncidentChanges(cb): () => void                       // incidents の 
 - レビュー2巡目（2026-09-26 チーフ差し戻し）:
   M1 状態を送る時（完了・対応中に戻す）は差分に頼らず必ず status を送り、closed_at を status と整合させて送る（対応中＝null／完了＝手元が完了で日時があればそのまま・無ければいまの日時）。
   画面は保存が 'queued' になったら送った値を手元の基準にして未保存の差分を解除し、送信待ちが減ったら（その記録に未送信があった時・未保存の入力が無い時）読み直す。
+  （2026-10-10 改訂・F53）送れたか止まったかは件数ではなく queueSubscribe ごとの hasPendingIncident(recordId) の「有る→無い」で見分けて読み直す
+  （「未送信です（自動で送信します）」を消し、送れた時は「送信しました」）。止まった追記・修正・取り消し（listStoppedOps の incidents）は
+  入力画面に最新とくらべて出し、〔この内容で保存し直す〕＝送り先の版が画面の版と同じ時だけ resendQueuedOp(qid, {rev})／
+  〔取り下げる〕＝確認つきで discardQueuedOp。止まっている間は事故報告書を印刷しない（この扱いでよいかは本人の裁定待ち）。
+  一覧はその行に「この端末に、止まっている修正・取り消しがあります（開いて選んでください）」を出す
   M2 与薬の落薬・誤薬の後は、input_enabled_incident が解禁なら「事故・ヒヤリハットを記録する」、封鎖・確かめられない時は「事故報告書（紙）に記録してください」。
   M3 氏名の写しが名簿の氏名と違う時だけ「名簿の氏名に合わせる」。updateIncident(current, { resyncSubjectName: true }) は氏名を送らず detail に一時の印
   `_resync_subject_name` を入れて送り、0014 のトリガが印を取り除いて名簿の現在の氏名で写し直す（他の欄は変えない）。
@@ -235,6 +301,9 @@ clearActor(): void
 resolveActor(staff: Staff[]): Staff | null   // 照合失敗（不在・inactive・不正値）は null
 shouldReconfirm(): boolean                   // 日替わり or 最終操作から4時間
 touchActivity(): void
+subscribeActor(fn: (id: number | null) => void): () => void
+                                             // 2026-10-10 追加（F46・F38）: 記録者の既定が変わった時（このタブ・別のタブ）の受け口。
+                                             // App はこれで actorId と db.setEditor を取り直す（設定タブ・RecorderBar の切り替えが再読み込みなしで記録に届く）
 ```
 
 ## src/lib/gasClient.ts（読み取り専用。書込actionのコードパスを作らない）
@@ -250,6 +319,31 @@ syncMasters(): Promise<{ residents: SyncResult; staff: SyncResult } | 'unconfigu
 // 増減両方向を master_sync_log に記録。応答本文を console に出さない。
 ```
 
+2026-10-10 改訂（F43・F45・F49・F50・F51。上の型のうち変わった所。上の記述は当初の契約として残す）:
+
+```ts
+// 名簿の取得は POST 本文で読む（F45。GET は 9/23 から失敗していた）。合言葉を URL に載せない。取得失敗の理由は GasReadFail
+export type GasReadFail = 'auth' | 'postOnly' | 'refused' | 'http' | 'format' | 'timeout' | 'network'
+pullStaffNames(url: string, token: string): Promise<StaffEntry[]>   // 氏名と在籍（{ name, active }）だけ。コード上の現行の型（この改訂の前から）
+syncMasters(opts?: SyncOptions): Promise<MasterSyncOutcome | 'unconfigured'>
+export interface SyncOptions { confirmedDrop?: { residents: number; staff: number } }   // 人が確かめた「一度に外れる人数」
+export interface MasterSyncOutcome { residents: SyncResult; staff: SyncResult; reviews: RosterReview[] }
+export interface RosterReview { id: number; current: string; roster: string }   // 氏名が食い違って保留にした方。画面の state だけに持つ（localStorage・console に出さない）
+export class MasterDropError extends Error { residents: number; staff: number }   // 在籍の2割以上か5人以上が一度に外れる時、どちらの表にも書かずに投げる（F43）
+MASS_DROP_RATIO = 0.2 / MASS_DROP_COUNT = 5 / isMassDrop(dropped, base): boolean
+planResidentSync(rows, entries): ResidentSyncPlan / planStaffSync(rows, names): StaffSyncPlan   // 計画（純関数）→歯止め→実行に分けた
+adoptRosterName(id: number, current: string, rosterName: string): Promise<'adopted' | 'stale'>
+                                             // 〔名簿の氏名を採用する〕（F51）。id・見ていた氏名・needs_review=true が条件。先に直されていれば 'stale'
+hasMasterConnection(): boolean               // この端末に名簿の接続設定があるか（合言葉は返さない）
+autoSyncMasters(now?: number): Promise<'unconfigured' | 'fresh' | 'busy' | MasterSyncOutcome>
+                                             // 自動同期（F50）。接続設定のある端末だけ、前回（他の端末の master_sync_log も見る）から60分たっていれば同期。
+                                             // 失敗後は10分あける（AUTO_SYNC_INTERVAL_MS・AUTO_SYNC_RETRY_MS）。同じ端末のタブは Web Lock cl_masterSync で1本に
+```
+
+- 照合（F49）: 氏名照合の候補から退去済み（active=false）の行を外す（退去者と同じ氏名の新しい入居者は新しい行になる）。在籍中の同名は従来どおり保留
+- 保留（F51）: source_id が一致して氏名だけが違う保留でも、部屋・介護度は名簿どおりに直す（氏名・かな・性別・在籍は変えない）
+- 同期・採用の後は db.notifyMastersChanged() を呼ぶ（App の名簿・設定画面の一覧が取り直す）
+
 ## src/hooks/useTimeline.ts
 
 ```ts
@@ -262,6 +356,21 @@ useTimeline(staffId: number | null): {
 // 初期10日＋追加10日（fetchTimelineChunk）。日単位に組み替えて DayData[]（新しい日が先頭）。
 // Realtime: subscribeChanges で表示ウィンドウ内の日だけ再取得。保持上限60日。
 ```
+
+2026-10-10 改訂（F67・F14・F16）: 戻り値の型は `UseTimelineResult`（上と同じ項目）。純ロジックを名前つきで export した。
+
+```ts
+export interface TimelineIndex { shown: Map<string, Map<number, string>>; pinned: Set<number>; ongoing: Set<number> }
+buildTimelineIndex(days: readonly DayData[]): TimelineIndex          // 画面に出している行の索引（表ごとの id → 出している日）
+export type TimelineReloadScope = 'none' | 'all' | string[]
+timelineReloadScope(table, row, win, idx): TimelineReloadScope     // 通知1件でどこを取り直すか
+chunkRangesFor(from: string, to: string, days: readonly string[]): [string, string][]   // 取り直す日を含む10日チャンクの範囲
+mergeChunkDays(days: readonly DayData[], fresh: ReadonlyMap<string, DayData>): DayData[] // 取り直した日を差し込む（変化の無い日は同じオブジェクト）
+```
+
+- Realtime の取り直しの規則: 自分の書込（isSelfWrite）と窓の外は除く。日の分かる変更は、その日を含む10日チャンクだけ取り直す。
+  画面に出している行の変更は日付に関係なく取り直す（日付を窓の外へ直した変更を取りこぼさない）。
+  継続・ピン留めの申し送り（とその既読）、外出（期間が窓に重なるもの）、行の分からない通知（物理削除・RESYNC）は窓全体
 
 ## src/components/ui.tsx が export する共通部品
 
@@ -277,11 +386,66 @@ useToast(): { toast: ReactNode; show(msg: string, undo?: () => void): void }   /
 SegmentPicker({ options: { value: string; label: string }[], value, onChange, ariaLabel? })
 StaffPickerModal({ open, staff: Staff[], onPick(id: number), onClose?, title? })   // かな絞込付き・行高44px
 ResidentPickerModal({ open, residents: Resident[], onPick(id: number | null), onClose, allowAll? })  // allowAll=「スタッフへ（全体）」= null
+useToastHost(): { toast: ReactNode; show(msg: string, undo?: () => void): void }
+                                             // 2026-10-10 追加（F64）: useToast と同じ呼び方。通知の state を小さな部品の中に持ち、出し入れで呼び出し側を描き直さない
+                                             // （toast・show は作り直さない）。既存の useToast は変えない（2026-10-10 時点で差し替えた画面は無い＝日報も useToast のまま）
+```
+
+## 2026-10-10 追加の部品・純ロジック（多端末運用の監査の直し）
+
+```ts
+// src/lib/appVersion.ts（F28・F60）: アプリの版の印と、新しい版の公開・部品の取得失敗の見分け。業務データ・氏名を持たない
+export interface BuildStamp { id: string; seq: number | null; at: string | null }   // dist/version.json と同じ形 {id, seq, at}
+DEV_BUILD_ID = 'dev' / CLIENT_BUILD: BuildStamp / parseBuildStamp(raw): BuildStamp | null / isDevBuild(b) / buildLabel(b)
+isOtherBuildPublished(local, remote): boolean      // 公開中の版が違うか（どちらかが dev なら比べない）
+fetchPublishedBuild(fetchImpl?, now?): Promise<BuildStamp | null>   // version.json をキャッシュを使わずに取り直す
+notePreloadError(now?) / isChunkLoadError(e, now?): boolean        // 画面の部品（チャンク）の取得失敗を描画の例外と見分ける
+clientBuildAllowed(minBuild: string | null, build?): boolean       // app_settings.min_client_build（0023）と通し番号 seq で比べる。
+                                                                   // 空・数字でない・0以下・dev・seq の無い版は止めない
+// vite.config.ts: buildStamp(env?): BuildStamp（id＝コミット12桁・seq＝GITHUB_RUN_NUMBER・at）／versionJsonPlugin(stamp): Plugin（dist/version.json を出す）。
+//   define __CL_BUILD__ で同じ印を焼き込む。deploy.yml が CL_BUILD_ID・CL_BUILD_SEQ を渡す
+
+// src/lib/stoppedOps.ts（F02・F37）: listStoppedOps の中身を「何の記録の・どの日の・どんな値か」の文へ直す（読むだけ・氏名は呼び出し側が名簿から渡す・列名は出さない）
+STOPPED_TABLE_LABEL / isStoppedDelete(op) / stoppedOpTitle(op) / stoppedOpReason(op) / stoppedOpLines(...) / stoppedOpNeedsCompare(op)
+
+// src/lib/presence.ts（F21〜F26。concurrent-entry.md §8）
+PRESENCE_IDLE_MS = 180000（3分） / PRESENCE_SELF_OTHER = 'あなたの別の端末'
+normalizePresence(row, now, opts?: { firstSeen?: number }) / othersFromState(state, selfKey, now, seen?: PresenceSeen)
+presenceWho(p, nameOf, selfStaffId?) / presenceWhoNames(list, nameOf, unknown?, selfStaffId?) / cellBusyText(list, nameOf, selfStaffId?) /
+rowBusyText(list, nameOf, selfStaffId?) / presenceSummaryText(entries, nameOf, max?, selfStaffId?)   // selfStaffId は末尾に足した省略可の引数
+createActivityGate(idleMs?) / liveComposing(rows, touched, now, idleMs?) / latestComposing(byDay)   // 「操作している時だけ配る」の判定（latestComposing は最後に手を入れた日）
+
+// src/lib/med.ts（F54）
+rebaseMedSlotsDraft(p: { base, draft, latest }): MedSlotsRebase   // 服薬の時間帯の下書きを最新の版の上に当て直す（型 MedSlotsValue・MedSlotsRebase）
+
+// src/hooks/useAuth.ts（F59）: 戻り値に offline: boolean を足した（圏外の起動で getSession が通信エラー＝ログインし直しではない）
+//   { session, ready, offline, user, editable }。offline を解くのは session が入った時と SIGNED_OUT の時だけ
+
+// src/components/RecorderBar.tsx（F38）
+RecorderBar({ actorId: number | null, staff?: Staff[] | null, onPick?: (id: number) => void, className?: string })
+                                             // 「記録者: 職員01〔変更〕」（未選択は〔選ぶ〕）。選ぶと actor.setActorId。時刻・日付で既定を外さない。print:hidden
+                                             // バイタル一覧・食事一覧・バイタル一括・食事一括の操作バーに置く
+
+// src/components/MasterSync.tsx（F50）
+MasterAutoSync()                             // App に1つ置く。autoSyncMasters を回し、失敗した時だけ帯を出す（それ以外は何も描かない）
+MasterSyncStatus()                           // 設定画面の「最終同期: 利用者 ◯日前・職員 ◯日前」。読めなければ何も出さない
 ```
 
 ## App.tsx の責務
 
 認証ゲート（useAuth: 未ready=ローディング／未ログイン=/login）→ 入力解禁フラグ取得（getNativeInputEnabled・封鎖中は入力画面をディセーブル＋理由文）→ actor ゲート（resolveActor 失敗 or shouldReconfirm で StaffPickerModal）→ シェル（スティッキーヘッダ: 画面名・未送信n件・操作者チップ／タブ: <768px下部・≥1024px左レール、アイコン+文字、各56px）。
+
+2026-10-10 改訂（多端末運用の監査の直し。上の流れは変えず、次を足した。帯はすべて print:hidden）:
+- 圏外の起動（F59）: useAuth の offline の間はログイン画面・/login へ移さず、lazy でない OfflineGate（「ログインし直す必要はありません。電波が戻ってから1分ほどで自動で開きます」）を出す。
+  401 の時の refreshSession が通信エラー（AuthRetryableFetchError）なら signOut({scope:'local'}) へ倒さない
+- 古い版（F28③）: db.onClientBuildOutdated で受け皿 OutdatedPanel（「新しい版に更新してください」・〔更新〕はいつでも押せる）に画面を置き換える。ヘッダ・タブ・未送信の件数は外に残す
+- 新しい版の帯（F28①）: 起動の少し後・5分ごと・画面に戻った時に version.json を取り直し、違えば「新しい版が公開されました」。〔更新〕は未送信0・端末に残せていない送信待ち無し・未保存の入力無しの時だけ出す（押した時にも確かめ直す）。自動の再読み込みはしない
+- 画面ごとの例外の受け皿（Boundary・KindBoundary・PageFailure）: 部品（チャンク）の取得失敗（isChunkLoadError）と描画の例外を見分け、公開中の版が違えば「新しい版が公開されました」、同じ・確かめられなければ従来の通信の案内
+- 送信待ち（F01・F27）: registerUnsaved(() => db.hasUnpersistedQueue(), 'input') を1回だけ登録。ヘッダの未送信は、端末に残せていない時に「▲ 未送信 n件・端末に残せていません」。queueUnreadableCount() が 0 でなければ「この端末に別の版の画面のタブが開いています…」の帯
+- 記録者・名簿（F46・F47・F50）: actor.subscribeActor で actorId（と db.setEditor）を取り直す。名簿を読めた後だけ db.watchStaffRoster(staff, setStaff) を張る（staffError・staff=null の全画面の経路は通さない）。
+  記録者の既定が取り直した名簿に無い時は黙って外さず、帯と〔設定を開く〕。<main> の中に <MasterAutoSync /> を1つ（lazy＋Suspense・読めなくても画面は止めない）
+- 端末の時間帯（F36）: 起動時と画面に戻った時に deviceTimeZoneWarning() を見て、null でなければ常時の帯（入力は止めない・閉じる操作なし）
+- 記録ハブの下の画面の復元（F68）: cl_recordTab（ui-design.md §9）
 
 ## supabase/migrations の契約
 
@@ -333,3 +497,6 @@ ResidentPickerModal({ open, residents: Resident[], onPick(id: number | null), on
   入浴の月次表は「訪」の記号と合計の「訪問」列（全＋シには数えない）
 - **適用順は 0001 → 0002 → 0003 → 0004 → 0005**。0003〜0005 は互いに独立だが、
   0003 未適用のまま新UIを配ると「定時以外のバイタル保存」と「食事一覧の読み込み」が失敗する（意図的にフォールバックを作っていない）。
+- 2026-10-10 追記: 0017〜0020 の契約は concurrent-entry.md §9（0017）・db-design.md、**0021〜0030（多端末運用の監査の直し）の要旨と適用の順番は
+  db-design.md §4 の表**が正本（0026 はアプリの配信が先・0027〜0029 は DB が先・0030 はアプリより先）。0001〜0020 は本番に当たっているので書き換えず、
+  直しは新しい番号で足す。流し直しの組（0010→0021・0017→0027・0002→0030）も同じ表

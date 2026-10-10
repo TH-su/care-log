@@ -27,7 +27,8 @@ import {
   historyColumnLabel,
   incidentDetailChangeLabels,
 } from '../lib/historyView'
-import { addDays, fmtDayLabel, fmtTimeHM, isoDate, todayIso } from '../lib/format'
+import { addDays, fmtDayLabel, isoDate, todayIso } from '../lib/format'
+import { fmtRecordTime, noteIsNextMorning, timeSortKey, vitalIsNextMorning } from '../lib/nextMorning'
 import { typesText } from '../lib/incident'
 import { BATH_SHOWN_LABEL, bathShownOf } from '../lib/bath'
 import {
@@ -244,7 +245,8 @@ function cmpVitalAsc(a: Vital, b: Vital): number {
   return (
     (a.measured_on < b.measured_on ? -1 : a.measured_on > b.measured_on ? 1 : 0) ||
     (KIND_ORDER[a.kind] ?? 9) - (KIND_ORDER[b.kind] ?? 9) ||
-    cmpTime(a.measured_at, b.measured_at) ||
+    // 夜勤明けに前日の列へ書いたバイタル（「翌」）は、その日の夜の記録の後ろ（F34）
+    cmpTime(timeSortKey(a.measured_at, vitalIsNextMorning(a)), timeSortKey(b.measured_at, vitalIsNextMorning(b))) ||
     a.id - b.id
   )
 }
@@ -1663,7 +1665,7 @@ function NoteCard({ note, reporterName }: NoteCardProps) {
   return (
     <li className={`rounded-md border p-3 ${tone}`}>
       <div className="flex flex-wrap items-center gap-gap">
-        <span className="tabular text-sm text-ink2">{fmtTimeHM(note.occurred_at) || '—'}</span>
+        <span className="tabular text-sm text-ink2">{fmtRecordTime(note.occurred_at, noteIsNextMorning(note)) || '—'}</span>
         <span className="text-sm text-ink2">{SHIFT_LABEL[note.shift] ?? ''}</span>
         {note.importance !== 'normal' ? (
           <span
@@ -1716,8 +1718,9 @@ function NotesSection({ notes, staffById }: NotesSectionProps) {
     // 新しい日・新しい時刻が先。時刻が無い記録（夜勤等）は同じ日の末尾に置く
     const sorted = notes.slice().sort((a, b) => {
       if (a.note_on !== b.note_on) return a.note_on < b.note_on ? 1 : -1
-      const at = a.occurred_at
-      const bt = b.occurred_at
+      // 夜勤明けに前日の夜勤の欄へ書いた申し送り（「翌」）は、その日の夜の記録より新しい側（F34）
+      const at = timeSortKey(a.occurred_at, noteIsNextMorning(a))
+      const bt = timeSortKey(b.occurred_at, noteIsNextMorning(b))
       if (at == null && bt != null) return 1
       if (at != null && bt == null) return -1
       if (at != null && bt != null && at !== bt) return at < bt ? 1 : -1

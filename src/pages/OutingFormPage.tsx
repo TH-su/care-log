@@ -275,7 +275,8 @@ export function OutingFormPage({
       setSameDayTick((n) => n + 1)
       onSaved?.()
     } catch (e) {
-      setSubmitError(e instanceof DbError ? e.message : SUBMIT_ERROR_UNKNOWN)
+      // 理由は DbError の文言で出し分け（F62）、入力が残ることは従来どおり添える
+      setSubmitError(e instanceof DbError ? `${e.message}　入力した内容はそのまま残っています。` : SUBMIT_ERROR_UNKNOWN)
     } finally {
       setSaving(false)
     }

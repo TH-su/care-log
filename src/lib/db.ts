@@ -69,6 +69,7 @@ import type {
   VitalKind,
 } from './types'
 import { validateNoteAlias } from './types'
+import { rememberCreatedAt } from './nextMorning'
 import {
   BATH_CANCEL_REASONS,
   BATH_RESULTS,
@@ -167,14 +168,16 @@ const OUTING_KINDS: readonly OutingKind[] = ['outing', 'overnight']
 // select する列は types.ts と一致させる（* を使わず、監査列・import_key を端末へ持ち出さない）
 const RESIDENT_COLS = 'id,source_id,name,kana,room,gender,care_level,active,needs_review,note_alias'
 const STAFF_COLS = 'id,name,active'
+// created_at（バイタル・水分・申し送り）は、夜勤明けに前日の欄へ書いた記録の「翌」の判定に使うので読む
+// （F34・2026-10-10。行の型には載せず nextMorning.ts に id で控える。与薬の MED_ADMIN_COLS と同じ扱い）
 const VITAL_COLS =
-  'id,resident_id,measured_on,kind,measured_at,temp,sys_bp,dia_bp,pulse,spo2,note,symptom,recorded_by,rev'
+  'id,resident_id,measured_on,kind,measured_at,temp,sys_bp,dia_bp,pulse,spo2,note,symptom,recorded_by,rev,created_at'
 const MEAL_COLS = 'id,resident_id,meal_on,meal_slot,main_amount,side_amount,status,note,recorded_by,rev'
-const FLUID_COLS = 'id,resident_id,taken_on,taken_at,amount_ml,kind,recorded_by,rev'
+const FLUID_COLS = 'id,resident_id,taken_on,taken_at,amount_ml,kind,recorded_by,rev,created_at'
 // ended_by（継続を終了した職員・0001 からある列）は F08（2026-10-10）で読むようにした。〔くらべて選ぶ〕の基準と表示が
 // 「未入力」のままだと、2台目の終了が何度送っても競合のまま終わらなかったため
 const NOTE_COLS =
-  'id,note_on,shift,facility,category,resident_id,role_tags,importance,body,occurred_at,ongoing,ended_at,ended_by,reporter_id,color,after16,rev'
+  'id,note_on,shift,facility,category,resident_id,role_tags,importance,body,occurred_at,ongoing,ended_at,ended_by,reporter_id,color,after16,rev,created_at'
 const OUTING_COLS = 'id,resident_id,kind,start_on,start_at,end_on,end_at,companion,note,recorded_by,rev'
 const ATTENDANCE_COLS = 'day,staff_id,role,sort'
 const IMPORT_DAY_COLS = 'source,day,imported_at,src_rows,inserted,updated,skipped,native_skip,unmatched'
@@ -588,6 +591,8 @@ function normalizeVital(row: unknown): Vital | null {
   const measured_on = dateStr(r.measured_on)
   const kind = oneOf(r.kind, VITAL_KINDS)
   if (id === null || resident_id === null || measured_on === null || kind === null) return null
+  // 作成時刻は「翌」の判定のために控える（返さない経路では何もしない＝前に控えた値を使う）
+  rememberCreatedAt('vitals', id, r.created_at)
   return {
     id,
     resident_id,
@@ -637,6 +642,8 @@ function normalizeFluid(row: unknown): FluidIntake | null {
   const taken_on = dateStr(r.taken_on)
   const amount_ml = num(r.amount_ml)
   if (id === null || resident_id === null || taken_on === null || amount_ml === null) return null
+  // 作成時刻は「翌」の判定のために控える（返さない経路では何もしない＝前に控えた値を使う）
+  rememberCreatedAt('fluid_intake', id, r.created_at)
   return {
     id,
     resident_id,
@@ -657,6 +664,8 @@ function normalizeNote(row: unknown): Note | null {
   const shift = oneOf(r.shift, SHIFTS)
   const body = str(r.body)
   if (id === null || note_on === null || shift === null || body === null) return null
+  // 作成時刻は「翌」の判定のために控える（返さない経路では何もしない＝前に控えた値を使う）
+  rememberCreatedAt('notes', id, r.created_at)
   const readCount = num(r.read_count)
   const note: Note = {
     id,

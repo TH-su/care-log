@@ -44,6 +44,7 @@ import {
   noteDeleted,
 } from '../lib/db'
 import { addDays, fmtDayLabel, fmtTimeHM, todayIso } from '../lib/format'
+import { fmtRecordTime, noteIsNextMorning, noteTimeFor } from '../lib/nextMorning'
 import { appendPhrase, NOTE_PHRASE_CATEGORIES, PHRASE_BLANK } from '../lib/notePhrases'
 import {
   adoptDraftRows,
@@ -129,34 +130,6 @@ type Errors = Partial<Record<ErrorKey, string>>
 function autoShift(d: Date): Shift {
   const h = d.getHours()
   return h >= 9 && h < 17 ? 'day' : 'night'
-}
-
-/** 'HH:MM'（notes.occurred_at は time 列） */
-function nowHM(d: Date): string {
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-}
-
-function pad2(n: number): string {
-  return String(n).padStart(2, '0')
-}
-
-/** 夜勤明けの時刻（この時刻より前は、前日の夜勤の続き）。勤務帯の既定（autoShift の 9 時から日勤）と同じ仮置き */
-const NIGHT_END_HOUR = 9
-
-/**
- * 申し送りに入れる時刻（F34・2026-10-10）。帰属は暦の日付のまま（本人回答: 0時〜朝の記録は当日の日報）。
- * ・記録日が今日: 今の時刻
- * ・記録日が前日で勤務帯が夜勤、夜勤明け（NIGHT_END_HOUR）より前に登録した: 今の時刻（夜勤の続きの記録の時刻を落とさない）
- * ・それ以外の過去日: 空（誤った時刻を残さない＝従来どおり）
- * 日報（DailySheetPage の noteOccurredAt）と同じ規則（試験で本体が同じことを確かめる）
- */
-function noteOccurredAt(day: string, shift: Shift, now: Date): string | null {
-  const iso = (d: Date): string => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
-  const hm = nowHM(now)
-  if (day === iso(now)) return hm
-  const yesterday = iso(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1))
-  if (shift === 'night' && day === yesterday && now.getHours() < NIGHT_END_HOUR) return hm
-  return null
 }
 
 /** 日報の「↓16時以降の記録」の区切り（16:00 以降・F35） */
@@ -879,8 +852,9 @@ export function NoteFormPage() {
         }
 
         const now = new Date()
-        // 記録日が今日のとき（と、前日の夜勤の続きを夜勤明けより前に書いた時）だけ現在時刻を入れる（F34）
-        const occurredAt = noteOccurredAt(form.noteOn, form.shift, now)
+        // 記録日が今日のとき（と、前日の夜勤の続きを夜勤明けより前に書いた時）だけ現在時刻を入れる（F34。前日の分は
+        // 画面で「翌」を付けて夜の記録の後ろに並べる）。規則は nextMorning.ts（日報と同じ関数）
+        const occurredAt = noteTimeFor(form.noteOn, form.shift, now)
         const payload: Omit<Note, 'id' | 'rev' | 'read_count' | 'my_read'> = {
           note_on: form.noteOn,
           shift: form.shift,
@@ -1239,7 +1213,8 @@ export function NoteFormPage() {
                           <li key={n.id} className="text-sm text-ink">
                             <span className="text-ink2">
                               {SHIFT_LABEL[n.shift] ?? ''}
-                              {fmtTimeHM(n.occurred_at) ? ` ${fmtTimeHM(n.occurred_at)}` : ''}
+                              {/* 夜勤明けに前日の夜勤の欄へ書いた申し送りは「翌2:00」（F34） */}
+                              {fmtTimeHM(n.occurred_at) ? ` ${fmtRecordTime(n.occurred_at, noteIsNextMorning(n))}` : ''}
                             </span>
                             <span className="ml-2">{n.body}</span>
                             {n.reporter_id !== null && (

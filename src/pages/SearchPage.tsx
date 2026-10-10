@@ -15,7 +15,8 @@ import type { CompositionEvent, FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { Chip, EmptyBlock, ErrorBlock, LoadingBlock, SegmentPicker } from '../components/ui'
 import { DbError, fetchAllStaff, fetchResidents, searchNotes } from '../lib/db'
-import { addDays, fmtDayLabel, fmtTimeHM, isoDate, todayIso } from '../lib/format'
+import { addDays, fmtDayLabel, isoDate, todayIso } from '../lib/format'
+import { fmtRecordTime, noteIsNextMorning } from '../lib/nextMorning'
 import { IMPORTANCE_LABEL, noteDisplayName, SHIFT_LABEL } from '../lib/types'
 import type { Importance, Note, Resident, Shift, Staff } from '../lib/types'
 
@@ -246,7 +247,7 @@ function NoteResultCard({
       {/* 1行目: 日付・時刻・勤務帯・対象・職種タグ・重要度 */}
       <div className="flex flex-wrap items-center gap-gap">
         <span className="tabular text-sm font-bold text-ink2">{fmtDayLabel(note.note_on)}</span>
-        <span className="tabular text-sm text-ink2">{fmtTimeHM(note.occurred_at) || '—'}</span>
+        <span className="tabular text-sm text-ink2">{fmtRecordTime(note.occurred_at, noteIsNextMorning(note)) || '—'}</span>
         <span className="text-sm text-ink2">{SHIFT_LABEL[note.shift] ?? ''}</span>
         {note.resident_id == null ? (
           <span className="text-base text-info">

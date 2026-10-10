@@ -20,3 +20,17 @@ test('与薬の「日付が変わりました」の帯は印刷に出さない�
   assert.ok(open > 0 && i - open < 400)
   assert.match(src.slice(open, src.indexOf('>', open)), /print:hidden/)
 })
+
+test('日報の出勤者・外出の帰着と削除・申し送りの削除などの「送信待ち」の一言は、端末に控えを残せたかで出し分ける（F01 の残り）', () => {
+  const src = read('src/pages/DailySheetPage.tsx')
+  assert.match(src, /const queuedMsg = \(\): string => \(isQueuePersisted\(\) \? MSG_QUEUED : MSG_NOT_PERSISTED\)/)
+  // 送信待ちにした直後に MSG_QUEUED を直接出す所が残っていない（控えから描き直す所と queuedMsg の定義は除く）
+  const direct = src.split('\n').filter((l) => /text: MSG_QUEUED \}|show\(MSG_QUEUED\)|\? MSG_QUEUED : '削除しました'/.test(l))
+  const allowed = direct.filter((l) => /next\[k\] = \{ tone: 'warn', text: MSG_QUEUED \}|return \{ tone: 'warn', text: MSG_QUEUED \}/.test(l))
+  assert.deepEqual(direct.length - allowed.length, 0, direct.join('\n'))
+})
+
+test('外出・外泊の登録に失敗した時も「入力した内容はそのまま残っています。」を添える（理由の出し分けは残す）', () => {
+  const src = read('src/pages/OutingFormPage.tsx')
+  assert.match(src, /e instanceof DbError \? `\$\{e\.message\}　入力した内容はそのまま残っています。` : SUBMIT_ERROR_UNKNOWN/)
+})

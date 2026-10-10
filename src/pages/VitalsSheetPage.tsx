@@ -56,6 +56,7 @@ import {
 } from '../lib/db'
 import type { CellSaveResult, ChangeInfo, PendingCellRow, VitalTarget } from '../lib/db'
 import { addDays, fmtDayLabel, normalizeVitalInput, todayIso, toHalfWidth } from '../lib/format'
+import { recordTimeFor } from '../lib/nextMorning'
 import {
   diaBpLevel,
   LS,
@@ -617,12 +618,6 @@ function stillPending(rec: Rec): boolean {
 /** 行の氏名のセルの id（食い違いを解決した後のフォーカスの戻り先） */
 function nameCellId(rowId: string): string {
   return `vs-name-${rowId}`
-}
-
-/** 端末ローカルの現在時刻 HH:MM（measured_at 用） */
-function nowHM(): string {
-  const d = new Date()
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
 /**
@@ -1454,9 +1449,10 @@ export function VitalsSheetPage({
       try {
         const res = await saveVitalEdits(target, sendEdits, {
           // 新しい行の測定時刻・記入者は「空いていれば埋める」（過去日をあとから埋める場合、端末の現在時刻は
-          // 測定時刻ではないので入れない）。既にある行では何も埋めない
+          // 測定時刻ではないので入れない。前日の列に夜勤明けより前に書いた時だけは今の時刻＝「翌」・F34）。
+          // 既にある行では何も埋めない
           ...(rec.vitalId == null
-            ? { fill: { measured_at: rec.day === today ? nowHM() : null, recorded_by: actorId ?? null } }
+            ? { fill: { measured_at: recordTimeFor(rec.day), recorded_by: actorId ?? null } }
             : {}),
           rebase,
         })
@@ -1592,7 +1588,7 @@ export function VitalsSheetPage({
           const res = await saveVitalEdits(target, sendEdits, {
             rebase: true,
             asNew: true,
-            fill: { measured_at: rec.day === today ? nowHM() : null, recorded_by: actorId ?? null },
+            fill: { measured_at: recordTimeFor(rec.day), recorded_by: actorId ?? null },
           })
           if (newRow && oldTarget && (res === 'queued' || (res.conflicts.length === 0 && res.held !== true))) {
             // 新しい行が書けた・送信待ちに確保できた後で、元の送信待ち（新しい行へ移した値の版）を外す（F5）

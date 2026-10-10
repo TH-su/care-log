@@ -49,7 +49,8 @@ import {
 } from '../lib/db'
 import type { ChangeInfo } from '../lib/db'
 import { getActorId, touchActivity } from '../lib/actor'
-import { addDays, fmtDayLabel, fmtTimeHM, todayIso, toHalfWidth } from '../lib/format'
+import { addDays, fmtDayLabel, todayIso, toHalfWidth } from '../lib/format'
+import { fluidIsNextMorning, fmtRecordTime, recordTimeFor, timeSortKey } from '../lib/nextMorning'
 import { isLowIntake, LS, MEAL_SLOT_LABEL, MEAL_STATUS_LABEL, SHEET_DAYS } from '../lib/types'
 import type { FluidIntake, Meal, MealSlot, MealStatus, Resident, SheetDays } from '../lib/types'
 import { CollapsibleBar } from '../components/CollapsibleBar'
@@ -377,13 +378,6 @@ function inShownRange(
   if (typeof raw !== 'string' || raw === '') return true
   const day = raw.slice(0, 10)
   return day >= from && day <= to
-}
-
-/** 'HH:MM'（端末ローカル時刻＝JST運用） */
-function nowTimeHM(d: Date): string {
-  const h = String(d.getHours()).padStart(2, '0')
-  const m = String(d.getMinutes()).padStart(2, '0')
-  return `${h}:${m}`
 }
 
 function mealKey(residentId: number, day: string, slot: MealSlot): string {
@@ -1670,8 +1664,9 @@ export function MealsSheetPage({
           const res = await insertFluid({
             resident_id: residentId,
             taken_on: day,
-            // 過去日にさかのぼって記録する場合、端末の現在時刻は実際の時刻ではないので入れない
-            taken_at: day === todayIso() ? nowTimeHM(new Date()) : null,
+            // 過去日にさかのぼって記録する場合、端末の現在時刻は実際の時刻ではないので入れない。ただし前日の列に
+            // 夜勤明けより前に書いた時は今の時刻（「翌」・F34。規則は nextMorning.ts）
+            taken_at: recordTimeFor(day),
             amount_ml: ml,
             kind: null,
             recorded_by: actorRef.current,
@@ -2119,7 +2114,13 @@ export function MealsSheetPage({
       map.set(key, cur)
     }
     for (const v of map.values()) {
-      v.rows.sort((a, b) => (a.taken_at ?? '').localeCompare(b.taken_at ?? '') || a.id - b.id)
+      // 夜勤明けに前日の列へ書いた水分（「翌」）は、その日の夜の記録の後ろ（F34）
+      v.rows.sort(
+        (a, b) =>
+          (timeSortKey(a.taken_at, fluidIsNextMorning(a)) ?? '').localeCompare(
+            timeSortKey(b.taken_at, fluidIsNextMorning(b)) ?? '',
+          ) || a.id - b.id,
+      )
     }
     return map
   }, [fluids])
@@ -2824,7 +2825,7 @@ export function MealsSheetPage({
                                 <ul className="mt-1 flex flex-col">
                                   {fl.rows.map((f) => (
                                     <li key={f.id} className="tabular text-base text-ink">
-                                      {f.taken_at ? fmtTimeHM(f.taken_at) : '時刻なし'}
+                                      {f.taken_at ? fmtRecordTime(f.taken_at, fluidIsNextMorning(f)) : '時刻なし'}
                                       {'　'}
                                       {f.amount_ml}ml
                                     </li>
