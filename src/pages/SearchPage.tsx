@@ -14,7 +14,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { CompositionEvent, FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { Chip, EmptyBlock, ErrorBlock, LoadingBlock, SegmentPicker } from '../components/ui'
-import { DbError, fetchResidents, fetchStaff, searchNotes } from '../lib/db'
+import { DbError, fetchAllStaff, fetchResidents, searchNotes } from '../lib/db'
 import { addDays, fmtDayLabel, fmtTimeHM, isoDate, todayIso } from '../lib/format'
 import { IMPORTANCE_LABEL, noteDisplayName, SHIFT_LABEL } from '../lib/types'
 import type { Importance, Note, Resident, Shift, Staff } from '../lib/types'
@@ -373,9 +373,11 @@ export function SearchPage({ residents: residentsProp }: SearchPageProps = {}) {
     }
   }, [residentsProp, residentsReload])
 
+  // 記入者名は退職者も含む全員から引く（F48・2026-10-10。退職者が書いた過去の申し送りの記入者を「—」にしない。
+  // 記入者での検索は db.ts の searchNotes が同じ全員の名簿で照合する）
   useEffect(() => {
     let cancelled = false
-    fetchStaff()
+    fetchAllStaff()
       .then((rows) => {
         if (cancelled) return
         setStaff(asArray<Staff>(rows).filter((s) => s != null && typeof s.id === 'number'))

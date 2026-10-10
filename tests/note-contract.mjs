@@ -1,6 +1,7 @@
-// 申し送りの欄ごとの compare-and-set（supabase/migrations/0017_apply_note_edits.sql）の契約。
+// 申し送りの欄ごとの compare-and-set（supabase/migrations/0017_apply_note_edits.sql・0027 で改訂）の契約。
 //
-// ・fakeApplyNoteEdits … 0017 の判定規則を JS で写した偽物（tests/logic.test.mjs の偽クライアントが使う）
+// ・fakeApplyNoteEdits … 0017＋0027 の判定規則を JS で写した偽物（tests/logic.test.mjs の偽クライアントが使う）
+//     0027（2026-10-10）: 取り消しの seen（見た行）の照合（F09）・継続の終了の組と row の ended_by（F08）
 // ・NOTE_CONTRACT_CASES … 同じ入力に対して 0017 と偽物が同じ答えを返すことを押さえる表。
 //     npm test は偽物で、素の Postgres（0001〜0011・0017 適用済み）では tests/note-contract-pg.mjs で
 //     同じ表を流し、どちらも expect と一致することを確かめる（規則の食い違いをここで捕まえる）。
@@ -42,6 +43,7 @@ const NOTE_ROW = [
   'occurred_at',
   'ongoing',
   'ended_at',
+  'ended_by',
   'reporter_id',
   'color',
   'after16',
@@ -157,6 +159,8 @@ export function fakeApplyNoteEdits(db, args) {
   }
   if (has(edits, 'body') && (jsonText(edits.body.value) ?? '') === '') throw new PgError('23514', '本文が空です')
   if (has(edits, 'deleted_at') && (jsonText(edits.deleted_at.value) ?? '') === '') throw bad('取り消しの指定を読み取れませんでした')
+  // 0027: 取り消しの見た行（seen）はオブジェクトだけを受ける
+  if (has(edits, 'deleted_at') && has(edits.deleted_at, 'seen') && !isObj(edits.deleted_at.seen)) throw bad('取り消しの指定を読み取れませんでした')
 
   const row = db.notes.find((r) => r.id === id) ?? null
   const found = row !== null
@@ -165,6 +169,7 @@ export function fakeApplyNoteEdits(db, args) {
   const settled = []
   const conf = []
   const reason = {}
+  const seenDiff = []
   for (const f of NOTE_FIELDS) {
     if (!has(edits, f)) continue
     const e = edits[f]
@@ -173,10 +178,21 @@ export function fakeApplyNoteEdits(db, args) {
         conf.push(f)
         reason[f] = 'missing'
       } else if (!live) settled.push(f)
-      else if (has(e, 'base') && (jsonText(e.base) ?? '') !== '' && row.body === jsonText(e.base)) write.push(f)
-      else {
+      else if (!(has(e, 'base') && (jsonText(e.base) ?? '') !== '' && row.body === jsonText(e.base))) {
         conf.push(f)
         reason[f] = 'changed'
+      } else {
+        // 0027（F09）: 見た行（seen）がある時は、書かれた欄がすべていまの値のままか確かめる（知らない欄は比べない）
+        if (has(e, 'seen')) {
+          for (const g of NOTE_FIELDS) {
+            if (g === 'deleted_at' || !has(e.seen, g)) continue
+            if (canonNote(g, e.seen[g] ?? null) !== canonNote(g, row[g] ?? null)) seenDiff.push(g)
+          }
+        }
+        if (seenDiff.length > 0) {
+          conf.push(f)
+          reason[f] = 'changed'
+        } else write.push(f)
       }
       continue
     }
@@ -199,6 +215,22 @@ export function fakeApplyNoteEdits(db, args) {
       reason[f] = 'changed'
     }
   }
+  // 0027（F08）: 継続の終了は1つの組。両方が送られ、片方が競合なら相方も書かず・「載っている」ともせずに競合へ
+  if (has(edits, 'ended_at') && has(edits, 'ended_by')) {
+    for (const [a, b] of [['ended_at', 'ended_by'], ['ended_by', 'ended_at']]) {
+      if (conf.includes(a) && !conf.includes(b)) {
+        const wi = write.indexOf(b)
+        if (wi >= 0) write.splice(wi, 1)
+        const si = settled.indexOf(b)
+        if (si >= 0) settled.splice(si, 1)
+        conf.push(b)
+        reason[b] = reason[a]
+        break
+      }
+    }
+  }
+  // 返り値の競合は欄の並び（NOTE_FIELDS）にそろえる（0017 の返り値の作り方と同じ）
+  conf.sort((x, y) => NOTE_FIELDS.indexOf(x) - NOTE_FIELDS.indexOf(y))
   const before = found ? { ...row, role_tags: [...(row.role_tags ?? [])] } : null
   if (live && write.length > 0) {
     const next = { ...row }
@@ -216,6 +248,8 @@ export function fakeApplyNoteEdits(db, args) {
     base: has(edits[f], 'base') ? edits[f].base : null,
     mine: edits[f].value ?? null,
     reason: reason[f],
+    // 0027（F09）: 取り消しが見た行と食い違って止まった時だけ、食い違った欄の名前を添える
+    ...(f === 'deleted_at' && seenDiff.length > 0 ? { fields: [...seenDiff] } : {}),
   }))
   const status = write.length > 0 && conf.length > 0 ? 'partial' : write.length > 0 ? 'applied' : conf.length > 0 ? 'conflict' : 'noop'
   return {
@@ -435,11 +469,128 @@ export const NOTE_CONTRACT_CASES = [
     },
   },
   {
-    name: '継続の終了（ended_at・ended_by）',
+    name: '継続の終了（ended_at・ended_by）・row に ended_by が入る（0027）',
     row: { ongoing: true },
     edits: { ended_at: { value: '2026-11-02T03:00:00Z', base: null }, ended_by: { value: 1, base: null } },
     editor: 1,
-    expect: { status: 'applied', applied: ['ended_at', 'ended_by'], settled: [], conflicts: [], row: { ongoing: true }, after: { revDelta: 1, history: 1 } },
+    expect: { status: 'applied', applied: ['ended_at', 'ended_by'], settled: [], conflicts: [], row: { ongoing: true, ended_by: 1 }, after: { revDelta: 1, history: 1 } },
+  },
+  // ── 0027（F08）: 継続の終了は1つの組 ──
+  {
+    name: '★F08 2台目の終了（先に別の職員が終了・終了時刻は画面のまま）→ 組で競合・どちらも書かない',
+    row: { ongoing: true, ended_at: '2026-11-02T01:05:00Z', ended_by: 2 },
+    edits: { ended_at: { value: '2026-11-02T01:10:00Z', base: '2026-11-02T01:05:00Z' }, ended_by: { value: 1 } },
+    editor: 1,
+    expect: {
+      status: 'conflict',
+      applied: [],
+      settled: [],
+      conflicts: [
+        { field: 'ended_at', reason: 'changed', server: '2026-11-02T01:05:00Z' },
+        { field: 'ended_by', reason: 'changed', server: 2 },
+      ],
+      row: { ended_by: 2 },
+      after: { revDelta: 0, history: 0 },
+    },
+  },
+  {
+    name: '★F08 同じ職員の2台目の終了（終了者は載っている・終了時刻だけ食い違う）→ 組で競合',
+    row: { ongoing: true, ended_at: '2026-11-02T01:05:00Z', ended_by: 1 },
+    edits: { ended_at: { value: '2026-11-02T01:00:00Z', base: null }, ended_by: { value: 1 } },
+    editor: 1,
+    expect: {
+      status: 'conflict',
+      applied: [],
+      settled: [],
+      conflicts: [
+        { field: 'ended_at', reason: 'changed', server: '2026-11-02T01:05:00Z' },
+        { field: 'ended_by', reason: 'changed', server: 1 },
+      ],
+      row: { ended_by: 1 },
+      after: { revDelta: 0, history: 0 },
+    },
+  },
+  {
+    name: 'F08 組でない編集（予定の期限だけを直す）は1欄で判定する',
+    row: { ongoing: true, ended_at: '2026-11-03T00:00:00Z' },
+    edits: { ended_at: { value: '2026-11-04T00:00:00Z', base: '2026-11-03T00:00:00Z' } },
+    editor: 1,
+    expect: { status: 'applied', applied: ['ended_at'], settled: [], conflicts: [], row: { ended_by: null }, after: { revDelta: 1, history: 1 } },
+  },
+  // ── 0027（F09）: 取り消しは見た行（seen）と照らす ──
+  {
+    name: '★F09 取り消し: 本文は同じでも、見た後に重要度が上がっていた → 競合（fields に重要度）・消さない',
+    row: { importance: 'critical' },
+    edits: { deleted_at: { value: '2026-11-01T01:00:00Z', base: '本文O', seen: { body: '本文O', resident_id: 1, importance: 'normal', ongoing: false } } },
+    editor: 1,
+    expect: {
+      status: 'conflict',
+      applied: [],
+      settled: [],
+      conflicts: [{ field: 'deleted_at', reason: 'changed', server: '本文O', fields: ['importance'] }],
+      row: { importance: 'critical' },
+      after: { revDelta: 0, history: 0, deleted: false },
+    },
+  },
+  {
+    name: '★F09 取り消し: 見た後に対象と継続が直されていた → 競合（fields に2欄）',
+    row: { resident_id: 2, ongoing: true },
+    edits: { deleted_at: { value: '2026-11-01T01:00:00Z', base: '本文O', seen: { resident_id: 1, importance: 'normal', ongoing: false, color: null } } },
+    editor: 1,
+    expect: {
+      status: 'conflict',
+      applied: [],
+      settled: [],
+      conflicts: [{ field: 'deleted_at', reason: 'changed', server: '本文O', fields: ['resident_id', 'ongoing'] }],
+      row: { resident_id: 2 },
+      after: { revDelta: 0, deleted: false },
+    },
+  },
+  {
+    name: 'F09 取り消し: 見た行のまま（型の違う書き方も同じとみなす）→ 取り消す',
+    row: { occurred_at: '09:00:00', role_tags: ['看護'], color: 'pink' },
+    edits: {
+      deleted_at: {
+        value: '2026-11-01T01:00:00Z',
+        base: '本文O',
+        seen: { body: '本文O', resident_id: '1', importance: 'normal', color: 'pink', occurred_at: '9:00', role_tags: ['看護'], ongoing: 'false', ended_at: null, ended_by: null },
+      },
+    },
+    editor: 1,
+    expect: { status: 'applied', applied: ['deleted_at'], settled: [], conflicts: [], row: null, after: { revDelta: 1, history: 1, deleted: true } },
+  },
+  {
+    name: 'F09 取り消し: seen が無い（旧版・旧い送信待ち）は従来どおり本文だけで判定する',
+    row: { importance: 'critical' },
+    edits: { deleted_at: { value: '2026-11-01T01:00:00Z', base: '本文O' } },
+    editor: 1,
+    expect: { status: 'applied', applied: ['deleted_at'], settled: [], conflicts: [], row: null, after: { revDelta: 1, history: 1, deleted: true } },
+  },
+  {
+    name: 'F09 取り消し: seen の知らない欄は比べない',
+    row: {},
+    edits: { deleted_at: { value: '2026-11-01T01:00:00Z', base: '本文O', seen: { importance: 'normal', future_field: 'x' } } },
+    editor: 1,
+    expect: { status: 'applied', applied: ['deleted_at'], settled: [], conflicts: [], row: null, after: { revDelta: 1, deleted: true } },
+  },
+  {
+    name: 'F09 取り消し: seen がオブジェクトでない → 拒否（22023）・何も書かない',
+    row: {},
+    edits: { deleted_at: { value: '2026-11-01T01:00:00Z', base: '本文O', seen: 'importance' } },
+    expect: { error: '22023', after: { revDelta: 0, deleted: false } },
+  },
+  {
+    name: 'F09 取り消し: 本文が直されていれば、seen があっても従来どおり競合（fields は付けない）',
+    row: { body: '本文X' },
+    edits: { deleted_at: { value: '2026-11-01T01:00:00Z', base: '本文O', seen: { importance: 'normal' } } },
+    expect: {
+      status: 'conflict',
+      applied: [],
+      settled: [],
+      conflicts: [{ field: 'deleted_at', reason: 'changed', server: '本文X', fields: null }],
+      row: { body: '本文X' },
+      after: { revDelta: 0, deleted: false },
+    },
   },
   {
     name: '全体連絡（resident_id null）も同じ',
@@ -481,6 +632,9 @@ export const NOTE_CONTRACT_CASES = [
 
 /** 値の突き合わせ（数値と数字の文字列は同じ・時刻の表記ゆれは吸収・それ以外は JSON 表記で比べる） */
 function sameJsonValue(a, b) {
+  // 時刻（timestamptz）は表記（Z と +00:00・+09:00）が違っても同じ時点なら同じ（0027 の継続の終了の競合で server に出る）
+  const ts = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/
+  if (typeof a === 'string' && typeof b === 'string' && ts.test(a) && ts.test(b)) return Date.parse(a) === Date.parse(b)
   if (typeof a === 'number' || typeof b === 'number') {
     const na = Number(a)
     const nb = Number(b)
@@ -507,6 +661,12 @@ export function checkNoteContract(c, result, after) {
     if (got.length !== want.length || got.some((g, i) => g[0] !== want[i][0] || g[1] !== want[i][1] || !sameJsonValue(g[2], want[i][2]))) {
       out.push(`conflicts ${JSON.stringify(got)} != ${JSON.stringify(want)}`)
     }
+    // 0027（F09）: 取り消しの競合の fields（食い違った欄）。期待に fields がある時だけ比べる（null＝付かないこと）
+    e.conflicts.forEach((x, i) => {
+      if (!has(x, 'fields')) return
+      const gf = r.conflicts?.[i]?.fields
+      if (!sameJsonValue(gf ?? null, x.fields)) out.push(`conflicts[${i}].fields ${JSON.stringify(gf)} != ${JSON.stringify(x.fields)}`)
+    })
     if (e.row === null) {
       if (r.row !== null) out.push(`row should be null: ${JSON.stringify(r.row)}`)
     } else if (e.row !== undefined) {

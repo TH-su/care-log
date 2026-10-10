@@ -7,6 +7,8 @@
 // 自動の時間帯（朝・昼・夕・眠前）の「未」は、自動の時刻から15分過ぎても記録が無いマス（与薬チェックの表と同じ・チーフ指摘1）。
 // 月の合計（状態ごとの件数・列ごとの記録と「未」の数・頓服の回数）を下に出す。
 // 印刷は既存の印刷部品（PrintArea）で A4 縦。「全員を印刷」は1人1ページ（改ページ）。
+// 他の端末の変更・つながり直し（RESYNC）での取り直しは、表を出したまま差し替える。取り直しに失敗しても表示中の表を残し、
+// 「読み込めませんでした」を添えるだけにする（表がエラーに置き換わってスクロール位置を失わない・2026-10-10 F14）。
 //
 // 規律:
 // - 取得は db.ts の fetchAllResidents / fetchMedSlots / fetchMedMonth / fetchMedFirstDay のみ（月の範囲でだけ引く）
@@ -106,6 +108,22 @@ export function MedMonthPage() {
   /** 描き終えてから刷るための合図（1人・全員のどちらも、中身を差し替えた次の描画の後に刷る） */
   const [printSeq, setPrintSeq] = useState(0)
   const printRef = useRef<PrintAreaHandle>(null)
+  /**
+   * 取り直しのきっかけ（'quiet'＝他の端末の変更・つながり直しの合図・F14）。quiet の取り直しが失敗した時は、
+   * 表示中の表を残して refreshFailed を出す（エラーに置き換えない）
+   */
+  const refreshKindRef = useRef<'user' | 'quiet'>('user')
+  const [refreshFailed, setRefreshFailed] = useState(false)
+  const baseRef = useRef<Base | null>(null)
+  baseRef.current = base
+  const dataRef = useRef<Loaded | null>(null)
+  dataRef.current = data
+
+  /** 人が押した取り直し（失敗したらエラーを出す） */
+  const retry = useCallback(() => {
+    refreshKindRef.current = 'user'
+    setTick((n) => n + 1)
+  }, [])
 
   useEffect(() => {
     const t = window.setInterval(() => setNowMin(minutesOfDay(new Date())), MED_RECHECK_MS)
@@ -122,6 +140,7 @@ export function MedMonthPage() {
   // 名簿（退居された方も含む）・在籍の方の時間帯・記録を始めた日
   useEffect(() => {
     let alive = true
+    const quiet = refreshKindRef.current === 'quiet'
     setBaseError(null)
     void (async () => {
       try {
@@ -130,9 +149,14 @@ export function MedMonthPage() {
           fetchMedSlots(residents.filter((r) => r.active)),
           fetchMedFirstDay(),
         ])
-        if (alive) setBase({ residents, settings, startDay })
+        if (alive) {
+          setBase({ residents, settings, startDay })
+          setRefreshFailed(false)
+        }
       } catch (e) {
-        if (alive) setBaseError(e instanceof DbError && e.kind === 'server' ? e.message : ERR_LOAD)
+        if (!alive) return
+        if (quiet && baseRef.current !== null) setRefreshFailed(true)
+        else setBaseError(e instanceof DbError && e.kind === 'server' ? e.message : ERR_LOAD)
       }
     })()
     return () => {
@@ -144,21 +168,28 @@ export function MedMonthPage() {
   useEffect(() => {
     if (residentId === null) return
     let alive = true
+    const quiet = refreshKindRef.current === 'quiet'
     setError(null)
     setData((d) => (d !== null && d.month === month && d.residentId === residentId ? d : null))
     fetchMedMonth(month, residentId)
       .then((records) => {
-        if (alive) setData({ month, residentId, records })
+        if (!alive) return
+        setData({ month, residentId, records })
+        setRefreshFailed(false)
       })
       .catch((e: unknown) => {
-        if (alive) setError(e instanceof DbError && e.kind === 'server' ? e.message : ERR_LOAD)
+        if (!alive) return
+        const d = dataRef.current
+        if (quiet && d !== null && d.month === month && d.residentId === residentId) setRefreshFailed(true)
+        else setError(e instanceof DbError && e.kind === 'server' ? e.message : ERR_LOAD)
       })
     return () => {
       alive = false
     }
   }, [month, residentId, tick])
 
-  // 他の端末の記録を取り込む（表示中の月・表示中の人の行だけ。行を特定できない通知は取り直す側へ倒す）
+  // 他の端末の記録を取り込む（表示中の月・表示中の人の行だけ。行を特定できない通知は取り直す側へ倒す）。
+  // つながり直し・画面に戻った時の合図（RESYNC・F14）も行が無いので取り直す。表は出したまま差し替える（quiet）
   useEffect(() => {
     let timer: number | null = null
     const unsub = subscribeMedChanges((table, info) => {
@@ -168,7 +199,10 @@ export function MedMonthPage() {
         if (typeof row.resident_id === 'number' && residentId !== null && row.resident_id !== residentId) return
       }
       if (timer !== null) window.clearTimeout(timer)
-      timer = window.setTimeout(() => setTick((n) => n + 1), 400)
+      timer = window.setTimeout(() => {
+        refreshKindRef.current = 'quiet'
+        setTick((n) => n + 1)
+      }, 400)
     })
     return () => {
       if (timer !== null) window.clearTimeout(timer)
@@ -275,7 +309,7 @@ export function MedMonthPage() {
   if (baseError !== null) {
     return (
       <div className="mx-auto w-full max-w-2xl p-4">
-        <ErrorBlock message={baseError} onRetry={() => setTick((n) => n + 1)} />
+        <ErrorBlock message={baseError} onRetry={retry} />
       </div>
     )
   }
@@ -375,11 +409,20 @@ export function MedMonthPage() {
       {residentId === null ? (
         <EmptyBlock message="入居者を選ぶと、その方の月次表が出ます。全員分は「全員を印刷」から紙に出せます。" actionLabel="入居者を選ぶ" onAction={() => setPickerOpen(true)} />
       ) : error !== null ? (
-        <ErrorBlock message={error} onRetry={() => setTick((n) => n + 1)} />
+        <ErrorBlock message={error} onRetry={retry} />
       ) : one === null ? (
         <LoadingBlock label="与薬の月次表を読み込み中です…" />
       ) : (
         <>
+          {refreshFailed ? (
+            <p role="status" className="text-sm text-warn print:hidden">
+              <span aria-hidden="true">▲ </span>
+              他の端末の変更を読み込めませんでした（表示は前に読んだ内容です）。{' '}
+              <button type="button" onClick={retry} className="inline-flex min-h-tap items-center font-bold text-link">
+                読み込み直す
+              </button>
+            </p>
+          ) : null}
           <p className="text-sm text-ink2">
             服薬の時間帯: {one.slots.length === 0 ? (one.resident.active ? '未設定（「未」は付きません）' : '（退居）') : one.slots.map((s) => MED_SLOT_LABEL[s]).join('・')}
           </p>

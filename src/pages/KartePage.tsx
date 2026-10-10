@@ -3,7 +3,8 @@
 //
 // この画面は読み取り専用（書き込み経路を持たない＝multi-device-sync 原則9「読み取りで書かない」。
 // 既読付与も行わない＝表示だけで note_reads を作らない）。
-// - 取得は db.ts の fetchResidents / fetchStaff / fetchKarte / fetchRecordHistory のみ
+// - 取得は db.ts の fetchResidents / fetchAllStaff / fetchKarte / fetchRecordHistory のみ
+//   （記入者名は退職者も含む全員から引く＝F48・2026-10-10。退職者が書いた過去の記録の記入者を「—」にしない）
 //   （supabase 直呼びなし・期間指定必須。変更の記録は14日ずつ遡る＝全件ロードしない）
 // - localStorage に保存するのは期間セグメント（cl_karteRange）だけ。氏名・記録本文は保存しない
 // - 体重（2026-09-27 追加）は weightClient.ts の fetchWeights で体重管理アプリの GAS から読むだけ。
@@ -16,7 +17,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import { flushSync } from 'react-dom'
 import { Link, useParams } from 'react-router-dom'
-import { diffHistoryRow, fetchKarte, fetchRecordHistory, fetchResidents, fetchStaff } from '../lib/db'
+import { diffHistoryRow, fetchAllStaff, fetchKarte, fetchRecordHistory, fetchResidents } from '../lib/db'
 import type { RecordHistoryEntry } from '../lib/db'
 import {
   clampLines,
@@ -2408,31 +2409,33 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
     [weight, fromIso, toIso],
   )
 
-  // 記入者名の対応表（職員マスタ。取得できなくてもカルテ本体は表示する）
+  // 記入者名の対応表（退職者も含む全員・F48。App から渡る名簿は在籍者だけなので、渡されていても全員を読む。
+  // 渡された名簿は読めるまでの間と、読めなかった時の控え。取得できなくてもカルテ本体は表示する）
+  const [allStaff, setAllStaff] = useState<Staff[]>([])
   useEffect(() => {
-    if (staff) {
-      setStaffList(staff)
-      return
-    }
+    if (staff) setStaffList(staff)
+  }, [staff])
+  useEffect(() => {
     let cancelled = false
-    fetchStaff()
+    fetchAllStaff()
       .then((rows) => {
         if (cancelled || !aliveRef.current) return
-        setStaffList(asArray<Staff>(rows).filter((s) => s != null && typeof s.id === 'number'))
+        setAllStaff(asArray<Staff>(rows).filter((s) => s != null && typeof s.id === 'number'))
       })
       .catch(() => {
-        // 記入者名が出せないだけなので、カルテの表示は続ける
+        // 退職者の記入者名が出せないだけなので、カルテの表示は続ける
       })
     return () => {
       cancelled = true
     }
-  }, [staff])
+  }, [])
 
   const staffById = useMemo(() => {
     const m = new Map<number, string>()
+    for (const s of allStaff) m.set(s.id, s.name)
     for (const s of staffList) m.set(s.id, s.name)
     return m
-  }, [staffList])
+  }, [staffList, allStaff])
 
   const floor = resident ? floorOf(resident.room) : null
 
@@ -2516,7 +2519,7 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
           {resident.needs_review ? (
             <p className="mt-1 text-sm text-warn">
               <span aria-hidden="true">▲ </span>
-              マスタ同期で確認待ちの利用者です。設定タブで内容をご確認ください。
+              マスタ同期で確認待ちの利用者です（名簿の氏名と食い違っています）。設定の「要確認の利用者」で内容を確かめてください。
             </p>
           ) : null}
         </header>

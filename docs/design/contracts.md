@@ -80,6 +80,12 @@ markRead(noteId: number, staffId: number): Promise<void>       // 明示操作�
 fetchNoteReaders(noteId: number): Promise<Staff[]>             // note_reads×staff・read_at昇順・limit100・氏名表示のみ
 fetchUnreadCount(staffId: number, sinceIso: string): Promise<number>
 getNativeInputGate(): Promise<{ value: boolean; observed: boolean }>  // observed=サーバー値を一度でも観測できたか
+                                                               // 2026-10-10: 戻り値に任意の outdated?: true（この版が app_settings の min_client_build より古い・F28③。
+                                                               // value=false・observed=true。理由文は OUTDATED_REASON）。getKindInputGate も同じ
+checkClientBuild(): Promise<boolean>                           // min_client_build を取り直して比べる（古い版か。読めない時は直近の観測のまま＝未観測なら false）
+isClientBuildOutdated(): boolean                               // この起動中に古い版と観測したか（観測したら戻さない＝値を下げた時は再読み込みで戻る）
+onClientBuildOutdated(fn: () => void): () => void              // 古い版と分かった時の受け口（App が受け皿 OutdatedPanel を出す）
+                                                               // 古い版と分かったら、書込の入口は OUTDATED_REASON で止め、送信待ちは送らない（端末に残す）
 getNativeInputEnabled(): Promise<boolean>                      // 互換用。gate.value を返す（既定 false）
 getAppSetting(key: string): Promise<string | null>
 
@@ -89,6 +95,8 @@ isSelfWrite(table: string, row: unknown): boolean             // 自分の書込
 isSeenRev(seenRev: number | null, row: unknown): boolean
 joinPresence(self: PresenceHere | null, onChange: (others: PresenceHere[]) => void):
   { update: (next: PresenceHere | null) => void; stop: () => void }   // 居場所の Presence（チャンネル cl_note_presence・DBに書かない）
+                                                               // 2026-10-10（F25）: private チャンネル（0029 の realtime.messages の RLS で許可リストの職員だけ）。
+                                                               // 参加を断られても例外にしない・何も出さない（console に起動中1回だけ残す）
 joinNotePresence(self: PresenceHere, onChange: (others: PresenceHere[]) => void):
   { update: (next: PresenceHere) => void; stop: () => void }          // 同じチャンネルの申し送りの居場所だけ（欄を入力中の要素は除く）
 queuePending(): number
@@ -130,6 +138,7 @@ fetchMedMonth(monthKey: string, residentId?: number): Promise<MedAdmin[]>
 fetchMedFirstDay(): Promise<string | null>                     // 施設全体で最初の与薬の記録の日（月次表の「未」を付け始める日）
 setMedSlots(residentId: number, slots: readonly MedSlot[], note: string | null, current: MedSlotsSetting | null, opts?: WriteOpts):
   Promise<MedSlotsSetting | Conflict | Queued>                 // current が null なら insert（client_key）、あれば rev 照合 update。upsert は使わない
+                                                               // 2026-10-10（F29）: update は変えた列だけ（slots・note）を送る（備考だけを直す古い版が、新しい版の時間帯を消さない）
 insertMedAdmin(m: Omit<MedAdmin, 'id' | 'rev' | 'created_at'>): Promise<MedAdmin | Conflict | Queued>
                                                                // client_key 付き。1人1日1時間帯1件の 23505（自分のキーでない）は 'conflict'
 updateMedAdmin(current: MedAdmin, patch: Partial<Pick<MedAdmin, 'status' | 'note' | 'given_at' | 'prn_drug' | 'prn_reason' | 'prn_effect'>>,
@@ -154,6 +163,8 @@ insertIncident(i: IncidentInput): Promise<Incident | Queued>   // client_key 付
 updateIncident(current: Incident, patch: IncidentPatch, opts?: WriteOpts): Promise<Incident | Conflict | Queued>
                                                                // rev 照合。列は変えた項目だけ、detail は current.detail に patch.detail を重ねた全体（jsonb は列ごと置換）。
                                                                // 氏名の写しは送らない（patch にあっても外す）。対象者を変えた時は detail も送る（写し直させる）
+                                                               // 2026-10-10（F29）: 移行 0028（サーバーが送られたキーだけを前の値に重ねる）を incidents_detail_merge_ready() で
+                                                               // 確かめられた時は、detail は変えたキーだけ（空にした欄は null を明示）。確かめられない・無い時は従来どおり全体
 softDeleteIncident(id: number, rev: number, opts?: WriteOpts): Promise<true | Conflict | Queued>
 hasPendingIncident(recordId: number): boolean                  // このタブの送信待ち（送信中を含む・blocked は除く）にその記録の追記・取り消しがあるか。読むだけ
 pendingIncidentOps(): PendingIncident[]                        // 送信待ちにある追加（未送信・送信中・止まっている）。読むだけ。一覧に「未送信」として出す

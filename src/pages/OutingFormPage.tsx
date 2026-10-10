@@ -12,14 +12,25 @@
 // - タップ要素は min-h-tap（44px）＋隣接 gap-gap（8px）。色だけで意味を伝えない（記号・文字を併記）
 // - ローディング／エラー／空の3状態を実装。エラー文は「何が起きたか＋次にどうすればよいか」
 // - outings と meals.status='out' を自動連動させない（db-design.md §7。本画面は食事に一切書かない）
+// - 利用者と開始日が決まったら、その日にその方に在る外出・外泊を参考に出す（F56・2026-10-10。2台で同じ外出を登録して
+//   日報に2行出るのを、書く前に気づけるように。保存は止めない・読めなければ何も出さない・端末には残さない）
 
 import { useEffect, useId, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
-import { fetchResidents, getNativeInputGate, insertOuting, isQueuePersisted } from '../lib/db'
+import { Link } from 'react-router-dom'
+import {
+  DbError,
+  fetchOutingsOn,
+  fetchResidents,
+  FORBIDDEN_REASON,
+  getNativeInputGate,
+  insertOuting,
+  isQueuePersisted,
+} from '../lib/db'
 import { getActorId, touchActivity } from '../lib/actor'
 import { OUTING_KIND_LABEL } from '../lib/types'
 import type { Outing, OutingKind, Resident } from '../lib/types'
-import { todayIso } from '../lib/format'
+import { fmtDayLabel, fmtTimeHM, todayIso } from '../lib/format'
 import {
   EmptyBlock,
   ErrorBlock,
@@ -49,6 +60,13 @@ const GATE_UNKNOWN_ERROR =
 /** 送信待ちにしたのに端末へ残せなかった時の案内（入力欄は消さない・NoteFormPage と同型） */
 const NOT_PERSISTED_REASON =
   '送信できませんでした。この端末にも保存できていません（保存領域の空きが不足している可能性があります）。入力はこの画面に残していますので、電波が戻るまでこの画面を閉じないでください。長引く場合は内容を控えてから管理者に連絡してください。'
+
+/**
+ * 登録に失敗した時の既定の文（DbError 以外の想定外の例外。F62: 理由が何でも「通信状態を確認」と出し、
+ * 電波の問題ではない時にも電波を探させていた。DbError は「何が起きた＋次にどうする」をそのまま出す）
+ */
+const SUBMIT_ERROR_UNKNOWN =
+  '登録できませんでした（原因不明のエラー）。もう一度「登録する」を押してください。直らない時は管理者に連絡してください。入力した内容はそのまま残っています。'
 
 interface FieldErrors {
   resident?: string
@@ -101,6 +119,9 @@ export function OutingFormPage({
   const [showErrors, setShowErrors] = useState(false)
   const [saving, setSaving] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
+  /** その日にその方に在る外出・外泊（参考表示・F56。key＝利用者|開始日。読めなければ null＝何も出さない） */
+  const [sameDay, setSameDay] = useState<{ key: string; list: Outing[] } | null>(null)
+  const [sameDayTick, setSameDayTick] = useState(0)
 
   const { toast, show } = useToast()
   const uid = useId()
@@ -136,6 +157,11 @@ export function OutingFormPage({
       .then(([rs, gate]) => {
         if (!alive) return
         if (rs) setFetchedResidents(rs)
+        if (gate.forbidden === true) {
+          // 許可リスト外のアカウント（F61）: 封鎖とも通信エラーとも別の理由を出す
+          setLoadError(FORBIDDEN_REASON)
+          return
+        }
         if (!gate.observed) {
           // 観測できていない＝「スプシ期間」と決めつけない。通信エラーとして再試行の導線を出す
           setLoadError(GATE_UNKNOWN_ERROR)
@@ -151,6 +177,27 @@ export function OutingFormPage({
       alive = false
     }
   }, [needResidentFetch, reloadKey])
+
+  // その日にその方に在る外出・外泊を読む（F56）。利用者を外した・日付が空の時は出さない
+  const sameDayKey = residentId != null && /^\d{4}-\d{2}-\d{2}$/.test(startOn) ? `${residentId}|${startOn}` : null
+  useEffect(() => {
+    if (residentId == null || sameDayKey === null) {
+      setSameDay(null)
+      return
+    }
+    let alive = true
+    fetchOutingsOn(residentId, startOn)
+      .then((rows) => {
+        if (alive) setSameDay({ key: sameDayKey, list: rows })
+      })
+      .catch(() => {
+        // 参考表示なので、読めなくても入力は止めない（何も出さないだけ）
+        if (alive) setSameDay(null)
+      })
+    return () => {
+      alive = false
+    }
+  }, [residentId, startOn, sameDayKey, sameDayTick])
 
   const errors = useMemo<FieldErrors>(() => {
     const e: FieldErrors = {}
@@ -224,11 +271,11 @@ export function OutingFormPage({
         show('外出・外泊を登録しました。')
       }
       resetForm()
+      // 同じ方・同じ日を続けて入れる時に、いま登録した分も参考表示に出す（利用者は空に戻るので、選び直した時に読む）
+      setSameDayTick((n) => n + 1)
       onSaved?.()
-    } catch {
-      setSubmitError(
-        '登録できませんでした。通信状態を確認して、もう一度「登録する」を押してください。入力した内容はそのまま残っています。',
-      )
+    } catch (e) {
+      setSubmitError(e instanceof DbError ? e.message : SUBMIT_ERROR_UNKNOWN)
     } finally {
       setSaving(false)
     }
@@ -282,7 +329,12 @@ export function OutingFormPage({
         <div role="status" className="rounded-lg border border-warn bg-warn-bg p-4">
           <p className="text-base text-ink">
             <span aria-hidden="true">▲ </span>
-            記録する職員が選ばれていないため登録できません。画面上部の職員名をタップして選び直してください。
+            記録する職員が選ばれていないため登録できません。
+            {/* F62: ヘッダの職員名表示は 2026-08-28 に廃止済み。未選択の時にヘッダに出る「記録者の既定を設定」と同じ行き先を示す */}
+            <Link to="/settings" className="text-link underline">
+              設定の「記録する職員」
+            </Link>
+            から選んでください（画面上部の「記録者の既定を設定」からも開けます）。
           </p>
         </div>
       ) : null}
@@ -380,6 +432,26 @@ export function OutingFormPage({
                 <span aria-hidden="true">▲ </span>
                 {errors.start}
               </p>
+            ) : null}
+
+            {/* その日にこの方に在る外出・外泊（参考表示・F56。保存は止めない。画面だけ） */}
+            {sameDay !== null && sameDay.key === sameDayKey && sameDay.list.length > 0 ? (
+              <div role="status" className="rounded border border-warn bg-warn-bg px-3 py-2 text-sm text-ink print:hidden">
+                <p>
+                  <span aria-hidden="true">▲ </span>
+                  この方には、{fmtDayLabel(startOn)}に次の外出・外泊がすでに登録されています。同じ外出を二重に登録していないか
+                  確かめてください（別の外出なら、このまま登録できます）。
+                </p>
+                <ul className="mt-1 space-y-1">
+                  {sameDay.list.map((o) => (
+                    <li key={o.id} className="tabular">
+                      {OUTING_KIND_LABEL[o.kind]}　開始 {o.start_on !== startOn ? `${fmtDayLabel(o.start_on)} ` : ''}
+                      {fmtTimeHM(o.start_at) || '—'}
+                      {o.end_on === null ? '　帰着未定' : `　帰着 ${fmtDayLabel(o.end_on)} ${fmtTimeHM(o.end_at) || '—'}`}
+                    </li>
+                  ))}
+                </ul>
+              </div>
             ) : null}
 
             {/* 帰着未定トグル（end を null にする） */}

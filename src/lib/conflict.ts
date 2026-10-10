@@ -112,6 +112,17 @@ export function conflictColumns<F extends string>(
     if (sameField(f, theirs, mine[f])) continue
     out.push({ field: f, theirs, mine: mine[f] ?? null })
   }
+  // 相方があなたの入力に無い（旧形式の退避で片側だけ・読み直しで外れた）時も、その相方を他の端末が変えていたら並べる
+  // （F12・2026-10-10）。〔自分の値で直す〕は相方を「見ていた値」で補って組で送る（withBpPair）ので、見せないまま
+  // 他の端末の値を戻さないよう、上書きする前に必ず見せる（「あなたの入力」の欄には見ていた値を出す）
+  for (const f of fields) {
+    if (has(mine, f) || out.some((c) => c.field === f)) continue
+    const other = pairOf(f)
+    if (other === null || !out.some((c) => c.field === other)) continue
+    const theirs = latest[f] ?? null
+    if (sameField(f, theirs, base[f])) continue // 相方は誰も触っていない
+    out.push({ field: f, theirs, mine: base[f] ?? null })
+  }
   return out.sort((a, b) => fields.indexOf(a.field) - fields.indexOf(b.field))
 }
 

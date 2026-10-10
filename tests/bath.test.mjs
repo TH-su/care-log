@@ -8,15 +8,19 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { registerLoadFailure } from './ts-load.mjs'
 
 const TS_UNSUPPORTED =
   'この Node では TypeScript を直接読み込めないため、入浴記録の純ロジックの検証をスキップしました（Node 22.18 以降で実行してください）。'
 
+// 読み込みの例外は捨てずに控える（F69。古い Node 以外で読めない時は、スキップでなく失敗にして原因を出す）
 let B = null
+let bLoadError = null
 try {
   B = await import('../src/lib/bath.ts')
-} catch {
+} catch (e) {
   B = null
+  bLoadError = e
 }
 
 /** BathRecord の最小形 */
@@ -35,7 +39,7 @@ function rec(id, residentId, day, result, over = {}) {
 }
 
 if (B === null) {
-  it('入浴記録の純ロジック', { skip: TS_UNSUPPORTED }, () => {})
+  registerLoadFailure('入浴記録の純ロジック', bLoadError, TS_UNSUPPORTED)
 } else {
   describe('isoWeekdayIndex（週間計画の曜日番号 0=月 … 6=日・SQL の isodow-1 と同じ）', () => {
     it('月曜は0・日曜は6', () => {

@@ -12,10 +12,17 @@
 // - 外出・外泊は「参考chip」の表示のみ。食事の状態（status）へ自動反映しない（ui-design §6【#6】）
 // - 実名・記録本文をコード・コメント・localStorage・console に書かない（表示は実行時の props/取得値のみ）
 // - Tailwind はトークン由来クラスのみ（色・px の直書き・arbitrary value を書かない）
+// - 他の端末の記録（食事・水分・外出）は subscribeChanges で受け、当日の分の変更だけを合図に背景で取り直す（F17・
+//   2026-10-10。入力中・未送信・競合の行の控えはそのまま）。復帰・電波の復帰・購読のつながり直しは db.ts が流す
+//   RESYNC（行なし）で受ける（F14）。送信待ちが減った時も取り直す（裏で送れた分の「⚠ 未送信」を外す）
+// - 表示中の日は開いた日。日付をまたいだら、入力中・未送信が無ければ今日へ切り替え、残っていれば帯で知らせる（F18）
+// - 保存領域が一杯で送信待ちを端末に残せない時は、送信待ちとして案内せず入力を残す（F01）
+// - 選んだ階は画面ごとの UI 状態として保存し、一覧にある階と照合して復元する（F68・原則11）
 
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { FocusEvent as ReactFocusEvent } from 'react'
 import {
+  FORBIDDEN_REASON,
   DbError,
   discardPendingRow,
   fetchLatestMeal,
@@ -23,17 +30,22 @@ import {
   fetchTimelineChunk,
   getNativeInputGate,
   insertFluid,
+  isQueuePersisted,
+  isSelfWrite,
   pendingRow,
+  queueSubscribe,
   saveMealEdits,
   softDeleteFluid,
+  subscribeChanges,
 } from '../lib/db'
-import type { PendingCellRow } from '../lib/db'
+import type { ChangeInfo, PendingCellRow } from '../lib/db'
 import { getActorId, touchActivity } from '../lib/actor'
 import { fmtDayLabel, toHalfWidth, todayIso } from '../lib/format'
 import { MEAL_SLOT_LABEL, MEAL_STATUS_LABEL, OUTING_KIND_LABEL } from '../lib/types'
 import type { FluidIntake, Meal, MealSlot, MealStatus, Outing, Resident } from '../lib/types'
 import {
   Chip,
+  ConfirmDialog,
   EmptyBlock,
   ErrorBlock,
   LoadingBlock,
@@ -66,12 +78,13 @@ import {
   settleSent,
 } from '../lib/rowSync'
 import type { Edits } from '../lib/rowSync'
-import { registerUnsaved } from '../lib/leaveGuard'
+import { LEAVE_TITLE, registerUnsaved } from '../lib/leaveGuard'
 import type { MealField } from '../lib/conflict'
 import { focusOf, useCellPresence } from '../hooks/useCellPresence'
 import type { BusyText, CellTarget } from '../lib/presence'
 import { BUSY_RING_OUTSIDE, BusyMark, PresenceSummary, RowBusyMark } from '../components/presence'
 import type { LeaveCell } from '../hooks/useCellPresence'
+import { RecorderBar } from '../components/RecorderBar'
 
 // ── 定数 ─────────────────────────────────────────────────────
 
@@ -103,6 +116,31 @@ const ERR_CONFLICT =
 const ERR_SAVE =
   '保存できませんでした。入力は消えていません。通信状況を確認して、もう一度タップしてください。'
 const MSG_QUEUED = '通信できないため送信待ちにしました。電波が戻ると自動で送信します。'
+/**
+ * 送信待ちにしたが、端末の保存領域が一杯で控えを残せなかった時（F01）。送信待ちはこのタブのメモリにだけあり、閉じる・
+ * 再読み込み・iOS の自動終了で消える。「電波が戻ると自動で送信します」とは言わず、入力も控えに残す
+ */
+const MSG_NOT_PERSISTED =
+  '送信待ちにしましたが、この端末に控えを残せませんでした（保存領域の空きが不足している可能性があります）。入力は消えていません。画面を閉じたり再読み込みしたりすると消えるので、この画面のまま電波の回復をお待ちください。'
+/** 他端末の変更通知をまとめる待ち時間（ミリ秒）。連続して届いた通知は最後の1回だけ取り直す（食事一覧と同じ） */
+const REALTIME_DEBOUNCE_MS = 1500
+/**
+ * 変更通知を受ける表と、その行の日付の列（当日の分だけを合図にする）。外出・外泊は期間で当たるので日付で絞らない
+ * （帰着日を変えた・取り消した通知は、変更前の日付が届かないため）
+ */
+const WATCHED_DAY_COL: Record<string, string | null> = {
+  meals: 'meal_on',
+  fluid_intake: 'taken_on',
+  outings: null,
+}
+/** 日付をまたいだかを見直す間隔（ミリ秒）。画面に戻った時・電波が戻った時にも見直す（F18） */
+const DAY_CHECK_MS = 60_000
+/**
+ * 食事一括で選んでいる階（UI状態だけ・F68）。値は階の数字（'1' '2' …）か 'other'（居室未設定）。食事一覧の階
+ * （cl_sheetFloor・「全」がある）とは選べる値が違うので別のキーにする。types.ts の LS は凍結契約のため、
+ * 申し送りフォームの cl_notePhraseCat と同じく画面の中に置く
+ */
+export const MEALS_FLOOR_KEY = 'cl_mealsGridFloor'
 const ERR_FLUID_UNDO =
   '水分の追加を取り消せませんでした。通信状況を確認して、もう一度お試しください。'
 const ERR_FLUID_UNDO_CONFLICT =
@@ -207,6 +245,56 @@ function nowTimeHM(d: Date): string {
   const h = String(d.getHours()).padStart(2, '0')
   const m = String(d.getMinutes()).padStart(2, '0')
   return `${h}:${m}`
+}
+
+/**
+ * 新しい水分の記録に入れる時刻。表示中の日が今日の時だけ今の時刻（食事一覧・日報と同じ式＝F18・F34）。
+ * 日付をまたいで開いたままの前日の画面で、前日の記録に今朝の時刻が入る（日付は昨日・時刻は今朝）のを防ぐ。
+ * 0時〜朝の記録は暦の日付（当日）に載せる決まり（2026-10-10 本人回答）なので、前日の記録の時刻は空にする
+ */
+export function takenAtFor(day: string): string | null {
+  return day === todayIso() ? nowTimeHM(new Date()) : null
+}
+
+/** 選んでいた階を読む（UI状態だけ。壊れた値・未知の形は null＝既定へ。一覧にあるかの照合は画面側で行う） */
+export function readMealsFloor(): string | null {
+  try {
+    if (typeof localStorage === 'undefined') return null
+    const v = localStorage.getItem(MEALS_FLOOR_KEY)
+    return v && /^[0-9a-z]{1,8}$/.test(v) ? v : null
+  } catch {
+    return null
+  }
+}
+
+export function writeMealsFloor(v: string): void {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(MEALS_FLOOR_KEY, v)
+  } catch {
+    // 保存できなくても表示は成立する（次回起動時に既定へ戻るだけ）
+  }
+}
+
+/**
+ * 変更通知が表示中の日に関わるか。行が無い・日付を取り出せない（削除・つながり直し・復帰の RESYNC＝F14）・
+ * 外出・外泊は「分からない」＝取り直す側へ倒す
+ */
+export function touchesDay(table: string, info: ChangeInfo | undefined, day: string): boolean {
+  const col = WATCHED_DAY_COL[table]
+  if (col === undefined) return false
+  if (col === null) return true
+  const raw = info?.row?.[col]
+  if (typeof raw !== 'string' || raw === '') return true
+  return raw.slice(0, 10) === day
+}
+
+/**
+ * 日付をまたいだ時の動き（F18。バイタル一括と同じ規則）。表示中の日が今日なら何もしない。切り替えて失うもの・取り違える
+ * もの（未保存・競合・未送信の食事と水分・保存中）が無ければ切り替え、あれば帯で知らせる（入力は止めない）
+ */
+export function dayRollover(shownDay: string, today: string, quiet: boolean): 'none' | 'switch' | 'notice' {
+  if (shownDay === today) return 'none'
+  return quiet ? 'switch' : 'notice'
 }
 
 function mealKey(residentId: number, slot: MealSlot): string {
@@ -394,6 +482,11 @@ interface MealRowProps {
   fluidCount: number
   /** 未送信のまま端末に退避している水分（合計 ml。0 なら表示しない） */
   queuedMl: number
+  /**
+   * 送信待ちにしたが端末に控えを残せなかった水分（合計 ml・F01。このタブのメモリにだけある）。0 なら表示しない。
+   * 閉じると消えるので、送信待ちの概算（queuedMl）とは分けて危険の色で出す
+   */
+  lostMl: number
   /** 当日の外出・外泊があれば表示する参考ラベル（食事の状態には自動反映しない） */
   outingLabel: string | null
   canUndoFluid: boolean
@@ -430,6 +523,7 @@ const MealRow = memo(function MealRow({
   fluidMl,
   fluidCount,
   queuedMl,
+  lostMl,
   outingLabel,
   canUndoFluid,
   onAmount,
@@ -571,6 +665,13 @@ const MealRow = memo(function MealRow({
             </span>
           ) : null}
         </div>
+        {lostMl > 0 ? (
+          // 送信待ちにしたが端末に控えを残せなかった水分（F01）。トーストだけで終わらせず、送れるまで行に残す
+          <p role="alert" className="mt-1 text-sm text-danger">
+            <span aria-hidden="true">▲ </span>
+            水分 ＋{lostMl}ml：{MSG_NOT_PERSISTED}
+          </p>
+        ) : null}
         <div className="mt-1 flex flex-wrap gap-gap">
           {FLUID_STEPS.map((ml) => (
             <button
@@ -712,12 +813,19 @@ export function MealsGridPage({
   actorId: actorIdProp,
   inputEnabled: inputEnabledProp,
 }: MealsGridPageProps = {}) {
-  // 対象日はこの画面を開いた日（当日）。日付切替UIは仕様に無いため設けない
-  const [day] = useState(() => todayIso())
+  // 対象日はこの画面を開いた日（当日）。日付を選ぶ UI は設けない。開いたまま日付をまたいだら、入力中・未送信が
+  // 無ければ今日へ切り替え、残っていれば帯で知らせて〔今日にする〕を出す（F18・2026-10-10 本人回答）
+  const [day, setDay] = useState(() => todayIso())
+  /** いまの日付（端末の時計）。表示中の日と食い違ったら帯を出す（1分ごと・画面に戻った時に見直す） */
+  const [nowDay, setNowDay] = useState(() => todayIso())
+  /** 〔今日にする〕で、まだ保存していない入力が消える時の確認 */
+  const [dayAsk, setDayAsk] = useState(false)
+  /** 日を切り替えて、新しい日の記録を読み終えるまで（前の日の値を新しい日の値として押させない） */
+  const [daySwitching, setDaySwitching] = useState(false)
   const [slot, setSlot] = useState<MealSlot>(() => slotForHour(new Date().getHours()))
   // フロアは一覧から作る（居室未設定の利用者も FLOOR_OTHER で必ず表示できるようにする）。
-  // 食事グリッド用の localStorage キーは types.ts の LS に無いため、選択は保存しない
-  const [floor, setFloor] = useState<string>('1')
+  // 選んだ階は UI 状態として保存し、復元した値が一覧に無ければ下の effect で先頭へ倒す（F68）
+  const [floor, setFloor] = useState<string>(() => readMealsFloor() ?? '1')
 
   const [residents, setResidents] = useState<Resident[]>(() => asArray<Resident>(residentsProp))
   const [meals, setMeals] = useState<Record<string, Meal>>({})
@@ -738,6 +846,11 @@ export function MealsGridPage({
    * 1名ずつ消し込む（キュー全体の件数では判定しない＝観測ベース・multi-device-sync 原則6）。
    */
   const [queuedFluids, setQueuedFluids] = useState<Record<number, { base: number; ml: number }>>({})
+  /**
+   * 送信待ちにしたが端末に控えを残せなかった水分（F01）。queuedFluids と同じ形・同じ消し込み（取り直した合計との差）
+   * だが、閉じると消えるので別に持ち、危険の色で出す（送信待ちの概算として案内しない）
+   */
+  const [lostFluids, setLostFluids] = useState<Record<number, { base: number; ml: number }>>({})
   /** くらべて選ぶ画面に渡す内容（開いた時点で固定する） */
   const [compare, setCompare] = useState<{
     key: string
@@ -753,6 +866,11 @@ export function MealsGridPage({
   const [inputEnabled, setInputEnabled] = useState<boolean>(inputEnabledProp === true)
   const [flagChecked, setFlagChecked] = useState(false)
   const [flagError, setFlagError] = useState<string | null>(null)
+  /**
+   * このアカウントは記録アプリを使えない（許可リストに無い・無効。F61 手直し）。flagError に FORBIDDEN_REASON を入れ、
+   * 再試行のボタンは出さない（何度押しても直らない。ログインし直す・管理者へ連絡する）
+   */
+  const [forbidden, setForbidden] = useState(false)
   /** サーバーに欄ごとの保存の仕組み（0011）がまだ無い＝サーバー側の更新待ち（入力を止める） */
   const [cellsMissing, setCellsMissing] = useState(false)
 
@@ -767,7 +885,7 @@ export function MealsGridPage({
    *   1台の端末を複数人が使うため、端末に1人を紐づける前提が実務に合わない。
    *   recorded_by は NULL 可の列で、未設定なら「誰が入れたか記録しない」だけになる。
    */
-  const canInput = inputEnabled && flagChecked && !cellsMissing
+  const canInput = inputEnabled && flagChecked && !cellsMissing && !daySwitching
 
   // 保存処理から読む最新値（setState の反映を待たずに直列処理で使う）
   const aliveRef = useRef(true)
@@ -793,6 +911,19 @@ export function MealsGridPage({
   /** 相手の行が他の端末で取り消されていた行（〔新しい行として保存〕〔取り下げる〕を出す） */
   const missingRef = useRef<Record<string, true>>({})
   /**
+   * 送信待ちにしたが端末に控えを残せなかった行（F01。このタブのメモリにだけある）。入力（edits）は残したまま
+   * 「未保存」として出し、送信待ちが送れた・止まった後の読み込みで外す
+   */
+  const unpersistedRef = useRef<Record<string, true>>({})
+  /** 未送信の水分（queuedFluids・lostFluids）の同期の控え（日の切替の判断に使う） */
+  const fluidsHeldRef = useRef({ queued: 0, lost: 0 })
+  /** 自分の書き込みで出た変更通知・取得の割り込みを見分ける印（保存の前後に進める。食事一覧と同じ作法） */
+  const selfWriteRef = useRef(0)
+  /** 順番待ちで動いている・待っている仕事の数（保存・水分・くらべて選ぶ。背景の取り直しと日の切替を後回しにする） */
+  const jobsRef = useRef(0)
+  /** 背景の取り直しを頼む（購読 effect の schedule を入れる。購読が無い時は null） */
+  const retryRef = useRef<(() => void) | null>(null)
+  /**
    * サーバーの値が古いかもしれない行（保存が競合したのに最新を取り直せなかった）。
    * この間は「先の値」を出さない（古い値を先の値として見せない＝指摘 U1c）。次の読み込みで外す
    */
@@ -815,6 +946,7 @@ export function MealsGridPage({
     canInputRef.current = canInput
     showRef.current = show
     residentsPropRef.current = residentsProp
+    fluidsHeldRef.current = { queued: Object.keys(queuedFluids).length, lost: Object.keys(lostFluids).length }
   })
 
   useEffect(() => {
@@ -874,10 +1006,20 @@ export function MealsGridPage({
     setRowMsgs(nextMsgs)
   }, [])
 
-  /** 同じ行への保存が交差しないよう、キーごとに直列化する（rev の追い越しを防ぐ） */
+  /**
+   * 同じ行への保存が交差しないよう、キーごとに直列化する（rev の追い越しを防ぐ）。
+   * 積んだ時から終わるまで数え、その間は背景の取り直しと日の切替を後回しにする（F17・F18）
+   */
   const enqueue = useCallback((key: string, job: () => Promise<void>) => {
+    jobsRef.current += 1
     const prev = chainRef.current.get(key) ?? Promise.resolve()
-    const next = prev.catch(() => undefined).then(job).catch(() => undefined)
+    const next = prev
+      .catch(() => undefined)
+      .then(job)
+      .catch(() => undefined)
+      .finally(() => {
+        jobsRef.current -= 1
+      })
     chainRef.current.set(key, next)
   }, [])
 
@@ -892,12 +1034,18 @@ export function MealsGridPage({
       setInputEnabled(gate.value === true)
       setFlagChecked(gate.observed)
       setCellsMissing(gate.cells === 'missing')
+      setForbidden(gate.forbidden === true)
+      if (gate.forbidden === true) {
+        setFlagError(FORBIDDEN_REASON)
+        return
+      }
       // 取得できない間は入力させない（封鎖側に倒す）
       if (!gate.observed) setFlagError(ERR_FLAG)
     } catch {
       if (!aliveRef.current) return
       setInputEnabled(false)
       setFlagChecked(false)
+      setForbidden(false)
       setFlagError(ERR_FLAG)
     }
   }, [])
@@ -968,9 +1116,14 @@ export function MealsGridPage({
   )
 
   // ── 当日分の取得（利用者・食事・水分・外出） ──
-  const load = useCallback(async () => {
+  const load = useCallback(async (opts?: { background?: boolean }) => {
     const gen = ++genRef.current
-    setLoading(true)
+    // 保存が割り込んだかどうかを見分けるための開始時刻（selfWriteRef は保存のたびに進む）
+    const startedAt = Date.now()
+    // 背景の取り直し（他端末の変更・復帰を受けた自動更新＝F17）では「読み込み中」にしない。
+    // 〔元に戻す〕（直前の水分の取り消し）も、取り直した一覧に行が残っている分は持ち越す
+    const background = opts?.background === true
+    if (!background) setLoading(true)
     setError(null)
     try {
       const fromProps = residentsPropRef.current
@@ -979,6 +1132,11 @@ export function MealsGridPage({
         fetchTimelineChunk(dayRef.current, dayRef.current, actorRef.current),
       ])
       if (gen !== genRef.current || !aliveRef.current) return
+      // 取得の途中で自分の保存が入った＝この応答は保存前のサーバー値。背景の取り直しは捨ててやり直す
+      if (background && selfWriteRef.current >= startedAt) {
+        retryRef.current?.()
+        return
+      }
 
       setResidents(asArray<Resident>(rs).filter((r) => r != null && r.active !== false))
 
@@ -1027,6 +1185,14 @@ export function MealsGridPage({
         }
         const fresh = nextMeals[k]
         delete staleRef.current[k] // 最新を読み込んだ（先の値を出してよい）
+        // 端末に控えを残せなかった送信待ち（F01）が送れた・止まった＝印を外して、下の突き合わせで片付ける
+        if (unpersistedRef.current[k] === true && pendingNow[k] === undefined) delete unpersistedRef.current[k]
+        if (unpersistedRef.current[k] === true) {
+          // まだ送れていない。入力と「未保存」をそのまま持ち続ける（「食い違いはありません」に塗り替えない）
+          keepPhases[k] = 'error'
+          keepMsgs[k] = MSG_NOT_PERSISTED
+          continue
+        }
         if (fromStorePhases[k] !== undefined) continue // 止まっている・拒否された行（送信待ちから取り込んだ）
         if (p === 'queued' && pendingNow[k] !== undefined) {
           keepPhases[k] = 'queued'
@@ -1065,11 +1231,25 @@ export function MealsGridPage({
       msgsRef.current = keepMsgs
       setRowMsgs(keepMsgs)
       syncPendingAll()
-      commitUndo({})
+      // Undo（直前の水分追加の取り消し）は利用者が押した読み込み直しでだけ捨てる。背景の取り直し（F17）で消すと、
+      // 押し間違えた ＋ml を戻す唯一の手段が黙って消える。取り直した結果に行が残っているものだけ持ち越す（食事一覧と同じ）
+      if (background) {
+        const aliveRev = new Map(nextFluids.map((f) => [f.id, f.rev]))
+        const keptUndo: Record<number, { id: number; rev: number; ml: number }> = {}
+        for (const [k, u] of Object.entries(undoRef.current)) {
+          const rev = aliveRev.get(u.id)
+          // 取り直した rev で持ち越す（古い rev のままだと取り消しが競合で弾かれる）
+          if (rev !== undefined) keptUndo[Number(k)] = { ...u, rev }
+        }
+        commitUndo(keptUndo)
+      } else {
+        commitUndo({})
+      }
       // 退避した水分がサーバーへ載ったかは、取り直した合計で1名ずつ確かめる（観測ベース）。
       // 「キュー全体が空か」で判断すると、無関係の未送信 op が残っている間ずっと概算が消えずに
       // 二重計上になり、逆に別要因でキューが空になった瞬間に未着の分が画面から消える。
-      setQueuedFluids((prev) => {
+      // 端末に控えを残せなかった水分（F01）も同じ消し込み（載ったと観測できた分だけ減らす）
+      const settleFluids = (prev: Record<number, { base: number; ml: number }>) => {
         const next: Record<number, { base: number; ml: number }> = {}
         for (const [key, held] of Object.entries(prev)) {
           const rid = Number(key)
@@ -1080,12 +1260,17 @@ export function MealsGridPage({
           if (remain > 0) next[rid] = { base: now, ml: remain }
         }
         return next
-      })
+      }
+      setQueuedFluids(settleFluids)
+      setLostFluids(settleFluids)
+      setDaySwitching(false)
       setError(null)
     } catch {
       if (gen !== genRef.current || !aliveRef.current) return
       // 取得に失敗しても表示中のデータは消さない（安全側フォールバック）
       setError(ERR_LOAD)
+      // 日を切り替えた後に読めなかった時も入力は止めない（電波の無い所でも記録できるように。送信待ちに積まれる）
+      setDaySwitching(false)
     } finally {
       if (gen === genRef.current && aliveRef.current) setLoading(false)
     }
@@ -1094,6 +1279,79 @@ export function MealsGridPage({
   useEffect(() => {
     void load()
   }, [load])
+
+  // ── 他端末の変更を自動で取り込む（F17・2026-10-10。食事一覧と同じ形） ──
+  // 当日の食事・水分・外出の変更だけを合図にし、連続通知は最後の1回にまとめてから背景で取り直す（入力中・未送信・
+  // 競合・応答待ちの控えは load が引き継ぐ）。購読は画面にいる間ずっと1本（日は dayRef から読む）。
+  // 購読できない環境（接続未設定・通信不可）では何もしない＝「最新を読み込む」の手動更新で成立する
+  const loadRef = useRef(load)
+  useEffect(() => {
+    loadRef.current = load
+  }, [load])
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let stopped = false
+    const schedule = () => {
+      if (stopped) return
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        if (stopped || !aliveRef.current) return
+        // 保存の応答待ち・順番待ちの仕事（保存・水分・くらべて選ぶ）がある間は取り直さない（応答と取得が交差すると
+        // 控えの消し込みが噛み合わず、保存できた値が一瞬もとの値に見える）。終わってから取り直す
+        if (jobsRef.current > 0 || Object.values(phasesRef.current).some((p) => p === 'saving')) {
+          schedule()
+          return
+        }
+        void loadRef.current({ background: true })
+      }, REALTIME_DEBOUNCE_MS)
+    }
+    retryRef.current = schedule
+
+    let unsub: (() => void) | null = null
+    try {
+      unsub = subscribeChanges((table, info?: ChangeInfo) => {
+        if (stopped || !aliveRef.current) return
+        // 自分の保存で出た通知（画面へ反映済み）は取り直さない（行で見分ける）
+        if (isSelfWrite(table, info?.row)) return
+        // 当日の分だけ。行が分からない通知（削除・つながり直し・復帰・電波の復帰の RESYNC＝F14）は取り直す＝安全側
+        if (!touchesDay(table, info, dayRef.current)) return
+        schedule()
+      })
+    } catch {
+      unsub = null
+    }
+
+    // 送信待ちが減った（裏で送れた・止まった）時も取り直す（F01・F17）。自分の送信の変更通知は isSelfWrite で
+    // 捨てられるので、ここで取り直さないと「⚠ 未送信」や、端末に控えを残せなかった入力の「未保存」が、手で読み込み
+    // 直すまで残る
+    let last = -1
+    let unsubQueue: (() => void) | null = null
+    try {
+      unsubQueue = queueSubscribe((n) => {
+        if (stopped || !aliveRef.current) return
+        const count = typeof n === 'number' && n >= 0 ? n : 0
+        if (last >= 0 && count < last) schedule()
+        last = count
+      })
+    } catch {
+      unsubQueue = null
+    }
+    return () => {
+      stopped = true
+      retryRef.current = null
+      if (timer) clearTimeout(timer)
+      for (const off of [unsub, unsubQueue]) {
+        if (!off) continue
+        try {
+          off()
+        } catch {
+          /* 解除失敗は表示に影響しないため無視する */
+        }
+      }
+    }
+  }, [])
 
   // App 側が利用者一覧を差し替えた場合は表示を合わせる
   useEffect(() => {
@@ -1177,6 +1435,8 @@ export function MealsGridPage({
       // 送信待ちで止まっている行を、読み直しで食い違いが無くなったのを確かめてから送り直す時は画面の基準で送る（rebase）
       const heldRow = pendingRow('meals', target)
       const rebase = heldRow !== null && heldRow.state === 'conflict'
+      // 送る前に印を付ける（変更通知が応答より先に届いても、自分の書き込みで取り直さない＝F17）
+      selfWriteRef.current = Date.now()
       try {
         const res = await saveMealEdits(target, edits, {
           // 記入者は新しい行の時だけ「空いていれば埋める」（更新では編集列以外を送らない＝部分更新）
@@ -1184,14 +1444,26 @@ export function MealsGridPage({
           rebase,
         })
         if (!aliveRef.current) return
+        selfWriteRef.current = Date.now()
+        if (res === 'queued' && !isQueuePersisted()) {
+          // 送信待ちにしたが、端末に控えを残せなかった（F01）。送ったものとして扱わない: 入力（edits）は残し、
+          // 送信待ちの重ね表示（queuedRef）にも積まず、「未保存」として理由を出す（離れる時の確認にも数える）。
+          // 送信待ちはこのタブのメモリにはあるので、電波が戻れば送られ、その後の読み込みで片付く
+          unpersistedRef.current[key] = true
+          setPhase(key, 'error', MSG_NOT_PERSISTED)
+          return
+        }
         if (res === 'queued') {
           // 送信待ちにした値は、送信が済むまで表示に重ねて残す（指摘 M1）。送信待ちへ渡し終えた欄だけ
           // 編集から消す（R-D・欄単位）。送信待ちの後に押す値は送った内容が基準
+          delete unpersistedRef.current[key]
           queuedRef.current[key] = { ...(queuedRef.current[key] ?? {}), ...send }
           writeEdits(key, settleSent(editsRef.current[key] ?? {}, edits, { ...shown, ...send }))
           setPhase(key, 'queued', MSG_QUEUED)
           return
         }
+        // サーバーへ届いた。端末に控えを残せなかった送信待ち（F01）の分も、同じ送り先の送信待ちへまとまって届いた
+        delete unpersistedRef.current[key]
         if (res.held === true) {
           // ほかの端末の値と食い違って止まっている行へまとめた（送っていない）。競合として見せる
           holdAsHeld(residentId, slotAt)
@@ -1344,16 +1616,31 @@ export function MealsGridPage({
       if (!canInputRef.current) return
       touchActivity()
       enqueue(`fluid:${residentId}`, async () => {
+        // 送る前に印を付ける（応答より先に届く変更通知で取り直さない）
+        selfWriteRef.current = Date.now()
         try {
           const res = await insertFluid({
             resident_id: residentId,
             taken_on: dayRef.current,
-            taken_at: nowTimeHM(new Date()),
+            // 時刻は表示中の日が今日の時だけ（日付をまたいで開いたままの前日に今朝の時刻を入れない＝F18）
+            taken_at: takenAtFor(dayRef.current),
             amount_ml: ml,
             kind: null,
             recorded_by: actorRef.current,
           })
           if (!aliveRef.current) return
+          selfWriteRef.current = Date.now()
+          if (res === 'queued' && !isQueuePersisted()) {
+            // 送信待ちにしたが、端末に控えを残せなかった（F01）。送信待ちの概算（queuedFluids）には積まず、
+            // この方の水分の欄に危険の色で残す（トーストだけで終わらせない）。電波が戻れば送られ、合計に載ったら消える
+            setLostFluids((prev) => {
+              const held = prev[residentId]
+              const base = held ? held.base : serverFluidMl(fluidsRef.current, residentId)
+              return { ...prev, [residentId]: { base, ml: (held?.ml ?? 0) + ml } }
+            })
+            showRef.current(`水分 ＋${ml}ml：${MSG_NOT_PERSISTED}`)
+            return
+          }
           if (res === 'queued') {
             setQueuedFluids((prev) => {
               const held = prev[residentId]
@@ -1383,9 +1670,11 @@ export function MealsGridPage({
       if (!target) return
       touchActivity()
       enqueue(`fluid:${residentId}`, async () => {
+        selfWriteRef.current = Date.now()
         try {
           const res = await softDeleteFluid(target.id, target.rev)
           if (!aliveRef.current) return
+          selfWriteRef.current = Date.now()
           if (res === 'conflict') {
             showRef.current(ERR_FLUID_UNDO_CONFLICT)
             return
@@ -1398,7 +1687,8 @@ export function MealsGridPage({
             const queuedUndo = { ...undoRef.current }
             delete queuedUndo[residentId]
             commitUndo(queuedUndo)
-            showRef.current(`水分 ＋${target.ml}ml の取り消し：${MSG_QUEUED}`)
+            // 端末に控えを残せなかった時（F01）は、送信待ちとして案内しない（閉じると取り消しが消え、記録が残る側に倒れる）
+            showRef.current(`水分 ＋${target.ml}ml の取り消し：${isQueuePersisted() ? MSG_QUEUED : MSG_NOT_PERSISTED}`)
             return
           }
           commitFluids(fluidsRef.current.filter((f) => f.id !== target.id))
@@ -1437,6 +1727,7 @@ export function MealsGridPage({
           if (e) edits[f] = { ...e, base: null }
         }
         if (!hasEdits(edits)) return
+        selfWriteRef.current = Date.now()
         try {
           const res = await saveMealEdits(
             { residentId, day: dayRef.current, slot: slotAt },
@@ -1444,7 +1735,15 @@ export function MealsGridPage({
             { rebase: true, asNew: true, fill: { recorded_by: actorRef.current } },
           )
           if (!aliveRef.current) return
+          selfWriteRef.current = Date.now()
           delete missingRef.current[key]
+          if (res === 'queued' && !isQueuePersisted()) {
+            // 端末に控えを残せなかった（F01）。新しい行として送る入力（基準 null）を残し、「未保存」として出す
+            unpersistedRef.current[key] = true
+            writeEdits(key, edits)
+            setPhase(key, 'error', MSG_NOT_PERSISTED)
+            return
+          }
           if (res === 'queued') {
             queuedRef.current[key] = { ...(queuedRef.current[key] ?? {}), ...(editValues(edits) as MealPatch) }
             writeEdits(key, {})
@@ -1514,10 +1813,137 @@ export function MealsGridPage({
       registerUnsaved(
         () =>
           Object.values(editsRef.current).some((e) => hasEdits(e)) ||
-          Object.values(phasesRef.current).some((p) => p === 'conflict'),
+          Object.values(phasesRef.current).some((p) => p === 'conflict') ||
+          // 端末に控えを残せなかった送信待ち（食事・水分＝F01）は、画面を離れると消える
+          Object.keys(unpersistedRef.current).length > 0 ||
+          fluidsHeldRef.current.lost > 0,
       ),
     [],
   )
+
+  // ── 日付をまたいだ時（F18・2026-10-10 本人回答: 入力中・未送信が無ければ今日へ自動で切り替える） ──
+  // 開いたまま日付をまたぐと、前日の朝食の行・前日の水分合計へ今朝の記録を入れていた。1分ごと・画面に戻った時・電波が
+  // 戻った時に今日と比べ、切り替えて失うものが無ければ黙って今日へ移る（食事の枠も今の時刻で選び直す）。
+  // 未保存・競合・未送信・保存中がある時は切り替えず、帯で知らせて〔今日にする〕を出す
+
+  /** 保存の応答待ち・順番待ちの仕事がある（日を切り替えると、その仕事が新しい日へ送られる） */
+  const isBusy = useCallback(
+    () => jobsRef.current > 0 || Object.values(phasesRef.current).some((p) => p === 'saving'),
+    [],
+  )
+  /** 日を切り替えると画面から消える入力（未保存・競合・止まった送信・端末に残せなかった送信待ち）があるか */
+  const holdsAnyInput = useCallback(
+    () =>
+      Object.values(editsRef.current).some((e) => hasEdits(e)) ||
+      Object.values(phasesRef.current).some((p) => p === 'conflict' || p === 'error') ||
+      Object.keys(unpersistedRef.current).length > 0 ||
+      fluidsHeldRef.current.lost > 0,
+    [],
+  )
+
+  /** 表示中の日を t へ切り替える（前の日の控えは片付ける。前の日の送信待ちは db.ts に残って前の日へ送られる） */
+  const switchDay = useCallback(
+    (t: string) => {
+      dayRef.current = t // 先に書く: 前の日の取得の応答を新しい日へ当てない（load は dayRef を読む）
+      genRef.current += 1
+      editsRef.current = {}
+      phasesRef.current = {}
+      setPhases({})
+      msgsRef.current = {}
+      setRowMsgs({})
+      queuedRef.current = {}
+      missingRef.current = {}
+      staleRef.current = {}
+      unpersistedRef.current = {}
+      commitMeals({})
+      commitFluids([])
+      setOutings([])
+      commitUndo({})
+      setQueuedFluids({})
+      setLostFluids({})
+      syncPendingAll()
+      setCompare(null)
+      setDayAsk(false)
+      // 食事の枠は開いた時と同じく今の時刻で選び直す（前の日の夕食の枠のまま今朝の朝食を入れない）
+      const nextSlot = slotForHour(new Date().getHours())
+      slotRef.current = nextSlot
+      setSlot(nextSlot)
+      setDaySwitching(true) // 新しい日の記録を読み終えるまで押させない（load が下ろす）
+      setNowDay(t)
+      setDay(t)
+      void load()
+    },
+    [commitFluids, commitMeals, commitUndo, load, syncPendingAll],
+  )
+
+  const switchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(
+    () => () => {
+      if (switchTimerRef.current !== null) clearTimeout(switchTimerRef.current)
+    },
+    [],
+  )
+
+  /**
+   * 今日へ切り替える（〔今日にする〕・確認の後）。保存の途中なら終わるのを待ってから切り替える。
+   * まだ保存していない入力が残っていれば、確認（confirmed=false の時）を出す
+   */
+  const switchToToday = useCallback(
+    (confirmed: boolean) => {
+      if (switchTimerRef.current !== null) clearTimeout(switchTimerRef.current)
+      switchTimerRef.current = null
+      const step = () => {
+        switchTimerRef.current = null
+        if (!aliveRef.current) return
+        const t = todayIso()
+        if (dayRef.current === t) {
+          setNowDay(t)
+          return
+        }
+        if (isBusy()) {
+          switchTimerRef.current = setTimeout(step, 300)
+          return
+        }
+        if (!confirmed && holdsAnyInput()) {
+          setDayAsk(true)
+          return
+        }
+        switchDay(t)
+      }
+      step()
+    },
+    [holdsAnyInput, isBusy, switchDay],
+  )
+
+  useEffect(() => {
+    const check = () => {
+      if (!aliveRef.current) return
+      const t = todayIso()
+      setNowDay(t)
+      if (dayRef.current === t) return
+      // 切り替えて失うもの・取り違えるものが無い時だけ黙って切り替える（未送信の食事・水分も残っていないこと）。
+      // 電波が無い間は切り替えない（新しい日を読めない。電波が戻った時に見直す）
+      const offline = typeof navigator !== 'undefined' && navigator.onLine === false
+      const quiet =
+        !offline &&
+        !isBusy() &&
+        !holdsAnyInput() &&
+        !Object.values(phasesRef.current).some((p) => p === 'queued') &&
+        fluidsHeldRef.current.queued === 0
+      if (dayRollover(dayRef.current, t, quiet) === 'switch') switchDay(t)
+    }
+    const timer = setInterval(check, DAY_CHECK_MS)
+    const onVisible = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') check()
+    }
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisible)
+    if (typeof window !== 'undefined') window.addEventListener('online', check)
+    return () => {
+      clearInterval(timer)
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisible)
+      if (typeof window !== 'undefined') window.removeEventListener('online', check)
+    }
+  }, [holdsAnyInput, isBusy, switchDay])
 
   /**
    * くらべて選ぶの送信（〔先の値を残す〕〔自分の値で直す〕〔両方残す〕）。通常の保存と同じ順番待ちに通す（指摘 L2）。
@@ -1527,9 +1953,12 @@ export function MealsGridPage({
     (key: string, job: () => Promise<void>) =>
       new Promise<void>((resolve) => {
         enqueue(key, async () => {
+          // 送る前と後に自分の書込の印を付ける（選び直した後の行を、その前に出た取り直しの古い値で描き直さない）
+          selfWriteRef.current = Date.now()
           try {
             await job()
           } finally {
+            selfWriteRef.current = Date.now()
             resolve()
           }
         })
@@ -1566,6 +1995,12 @@ export function MealsGridPage({
       }
       // 3択のどれかを選んだ＝この行の編集は解決した（くらべて選ぶで送った・取り下げた）
       writeEdits(key, {})
+      if (r.queued && (r.choice === 'mine' || r.choice === 'both') && !isQueuePersisted()) {
+        // 選んだ内容を送信待ちにしたが、端末に控えを残せなかった（F01）。送信待ちとして案内せず、離れる時の確認に数える
+        unpersistedRef.current[key] = true
+        setPhase(key, 'error', MSG_NOT_PERSISTED)
+        return
+      }
       if (r.choice === 'mine' && r.queued) {
         setPhase(key, 'queued', MSG_QUEUED)
         return
@@ -1644,6 +2079,25 @@ export function MealsGridPage({
             最新を読み込む
           </button>
         </div>
+        {/* いまの記録者（新しい行の記入者・変更の記録に付く）を常に出し、その場で切り替えられるようにする（F38）。
+            1台を複数の職員で使うため、前の人の記録者のまま入れるのを防ぐ。印刷には出さない（部品が print:hidden） */}
+        <RecorderBar actorId={actorId ?? null} className="mt-2" />
+        {day !== nowDay ? (
+          // 日付をまたいだが、未保存・未送信などがあって自動では切り替えなかった（F18）。入力は止めない
+          <div role="status" className="mt-3 rounded border border-warn bg-warn-bg p-3">
+            <p className="text-base text-ink">
+              <span aria-hidden="true">▲ </span>
+              日付が変わりました（表示中: {fmtDayLabel(day)}）。入力中・未送信の記録があるか電波が無いため、自動では切り替えていません。
+            </p>
+            <button
+              type="button"
+              onClick={() => switchToToday(false)}
+              className="mt-3 min-h-tap rounded border border-primary bg-surface px-4 text-base font-bold text-primary"
+            >
+              今日（{fmtDayLabel(nowDay)}）にする
+            </button>
+          </div>
+        ) : null}
         <div className="bar-compact mt-3">
           <span className="text-sm text-ink2">食事の枠</span>
           <div className="mt-1">
@@ -1662,7 +2116,11 @@ export function MealsGridPage({
               <SegmentPicker
                 options={floorOptions}
                 value={floor}
-                onChange={setFloor}
+                onChange={(v) => {
+                  setFloor(v)
+                  // 選んだ階を UI 状態として残す（再読み込み・Safari の画面の破棄の後も同じ階で開く＝F68・原則11）
+                  writeMealsFloor(v)
+                }}
                 ariaLabel="フロアを選ぶ"
               />
             </div>
@@ -1670,7 +2128,7 @@ export function MealsGridPage({
         ) : null}
       </SectionCard>
 
-      {flagError ? <ErrorBlock message={flagError} onRetry={() => void loadFlag()} /> : null}
+      {flagError ? <ErrorBlock message={flagError} onRetry={forbidden ? undefined : () => void loadFlag()} /> : null}
 
       {!flagError && !flagChecked ? (
         <div role="status" aria-live="polite" className="rounded-lg border border-border bg-surface p-4">
@@ -1748,6 +2206,7 @@ export function MealsGridPage({
                   fluidMl={fl?.ml ?? 0}
                   fluidCount={fl?.count ?? 0}
                   queuedMl={queuedFluids[r.id]?.ml ?? 0}
+                  lostMl={lostFluids[r.id]?.ml ?? 0}
                   outingLabel={o ? OUTING_KIND_LABEL[o.kind] : null}
                   canUndoFluid={undoFluids[r.id] != null}
                   onAmount={onAmount}
@@ -1782,6 +2241,19 @@ export function MealsGridPage({
         serialize={compare ? (job) => runResolverJob(compare.key, job) : undefined}
         onClose={() => setCompare(null)}
         onResolved={onResolved}
+      />
+
+      <ConfirmDialog
+        open={dayAsk}
+        title={LEAVE_TITLE}
+        body={`表示中の日（${fmtDayLabel(day)}）に、他の端末の値と食い違って止まっている入力、またはまだ保存していない入力があります。今日に切り替えると、その入力は破棄されます（送信待ちにした記録は ${fmtDayLabel(day)} の記録として送られます）。切り替えてよろしいですか。`}
+        confirmLabel="今日に切り替える"
+        danger
+        onConfirm={() => {
+          setDayAsk(false)
+          switchToToday(true)
+        }}
+        onCancel={() => setDayAsk(false)}
       />
 
       {toast}

@@ -3,11 +3,14 @@
 // - 取得は fetchTimelineChunk のみ（RPC 1発）。初期10日・追加10日・日付境界 keyset（offset 不使用）
 // - 受信チャンクを日単位に組み替えて DayData[] を返す（新しい日が先頭）
 // - DOM 保持上限60日。超過分は「新しい側」を外し trimmed=true（resetToLatest で最新へ戻す）
-// - Realtime は表示ウィンドウ内の日だけ取り直す（ウィンドウ外の日は取りに行かない＝全件ロード禁止）
+// - Realtime は表示ウィンドウ内の日だけ取り直す（ウィンドウ外の日は取りに行かない＝全件ロード禁止）。
+//   2026-10-10（F67）: この端末自身の書き込みと、窓の外の日の変更は取り直さない。日が分かる変更（バイタル・食事・水分・
+//   継続でない申し送りとその既読）は、その日を含む10日のチャンクだけを取り直して差し替える。日が分からない通知（取り消し・
+//   取り直しの合図 RESYNC）・継続の申し送り（ピン留めが各日に複製される）・外出（チャンクをまたぐ）は、今までどおり窓全体
 // - 取得失敗時は表示中のデータを消さない（安全側フォールバック）。個人情報は console にも localStorage にも出さない
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { fetchTimelineChunk, subscribeChanges } from '../lib/db'
+import { fetchTimelineChunk, isSelfWrite, subscribeChanges } from '../lib/db'
 import { addDays, isoDate, todayIso } from '../lib/format'
 import type {
   DayData,
@@ -230,6 +233,158 @@ function placeOutings(days: DayData[]): DayData[] {
   })
 }
 
+// ── Realtime の通知から取り直す範囲を決める（F67・純ロジック） ──────────────────
+
+/** 画面に出している行の索引（通知の行が「いま出している行」かを引く） */
+export interface TimelineIndex {
+  /** 表ごとに、出している行の id → 出している日 */
+  shown: Map<string, Map<number, string>>
+  /** ピン留めに出している（継続の）申し送りの id。各日に複製されるので、変われば窓全体を取り直す */
+  pinned: Set<number>
+  /** 申し送りの欄に出している継続（ongoing）の申し送りの id（ピン留めにも複製されうる） */
+  ongoing: Set<number>
+}
+
+/** 組み上がった日の並びから索引を作る */
+export function buildTimelineIndex(days: readonly DayData[]): TimelineIndex {
+  const shown = new Map<string, Map<number, string>>()
+  const put = (table: string, id: unknown, day: string) => {
+    if (typeof id !== 'number') return
+    let m = shown.get(table)
+    if (!m) {
+      m = new Map()
+      shown.set(table, m)
+    }
+    if (!m.has(id)) m.set(id, day)
+  }
+  const pinned = new Set<number>()
+  const ongoing = new Set<number>()
+  for (const d of days) {
+    for (const n of d.notes) {
+      put('notes', n.id, d.day)
+      if (n.ongoing === true) ongoing.add(n.id)
+    }
+    for (const v of d.vitals) put('vitals', v.id, d.day)
+    for (const m of d.meals) put('meals', m.id, d.day)
+    for (const f of d.fluids) put('fluid_intake', f.id, d.day)
+    for (const o of d.outings) put('outings', o.id, d.day)
+    for (const p of d.pinned) pinned.add(p.id)
+  }
+  return { shown, pinned, ongoing }
+}
+
+/** 取り直す範囲。'none'＝取り直さない／'all'＝窓全体／日付の並び＝その日を含むチャンクだけ */
+export type TimelineReloadScope = 'none' | 'all' | string[]
+
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/
+/** 表ごとの「その行が載る日」の列 */
+const DAY_COLUMN: Record<string, string> = {
+  vitals: 'measured_on',
+  meals: 'meal_on',
+  fluid_intake: 'taken_on',
+  notes: 'note_on',
+  import_days: 'day',
+}
+
+/**
+ * Realtime の通知1件で、どこを取り直すか（F67）。win は表示中の窓（最新側は今日まで伸ばした端）。
+ * - 行が分からない通知（物理削除・取り直しの合図 RESYNC・取り出せなかった）は窓全体（分からない＝取り直す側に倒す）
+ * - 画面に出している行の変更は、日付に関係なく取り直す（日付を窓の外へ直した変更を取りこぼさない・F16 と同じ考え方）
+ * - 外出は期間が窓に重なれば窓全体（チャンクをまたいで1か所に置き直すため）
+ * - 継続の申し送り・ピン留めに出している申し送り（とその既読）は窓全体（各日に複製されている）
+ * - 既読は、出している申し送りの既読だけ（既読の行には日付が無いので、申し送りの id から日を引く）
+ * - それ以外は、行の日が窓の中ならその日（と、出していた日）
+ * 自分の書き込み（isSelfWrite）は呼ぶ側で先に除く
+ */
+export function timelineReloadScope(
+  table: string,
+  row: Record<string, unknown> | null,
+  win: { from: string; to: string } | null,
+  idx: TimelineIndex,
+): TimelineReloadScope {
+  if (!WATCHED_TABLES.has(table)) return 'none'
+  if (row === null || win === null) return 'all'
+  const inWin = (day: string) => day >= win.from && day <= win.to
+  const id = typeof row.id === 'number' ? row.id : Number.NaN
+  const shownDay = idx.shown.get(table)?.get(id)
+  if (table === 'note_reads') {
+    const noteId = typeof row.note_id === 'number' ? row.note_id : Number.NaN
+    if (idx.pinned.has(noteId) || idx.ongoing.has(noteId)) return 'all'
+    const day = idx.shown.get('notes')?.get(noteId)
+    return day === undefined ? 'none' : [day]
+  }
+  if (table === 'outings') {
+    if (shownDay !== undefined) return 'all'
+    const start = row.start_on
+    const end = row.end_on
+    if (typeof start !== 'string' || !DAY_RE.test(start)) return 'all'
+    if (end !== null && end !== undefined && (typeof end !== 'string' || !DAY_RE.test(end))) return 'all'
+    return start <= win.to && (end == null || end >= win.from) ? 'all' : 'none'
+  }
+  if (table === 'notes') {
+    if (idx.pinned.has(id) || idx.ongoing.has(id) || row.ongoing !== false) {
+      // 継続（または継続かどうか分からない）申し送りは、窓より前に始まった分もピン留めに載る
+      const on = row.note_on
+      if (shownDay !== undefined || idx.pinned.has(id)) return 'all'
+      if (typeof on !== 'string' || !DAY_RE.test(on)) return 'all'
+      // 窓が始まる前に終わった継続は、窓のどの日にも載らない
+      const endDay = typeof row.ended_at === 'string' ? tsToDay(row.ended_at) : null
+      if (endDay !== null && endDay < win.from) return 'none'
+      return on <= win.to ? 'all' : 'none'
+    }
+  }
+  const col = DAY_COLUMN[table]
+  const day = col === undefined ? undefined : row[col]
+  if (typeof day !== 'string' || !DAY_RE.test(day)) return 'all'
+  const out: string[] = []
+  if (inWin(day)) out.push(day)
+  if (shownDay !== undefined && shownDay !== day) out.push(shownDay)
+  return out.length === 0 ? 'none' : out
+}
+
+/** 'YYYY-MM-DD' → 通日（UTC の日数。差を取るためだけに使う） */
+function dayNumber(iso: string): number {
+  const [y, m, d] = iso.split('-').map(Number)
+  return Math.round(Date.UTC(y, m - 1, d) / 86_400_000)
+}
+
+/**
+ * 窓 [from, to] を最新側から10日ずつ区切った時に、指定の日を含む区切り（重複なし・新しい順）。
+ * loadWindow と同じ区切り方にそろえる（窓の外の日は無視する）
+ */
+export function chunkRangesFor(from: string, to: string, days: readonly string[]): [string, string][] {
+  if (!DAY_RE.test(from) || !DAY_RE.test(to) || from > to) return []
+  const ks = new Set<number>()
+  for (const d of days) {
+    if (!DAY_RE.test(d) || d < from || d > to) continue
+    ks.add(Math.floor((dayNumber(to) - dayNumber(d)) / CHUNK_DAYS))
+  }
+  return [...ks]
+    .sort((a, b) => a - b)
+    .map((k) => {
+      const ct = addDays(to, -CHUNK_DAYS * k)
+      const cf = maxIso(addDays(ct, -(CHUNK_DAYS - 1)), from)
+      return [cf, ct] as [string, string]
+    })
+}
+
+/**
+ * 取り直したチャンクの日（fresh）を窓へ差し替える。取り直していない日はオブジェクトをそのまま使う（DaySection の memo を
+ * 効かせる）。取り直した日に載った外出は取り直した方を正とし、他の日の控えから外してから窓全体で置き直す（チャンクを
+ * またぐ外出を二重に置かない・placeOutings）
+ */
+export function mergeChunkDays(days: readonly DayData[], fresh: ReadonlyMap<string, DayData>): DayData[] {
+  const freshOutings = new Set<number>()
+  for (const d of fresh.values()) for (const o of d.outings) freshOutings.add(o.id)
+  const merged = days.map((d) => {
+    const f = fresh.get(d.day)
+    if (f) return f
+    if (!d.outings.some((o) => freshOutings.has(o.id))) return d
+    return { ...d, outings: d.outings.filter((o) => !freshOutings.has(o.id)) }
+  })
+  return placeOutings(merged)
+}
+
 // ── フック本体 ───────────────────────────────────────────────
 
 export interface UseTimelineResult {
@@ -262,8 +417,11 @@ export function useTimeline(staffId: number | null): UseTimelineResult {
   const staffIdRef = useRef<number | null>(staffId)
   const cacheRef = useRef(new Map<string, DayData>()) // 60日超で外した「新しい側」の控え
 
+  const indexRef = useRef<TimelineIndex | null>(null) // 出している行の索引（通知の判定用・必要になった時に作る）
+
   const commitDays = useCallback((next: DayData[]) => {
     daysRef.current = next
+    indexRef.current = null
     setDays(next)
   }, [])
 
@@ -313,6 +471,45 @@ export function useTimeline(staffId: number | null): UseTimelineResult {
       }
     },
     [commitDays],
+  )
+
+  /**
+   * 指定の日を含むチャンクだけを取り直して、その日を差し替える（F67。他の日はそのまま）。
+   * 日付が変わって窓の最新側の端が動いた時は区切りがずれるので、窓全体を取り直す。取り直せなくても表示は消さない
+   */
+  const loadDays = useCallback(
+    async (dirty: readonly string[]) => {
+      const w = winRef.current
+      if (!w) return
+      const to = windowTo(w)
+      if (to !== w.to) {
+        void loadWindow(w.from, to, true)
+        return
+      }
+      const ranges = chunkRangesFor(w.from, w.to, dirty)
+      if (ranges.length === 0) return
+      const gen = ++genRef.current // 後から始めた取得（全体の取り直し・追加読み込み）が来たら、この結果は捨てる
+      busyRef.current = true
+      const sid = staffIdRef.current
+      try {
+        const fresh = new Map<string, DayData>()
+        for (const [cf, ct] of ranges) {
+          const chunk = await fetchTimelineChunk(cf, ct, sid)
+          if (gen !== genRef.current || !aliveRef.current) return
+          for (const d of assembleDays(cf, ct, chunk)) fresh.set(d.day, d)
+        }
+        if (gen !== genRef.current || !aliveRef.current) return
+        commitDays(mergeChunkDays(daysRef.current, fresh))
+      } catch {
+        // 取り直せなかっただけ（原則4: 表示中のデータは消さない）。次の通知・再読み込みで取り直す
+      } finally {
+        if (gen === genRef.current) {
+          busyRef.current = false
+          setLoading(false)
+        }
+      }
+    },
+    [commitDays, loadWindow, windowTo],
   )
 
   /** 続きの10日（古い側）を追加する */
@@ -416,10 +613,13 @@ export function useTimeline(staffId: number | null): UseTimelineResult {
     }
   }, [staffId, loadWindow, windowTo])
 
-  // Realtime: 表示ウィンドウ内の日だけ取り直す（連続通知はまとめる）
+  // Realtime: 表示ウィンドウ内の日だけ取り直す（連続通知はまとめる）。自分の書き込み・窓の外の変更は取り直さず、
+  // 日が分かる変更はその日を含むチャンクだけを取り直す（F67）。行の分からない通知（RESYNC 等）は窓全体（F14）
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null
     let stopped = false
+    let wantAll = false
+    const wantDays = new Set<string>()
     const schedule = () => {
       if (stopped) return
       if (timer) clearTimeout(timer)
@@ -428,18 +628,33 @@ export function useTimeline(staffId: number | null): UseTimelineResult {
         if (stopped || !aliveRef.current) return
         const w = winRef.current
         if (!w) return
-        // 取得中は利用者操作を優先し、あとで取り直す
+        // 取得中は利用者操作を優先し、あとで取り直す（貯めた範囲はそのまま持ち越す）
         if (busyRef.current) {
           schedule()
           return
         }
-        void loadWindow(w.from, windowTo(w), true)
+        const all = wantAll
+        const dirty = [...wantDays]
+        wantAll = false
+        wantDays.clear()
+        if (all) void loadWindow(w.from, windowTo(w), true)
+        else if (dirty.length > 0) void loadDays(dirty)
       }, REALTIME_DEBOUNCE_MS)
     }
     let unsub: (() => void) | null = null
     try {
-      unsub = subscribeChanges((table) => {
-        if (typeof table === 'string' && WATCHED_TABLES.has(table)) schedule()
+      unsub = subscribeChanges((table, info) => {
+        if (typeof table !== 'string' || !WATCHED_TABLES.has(table)) return
+        const row = info?.row ?? null
+        // この端末が書いて画面に反映済みの行（保存の後は画面が自分で取り直す）
+        if (row !== null && isSelfWrite(table, row)) return
+        const w = winRef.current
+        if (indexRef.current === null) indexRef.current = buildTimelineIndex(daysRef.current)
+        const scope = timelineReloadScope(table, row, w ? { from: w.from, to: windowTo(w) } : null, indexRef.current)
+        if (scope === 'none') return
+        if (scope === 'all') wantAll = true
+        else for (const d of scope) wantDays.add(d)
+        schedule()
       })
     } catch {
       // 購読できない環境（接続未設定など）でも画面は成立させる
@@ -456,7 +671,7 @@ export function useTimeline(staffId: number | null): UseTimelineResult {
         }
       }
     }
-  }, [loadWindow, windowTo])
+  }, [loadWindow, loadDays, windowTo])
 
   return { days, loading, error, loadMore, hasMore, refresh, trimmed, resetToLatest }
 }

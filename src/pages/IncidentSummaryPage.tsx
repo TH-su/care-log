@@ -58,21 +58,37 @@ export function IncidentSummaryPage() {
         if (alive) setData({ month, list, open })
       })
       .catch((e: unknown) => {
-        if (alive) setError(e instanceof DbError && e.kind === 'server' ? e.message : ERR_LOAD)
+        // 許可リスト外（forbidden）も、通信エラーの定型文ではなくその理由を出す（F61）
+        if (alive) setError(e instanceof DbError && (e.kind === 'server' || e.kind === 'forbidden') ? e.message : ERR_LOAD)
       })
     return () => {
       alive = false
     }
   }, [month, tick])
 
+  // 集計に入れている記録の id（件数の一覧と未完了の一覧。F16: 発生日を月末より後へ直した変更は、更新後の行だけを見ると
+  // 関係なしと捨ててしまい、直す前の集計が残った。入れている記録の変更は日付に関係なく取り込む）。購読を張り直さないよう ref に持つ
+  const shownIdsRef = useRef<Set<number>>(new Set())
+  useEffect(() => {
+    shownIdsRef.current = new Set(data === null ? [] : [...data.list, ...data.open].map((i) => i.id))
+  }, [data])
+
   // 他の端末の追加・変更を取り込む（表示中の月の行だけ。行を特定できない通知は取り直す側へ倒す）
   useEffect(() => {
     let timer: number | null = null
     const unsub = subscribeIncidentChanges((_table, info) => {
       const row = info?.row ?? null
-      // 月末より後に発生した記録だけは表示に関係しない（前月以前の記録も「未完了の一覧」に載りうる）
+      // 月末より後に発生した記録だけは表示に関係しない（前月以前の記録も「未完了の一覧」に載りうる）。
+      // ただし集計に入れている記録が月末より後へ動いた時は取り込む（F16）
       const range = monthRange(month)
-      if (row !== null && typeof row.occurred_on === 'string' && range !== null && row.occurred_on > range.to) return
+      if (
+        row !== null &&
+        typeof row.occurred_on === 'string' &&
+        range !== null &&
+        row.occurred_on > range.to &&
+        !shownIdsRef.current.has(Number(row.id))
+      )
+        return
       if (timer !== null) window.clearTimeout(timer)
       timer = window.setTimeout(() => setTick((n) => n + 1), 400)
     })
@@ -138,10 +154,11 @@ export function IncidentSummaryPage() {
         </p>
       </SectionCard>
 
-      {error !== null ? (
-        <ErrorBlock message={error} onRetry={() => setTick((n) => n + 1)} />
-      ) : summary === null ? (
-        <LoadingBlock label="月次集計を読み込み中です…" />
+      {/* 読み直しに失敗しても、前に読めた同じ月の集計は消さずに残す（F14。画面に戻った時・再接続の取り直しの失敗で
+          表が消えないように。失敗の知らせは上に出す） */}
+      {error !== null ? <ErrorBlock message={error} onRetry={() => setTick((n) => n + 1)} /> : null}
+      {summary === null ? (
+        error !== null ? null : <LoadingBlock label="月次集計を読み込み中です…" />
       ) : summary.total.total === 0 && summary.open.length === 0 ? (
         <EmptyBlock message="この月の事故・ヒヤリハットの記録と、月末までの未完了の記録はありません。" />
       ) : (

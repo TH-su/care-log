@@ -66,12 +66,53 @@ export function setActorId(id: number): void {
   if (!Number.isSafeInteger(id) || id <= 0) return
   writeRaw(LS.staffId, String(id))
   touchActivity()
+  notifyActor()
 }
 
 /** 操作者を解除する（明示切替・照合失敗時のフォールバック） */
 export function clearActor(): void {
   removeRaw(LS.staffId)
   removeRaw(SEEN_AT_KEY)
+  notifyActor()
+}
+
+// ── 操作者が変わった知らせ（F46・F38・2026-10-10） ─────────────────────────
+// 設定タブで「記録する職員」を切り替えても、App が持つ操作者（各画面の recorded_by の既定・edited_by・既読の主体）は
+// 起動時の値のまま残り、再読み込みするまで前の職員の名前で記録が付いた（localStorage に書くだけで誰にも知らせなかった）。
+// 切り替えた所（設定タブ・バイタル/食事の「記録者」）に関係なく、ここで切り替えを知らせ、App が受けて取り直す。
+
+const actorListeners = new Set<(id: number | null) => void>()
+let storageHooked = false
+
+function notifyActor(): void {
+  const id = getActorId()
+  for (const fn of [...actorListeners]) {
+    try {
+      fn(id)
+    } catch {
+      // 受け口の例外で切替そのものを止めない
+    }
+  }
+}
+
+/**
+ * 操作者が変わったら呼ばれる（戻り値の関数で外す）。渡すのは保持中の staff_id（未設定・不正値は null）で、
+ * 名簿との照合（退職者を外す）は受け取った側が resolveActor で行う。
+ * この端末の別のタブで切り替えた時も、localStorage の storage イベントで知らせる
+ * （iOS のホーム画面のアプリと Safari のタブは保存領域が別なので、その間には届かない）
+ */
+export function subscribeActor(fn: (id: number | null) => void): () => void {
+  actorListeners.add(fn)
+  if (!storageHooked && typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    storageHooked = true
+    window.addEventListener('storage', (e: StorageEvent) => {
+      // key が null＝別のタブが localStorage を全部消した
+      if (e.key === LS.staffId || e.key === null) notifyActor()
+    })
+  }
+  return () => {
+    actorListeners.delete(fn)
+  }
 }
 
 /**

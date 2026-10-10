@@ -164,8 +164,12 @@ insertVitalKind(v: Omit<Vital, 'id' | 'rev'>): Promise<Vital | Queued>
 saveAttendance(
   dayIso: string,
   rows: { staff_id: number; role: 'manager' | 'staff'; sort: number }[],
-  options: { baseline: number[] },
+  options: { baseline: number[]; roles?: Record<number, 'manager' | 'staff'> },
 ): Promise<void | Queued>   // 1件も書く前の通信断はキュー（kind:'attendance'）へ退避して 'queued'。再送時はサーバー現況と差分を取り直す
+// 2026-10-10（F70・移行 0026）: roles＝画面が見ていた役割（任意）。この端末が変えていない役割は、他の端末が変えていれば書き戻さない。
+//   施設長を手放す行を先に書く（施設長は1日1人の索引）。索引に当たったら「この日の施設長は、ほかの端末で別の職員が選ばれています」で
+//   止める（送信待ちの再送は 'conflict'＝設定タブの「送れていない記録」に残す。捨てない）。roles の無い旧い送信待ちは従来どおり
+//   手直し（同日）: roles に無い職員＝この端末の画面に出ていなかった職員は、サーバーで施設長なら職員へ下げない（ピッカーから足しても・再送でも）
 ```
 
 **規律（既存のまま）**: `.is('deleted_at', null)` と limit を機械付与。upsert は使わない。更新は rev 照合。

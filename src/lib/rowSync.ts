@@ -185,6 +185,17 @@ export function planEdits<F extends string>(
     delete send[f]
     delete sendEdits[f]
   }
+  // 組の相方が競合している間は、もう同じ値が載っている片側も「済み」にしない（F12・2026-10-10。0011 の組の判定と同じ。
+  // 済みにすると読み直しで edits から外れ、〔自分の値で直す〕が相方を古い「見ていた値」で補って、その後に他の端末が
+  // 変えた相方を見せないまま上書きしうる）。edits に残して、相方も一緒に比べる
+  for (const f of [...settled]) {
+    const other = pairOf(f)
+    if (other === null || !conflicts.some((c) => c.field === other)) continue
+    const e = edits[f]
+    if (!e) continue
+    conflicts.push({ field: f, theirs: server[f] ?? null, mine: e.value })
+    settled.splice(settled.indexOf(f), 1)
+  }
   conflicts.sort((a, b) => fields.indexOf(a.field) - fields.indexOf(b.field))
   return { conflicts, send, sendEdits, settled }
 }

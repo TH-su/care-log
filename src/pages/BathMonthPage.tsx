@@ -5,6 +5,8 @@
 // マス＝○（入浴した）／×（入浴していない）／未（予定があったのに記録なし）（2026-10-01 代表指示で2つに。
 // DB の区分は全身浴・シャワー浴・部分浴・清拭・訪問介護で入浴が○、中止が×）。自動で入った記録かどうかは出さない（同日の代表指示）。
 // 右端に月合計（入浴・入浴なし）。A4 横1枚で印刷できる（PrintArea）。
+// 他の端末の変更・つながり直し（RESYNC）での取り直しは、表を出したまま差し替える。取り直しに失敗しても表示中の表を残し、
+// 「読み込めませんでした」を添えるだけにする（表がエラーに置き換わってスクロール位置を失わない・2026-10-10 F14）。
 //
 // 規律:
 // - 取得は db.ts の fetchAllResidents / fetchBathMonth / fetchBathPlan / fetchBathFirstDay のみ（月の範囲・1行でだけ引く）
@@ -105,6 +107,20 @@ export function BathMonthPage() {
   const [error, setError] = useState<string | null>(null)
   const [tick, setTick] = useState(0)
   const printRef = useRef<PrintAreaHandle>(null)
+  /**
+   * 取り直しのきっかけ（'quiet'＝他の端末の変更・つながり直しの合図・F14）。quiet の取り直しが失敗した時は、
+   * 表示中の表を残して refreshFailed を出す（エラーに置き換えない）
+   */
+  const refreshKindRef = useRef<'user' | 'quiet'>('user')
+  const [refreshFailed, setRefreshFailed] = useState(false)
+  const dataRef = useRef<Loaded | null>(null)
+  dataRef.current = data
+
+  /** 人が押した取り直し（失敗したらエラーを出す） */
+  const retry = useCallback(() => {
+    refreshKindRef.current = 'user'
+    setTick((n) => n + 1)
+  }, [])
 
   const changeMonth = useCallback(
     (next: string) => {
@@ -115,6 +131,7 @@ export function BathMonthPage() {
 
   useEffect(() => {
     let alive = true
+    const quiet = refreshKindRef.current === 'quiet'
     setError(null)
     setData((d) => (d !== null && d.month === month ? d : null))
     void (async () => {
@@ -162,9 +179,12 @@ export function BathMonthPage() {
           planUpdatedAt: planned === null ? null : planUpdatedAt,
           unmatched,
         })
+        setRefreshFailed(false)
       } catch (e) {
         if (!alive) return
-        setError(e instanceof DbError && e.kind === 'server' ? e.message : ERR_LOAD)
+        const d = dataRef.current
+        if (quiet && d !== null && d.month === month) setRefreshFailed(true)
+        else setError(e instanceof DbError && e.kind === 'server' ? e.message : ERR_LOAD)
       }
     })()
     return () => {
@@ -172,14 +192,18 @@ export function BathMonthPage() {
     }
   }, [month, tick])
 
-  // 他の端末の記録を取り込む（表示中の月の行だけ。行を特定できない通知は取り直す側へ倒す）
+  // 他の端末の記録を取り込む（表示中の月の行だけ。行を特定できない通知は取り直す側へ倒す）。
+  // つながり直し・画面に戻った時の合図（RESYNC・F14）も行が無いので取り直す。表は出したまま差し替える（quiet）
   useEffect(() => {
     let timer: number | null = null
     const unsub = subscribeBathChanges((_table, info) => {
       const day = typeof info?.row?.bath_on === 'string' ? info.row.bath_on : null
       if (day !== null && monthKeyOf(day) !== month) return
       if (timer !== null) window.clearTimeout(timer)
-      timer = window.setTimeout(() => setTick((n) => n + 1), 400)
+      timer = window.setTimeout(() => {
+        refreshKindRef.current = 'quiet'
+        setTick((n) => n + 1)
+      }, 400)
     })
     return () => {
       if (timer !== null) window.clearTimeout(timer)
@@ -260,12 +284,21 @@ export function BathMonthPage() {
       </SectionCard>
 
       {error !== null ? (
-        <ErrorBlock message={error} onRetry={() => setTick((n) => n + 1)} />
+        <ErrorBlock message={error} onRetry={retry} />
       ) : table === null || data === null ? (
         <LoadingBlock label="入浴の月次表を読み込み中です…" />
       ) : (
         <>
           <div className="space-y-1">
+            {refreshFailed ? (
+              <p role="status" className="text-sm text-warn print:hidden">
+                <span aria-hidden="true">▲ </span>
+                他の端末の変更を読み込めませんでした（表示は前に読んだ内容です）。{' '}
+                <button type="button" onClick={retry} className="inline-flex min-h-tap items-center font-bold text-link">
+                  読み込み直す
+                </button>
+              </p>
+            ) : null}
             <p className="text-sm text-ink2">
               <span aria-hidden="true">ⓘ </span>
               {data.planned === null

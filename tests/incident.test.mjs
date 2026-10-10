@@ -11,6 +11,7 @@
 import { afterEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { registerLoadFailure } from './ts-load.mjs'
 
 const TS_UNSUPPORTED =
   'この Node では TypeScript を直接読み込めないため、事故・ヒヤリハットの検証をスキップしました（Node 22.18 以降で実行してください）。'
@@ -20,17 +21,21 @@ const DB_UNSUPPORTED =
 let I = null
 let T = null
 let MED = null
+// 読み込みの例外は捨てずに控える（F69。古い Node 以外で読めない時は、スキップでなく失敗にして原因を出す）
+let iLoadError = null
 try {
   I = await import('../src/lib/incident.ts')
   T = await import('../src/lib/types.ts')
   MED = await import('../src/lib/med.ts')
-} catch {
+} catch (e) {
   I = null
+  iLoadError = e
 }
 
 // db.ts は拡張子の無い相対 import を使うので、'.ts' を補う解決フックを入れてから読む（tests/med.test.mjs と同じ）
 const lsStore = new Map()
 let DB = null
+let dbLoadError = null
 try {
   const { registerHooks } = await import('node:module')
   if (typeof registerHooks !== 'function') throw new Error('no registerHooks')
@@ -56,8 +61,9 @@ try {
     },
   }
   DB = await import('../src/lib/db.ts')
-} catch {
+} catch (e) {
   DB = null
+  dbLoadError = e
 }
 
 const read = (p) => readFileSync(new URL(p, import.meta.url), 'utf8')
@@ -100,7 +106,7 @@ const NOW = new Date(2026, 8, 26, 12, 0, 0)
 // ══════════════════════════════════════════════════════════════
 
 if (I === null) {
-  it('事故・ヒヤリハットの純ロジック', { skip: TS_UNSUPPORTED }, () => {})
+  registerLoadFailure('事故・ヒヤリハットの純ロジック', iLoadError, TS_UNSUPPORTED)
 } else {
   describe('入力の検証（validateIncidentInput）: 第1報の必須項目', () => {
     const ok = (v) => I.validateIncidentInput(v, TODAY, NOW)
@@ -640,7 +646,7 @@ async function drain() {
 }
 
 if (DB === null || I === null) {
-  it('事故・ヒヤリハットの db.ts の検証', { skip: DB_UNSUPPORTED }, () => {})
+  registerLoadFailure('事故・ヒヤリハットの db.ts の検証', dbLoadError ?? iLoadError, DB_UNSUPPORTED, { hooks: true })
 } else {
   describe('事故・ヒヤリハット（db.ts）: 種類ごとの入力解禁 input_enabled_incident', () => {
     afterEach(drain)

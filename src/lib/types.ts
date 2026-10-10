@@ -163,6 +163,11 @@ export interface Note {
   occurred_at: string | null
   ongoing: boolean
   ended_at: string | null
+  /**
+   * 継続を終了した職員（2026-10-10 F08 で追加・省略可）。列を返さない経路（タイムラインの RPC・申し送りの保存の応答）では
+   * 付かない＝分からない（null は「終了した職員なし」）
+   */
+  ended_by?: number | null
   reporter_id: number | null
   /** 行の色。null=既定（白）。生の色コードでなくトークン名を持つ（ダークモードでも読める色へ解決する） */
   color: NoteColor | null

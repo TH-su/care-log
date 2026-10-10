@@ -174,6 +174,8 @@ const GOOGLE_LOGIN_URL = '../care-tools/login.html?return=care-log'
  */
 export function LoginPage() {
   const [pending, setPending] = useState(0)
+  /** うち、競合・拒否で止まっていて自動では送られない件数（F37。ログインしても送られない） */
+  const [stopped, setStopped] = useState(0)
 
   // 401（セッション失効）でこの画面に戻された場合に備え、未送信の記録が残っていることを伝える。
   // db.ts は supabase を静的 import しないので読み込み自体は安全だが、失敗しても画面は出す。
@@ -183,6 +185,12 @@ export function LoginPage() {
       .then((m) => {
         const n = m.queuePending()
         if (alive && typeof n === 'number' && n > 0) setPending(n)
+        // 止まっている件（申し送り以外の退避 op＋止まった申し送り）は「ログインすると自動で送信」に当てはまらない
+        const notes = m
+          .listUnsentNotes()
+          .filter((u) => u.kind === 'rescued' || (u.kind === 'edit' ? u.row.state : u.op.state) !== 'pending').length
+        const s = m.listStoppedOps().length + notes
+        if (alive && s > 0) setStopped(Math.min(s, typeof n === 'number' ? n : s))
       })
       .catch(() => undefined)
     return () => {
@@ -203,7 +211,17 @@ export function LoginPage() {
             ⚠{' '}
           </span>
           未送信の記録が<span className="tabular font-bold">{pending}</span>
-          件残っています。ログインすると自動で送信されます。入力は消えていません。
+          件残っています。
+          {stopped > 0 ? (
+            <>
+              うち<span className="tabular font-bold">{stopped}</span>
+              件は、他の端末の記録と食い違うなどで止まっているため、ログインした後に設定画面の「送れていない記録」から選んでください。
+              {stopped < pending ? 'それ以外はログインすると自動で送信されます。' : ''}
+            </>
+          ) : (
+            'ログインすると自動で送信されます。'
+          )}
+          入力は消えていません。
         </p>
       )}
 
@@ -221,6 +239,8 @@ export function LoginPage() {
         <p className="text-sm text-ink2">
           使えるアカウントは管理者が登録します。ログインできない場合は管理者にご連絡ください。
         </p>
+        {/* F59: 通信できない所で押すと、ブラウザのエラー画面へ移ってしまう */}
+        <p className="text-sm text-ink2">通信できない所ではログインできません。電波の届く所で押してください。</p>
       </section>
     </FullScreen>
   )

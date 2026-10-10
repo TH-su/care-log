@@ -22,6 +22,17 @@
 // その人・その時間帯に未送信の記録（この端末の送信待ち・送信中）があるマスは押せない（入浴と同じ方式。送信待ちは書き換えない）。
 // 頓服の未送信は送信待ち（pendingPrnOps）から組み立てて一覧に出す（再読み込み・日付の切り替えの後も消えない＝二重記録を防ぐ）。
 // 「未」と「未記録 N」は、与薬の記録が解禁済み かつ 施設で記録を始めた日（fetchMedFirstDay）以降の日だけ（月次表とそろえる）。
+// 多端末の運用（2026-10-10 監査の修正）:
+//   ・開いたまま日付が変わったら、今日を見ていて 入力中（小窓）・保存中・未送信・止まった記録が無ければ今日へ切り替える。
+//     あれば切り替えずに「日付が変わりました〔今日を開く〕」の帯を出す（F18。手で過去の日を選んでいる時は追従しない）
+//   ・読み込み・読み直しには世代を付け、最新の世代 かつ 今の日付の応答だけを表へ入れる（F20。日付を変えた直後に前の日の
+//     応答で上書きしない・保存の後に保存前の読み直しで自分の記録を消さない）
+//   ・頓服の小窓は開いた時だけ初期化する（F32。開いたまま0時を越えても入力を消さない）。記録する前に、その方のその日の頓服
+//     （時刻・薬・記入者・この端末の未送信）をサーバーから取り直して出し、同じ薬が既にあれば確かめる（F55・保存は止めない）。
+//     表示中の日が今日でなく、使用時刻が12時間以上前になる時は「今日の記録にする」を選べる確認を出す（F33）
+//   ・送れずに止まった記録（他の端末が先に記録した・受け付けられなかった）は表の上に中身を出し、設定タブへ案内する（F37）
+//   ・App が配り直した職員名簿は名簿だけを差し替える（F47。名簿のたびに入力解禁を取り直して画面を「準備中」に戻さない）。
+//     記入者の名前は退職者も含む名簿で引く
 //
 // 規律:
 // - 取得・保存は db.ts の関数のみ（supabase を直呼びしない）
@@ -33,8 +44,10 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import {
+  FORBIDDEN_REASON,
   DbError,
   fetchAllResidents,
+  fetchAllStaff,
   fetchMedDay,
   fetchMedFirstDay,
   fetchMedSlots,
@@ -45,12 +58,14 @@ import {
   isQueuePersisted,
   isSelfWrite,
   kindBlockedMessage,
+  listStoppedOps,
   pendingPrnOps,
   queueSubscribe,
   softDeleteMedAdmin,
   subscribeMedChanges,
   updateMedAdmin,
 } from '../lib/db'
+import type { StoppedOp } from '../lib/db'
 import { resolveActor, touchActivity } from '../lib/actor'
 import {
   buildMedDayRows,
@@ -104,6 +119,11 @@ const MSG_INCIDENT_AFTER = '事故・ヒヤリハットとして記録してく�
 /** 保存した後の小窓の文（事故・ヒヤリハットの入力が封鎖中・確かめられない＝紙へ） */
 const MSG_INCIDENT_PAPER = '事故報告書（紙）に記録してください'
 const MSG_NO_SLOTS = '服薬の時間帯が未設定です（その他→服薬の時間帯）'
+/** 表示中の日付と違う日の記録を直そうとした（古い読み直しが残っていた時の歯止め・F20） */
+const MSG_OTHER_DAY = '表示中の日付と違う日の記録でした。読み直したので、確かめてからもう一度押してください。'
+/** 送れずに止まった記録の案内（F37。どうするかは設定タブの「未送信データ」で選ぶ） */
+const MSG_STOPPED_GUIDE =
+  '自動では送りません。設定タブの「未送信データ」で、いまの記録とくらべてどうするか選んでください（同じ記録を押し直す前に確かめてください）。'
 
 const FLOOR_ALL = 'all'
 const FLOOR_OTHER = 'other'
@@ -139,6 +159,124 @@ type Msg = { tone: 'warn' | 'danger' | 'info'; text: string }
 /** マスの鍵（利用者ID と時間帯） */
 const cellKey = (residentId: number, slot: string): string => `${residentId}|${slot}`
 
+// ── 多端末の運用の判定（純関数・tests/medbath-multidevice.test.mjs が確かめる） ──
+
+/**
+ * 開いたまま日付が変わった時の動き（F18・2026-10-10 本人回答）。今日を見ていた（day＝変わる前の今日）時だけ追従する。
+ * 入力中・保存中・未送信・止まった記録がある（holding）なら切り替えずに帯で知らせる（入力の送り先の日をずらさない）。
+ * 手で過去の日を選んでいた時は何もしない（〔今日へ〕がある）
+ */
+export function dayRolloverAction(p: { day: string; prevToday: string; today: string; holding: boolean }): 'none' | 'switch' | 'notice' {
+  if (p.today === p.prevToday || p.day !== p.prevToday) return 'none'
+  return p.holding ? 'notice' : 'switch'
+}
+
+/**
+ * 読み込み・読み直しの応答を表へ入れてよいか（F20）。最新の世代 かつ 取りに行った日が今の日 かつ 画面が出ている時だけ。
+ * 日付を変えた直後に前の日の応答が後から返る・同じ日の読み直しが2回走って古い方が後から返る、を捨てる
+ */
+export function acceptDayLoad(p: { gen: number; latestGen: number; day: string; shownDay: string; alive: boolean }): boolean {
+  return p.alive && p.gen === p.latestGen && p.day === p.shownDay
+}
+
+/** 頓服の小窓に出す、その方のその日の頓服の1件（サーバーの記録とこの端末の未送信。F55） */
+export interface PrnSameDayItem {
+  key: string
+  givenAt: string | null
+  drug: string | null
+  /** 記入者の名前（未送信・分からない時は null） */
+  recorder: string | null
+  /** この端末の送信待ち（まだサーバーに無い） */
+  unsent: boolean
+}
+
+/** その方・その日の頓服（記録＋この端末の未送信）を使用時刻の順に並べる（F55） */
+export function prnSameDayItems(
+  records: readonly MedAdmin[],
+  pending: readonly PendingPrn[],
+  residentId: number,
+  day: string,
+  nameOf: (id: number | null) => string | null,
+): PrnSameDayItem[] {
+  const out: PrnSameDayItem[] = []
+  for (const r of records) {
+    if (r.slot !== 'prn' || r.resident_id !== residentId || r.admin_on !== day) continue
+    out.push({ key: `r${r.id}`, givenAt: r.given_at, drug: r.prn_drug, recorder: nameOf(r.recorded_by), unsent: false })
+  }
+  for (const p of pending) {
+    if (p.residentId !== residentId) continue
+    out.push({ key: p.qid, givenAt: p.givenAt, drug: p.drug, recorder: null, unsent: true })
+  }
+  return out.sort((a, b) => ((a.givenAt ?? '') < (b.givenAt ?? '') ? -1 : (a.givenAt ?? '') > (b.givenAt ?? '') ? 1 : 0))
+}
+
+/** 薬の名前の比べ方（自由記述なので、全角・半角と空白・大文字小文字だけをそろえる。F55） */
+export function prnDrugKey(s: string | null): string {
+  return (s ?? '').normalize('NFKC').replace(/\s+/g, '').toLowerCase()
+}
+
+/** 表示中の日が今日でない時、使用時刻がこの時間以上前なら確かめる（F33。前日23時台の正当な記録は止めない） */
+export const PRN_STALE_HOURS = 12
+
+/**
+ * 頓服を記録する前の確かめ（F33・F55）。どちらも保存は止めず、確認を出すだけ。
+ *   staleDay … 記録する日が今日でなく、使用時刻が PRN_STALE_HOURS 時間以上前（開いたまま0時を越えた画面で、今朝の頓服が
+ *              前日の同じ時刻＝24時間前として保存されるのを見落とさない）
+ *   sameDrug … その日に同じ薬の頓服が既にある（他の端末・持ち替えでの二重の記録に気づく）。取り直せなかった時（null）は空
+ */
+export function prnCheck(p: {
+  adminOn: string
+  today: string
+  givenAt: string | null
+  nowMs: number
+  drug: string
+  sameDay: readonly PrnSameDayItem[] | null
+}): { staleDay: boolean; hoursBefore: number; sameDrug: PrnSameDayItem[] } {
+  const t = p.givenAt === null ? Number.NaN : Date.parse(p.givenAt)
+  const hoursBefore = Number.isFinite(t) ? Math.floor((p.nowMs - t) / 3_600_000) : 0
+  const staleDay = p.adminOn !== p.today && Number.isFinite(t) && p.nowMs - t >= PRN_STALE_HOURS * 3_600_000
+  const key = prnDrugKey(p.drug)
+  const sameDrug = key === '' || p.sameDay === null ? [] : p.sameDay.filter((x) => prnDrugKey(x.drug) === key)
+  return { staleDay, hoursBefore, sameDrug }
+}
+
+/**
+ * 送れずに止まった与薬の記録のうち、表示中の日に当たるもの（F37）。時間帯の追加は admin_on で、修正・取り消しは
+ * 表示中の日の記録の id で当てる。頓服の追加は頓服の区画（pendingPrnOps）に出るので除く
+ */
+export function stoppedMedFor(ops: readonly StoppedOp[], day: string, records: readonly MedAdmin[]): StoppedOp[] {
+  const ids = new Set(records.filter((r) => r.admin_on === day).map((r) => r.id))
+  return ops.filter((op) => {
+    if (op.table !== 'med_admin') return false
+    if (op.kind === 'insert') return op.payload.admin_on === day && op.payload.slot !== 'prn'
+    return op.kind === 'update' && op.rowId !== null && ids.has(op.rowId)
+  })
+}
+
+/** 止まった与薬の記録の中身と、止まった理由の1行（F37。拒否などの観察を取り下げる前に必ず見せる） */
+export function stoppedMedText(op: StoppedOp, rec: MedAdmin | null, residentName: string): string {
+  const p = op.payload
+  const slotRaw = op.kind === 'insert' ? p.slot : rec?.slot
+  const slot = typeof slotRaw === 'string' && slotRaw in MED_SLOT_LABEL ? MED_SLOT_LABEL[slotRaw as MedSlot] : slotRaw === 'prn' ? '頓服' : ''
+  const statusOf = (v: unknown): string | null =>
+    typeof v === 'string' && v in MED_STATUS_LABEL ? `「${MED_STATUS_LABEL[v as MedStatus]}」` : null
+  const note = typeof p.note === 'string' && p.note.trim() !== '' ? `（備考: ${p.note}）` : ''
+  const head = `${residentName ? `${residentName}　` : ''}${slot}`
+  let what: string
+  if (op.kind === 'insert') what = `${head}${statusOf(p.status) ?? ''}${note}の記録`
+  else if ('deleted_at' in p) what = `${head}の記録の取り消し`
+  else if (statusOf(p.status) !== null) what = `${head}を${statusOf(p.status)}${note}にする修正`
+  else if ('prn_effect' in p) what = `${head}の効果の記録`
+  else what = `${head}の修正${note}`
+  const why =
+    op.state === 'rejected'
+      ? 'サーバーに受け付けられませんでした'
+      : op.kind === 'insert'
+        ? '他の端末が先にこのマスを記録しました'
+        : '他の端末が先にこの記録を変更しました'
+  return `${what} — ${why}`
+}
+
 
 export interface MedRecordPageProps {
   /** App.tsx が持っている職員名簿（未指定ならこの画面が取得する） */
@@ -153,9 +291,14 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
   const [day, setDay] = useState(today)
   const [dayMsg, setDayMsg] = useState<string | null>(null)
 
+  /** 開いたまま日付が変わり、入力中・未送信があったので切り替えなかった時の、その時の表示日（帯を出す・F18） */
+  const [rolloverDay, setRolloverDay] = useState<string | null>(null)
+
   const [residents, setResidents] = useState<Resident[] | null>(null)
   const [staff, setStaff] = useState<Staff[] | null>(staffProp ?? null)
-  const [gate, setGate] = useState<{ value: boolean; observed: boolean } | null>(null)
+  /** 記入者の名前を引く名簿（退職者も含む・F47。読めなければ null＝在籍の名簿で引く） */
+  const [allStaff, setAllStaff] = useState<Staff[] | null>(null)
+  const [gate, setGate] = useState<{ value: boolean; observed: boolean; forbidden?: true } | null>(null)
   const [baseError, setBaseError] = useState<string | null>(null)
   const [baseTick, setBaseTick] = useState(0)
 
@@ -186,6 +329,13 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
   const { toast, show } = useToast()
   const uid = useId()
   const aliveRef = useRef(true)
+  // 読み込み・読み直しの世代と、表示中の日・記録の控え（F20。応答が返った時に「今も同じ日・最新の取得か」を確かめる）
+  const genRef = useRef(0)
+  const inFlightRef = useRef(0)
+  const dayRef = useRef(day)
+  dayRef.current = day
+  const recordsRef = useRef<MedAdmin[] | null>(null)
+  recordsRef.current = records
 
   useEffect(() => {
     aliveRef.current = true
@@ -194,35 +344,55 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
     }
   }, [])
 
-  // 今日の「未」は締め時刻で決まるので、60 秒ごとに時刻を取り直す（表示し直すだけ。取得はしない）
+  // 今日の「未」は締め時刻で決まるので、60 秒ごとに時刻を取り直す（表示し直すだけ。取得はしない）。
+  // 画面に戻った時もすぐ取り直す（ロック中は時計が止まり、0時を越えても次の60秒まで前日のままだった・F18）
   useEffect(() => {
-    const t = window.setInterval(() => setNowMin(minutesOfDay(new Date())), MED_RECHECK_MS)
-    return () => window.clearInterval(t)
+    const tick = () => setNowMin(minutesOfDay(new Date()))
+    const t = window.setInterval(tick, MED_RECHECK_MS)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') tick()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.clearInterval(t)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
   }, [])
+
+  // App が配り直した職員名簿（F47）。名簿だけを差し替える（下の取得の依存に入れると、名簿が変わるたびに入力解禁を
+  // 取り直して画面が「準備しています」に戻り、開いている頓服の小窓の入力まで消えた）。取り直し（baseTick）では ref の最新を使う
+  const staffPropRef = useRef(staffProp)
+  staffPropRef.current = staffProp
+  useEffect(() => {
+    if (staffProp !== undefined) setStaff(staffProp)
+  }, [staffProp])
 
   // 名簿・職員・入力解禁（画面を開くたびに取り直す＝前提情報は毎回実測）
   useEffect(() => {
     let alive = true
     setBaseError(null)
     setGate(null)
-    Promise.all([
-      fetchAllResidents(),
-      staffProp !== undefined ? Promise.resolve(staffProp) : fetchStaff(),
-      getKindInputGate('med'),
-    ])
+    const given = staffPropRef.current
+    Promise.all([fetchAllResidents(), given !== undefined ? Promise.resolve(given) : fetchStaff(), getKindInputGate('med')])
       .then(([rs, st, g]) => {
         if (!alive) return
         setResidents(rs)
-        setStaff(st)
+        setStaff(staffPropRef.current ?? st)
         setGate(g)
       })
       .catch(() => {
         if (alive) setBaseError(ERR_LOAD)
       })
+    // 記入者の名前を引く名簿（退職者も含む）。読めなくても画面は止めない（在籍の名簿で引く）
+    fetchAllStaff()
+      .then((all) => {
+        if (alive) setAllStaff(all)
+      })
+      .catch(() => {})
     return () => {
       alive = false
     }
-  }, [baseTick, staffProp])
+  }, [baseTick])
 
   // 事故・ヒヤリハットの入力の旗（落薬・誤薬の後の案内をボタンにするか紙にするか）。画面を開くたびに取り直す。
   // 取れなくても与薬チェックは妨げない（案内が紙になるだけ）
@@ -262,42 +432,66 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
   useEffect(() => {
     if (residents === null) return
     let alive = true
+    // 世代を進める＝日付を変える前に投げた読み直しの応答を捨てる（F20）
+    const gen = ++genRef.current
     setDayError(null)
     setRecords(null)
     setSlots(null)
+    inFlightRef.current += 1
     Promise.all([loadRecords(day), fetchMedSlots(activeResidents), fetchMedFirstDay()])
       .then(([rs, ss, first]) => {
-        if (!alive) return
+        if (!alive || !acceptDayLoad({ gen, latestGen: genRef.current, day, shownDay: dayRef.current, alive: aliveRef.current })) return
         setRecords(rs)
         setSlots(ss)
         setStartDay(first)
       })
       .catch((e: unknown) => {
-        if (!alive) return
+        // 後から投げた読み直しに追い越された時は、そちらの結果に任せる（読み直しが失敗したら、そちらがエラーを出す）
+        if (!alive || gen !== genRef.current) return
         setDayError(e instanceof DbError ? e.message : ERR_LOAD)
+      })
+      .finally(() => {
+        inFlightRef.current -= 1
       })
     return () => {
       alive = false
     }
   }, [day, dayTick, residents, activeResidents, loadRecords])
 
-  // 日付を変えたら、その日に紐づく画面の状態を持ち越さない
+  // 日付を変えたら、その日に紐づく画面の状態を持ち越さない（日付が変わった時の帯も外す）
   useEffect(() => {
     setPendingMarks(new Map())
     setMsg(null)
+    setRolloverDay(null)
   }, [day])
 
-  /** 記録と時間帯を読み直す（保存の競合・他の端末の変更の後）。読めなければ表示中のまま */
-  const reloadDay = useCallback(() => {
-    Promise.all([loadRecords(day), fetchMedSlots(activeResidents), fetchMedFirstDay()])
+  /**
+   * 記録と時間帯を読み直す（保存の競合・他の端末の変更の後）。読めなければ表示中のまま。
+   * 世代を付け、最新の世代 かつ 取りに行った日が今の日の時だけ表へ入れる（F20）。結果: true＝表へ入れた
+   */
+  const reloadDay = useCallback((): Promise<boolean> => {
+    const d = day
+    // 日付を変える前の描画から呼ばれた（保存の応答を待つ間に日付を変えた等）時は何もしない。世代だけ進めると、
+    // 新しい日の読み込みの応答を捨て、この読み直しの応答も日付違いで捨てて「読み込み中」のまま残るため
+    if (d !== dayRef.current) return Promise.resolve(false)
+    const gen = ++genRef.current
+    inFlightRef.current += 1
+    return Promise.all([loadRecords(d), fetchMedSlots(activeResidents), fetchMedFirstDay()])
       .then(([rs, ss, first]) => {
-        if (!aliveRef.current) return
+        if (!acceptDayLoad({ gen, latestGen: genRef.current, day: d, shownDay: dayRef.current, alive: aliveRef.current })) return false
         setRecords(rs)
         setSlots(ss)
         setStartDay(first)
+        return true
       })
       .catch(() => {
-        // 読み直せなかっただけ。表示中の記録はそのまま残す（「最新を読み込む」で再試行できる）
+        // 読み直せなかっただけ。表示中の記録はそのまま残す（「最新を読み込む」で再試行できる）。
+        // ただし日付の読み込みをこの読み直しが追い越していた時（まだ何も出ていない）は、「読み込み中」から抜けるようにエラーを出す
+        if (aliveRef.current && gen === genRef.current && d === dayRef.current && recordsRef.current === null) setDayError(ERR_LOAD)
+        return false
+      })
+      .finally(() => {
+        inFlightRef.current -= 1
       })
   }, [day, loadRecords, activeResidents])
 
@@ -327,7 +521,8 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
     })
   }, [queueTick, records, day])
 
-  // 他の端末の記録・時間帯の変更を取り込む（自分の書込の通知・別の日の通知は無視。行を特定できない通知は取り直す）
+  // 他の端末の記録・時間帯の変更を取り込む（自分の書込の通知・別の日の通知は無視。行を特定できない通知は取り直す）。
+  // つながり直した・画面に戻った・電波が戻った時の取り直しの合図（RESYNC・F14）も行が無いので、ここで読み直す
   useEffect(() => {
     let timer: number | null = null
     const unsub = subscribeMedChanges((table, info) => {
@@ -347,6 +542,11 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
   /** 「未」を付けてよいか（解禁済み かつ 記録を始めた日以降。封鎖中・開始前は締めを過ぎても空欄） */
   const missingAllowed = medMissingAllowed(gate !== null && gate.observed && gate.value === true, startDay, day)
   const gateUnknown = gate !== null && !gate.observed
+  /**
+   * このアカウントは記録アプリを使えない（許可リストに無い・無効。F61 手直し）。入力は止めたまま（locked）、案内だけを
+   * 「通信エラー・再試行」ではなく、ログインし直す・管理者へ連絡する文にする（再試行では直らない）
+   */
+  const forbidden = gate?.forbidden === true
   const reasonId = `${uid}-locked`
 
   const residentById = useMemo(() => {
@@ -409,13 +609,21 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
   const prnRecords = useMemo(
     () =>
       (records ?? [])
-        .filter((r) => r.slot === 'prn')
+        // 表示中の日の頓服だけ（古い応答・別の日へ記録した行を混ぜない二重の歯止め・F20）
+        .filter((r) => r.slot === 'prn' && r.admin_on === day)
         .sort((a, b) => ((a.given_at ?? '') < (b.given_at ?? '') ? -1 : (a.given_at ?? '') > (b.given_at ?? '') ? 1 : a.id - b.id)),
-    [records],
+    [records, day],
   )
 
+  // 送れずに止まった記録（F37）。止まっても件数は減らないので、送信待ちの通知のたびと記録を読み直した時に引き直す
+  const stoppedAll = useMemo(() => listStoppedOps().filter((op) => op.table === 'med_admin'), [queueTick, records])
+  const stoppedHere = useMemo(() => stoppedMedFor(stoppedAll, day, records ?? []), [stoppedAll, day, records])
+
+  /** 記入者の名前（在籍の名簿 → 退職者も含む名簿の順に引く・F47） */
   const staffName = (id: number | null): string | null =>
-    id === null ? null : ((staff ?? []).find((s) => s.id === id)?.name ?? null)
+    id === null ? null : ((staff ?? []).find((s) => s.id === id)?.name ?? (allStaff ?? []).find((s) => s.id === id)?.name ?? null)
+  const staffNameRef = useRef(staffName)
+  staffNameRef.current = staffName
 
   function setCellBusy(key: string, on: boolean) {
     setBusy((prev) => {
@@ -429,12 +637,17 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
   function applySaved(saved: MedAdmin) {
     // 施設で最初の記録なら、その日から「未」を付け始める（読み直しを待たない）
     setStartDay((cur) => (cur === null || saved.admin_on < cur ? saved.admin_on : cur))
-    setRecords((prev) => {
-      const list = (prev ?? []).filter(
-        (r) => r.id !== saved.id && !(saved.slot !== 'prn' && r.resident_id === saved.resident_id && r.slot === saved.slot),
-      )
-      return [...list, saved]
-    })
+    // 表示中の日の記録だけを表へ足す（別の日へ記録した頓服は、その日を開いた時に読む）。まだ何も読めていない時（null）は
+    // 1件だけの表を作らない（読み込みの結果を待つ）
+    if (saved.admin_on === dayRef.current) {
+      setRecords((prev) => {
+        if (prev === null) return prev
+        const list = prev.filter(
+          (r) => r.id !== saved.id && !(saved.slot !== 'prn' && r.resident_id === saved.resident_id && r.slot === saved.slot),
+        )
+        return [...list, saved]
+      })
+    }
     setPendingMarks((prev) => {
       const key = cellKey(saved.resident_id, saved.slot)
       if (!prev.has(key)) return prev
@@ -442,12 +655,32 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
       next.delete(key)
       return next
     })
+    supersedeInFlight()
+  }
+
+  /**
+   * 保存・取り消しの前に投げた読み直しがまだ返っていなければ、もう一度読み直す（F20）。その古い応答は保存の前の状態なので、
+   * 後から返ると自分の記録が消えて見える（自分の書込の通知は捨てるので戻らない）。読み直し直すと世代が進み、古い応答は捨てられる
+   */
+  function supersedeInFlight() {
+    if (inFlightRef.current > 0) void reloadDay()
   }
 
   /** そのマスに未送信の記録（この端末の送信待ち・送信中、または画面の「送信待ちにした入力」の印）があるか */
   function cellPending(residentId: number, slot: MedSlot, cell: MedCell): boolean {
     const recId = cell.kind === 'record' ? cell.record.id : null
     return pendingMarks.has(cellKey(residentId, slot)) || hasPendingMed(residentId, day, slot, recId)
+  }
+
+  /**
+   * 表示中の日付と違う日の記録なら書かずに読み直す（古い応答が表に残っていた時の、書き込みの側の歯止め・F20）。
+   * 書かなかった時は true
+   */
+  function rejectOtherDay(rec: MedAdmin): boolean {
+    if (rec.admin_on === dayRef.current) return false
+    setMsg({ tone: 'warn', text: MSG_OTHER_DAY })
+    void reloadDay()
+    return true
   }
 
   /** 保存の結果を画面へ（conflict・queued・例外の案内をそろえる）。保存できた行を返す */
@@ -529,6 +762,7 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
     setStatusFor(null)
     const key = cellKey(rec.resident_id, rec.slot)
     if (locked || busy.has(key)) return
+    if (rejectOtherDay(rec)) return
     if (recorderId === null) {
       setMsg({ tone: 'warn', text: MSG_NO_RECORDER })
       return
@@ -565,6 +799,7 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
     setDeleteFor(null)
     const key = rec.slot === 'prn' ? `prn:${rec.id}` : cellKey(rec.resident_id, rec.slot)
     if (locked || busy.has(key) || hasPendingMed(rec.resident_id, rec.admin_on, rec.slot, rec.id)) return
+    if (rejectOtherDay(rec)) return
     if (recorderId === null) {
       setMsg({ tone: 'warn', text: MSG_NO_RECORDER })
       return
@@ -587,7 +822,8 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
         })
         return
       }
-      setRecords((prev) => (prev ?? []).filter((r) => r.id !== rec.id))
+      setRecords((prev) => (prev === null ? prev : prev.filter((r) => r.id !== rec.id)))
+      supersedeInFlight()
       show('記録を取り消しました。')
     } catch (e) {
       if (!aliveRef.current) return
@@ -597,13 +833,16 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
     }
   }
 
-  /** 頓服の記録 */
-  async function savePrn(p: { residentId: number; hm: string; drug: string; reason: string; note: string }): Promise<string | null> {
+  /**
+   * 頓服の記録。記録する日（adminOn）は小窓が決める（ふだんは表示中の日。開いたまま0時を越えた時は、確かめた上で
+   * 今日を選べる・F33）。使用時刻はその日の時刻として送る
+   */
+  async function savePrn(p: PrnInput): Promise<string | null> {
     if (locked) return kindBlockedMessage('med')
     if (recorderId === null) return MSG_NO_RECORDER
-    const givenAt = localDateTimeIso(day, p.hm)
+    const givenAt = localDateTimeIso(p.adminOn, p.hm)
     const input = {
-      admin_on: day,
+      admin_on: p.adminOn,
       slot: 'prn' as const,
       status: 'taken' as MedStatus,
       given_at: givenAt,
@@ -633,6 +872,8 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
       }
       applySaved(res)
       show('頓服を記録しました。')
+      // 他の端末が同じ頃に記録した頓服も見えるように読み直す（自分の書込の通知は捨てるので、そのままでは相手の行が出ない・F55）
+      if (res.admin_on === dayRef.current) void reloadDay()
       return null
     } catch (e) {
       return e instanceof DbError ? e.message : MSG_SAVE_FAILED
@@ -644,6 +885,7 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
     setEffectFor(null)
     const key = `prn:${rec.id}`
     if (locked || busy.has(key)) return
+    if (rejectOtherDay(rec)) return
     if (recorderId === null) {
       setMsg({ tone: 'warn', text: MSG_NO_RECORDER })
       return
@@ -668,6 +910,50 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
     }
   }
 
+  /** 頓服の小窓に出す、その方のその日の頓服（サーバーから取り直す＋この端末の未送信。読めなければ null・F55） */
+  const loadPrnSameDay = useCallback(
+    async (residentId: number, d: string): Promise<PrnSameDayItem[] | null> => {
+      try {
+        const rows = await loadRecords(d)
+        return prnSameDayItems(rows, pendingPrnOps(d), residentId, d, (id) => staffNameRef.current(id))
+      } catch {
+        return null
+      }
+    },
+    [loadRecords],
+  )
+
+  // ── 開いたまま日付が変わった時（F18） ──
+  /** 入力中（小窓）・保存中・未送信・止まった記録があるか（あれば日付を勝手に切り替えない＝送り先の日をずらさない） */
+  const holding =
+    prnOpen ||
+    statusFor !== null ||
+    newFor !== null ||
+    deleteFor !== null ||
+    effectFor !== null ||
+    incidentFor !== null ||
+    staffPickerOpen ||
+    busy.size > 0 ||
+    pendingMarks.size > 0 ||
+    pendingPrnOps(day).length > 0 ||
+    stoppedHere.length > 0 ||
+    allRows.some((row) => MED_SLOTS.some((s) => cellPending(row.residentId, s, row.cells[s])))
+  const prevTodayRef = useRef(today)
+  useEffect(() => {
+    const prev = prevTodayRef.current
+    if (prev === today) return
+    prevTodayRef.current = today
+    const act = dayRolloverAction({ day, prevToday: prev, today, holding })
+    if (act === 'switch') {
+      setRolloverDay(null)
+      setDay(today)
+      setDayMsg(`日付が変わったので、今日（${fmtDayLabel(today)}）の表示に切り替えました。`)
+    } else if (act === 'notice') {
+      setRolloverDay(day)
+    }
+    // 判定は今日が変わった時だけ（表示中の日・入力中かは、その時の値を読む）
+  }, [today])
+
   // ── 3状態: エラー → ローディング → 本体 ──
   if (baseError !== null) {
     return (
@@ -689,10 +975,17 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
   const statusName = statusFor === null ? '' : (residentById.get(statusFor.resident_id)?.name ?? '')
   const effectName = effectFor === null ? '' : (residentById.get(effectFor.resident_id)?.name ?? '')
   const showTable = slots !== null && (configuredCount > 0 || allCounts.recorded > 0)
+  // 止まった記録のうち、表示中の日の表・頓服の区画のどちらにも出ない分（ほかの日の記録・表に無い記録）
+  const stoppedElsewhere = stoppedAll.filter(
+    (op) => !stoppedHere.includes(op) && !(op.kind === 'insert' && op.payload.slot === 'prn' && op.payload.admin_on === day),
+  ).length
+  const recordById = new Map((records ?? []).map((r) => [r.id, r] as const))
 
   return (
     <div className="mx-auto w-full max-w-2xl space-y-4 p-4">
-      {gateUnknown ? (
+      {forbidden ? (
+        <ErrorBlock message={FORBIDDEN_REASON} />
+      ) : gateUnknown ? (
         <ErrorBlock message={ERR_GATE} onRetry={() => setBaseTick((n) => n + 1)} />
       ) : locked ? (
         <div id={reasonId} role="status" className="rounded-lg border border-warn bg-warn-bg p-4">
@@ -702,6 +995,27 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
             {kindBlockedMessage('med')}
           </p>
           <p className="mt-2 text-base text-ink2">記録の閲覧はこのままできます。</p>
+        </div>
+      ) : null}
+
+      {/* 開いたまま日付が変わり、入力中・未送信があったので切り替えなかった時の帯（F18） */}
+      {rolloverDay !== null && rolloverDay === day && !isToday ? (
+        <div role="status" className="rounded-lg border border-warn bg-warn-bg p-4 print:hidden">
+          <p className="text-base text-ink">
+            <span aria-hidden="true">▲ </span>
+            日付が変わりました（表示中: {fmtDayLabel(day)}）。入力中・未送信の記録があったので、表示はそのままにしています。今日の記録は「今日を開く」から入れてください。
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              setDayMsg(null)
+              setRolloverDay(null)
+              setDay(todayIso())
+            }}
+            className="mt-2 min-h-tap rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink"
+          >
+            今日を開く
+          </button>
         </div>
       ) : null}
 
@@ -837,6 +1151,35 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
                   服薬の時間帯を設定する<span aria-hidden="true"> ›</span>
                 </Link>
               </p>
+            </div>
+          ) : null}
+
+          {stoppedHere.length > 0 || stoppedElsewhere > 0 ? (
+            <div role="status" className="rounded-lg border border-danger bg-danger-bg p-3">
+              <p className="text-base font-bold text-danger">
+                <span aria-hidden="true">⚠ </span>送れずに止まっている記録があります
+              </p>
+              {stoppedHere.length > 0 ? (
+                <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-ink">
+                  {stoppedHere.map((op) => {
+                    const rec = op.rowId === null ? null : (recordById.get(op.rowId) ?? null)
+                    const rid = rec?.resident_id ?? (typeof op.payload.resident_id === 'number' ? op.payload.resident_id : null)
+                    const name = rid === null ? '' : (residentById.get(rid)?.name ?? `利用者番号 ${rid}`)
+                    return (
+                      <li key={op.qid} className="break-words">
+                        {stoppedMedText(op, rec, name)}
+                      </li>
+                    )
+                  })}
+                </ul>
+              ) : null}
+              {stoppedElsewhere > 0 ? (
+                <p className="mt-1 text-sm text-ink">ほかの日の与薬の記録にも、止まっているものが {stoppedElsewhere}件あります。</p>
+              ) : null}
+              <p className="mt-1 text-sm text-ink">{MSG_STOPPED_GUIDE}</p>
+              <Link to="/settings" className="inline-flex min-h-tap items-center text-sm font-bold text-link">
+                設定タブを開く<span aria-hidden="true"> ›</span>
+              </Link>
             </div>
           ) : null}
 
@@ -1000,12 +1343,22 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
       <PrnDialog
         open={prnOpen}
         day={day}
+        today={today}
         isToday={isToday}
         residents={activeResidents}
+        loadSameDay={loadPrnSameDay}
+        refreshKey={records}
         onCancel={() => setPrnOpen(false)}
         onSave={async (p) => {
           const err = await savePrn(p)
-          if (err === null && aliveRef.current) setPrnOpen(false)
+          if (err === null && aliveRef.current) {
+            setPrnOpen(false)
+            // 今日の記録にした時（F33）は、表示も記録した日にする（記録した行・未送信の行がそこに出る）
+            if (p.adminOn !== dayRef.current) {
+              setDay(p.adminOn)
+              setDayMsg(`頓服を ${fmtDayLabel(p.adminOn)} の記録にしました。表示も ${fmtDayLabel(p.adminOn)} にしました。`)
+            }
+          }
           return err
         }}
       />
@@ -1210,7 +1563,7 @@ function PrnSection({ records, pending, residentById, staffName, locked, busy, r
                 </p>
                 <p className="mt-1 text-sm text-ink2">
                   {blocked
-                    ? 'この記録は自動では送れません。管理者に連絡してください（同じ頓服を記録し直さないでください）。'
+                    ? 'この記録は自動では送れません。設定タブの「未送信データ」で、どうするか選んでください（同じ頓服を記録し直さないでください）。'
                     : '電波が戻ると自動で送信します。同じ頓服を記録し直さないでください。'}
                 </p>
               </li>
@@ -1424,17 +1777,41 @@ function IncidentDialog({
 // 頓服の記録（小窓）
 // ══════════════════════════════════════════════════════════════
 
+/** 頓服の記録の入力（adminOn＝記録する日。ふだんは表示中の日） */
+interface PrnInput {
+  residentId: number
+  hm: string
+  drug: string
+  reason: string
+  note: string
+  adminOn: string
+}
+
 interface PrnDialogProps {
   open: boolean
   day: string
+  /** 今日（日付が変わったことの知らせと、「今日の記録にする」に使う） */
+  today: string
   isToday: boolean
   residents: Resident[]
+  /** その方のその日の頓服を取り直す（読めなければ null・F55） */
+  loadSameDay: (residentId: number, day: string) => Promise<PrnSameDayItem[] | null>
+  /** 画面の記録を読み直した合図（他の端末の頓服の通知など）。変わったら小窓の一覧も取り直す */
+  refreshKey?: unknown
   onCancel: () => void
   /** 保存する。失敗した時は理由文を返す（小窓は閉じずに入力を残す） */
-  onSave: (p: { residentId: number; hm: string; drug: string; reason: string; note: string }) => Promise<string | null>
+  onSave: (p: PrnInput) => Promise<string | null>
 }
 
-function PrnDialog({ open, day, isToday, residents, onCancel, onSave }: PrnDialogProps) {
+/** 記録する前の確かめ（F33・F55）。保存は止めず、押し直してもらうだけ */
+interface PrnConfirm {
+  adminOn: string
+  staleDay: boolean
+  hoursBefore: number
+  sameDrug: PrnSameDayItem[]
+}
+
+function PrnDialog({ open, day, today, isToday, residents, loadSameDay, refreshKey, onCancel, onSave }: PrnDialogProps) {
   const [residentId, setResidentId] = useState<number | null>(null)
   const [hm, setHm] = useState('')
   const [drug, setDrug] = useState('')
@@ -1443,11 +1820,22 @@ function PrnDialog({ open, day, isToday, residents, onCancel, onSave }: PrnDialo
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [pickerOpen, setPickerOpen] = useState(false)
+  /** 小窓を開いた時に今日を表示していたか（開いたまま0時を越えたことの知らせに使う） */
+  const [openedToday, setOpenedToday] = useState(false)
+  /** その方のその日の頓服（'loading'＝取り直し中／items=null＝読めなかった） */
+  const [sameDay, setSameDay] = useState<{ residentId: number; items: PrnSameDayItem[] | null } | 'loading' | null>(null)
+  const [confirm, setConfirm] = useState<PrnConfirm | null>(null)
+  const sameDaySeq = useRef(0)
+  const wasOpenRef = useRef(false)
   const uid = useId()
   const firstRef = useRef<HTMLButtonElement>(null)
 
+  // 初期化は「開いた時」（open が false→true）だけ。isToday は依存に入れない（開いている間に0時を越えて isToday が
+  // 変わるだけで、入居者・時刻・薬・理由・備考が全部消えていた・F32）。開いた時点の isToday で使用時刻の既定を決める
   useEffect(() => {
-    if (!open) return
+    const opening = open && !wasOpenRef.current
+    wasOpenRef.current = open
+    if (!opening) return
     setResidentId(null)
     // 使用時刻の既定は「今」（今日を表示している時だけ。過去の日は入れてもらう）
     setHm(isToday ? clockInputValue(new Date().toISOString()) : '')
@@ -1456,19 +1844,60 @@ function PrnDialog({ open, day, isToday, residents, onCancel, onSave }: PrnDialo
     setNote('')
     setError(null)
     setSaving(false)
-  }, [open, isToday])
+    setOpenedToday(isToday)
+    setSameDay(null)
+    setConfirm(null)
+  }, [open])
+
+  // 入居者を選んだら、その方のその日の頓服をサーバーから取り直して出す（古い表示のまま二重に与薬しない・F55）。
+  // 小窓を開いている間に画面の記録が読み直された（他の端末の頓服の通知など）時も取り直す（表示中の一覧は出したまま）
+  useEffect(() => {
+    if (!open || residentId === null) return
+    const seq = ++sameDaySeq.current
+    setSameDay((cur) => (cur !== null && cur !== 'loading' && cur.residentId === residentId ? cur : 'loading'))
+    void loadSameDay(residentId, day).then((items) => {
+      if (seq === sameDaySeq.current) setSameDay({ residentId, items })
+    })
+  }, [open, residentId, day, loadSameDay, refreshKey])
 
   const resident = residents.find((r) => r.id === residentId) ?? null
+  /** 開いたまま0時を越えた（この小窓は開いた日＝表示中の日の分として記録する・F32） */
+  const crossedMidnight = openedToday && !isToday
 
-  async function submit() {
+  /**
+   * 記録する。acknowledged=false の時は先に確かめる（記録する日が今日でなく使用時刻が12時間以上前・同じ日に同じ薬）。
+   * 確かめはサーバーから取り直した一覧で行う（読めなければ同じ薬の確かめは飛ばす＝保存は止めない）
+   */
+  async function submit(adminOn: string, acknowledged: boolean) {
     if (residentId === null) {
       setError('入居者を選んでください。')
       return
     }
     setSaving(true)
-    const err = await onSave({ residentId, hm, drug, reason, note })
+    setError(null)
+    if (!acknowledged) {
+      const givenAt = localDateTimeIso(adminOn, hm)
+      const items = await loadSameDay(residentId, adminOn)
+      if (adminOn === day) setSameDay({ residentId, items })
+      const c = prnCheck({ adminOn, today: todayIso(), givenAt, nowMs: Date.now(), drug, sameDay: items })
+      if (c.staleDay || c.sameDrug.length > 0) {
+        setSaving(false)
+        setConfirm({ adminOn, ...c })
+        return
+      }
+    }
+    setConfirm(null)
+    const err = await onSave({ residentId, hm, drug, reason, note, adminOn })
     setSaving(false)
     setError(err)
+  }
+
+  /** 入力を変えたら、出していた確かめは外す（確かめた中身と違うまま記録しない） */
+  function changed<T>(set: (v: T) => void): (v: T) => void {
+    return (v: T) => {
+      setConfirm(null)
+      set(v)
+    }
   }
 
   return (
@@ -1477,6 +1906,12 @@ function PrnDialog({ open, day, isToday, residents, onCancel, onSave }: PrnDialo
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
           <h2 className="text-lg font-bold text-ink">頓服を記録</h2>
           <p className="mt-1 text-sm text-ink2">{fmtDayLabel(day)}</p>
+          {crossedMidnight ? (
+            <p role="status" className="mt-2 rounded border border-warn bg-warn-bg px-2 py-1 text-sm text-ink">
+              <span aria-hidden="true">▲ </span>
+              日付が変わりました。この記録は {fmtDayLabel(day)} の分です（0時を過ぎてから使った頓服は、記録する時に今日の分を選べます）。入力はそのまま残っています。
+            </p>
+          ) : null}
           <span className="mt-3 block text-sm text-ink2">入居者（必須）</span>
           <button
             ref={firstRef}
@@ -1489,6 +1924,9 @@ function PrnDialog({ open, day, isToday, residents, onCancel, onSave }: PrnDialo
             </span>
             <span className="ml-auto text-sm text-link">選ぶ</span>
           </button>
+          {resident !== null ? (
+            <PrnSameDayList day={day} state={sameDay !== null && sameDay !== 'loading' && sameDay.residentId !== resident.id ? 'loading' : sameDay} />
+          ) : null}
           <label htmlFor={`${uid}-time`} className="mt-3 block text-sm text-ink2">
             使用時刻（必須）
           </label>
@@ -1496,7 +1934,7 @@ function PrnDialog({ open, day, isToday, residents, onCancel, onSave }: PrnDialo
             id={`${uid}-time`}
             type="time"
             value={hm}
-            onChange={(e) => setHm(e.target.value)}
+            onChange={(e) => changed(setHm)(e.target.value)}
             className="tabular mt-1 min-h-tap rounded border border-border bg-surface px-3 text-base text-ink"
           />
           <label htmlFor={`${uid}-drug`} className="mt-3 block text-sm text-ink2">
@@ -1506,7 +1944,7 @@ function PrnDialog({ open, day, isToday, residents, onCancel, onSave }: PrnDialo
             id={`${uid}-drug`}
             type="text"
             value={drug}
-            onChange={(e) => setDrug(e.target.value)}
+            onChange={(e) => changed(setDrug)(e.target.value)}
             autoComplete="off"
             className="mt-1 min-h-tap w-full rounded border border-border bg-surface px-3 text-base text-ink"
           />
@@ -1540,18 +1978,73 @@ function PrnDialog({ open, day, isToday, residents, onCancel, onSave }: PrnDialo
             </p>
           ) : null}
         </div>
-        <div className="flex flex-wrap justify-end gap-gap border-t border-border p-4">
-          <button type="button" onClick={onCancel} className="min-h-tap rounded border border-border-strong px-4 text-base text-ink">
-            やめる
-          </button>
-          <button
-            type="button"
-            onClick={() => void submit()}
-            disabled={saving}
-            className="min-h-tap rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink disabled:opacity-60"
-          >
-            {saving ? '保存しています…' : '記録する'}
-          </button>
+        {/* 記録する前の確かめ（F33・F55）は、ボタンのすぐ上に出す（中身を下まで送らなくても読める） */}
+        <div className="border-t border-border p-4">
+          {confirm !== null ? (
+            <div role="alert" className="mb-3 max-h-40 space-y-2 overflow-y-auto rounded border border-warn bg-warn-bg p-3 text-sm text-ink">
+              {confirm.staleDay ? (
+                <p>
+                  <span aria-hidden="true">▲ </span>
+                  表示中は {fmtDayLabel(confirm.adminOn)} です。使用時刻 {hm} は {fmtDayLabel(confirm.adminOn)} の {hm}（今から約{confirm.hoursBefore}時間前）として記録されます。
+                  0時を過ぎてから使った頓服なら「今日（{fmtDayLabel(today)}）の記録にする」を押してください。
+                </p>
+              ) : null}
+              {confirm.sameDrug.length > 0 ? (
+                <p>
+                  <span aria-hidden="true">▲ </span>
+                  この方には {fmtDayLabel(confirm.adminOn)} に同じ薬の頓服があります（
+                  {confirm.sameDrug.map((x) => `${fmtClock(x.givenAt) || '—'} ${x.drug ?? ''}${x.unsent ? '・この端末の未送信' : x.recorder ? `・記入 ${x.recorder}` : ''}`).join('、')}
+                  ）。二重に記録していないか確かめてください。別の与薬なら「このまま記録する」を押してください。
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+          <div className="flex flex-wrap justify-end gap-gap">
+            {confirm !== null ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setConfirm(null)}
+                  disabled={saving}
+                  className="min-h-tap rounded border border-border-strong px-4 text-base text-ink"
+                >
+                  戻る
+                </button>
+                {confirm.staleDay && confirm.adminOn !== today ? (
+                  <button
+                    type="button"
+                    onClick={() => void submit(today, false)}
+                    disabled={saving}
+                    className="min-h-tap rounded border border-primary bg-surface px-4 text-base font-bold text-primary disabled:opacity-60"
+                  >
+                    今日（{fmtDayLabel(today)}）の記録にする
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => void submit(confirm.adminOn, true)}
+                  disabled={saving}
+                  className="min-h-tap rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink disabled:opacity-60"
+                >
+                  {saving ? '保存しています…' : 'このまま記録する'}
+                </button>
+              </>
+            ) : (
+              <>
+                <button type="button" onClick={onCancel} className="min-h-tap rounded border border-border-strong px-4 text-base text-ink">
+                  やめる
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void submit(day, false)}
+                  disabled={saving}
+                  className="min-h-tap rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink disabled:opacity-60"
+                >
+                  {saving ? '保存しています…' : '記録する'}
+                </button>
+              </>
+            )}
+          </div>
         </div>
       </ModalShell>
       <ResidentPickerModal
@@ -1559,11 +2052,42 @@ function PrnDialog({ open, day, isToday, residents, onCancel, onSave }: PrnDialo
         residents={residents}
         onPick={(id) => {
           setPickerOpen(false)
-          if (id !== null) setResidentId(id)
+          if (id !== null) {
+            setConfirm(null)
+            setResidentId(id)
+          }
         }}
         onClose={() => setPickerOpen(false)}
       />
     </>
+  )
+}
+
+/** 小窓の中の「この方のこの日の頓服」（参考の表示。読めなくても記録は止めない・F55） */
+function PrnSameDayList({ day, state }: { day: string; state: { items: PrnSameDayItem[] | null } | 'loading' | null }) {
+  return (
+    <div className="mt-2 rounded border border-border bg-surface2 p-2 text-sm text-ink" aria-live="polite">
+      <p className="font-bold">この方の {fmtDayLabel(day)} の頓服</p>
+      {state === null || state === 'loading' ? (
+        <p className="text-ink2">確かめています…</p>
+      ) : state.items === null ? (
+        <p className="text-warn">
+          <span aria-hidden="true">▲ </span>
+          確かめられませんでした（記録はできます。電波が戻ったら、頓服の一覧で二重になっていないか確かめてください）。
+        </p>
+      ) : state.items.length === 0 ? (
+        <p className="text-ink2">記録はありません。</p>
+      ) : (
+        <ul className="mt-1 space-y-1">
+          {state.items.map((x) => (
+            <li key={x.key} className="break-words">
+              <span className="tabular">{fmtClock(x.givenAt) || '—'}</span>　{x.drug ?? '—'}
+              {x.unsent ? '　（この端末の未送信）' : `　記入 ${x.recorder ?? '—'}`}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   )
 }
 

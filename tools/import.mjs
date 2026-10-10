@@ -46,6 +46,9 @@
 //   恒等式の外（reconcileKept）で数える。notes・vitals・meals の3表とも同じ規則。
 //   ★アプリの更新経路（apply_cell_edits・申し送りの更新）は取込行も枠や id で書き換えるため、
 //     これが無いと毎時の取込が職員の訂正を移行元の値へ戻していた。
+//   ★取込の UPDATE・取り消しは「読んだ時の rev のまま」も条件にする（F74・2026-10-10）。端末の RPC と
+//     同じ行で競った時（行ロック待ちの後）にも職員の訂正を戻さないため。0行で終わった分は
+//     app_protected（取り消しは reconcileKept）に数える。
 //
 // 移行元側の削除への追従（source 正本の原則）:
 //   移行元は行を消さず墓標（deletedAt）を立て、APIは墓標行を**返さない**。
@@ -614,13 +617,16 @@ function buildMealCandidates(mrow, masters, out) {
 // DB 書き込み（表ごとの差分適用）
 // ---------------------------------------------------------------------
 
-/** 既存行（import_key 一致）をまとめて引く */
+/**
+ * 既存行（import_key 一致）をまとめて引く。
+ * rev も読む（F74）: UPDATE を「読んだ時の rev のままの時だけ」にするため（applyCandidates の UPDATE の注記）
+ */
 async function selectExisting(db, table, cols, keys) {
   const found = new Map()
   for (let i = 0; i < keys.length; i += BATCH) {
     const chunk = keys.slice(i, i + BATCH)
     const r = await db.query(
-      `select import_key, id, deleted_at, import_tombstoned_at, ${cols.join(', ')} from ${table} where import_key = any($1)`,
+      `select import_key, id, rev, deleted_at, import_tombstoned_at, ${cols.join(', ')} from ${table} where import_key = any($1)`,
       [chunk],
     )
     for (const row of r.rows) found.set(row.import_key, row)
@@ -763,8 +769,20 @@ async function applyCandidates(db, opts) {
         counts.app_protected++
         continue
       }
+      /**
+       * 取込が消した後に、同じ枠（利用者×日、食事は＋食）を端末のアプリ入力（またはアプリで直した
+       * 取込行）が使っていたら、復活させずに見送る（F75・新規の INSERT と同じ native_skip）。
+       * ★これが無いと、消した行を生き返らせる UPDATE が uq_vitals_routine_day / uq_meals_slot に
+       *   当たって 23505 になり、窓（最大149日）ごと rollback する。移行元は同じキーを返し続けるので
+       *   毎時の取込が同じ所で落ち続け、その窓の他の日の追加・訂正も入らなくなる（実測で確認）。
+       *   枠を持っているのは職員の入力なので、そちらを正とする（C3 と同じ考え方）。
+       */
+      if (nativeTaken.has(c.row.import_key)) {
+        counts.native_skip++
+        continue
+      }
       const revDiff = colsToCompare.filter((col) => !sameValue(ex[col], c.row[col], col))
-      toUpdate.push({ id: ex.id, row: c.row, diff: revDiff, revive: true })
+      toUpdate.push({ id: ex.id, rev: ex.rev, row: c.row, diff: revDiff, revive: true })
       counts.updated++
       counts.revived++
       continue
@@ -781,7 +799,7 @@ async function applyCandidates(db, opts) {
       counts.app_protected++
       continue
     }
-    toUpdate.push({ id: ex.id, row: c.row, diff, revive: false })
+    toUpdate.push({ id: ex.id, rev: ex.rev, row: c.row, diff, revive: false })
     counts.updated++
   }
 
@@ -822,10 +840,34 @@ async function applyCandidates(db, opts) {
       // 変更の記録（0010）: 取込の更新は「変えた職員」が空（null）。前にアプリで触った職員の
       // edited_by を残すと、取込の変更がその職員の操作として記録されるため明示的に空にする
       if (await hasEditedBy(db, table)) sets.push('edited_by = null')
-      params.push(u.id)
+      params.push(u.id, u.rev)
       // SELECT から UPDATE までの間に職員がアプリで触った時も戻さない（0行更新で素通りする）
       const appGuard = await appTouchedCond(db, table, table)
-      await db.query(`update ${table} set ${sets.join(', ')} where id = $${n} and ${guard} and not ${appGuard}`, params)
+      /**
+       * rev も条件に入れる（F74）。読んだ時の rev のままの時だけ書く。
+       * ★appGuard だけでは足りない: 端末の RPC（apply_cell_edits・apply_note_edits）がこの行の
+       *   行ロックを持っている間にこの UPDATE が始まると、ロック待ちの後の再判定（READ COMMITTED の
+       *   EvalPlanQual）は「行の新しい版」には当たるが、appGuard の exists（record_history）は
+       *   文の開始時のスナップショットのまま評価される。操作者未選択（p_editor=null）の職員の訂正は
+       *   edited_by も空なので、どちらの判定にも掛からず移行元の値へ戻されていた（3表とも実測で確認）。
+       *   rev は行そのものの列なので再判定で新しい値と比べられ、職員が直していれば必ず外れる
+       *   （rev は 0001 のトリガが更新のたびに +1 する）。
+       */
+      const r = await db.query(
+        `update ${table} set ${sets.join(', ')} where id = $${n} and rev = $${n + 1} and ${guard} and not ${appGuard}`,
+        params,
+      )
+      /**
+       * 0行で終わった＝読んだ後に職員が触った（直した・消した）行。書いていないので「更新」には数えず、
+       * アプリ入力保護（native_skip の内訳 app_protected）へ移す（F74）。1件を同じ式の中で付け替える
+       * だけなので恒等式は崩れない。これが無いと、戻していないのに報告と import_days が「更新 1」になる。
+       */
+      if (r.rowCount === 0) {
+        counts.updated--
+        if (u.revive) counts.revived--
+        counts.native_skip++
+        counts.app_protected++
+      }
     }
   }
   return counts
@@ -972,17 +1014,21 @@ async function selectAppTouched(db, table, ids) {
  * 移行元の削除への追従: 取込済みの日の取込行のうち、今回の応答に key が無いものへ
  * soft delete を付ける。恒等式の外。
  * アプリで直した取込行は取り消さない（C3）。
- * 返り値: { tombstoned: 消した件数, kept: アプリで直した行なので消さずに残した件数 }
+ * 返り値: { tombstoned: 消した件数, kept: アプリで直した行なので消さずに残した件数
+ *          （読んだ後に職員が触って取り消しが0行で終わった分も含む・F74） }
  */
 async function reconcileTombstones(db, table, dateCol, prefix, day, liveKeys, execute, extraWhere = '') {
+  // rev も読む（F74）: 取り消しも「読んだ時の rev のままの行だけ」にするため（下の update の注記）
   const r = await db.query(
-    `select id, import_key from ${table}
+    `select id, rev, import_key from ${table}
       where ${dateCol} = $1 and deleted_at is null and import_key like $2 ${extraWhere}`,
     [day, `${prefix}%`],
   )
   const gone = r.rows.filter((row) => !liveKeys.has(row.import_key))
   const touched = await selectAppTouched(db, table, gone.map((g) => g.id))
   const target = gone.filter((g) => !touched.has(String(g.id)))
+  // ドライランは書かないので、取り消す予定の件数をそのまま出す
+  let tombstoned = target.length
   if (execute && target.length > 0) {
     // ★「取込が付けた墓標」であることを残す。これが無いと、移行元に行が戻った時に
     //   職員の削除と区別できず復活させられない（2026-09-01 追加）
@@ -990,13 +1036,23 @@ async function reconcileTombstones(db, table, dateCol, prefix, day, liveKeys, ex
     const editedBy = (await hasEditedBy(db, table)) ? ', edited_by = null' : ''
     // SELECT から UPDATE までの間に職員がアプリで触った行も消さない
     const appGuard = await appTouchedCond(db, table, table)
-    await db.query(
+    /**
+     * id と読んだ時の rev を組で照合する（F74）。applyCandidates の UPDATE と同じ理由で、
+     * 端末の RPC の行ロック待ちの後は appGuard の exists が古いスナップショットのまま評価されるため、
+     * 操作者未選択（p_editor=null）で職員が直した行を取り消していた（3表とも実測で確認）。
+     * rev は行の列なので、ロック待ちの後の再判定でも新しい値と比べられる。
+     */
+    const u = await db.query(
       `update ${table} set deleted_at = now(), import_tombstoned_at = now()${editedBy}
-        where id = any($1) and deleted_at is null and not ${appGuard}`,
-      [target.map((g) => g.id)],
+        from unnest($1::bigint[], $2::int[]) as x(id, rev)
+        where ${table}.id = x.id and ${table}.rev = x.rev and ${table}.deleted_at is null and not ${appGuard}`,
+      [target.map((g) => g.id), target.map((g) => g.rev)],
     )
+    // 0行で終わった分は「読んだ後に職員が触った行」＝取り消さずに残した側（kept）へ数える（F74）。
+    // これが無いと、残したのに報告が「追従で取り消した」と数える
+    if (typeof u.rowCount === 'number') tombstoned = u.rowCount
   }
-  return { tombstoned: target.length, kept: gone.length - target.length }
+  return { tombstoned, kept: gone.length - tombstoned }
 }
 
 // ---------------------------------------------------------------------
@@ -1593,3 +1649,9 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
 }
 
 export { buildNoteCandidate, buildVitalCandidate, buildMealCandidates, normName, validTime, addDaysYmd }
+
+/**
+ * 試験だけが使う差し込み口（tests/import-race.test.mjs）。DB の代わりに偽の db（query だけを持つ物）を渡して、
+ * 端末と競った時の UPDATE・取り消しの条件と数え方（F74・F75）を確かめる。本番の取込（main）は使わない。
+ */
+export const __testHooks = { applyCandidates, reconcileTombstones }

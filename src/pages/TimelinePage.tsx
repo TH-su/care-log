@@ -24,10 +24,12 @@ import { useTimeline } from '../hooks/useTimeline'
 import {
   DbError,
   deleteNote,
+  fetchAllResidents,
+  fetchAllStaff,
   fetchNoteReaders,
   isNoteRpcMissing,
+  isQueuePersisted,
   fetchResidents,
-  fetchStaff,
   getNativeInputEnabled,
   markRead,
   noteDeleted,
@@ -88,6 +90,8 @@ const BLOCKED_REASON = '現在はスプレッドシートで記録する期間�
 
 /** 申し送りへの操作（継続終了・削除・本文の訂正）の結果 */
 type NoteActionResult = { ok: true } | { ok: false; message: string }
+/** 帰着の後追い記入の結果（notPersisted＝送信待ちにしたが端末に控えを残せなかった・F01） */
+type OutingEndResult = 'ok' | 'conflict' | 'error' | 'queued' | 'notPersisted'
 
 const ERR_NOTE_ACTION =
   '操作できませんでした（通信エラー）。電波状態を確認して、もう一度お試しください。記録は変わっていません'
@@ -100,6 +104,23 @@ const MSG_QUEUED = '通信できないため送信待ちにしました。電波
  */
 const MSG_HELD =
   '他の端末で先に変更されていたため、保存を止めました。入力はこの端末に残っています。カードの下の「くらべて選ぶ」で選んでください'
+
+/**
+ * 送信待ちにしたのに端末へ残せなかった時（保存領域が一杯など・F01）。送信待ちはこのタブのメモリにしか無く、閉じる・
+ * 再読み込み・iOS の自動終了で消えるので、「電波が戻ると自動で送信します」とは言わない（日報の MSG_NOT_PERSISTED と同じ趣旨）。
+ * 入力欄は閉じずに残す
+ */
+const MSG_NOT_PERSISTED =
+  '送信待ちにしましたが、端末に控えを残せませんでした（保存領域の空きが不足している可能性があります）。この画面を閉じずに電波の回復をお待ちください。入力は消えていません'
+/** 継続の終了を、もう終了している申し送りに重ねて押した時（F08。最初の終了を正として送らない） */
+const MSG_ALREADY_ENDED = 'この継続申し送りは既に終了済みです（先に終了した記録をそのまま残します）'
+
+/** 継続の期限（ended_at）が押した時刻以前＝もう終了している（F08。db の重ね押しの判定と同じ。壊れた値は終了していない側） */
+function isEndedAt(stamp: string | null, now: number): boolean {
+  if (!stamp) return false
+  const t = Date.parse(stamp)
+  return Number.isFinite(t) && t <= now
+}
 
 /**
  * 申し送りを送信待ちにした時の一言。サーバー側の更新（0017）待ちの時はそう伝える（通信断とは言わない・修正依頼2）
@@ -256,7 +277,7 @@ export function TimelinePage({
   const { days, loading, error, loadMore, hasMore, refresh, trimmed, resetToLatest } =
     useTimeline(actorId)
 
-  // 利用者マスタ（氏名・居室の表示用）
+  // 利用者マスタ（氏名・居室の表示用。バイタル・食事の全員表の行は在籍者だけ）
   const [loadedResidents, setLoadedResidents] = useState<Resident[] | null>(null)
   const [residentsError, setResidentsError] = useState(false)
   const [residentsReload, setResidentsReload] = useState(0)
@@ -280,18 +301,37 @@ export function TimelinePage({
 
   const residents = residentsProp ?? loadedResidents ?? NO_RESIDENTS
 
+  // 名前の引き当てに使う利用者（退居者も含む全員・F48・2026-10-10）。退居された方の過去の申し送り・バイタル等の対象が
+  // 「利用者ID n」になっていた。全員表の行（residents）は在籍者のまま。読めなければ在籍者だけで引く（今までどおり）
+  const [allResidents, setAllResidents] = useState<Resident[] | null>(null)
+  useEffect(() => {
+    let alive = true
+    fetchAllResidents()
+      .then((rows) => {
+        if (alive) setAllResidents(Array.isArray(rows) ? rows : null)
+      })
+      .catch(() => {
+        // 退居者の名前が「利用者ID n」に落ちるだけ
+      })
+    return () => {
+      alive = false
+    }
+  }, [residentsReload])
+
   const residentById = useMemo(() => {
     const m = new Map<number, Resident>()
+    for (const r of allResidents ?? NO_RESIDENTS) m.set(r.id, r)
     for (const r of residents) m.set(r.id, r)
     return m
-  }, [residents])
+  }, [residents, allResidents])
 
-  // 職員マスタ（記入者名の表示用）。取れなくても「記入者ID n」に落として画面は成立させる
+  // 職員マスタ（記入者名の表示用）。退職者も含む全員から引く（F48: App から渡る名簿は在籍者だけで、退職者が書いた
+  // 過去の申し送りの記入者が「ID n」になっていた）。渡された名簿は読めるまでの間と、読めなかった時の控えにする。
+  // 取れなくても「記入者ID n」に落として画面は成立させる
   const [loadedStaff, setLoadedStaff] = useState<Staff[] | null>(null)
   useEffect(() => {
-    if (staffProp !== undefined) return
     let alive = true
-    fetchStaff()
+    fetchAllStaff()
       .then((rows) => {
         if (alive) setLoadedStaff(Array.isArray(rows) ? rows : [])
       })
@@ -301,11 +341,12 @@ export function TimelinePage({
     return () => {
       alive = false
     }
-  }, [staffProp])
+  }, [])
 
   const staffById = useMemo(() => {
     const m = new Map<number, string>()
-    for (const s of staffProp ?? loadedStaff ?? NO_STAFF) m.set(s.id, s.name)
+    for (const s of loadedStaff ?? NO_STAFF) m.set(s.id, s.name)
+    for (const s of staffProp ?? NO_STAFF) m.set(s.id, s.name)
     return m
   }, [staffProp, loadedStaff])
 
@@ -363,17 +404,36 @@ export function TimelinePage({
   const handleEndOngoing = useCallback(
     async (note: Note): Promise<NoteActionResult> => {
       try {
-        // 継続の終了（ended_at・ended_by）も欄ごとの判定（2026-09-29）。基準はいま画面に出ているサーバーの期限
+        const now = Date.now()
+        // もう終了している継続（同じ日のピン留めには終了済みの継続も残る）への重ね押しは送らない（F08・2026-10-10 本人回答:
+        // 後の終了は「既に終了済み」として外し、最初の終了を正とする。送ると終了時刻だけが後の時刻に書き換わる）
+        if (isEndedAt(note.ended_at, now)) {
+          showRef.current(MSG_ALREADY_ENDED)
+          refreshRef.current()
+          return { ok: true }
+        }
+        // 継続の終了（ended_at・ended_by）も欄ごとの判定（2026-09-29）。基準はいま画面に出ているサーバーの期限。
+        // 終了した職員の基準は、行に値がある時（ended_by を返す経路で読んだ時）だけ付ける（F08。タイムラインの RPC は
+        // ended_by を返さない＝分からない。分からないのに null を基準にすると、自分で競合を作る）
+        const endedByEdit = note.ended_by !== undefined ? { value: actorId, base: note.ended_by } : { value: actorId }
         const res = await saveNoteEdits(
           { id: note.id },
-          { ended_at: { value: new Date().toISOString(), base: note.ended_at }, ended_by: { value: actorId } },
+          { ended_at: { value: new Date(now).toISOString(), base: note.ended_at }, ended_by: endedByEdit },
           { meta: noteMetaOf(note) },
         )
         const r = heldOrOk(res)
         if (r === 'held') return { ok: false, message: MSG_HELD }
         if (r === 'queued') {
+          // 端末に控えを残せていない時は、送ったものとして扱わない（F01。閉じると消える）
+          if (!isQueuePersisted()) return { ok: false, message: MSG_NOT_PERSISTED }
           // 送信待ちへ退避。サーバーはまだ変わっていないので取り直さない（行は次の送信成功で終了表示になる）
           showRef.current(queuedText())
+          return { ok: true }
+        }
+        if (res !== 'queued' && res.status === 'noop' && res.settled.includes('ended_at')) {
+          // 既に終了していた（db が重ね押しとして送らなかった・サーバーが同じ値で済みとした）。終了したとは言わない（F08）
+          showRef.current(MSG_ALREADY_ENDED)
+          refreshRef.current()
           return { ok: true }
         }
         touchActivity()
@@ -389,13 +449,15 @@ export function TimelinePage({
 
   /** 申し送りの削除（論理削除。記録は消さずに非表示へ）。確認ダイアログの後ろでのみ呼ぶ */
   const handleDeleteNote = useCallback(
-    async (note: Note, seenBody: string): Promise<NoteActionResult> => {
+    async (note: Note, seen: Note): Promise<NoteActionResult> => {
       try {
-        // 取り消すのは「見た本文」のままの時だけ（他の端末が直していたら取り消さずに止める）。
-        // 見た本文は確認を開いた時の本文（確認の間に自動の取り直しで新しくなった本文を基準にしない＝修正依頼4）
-        const res = await deleteNote({ id: note.id }, seenBody, { meta: noteMetaOf(note) })
+        // 取り消すのは「見た本文」と「見た行」（対象・重要度・色・継続・終了）のままの時だけ（他の端末が直していたら
+        // 取り消さずに止める・F09）。見た行は確認を開いた時の行（確認の間に自動の取り直しで新しくなった行を基準にしない＝修正依頼4）
+        const res = await deleteNote({ id: note.id }, seen, { meta: noteMetaOf(note) })
         if (res !== 'queued' && !noteDeleted(res)) return { ok: false, message: MSG_HELD }
         if (res === 'queued') {
+          // 端末に控えを残せていない時は、送ったものとして扱わない（F01）
+          if (!isQueuePersisted()) return { ok: false, message: MSG_NOT_PERSISTED }
           showRef.current(queuedText())
           return { ok: true }
         }
@@ -427,6 +489,8 @@ export function TimelinePage({
           return { ok: true }
         }
         if (r === 'queued') {
+          // 端末に控えを残せていない時は、編集欄を閉じずに入力を残す（F01。閉じる・再読み込みで消える）
+          if (!isQueuePersisted()) return { ok: false, message: MSG_NOT_PERSISTED }
           showRef.current(queuedText())
           return { ok: true }
         }
@@ -447,10 +511,12 @@ export function TimelinePage({
       outing: Outing,
       endOn: string,
       endAt: string | null,
-    ): Promise<'ok' | 'conflict' | 'error' | 'queued'> => {
+    ): Promise<OutingEndResult> => {
       try {
         const res = await setOutingEnd(outing.id, outing.rev, endOn, endAt)
         if (res === 'conflict') return 'conflict'
+        // 端末に控えを残せていない時は、帰着の入力欄を閉じずに残す（F01）
+        if (res === 'queued' && !isQueuePersisted()) return 'notPersisted'
         if (res === 'queued') {
           // 入力欄の値は残したまま送信待ちへ。電波が戻れば db.ts が同じ内容を送る
           showRef.current(MSG_QUEUED)
@@ -715,9 +781,9 @@ interface DaySectionProps {
     o: Outing,
     endOn: string,
     endAt: string | null,
-  ) => Promise<'ok' | 'conflict' | 'error' | 'queued'>
+  ) => Promise<OutingEndResult>
   onEndOngoing: (note: Note) => Promise<NoteActionResult>
-  onDeleteNote: (note: Note, seenBody: string) => Promise<NoteActionResult>
+  onDeleteNote: (note: Note, seen: Note) => Promise<NoteActionResult>
   onUpdateNoteBody: (note: Note, body: string, base: string) => Promise<NoteActionResult>
   onNotify: (message: string) => void
   /** 申し送りの送信待ち・止まった変更（行 id → 送信待ち） */
@@ -947,8 +1013,14 @@ const DaySection = memo(function DaySection(props: DaySectionProps) {
                       : '継続中'
                     : '最重要'}
                 </span>
-                {/* 期限を決めずに登録した継続は、この操作をするまで毎日再掲され続ける */}
-                {ongoing && (
+                {/* 期限を決めずに登録した継続は、この操作をするまで毎日再掲され続ける。
+                    もう終了している継続（その日のうちはピン留めに残る）には押す入口を出さない（F08。ピン留めの表示規則は変えない） */}
+                {ongoing && isEndedAt(n.ended_at, Date.now()) ? (
+                  <span className="text-sm text-ink2">
+                    <span aria-hidden="true">✓ </span>終了済み
+                  </span>
+                ) : null}
+                {ongoing && !isEndedAt(n.ended_at, Date.now()) && (
                   <EndOngoingButton
                     note={n}
                     inputEnabled={inputEnabled}
@@ -1127,7 +1199,7 @@ interface NoteCardProps {
   onToggleExpand: (note: Note) => void
   onMarkRead: (note: Note) => void
   onOpenKarte: (residentId: number) => void
-  onDeleteNote: (note: Note, seenBody: string) => Promise<NoteActionResult>
+  onDeleteNote: (note: Note, seen: Note) => Promise<NoteActionResult>
   onUpdateNoteBody: (note: Note, body: string, base: string) => Promise<NoteActionResult>
   /** この申し送りの送信待ち・止まった変更（無ければ null） */
   pending: PendingNoteRow | null
@@ -1170,8 +1242,8 @@ function NoteCard({
    * （保存を押した時の note を基準にすると、その間に他の端末が直した本文を黙って上書きしてしまう）
    */
   const editBaseRef = useRef(note.body)
-  /** 削除の確認を開いた時の本文（サーバーの生の値・修正依頼4）。確認の間の自動の取り直しで変えない */
-  const deleteBaseRef = useRef(note.body)
+  /** 削除の確認を開いた時の行（サーバーの生の値・修正依頼4・F09）。確認の間の自動の取り直しで変えない */
+  const deleteBaseRef = useRef<Note>(note)
   const [asking, setAsking] = useState(false)
   const [busy, setBusy] = useState(false)
   const [rowError, setRowError] = useState<string | null>(null)
@@ -1368,7 +1440,7 @@ function NoteCard({
                 type="button"
                 className="min-h-tap rounded-md border border-danger px-3 text-base font-bold text-danger disabled:border-border disabled:text-ink3"
                 onClick={() => {
-                  deleteBaseRef.current = note.body
+                  deleteBaseRef.current = note
                   setAsking(true)
                 }}
                 disabled={!canEdit || busy}
@@ -1544,7 +1616,7 @@ interface OutingRowProps {
     o: Outing,
     endOn: string,
     endAt: string | null,
-  ) => Promise<'ok' | 'conflict' | 'error' | 'queued'>
+  ) => Promise<OutingEndResult>
 }
 
 function OutingRow({ outing, dayIso, resident, inputEnabled, onOpenKarte, onSaveEnd }: OutingRowProps) {
@@ -1580,7 +1652,9 @@ function OutingRow({ outing, dayIso, resident, inputEnabled, onOpenKarte, onSave
     setRowError(
       res === 'conflict'
         ? '他の端末で先に更新されました。入力は消えていません。画面を再読み込みして最新の内容を確認してから、もう一度記入してください'
-        : '保存できませんでした（通信エラー）。電波状態を確認して、もう一度お試しください',
+        : res === 'notPersisted'
+          ? MSG_NOT_PERSISTED
+          : '保存できませんでした（通信エラー）。電波状態を確認して、もう一度お試しください',
     )
   }
 

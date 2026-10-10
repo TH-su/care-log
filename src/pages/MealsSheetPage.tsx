@@ -34,15 +34,20 @@ import type {
   RefObject,
 } from 'react'
 import {
+  FORBIDDEN_REASON,
   DbError,
   fetchMealsSheet,
   isSelfWrite,
   fetchResidents,
   getNativeInputGate,
+  hasUnpersistedQueue,
   insertFluid,
+  isQueuePersisted,
+  queueSubscribe,
   softDeleteFluid,
   subscribeChanges,
 } from '../lib/db'
+import type { ChangeInfo } from '../lib/db'
 import { getActorId, touchActivity } from '../lib/actor'
 import { addDays, fmtDayLabel, fmtTimeHM, todayIso, toHalfWidth } from '../lib/format'
 import { isLowIntake, LS, MEAL_SLOT_LABEL, MEAL_STATUS_LABEL, SHEET_DAYS } from '../lib/types'
@@ -63,6 +68,7 @@ import { focusOf, useCellPresence } from '../hooks/useCellPresence'
 import { cellKey } from '../lib/presence'
 import type { CellTarget } from '../lib/presence'
 import { BUSY_RING, BusyMark, PresenceSummary, RowBusyMark } from '../components/presence'
+import { RecorderBar } from '../components/RecorderBar'
 import { ConflictResolver } from '../components/ConflictResolver'
 import type { ConflictResolution, ConflictTarget } from '../components/ConflictResolver'
 import {
@@ -205,6 +211,35 @@ const ERR_SAVE =
   '保存できませんでした。入力は消えていません。通信状況を確認して、もう一度入力してください。'
 const ERR_AMOUNT = `主食・副食は 0〜${AMOUNT_MAX} の数字で入力してください。入力はそのまま残しています。`
 const MSG_QUEUED = '通信できないため送信待ちにしました。電波が戻ると自動で送信します。'
+/**
+ * 送信待ちにしたが、端末の保存領域が一杯で控えを残せなかった時（F01）。送信待ちはこのタブのメモリにだけあり、閉じる・
+ * 再読み込み・iOS の自動終了で消える。「電波が戻ると自動で送信します」とは言わず、入力も控えに残す。
+ * 表の上の警告（saveError）に出し、この文で終わる時は危険の色にする（isNotPersistedText）
+ */
+export const MSG_NOT_PERSISTED =
+  '送信待ちにしましたが、この端末に控えを残せませんでした（保存領域の空きが不足している可能性があります）。入力は消えていません。画面を閉じたり再読み込みしたりすると消えるので、この画面のまま電波の回復をお待ちください。'
+
+/** 表の上の警告が「端末に控えを残せなかった」もの（F01。水分の「水分 ＋200ml：」付きも含む）か */
+export function isNotPersistedText(text: string | null): boolean {
+  return text !== null && text.endsWith(MSG_NOT_PERSISTED)
+}
+
+/**
+ * 表の上の警告を下ろしてよい時の次の値（F01）。端末に控えを残せなかった送信待ちがまだメモリにある間は、その警告を
+ * 下ろさない（食事のセルが片付いても、水分の追加などが残っている）
+ */
+export function settledSaveError(cur: string | null): string | null {
+  return isNotPersistedText(cur) && hasUnpersistedQueue() ? cur : null
+}
+
+/**
+ * 取り直しの合図（db.ts の RESYNC・F14）のうち、画面に戻った（resume）・電波が戻った（online）のものか。
+ * この2つはこの画面の自前の復帰処理（AWAY_REFETCH_MS のしきい値つき）が受け持つので、購読側では捨てる。
+ * 購読がつながり直した（reconnect＝Wi-Fi の切替・瞬断で WebSocket だけ張り直された）は自前では気づけないので受ける
+ */
+export function isResumeOrOnline(info: Pick<ChangeInfo, 'event' | 'resync'> | undefined): boolean {
+  return info?.event === 'RESYNC' && (info.resync === 'resume' || info.resync === 'online')
+}
 const ERR_FLUID_UNDO =
   '水分の追加を取り消せませんでした。通信状況を確認して、もう一度お試しください。'
 const ERR_FLUID_UNDO_CONFLICT =
@@ -767,6 +802,11 @@ export function MealsSheetPage({
   const [inputEnabled, setInputEnabled] = useState<boolean>(inputEnabledProp === true)
   const [flagChecked, setFlagChecked] = useState(false)
   const [flagError, setFlagError] = useState<string | null>(null)
+  /**
+   * このアカウントは記録アプリを使えない（許可リストに無い・無効。F61 手直し）。flagError に FORBIDDEN_REASON を入れ、
+   * 再試行のボタンは出さない（何度押しても直らない。ログインし直す・管理者へ連絡する）
+   */
+  const [forbidden, setForbidden] = useState(false)
   /** サーバーに欄ごとの保存の仕組み（0011）がまだ無い＝サーバー側の更新待ち（入力を止める） */
   const [cellsMissing, setCellsMissing] = useState(false)
 
@@ -843,6 +883,11 @@ export function MealsSheetPage({
   const staleRef = useRef<Record<string, true>>({})
   /** くらべて選ぶの送信が動いている数（その間は背景の取り直しを先送りする＝指摘 L2） */
   const resolverBusyRef = useRef(0)
+  /**
+   * 送信待ちにしたが端末に控えを残せなかった食事（F01。このタブのメモリにだけある）。入力（edits）は残したまま
+   * 「未保存」として出し、送信待ちが送れた・止まった後の読み込みで外す
+   */
+  const unpersistedRef = useRef<Record<string, true>>({})
   const canInputRef = useRef(canInput)
   const actorRef = useRef<number | null>(actorId)
   const showRef = useRef(show)
@@ -884,6 +929,8 @@ export function MealsSheetPage({
     loadRef.current = load
     blockedHintRef.current = loading
       ? HINT_LOADING
+      : forbidden
+        ? FORBIDDEN_REASON
       : !flagChecked
         ? HINT_FLAG_CHECKING
         : !inputEnabled
@@ -966,7 +1013,8 @@ export function MealsSheetPage({
     const stuck = Object.values(phasesRef.current).some(
       (p) => p === 'conflict' || p === 'error' || p === 'queued',
     )
-    if (!stuck) setSaveError(null)
+    // 端末に控えを残せなかった送信待ち（水分など・F01）がまだメモリにある間は、その警告を下ろさない
+    if (!stuck) setSaveError(settledSaveError)
   }, [])
 
   /** 同じセルへの保存が交差しないよう、キーごとに直列化する（rev の追い越しを防ぐ） */
@@ -989,11 +1037,17 @@ export function MealsSheetPage({
       setInputEnabled(gate.value === true)
       setFlagChecked(gate.observed)
       setCellsMissing(gate.cells === 'missing')
+      setForbidden(gate.forbidden === true)
+      if (gate.forbidden === true) {
+        setFlagError(FORBIDDEN_REASON)
+        return
+      }
       if (!gate.observed) setFlagError(ERR_FLAG)
     } catch {
       if (!aliveRef.current) return
       setInputEnabled(false)
       setFlagChecked(false)
+      setForbidden(false)
       setFlagError(ERR_FLAG)
     }
   }, [])
@@ -1136,6 +1190,7 @@ export function MealsSheetPage({
       )
       const pendingNow = store.queued
       const keys = new Set([...Object.keys(phasesRef.current), ...Object.keys(editsRef.current)])
+      let notPersistedLeft = false
       for (const k of keys) {
         const p = phasesRef.current[k]
         const edits = editsRef.current[k] ?? {}
@@ -1148,6 +1203,14 @@ export function MealsSheetPage({
         }
         const fresh = nextMeals[k]
         delete staleRef.current[k] // 最新を読み込んだ（先の値を出してよい）
+        // 端末に控えを残せなかった送信待ち（F01）が送れた・止まった＝印を外して、下の突き合わせで片付ける
+        if (unpersistedRef.current[k] === true && pendingNow[k] === undefined) delete unpersistedRef.current[k]
+        if (unpersistedRef.current[k] === true) {
+          // まだ送れていない。入力と「未保存」をそのまま持ち続ける（「食い違いはありません」に塗り替えない）
+          keepPhases[k] = 'error'
+          notPersistedLeft = true
+          continue
+        }
         if (keepPhasesFromStore[k] !== undefined) continue // 止まっている・拒否された食事（送信待ちから取り込んだ）
         if (p === 'queued' && pendingNow[k] !== undefined) {
           keepPhases[k] = 'queued'
@@ -1187,6 +1250,7 @@ export function MealsSheetPage({
       syncPendingAll()
       if (stillConflict) setSaveError(ERR_CONFLICT_STILL)
       else if (store.rejected) setSaveError(ERR_REJECTED)
+      else if (notPersistedLeft) setSaveError(MSG_NOT_PERSISTED)
       else if (unsavedLeft) setSaveError(MSG_UNSAVED_AFTER_RELOAD)
       // Undo（直前の水分追加の取り消し）は利用者が押した読み込み直し・期間変更でだけ捨てる。
       // 背景の取り直しで消すと、押し間違えた ＋ml を戻す唯一の手段が黙って消える。
@@ -1203,7 +1267,8 @@ export function MealsSheetPage({
       } else {
         commitUndo({})
       }
-      if (Object.keys(keepPhases).length === 0) setSaveError(null)
+      // 端末に控えを残せなかった水分など（F01）がまだメモリにある間は、その警告を下ろさない
+      if (Object.keys(keepPhases).length === 0) setSaveError(settledSaveError)
 
       // 退避した水分がサーバーへ載ったかは、取り直した合計で1名1日ずつ確かめる（観測ベース）
       setQueuedFluids((prev) => {
@@ -1291,9 +1356,12 @@ export function MealsSheetPage({
     try {
       // info（変更のあった行）は渡されないこともある＝引数は省略可として受ける
       // （行情報を渡さない db.ts でも、この画面は「取り直す」側へ倒れて成立する）
-      unsub = subscribeChanges((table: string, info?: { event: string; row: RowInfo }) => {
+      unsub = subscribeChanges((table: string, info?: { event: string; row: RowInfo; resync?: ChangeInfo['resync'] }) => {
         if (stopped || !aliveRef.current) return
         if (typeof table !== 'string' || WATCHED_DAY_COL[table] === undefined) return
+        // 取り直しの合図（RESYNC・F14）のうち、画面に戻った（resume）・電波が戻った（online）は、上の自前の処理
+        // （30秒のしきい値つき）が受け持つ。二重に読み直さないよう捨て、購読がつながり直した（reconnect）だけを受ける
+        if (isResumeOrOnline(info)) return
         // 自分の保存で出た通知には反応しない（保存直後の取り直しは無駄な往復になる）。
         // ★行で見分ける（2026-09-05 修正）。以前は「自分の保存から3秒間の通知を捨てる」
         //   時刻だけの判定で、同じ3秒に届いた**他端末の変更まで捨てて**いた。
@@ -1313,6 +1381,33 @@ export function MealsSheetPage({
       if (timer) clearTimeout(timer)
       if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisible)
       if (typeof window !== 'undefined') window.removeEventListener('online', onOnline)
+      if (unsub) {
+        try {
+          unsub()
+        } catch {
+          /* 解除失敗は表示に影響しないため無視する */
+        }
+      }
+    }
+  }, [])
+
+  // 送信待ちが減った（裏で送れた・止まった）時に背景で取り直す（F01・F17）。自分の送信の変更通知は isSelfWrite で
+  // 捨てられるので、ここで取り直さないと「⚠ 未送信」や、端末に控えを残せなかった入力の「未保存」が、手で読み込み
+  // 直すまで残る。取り直しは送信待ち・止まった行を db.ts から読み直し、届いた値と同じ入力を片付ける
+  useEffect(() => {
+    let last = -1
+    let unsub: (() => void) | null = null
+    try {
+      unsub = queueSubscribe((n) => {
+        if (!aliveRef.current) return
+        const count = typeof n === 'number' && n >= 0 ? n : 0
+        if (last >= 0 && count < last) retryRef.current?.()
+        last = count
+      })
+    } catch {
+      unsub = null
+    }
+    return () => {
       if (unsub) {
         try {
           unsub()
@@ -1420,9 +1515,19 @@ export function MealsSheetPage({
           rebase,
         })
         if (!aliveRef.current) return
+        if (res === 'queued' && !isQueuePersisted()) {
+          // 送信待ちにしたが、端末に控えを残せなかった（F01）。送ったものとして扱わない: 入力（edits）は残し、
+          // 送信待ちの重ね表示（queuedRef）にも積まず、「未保存」として表の上の警告（危険の色）に出す。
+          // 送信待ちはこのタブのメモリにはあるので、電波が戻れば送られ、その後の読み込みで片付く
+          unpersistedRef.current[key] = true
+          setPhase(key, 'error')
+          setSaveError(MSG_NOT_PERSISTED)
+          return
+        }
         if (res === 'queued') {
           // 送信待ちにした値は、送信が済むまで表示に重ねて残す（指摘 M1）。送信待ちへ渡し終えた欄だけ
           // 編集から消す（R-D・欄単位）。送信待ちの後に入れる値は送った内容が基準
+          delete unpersistedRef.current[key]
           queuedRef.current[key] = { ...(queuedRef.current[key] ?? {}), ...send }
           writeEdits(key, settleSent(editsRef.current[key] ?? {}, edits, { ...shown, ...send }))
           setPhase(key, 'queued')
@@ -1431,6 +1536,8 @@ export function MealsSheetPage({
         }
         // サーバーへ届いた＝この直後に届く変更通知は自分のもの（取り直しの合図にしない）
         selfWriteRef.current = Date.now()
+        // 端末に控えを残せなかった送信待ち（F01）の分も、この保存でサーバーへ届いた（同じ送り先の送信待ちへまとまる）
+        delete unpersistedRef.current[key]
         if (res.held === true) {
           // ほかの端末の値と食い違って止まっている食事へまとめた（送っていない）。競合として見せる
           holdAsHeld(t)
@@ -1570,6 +1677,14 @@ export function MealsSheetPage({
             recorded_by: actorRef.current,
           })
           if (!aliveRef.current) return
+          if (res === 'queued' && !isQueuePersisted()) {
+            // 送信待ちにしたが、端末に控えを残せなかった（F01）。送信待ちの概算（queuedFluids）には積まず、
+            // 表の上の警告（危険の色・閉じるまで残す）とトーストで知らせる。電波が戻れば送られ、合計に載る
+            const text = `水分 ＋${ml}ml：${MSG_NOT_PERSISTED}`
+            setSaveError(text)
+            showRef.current(text)
+            return
+          }
           if (res === 'queued') {
             setQueuedFluids((prev) => {
               const held = prev[key]
@@ -1618,6 +1733,13 @@ export function MealsSheetPage({
             const queuedUndo = { ...undoRef.current }
             delete queuedUndo[key]
             commitUndo(queuedUndo)
+            if (!isQueuePersisted()) {
+              // 取り消しを送信待ちにしたが、端末に控えを残せなかった（F01）。表の上の警告にも残す
+              const text = `水分 ＋${target.ml}ml の取り消し：${MSG_NOT_PERSISTED}`
+              setSaveError(text)
+              showRef.current(text)
+              return
+            }
             showRef.current(`水分 ＋${target.ml}ml の取り消し：${MSG_QUEUED}`)
             return
           }
@@ -1686,6 +1808,14 @@ export function MealsSheetPage({
           const res = await saveMealEdits(t, edits, { rebase: true, asNew: true, fill: { recorded_by: actorRef.current } })
           if (!aliveRef.current) return
           delete missingRef.current[key]
+          if (res === 'queued' && !isQueuePersisted()) {
+            // 端末に控えを残せなかった（F01）。新しい行として送る入力（基準 null）を残し、「未保存」として出す
+            unpersistedRef.current[key] = true
+            writeEdits(key, edits)
+            setPhase(key, 'error')
+            setSaveError(MSG_NOT_PERSISTED)
+            return
+          }
           if (res === 'queued') {
             queuedRef.current[key] = { ...(queuedRef.current[key] ?? {}), ...(editValues(edits) as MealPatch) }
             writeEdits(key, {})
@@ -1807,6 +1937,13 @@ export function MealsSheetPage({
       }
       // 3択のどれかを選んだ＝この食事の編集は解決した（くらべて選ぶで送った・取り下げた）
       writeEdits(key, {})
+      if (r.queued && (r.choice === 'mine' || r.choice === 'both') && !isQueuePersisted()) {
+        // 選んだ内容を送信待ちにしたが、端末に控えを残せなかった（F01）。送信待ちとして案内せず、離れる時の確認に数える
+        unpersistedRef.current[key] = true
+        setPhase(key, 'error')
+        setSaveError(MSG_NOT_PERSISTED)
+        return
+      }
       if (r.choice === 'mine' && r.queued) {
         // 自分の値で直す更新を送信待ちにした
         setPhase(key, 'queued')
@@ -1835,7 +1972,9 @@ export function MealsSheetPage({
       registerUnsaved(
         () =>
           Object.values(editsRef.current).some((e) => hasEdits(e)) ||
-          Object.values(phasesRef.current).some((p) => p === 'conflict'),
+          Object.values(phasesRef.current).some((p) => p === 'conflict') ||
+          // 端末に控えを残せなかった送信待ち（F01）は、画面を離れると消える
+          Object.keys(unpersistedRef.current).length > 0,
       ),
     [],
   )
@@ -2144,7 +2283,10 @@ export function MealsSheetPage({
           openLabel="フロア・日数・倍率の操作を開く"
           closeLabel="フロア・日数・倍率の操作を畳む"
           collapsed={(compact) => periodNav(compact ? periodLabelShort : periodLabel, compact)}
-          full={() => (
+          // いまの記録者（新しい行の記入者・変更の記録に付く）を常に出し、その場で切り替えられるようにする（F38。
+          // 畳んでも隠さない）。記録者の表示は印刷に出さない（部品が print:hidden＝紙は今のまま）
+          persistent={<RecorderBar actorId={actorId ?? null} />}
+          full={(extra) => (
             <div className="sheet-pickbar">
               <div className="sheet-pickbar-group">
                 <SegmentPicker
@@ -2175,6 +2317,7 @@ export function MealsSheetPage({
               >
                 最新
               </button>
+              {extra}
             </div>
           )}
         />
@@ -2193,7 +2336,7 @@ export function MealsSheetPage({
         ) : null}
       </SectionCard>
 
-      {flagError ? <ErrorBlock message={flagError} onRetry={() => void loadFlag()} /> : null}
+      {flagError ? <ErrorBlock message={flagError} onRetry={forbidden ? undefined : () => void loadFlag()} /> : null}
 
       {!flagError && !flagChecked ? (
         <div
@@ -2225,7 +2368,15 @@ export function MealsSheetPage({
 
 
       {saveError ? (
-        <div role="alert" className="rounded-lg border border-warn bg-warn-bg p-4">
+        // 端末に控えを残せなかった送信待ち（F01）は、閉じると消えるので危険の色で出す（枠そのものは今までと同じ）
+        <div
+          role="alert"
+          className={
+            isNotPersistedText(saveError)
+              ? 'rounded-lg border border-danger bg-danger-bg p-4'
+              : 'rounded-lg border border-warn bg-warn-bg p-4'
+          }
+        >
           <p className="text-base text-ink">
             <span aria-hidden="true">▲ </span>
             {saveError}

@@ -47,7 +47,7 @@
 **結論: 構造は合格（RLS authenticated 限定・実名ゼロ・VITE_回避・console規律はいずれも実在前例 0008/0009/wsClient.ts と同型を確認）。1点だけ設計間矛盾がある。**
 
 - 0008（read_auth を authenticated 限定・anon はポリシー不存在で全拒否）・0009（VITE_ は公開バンドルへ焼き込まれる実測）の引用は原文確認済み。踏襲は正しい。
-- **矛盾（⑧にも計上）**: 設計1 §5 は「入力途中の下書きも localStorage 保持」、設計2 §9 は「本文下書きは保存しない」。申し送り本文は体調・氏名を含み得る実質PIIであり、共有iPadの localStorage に平文で残る。裁定案: **送信失敗キューは保持必須（記録消失防止が優先・原則4）／入力途中下書きは「送信成功または明示破棄で即削除＋24時間期限」付きで保持**とし、承認時に1点確認。
+- **矛盾（⑧にも計上）**: 設計1 §5 は「入力途中の下書きも localStorage 保持」、設計2 §9 は「本文下書きは保存しない」。申し送り本文は体調・氏名を含み得る実質PIIであり、共有iPadの localStorage に平文で残る。裁定案: **送信失敗キューは保持必須（記録消失防止が優先・原則4）／入力途中下書きは「送信成功または明示破棄で即削除＋24時間期限」付きで保持**とし、承認時に1点確認。（追記 2026-10-10: 2026-09-29 本人承認 M3・L1 で下書きの期限は**設けない**ことに決まった。現行の規則は ui-design.md §6.5・concurrent-entry.md §9）
 - 現場トークンの localStorage 手入力・console 非出力・最小射影は wsClient.ts 規約1/3/4 と同型で合格。合成データでの性能検証（実在氏名ゼロ）も明記済み。
 
 ## ⑤ 規約適合監査
@@ -120,7 +120,7 @@
 - [medium/both] チャンクサイズ不一致（設計1: 5日／設計2: 初期10日＋追加10日）とタイムライン構成データの数え違い（「3系列」だが実際は7種）
   - 修正: 初期10日・追加10日・RPC1発に統一（要求原文「直近10日分」に整合）。設計1 §2 の見積り表を10日チャンクで再計算して差し替え
 - [medium/both] 下書き保存の矛盾（設計1: localStorage保持／設計2: 保存しない）。申し送り本文は実質PIIで共有iPadに平文残留するリスクと、記録消失防止の要求が衝突
-  - 修正: 送信失敗キューは保持必須（原則4優先）。入力途中下書きは「送信成功または明示破棄で即削除＋24時間期限」付き保持案で承認時に1点確認。localStorage プレフィクスも cl_ に統一（設計1の clg_ を廃止）
+  - 修正: 送信失敗キューは保持必須（原則4優先）。入力途中下書きは「送信成功または明示破棄で即削除＋24時間期限」付き保持案で承認時に1点確認（→ 2026-09-29 本人承認で期限なしに決定・ui-design.md §6.5）。localStorage プレフィクスも cl_ に統一（設計1の clg_ を廃止）
 - [medium/db] 移行元 events の facility・kind（種別）列の受け皿が notes に無く、importer で無言に落ちる（moushiokuri-api.gs L126-129 で列の実在を確認済み）
   - 修正: notes に facility text・category text を追加（または本文前置タグ化を明示裁定）。M-024 両方向計数の対象列に含め、列単位の落丁もレポートする
 - [medium/ui] タイムラインのサマリチップが min-height 32px でタップ可能＝タップ領域44px未満（HIG介護現場要件2違反）
@@ -176,6 +176,19 @@
 - 空上書き: body='' の update が DB check で拒否されること／部分更新で未送信列が温存されること
 - soft delete → 復元（deleted_at=null）の一巡／anon キー直叩きで全表 select/insert/update/delete が全拒否（pg_policies 照合＝0008 の検証手順を踏襲）
 - バックアップ: pg_dump → ローカルPostgres復元 → 全表行数一致
+- サーバーの契約（使い捨ての Postgres・本番に向けない。2026-10-10 追記）: Supabase の役割・auth の真似（care-backend の
+  supabase/tests/00_supabase_stub.sql）・private.is_member() の差し替え（current_setting('test.member')）・kv_entries と cron の真似・
+  Realtime 認可の真似（realtime.messages と realtime.topic()）を当ててから supabase/migrations の 0001〜最新を ON_ERROR_STOP で当て、
+  `CARELOG_PG_URL=postgres://postgres@127.0.0.1:<port>/<db>` で次の3本を流す: `node tests/note-contract-pg.mjs`（0017・0027）／
+  `node tests/vital-delete-pg.mjs`（0020）／`node tests/migrations-pg.mjs`（0021〜0030）。0001〜0020 だけの DB では 0021〜0030 の契約が赤になること
+  （直す前の再現）も確かめる。移行は2回流してもエラーにならないこと（冪等）
+- 上の用意と実行器は、まとめて `CARELOG_PG_ADMIN_URL=postgres://postgres@127.0.0.1:<port>/postgres node tests/pg-run-all.mjs` で流せる
+  （2026-10-10 監査 F13）。真似はリポジトリの tests/pg-supabase-stub.sql・tests/pg-backend-stub.sql・tests/pg-realtime-stub.sql を使い
+  （care-backend は読まない）、0015 の pg_cron の読み込み1文だけを試験の DB で外す。0021 以降は2回目も当てて冪等を確かめ、
+  `tests/*-pg.mjs` を実行器ごとに写した新しい DB で流す。上の3本に加えて `tests/cell-contract-pg.mjs`（0011・偽物と並べる）と
+  `tests/concurrent-pg.mjs`（concurrent-entry.md §7 の同時実行）も流れる。soft delete → 復元（deleted_at=null）の一巡は
+  vital-delete-pg.mjs の最後の1件。GitHub Actions の `pg-contract`（postgres サービス）が push のたびに同じものを流す
+- 流し直しの組: 0010 を流し直したら 0021、0017 を流し直したら 0027、0002 を流し直したら 0030 も流し直す（後の移行が同じ関数を作り直しているため）
 
 ### 6. 移行検証（importer・合成spreadsheet相当のフィクスチャで先行、実データは読取のみ）
 - 冪等: 同一期間を2回実行し2回目 inserted=0

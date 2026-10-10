@@ -2,8 +2,9 @@
 //
 // ・fakeApplyCellEdits … 0011 の判定規則を JS で写した偽物（tests/logic.test.mjs の偽クライアントが使う）
 // ・CELL_CONTRACT_CASES … 同じ入力に対して 0011 と偽物が同じ答えを返すことを押さえる表。
-//     npm test は偽物で、素の Postgres（0001〜0011 適用済み）では別の実行器で同じ表を流し、
+//     npm test は偽物で、素の Postgres（移行 0001〜最新を適用）では tests/cell-contract-pg.mjs で同じ表を流し、
 //     どちらも expect と一致することを確かめる（規則の食い違いをここで捕まえる）。
+//     Postgres の側は tests/pg-run-all.mjs がまとめて流し、GitHub Actions の pg-contract が push のたびに流す（2026-10-10 監査 F13）。
 // ・checkContract … 結果と後の状態を expect と突き合わせ、食い違いの一覧を返す（空なら一致）
 //
 // 個人情報は置かない（利用者・職員は数値IDのみ。本文は記号だけ）。

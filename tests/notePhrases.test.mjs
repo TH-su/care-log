@@ -6,20 +6,24 @@
 
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { registerLoadFailure } from './ts-load.mjs'
 
 // TypeScript を直接読み込めない Node では検証を登録せずスキップし、理由を実行結果に残す
 // （tests/logic.test.mjs と同じ扱い。黙って「成功」にしない）
+// 読めないのが古い Node のせいでなければ失敗にする（F69。例外は捨てずに控えて結果に出す）
 let NP = null
+let npLoadError = null
 try {
   NP = await import('../src/lib/notePhrases.ts')
-} catch {
+} catch (e) {
   NP = null
+  npLoadError = e
 }
 
 const BLANK = '＿' // 全角の低線「＿」
 
 if (NP === null) {
-  it('notePhrases の検証（スキップ）', { skip: 'この Node では TypeScript を直接読み込めないため、定型句の検証をスキップしました（Node 22.18 以降で実行してください）。' }, () => {})
+  registerLoadFailure('notePhrases の検証', npLoadError, 'この Node では TypeScript を直接読み込めないため、定型句の検証をスキップしました（Node 22.18 以降で実行してください）。')
 } else {
   const { appendPhrase, NOTE_PHRASE_CATEGORIES } = NP
 

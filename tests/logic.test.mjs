@@ -15,6 +15,7 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { registerLoadFailure } from './ts-load.mjs'
 
 // 検証対象は凍結ファイル（src/lib/types.ts・src/lib/format.ts）そのもの。しきい値の写しは持たない
 // （写しを持つと本体がずれてもテストが落ちなくなり、回帰テストの意味が無くなる）。
@@ -27,12 +28,15 @@ const TS_UNSUPPORTED =
 
 let T = null
 let F = null
+// 読み込みの例外は捨てずに控える（F69。古い Node 以外で読めない時は、スキップでなく失敗にして原因を出す）
+let tsLoadError = null
 try {
   T = await import('../src/lib/types.ts')
   F = await import('../src/lib/format.ts')
-} catch {
+} catch (e) {
   T = null
   F = null
+  tsLoadError = e
 }
 const TS_READY = T !== null && F !== null
 
@@ -185,6 +189,7 @@ const DB_UNSUPPORTED =
 const lsStore = new Map()
 
 let DB = null
+let dbLoadError = null
 if (process.env[PROBE_ENV] !== '1') {
   try {
     const { registerHooks } = await import('node:module')
@@ -212,8 +217,9 @@ if (process.env[PROBE_ENV] !== '1') {
       },
     }
     DB = await import('../src/lib/db.ts')
-  } catch {
+  } catch (e) {
     DB = null
+    dbLoadError = e
   }
 }
 
@@ -449,11 +455,14 @@ let RS = null
 let CC = null
 // 欄単位の「入力中」表示（Presence）の純関数
 let PR = null
+let prLoadError = null
+let libLoadError = null
 if (process.env[PROBE_ENV] !== '1') {
   try {
     PR = await import('../src/lib/presence.ts')
-  } catch {
+  } catch (e) {
     PR = null
+    prLoadError = e
   }
   try {
     CF = await import('../src/lib/conflict.ts')
@@ -461,12 +470,13 @@ if (process.env[PROBE_ENV] !== '1') {
     LG = await import('../src/lib/leaveGuard.ts')
     RS = await import('../src/lib/rowSync.ts')
     CC = await import('./cell-contract.mjs')
-  } catch {
+  } catch (e) {
     CF = null
     HV = null
     LG = null
     RS = null
     CC = null
+    libLoadError = e
   }
 }
 
@@ -476,19 +486,20 @@ if (process.env[PROBE_ENV] === '1') {
   process.stdout.write(JSON.stringify(tzObservations()))
 } else if (TS_READY) {
   registerTests()
+  // 読み込めない時: 古い Node だけスキップ。それ以外（本体に Node で読めない書き方・読み込み時の例外）と CI では失敗にする（F69）
   if (CF) registerConflictTests()
-  else it('食い違いの判定の検証', { skip: TS_UNSUPPORTED }, () => {})
+  else registerLoadFailure('食い違いの判定の検証', libLoadError, TS_UNSUPPORTED)
   if (RS) registerRowSyncTests()
-  else it('行の入力と保存の共通の仕組みの検証', { skip: TS_UNSUPPORTED }, () => {})
+  else registerLoadFailure('行の入力と保存の共通の仕組みの検証', libLoadError, TS_UNSUPPORTED)
   if (CC) registerCellContractTests()
-  else it('欄ごとの compare-and-set の契約の検証', { skip: TS_UNSUPPORTED }, () => {})
+  else registerLoadFailure('欄ごとの compare-and-set の契約の検証', libLoadError, TS_UNSUPPORTED)
   if (PR) registerPresenceTests()
-  else it('欄単位の「入力中」表示（Presence）の検証', { skip: TS_UNSUPPORTED }, () => {})
+  else registerLoadFailure('欄単位の「入力中」表示（Presence）の検証', prLoadError, TS_UNSUPPORTED)
   if (DB && CC && RS) registerDbTests()
-  else it('送信キュー・入力解禁ゲートの検証', { skip: DB_UNSUPPORTED }, () => {})
+  else registerLoadFailure('送信キュー・入力解禁ゲートの検証', dbLoadError ?? libLoadError, DB_UNSUPPORTED, { hooks: true })
 } else {
-  // 対象を読み込めない Node。テスト本体は登録せず、スキップの理由だけを結果に残す
-  it('純ロジックの回帰テスト', { skip: TS_UNSUPPORTED }, () => {})
+  // 対象を読み込めない。古い Node ならスキップの理由だけを結果に残し、それ以外は失敗にする（F69）
+  registerLoadFailure('純ロジックの回帰テスト', tsLoadError, TS_UNSUPPORTED)
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -525,7 +536,9 @@ function registerDbTests() {
     })
 
     it('table/kind が壊れた行は数えない（未送信の記録として扱わない）', () => {
-      setQueueRaw(JSON.stringify({ ops: [op('a'), op('b', { table: 'unknown_table' })] }))
+      // 2026-10-10 F27②: 形の整った「この版が知らない表」の op は新しい版のタブが積んだ分として数える
+      // （tests/queue-core.test.mjs）。数えないのは中身（payload）すら読めない壊れた行
+      setQueueRaw(JSON.stringify({ ops: [op('a'), op('b', { table: 'unknown_table', payload: null })] }))
       assert.equal(DB.queuePending(), 1)
     })
 
@@ -3741,8 +3754,9 @@ function registerConflictTests() {
 // 欄ごとの compare-and-set の契約（supabase/migrations/0011_apply_cell_edits.sql）
 //
 // tests/cell-contract.mjs の表を、JS の写し（偽のサーバー）で流す。同じ表は素の Postgres
-// （0001〜0011 適用済み）でも流して expect と一致することを実測してある（第1段の検収）。
-// 規則を変えたら、表・0011・写しの3つを一緒に直すこと（どれか1つだけ直すとここか実測で落ちる）。
+// （移行 0001〜最新を適用）でも tests/cell-contract-pg.mjs で流し、GitHub Actions の pg-contract が push のたびに
+// expect と一致することを確かめる（2026-10-10 監査 F13。それまでは第1段の検収で1回だけ手で実測していた）。
+// 規則を変えたら、表・0011・写しの3つを一緒に直すこと（どれか1つだけ直すとここか pg-contract で落ちる）。
 // ══════════════════════════════════════════════════════════════
 
 function registerCellContractTests() {
@@ -4511,13 +4525,16 @@ function registerPresenceTests() {
     it('日報は記録する職員を選んでいなくても参加し、配るのは書きかけがある時だけ（見ているだけの端末は配らない）', () => {
       const s = src('pages/DailySheetPage.tsx')
       assert.doesNotMatch(s, /if \(actorId === null\) return\s*\n\s*const p = joinNotePresence/)
-      assert.match(s, /return first \? \{ day: first\[0\], residentId: first\[1\] \} : null/)
+      // 2026-10-10 F21: 配るのは「この起動中に手を入れた書きかけ」がある時だけ。複数の日なら最後に手を入れた日
+      // （tests/daily-mdfix.test.mjs で詳しく見る）
+      assert.match(s, /return latestComposing\(composingRef\.current\)/)
       assert.match(s, /presenceWhoNames\(othersHere,/)
     })
     it('申し送りフォームは開いただけでは配らず（受け取りだけ）、開いている日の要素だけを出す', () => {
       const s = src('pages/NoteFormPage.tsx')
       assert.match(s, /joinNotePresence\(null, setOthersHere\)/)
-      assert.match(s, /const composing = form\.targetPicked \|\| form\.body\.trim\(\) !== ''/)
+      // 2026-10-10 F21: 戻した書きかけだけでは配らない（本文を打った・対象を選んだ後だけ）
+      assert.match(s, /const composing = touched && \(form\.targetPicked \|\| form\.body\.trim\(\) !== ''\)/)
       assert.match(s, /presenceOnDay\(othersHere, form\.noteOn\)/)
     })
     it('食事一括は触れただけ（pointerdown）では配らず、押す操作の確定（click）とフォーカスで配る', () => {

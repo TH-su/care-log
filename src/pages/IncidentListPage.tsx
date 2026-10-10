@@ -4,6 +4,7 @@
 // 行: 発生日時・区分・対象者・種別・程度・状態（対応中／完了）・市への報告（要／報告済み 日付／—）。行を押すと入力・編集（/incident/:id）。
 // 上部に件数（対応中 N・市へ報告が要で未報告 N）と「＋記録する」（/incident/new）。
 // この端末の送信待ちにある追加（まだサーバーに無い記録）は送信待ちから読んで「未送信」として出す（押せない・二重に記録しない）。
+// この端末で止まっている（自動では送られない）修正・取り消しがある記録の行には、その印を出す（F37・2026-10-10）。
 //
 // 規律:
 // - 取得は db.ts の関数のみ（supabase を直呼びしない）。期間は必須（全件ロードしない）
@@ -11,14 +12,16 @@
 // - 期間・区分・状態は保存しない（日付に紐づく状態＝原則11の既定。開くと常に直近3か月・全て）。現在地は URL で復元される
 // - 氏名・記録を localStorage・console に出さない。色だけで意味を伝えない（文字を併記）
 
-import { useCallback, useEffect, useId, useMemo, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import {
   DbError,
   fetchAllResidents,
   fetchIncidents,
+  FORBIDDEN_REASON,
   getKindInputGate,
   kindBlockedMessage,
+  listStoppedOps,
   pendingIncidentOps,
   queueSubscribe,
   subscribeIncidentChanges,
@@ -63,7 +66,7 @@ export function IncidentListPage() {
   const [rangeMsg, setRangeMsg] = useState<string | null>(null)
 
   const [residents, setResidents] = useState<Resident[] | null>(null)
-  const [gate, setGate] = useState<{ value: boolean; observed: boolean } | null>(null)
+  const [gate, setGate] = useState<{ value: boolean; observed: boolean; forbidden?: true } | null>(null)
   const [baseError, setBaseError] = useState<string | null>(null)
   const [baseTick, setBaseTick] = useState(0)
   const [list, setList] = useState<Incident[] | null>(null)
@@ -89,10 +92,15 @@ export function IncidentListPage() {
     }
   }, [baseTick])
 
+  // 絞り込み（期間・区分・状態）が変わった時だけ一覧を空にして「読み込み中」を出す。他の端末の変更・画面に戻った時の
+  // 取り直し（tick）では、表示中の一覧を残したまま差し替える（F14・2026-10-10。復帰・再接続のたびに読み込み中へ戻ると、
+  // 一覧がちらつき、スクロールの位置も失う）
+  const queryKey = `${from}|${to}|${kind}|${status}`
+  const shownQueryRef = useRef<string | null>(null)
   useEffect(() => {
     let alive = true
     setListError(null)
-    setList(null)
+    if (shownQueryRef.current !== queryKey) setList(null)
     fetchIncidents({
       fromIso: from,
       toIso: to,
@@ -100,15 +108,18 @@ export function IncidentListPage() {
       status: status === 'all' ? null : status,
     })
       .then((rows) => {
-        if (alive) setList(rows)
+        if (!alive) return
+        shownQueryRef.current = queryKey
+        setList(rows)
       })
       .catch((e: unknown) => {
-        if (alive) setListError(e instanceof DbError && e.kind === 'server' ? e.message : ERR_LOAD)
+        // 許可リスト外（forbidden）も、通信エラーの定型文ではなくその理由を出す（F61）
+        if (alive) setListError(e instanceof DbError && (e.kind === 'server' || e.kind === 'forbidden') ? e.message : ERR_LOAD)
       })
     return () => {
       alive = false
     }
-  }, [from, to, kind, status, tick])
+  }, [from, to, kind, status, tick, queryKey])
 
   // 送信待ちの件数が変わったら「未送信」の行を描き直す。減った時（送れた）は一覧を読み直す
   useEffect(() => {
@@ -121,12 +132,26 @@ export function IncidentListPage() {
     })
   }, [])
 
-  // 他の端末の追加・変更を取り込む（期間外の通知は無視。行を特定できない通知は読み直す側へ倒す）
+  // 一覧に出している記録の id（F16。発生日を期間の外へ直した変更は、更新後の行だけを見ると期間外で捨ててしまい、
+  // 直す前の日付の行が一覧に残った。出している行の変更は日付に関係なく取り込む）。購読の張り直しを避けるため ref に持つ
+  const shownIdsRef = useRef<Set<number>>(new Set())
+  useEffect(() => {
+    shownIdsRef.current = new Set((list ?? []).map((i) => i.id))
+  }, [list])
+
+  // 他の端末の追加・変更を取り込む（期間外の通知は無視。ただし一覧に出している記録の変更は取り込む。
+  // 行を特定できない通知は読み直す側へ倒す）
   useEffect(() => {
     let timer: number | null = null
     const unsub = subscribeIncidentChanges((_table, info) => {
       const row = info?.row ?? null
-      if (row !== null && typeof row.occurred_on === 'string' && (row.occurred_on < from || row.occurred_on > to)) return
+      if (
+        row !== null &&
+        typeof row.occurred_on === 'string' &&
+        (row.occurred_on < from || row.occurred_on > to) &&
+        !shownIdsRef.current.has(Number(row.id))
+      )
+        return
       if (timer !== null) window.clearTimeout(timer)
       timer = window.setTimeout(() => setTick((n) => n + 1), 400)
     })
@@ -146,6 +171,15 @@ export function IncidentListPage() {
   const pending = useMemo(() => {
     void queueTick
     return pendingIncidentOps()
+  }, [queueTick])
+  // この端末で止まっている修正・取り消しがある記録（F37。止まっても件数は減らないので、送信待ちの通知のたびに引き直す）
+  const stoppedIds = useMemo(() => {
+    void queueTick
+    const ids = new Set<number>()
+    for (const o of listStoppedOps()) {
+      if (o.table === 'incidents' && o.kind === 'update' && o.rowId !== null) ids.add(o.rowId)
+    }
+    return ids
   }, [queueTick])
 
   const onRange = useCallback(
@@ -190,7 +224,10 @@ export function IncidentListPage() {
 
   return (
     <div className="mx-auto w-full max-w-2xl space-y-4 p-4">
-      {!gate.observed ? (
+      {gate.forbidden === true ? (
+        // 許可リスト外のアカウント（F61）: 封鎖とも通信エラーとも別の理由を出す
+        <ErrorBlock message={FORBIDDEN_REASON} onRetry={() => setBaseTick((n) => n + 1)} />
+      ) : !gate.observed ? (
         <ErrorBlock message={ERR_GATE} onRetry={() => setBaseTick((n) => n + 1)} />
       ) : locked ? (
         <div id={reasonId} role="status" className="rounded-lg border border-warn bg-warn-bg p-4">
@@ -319,10 +356,12 @@ export function IncidentListPage() {
         </section>
       ) : null}
 
-      {listError !== null ? (
-        <ErrorBlock message={listError} onRetry={() => setTick((n) => n + 1)} />
-      ) : list === null ? (
-        <LoadingBlock label="事故・ヒヤリハットを読み込み中です…" />
+      {/* 読み直しに失敗しても、前に読めた一覧は消さずに残す（F14。失敗の知らせは上に出す） */}
+      {listError !== null ? <ErrorBlock message={listError} onRetry={() => setTick((n) => n + 1)} /> : null}
+      {list === null ? (
+        listError !== null ? null : (
+          <LoadingBlock label="事故・ヒヤリハットを読み込み中です…" />
+        )
       ) : list.length === 0 ? (
         <EmptyBlock message="この期間・絞り込みの記録はありません。期間を広げるか、絞り込みを「全て」にしてください。" />
       ) : (
@@ -363,6 +402,11 @@ export function IncidentListPage() {
                           : '—'}
                     </span>
                   </span>
+                  {stoppedIds.has(i.id) ? (
+                    <span className="mt-1 block text-sm font-bold text-danger">
+                      <span aria-hidden="true">▲ </span>この端末に、止まっている修正・取り消しがあります（開いて選んでください）
+                    </span>
+                  ) : null}
                 </Link>
               </li>
             )

@@ -517,6 +517,60 @@ export function useToast(): { toast: ReactNode; show: (msg: string, undo?: () =>
 }
 
 // ══════════════════════════════════════════════════════════════
+// useToastHost（F64・2026-10-10）
+// ══════════════════════════════════════════════════════════════
+// useToast は通知の state を呼び出し側の画面に持つので、通知が出る時と消える時に画面全体を描き直す
+// （日報の10日表示では1回あたり数十〜百数十 ms。iPhone で文字入力がもたつく）。
+// useToastHost は同じ見た目・同じ呼び方（{ toast, show }）のまま、通知の state を小さな部品（ToastHost）の中に持つ。
+// show は ref 経由で部品へ渡すだけなので、通知の出し入れで呼び出し側の画面は描き直さない。
+// 既存の useToast は変えない（使っている画面の挙動はそのまま）。差し替えるかは各画面が決める。
+
+interface ToastHandle {
+  show: (msg: string, undo?: () => void) => void
+}
+
+/** 通知の state を自分で持つ部品（useToastHost の中だけで使う） */
+function ToastHost({
+  handleRef,
+  pendingRef,
+}: {
+  handleRef: { current: ToastHandle | null }
+  pendingRef: { current: ToastState | null }
+}) {
+  const { toast, show } = useToast()
+  useEffect(() => {
+    const handle: ToastHandle = { show }
+    handleRef.current = handle
+    // 部品が描かれる前に頼まれた通知があれば、ここで出す（取りこぼさない）
+    const waiting = pendingRef.current
+    if (waiting !== null) {
+      pendingRef.current = null
+      show(waiting.msg, waiting.undo)
+    }
+    return () => {
+      if (handleRef.current === handle) handleRef.current = null
+    }
+  }, [handleRef, pendingRef, show])
+  return <>{toast}</>
+}
+
+/**
+ * useToast と同じ呼び方の通知。通知の出し入れで呼び出し側を描き直さない（F64）。
+ * toast（描く物）と show（出す関数）はどちらも作り直さない＝依存に入れても effect・memo を壊さない
+ */
+export function useToastHost(): { toast: ReactNode; show: (msg: string, undo?: () => void) => void } {
+  const handleRef = useRef<ToastHandle | null>(null)
+  const pendingRef = useRef<ToastState | null>(null)
+  const show = useCallback((msg: string, undo?: () => void) => {
+    const h = handleRef.current
+    if (h !== null) h.show(msg, undo)
+    else pendingRef.current = { msg, undo }
+  }, [])
+  const toast = useMemo(() => <ToastHost handleRef={handleRef} pendingRef={pendingRef} />, [])
+  return { toast, show }
+}
+
+// ══════════════════════════════════════════════════════════════
 // SegmentPicker
 // ══════════════════════════════════════════════════════════════
 

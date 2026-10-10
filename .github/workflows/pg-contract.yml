@@ -1,0 +1,42 @@
+name: Postgres contract tests
+
+# サーバーの契約（supabase/migrations の関数・権限・同時実行）を、使い捨ての Postgres で毎回確かめる（2026-10-10 監査 F13）。
+# npm test は 0011・0017・0020 などを JS で写した偽物だけを相手にするので、移行か偽物の片方だけを直すと食い違いに気づけない。
+# ここでは tests/pg-run-all.mjs が Supabase の真似と 0001〜最新の移行を当て、tests/*-pg.mjs（契約の表・同時実行）をすべて流す。
+# 公開（deploy.yml）とは別の workflow にしてある: DB の起動の不調で公開まで止めないため。食い違えばこの workflow が赤になる。
+# 本番の Supabase には一切つながない（接続先は下の postgres サービスだけ。実行器は 127.0.0.1／localhost 以外を断る）。
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pg-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          # 使い捨ての試験用（外へ公開しない・job が終われば消える）。役割・DB を作るので postgres（管理者）で入る
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -h 127.0.0.1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Postgres の契約（移行 0001〜最新・tests/*-pg.mjs）
+        run: node tests/pg-run-all.mjs
+        env:
+          CARELOG_PG_ADMIN_URL: postgres://postgres@127.0.0.1:5432/postgres

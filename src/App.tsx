@@ -48,7 +48,18 @@ import {
   markAccepted,
   onBlockedNavigation,
   proceedBlocked,
+  registerUnsaved,
 } from './lib/leaveGuard'
+// 版の印・部品の取得失敗の見分け（F28・F60）と端末の時刻帯の確かめ（F36）。どちらも supabase に依存しない純粋なモジュール
+import {
+  CLIENT_BUILD,
+  fetchPublishedBuild,
+  isChunkLoadError,
+  isDevBuild,
+  isOtherBuildPublished,
+  notePreloadError,
+} from './lib/appVersion'
+import { deviceTimeZoneWarning } from './lib/format'
 
 // ── 接続設定（VITE_ 変数）──────────────────────────────────────────
 // 型は src/vite-env.d.ts（vite/client）で付くが、未設定・非 Vite 実行でも落ちないようキャスト経由で読む。
@@ -109,6 +120,8 @@ const LoginPage = lazy(() => import('./pages/AuthGates').then((m) => ({ default:
 const NotConfiguredPage = lazy(() =>
   import('./pages/AuthGates').then((m) => ({ default: m.NotConfiguredPage })),
 )
+// 名簿の自動同期（F50・2026-10-10）。部品が db を読むので、他の画面と同じく遅延読込にする
+const MasterAutoSync = lazy(() => import('./components/MasterSync').then((m) => ({ default: m.MasterAutoSync })))
 
 // ── UI状態の復元（dev-principles 原則11: 既知値のホワイトリスト照合）──
 // 既定（不正値・未知値のフォールバック先）は日報シート。
@@ -185,11 +198,62 @@ function viewOf(pathname: string): View | null {
   return null
 }
 
+// ── 記録ハブの下の画面（F68・2026-10-10）─────────────────────────────────
+// cl_view は /record/* をまとめて 'record' にするため、ホーム画面のアイコン（ハッシュの無いURL）から開くと、
+// 直前にいたバイタル一括・食事一括ではなく記録ハブが開いた。設計（ui-design.md §9）で許可リストに載せてある
+// cl_recordTab に「記録ハブの下のどの画面か」だけを持ち、cl_view が 'record' の時に2段目の行き先として使う。
+// 値は画面の名前だけ（利用者・日付・入力値は保存しない＝原則11）。許可リスト外・不正値は記録ハブのまま
+const RECORD_TABS = ['vitals', 'meals', 'note', 'outing'] as const
+type RecordTab = (typeof RECORD_TABS)[number]
+
+function readRecordTab(): RecordTab | null {
+  try {
+    const raw = window.localStorage.getItem(LS.recordTab)
+    return RECORD_TABS.includes(raw as RecordTab) ? (raw as RecordTab) : null
+  } catch {
+    return null
+  }
+}
+
+function writeRecordTab(tab: RecordTab | null): void {
+  try {
+    if (tab === null) window.localStorage.removeItem(LS.recordTab)
+    else window.localStorage.setItem(LS.recordTab, tab)
+  } catch {
+    // 保存できなくても操作は続行する
+  }
+}
+
+/**
+ * 記録ハブの下のどの画面か。許可リストの画面ならその名前、記録ハブ・それ以外の /record/* は null（＝控えを消す）、
+ * 記録ハブの外は undefined（控えに触れない）
+ */
+function recordTabOf(pathname: string): RecordTab | null | undefined {
+  if (pathname === '/record') return null
+  if (!pathname.startsWith('/record/')) return undefined
+  const tab = pathname.slice('/record/'.length)
+  return RECORD_TABS.includes(tab as RecordTab) ? (tab as RecordTab) : null
+}
+
 // HashRouter が hash を書き換える前に「ベースURL直開きか」を確定させる（module 評価時に採取）
 const INITIAL_HASH = typeof window === 'undefined' ? '' : window.location.hash
 const OPENED_BARE = INITIAL_HASH === '' || INITIAL_HASH === '#' || INITIAL_HASH === '#/'
 // 起動時の cl_view も、以降の保存で上書きされる前にここで読み切る
 const STORED_VIEW = typeof window === 'undefined' ? null : readView()
+// 記録ハブの下の画面の控えも同じく読み切る（起動直後の '/' で保存の effect が先に走っても失わない）
+const STORED_RECORD_TAB = typeof window === 'undefined' ? null : readRecordTab()
+
+// ── 新しい版の確かめ（F28①・2026-10-10）。間隔は仮の合格ライン（起動直後の読み込みと重ねない・5分ごと）
+/** 起動から最初に確かめるまで（名簿・記録の読み込みと重ねない） */
+const VERSION_FIRST_CHECK_MS = 10_000
+/** 開いたままの端末で確かめる間隔 */
+const VERSION_CHECK_MS = 5 * 60_000
+/** 帯を出している間、〔更新〕を押せるか（未保存の入力が無いか）を見直す間隔 */
+const VERSION_GUARD_TICK_MS = 15_000
+
+// 画面の部品の先読み（modulepreload・CSS）に失敗した合図（F28②）。その後に上がる例外を「部品の取得失敗」として
+// 見分けるため、時刻だけを控える（既定の動き＝例外を投げる、はそのまま）
+if (typeof window !== 'undefined') window.addEventListener('vite:preloadError', () => notePreloadError())
 
 // 表示モード（cl_mode）の適用。初回描画前に当てて切替時のちらつきを防ぐ。
 // 既知値が保存されている時だけ触り、未設定・不正値では index.html の指定をそのまま残す
@@ -444,15 +508,94 @@ function NotConfiguredInline() {
   )
 }
 
+/**
+ * 古い版の受け皿（F28③）。app_settings の min_client_build より前の版では、記録の画面の代わりにこれを出す
+ * （入力・送信を止める。ヘッダ・タブ・未送信の件数は外に残る）。〔更新〕で新しい版を読み込む（自動では読み込まない）。
+ * 送信待ちは端末（localStorage）に残り、更新した版が送る。端末に残せていない送信待ちだけは更新で消えるので、そう書く
+ */
+function OutdatedPanel({ unpersisted, pending }: { unpersisted: boolean; pending: number }) {
+  return (
+    <div role="alert" className="rounded-lg border border-danger bg-surface p-4 print:hidden">
+      <h2 className="text-xl font-heavy text-ink">新しい版に更新してください</h2>
+      <p className="mt-2 text-base text-ink2">
+        この端末のアプリは古い版のため、記録できません（記録の形が新しくなりました）。〔更新〕を押すと新しい版で開き直します。
+      </p>
+      {pending > 0 && (
+        <p className="mt-2 text-base text-ink2">
+          {unpersisted
+            ? `送れていない記録が${pending}件あります。うち端末に残せていないものは、更新すると消えます。内容を確かめてから押してください。`
+            : `送れていない記録が${pending}件あります。端末に残っていて、更新した後に新しい版が送ります。`}
+        </p>
+      )}
+      <button
+        type="button"
+        onClick={() => window.location.reload()}
+        className="mt-3 min-h-tap rounded-md border border-primary bg-primary px-4 text-base font-bold text-primary-ink"
+      >
+        更新
+      </button>
+    </div>
+  )
+}
+
+/**
+ * 公開中の版がこの端末の版と違うか（画面の部品を取れなかった時の案内の出し分け・F28②）。
+ * null＝確かめている最中・確かめられない
+ */
+function usePublishedBuildDiffers(): boolean | null {
+  const [differs, setDiffers] = useState<boolean | null>(null)
+  useEffect(() => {
+    let alive = true
+    if (isDevBuild(CLIENT_BUILD)) {
+      setDiffers(false)
+      return undefined
+    }
+    void fetchPublishedBuild().then((remote) => {
+      if (alive) setDiffers(remote === null ? null : isOtherBuildPublished(CLIENT_BUILD, remote))
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
+  return differs
+}
+
+/** 部品の取得失敗の時、公開中の版が違えば「新しい版」、同じ・確かめられなければ従来の通信の案内（F28②） */
+function ChunkFailureText({ differs }: { differs: boolean | null }) {
+  return differs === true ? (
+    <>
+      <h1 className="text-xl font-heavy text-ink">新しい版が公開されました</h1>
+      <p className="mt-2 text-base text-ink2">
+        この画面の部品が新しい版に置き換わったため、読み込めませんでした。再読み込みすると新しい版で開きます（通信の不具合ではありません）。
+      </p>
+    </>
+  ) : (
+    <>
+      <h1 className="text-xl font-heavy text-ink">画面を読み込めませんでした</h1>
+      <p className="mt-2 text-base text-ink2">
+        通信が途切れた可能性があります。電波状態を確認してから、再読み込みしてください。
+      </p>
+    </>
+  )
+}
+
 /** 起動そのものに失敗したとき（チャンク取得失敗など）の案内 */
-function StartupError() {
+function StartupError({ kind = 'chunk' }: { kind?: FailKind }) {
+  const differs = usePublishedBuildDiffers()
   return (
     <FullScreen>
       <div className="rounded-lg border border-border bg-surface p-4">
-        <h1 className="text-xl font-heavy text-ink">画面を読み込めませんでした</h1>
-        <p className="mt-2 text-base text-ink2">
-          通信が途切れた可能性があります。電波状態を確認してから、再読み込みしてください。
-        </p>
+        {kind === 'chunk' ? (
+          <ChunkFailureText differs={differs} />
+        ) : (
+          // 描画の例外（F60）。通信の案内を出すと電波を疑って時間を失うので分ける
+          <>
+            <h1 className="text-xl font-heavy text-ink">画面の表示で問題が起きました</h1>
+            <p className="mt-2 text-base text-ink2">
+              再読み込みしてください。送信待ちの記録は端末に残っています。続く場合は管理者に連絡してください。
+            </p>
+          </>
+        )}
         <ReloadButton />
       </div>
     </FullScreen>
@@ -475,11 +618,139 @@ class Boundary extends Component<BoundaryProps, BoundaryState> {
   }
 }
 
+/** 受けた例外の種類。chunk＝画面の部品（チャンク）を取れなかった／render＝画面の描画の例外 */
+type FailKind = 'chunk' | 'render'
+
+type KindBoundaryProps = {
+  /** 受けた例外の種類ごとの代わりの表示 */
+  fallback: (kind: FailKind) => ReactNode
+  /** この値が変わったら受けた状態を解く（画面を移ったら、移った先の画面を描き直す） */
+  resetKey?: string
+  /** 例外を受けた時に呼ぶ（エラーの中身は渡さない＝業務データを含み得るため記録しない） */
+  onCaught?: (kind: FailKind) => void
+  children: ReactNode
+}
+type KindBoundaryState = { failed: FailKind | null }
+
+/**
+ * 例外の種類（部品の取得失敗か描画の例外か）を見分ける境界（F28②・F60・2026-10-10）。
+ * 包み要素を作らず children をそのまま返す（印刷レイアウト・表の高さを変えない）。
+ * resetKey が変わると受けた状態を解く＝画面ごとの受け皿として使うと、タブで他の画面へ移れば元に戻る
+ * （包む部品を毎回作り直さないので、普段の画面移動の動きは変わらない）
+ */
+class KindBoundary extends Component<KindBoundaryProps, KindBoundaryState> {
+  state: KindBoundaryState = { failed: null }
+
+  static getDerivedStateFromError(e: unknown): KindBoundaryState {
+    return { failed: isChunkLoadError(e) ? 'chunk' : 'render' }
+  }
+
+  componentDidCatch(e: unknown): void {
+    this.props.onCaught?.(isChunkLoadError(e) ? 'chunk' : 'render')
+  }
+
+  componentDidUpdate(prev: KindBoundaryProps): void {
+    if (this.state.failed !== null && prev.resetKey !== this.props.resetKey) this.setState({ failed: null })
+  }
+
+  render(): ReactNode {
+    return this.state.failed !== null ? this.props.fallback(this.state.failed) : this.props.children
+  }
+}
+
+/**
+ * 画面ごとの受け皿の表示（F60・F28②）。ヘッダ・タブ・未送信の件数は受け皿の外に残るので、タブでほかの画面へ移れる。
+ * 部品の取得失敗は再読み込みでしか直らない（React.lazy は失敗を覚えている）。端末に残せていない送信待ちがある間は、
+ * 再読み込みで消えるので〔再読み込み〕を出さない
+ */
+function PageFailure({
+  kind,
+  pathname,
+  unpersisted,
+  isUnpersisted,
+}: {
+  kind: FailKind
+  pathname: string
+  unpersisted: boolean
+  /** 押した時に確かめ直す（描いた後に端末へ残せなくなっていれば再読み込みしない＝保全の確認の後ろで消す） */
+  isUnpersisted: () => boolean
+}) {
+  const differs = usePublishedBuildDiffers()
+  const [blocked, setBlocked] = useState(false)
+  return (
+    <div role="alert" className="mx-auto w-full max-w-2xl rounded-lg border border-danger bg-surface p-4 print:hidden">
+      {kind === 'chunk' ? (
+        <ChunkFailureText differs={differs} />
+      ) : (
+        <>
+          <h1 className="text-xl font-heavy text-ink">この画面で問題が起きました</h1>
+          <p className="mt-2 text-base text-ink2">
+            送信待ちの記録は消えていません。下のタブ（広い画面では左の列）から、ほかの画面へ移って使えます。
+            再読み込みしても直らない場合は、管理者に連絡してください。
+          </p>
+        </>
+      )}
+      {unpersisted || blocked ? (
+        <p className="mt-2 text-base font-bold text-danger">
+          <span aria-hidden="true">▲ </span>
+          端末に残せていない送信待ちがあります。再読み込みすると消えるので、電波のある所で送り終えるまで、ほかの画面をお使いください。
+        </p>
+      ) : (
+        <button
+          type="button"
+          onClick={() => {
+            if (isUnpersisted()) {
+              setBlocked(true)
+              return
+            }
+            window.location.reload()
+          }}
+          className="mt-4 inline-flex min-h-tap items-center justify-center rounded-md bg-primary px-4 text-base font-bold text-primary-ink"
+        >
+          再読み込み
+        </button>
+      )}
+      {kind === 'render' ? (
+        <p className="mt-3">
+          {/* 壊れているのが日報（既定の画面）の時に「日報へ」は役に立たないので、その時は「その他」へ */}
+          <Link
+            to={pathname === '/' ? '/more' : '/'}
+            className="inline-flex min-h-tap items-center rounded-md border border-border-strong px-4 text-base text-link"
+          >
+            {pathname === '/' ? '「その他」を開く' : '日報へ戻る'}
+          </Link>
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * 圏外で起動した時の案内（F59・2026-10-10）。ログインの確認（トークンの更新）が通信できずに失敗しただけで、
+ * ログインは切れていない。電波が戻ると自動の更新で開くので、ログイン画面（別の部品＝圏外では読み込めない）は出さない
+ */
+function OfflineGate() {
+  return (
+    <FullScreen>
+      <div role="status" className="rounded-lg border border-warn bg-warn-bg p-4">
+        <h1 className="text-xl font-heavy text-ink">
+          <span aria-hidden="true">▲ </span>
+          通信できないため、ログインを確かめられません
+        </h1>
+        <p className="mt-2 text-base text-ink">
+          ログインし直す必要はありません。電波が戻ってから1分ほどで自動で開きます。この画面は開いたままにしてください。
+        </p>
+        <p className="mt-2 text-base text-ink2">送信待ちの記録は端末に残っています。</p>
+      </div>
+    </FullScreen>
+  )
+}
+
 // ── 認証ゲート ──────────────────────────────────────────────────
 function Shell({ deps }: { deps: Deps }) {
   const { ui } = deps
   // useAuth は動的読込したモジュールの関数。呼び出し位置は固定なのでフックの規則は満たす
-  const { ready, session } = deps.useAuth()
+  const { ready, session, offline } = deps.useAuth()
   const location = useLocation()
   const returnToRef = useRef<string>('/')
 
@@ -494,6 +765,10 @@ function Shell({ deps }: { deps: Deps }) {
       </FullScreen>
     )
   }
+
+  // 圏外で起動してログインの確認だけが通信できなかった（F59）: ログイン画面へ移さない（ログインは切れていない。
+  // 電波が戻ると自動の更新で session が入り、そのままログイン後の画面になる）
+  if (!session && offline) return <OfflineGate />
 
   if (!session) {
     return (
@@ -547,6 +822,18 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
   /** 施設名（日報の見出しの右に出す。2026-08-31 指示で日報の各日の左上から移した） */
   const [facility, setFacility] = useState<string | null>(null)
   const [pending, setPending] = useState(0)
+  /** 端末に残せていない送信待ちがある（保存領域が一杯。閉じる・再読み込みで消える＝F01） */
+  const [unpersisted, setUnpersisted] = useState(false)
+  /** この版では送れない未送信（別の版の画面のタブが書いた・読めずに控えている＝F27③） */
+  const [unreadable, setUnreadable] = useState(0)
+  /** 端末の時刻帯が日本時間でない時の案内（F36）。null＝日本時間 */
+  const [tzWarning, setTzWarning] = useState<string | null>(() => deviceTimeZoneWarning())
+  /** 新しい版が公開された（F28①） */
+  const [newBuild, setNewBuild] = useState(false)
+  /** この版が古い（app_settings の min_client_build より前・F28③）。入力と送信を止め、画面を受け皿に置き換える */
+  const [outdated, setOutdated] = useState<boolean>(() => db.isClientBuildOutdated())
+  /** 〔更新〕を押せるかを取り直すための合図（未保存の入力は購読できないので、帯を出している間だけ時々見直す） */
+  const [, setGuardTick] = useState(0)
   const restoredRef = useRef(false)
 
   // 入力を受け付ける画面（＝入力解禁フラグを入るたび取り直す対象）。
@@ -556,11 +843,85 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
     location.pathname.startsWith('/record/') ||
     isSheetPath(location.pathname)
 
-  // 未送信キュー件数（ヘッダの「⚠ 未送信n件」）
+  // 未送信キュー件数（ヘッダの「⚠ 未送信n件」）。送信待ちを書き戻すたびに通知が来るので、
+  // 端末に残せているか（F01）・この版で読めない未送信があるか（F27③）も同じ時に取り直す
   useEffect(() => {
-    setPending(db.queuePending())
-    return db.queueSubscribe((n) => setPending(typeof n === 'number' && n > 0 ? n : 0))
+    const sync = (n: number) => {
+      setPending(typeof n === 'number' && n > 0 ? n : 0)
+      setUnpersisted(db.hasUnpersistedQueue())
+      setUnreadable(db.queueUnreadableCount())
+    }
+    sync(db.queuePending())
+    return db.queueSubscribe(sync)
   }, [db])
+
+  // 端末に残せていない送信待ち（全ての表）は、閉じる・再読み込みで消える。画面を離れる前の確認に「消える入力」として
+  // App 全体で1回だけ数える（F01。申し送りだけを数える UnsentNotes は日報と設定の画面にしか無い）
+  useEffect(() => registerUnsaved(() => db.hasUnpersistedQueue(), 'input'), [db])
+
+  // 端末の時刻帯（F36）: 起動時と、画面に戻った時に確かめ直す（設定を直したら帯を消す）
+  useEffect(() => {
+    const onVis = () => {
+      if (document.visibilityState === 'visible') setTzWarning(deviceTimeZoneWarning())
+    }
+    document.addEventListener('visibilitychange', onVis)
+    return () => document.removeEventListener('visibilitychange', onVis)
+  }, [])
+
+  // 新しい版の公開（F28①）: 少し待ってから・画面に戻った時・5分ごとに version.json を取り直して比べる。
+  // 自動では再読み込みしない（本人回答 2026-10-10）。開発中の版（'dev'）は比べない
+  useEffect(() => {
+    if (isDevBuild(CLIENT_BUILD)) return undefined
+    let alive = true
+    const check = async () => {
+      const remote = await fetchPublishedBuild()
+      if (alive && isOtherBuildPublished(CLIENT_BUILD, remote)) setNewBuild(true)
+    }
+    const first = window.setTimeout(() => void check(), VERSION_FIRST_CHECK_MS)
+    const timer = window.setInterval(() => void check(), VERSION_CHECK_MS)
+    const onVis = () => {
+      if (document.visibilityState === 'visible') void check()
+    }
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      alive = false
+      window.clearTimeout(first)
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVis)
+    }
+  }, [])
+  // 古い版の入力止め（F28③）: 起動時・画面に戻った時・5分ごとに min_client_build を確かめる（入力解禁の確認からも
+  // 確かめる）。古いと分かったら受け皿を出す。開発中の版・未設定・読めない時は止めない（db.checkClientBuild）
+  useEffect(() => {
+    let alive = true
+    const off = db.onClientBuildOutdated(() => {
+      if (alive) setOutdated(true)
+    })
+    const check = () => {
+      void db.checkClientBuild().then((v) => {
+        if (alive && v) setOutdated(true)
+      })
+    }
+    check()
+    const timer = window.setInterval(check, VERSION_CHECK_MS)
+    const onVis = () => {
+      if (document.visibilityState === 'visible') check()
+    }
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      alive = false
+      off()
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVis)
+    }
+  }, [db])
+
+  // 帯を出している間は、〔更新〕を押せるか（未保存の入力が無いか）を時々見直す
+  useEffect(() => {
+    if (!newBuild && !outdated) return undefined
+    const t = window.setInterval(() => setGuardTick((n) => n + 1), VERSION_GUARD_TICK_MS)
+    return () => window.clearInterval(t)
+  }, [newBuild, outdated])
 
   // 401（セッション失効）→ キューは保全したままログイン画面へ。
   // ここで /login へ navigate しても、下のルート定義で '/' へ戻されるため画面は変わらない。
@@ -576,6 +937,10 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
         try {
           const { data, error } = await supabase.auth.refreshSession()
           if (!error && data.session) return // 復帰できた＝ログイン画面へ戻さない
+          // 更新の要求そのものが通信できなかった（圏外・サーバーの一時的な不調＝AuthRetryableFetchError）: ログインは
+          // 切れていない。ここで端末の session を捨てると更新トークンまで消え、電波が戻っても自動で戻れなくなる（F59）。
+          // 捨てずに待つ（電波が戻れば自動の更新が session を新しくし、退避した送信待ちも送られる）
+          if (error && error.name === 'AuthRetryableFetchError') return
         } catch {
           // 通信不能・想定外の例外はここでは判断せず、下の破棄へ倒す
         }
@@ -627,6 +992,19 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
       alive = false
     }
   }, [db, actor, reload])
+
+  // 記録者の切り替え（F46・F38・2026-10-10）: 設定タブ・バイタル/食事の「記録者」・別のタブで切り替えたら、その場で
+  // 取り直す（以前は localStorage に書くだけで、再読み込みするまで前の職員の名前で recorded_by・edited_by・既読が付いた）。
+  // 名簿との照合（退職者を外す）はここで行う。名簿を読めるまで（staff が null の間）は何もしない
+  useEffect(() => {
+    if (staff === null) return undefined
+    return actor.subscribeActor(() => setActorId(actor.resolveActor(staff)?.id ?? null))
+  }, [actor, staff])
+
+  // 職員名簿を新しく保つ（F47・2026-10-10）: マスタ同期・画面に戻った時・電波が戻った時に取り直し、中身が変わった時
+  // だけ差し替える。失敗した時は今の名簿を残す（全画面のエラー・読み込み中には戻さない＝入力中の日報を消さない）。
+  // 記録者の既定は、名簿から外れても黙って外さない（下の案内で選び直しを促す）
+  useEffect(() => (staff === null ? undefined : db.watchStaffRoster(staff, setStaff)), [db, staff])
 
   // 更新・削除の「最後にこの行を書き換えた職員」（edited_by）として、名簿と照合済みの操作者を渡す。
   // 新規記録の記入者（recorded_by）と同じ操作者。未選択の間は null＝送らない
@@ -680,6 +1058,11 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
     if (location.pathname !== '/') return
     // 未保存・不正値・既定（日報）はそのまま '/' ＝ DailySheetPage
     if (!STORED_VIEW || STORED_VIEW === DEFAULT_VIEW) return
+    // 記録ハブの下の画面にいた（F68）: 許可リストの画面ならそこへ戻す（無ければ記録ハブ）
+    if (STORED_VIEW === 'record' && STORED_RECORD_TAB !== null) {
+      navigate(`/record/${STORED_RECORD_TAB}`, { replace: true })
+      return
+    }
     navigate(VIEW_PATH[STORED_VIEW], { replace: true })
   }, [location.pathname])
 
@@ -687,6 +1070,9 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
   useEffect(() => {
     const v = viewOf(location.pathname)
     if (v) writeView(v)
+    // 記録ハブの下のどの画面か（F68）。記録ハブの外では触らない
+    const rt = recordTabOf(location.pathname)
+    if (rt !== undefined) writeRecordTab(rt)
     actor.touchActivity()
   }, [location.pathname, actor])
 
@@ -787,11 +1173,25 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
   }
 
   const actorName = staff.find((s) => s.id === actorId)?.name ?? null
+  // 記録者の既定が、取り直した名簿に無い（退職扱いになった等・F47）。黙って外さず、選び直しを促す
+  const actorOffRoster = actorId !== null && staff.length > 0 && !staff.some((s) => s.id === actorId)
   const back = backTarget(location.pathname)
   const currentView = viewOf(location.pathname)
   const pickerTitle = actorName
     ? `記録者の既定を切り替える（いまは「${actorName}」）`
     : '記録者の既定を選ぶ'
+  // 新しい版へ切り替えてよいか（F28・本人回答: 未保存・未送信が無い時だけ〔更新〕を出す。自動の再読み込みはしない）
+  const canReloadForBuild = pending === 0 && !unpersisted && !hasUnsavedInput()
+  // 古い版（F28③）: 入力中の内容がある間は画面を残す（受け皿に置き換えると打った文字が消える。保存は db が止める）
+  const outdatedTyping = outdated && hasUnsavedInput()
+  const reloadForBuild = () => {
+    // 押した時にもう一度確かめる（帯を描いた後に入力・送信待ちができていれば押させない）
+    if (db.queuePending() > 0 || db.hasUnpersistedQueue() || hasUnsavedInput()) {
+      setGuardTick((n) => n + 1)
+      return
+    }
+    window.location.reload()
+  }
 
   return (
     <div className="min-h-screen bg-bg text-ink lg:pl-24">
@@ -821,7 +1221,13 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
               （契約 §5〜§7）。ヘッダにも出すと ZoomBar が同一画面に2つ並び、
               片方で切り替えても他方は選択表示が変わらず「現在の倍率」が食い違うため */}
           <span role="status">
-            {pending > 0 && <ui.Chip tone="warn">{`⚠ 未送信 ${pending}件`}</ui.Chip>}
+            {/* 端末に残せていない時（保存領域が一杯・F01）は、閉じる・再読み込みで消えることを件数に添える */}
+            {pending > 0 &&
+              (unpersisted ? (
+                <ui.Chip tone="danger">{`▲ 未送信 ${pending}件・端末に残せていません`}</ui.Chip>
+              ) : (
+                <ui.Chip tone="warn">{`⚠ 未送信 ${pending}件`}</ui.Chip>
+              ))}
           </span>
           {/*
             記録者（操作者）の常時表示は 2026-08-28 の指示で廃止した。
@@ -865,6 +1271,112 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
             </button>
           </div>
         )}
+        {/* 名簿の自動同期（F50）。接続設定のある端末だけが動き、失敗した時だけ帯を出す。
+            部品を読めなくても画面は止めない（受け皿は何も出さない） */}
+        <Boundary fallback={null}>
+          <Suspense fallback={null}>
+            <MasterAutoSync />
+          </Suspense>
+        </Boundary>
+        {/*
+          ここから下の帯は画面だけ（print:hidden）。表の上に積むので、表の枠は高さを測り直して画面に収める
+          （sheet.tsx の SheetFrame が body の大きさの変化を見ている）
+        */}
+        {/* 端末の時刻帯が日本時間でない（F36）。入力は止めない・閉じる操作は設けない */}
+        {tzWarning !== null && (
+          <p role="status" className="mb-4 rounded-md border border-warn bg-warn-bg p-3 text-base text-ink print:hidden">
+            <span aria-hidden="true">▲ </span>
+            {tzWarning}
+          </p>
+        )}
+        {/* この版では送れない未送信がある（F27③）＝別の版の画面のタブが開いている・書いた */}
+        {unreadable > 0 && (
+          <p role="status" className="mb-4 rounded-md border border-warn bg-warn-bg p-3 text-base text-ink print:hidden">
+            <span aria-hidden="true">▲ </span>
+            この端末に別の版の画面のタブが開いています。すべて閉じてから開き直してください（この版で読めない未送信
+            {` ${unreadable}件`}は、消さずに残しています）。
+          </p>
+        )}
+        {/* 記録者の既定が職員名簿に無い（F47） */}
+        {actorOffRoster && (
+          <div className="mb-4 flex flex-wrap items-center gap-gap rounded-md border border-warn bg-warn-bg p-3 print:hidden">
+            <p className="min-w-0 flex-1 text-base text-ink">
+              <span aria-hidden="true">▲ </span>
+              記録者の既定（いまの記録者）が職員名簿にありません（退職扱いになった可能性があります）。設定タブの「記録する職員」で選び直してください。
+            </p>
+            <button
+              type="button"
+              onClick={() => guardedNavigate('/settings')}
+              className="min-h-tap shrink-0 rounded-md border border-primary bg-surface px-4 text-base font-bold text-primary"
+            >
+              設定を開く
+            </button>
+          </div>
+        )}
+        {/* この版が古い（F28③・min_client_build）。入力中の内容がある間だけ画面を残し、この帯で知らせる。
+            〔更新〕はいつでも押せる（この版では保存も送信もできないため。送信待ちは端末に残り、新しい版が送る） */}
+        {outdatedTyping && (
+          <div
+            role="alert"
+            className="mb-4 flex flex-wrap items-center gap-gap rounded-md border border-danger bg-danger-bg p-3 print:hidden"
+          >
+            <p className="min-w-0 flex-1 text-base text-ink">
+              <span aria-hidden="true">▲ </span>
+              この端末のアプリは古い版のため、記録できません。入力中の内容はこの版では保存できないので、必要なら書き写してから〔更新〕を押してください（更新すると画面の入力は消えます）。
+            </p>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="min-h-tap shrink-0 rounded-md border border-primary bg-primary px-4 text-base font-bold text-primary-ink"
+            >
+              更新
+            </button>
+          </div>
+        )}
+        {/* 新しい版が公開された（F28①）。〔更新〕は未保存・未送信が無い時だけ出す（自動では再読み込みしない） */}
+        {/* 古い版の受け皿（OutdatedPanel）を出している間は重ねない */}
+        {newBuild && (outdated ? null : (
+          <div
+            role="status"
+            className="mb-4 flex flex-wrap items-center gap-gap rounded-md border border-info bg-info-bg p-3 print:hidden"
+          >
+            <p className="min-w-0 flex-1 text-base text-ink">
+              <span aria-hidden="true">ⓘ </span>
+              新しい版が公開されました。
+              {canReloadForBuild
+                ? '〔更新〕を押すと新しい版で開き直します。'
+                : '未送信の記録・入力中の内容がなくなると〔更新〕を押せます（送り終える・保存してから）。'}
+            </p>
+            {canReloadForBuild && (
+              <button
+                type="button"
+                onClick={reloadForBuild}
+                className="min-h-tap shrink-0 rounded-md border border-primary bg-primary px-4 text-base font-bold text-primary-ink"
+              >
+                更新
+              </button>
+            )}
+          </div>
+        ))}
+        {/* 画面ごとの受け皿（F60・F28②）。ヘッダ・タブ・未送信の件数は外に残る。画面を移ると元に戻る。
+            描画の例外を受けたら、ホーム画面から開いた時に壊れた画面へ戻らないよう、現在地の控えを既定へ戻す */}
+        <KindBoundary
+          resetKey={location.pathname}
+          onCaught={(kind) => {
+            if (kind === 'render') writeView(DEFAULT_VIEW)
+          }}
+          fallback={(kind) => (
+            <PageFailure
+              kind={kind}
+              pathname={location.pathname}
+              unpersisted={unpersisted}
+              isUnpersisted={() => db.hasUnpersistedQueue()}
+            />
+          )}
+        >
+        {outdated && !outdatedTyping ? (
+          <OutdatedPanel unpersisted={unpersisted} pending={pending} />
+        ) : (
         <Suspense
           fallback={
             <div className="py-8">
@@ -926,6 +1438,8 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </Suspense>
+        )}
+        </KindBoundary>
       </main>
 
       {/* <1024px: 下部タブ5つ（親指圏） */}
@@ -1047,13 +1561,15 @@ export default function App() {
     )
   }
 
+  // 一番外の受け皿。起動の部品（AppRoot）を取れなかった時と、画面の受け皿の外（ヘッダ・タブ）の例外を受ける。
+  // 部品の取得失敗と描画の例外で案内を分ける（F28②・F60）
   return (
-    <Boundary fallback={<StartupError />}>
+    <KindBoundary fallback={(kind) => <StartupError kind={kind} />}>
       <HashRouter>
         <Suspense fallback={<Booting />}>
           <AppRoot />
         </Suspense>
       </HashRouter>
-    </Boundary>
+    </KindBoundary>
   )
 }

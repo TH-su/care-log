@@ -38,6 +38,7 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  FORBIDDEN_REASON,
   DbError,
   discardPendingRow,
   fetchLatestVital,
@@ -45,6 +46,7 @@ import {
   fetchVitalsSheet,
   isSelfWrite,
   getNativeInputGate,
+  isQueuePersisted,
   newClientKey,
   pendingRow,
   queuePending,
@@ -52,7 +54,7 @@ import {
   saveVitalEdits,
   subscribeChanges,
 } from '../lib/db'
-import type { CellSaveResult, PendingCellRow, VitalTarget } from '../lib/db'
+import type { CellSaveResult, ChangeInfo, PendingCellRow, VitalTarget } from '../lib/db'
 import { addDays, fmtDayLabel, normalizeVitalInput, todayIso, toHalfWidth } from '../lib/format'
 import {
   diaBpLevel,
@@ -107,6 +109,7 @@ import { focusOf, useCellPresence } from '../hooks/useCellPresence'
 import type { CellPresence } from '../hooks/useCellPresence'
 import type { CellTarget } from '../lib/presence'
 import { PresenceSummary, RowBusyMark } from '../components/presence'
+import { RecorderBar } from '../components/RecorderBar'
 import '../styles/sheet.css'
 
 // ── 定数 ─────────────────────────────────────────────────────
@@ -222,6 +225,12 @@ const ERR_LOAD =
 const ERR_SAVE =
   '保存できませんでした。入力は消えていません。通信状況を確認して、もう一度入力を確定してください。'
 const MSG_QUEUED = '通信できないため送信待ちにしました。電波が戻ると自動で送信します。'
+/**
+ * 送信待ちにしたが、端末の保存領域が一杯で控えを残せなかった時（F01）。送信待ちはこのタブのメモリにだけあり、閉じる・
+ * 再読み込み・iOS の自動終了で消える。「電波が戻ると自動で送信します」とは言わず、入力もセルに残す
+ */
+const MSG_NOT_PERSISTED =
+  '送信待ちにしましたが、この端末に控えを残せませんでした（保存領域の空きが不足している可能性があります）。入力は消えていません。画面を閉じたり再読み込みしたりすると消えるので、この画面のまま電波の回復をお待ちください。'
 /** サーバーに受け付けられなかった保存（型・範囲の拒否）が送信待ちに残っている時 */
 const ERR_REJECTED =
   'サーバーに受け付けられなかった保存があります（入力は消えていません）。値を確かめて「保存し直す」を押してください。'
@@ -267,6 +276,17 @@ function unsavedText(fields: Field[]): string {
 function numOrNull(v: unknown): number | null {
   const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : Number.NaN
   return Number.isFinite(n) ? n : null
+}
+
+/**
+ * 取り直しの合図（db.ts の RESYNC・F14）のうち、画面に戻った（resume）・電波が戻った（online）のものか。
+ * この2つはこの画面の自前の復帰処理（AWAY_REFETCH_MS のしきい値つき）が受け持つので、購読側では捨てる。
+ * 購読がつながり直した（reconnect＝Wi-Fi の切替・瞬断で WebSocket だけ張り直された）は自前では気づけないので受ける
+ */
+export function isResumeOrOnline(info: unknown): boolean {
+  if (typeof info !== 'object' || info === null) return false
+  const i = info as Pick<ChangeInfo, 'event' | 'resync'>
+  return i.event === 'RESYNC' && (i.resync === 'resume' || i.resync === 'online')
 }
 
 /**
@@ -424,9 +444,10 @@ function badCells(buf: Record<Field, string>): { unreadable: Field[]; outside: F
  * （送信待ちの後に打った値・保存中に打った値を含む）・読めない入力がある（範囲外の警告中）・競合中。
  * 送信待ちの内容そのものは送信キュー（端末に残る）が持っているので数えない
  */
-function holdsInput(r: Rec): boolean {
+export function holdsInput(r: Rec): boolean {
   const bad = badCells(r.buf)
-  return hasEdits(r.edits) || bad.unreadable.length + bad.outside.length > 0 || r.state === 'conflict'
+  // 端末に控えを残せなかった送信待ち（F01）は、画面を離れると消えるので数える
+  return hasEdits(r.edits) || bad.unreadable.length + bad.outside.length > 0 || r.state === 'conflict' || r.unpersisted === true
 }
 
 /** 読み込みで作り直さずに載せ替える行か（止まっている入力・送信待ち・競合がある） */
@@ -436,7 +457,8 @@ function isHeldRec(r: Rec): boolean {
     hasEdits(r.edits) ||
     bad.unreadable.length + bad.outside.length > 0 ||
     r.state === 'conflict' ||
-    r.state === 'queued'
+    r.state === 'queued' ||
+    r.unpersisted === true
   )
 }
 
@@ -448,7 +470,7 @@ function isHeldRec(r: Rec): boolean {
  * ・状態は edits と最新の値の突き合わせで決め直す: 食い違い→競合／送る差分あり→未保存／何も無い→通常
  * fresh が無い（行が見当たらない）時は、先の値が無いもの（新しい行）として裁く
  */
-function mergeOnLoad(cur: Rec, fresh: Rec | undefined): Rec {
+export function mergeOnLoad(cur: Rec, fresh: Rec | undefined): Rec {
   const latest: Rec = fresh ?? { ...cur, vitalId: null, rev: 0, saved: savedOf(null) }
   let edits = cur.edits ?? {}
   const buf = bufOf(latest.saved)
@@ -466,6 +488,8 @@ function mergeOnLoad(cur: Rec, fresh: Rec | undefined): Rec {
     edits,
     stale: undefined,
     missing: undefined,
+    // 端末に残せなかった送信待ちの印は、送信が済んだ（または止まった）後の読み込みで外す（F01）
+    unpersisted: undefined,
     ...(latest.vitalId == null && cur.clientKey ? { clientKey: cur.clientKey } : {}),
   }
   if (r.status === 'conflict') return { ...next, state: 'conflict', message: conflictStillText(r.conflicts) }
@@ -535,6 +559,8 @@ function adoptStoreRecs(next: Map<string, Rec>, residentIds: number[], days: str
     if (p === null) continue
     if (p.state === 'pending') {
       if (cur.state === 'conflict') continue
+      // 端末に控えを残せなかった送信待ち（F01）は「送信待ち」として重ねない（入力を残したまま「未保存」で見せる）
+      if (cur.unpersisted === true) continue
       const q: Partial<Record<Field, number | null>> = {}
       for (const f of FIELDS) if (f in p.values) q[f] = numOrNull(p.values[f])
       if (Object.keys(q).length === 0) continue
@@ -660,6 +686,11 @@ interface Rec {
    * （古い値を先の値として見せない＝指摘 U1）。次の読み込みで消える
    */
   stale?: boolean
+  /**
+   * 送信待ちにしたが端末に控えを残せなかった（F01。このタブのメモリにだけある）。入力（edits）は残したまま
+   * 「未保存」として出し、送信が済んだら読み込みで片付ける（送った値と同じなら edits から外れる）
+   */
+  unpersisted?: true
 }
 
 function recKey(residentId: number, day: string, kind: RowKind, slot: number): string {
@@ -732,6 +763,11 @@ export function VitalsSheetPage({
   const [inputEnabled, setInputEnabled] = useState<boolean>(propInputEnabled ?? false)
   /** 入力できるかどうかを観測できなかった（通信エラー）。封鎖の理由文とは分けて案内する */
   const [gateUnknown, setGateUnknown] = useState(false)
+  /**
+   * このアカウントは記録アプリを使えない（許可リストに無い・無効。F61 手直し）。gateUnknown も true のまま（入力は止める）で、
+   * 案内だけを「通信エラー・もう一度確認する」ではなく、ログインし直す・管理者へ連絡する文にする（再試行では直らないため）
+   */
+  const [forbidden, setForbidden] = useState(false)
   /** サーバーに欄ごとの保存の仕組み（0011）がまだ無い＝サーバー側の更新待ち（入力を止める） */
   const [cellsMissing, setCellsMissing] = useState(false)
   const [recs, setRecs] = useState<Map<string, Rec>>(() => new Map())
@@ -898,6 +934,15 @@ export function VitalsSheetPage({
         } else if (!isHeldRec(cur) && cur.state !== 'saving') {
           // 編集・読めない入力・送信待ち・応答待ち・競合のどれも無い行は、サーバーの値で作り直す
           continue
+        } else if (cur.unpersisted === true && stillPending(cur)) {
+          // 端末に控えを残せなかった送信待ちが、まだ送れていない（F01）。入力と「未保存」の一言をそのまま持ち続ける
+          // （読み直しで「食い違いはありません・保存し直す」に塗り替えない。送信が済んだら mergeOnLoad で片付く）
+          next.set(
+            k,
+            fresh
+              ? { ...fresh, buf: cur.buf, state: cur.state, message: cur.message, edits: cur.edits, unpersisted: true }
+              : cur,
+          )
         } else if (cur.state === 'saving') {
           // 保存の応答待ち。応答で描き直すので、入力と編集をそのまま温存する（順番待ちが後で計算し直す）
           next.set(
@@ -949,6 +994,7 @@ export function VitalsSheetPage({
       setResidents(sorted)
       setInputEnabled(gate.value === true)
       setGateUnknown(!gate.observed)
+      setForbidden(gate.forbidden === true)
       setCellsMissing(gate.cells === 'missing')
       commitRecs(next)
       commitRecheckRows(rowCounts)
@@ -980,7 +1026,11 @@ export function VitalsSheetPage({
     let unsub: (() => void) | null = null
     try {
       unsub = queueSubscribe((n) => {
-        if (aliveRef.current) setPending(typeof n === 'number' && n >= 0 ? n : 0)
+        if (!aliveRef.current) return
+        setPending(typeof n === 'number' && n >= 0 ? n : 0)
+        // 端末に控えを残せなかった送信待ち（F01）が送れた・止まった。残していた入力は、取り直した値と同じなら
+        // 片付く（自分の送信の通知は isSelfWrite で捨てられるので、ここで取り直す）
+        if (Array.from(recsRef.current.values()).some((r) => r.unpersisted === true && !stillPending(r))) retryRef.current?.()
       })
     } catch {
       unsub = null
@@ -1066,6 +1116,9 @@ export function VitalsSheetPage({
         if (!aliveRef.current) return
         // この画面が描画する表だけを合図にする
         if (typeof table !== 'string' || table !== WATCHED_TABLE) return
+        // 取り直しの合図（RESYNC・F14）のうち、画面に戻った（resume）・電波が戻った（online）は、上の自前の処理
+        // （30秒のしきい値つき）が受け持つ。二重に読み直さないよう捨て、購読がつながり直した（reconnect）だけを受ける
+        if (isResumeOrOnline(info)) return
         // 自分の保存で出た通知（画面へ反映済み）は取り直さない。
         // ★行で見分ける（2026-09-05 修正）。以前は「自分の保存から3秒間の通知を捨てる」
         //   時刻だけの判定で、同じ3秒に届いた**他端末の変更まで捨てて**いた。
@@ -1395,7 +1448,7 @@ export function VitalsSheetPage({
       const heldRow = pendingRow('vitals', target)
       const rebase = heldRow !== null && heldRow.state === 'conflict'
       const wasQueued = rec.state === 'queued'
-      patchRec(key, { edits, clientKey, state: 'saving', message: stillBad ? invalidMessage : '' })
+      patchRec(key, { edits, clientKey, state: 'saving', message: stillBad ? invalidMessage : '', unpersisted: undefined })
       // 送る前に印を付ける（変更通知が応答より先に届いても、自分の書き込みで取り直さない）
       selfWriteRef.current = Date.now()
       try {
@@ -1409,6 +1462,13 @@ export function VitalsSheetPage({
         })
         if (!aliveRef.current) return
         const cur = recsRef.current.get(key)
+        if (res === 'queued' && !isQueuePersisted()) {
+          // 送信待ちにしたが、端末に控えを残せなかった（F01）。送ったものとして扱わない: 入力（edits）は残し、
+          // 送信待ちの重ね表示（sent）も出さず、「未保存」として理由を出す（離れる時の確認にも数える）。
+          // 送信待ちはこのタブのメモリにはあるので、電波が戻れば送られ、その後の読み込みで片付く
+          patchRec(key, { state: 'error', message: MSG_NOT_PERSISTED, unpersisted: true })
+          return
+        }
         if (res === 'queued') {
           // 送信待ちへ渡し終えた欄だけ消す（R-D・欄単位）。送信待ちの値は重ねて表示し、その後に打つ値と見分ける
           const sentValues: Partial<Record<Field, number | null>> = {}
@@ -1525,7 +1585,7 @@ export function VitalsSheetPage({
           clientKey = newClientKey()
           target = { routine: false, clientKey, residentId: rec.residentId, day: rec.day, kind: 'recheck' }
         }
-        patchRec(key, { state: 'saving', message: '', vitalId: rec.kind === 'routine' ? rec.vitalId : null, clientKey })
+        patchRec(key, { state: 'saving', message: '', vitalId: rec.kind === 'routine' ? rec.vitalId : null, clientKey, unpersisted: undefined })
         selfWriteRef.current = Date.now()
         try {
           // 同じ行の送信待ちの全ての欄を「空欄を見て書いた」（基準 null）にそろえて送る（F4）
@@ -1539,6 +1599,12 @@ export function VitalsSheetPage({
             await discardPendingRow('vitals', oldTarget, undefined, seenVers(oldPending, editValues(sendEdits)))
           }
           if (!aliveRef.current) return
+          if (res === 'queued' && !isQueuePersisted()) {
+            // 端末に控えを残せなかった（F01）。新しい行として送る入力（基準 null）を残し、「未保存」として出す。
+            // 〔保存し直す〕は同じ送り先（定時は利用者×日・再検はこの冪等キー）の送信待ちへまとまる
+            patchRec(key, { state: 'error', message: MSG_NOT_PERSISTED, missing: undefined, edits: sendEdits, unpersisted: true })
+            return
+          }
           if (res === 'queued') {
             patchRec(key, { state: 'queued', message: MSG_QUEUED, missing: undefined, edits: undefined })
             return
@@ -1671,6 +1737,23 @@ export function VitalsSheetPage({
       // 送信待ちで止まっていた値の取り下げ・送り直しは ConflictResolver が済ませている
       const v = r.latest as Vital | null
       const fresh = v ? recFromVital(v, rec.kind, rec.slot) : newRec(rec.residentId, rec.day, rec.kind, rec.slot)
+      if (r.queued && (r.choice === 'mine' || r.choice === 'both') && !isQueuePersisted()) {
+        // 選んだ内容を送信待ちにしたが、端末に控えを残せなかった（F01）。送信待ちとして案内せず、理由を出して
+        // 離れる時の確認に数える（送信が済んだら読み込みで片付く）
+        patchRec(cur.key, {
+          ...fresh,
+          buf: bufOf(fresh.saved),
+          state: 'error',
+          message: MSG_NOT_PERSISTED,
+          sent: undefined,
+          edits: undefined,
+          stale: undefined,
+          missing: undefined,
+          unpersisted: true,
+        })
+        focusAfterResolve(cur.focusId)
+        return
+      }
       if (r.choice === 'mine' && r.queued) {
         // 自分の値で直す更新を送信待ちにした。送った内容を控え、送信の後に入れた値と見分ける
         patchRec(cur.key, {
@@ -1817,23 +1900,28 @@ export function VitalsSheetPage({
     </>
   )
   /** 保存状況（未送信・保存中・保存済み）。畳んでも隠さない（畳めない時は今と同じく操作の行の末尾） */
-  // 同じ行の末尾に置く＝行を増やさない。画面が狭い時は折り返して2行目に来る（消さない＝保存できたかは必ず見せる）
+  // 同じ行の末尾に置く＝行を増やさない。画面が狭い時は折り返して2行目に来る（消さない＝保存できたかは必ず見せる）。
+  // 並べて、いまの記録者（新しい行の記入者・変更の記録に付く）を常に出し、その場で切り替えられるようにする（F38。
+  // 1台を複数の職員で使うため、前の人の記録者のまま入れるのを防ぐ）。記録者は印刷に出さない（部品が print:hidden）
   const statusLine = (
-    <p
-      role="status"
-      aria-live="polite"
-      className={
-        loading
-          ? 'text-base text-ink2'
-          : pending > 0
-            ? 'text-base font-bold text-warn'
-            : savingCount > 0
-              ? 'text-base text-ink2'
-              : 'text-base text-ok'
-      }
-    >
-      {statusText}
-    </p>
+    <>
+      <p
+        role="status"
+        aria-live="polite"
+        className={
+          loading
+            ? 'text-base text-ink2'
+            : pending > 0
+              ? 'text-base font-bold text-warn'
+              : savingCount > 0
+                ? 'text-base text-ink2'
+                : 'text-base text-ok'
+        }
+      >
+        {statusText}
+      </p>
+      <RecorderBar actorId={actorId ?? null} />
+    </>
   )
 
   return (
@@ -1897,7 +1985,13 @@ export function VitalsSheetPage({
           )}
         />
 
-        {gateUnknown ? (
+        {forbidden ? (
+          // 許可リストに無い・無効なアカウント（F61）。再試行のボタンは出さない（何度押しても直らない）
+          <p role="alert" className="mt-3 rounded border border-danger bg-danger-bg p-3 text-base text-ink">
+            <span aria-hidden="true">▲ </span>
+            {FORBIDDEN_REASON}
+          </p>
+        ) : gateUnknown ? (
           // 観測できていない＝「スプシ期間」と決めつけない。通信エラーとして再確認の導線を出す
           <div role="alert" className="mt-3 rounded border border-warn bg-warn-bg p-3">
             <p className="text-base text-ink">

@@ -127,6 +127,60 @@ export function sameMedSlots(a: readonly MedSlot[], b: readonly MedSlot[]): bool
   return na.length === nb.length && na.every((s, i) => s === nb[i])
 }
 
+/** 時間帯の設定の値（下書き・編集を始めた時・最新のどれにも使う） */
+export interface MedSlotsValue {
+  slots: readonly MedSlot[]
+  note: string | null
+}
+
+/** 時間帯の下書きを、他の端末の変更の上に当て直した結果（F54） */
+export interface MedSlotsRebase {
+  /** 当て直した時間帯（朝→昼→夕→眠前の順）。保存はこれを最新の版（latest の rev）で送る */
+  slots: MedSlot[]
+  /** 当て直した備考（noteClash の間は最新の値。人が選ぶまで自分の値で上書きしない） */
+  note: string | null
+  /** 他の端末が足した時間帯・外した時間帯（「他の端末の変更を取り込みました（眠前を追加）」の表示に使う） */
+  theirsAdded: MedSlot[]
+  theirsRemoved: MedSlot[]
+  /** 備考を両方が別の値に変えた（どちらにするか人が選ぶ） */
+  noteClash: boolean
+  /** 他の端末が時間帯か備考を変えていたか（false なら下書きのまま保存してよい） */
+  changedByOthers: boolean
+}
+
+/** 備考の比べ方（空白だけ・空は「無し」と同じ） */
+function noteKey(v: string | null): string {
+  return v === null ? '' : v.trim()
+}
+
+/**
+ * 服薬の時間帯の下書き（draft）を、編集を始めた時の値（base）と最新の値（latest）から当て直す（F54・2026-10-10）。
+ * 下書きを丸ごと送ると、編集中に他の端末が足した時間帯（例: 眠前）を黙って消し、眠前の与薬チェックと自動の記録が抜けた。
+ * 時間帯ごとに、自分が変えた（draft≠base）なら自分の値、変えていなければ最新の値を採る（時間帯は「有る・無い」だけなので、
+ * 両方が変えた時は同じ向き＝食い違わない）。備考は自分だけが変えたなら自分の値、他の端末だけなら最新、両方が別の値に
+ * 変えたら noteClash（最新の値を残し、人に選ばせる）
+ */
+export function rebaseMedSlotsDraft(p: { base: MedSlotsValue; draft: MedSlotsValue; latest: MedSlotsValue }): MedSlotsRebase {
+  const base = new Set(normalizeMedSlots(p.base.slots))
+  const draft = new Set(normalizeMedSlots(p.draft.slots))
+  const latest = new Set(normalizeMedSlots(p.latest.slots))
+  const slots = MED_SLOTS.filter((s) => (draft.has(s) !== base.has(s) ? draft.has(s) : latest.has(s)))
+  const theirsAdded = MED_SLOTS.filter((s) => latest.has(s) && !base.has(s))
+  const theirsRemoved = MED_SLOTS.filter((s) => !latest.has(s) && base.has(s))
+  const mineNoteChanged = noteKey(p.draft.note) !== noteKey(p.base.note)
+  const theirNoteChanged = noteKey(p.latest.note) !== noteKey(p.base.note)
+  const noteClash = mineNoteChanged && theirNoteChanged && noteKey(p.draft.note) !== noteKey(p.latest.note)
+  const note = mineNoteChanged && !noteClash ? p.draft.note : p.latest.note
+  return {
+    slots,
+    note,
+    theirsAdded,
+    theirsRemoved,
+    noteClash,
+    changedByOthers: theirsAdded.length > 0 || theirsRemoved.length > 0 || theirNoteChanged,
+  }
+}
+
 // ── 1日の表 ────────────────────────────────────────────────────────────────
 
 /**

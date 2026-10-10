@@ -13,6 +13,13 @@
 // 自動で入った記録かどうかは画面に出さない（2026-10-01 代表指示）。入浴しなかった方は［入浴していない］を押す＝直すと手動の記録（記入者つき）。
 // 12:30 より前の今日は従来どおり「未記録」。自動の記録は端末では作らない（この画面は表示と直すだけ）。
 // デイの休業日（12/31〜1/3 など・0016）は、12:30 に予定者が「訪問介護で入浴」（visit）で自動記録される。画面では「入浴した」と出す。
+// 多端末の運用（2026-10-10 監査の修正）:
+//   ・開いたまま日付が変わったら、今日を見ていて 入力中（備考の書きかけ・予定外に足した人・小窓）・保存中・未送信・
+//     止まった記録が無ければ今日へ切り替える。あれば切り替えずに「日付が変わりました〔今日を開く〕」の帯を出す（F18）
+//   ・読み込み・読み直しには世代を付け、最新の世代 かつ 今の日付の応答だけを表へ入れる（F20。日付を変えた直後に前の日の
+//     応答で上書きしない・保存の後に保存前の読み直しで自分の記録を消さない）。表示と書き込みの入口でも日付を確かめる
+//   ・送れずに止まった記録・取り消し・修正は、その方の行に出し、設定タブへ案内する（F37）
+//   ・App が配り直した職員名簿は名簿だけを差し替える（F47。名簿のたびに入力解禁を取り直して画面を「準備中」に戻さない）
 //
 // 規律:
 // - 取得・保存は db.ts の関数のみ（supabase を直呼びしない）
@@ -27,6 +34,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
+  FORBIDDEN_REASON,
   DbError,
   fetchAllResidents,
   fetchBathDay,
@@ -39,12 +47,13 @@ import {
   isQueuePersisted,
   isSelfWrite,
   kindBlockedMessage,
+  listStoppedOps,
   queueSubscribe,
   softDeleteBath,
   subscribeBathChanges,
   updateBath,
 } from '../lib/db'
-import type { BathPlanResult } from '../lib/db'
+import type { BathPlanResult, StoppedOp } from '../lib/db'
 import { resolveActor, touchActivity } from '../lib/actor'
 import {
   BATH_AUTO_TIME,
@@ -85,6 +94,10 @@ const MSG_NOT_PERSISTED =
 const MSG_SAVE_FAILED = '保存できませんでした。通信状態を確認して、もう一度選んでください。'
 const MSG_NO_RECORDER = '記入者が選ばれていません。上の「記入者」で選んでから記録・取り消しをしてください。'
 const MSG_ROW_PENDING = '未送信の記録があります。送信が終わってから直してください'
+/** 表示中の日付と違う日の記録を直そうとした（古い読み直しが残っていた時の歯止め・F20） */
+const MSG_OTHER_DAY = '表示中の日付と違う日の記録でした。読み直したので、確かめてからもう一度選んでください。'
+/** 送れずに止まった記録の案内（F37。どうするかは設定タブの「未送信データ」で選ぶ） */
+const MSG_STOPPED_GUIDE = '自動では送りません。設定タブの「未送信データ」で、いまの記録とくらべてどうするか選んでください。'
 
 type RowMsg = { tone: 'warn' | 'danger' | 'info'; text: string }
 
@@ -92,6 +105,60 @@ type RowMsg = { tone: 'warn' | 'danger' | 'info'; text: string }
 interface LocalPending {
   result: BathResult
   cancel_reason: BathCancelReason | null
+}
+
+// ── 多端末の運用の判定（純関数・tests/medbath-multidevice.test.mjs が確かめる） ──
+
+/**
+ * 開いたまま日付が変わった時の動き（F18・2026-10-10 本人回答。与薬チェックと同じ規則）。今日を見ていた時だけ追従し、
+ * 入力中・保存中・未送信・止まった記録がある（holding）なら切り替えずに帯で知らせる。手で過去の日を選んでいた時は何もしない
+ */
+export function dayRolloverAction(p: { day: string; prevToday: string; today: string; holding: boolean }): 'none' | 'switch' | 'notice' {
+  if (p.today === p.prevToday || p.day !== p.prevToday) return 'none'
+  return p.holding ? 'notice' : 'switch'
+}
+
+/** 読み込み・読み直しの応答を表へ入れてよいか（F20。最新の世代 かつ 取りに行った日が今の日 かつ 画面が出ている時だけ） */
+export function acceptDayLoad(p: { gen: number; latestGen: number; day: string; shownDay: string; alive: boolean }): boolean {
+  return p.alive && p.gen === p.latestGen && p.day === p.shownDay
+}
+
+/**
+ * 送れずに止まった入浴の記録を、表示中の日の利用者ごとに当てる（F37）。追加は bath_on と利用者 id で、
+ * 修正・取り消しは表示中の日の記録の id で当てる
+ */
+export function stoppedBathByResident(ops: readonly StoppedOp[], day: string, records: readonly BathRecord[]): Map<number, StoppedOp[]> {
+  const byId = new Map(records.filter((r) => r.bath_on === day).map((r) => [r.id, r.resident_id] as const))
+  const out = new Map<number, StoppedOp[]>()
+  for (const op of ops) {
+    if (op.table !== 'bath_records') continue
+    let rid: number | null = null
+    if (op.kind === 'insert' && op.payload.bath_on === day && typeof op.payload.resident_id === 'number') rid = op.payload.resident_id
+    else if (op.kind === 'update' && op.rowId !== null) rid = byId.get(op.rowId) ?? null
+    if (rid === null) continue
+    out.set(rid, [...(out.get(rid) ?? []), op])
+  }
+  return out
+}
+
+/** 止まった入浴の記録の中身と、止まった理由の1行（F37） */
+export function stoppedBathText(op: StoppedOp): string {
+  const p = op.payload
+  const shown = (v: unknown): string | null =>
+    typeof v === 'string' && v !== '' ? `「${BATH_SHOWN_LABEL[bathShownOf(v as BathResult)]}」` : null
+  const note = typeof p.note === 'string' && p.note.trim() !== '' ? `（備考: ${p.note}）` : ''
+  let what: string
+  if (op.kind === 'insert') what = `${shown(p.result) ?? ''}${note}の記録`
+  else if ('deleted_at' in p) what = '記録の取り消し'
+  else if (shown(p.result) !== null) what = `${shown(p.result)}${note}への修正`
+  else what = `備考の修正${note}`
+  const why =
+    op.state === 'rejected'
+      ? 'サーバーに受け付けられませんでした'
+      : op.kind === 'insert'
+        ? '他の端末が先にこの方の記録を保存しました'
+        : '他の端末が先にこの記録を変更しました'
+  return `送れずに止まっている${what}があります（${why}）。`
 }
 
 export interface BathRecordPageProps {
@@ -102,13 +169,17 @@ export interface BathRecordPageProps {
 }
 
 export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProps = {}) {
+  // 時計の取り直し（60 秒ごと・画面に戻った時）で描き直し、今日を取り直す（開いたまま日付が変わったことに気づく・F18）
+  const [, setClockTick] = useState(0)
   const today = todayIso()
   const [day, setDay] = useState(today)
   const [dayMsg, setDayMsg] = useState<string | null>(null)
+  /** 開いたまま日付が変わり、入力中・未送信があったので切り替えなかった時の、その時の表示日（帯を出す・F18） */
+  const [rolloverDay, setRolloverDay] = useState<string | null>(null)
 
   const [residents, setResidents] = useState<Resident[] | null>(null)
   const [staff, setStaff] = useState<Staff[] | null>(staffProp ?? null)
-  const [gate, setGate] = useState<{ value: boolean; observed: boolean } | null>(null)
+  const [gate, setGate] = useState<{ value: boolean; observed: boolean; forbidden?: true } | null>(null)
   const [baseError, setBaseError] = useState<string | null>(null)
   const [baseTick, setBaseTick] = useState(0)
 
@@ -131,6 +202,13 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
   const { toast, show } = useToast()
   const uid = useId()
   const aliveRef = useRef(true)
+  // 読み込み・読み直しの世代と、表示中の日・記録の控え（F20。応答が返った時に「今も同じ日・最新の取得か」を確かめる）
+  const genRef = useRef(0)
+  const inFlightRef = useRef(0)
+  const dayRef = useRef(day)
+  dayRef.current = day
+  const recordsRef = useRef<BathRecord[] | null>(null)
+  recordsRef.current = records
 
   useEffect(() => {
     aliveRef.current = true
@@ -139,20 +217,38 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
     }
   }, [])
 
+  useEffect(() => {
+    const tick = () => setClockTick((n) => n + 1)
+    const t = window.setInterval(tick, 60_000)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') tick()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.clearInterval(t)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [])
+
+  // App が配り直した職員名簿（F47）。名簿だけを差し替える（下の取得の依存に入れると、名簿が変わるたびに入力解禁を
+  // 取り直して画面が「準備しています」に戻っていた）。取り直し（baseTick）では ref の最新を使う
+  const staffPropRef = useRef(staffProp)
+  staffPropRef.current = staffProp
+  useEffect(() => {
+    if (staffProp !== undefined) setStaff(staffProp)
+  }, [staffProp])
+
   // 名簿・職員・入力解禁（画面を開くたびに取り直す＝前提情報は毎回実測）
   useEffect(() => {
     let alive = true
     setBaseError(null)
     setGate(null)
-    Promise.all([
-      fetchAllResidents(),
-      staffProp !== undefined ? Promise.resolve(staffProp) : fetchStaff(),
-      getKindInputGate('bath'),
-    ])
+    const given = staffPropRef.current
+    Promise.all([fetchAllResidents(), given !== undefined ? Promise.resolve(given) : fetchStaff(), getKindInputGate('bath')])
       .then(([rs, st, g]) => {
         if (!alive) return
         setResidents(rs)
-        setStaff(st)
+        setStaff(staffPropRef.current ?? st)
         setGate(g)
       })
       .catch(() => {
@@ -167,7 +263,7 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
     return () => {
       alive = false
     }
-  }, [baseTick, staffProp])
+  }, [baseTick])
 
   // 記入者の既定値（名簿と照合できた操作者。できなければ未選択＝記録前に選んでもらう）
   useEffect(() => {
@@ -191,16 +287,23 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
   useEffect(() => {
     if (residents === null) return
     let alive = true
+    // 世代を進める＝日付を変える前に投げた読み直しの応答を捨てる（F20）
+    const gen = ++genRef.current
     setDayError(null)
     setRecords(null)
     setPlan(null)
+    inFlightRef.current += 1
     loadRecords(day)
       .then((rs) => {
-        if (alive) setRecords(rs)
+        if (alive && acceptDayLoad({ gen, latestGen: genRef.current, day, shownDay: dayRef.current, alive: aliveRef.current })) setRecords(rs)
       })
       .catch((e: unknown) => {
-        if (!alive) return
+        // 後から投げた読み直しに追い越された時は、そちらの結果に任せる
+        if (!alive || gen !== genRef.current) return
         setDayError(e instanceof DbError ? e.message : ERR_LOAD)
+      })
+      .finally(() => {
+        inFlightRef.current -= 1
       })
     fetchBathPlan(day, activeResidents)
       .then((p) => {
@@ -214,24 +317,47 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
     }
   }, [day, dayTick, residents, activeResidents, loadRecords])
 
-  // 日付を変えたら、その日に紐づく画面の状態（予定外に足した人・備考の書きかけ・一言）を持ち越さない
+  // 日付を変えたら、その日に紐づく画面の状態（予定外に足した人・備考の書きかけ・一言・日付が変わった時の帯）を持ち越さない
   useEffect(() => {
     setExtras([])
     setNotes(new Map())
     setMsgs(new Map())
     setPending(new Map())
+    setRolloverDay(null)
   }, [day])
 
-  /** 記録だけを読み直す（保存の競合・他の端末の変更の後） */
+  /**
+   * 記録だけを読み直す（保存の競合・他の端末の変更の後）。世代を付け、最新の世代 かつ 取りに行った日が今の日の時だけ
+   * 表へ入れる（F20）
+   */
   const reloadRecords = useCallback(() => {
-    loadRecords(day)
+    const d = day
+    // 日付を変える前の描画から呼ばれた（保存の応答を待つ間に日付を変えた等）時は何もしない。世代だけ進めると、
+    // 新しい日の読み込みの応答を捨て、この読み直しの応答も日付違いで捨てて「読み込み中」のまま残るため
+    if (d !== dayRef.current) return
+    const gen = ++genRef.current
+    inFlightRef.current += 1
+    loadRecords(d)
       .then((rs) => {
-        if (aliveRef.current) setRecords(rs)
+        if (acceptDayLoad({ gen, latestGen: genRef.current, day: d, shownDay: dayRef.current, alive: aliveRef.current })) setRecords(rs)
       })
       .catch(() => {
-        // 読み直せなかっただけ。表示中の記録はそのまま残す（上の「最新を読み込む」で再試行できる）
+        // 読み直せなかっただけ。表示中の記録はそのまま残す（上の「最新を読み込む」で再試行できる）。
+        // ただし日付の読み込みをこの読み直しが追い越していた時（まだ何も出ていない）は、「読み込み中」から抜けるようにエラーを出す
+        if (aliveRef.current && gen === genRef.current && d === dayRef.current && recordsRef.current === null) setDayError(ERR_LOAD)
+      })
+      .finally(() => {
+        inFlightRef.current -= 1
       })
   }, [day, loadRecords])
+
+  /**
+   * 保存・取り消しの前に投げた読み直しがまだ返っていなければ、もう一度読み直す（F20。その古い応答は保存の前の状態なので、
+   * 後から返ると自分の記録が消えて見える。読み直し直すと世代が進み、古い応答は捨てられる）
+   */
+  function supersedeInFlight() {
+    if (inFlightRef.current > 0) reloadRecords()
+  }
 
   // 送信待ちの件数の変化を画面に映す（行のロックの判定を取り直す）。減った時は、その日の記録を読み直して
   // 行を記録済みに戻す（自分の書込の Realtime 通知は isSelfWrite で無視するので、ここで読み直す）
@@ -259,7 +385,8 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
     })
   }, [queueTick, records, day])
 
-  // 他の端末の記録を取り込む（自分の書込の通知・別の日の通知は無視。行を特定できない通知は取り直す）
+  // 他の端末の記録を取り込む（自分の書込の通知・別の日の通知は無視。行を特定できない通知は取り直す）。
+  // つながり直した・画面に戻った・電波が戻った時の取り直しの合図（RESYNC・F14）も行が無いので、ここで読み直す
   useEffect(() => {
     let timer: number | null = null
     const unsub = subscribeBathChanges((table, info) => {
@@ -277,6 +404,11 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
 
   const locked = gate === null || !gate.observed || gate.value !== true
   const gateUnknown = gate !== null && !gate.observed
+  /**
+   * このアカウントは記録アプリを使えない（許可リストに無い・無効。F61 手直し）。入力は止めたまま（locked）、案内だけを
+   * 「通信エラー・再試行」ではなく、ログインし直す・管理者へ連絡する文にする（再試行では直らない）
+   */
+  const forbidden = gate?.forbidden === true
   const reasonId = `${uid}-locked`
 
   const residentById = useMemo(() => {
@@ -289,12 +421,16 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
     () =>
       buildBathDayRows(
         plan !== null && plan !== 'error' && plan.available ? plan.entries : [],
-        records ?? [],
+        // 表示中の日の記録だけ（古い応答の行を混ぜない二重の歯止め・F20）
+        (records ?? []).filter((r) => r.bath_on === day),
         extras,
         (residents ?? []).map((r) => r.id),
       ),
-    [plan, records, extras, residents],
+    [plan, records, extras, residents, day],
   )
+  // 送れずに止まった記録（F37）。止まっても件数は減らないので、送信待ちの通知のたびと記録を読み直した時に引き直す
+  const stoppedAll = useMemo(() => listStoppedOps().filter((op) => op.table === 'bath_records'), [queueTick, records])
+  const stoppedByResident = useMemo(() => stoppedBathByResident(stoppedAll, day, records ?? []), [stoppedAll, day, records])
   const counts = countBathDay(rows)
   const staffName = (id: number | null): string | null =>
     id === null ? null : ((staff ?? []).find((s) => s.id === id)?.name ?? null)
@@ -323,10 +459,15 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
   }
 
   function applySaved(saved: BathRecord) {
-    setRecords((prev) => {
-      const list = (prev ?? []).filter((r) => r.id !== saved.id && r.resident_id !== saved.resident_id)
-      return [...list, saved]
-    })
+    // 表示中の日の記録だけを表へ足す。まだ何も読めていない時（null）は1件だけの表を作らない（読み込みの結果を待つ）
+    if (saved.bath_on === dayRef.current) {
+      setRecords((prev) => {
+        if (prev === null) return prev
+        const list = prev.filter((r) => r.id !== saved.id && r.resident_id !== saved.resident_id)
+        return [...list, saved]
+      })
+    }
+    supersedeInFlight()
     setNotes((prev) => {
       const next = new Map(prev)
       next.delete(saved.resident_id)
@@ -343,6 +484,7 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
   async function save(row: BathDayRow, result: BathResult, cancelReason: BathCancelReason | null, note: string) {
     const id = row.residentId
     if (locked || busy.has(id) || rowPending(row)) return
+    if (row.record !== null && rejectOtherDay(row.record)) return
     if (recorderId === null) {
       setRowMsg(id, { tone: 'warn', text: MSG_NO_RECORDER })
       return
@@ -398,6 +540,17 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
     else void save(row, 'cancel', null, noteOf(row))
   }
 
+  /**
+   * 表示中の日付と違う日の記録なら書かずに読み直す（古い応答が表に残っていた時の、書き込みの側の歯止め・F20）。
+   * 書かなかった時は true
+   */
+  function rejectOtherDay(rec: BathRecord): boolean {
+    if (rec.bath_on === dayRef.current) return false
+    setRowMsg(rec.resident_id, { tone: 'warn', text: MSG_OTHER_DAY })
+    reloadRecords()
+    return true
+  }
+
   /** その行に未送信の記録（この端末の送信待ち・送信中、または画面の「送信待ちにした入力」の印）があるか */
   function rowPending(row: BathDayRow): boolean {
     return pending.has(row.residentId) || hasPendingBath(row.residentId, day, row.record?.id ?? null)
@@ -409,6 +562,7 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
     setDeleteFor(null)
     const row = rows.find((r) => r.residentId === id)
     if (locked || busy.has(id) || (row !== undefined && rowPending(row))) return
+    if (rejectOtherDay(rec)) return
     if (recorderId === null) {
       setRowMsg(id, { tone: 'warn', text: MSG_NO_RECORDER })
       return
@@ -428,7 +582,8 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
         setRowMsg(id, { tone: 'warn', text: isQueuePersisted() ? '取り消しは未送信です（電波が戻ると自動で送信します）' : MSG_NOT_PERSISTED })
         return
       }
-      setRecords((prev) => (prev ?? []).filter((r) => r.id !== rec.id))
+      setRecords((prev) => (prev === null ? prev : prev.filter((r) => r.id !== rec.id)))
+      supersedeInFlight()
       show('記録を取り消しました。')
     } catch (e) {
       if (!aliveRef.current) return
@@ -437,6 +592,37 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
       if (aliveRef.current) setRowBusy(id, false)
     }
   }
+
+  // ── 開いたまま日付が変わった時（F18） ──
+  /**
+   * 入力中（備考の書きかけ・予定外に足した人・小窓）・保存中・未送信・止まった記録があるか
+   * （あれば日付を勝手に切り替えない＝入力の送り先の日をずらさない・書きかけを消さない）
+   */
+  const holding =
+    [...notes.entries()].some(([rid, v]) => v !== (rows.find((r) => r.residentId === rid)?.record?.note ?? '')) ||
+    extras.length > 0 ||
+    busy.size > 0 ||
+    pending.size > 0 ||
+    deleteFor !== null ||
+    staffPickerOpen ||
+    residentPickerOpen ||
+    stoppedByResident.size > 0 ||
+    rows.some((row) => rowPending(row))
+  const prevTodayRef = useRef(today)
+  useEffect(() => {
+    const prev = prevTodayRef.current
+    if (prev === today) return
+    prevTodayRef.current = today
+    const act = dayRolloverAction({ day, prevToday: prev, today, holding })
+    if (act === 'switch') {
+      setRolloverDay(null)
+      setDay(today)
+      setDayMsg(`日付が変わったので、今日（${fmtDayLabel(today)}）の表示に切り替えました。`)
+    } else if (act === 'notice') {
+      setRolloverDay(day)
+    }
+    // 判定は今日が変わった時だけ（表示中の日・入力中かは、その時の値を読む）
+  }, [today])
 
   // ── 3状態: エラー → ローディング → 本体 ──
   if (baseError !== null) {
@@ -456,10 +642,15 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
 
   const recorderName = staffName(recorderId)
   const pickable = activeResidents.filter((r) => !rows.some((row) => row.residentId === r.id))
+  // 止まった記録のうち、表示中の行に出ない分（ほかの日の記録・表に無い方の記録）
+  const stoppedShown = rows.reduce((n, row) => n + (stoppedByResident.get(row.residentId)?.length ?? 0), 0)
+  const stoppedElsewhere = stoppedAll.length - stoppedShown
 
   return (
     <div className="mx-auto w-full max-w-2xl space-y-4 p-4">
-      {gateUnknown ? (
+      {forbidden ? (
+        <ErrorBlock message={FORBIDDEN_REASON} />
+      ) : gateUnknown ? (
         <ErrorBlock message={ERR_GATE} onRetry={() => setBaseTick((n) => n + 1)} />
       ) : locked ? (
         <div id={reasonId} role="status" className="rounded-lg border border-warn bg-warn-bg p-4">
@@ -469,6 +660,28 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
             {kindBlockedMessage('bath')}
           </p>
           <p className="mt-2 text-base text-ink2">予定と記録の閲覧はこのままできます。</p>
+        </div>
+      ) : null}
+
+      {/* 開いたまま日付が変わり、入力中・未送信があったので切り替えなかった時の帯（F18） */}
+      {rolloverDay !== null && rolloverDay === day && day !== today ? (
+        <div role="status" className="rounded-lg border border-warn bg-warn-bg p-4">
+          <p className="text-base text-ink">
+            <span aria-hidden="true">▲ </span>
+            日付が変わりました（表示中: {fmtDayLabel(day)}）。入力中・未送信の記録があったので、表示はそのままにしています。今日の記録は「今日を開く」から入れてください。
+            {notes.size > 0 ? '（書きかけの備考は、先に「備考を保存」を押してください。今日を開くと消えます）' : ''}
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              setDayMsg(null)
+              setRolloverDay(null)
+              setDay(todayIso())
+            }}
+            className="mt-2 min-h-tap rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink"
+          >
+            今日を開く
+          </button>
         </div>
       ) : null}
 
@@ -568,6 +781,15 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
         <LoadingBlock label="この日の入浴の記録を読み込み中です…" />
       ) : (
         <>
+          {stoppedElsewhere > 0 ? (
+            <p role="status" className="rounded border border-danger bg-danger-bg px-3 py-2 text-sm text-ink">
+              <span aria-hidden="true">⚠ </span>
+              ほかの日の入浴の記録に、送れずに止まっているものが {stoppedElsewhere}件あります。{MSG_STOPPED_GUIDE}{' '}
+              <Link to="/settings" className="inline-flex min-h-tap items-center font-bold text-link">
+                設定タブを開く<span aria-hidden="true"> ›</span>
+              </Link>
+            </p>
+          ) : null}
           {rows.length === 0 ? (
             <EmptyBlock message="この日の入浴の予定と記録はありません。予定外の方は下の「予定外の人を追加」から記録できます。" />
           ) : (
@@ -589,6 +811,7 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
                   busy={busy.has(row.residentId)}
                   msg={msgs.get(row.residentId) ?? null}
                   pending={pending.get(row.residentId) ?? null}
+                  stopped={stoppedByResident.get(row.residentId) ?? []}
                   reasonId={locked && !gateUnknown ? reasonId : undefined}
                 />
               ))}
@@ -676,6 +899,8 @@ interface BathRowProps {
   busy: boolean
   msg: RowMsg | null
   pending: LocalPending | null
+  /** 送れずに止まっている、この方の記録・取り消し・修正（F37） */
+  stopped: StoppedOp[]
   reasonId?: string
 }
 
@@ -692,6 +917,7 @@ function BathRow({
   busy,
   msg,
   pending,
+  stopped,
   reasonId,
 }: BathRowProps) {
   const uid = useId()
@@ -805,6 +1031,20 @@ function BathRow({
           <span aria-hidden="true">⚠ </span>
           {MSG_ROW_PENDING}
         </p>
+      ) : null}
+      {stopped.length > 0 ? (
+        <div role="status" className="mt-2 rounded border border-danger bg-danger-bg px-2 py-1 text-sm text-ink">
+          {stopped.map((op) => (
+            <p key={op.qid} className="break-words font-bold text-danger">
+              <span aria-hidden="true">⚠ </span>
+              {stoppedBathText(op)}
+            </p>
+          ))}
+          <p className="mt-1">{MSG_STOPPED_GUIDE}</p>
+          <Link to="/settings" className="inline-flex min-h-tap items-center font-bold text-link">
+            設定タブを開く<span aria-hidden="true"> ›</span>
+          </Link>
+        </div>
       ) : null}
       {busy ? (
         <p role="status" className="mt-2 text-sm text-ink2">

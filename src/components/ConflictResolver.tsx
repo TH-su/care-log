@@ -29,6 +29,7 @@ import {
   fetchLatestMeal,
   fetchLatestNote,
   fetchLatestVital,
+  fetchAllStaff,
   fetchStaff,
   insertNoteAsNew,
   newClientKey,
@@ -284,8 +285,10 @@ export function ConflictResolver({
                 : { routine: false, id: target.vitalId },
             )
           : fetchLatestMeal(target.residentId, target.day, target.slot),
-        // 名簿は記入者名を出すためだけに使う。取れなくても比較そのものは出す
-        staff ? Promise.resolve(staff) : fetchStaff().catch(() => null),
+        // 名簿は記入者名を出すためだけに使う。取れなくても比較そのものは出す。
+        // 退職者も含む全員から引く（F48。在籍者だけだと、退職した職員が先に書いた値の記入者が「職員ID n」になる）。
+        // 読めなければ渡された名簿（在籍者）で出す
+        fetchAllStaff().catch(() => staff ?? fetchStaff().catch(() => null)),
       ])
       if (gen !== genRef.current || !aliveRef.current) return
       setLatest(row as LatestRow<Vital | Meal> | null)
@@ -365,6 +368,12 @@ export function ConflictResolver({
           .map((f) => ({ name: nameOf(f), value: fmt(f, mine[f]) })),
       ),
     [fields, fmt, mine, nameOf],
+  )
+
+  /** 比べる欄のうち、あなたの入力に無い血圧の相方（F12。〔自分の値で直す〕で見ていた値を書き戻す欄） */
+  const pairBack = useMemo(
+    () => columns.filter((c) => !Object.prototype.hasOwnProperty.call(mine, c.field)),
+    [columns, mine],
   )
 
   /** 両方残すで残せる値があるか（空にする入力だけでは新しい記録にできない） */
@@ -675,7 +684,9 @@ export function ConflictResolver({
                     </span>
                   </p>
                   <p className="mt-1 text-base text-ink">
-                    あなたの入力：<span className="tabular font-bold">{fmt(c.field, c.mine)}</span>
+                    {/* あなたの入力に無い血圧の相方（F12）は「見ていた値」。〔自分の値で直す〕は組でこの値を書く */}
+                    {Object.prototype.hasOwnProperty.call(mine, c.field) ? 'あなたの入力' : 'あなたの画面で見ていた値'}：
+                    <span className="tabular font-bold">{fmt(c.field, c.mine)}</span>
                   </p>
                 </li>
               ))}
@@ -709,6 +720,10 @@ export function ConflictResolver({
                 </button>
                 <p id={idMine} className="mt-1 text-sm text-ink2">
                   あなたの値で書き直します。前の値は変更の記録に残ります。
+                  {/* 相方を見ていた値で組にして書く時は、それも書き戻すことを先に示す（F12: 見せないまま戻さない） */}
+                  {pairBack.length > 0
+                    ? `血圧は上下を組で書くため、${pairBack.map((c) => `${nameOf(c.field)}も見ていた値（${fmt(c.field, c.mine)}）`).join('・')}に戻します。`
+                    : null}
                 </p>
               </div>
               <div>
@@ -913,7 +928,8 @@ export function NoteConflictResolver({
     try {
       const [row, names, m] = await Promise.all([
         fetchLatestNote(t.id),
-        staffRef.current ? Promise.resolve(staffRef.current) : fetchStaff().catch(() => null),
+        // 名前の引き当ては退職者も含む全員から（F48）。読めなければ渡された名簿
+        fetchAllStaff().catch(() => staffRef.current ?? fetchStaff().catch(() => null)),
         resolveNoteMeta(t.id).catch(() => null),
       ])
       if (gen !== genRef.current || !aliveRef.current) return
@@ -939,6 +955,10 @@ export function NoteConflictResolver({
   const deleting = mine !== null && Object.prototype.hasOwnProperty.call(mine.values, 'deleted_at')
   const mineBody = mine !== null && typeof mine.values.body === 'string' ? mine.values.body : null
   const fields = mine === null ? [] : Object.keys(mine.values).filter((f) => f !== 'deleted_at')
+  // 取り消しが「見た行」と食い違って止まった欄（F09・0027。本文は同じでも重要度・対象などが直されていた）
+  const seenDiff = mine?.conflicts.find((c) => c.field === 'deleted_at')?.fields ?? []
+  /** 先の内容に並べる欄（あなたの入力の欄＋取り消しが止まった理由の欄） */
+  const shownFields = [...fields, ...seenDiff.filter((f) => f !== 'body' && !fields.includes(f))]
   const latestRow = latest?.row as unknown as Record<string, unknown> | undefined
   const who = latest === null ? '' : recorderName(latest.editedBy, latest.row.reporter_id, staffList)
   const stamp = latest === null ? '' : fmtStamp(latest.updatedAt)
@@ -958,10 +978,16 @@ export function NoteConflictResolver({
       const row = latest.row as unknown as Record<string, unknown>
       let res
       if (deleting) {
-        res = await deleteNote(noteTargetOf(target), latest.row.body, { rebase: true })
+        // 見た行＝いま取り直した最新の行（F09。〔それでも削除する〕の後に、さらに直されていたら止める）
+        res = await deleteNote(noteTargetOf(target), latest.row, { rebase: true })
       } else {
         const edits: CellEditInput<NoteEditField> = {}
-        for (const f of fields) edits[f as NoteEditField] = { value: mine.values[f], base: row[f] ?? null }
+        for (const f of fields) {
+          // 基準＝取り直した最新の値。列を返さない経路で値が分からない欄（undefined）は基準を付けない
+          // （F08: 継続を終了した職員 ended_by を null として送ると、サーバーの値が入っている時は何度押しても競合になった）
+          const known = Object.prototype.hasOwnProperty.call(row, f) && row[f] !== undefined
+          edits[f as NoteEditField] = known ? { value: mine.values[f], base: row[f] ?? null } : { value: mine.values[f] }
+        }
         res = await saveNoteEdits(noteTargetOf(target), edits, { rebase: true })
       }
       if (!aliveRef.current) return
@@ -1108,11 +1134,15 @@ export function NoteConflictResolver({
                       {stamp ? `・${stamp}` : ''}
                     </p>
                     <p className="mt-1 whitespace-pre-wrap break-words text-base text-ink">{latest.row.body}</p>
-                    {fields
+                    {shownFields
                       .filter((f) => f !== 'body')
                       .map((f) => (
                         <p key={f} className="mt-1 text-base text-ink">
-                          {NOTE_FIELD_NAME[f] ?? f}：<span className="font-bold">{fmtV(f, latestRow?.[f] ?? null)}</span>
+                          {NOTE_FIELD_NAME[f] ?? f}：
+                          <span className="font-bold">
+                            {/* 値を読めなかった欄（undefined）は「未入力」と言わない（F08） */}
+                            {latestRow !== undefined && latestRow[f] === undefined ? '（確かめられません）' : fmtV(f, latestRow?.[f] ?? null)}
+                          </span>
                         </p>
                       ))}
                   </>
@@ -1123,7 +1153,11 @@ export function NoteConflictResolver({
                 {deleting ? (
                   <p className="mt-1 text-base text-ink">
                     <span aria-hidden="true">▲ </span>
-                    この申し送りを削除しようとしました。削除した後に、ほかの端末で本文が直されています。
+                    {seenDiff.length > 0
+                      ? `この申し送りを削除しようとしました。削除する前に見ていた内容から、ほかの端末で${seenDiff
+                          .map((f) => NOTE_FIELD_NAME[f] ?? f)
+                          .join('・')}が直されています。`
+                      : 'この申し送りを削除しようとしました。削除した後に、ほかの端末で本文が直されています。'}
                   </p>
                 ) : null}
                 {mineBody !== null ? (
@@ -1213,7 +1247,7 @@ export function NoteConflictResolver({
                         aria-describedby={idDrop}
                         className={`${btn} border-border-strong text-ink`}
                       >
-                        {missing || deleting ? '取り下げる' : '先の本文を残す'}
+                        {missing || deleting ? '取り下げる' : mineBody !== null ? '先の本文を残す' : '先の内容を残す'}
                       </button>
                       <p id={idDrop} className="mt-1 text-sm text-ink2">
                         あなたの{mineBody !== null ? '本文' : '入力'}は保存されません（押すと確認が出ます）。

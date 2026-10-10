@@ -27,13 +27,27 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Test
-        run: npm test
+        # 試験のスキップが1件でもあれば公開を止める（F69・2026-10-10）。ここは Node 24 に固定なので、スキップが出るのは
+        # 試験の対象（db.ts など）を読み込めなかった時だけ。以前はそれが「この Node では使えない」のスキップになり、
+        # 同期の試験が1件も走らないまま成功として公開されていた。件数の行が読めない時も止める（黙って通さない）
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee "$RUNNER_TEMP/npm-test.log"
+          if ! grep -Eq '^(ℹ|#) skipped 0$' "$RUNNER_TEMP/npm-test.log"; then
+            echo "::error::試験にスキップがあります（または件数の行が読めません）。スキップの理由を確かめてください。"
+            grep -E '^(ℹ|#) (tests|pass|fail|skipped) ' "$RUNNER_TEMP/npm-test.log" || true
+            exit 1
+          fi
       - name: Build
         run: npm run build
         env:
           # Supabase 接続情報（リポジトリの Secrets に登録しておくこと）
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          # 版の印（F28・2026-10-10）。画面へ焼き込み、公開物の version.json にも出す（vite.config.ts）。
+          # 開いたままの端末が「新しい版があります」に気づくのと、設定画面で各端末の版を確かめるのに使う
+          CL_BUILD_ID: ${{ github.sha }}
+          CL_BUILD_SEQ: ${{ github.run_number }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

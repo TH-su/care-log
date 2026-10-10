@@ -10,13 +10,20 @@
 // - 職員を選んでいない端末（actorId=null）も参加する（相手の画面には「別の端末」と出る）
 // - 表示は補助であり、保存を妨げない。接続できない時は others が空のまま（何も出さない・例外を出さない）
 // - 名前は受け取った側が職員名簿で引く（配られてくるのは職員IDだけ）。名簿を読めなければ「他の職員」
+// - 配るのは操作している間だけ（F22・F21・2026-10-10 本人回答）。この画面での打鍵・タップ・入力・欄に入る操作から
+//   PRESENCE_IDLE_MS（3分）操作が無ければ配るのをやめる（欄・idle は持ったまま＝次の操作で配り直す。キーパッドも入力の値も
+//   そのまま）。開いた直後もまだ配らない＝控えから戻しただけの書きかけで「書いています」を出さない。
+//   画面を隠した時の取り消しは db.ts の joinPresence が受け持つ（参加している全部に効く）
+// - 受け手の記録者（actorId）と同じ職員の別の端末は「あなたの別の端末」と出す（F26）
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { fetchStaff, joinPresence } from '../lib/db'
 import {
   cellBusyText,
+  createActivityGate,
   createFocusSlot,
   indexPresence,
+  PRESENCE_IDLE_MS,
   PRESENCE_RELEASE_MS,
   PRESENCE_TOUCH_HOLD_MS,
   presenceForCell,
@@ -68,7 +75,16 @@ export interface CellPresence {
    * 押すたびに呼び直すと延びる。戻り値は enter と同じ（blur で呼ぶと早い方で取り消す）
    */
   touch: (f: CellFocus, holdMs?: number) => LeaveCell
+  /**
+   * 操作したことを知らせる（F22）。この画面の打鍵・タップ・入力はフックが自分で拾うので、普通は呼ばなくてよい
+   * （画面の外の部品＝別の窓の中の操作などを数えたい時だけ呼ぶ）。PRESENCE_IDLE_MS 操作が無いと配るのをやめ、
+   * 次の操作で配り直す
+   */
+  activity: () => void
 }
+
+/** 操作として数える出来事（この画面のどこで起きても数える。押すだけ・打つだけ・IME の変換中も） */
+const ACTIVITY_EVENTS = ['keydown', 'pointerdown', 'input', 'compositionupdate'] as const
 
 export interface UseCellPresenceOptions {
   /** 記録する職員。null＝選んでいない（「別の端末」として参加する） */
@@ -103,9 +119,16 @@ export function useCellPresence({ actorId, idle = null, staff = null }: UseCellP
   idleRef.current = idle
   /** 最後に配った中身（同じなら配り直さない＝打鍵や再描画で配らない） */
   const sentRef = useRef('')
+  /** 最後に操作した時刻（F22。操作が無いまま PRESENCE_IDLE_MS 経ったら配らない） */
+  const gateRef = useRef(createActivityGate(PRESENCE_IDLE_MS))
+  const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  /** いま配るべき居場所。欄に入っていればその欄、無ければ idle、それも無ければ null（配らない） */
+  /**
+   * いま配るべき居場所。欄に入っていればその欄、無ければ idle、それも無ければ null（配らない）。
+   * 操作が無いまま PRESENCE_IDLE_MS 経った（または開いてからまだ操作していない）間も null（F22・F21）
+   */
   const metaNow = useCallback((): PresenceHere | null => {
+    if (!gateRef.current.active(Date.now())) return null
     const cur = slotRef.current.current()
     const staffId = actorRef.current
     if (cur !== null) return { staffId, day: cur.day, residentId: cur.residentId, cell: { ...cur.cell } }
@@ -131,12 +154,54 @@ export function useCellPresence({ actorId, idle = null, staff = null }: UseCellP
     return () => {
       if (releaseRef.current !== null) clearTimeout(releaseRef.current)
       releaseRef.current = null
+      if (idleTimerRef.current !== null) clearTimeout(idleTimerRef.current)
+      idleTimerRef.current = null
       slotRef.current.clear()
+      gateRef.current.reset()
       joinRef.current = null
       setOthers([])
       p.stop()
     }
   }, [metaNow])
+
+  /** 操作が切れる時刻に合わせて、配るのをやめるタイマーを張り直す（F22） */
+  const armIdle = useCallback(() => {
+    if (idleTimerRef.current !== null) clearTimeout(idleTimerRef.current)
+    idleTimerRef.current = null
+    const due = gateRef.current.dueAt()
+    if (due === null) return
+    idleTimerRef.current = setTimeout(
+      () => {
+        idleTimerRef.current = null
+        send() // 操作が切れた → 配っていれば取り消す（欄・idle は持ったまま）
+      },
+      Math.max(0, due - Date.now()) + 50,
+    )
+  }, [send])
+
+  /** 操作を記録する。操作していない状態から戻った時は、持っている欄・idle を配り直す（F22） */
+  const activity = useCallback(() => {
+    const back = gateRef.current.touch(Date.now())
+    armIdle()
+    if (back) send()
+  }, [armIdle, send])
+
+  // この画面のどこでの打鍵・タップ・入力も「操作」として数える（キーパッドの打鍵も拾う＝画面ごとに配線しない）。
+  // 画面に戻った（見えた）時も、開いたままの欄へ戻ってきたとみなして数える
+  useEffect(() => {
+    if (typeof document === 'undefined') return
+    const onAct = () => activity()
+    const onVis = () => {
+      if (document.visibilityState === 'visible') activity()
+    }
+    const opts: AddEventListenerOptions = { capture: true, passive: true }
+    for (const ev of ACTIVITY_EVENTS) document.addEventListener(ev, onAct, opts)
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      for (const ev of ACTIVITY_EVENTS) document.removeEventListener(ev, onAct, opts)
+      document.removeEventListener('visibilitychange', onVis)
+    }
+  }, [activity])
 
   const idleDay = idle?.day ?? null
   const idleResident = idle?.residentId ?? null
@@ -163,10 +228,13 @@ export function useCellPresence({ actorId, idle = null, staff = null }: UseCellP
       if (releaseRef.current !== null) clearTimeout(releaseRef.current)
       releaseRef.current = null
       const token = slotRef.current.enter(f)
+      // 欄に入るのは操作そのもの（フォーカスの移動で入った時も数える）
+      gateRef.current.touch(Date.now())
+      armIdle()
       send()
       return () => scheduleRelease(token, PRESENCE_RELEASE_MS)
     },
-    [scheduleRelease, send],
+    [armIdle, scheduleRelease, send],
   )
 
   const touch = useCallback(
@@ -174,11 +242,13 @@ export function useCellPresence({ actorId, idle = null, staff = null }: UseCellP
       if (releaseRef.current !== null) clearTimeout(releaseRef.current)
       releaseRef.current = null
       const token = slotRef.current.enter(f)
+      gateRef.current.touch(Date.now())
+      armIdle()
       send()
       scheduleRelease(token, holdMs)
       return () => scheduleRelease(token, PRESENCE_RELEASE_MS)
     },
-    [scheduleRelease, send],
+    [armIdle, scheduleRelease, send],
   )
 
   // ── 名前の引き当て（配られてくるのは職員IDだけ） ──
@@ -214,16 +284,21 @@ export function useCellPresence({ actorId, idle = null, staff = null }: UseCellP
 
   const index = useMemo(() => indexPresence(others), [others])
 
+  // 受け手の記録者と同じ職員の別の端末は「あなたの別の端末」と出す（F26）
   const cellBusy = useCallback(
     (targets: CellTarget | CellTarget[]) =>
-      cellBusyText(presenceForCell(index, Array.isArray(targets) ? targets : [targets]), nameOf),
-    [index, nameOf],
+      cellBusyText(presenceForCell(index, Array.isArray(targets) ? targets : [targets]), nameOf, actorId),
+    [index, nameOf, actorId],
   )
 
   const rowBusy = useCallback(
     (table: PresenceTable, days: string | string[], residentId: number, kinds?: readonly VitalKind[]) =>
-      rowBusyText(presenceForRow(index, table, Array.isArray(days) ? days : [days], residentId, kinds), nameOf),
-    [index, nameOf],
+      rowBusyText(
+        presenceForRow(index, table, Array.isArray(days) ? days : [days], residentId, kinds),
+        nameOf,
+        actorId,
+      ),
+    [index, nameOf, actorId],
   )
 
   const summary = useCallback(
@@ -234,13 +309,13 @@ export function useCellPresence({ actorId, idle = null, staff = null }: UseCellP
         const what = describe(p as PresenceHere & { cell: PresenceCell; residentId: number })
         if (what !== null) entries.push({ p, what })
       }
-      return presenceSummaryText(entries, nameOf)
+      return presenceSummaryText(entries, nameOf, undefined, actorId)
     },
-    [others, nameOf],
+    [others, nameOf, actorId],
   )
 
   return useMemo(
-    () => ({ others, cellBusy, rowBusy, summary, enter, touch }),
-    [others, cellBusy, rowBusy, summary, enter, touch],
+    () => ({ others, cellBusy, rowBusy, summary, enter, touch, activity }),
+    [others, cellBusy, rowBusy, summary, enter, touch, activity],
   )
 }

@@ -10,8 +10,11 @@
 //     取り消し（論理削除・確認つき・記入者必須）
 //   ・「事故報告書を印刷」: 報告区分・提出日を小窓で選び（保存する）、A4 縦で刷る（IncidentReportSheet）
 //   ・与薬チェックからは /incident/new?resident=ID&date=YYYY-MM-DD&type=med_error で開く（区分は未選択のまま。URL に氏名を載せない）
-// 未送信の変更がある記録は編集できない（入浴・与薬と同じ。送信待ちは書き換えない・読むだけ）。
+// 送信を待っている変更がある記録は編集できない（入浴・与薬と同じ。送信待ちは書き換えない・読むだけ）。
 // 他の端末が先に変えていた時（conflict）は、最新の内容に自分が変えた欄を重ねて表示し、確かめてから保存し直してもらう（入力を消さない）。
+// 送信待ちの追記・修正・取り消しが止まった時（他の端末が先に変えていた・受け付けられなかった。自動では送られない）は、
+// 最新を読み直し、送れていない内容を最新とくらべて出して〔この内容で保存し直す〕〔取り下げる〕を選ばせる（F53・2026-10-10）。
+// 新しい記録では、同じ日・同じ方の既存の記録（この端末の未送信を含む）を参考に出す（保存は止めない・F56）。
 //
 // 規律:
 // - 取得・保存は db.ts の関数のみ。入力解禁は input_enabled_incident（封鎖中は隠さずにディセーブル＋理由文。書込関数の入口でも止まる）
@@ -25,10 +28,15 @@ import type { ReactNode } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import {
   DbError,
+  discardQueuedOp,
   fetchAllResidents,
+  fetchAllStaff,
   fetchIncident,
+  fetchIncidents,
   fetchOfficeProfile,
+  fetchQueuedOpTarget,
   fetchStaff,
+  FORBIDDEN_REASON,
   getAppSetting,
   getKindInputGate,
   hasPendingIncident,
@@ -36,12 +44,17 @@ import {
   isQueuePersisted,
   isSelfWrite,
   kindBlockedMessage,
+  listStoppedOps,
+  pendingIncidentOps,
   queueSubscribe,
+  resendQueuedOp,
+  RESYNC_SUBJECT_KEY,
   softDeleteIncident,
   subscribeIncidentChanges,
   updateIncident,
 } from '../lib/db'
-import type { IncidentPatch, OfficeProfile } from '../lib/db'
+import type { IncidentPatch, OfficeProfile, PendingIncident, StoppedOp } from '../lib/db'
+import { fmtHistoryValue, historyColumnLabel, incidentDetailChangeLabels } from '../lib/historyView'
 import { resolveActor, touchActivity } from '../lib/actor'
 import { LEAVE_BODY, LEAVE_TITLE, registerUnsaved } from '../lib/leaveGuard'
 import {
@@ -55,10 +68,11 @@ import {
   genderKeyOf,
   missingForClose,
   parseIncidentPrefill,
+  typesText,
   validateIncidentInput,
 } from '../lib/incident'
 import type { IncidentInput } from '../lib/incident'
-import { clockInputValue, localDateTimeIso } from '../lib/med'
+import { clockInputValue, fmtClock, localDateTimeIso } from '../lib/med'
 import { fmtDayLabel, todayIso } from '../lib/format'
 import {
   INCIDENT_ADDRESS_KIND_LABEL,
@@ -134,6 +148,19 @@ const MSG_INSERT_QUEUED =
 const MSG_PENDING = '未送信の変更があります。送信が終わってから直してください（閲覧・印刷はできます）。'
 const MSG_DELETED_REMOTE = 'この記録は他の端末で取り消されました。一覧から開き直してください。'
 const MSG_CONFIRM_NOTE = '確認者の権限の強制はまだありません（誰でも「確認しました」を押せます）。'
+/** 送信待ちだった変更が送れた時（F53。件数の増減ではなく、この記録の送信待ちが無くなったことで気づく） */
+const MSG_QUEUED_SENT = '未送信だった変更を送信しました。'
+/** 止まっている変更がある間は、保存し直すか取り下げるかを先に選んでもらう（印刷する中身がどちらか分からないため・F53） */
+const MSG_STOPPED_PRINT =
+  '送れていない変更が止まっています。先に下の「この内容で保存し直す」か「取り下げる」を選んでから印刷してください（記録は変わっていません）。'
+const MSG_STOPPED_RESENT = '送れていなかった変更を保存し直しました。'
+const MSG_STOPPED_AGAIN =
+  'その間に、また他の端末がこの記録を変更しました。最新を表示しました。違いを確かめてから、もう一度押してください。'
+const MSG_STOPPED_REJECTED =
+  'サーバーに受け付けられませんでした（送れていない変更はこの端末に残っています）。内容を確かめて、入力欄で直してから保存するか、取り下げてください。'
+const MSG_STOPPED_DROPPED = '送れていなかった変更を取り下げました（記録には書いていません）。'
+const MSG_STOPPED_GONE = '送れていなかった変更は、既に送信待ちから外れていました（他の画面で処理されました）。最新を表示しています。'
+const MSG_STOPPED_ALREADY_SENT = '送れていなかった変更は、既に送信されていました（取り下げていません）。最新を表示しています。'
 
 /** 画面の入力の形（保存する値 IncidentInput に組み直す前。時刻は 'HH:MM'、区分は未選択を持てる） */
 interface FormState {
@@ -286,6 +313,67 @@ function asQueued(server: Incident, f: FormState): Incident {
   }
 }
 
+/** 止まっている変更と、いま表示している記録との違い（F53。画面に並べて出す） */
+interface StoppedDiff {
+  /** 取り消し（deleted_at）が止まっている */
+  isDelete: boolean
+  /** 列の違い（欄名・送れていない値・いまの値。値は画面に出せる文字にしたもの） */
+  cols: { key: string; label: string; mine: string; now: string }[]
+  /**
+   * 様式の欄（detail）の違い（欄名・送れていない値・いまの値）。氏名の写しは出さない。
+   * 送信待ちの detail は全欄を持つ（空の欄も空として持つ）ので、他の端末が後から書いた欄は「送れていない値＝（空）」として出る
+   * （2026-10-10 F29: サーバーが重ねる移行 0028 を確かめられた後に積んだ送信待ちは、変えた欄だけを持つ＝その欄だけが並ぶ）
+   */
+  detail: { key: string; label: string; mine: string; now: string }[]
+}
+
+/**
+ * 止まっている変更（送信待ちの中身）を、いまの記録とくらべる（F53）。
+ * 送信待ちの detail は「変えた欄だけ」ではなく様式の全欄を持つ（updateIncident が重ねた全体を送る。0028 を確かめられた後は変えた欄だけ・F29）ので、
+ * いまの記録と違う欄には、他の端末が後から書いた欄も含まれうる。保存し直す前にそれを人が確かめられるよう、違う欄を全部出す。
+ * 氏名の写し・写し直しの印・記入者（edited_by）・完了の日時（状態に付いて送るもの）は比べない
+ */
+function stoppedDiff(op: StoppedOp, server: Incident, staffName: (id: number) => string | null): StoppedDiff {
+  const payload = op.payload
+  const isDelete = payload.deleted_at !== undefined && payload.deleted_at !== null
+  const cols: StoppedDiff['cols'] = []
+  for (const k of COLUMN_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(payload, k)) continue
+    const mine = payload[k]
+    const now = server[k]
+    const equal =
+      k === 'occurred_at'
+        ? new Date(String(mine)).getTime() === new Date(String(now)).getTime()
+        : same(mine, now)
+    if (equal) continue
+    cols.push({
+      key: k,
+      label: historyColumnLabel('incidents', k) ?? k,
+      mine: fmtHistoryValue('incidents', k, mine, staffName),
+      now: fmtHistoryValue('incidents', k, now, staffName),
+    })
+  }
+  const detail: StoppedDiff['detail'] = []
+  const d = payload.detail
+  if (d !== null && typeof d === 'object' && !Array.isArray(d)) {
+    const mineDetail = d as Record<string, unknown>
+    const nowDetail = server.detail as unknown as Record<string, unknown>
+    for (const [k, v] of Object.entries(mineDetail)) {
+      if (k === 'subject_name' || k === RESYNC_SUBJECT_KEY) continue
+      if (same(v, nowDetail[k])) continue
+      // 欄の日本語名は変更の記録と同じ表から引く（1欄だけを渡して名前を得る。知らない欄は「その他の欄」）
+      const label = incidentDetailChangeLabels({ [k]: null }, { [k]: true })[0] ?? 'その他の欄'
+      detail.push({
+        key: k,
+        label,
+        mine: fmtHistoryValue('incidents', k, v, staffName),
+        now: fmtHistoryValue('incidents', k, nowDetail[k], staffName),
+      })
+    }
+  }
+  return { isDelete, cols, detail }
+}
+
 /** 新しい記録の初期値 */
 function blankForm(day: string, reporterId: number | null): FormState {
   return {
@@ -356,7 +444,12 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
 
   const [residents, setResidents] = useState<Resident[] | null>(null)
   const [staff, setStaff] = useState<Staff[] | null>(staffProp ?? null)
-  const [gate, setGate] = useState<{ value: boolean; observed: boolean } | null>(null)
+  /**
+   * 名前の引き当てだけに使う職員の一覧（退職者も含む全員・F48）。記録者・確認者を選ぶ候補は staff（在籍者）のまま。
+   * 読めなければ空のまま（staff で引ける人だけ名前が出る＝今までどおり）
+   */
+  const [allStaff, setAllStaff] = useState<Staff[]>([])
+  const [gate, setGate] = useState<{ value: boolean; observed: boolean; forbidden?: true } | null>(null)
   const [profile, setProfile] = useState<OfficeProfile | null>(null)
   const [profileError, setProfileError] = useState(false)
   const [managerId, setManagerId] = useState<number | null>(null)
@@ -384,11 +477,19 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
   const [printSource, setPrintSource] = useState<FormState | null>(null)
   const [printSeq, setPrintSeq] = useState(0)
   const [leaveAsk, setLeaveAsk] = useState(false)
+  /** 止まっている変更の〔取り下げる〕の確認（F53） */
+  const [discardAsk, setDiscardAsk] = useState(false)
+  /** 新しい記録の、同じ日・同じ方の既存の記録（参考表示・F56。読めなければ null＝何も出さない） */
+  const [sameDay, setSameDay] = useState<{ key: string; list: Incident[] } | null>(null)
+  const [sameDayTick, setSameDayTick] = useState(0)
   const printRef = useRef<PrintAreaHandle>(null)
   const { toast, show } = useToast()
   const aliveRef = useRef(true)
   const dirtyRef = useRef(false)
   const pendingRef = useRef(false)
+  /** いまの差分の基準（読み直しの応答で、版が変わったかを見るため・F19） */
+  const serverRef = useRef<Incident | null>(null)
+  serverRef.current = server
 
   useEffect(() => {
     aliveRef.current = true
@@ -417,6 +518,14 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
       })
       .catch(() => {
         if (alive) setBaseError(ERR_LOAD)
+      })
+    // 退職者の名前（過去の記録の記録者・確認者）。読めなくても入力は妨げない（在籍者の名前は staff で引ける・F48）
+    fetchAllStaff()
+      .then((rows) => {
+        if (alive) setAllStaff(rows)
+      })
+      .catch(() => {
+        // 名前が「選んでください」「—」に落ちるだけ
       })
     // 事業所の情報は印刷にだけ使う。読めなくても入力は妨げない（印刷の時に空欄になる旨を出す）
     fetchOfficeProfile()
@@ -494,7 +603,8 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
         setRemoteChanged(false)
       })
       .catch((e: unknown) => {
-        if (alive) setBaseError(e instanceof DbError && e.kind === 'server' ? e.message : ERR_LOAD)
+        // 許可リスト外（forbidden）も、通信エラーの定型文ではなくその理由を出す（F61）
+        if (alive) setBaseError(e instanceof DbError && (e.kind === 'server' || e.kind === 'forbidden') ? e.message : ERR_LOAD)
       })
     return () => {
       alive = false
@@ -523,7 +633,12 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
   // 未保存の入力がある時は、画面を離れる・再読み込みする前に確認する（App の確認・beforeunload）
   useEffect(() => registerUnsaved(() => dirtyRef.current), [])
 
-  /** 最新を読み直す（未保存の入力がある時は呼ばない） */
+  /**
+   * 最新を読み直す。**応答が届いた時点で**未保存の入力があれば、入力も差分の基準（server）も置き換えず、
+   * 版が変わっていた時だけ知らせる（F19・2026-10-10。取得を始めた時に入力が無くても、取得の間に打ち始めた入力を
+   * 応答の setForm が黙って消していた。server だけを最新にすると、他の端末が変えた欄を自分の古い値へ戻す差分になり、
+   * rev 照合も通って黙って上書きする。基準を古いまま残せば保存が競合になり、最新に自分の欄だけを重ねて見せられる）
+   */
   const reload = useCallback(() => {
     loadRecord()
       .then((row) => {
@@ -531,6 +646,10 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
         if (row === null) {
           setMsg({ tone: 'warn', text: MSG_DELETED_REMOTE })
           setNotFound(true)
+          return
+        }
+        if (dirtyRef.current) {
+          if (row.rev !== serverRef.current?.rev) setRemoteChanged(true)
           return
         }
         setServer(row)
@@ -542,29 +661,47 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
       })
   }, [loadRecord])
 
-  // 送信待ちの件数の変化を画面に映す。減った時（送れた）は、この記録に未送信があった（その間は直せない）か、
-  // 未保存の入力が無ければ読み直す（未送信の無い記録で入力中の時だけは、入力を消さないよう読み直さない）
+  // 送信待ちの変化を画面に映す。読み直すのは次の2つ:
+  //   ・この記録の送信待ちが無くなった（送れた・止まった。止まった時は件数が減らないので、件数では気づけない＝F53）
+  //   ・件数が減った（送れた）時に、この記録に未送信があったか、未保存の入力が無い（入力中の時は読み直さない＝入力を消さない）
   useEffect(() => {
     let last = -1
+    let lastPending = recordId !== null && hasPendingIncident(recordId)
     return queueSubscribe((n) => {
       const prev = last
       last = n
       setQueueTick((t) => t + 1)
-      if (prev >= 0 && n < prev && !isNew && (pendingRef.current || !dirtyRef.current)) reload()
+      if (isNew || recordId === null) return
+      const nowPending = hasPendingIncident(recordId)
+      const settled = lastPending && !nowPending
+      lastPending = nowPending
+      if (settled) {
+        // 「未送信です（自動で送信します）」を出し続けない。止まった時は止まった変更の欄が代わりに出る
+        const stopped = listStoppedOps().some((o) => o.table === 'incidents' && o.kind === 'update' && o.rowId === recordId)
+        setMsg((cur) => (cur !== null && cur.text === MSG_QUEUED ? null : cur))
+        if (!stopped) show(MSG_QUEUED_SENT)
+      }
+      if (settled || (prev >= 0 && n < prev && (pendingRef.current || !dirtyRef.current))) reload()
     })
-  }, [isNew, reload])
+  }, [isNew, recordId, reload, show])
 
-  // 他の端末の変更（この記録だけ）。未保存の入力が無ければ読み直し、あれば知らせるだけ（入力を消さない）
+  // 他の端末の変更（この記録だけ）。読み直す（未保存の入力がある時は、reload が版を見て知らせるだけにする＝入力を消さない）。
+  // 取り直しの合図（RESYNC・F14。切れていた間に変わったかは分からない）は、入力中なら版を確かめてから知らせる
   useEffect(() => {
     if (isNew || recordId === null) return
     let timer: number | null = null
+    let sawChange = false
     const unsub = subscribeIncidentChanges((table, info) => {
       const row = info?.row ?? null
       if (row !== null && row.id !== recordId) return
       if (row !== null && isSelfWrite(table, row)) return
+      if (info?.event !== 'RESYNC') sawChange = true
       if (timer !== null) window.clearTimeout(timer)
       timer = window.setTimeout(() => {
-        if (dirtyRef.current) setRemoteChanged(true)
+        timer = null
+        const changed = sawChange
+        sawChange = false
+        if (dirtyRef.current && changed) setRemoteChanged(true)
         else reload()
       }, 400)
     })
@@ -573,6 +710,45 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
       unsub()
     }
   }, [isNew, recordId, reload])
+
+  // 新しい記録: 同じ日・同じ方の既存の記録を参考に出す（F56・2026-10-10。2台で同じ出来事を第1報に入れて2件になるのを、
+  // 書く前に気づけるように。保存は止めない。読めなければ何も出さない。氏名は出さず、時刻・区分・種別・状態だけ）
+  const sameDayResident = isNew && form !== null ? form.resident_id : null
+  const sameDayOn = isNew && form !== null && /^\d{4}-\d{2}-\d{2}$/.test(form.occurred_on) ? form.occurred_on : null
+  useEffect(() => {
+    if (sameDayResident === null || sameDayOn === null) {
+      setSameDay(null)
+      return
+    }
+    let alive = true
+    const key = `${sameDayResident}|${sameDayOn}`
+    fetchIncidents({ fromIso: sameDayOn, toIso: sameDayOn, residentId: sameDayResident })
+      .then((rows) => {
+        if (alive) setSameDay({ key, list: rows })
+      })
+      .catch(() => {
+        if (alive) setSameDay(null)
+      })
+    return () => {
+      alive = false
+    }
+  }, [sameDayResident, sameDayOn, sameDayTick])
+
+  // 書いている間に他の端末が同じ日・同じ方の記録を保存した時も出す（第1報は入力が長く、同時に書き始めるのが主な発生条件）
+  useEffect(() => {
+    if (sameDayResident === null || sameDayOn === null) return
+    let timer: number | null = null
+    const unsub = subscribeIncidentChanges((_table, info) => {
+      const row = info?.row ?? null
+      if (row !== null && (row.resident_id !== sameDayResident || row.occurred_on !== sameDayOn)) return
+      if (timer !== null) window.clearTimeout(timer)
+      timer = window.setTimeout(() => setSameDayTick((t) => t + 1), 400)
+    })
+    return () => {
+      if (timer !== null) window.clearTimeout(timer)
+      unsub()
+    }
+  }, [sameDayResident, sameDayOn])
 
   // 刷る中身を差し替えて描き終えてから刷る
   useEffect(() => {
@@ -594,8 +770,104 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
   const editable = !locked && !pendingNow && !queuedInsert && !busy && !notFound
   const reasonId = `${uid}-locked`
 
+  // この記録の、止まっている（自動では送らない）追記・修正・取り消し（F53）。止まっても件数は減らないので、
+  // 送信待ちの通知のたび（queueTick）に引き直す。止まっている間も記録は直せる（裁定する手段の無いまま閉じ込めない）
+  const stoppedOp = useMemo<StoppedOp | null>(() => {
+    void queueTick
+    if (server === null) return null
+    return listStoppedOps().find((o) => o.table === 'incidents' && o.kind === 'update' && o.rowId === server.id) ?? null
+  }, [server, queueTick])
+
+  // 名前は退職者も含む全員から引く（過去の記録の記録者・確認者を「選んでください」「—」にしない・F48）
   const staffName = (id: number | null): string | null =>
-    id === null ? null : ((staff ?? []).find((s) => s.id === id)?.name ?? null)
+    id === null
+      ? null
+      : ((staff ?? []).find((s) => s.id === id)?.name ?? allStaff.find((s) => s.id === id)?.name ?? null)
+
+  // 同じ日・同じ方の既存の記録と、この端末の未送信の追加（F56。保存した後＝送信待ちにした後は自分の分なので出さない）
+  const sameDayKey = sameDayResident !== null && sameDayOn !== null ? `${sameDayResident}|${sameDayOn}` : null
+  const sameDayPending = useMemo<PendingIncident[]>(() => {
+    void queueTick
+    if (sameDayResident === null || sameDayOn === null) return []
+    return pendingIncidentOps().filter((p) => p.residentId === sameDayResident && p.occurredOn === sameDayOn)
+  }, [sameDayResident, sameDayOn, queueTick])
+  const sameDayList = sameDay !== null && sameDay.key === sameDayKey ? sameDay.list : []
+  const showSameDay = isNew && !queuedInsert && sameDayKey !== null && sameDayList.length + sameDayPending.length > 0
+
+  /**
+   * 止まっている変更を、いま表示している記録の版の上にもう一度送る（F53〔この内容で保存し直す〕）。
+   * 送り先のいまの版が画面の版と違えば送らずに読み直す（見せていない変更を黙って上書きしない）
+   */
+  async function resendStopped() {
+    if (stoppedOp === null || server === null || busy) return
+    setBusy(true)
+    setMsg(null)
+    try {
+      const target = await fetchQueuedOpTarget(stoppedOp.qid)
+      if (!aliveRef.current) return
+      if (target === undefined) {
+        setMsg({ tone: 'danger', text: MSG_SAVE_FAILED })
+        return
+      }
+      if (target === null) {
+        setQueueTick((t) => t + 1)
+        reload()
+        setMsg({ tone: 'info', text: MSG_STOPPED_GONE })
+        return
+      }
+      if (target.deleted_at !== null && target.deleted_at !== undefined) {
+        setMsg({ tone: 'warn', text: MSG_DELETED_REMOTE })
+        return
+      }
+      if (Number(target.rev) !== server.rev) {
+        reload()
+        setMsg({ tone: 'warn', text: MSG_STOPPED_AGAIN })
+        return
+      }
+      const r = await resendQueuedOp(stoppedOp.qid, { rev: server.rev })
+      touchActivity()
+      if (!aliveRef.current) return
+      setQueueTick((t) => t + 1)
+      if (r === 'sent') {
+        reload()
+        show(MSG_STOPPED_RESENT)
+      } else if (r === 'queued') {
+        setMsg({ tone: isQueuePersisted() ? 'warn' : 'danger', text: isQueuePersisted() ? MSG_QUEUED : MSG_NOT_PERSISTED })
+      } else if (r === 'conflict') {
+        reload()
+        setMsg({ tone: 'warn', text: MSG_STOPPED_AGAIN })
+      } else if (r === 'rejected') {
+        setMsg({ tone: 'danger', text: MSG_STOPPED_REJECTED })
+      } else {
+        reload()
+        setMsg({ tone: 'info', text: MSG_STOPPED_GONE })
+      }
+    } catch (e) {
+      if (aliveRef.current) setMsg({ tone: 'danger', text: e instanceof DbError ? e.message : MSG_SAVE_FAILED })
+    } finally {
+      if (aliveRef.current) setBusy(false)
+    }
+  }
+
+  /** 止まっている変更を取り下げる（確認の後だけ。記録には書かない・F53〔取り下げる〕） */
+  async function discardStopped() {
+    setDiscardAsk(false)
+    if (stoppedOp === null || busy) return
+    setBusy(true)
+    setMsg(null)
+    try {
+      const r = await discardQueuedOp(stoppedOp.qid)
+      touchActivity()
+      if (!aliveRef.current) return
+      setQueueTick((t) => t + 1)
+      setMsg({ tone: 'info', text: r === 'dropped' ? MSG_STOPPED_DROPPED : r === 'sent' ? MSG_STOPPED_ALREADY_SENT : MSG_STOPPED_GONE })
+      if (!dirtyRef.current) reload()
+    } catch (e) {
+      if (aliveRef.current) setMsg({ tone: 'danger', text: e instanceof DbError ? e.message : MSG_SAVE_FAILED })
+    } finally {
+      if (aliveRef.current) setBusy(false)
+    }
+  }
 
   const set = (patch: Partial<FormState>) => setForm((f) => (f === null ? f : { ...f, ...patch }))
   const setDetail = (patch: Partial<IncidentDetail>) =>
@@ -733,6 +1005,12 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
   async function printWith(stage: IncidentReportStage, no: number | null, submitted: string | null) {
     setPrintOpen(false)
     if (form === null) return
+    // 止まっている変更がある間は刷らない（F53。サーバーの値と送れていない追記のどちらを刷るかを、人が先に決める。
+    // 報告区分の保存と一緒に追記が黙って抜けた報告書を市へ出さないため）
+    if (stoppedOp !== null) {
+      setMsg({ tone: 'warn', text: MSG_STOPPED_PRINT })
+      return
+    }
     const extra: Partial<FormState> = { report_stage: stage, report_no: stage === 'nth' ? no : null, submitted_on: submitted }
     if (editable && server !== null) {
       const out = await save(extra)
@@ -796,7 +1074,10 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
 
   return (
     <div className="mx-auto w-full max-w-2xl space-y-4 p-4">
-      {!gate.observed ? (
+      {gate.forbidden === true ? (
+        // 許可リスト外のアカウント（F61）: 封鎖とも通信エラーとも別の理由を出す
+        <ErrorBlock message={FORBIDDEN_REASON} onRetry={() => setBaseTick((n) => n + 1)} />
+      ) : !gate.observed ? (
         <ErrorBlock message={ERR_GATE} onRetry={() => setBaseTick((n) => n + 1)} />
       ) : locked ? (
         <div id={reasonId} role="status" className="rounded-lg border border-warn bg-warn-bg p-4">
@@ -855,6 +1136,18 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
           </p>
         ) : null}
       </section>
+
+      {/* 止まっている変更（F53）。画面だけに出す（印刷・PrintArea には出さない） */}
+      {stoppedOp !== null && server !== null ? (
+        <StoppedPanel
+          diff={stoppedDiff(stoppedOp, server, (id) => staffName(id))}
+          reason={stoppedOp.state}
+          disabled={busy || locked || notFound}
+          dirty={dirty}
+          onResend={() => void resendStopped()}
+          onDiscard={() => setDiscardAsk(true)}
+        />
+      ) : null}
 
       <fieldset disabled={!editable} aria-describedby={locked && gate.observed ? reasonId : undefined} className="min-w-0 space-y-4">
         <legend className="sr-only">事故・ヒヤリハットの入力</legend>
@@ -939,6 +1232,32 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
               ) : null}
             </div>
           </div>
+          {/* 同じ日・同じ方の既存の記録（参考表示・F56。保存は止めない。画面だけ＝印刷には出さない） */}
+          {showSameDay ? (
+            <div role="status" className="rounded border border-warn bg-warn-bg px-3 py-2 text-sm text-ink print:hidden">
+              <p>
+                <span aria-hidden="true">▲ </span>
+                この方の同じ日（{fmtDayLabel(sameDayOn ?? '')}）の記録が、すでに {sameDayList.length + sameDayPending.length} 件あります。
+                同じ出来事を二重に記録していないか確かめてください（別の出来事なら、このまま保存できます）。
+              </p>
+              <ul className="mt-1 space-y-1">
+                {sameDayList.map((i) => (
+                  <li key={i.id} className="tabular">
+                    {fmtClock(i.occurred_at)}　{INCIDENT_KIND_LABEL[i.kind]}　{typesText(i.types)}　{i.status === 'open' ? '▲ ' : '✓ '}
+                    {INCIDENT_STATUS_LABEL[i.status]}
+                  </li>
+                ))}
+                {sameDayPending.map((p) => (
+                  <li key={p.qid} className="tabular">
+                    {p.occurredAt !== null ? fmtClock(p.occurredAt) : '—'}　{p.kind !== null ? INCIDENT_KIND_LABEL[p.kind] : ''}　
+                    {typesText(p.types.filter((t): t is IncidentType => (INCIDENT_TYPES as readonly string[]).includes(t)))}　
+                    （この端末の{p.state === 'blocked' ? '止まっている記録' : p.state === 'sending' ? '送信中の記録' : '未送信の記録'}）
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-1 text-ink2">ほかの端末でまだ送られていない記録は、ここには出ません。</p>
+            </div>
+          ) : null}
           <TextArea id={`${uid}-situation`} label="発生時状況、事故内容の詳細" required value={d.situation} onChange={(v) => setDetail({ situation: v })} rows={4} />
           <TextArea id={`${uid}-response`} label="発生時の対応" required value={d.response} onChange={(v) => setDetail({ response: v })} rows={3} />
           <div>
@@ -1404,6 +1723,16 @@ export function IncidentFormPage({ staff: staffProp, actorId }: IncidentFormPage
       />
 
       <ConfirmDialog
+        open={discardAsk}
+        title="送れていない変更を取り下げますか"
+        body="止まっている変更を、この端末の送信待ちから外します。記録には書きません。取り下げた内容は戻せません（残したい欄は、先に入力欄へ書き写して保存してください）。"
+        confirmLabel="取り下げる"
+        danger
+        onConfirm={() => void discardStopped()}
+        onCancel={() => setDiscardAsk(false)}
+      />
+
+      <ConfirmDialog
         open={leaveAsk}
         title={LEAVE_TITLE}
         body={LEAVE_BODY}
@@ -1449,6 +1778,89 @@ function fmtStamp(iso: string): string {
   if (Number.isNaN(t.getTime())) return ''
   const day = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`
   return `${fmtDayLabel(day)} ${t.getHours()}:${String(t.getMinutes()).padStart(2, '0')}`
+}
+
+/**
+ * 止まっている変更の欄（F53）。送れていない内容と、いま表示している記録との違いを並べ、
+ * 〔この内容で保存し直す〕（表示中の版の上に、送れていない内容をそのまま送る）と〔取り下げる〕を出す
+ */
+function StoppedPanel({
+  diff,
+  reason,
+  disabled,
+  dirty,
+  onResend,
+  onDiscard,
+}: {
+  diff: StoppedDiff
+  reason: 'conflict' | 'rejected'
+  disabled: boolean
+  dirty: boolean
+  onResend: () => void
+  onDiscard: () => void
+}) {
+  const what = diff.isDelete ? '取り消し' : '追記・修正'
+  const why = reason === 'conflict' ? '他の端末が先にこの記録を変更していたため' : 'サーバーに受け付けられなかったため'
+  const none = !diff.isDelete && diff.cols.length === 0 && diff.detail.length === 0
+  return (
+    <section aria-label="送れていない変更" className="space-y-2 rounded-lg border border-danger bg-danger-bg p-4 text-ink print:hidden">
+      <p role="status" className="text-base">
+        <span aria-hidden="true">▲ </span>
+        <span className="font-bold">この記録への{what}が、送れずに止まっています（自動では送られません）。</span>
+        {why}です。
+      </p>
+      {diff.isDelete ? (
+        <p className="text-sm">送れていないのは、この記録の取り消しです。最新の内容を確かめてから選んでください。</p>
+      ) : none ? (
+        <p className="text-sm">表示中の記録と同じ内容です（既に届いていた可能性があります）。「取り下げる」で送信待ちから外せます。</p>
+      ) : (
+        <>
+          <p className="text-sm">送れていない内容のうち、いま表示している記録と違う欄:</p>
+          <ul className="space-y-1 text-sm">
+            {diff.cols.map((c) => (
+              <li key={c.key} className="break-words">
+                <span className="font-bold">{c.label}</span>：送れていない値「{c.mine}」（いまの記録「{c.now}」）
+              </li>
+            ))}
+            {diff.detail.map((c) => (
+              <li key={c.key} className="whitespace-pre-wrap break-words">
+                <span className="font-bold">{c.label}</span>：送れていない値「{c.mine}」（いまの記録「{c.now}」）
+              </li>
+            ))}
+          </ul>
+          <p className="text-sm text-ink2">
+            <span aria-hidden="true">ⓘ </span>
+            違う欄には、他の端末が後から書いた欄も含まれることがあります。「この内容で保存し直す」を押すと、ここに挙げた欄を
+            すべて送れていない内容で書きます。一部だけ残す時は、入力欄で直して保存してから「取り下げる」を押してください。
+          </p>
+        </>
+      )}
+      {dirty ? (
+        <p className="text-sm text-warn">
+          <span aria-hidden="true">▲ </span>
+          入力中の変更があります。先に保存するか元に戻してから「この内容で保存し直す」を押してください。
+        </p>
+      ) : null}
+      <div className="flex flex-wrap gap-gap">
+        <button
+          type="button"
+          disabled={disabled || dirty || none}
+          onClick={onResend}
+          className="min-h-tap rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink disabled:border-border disabled:bg-surface2 disabled:text-ink3"
+        >
+          {diff.isDelete ? 'この取り消しを送り直す' : 'この内容で保存し直す'}
+        </button>
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={onDiscard}
+          className="min-h-tap rounded border border-danger bg-surface px-4 text-base text-danger disabled:border-border disabled:text-ink3"
+        >
+          取り下げる
+        </button>
+      </div>
+    </section>
+  )
 }
 
 function MessageLine({ msg }: { msg: Msg }) {

@@ -39,6 +39,12 @@ const ORIGIN_MAX = 8
 interface TabPart<D> {
   at: number
   rows: DraftRow<D>[]
+  /**
+   * この版が読めない行（新しい版が書いた色・勤務帯・種類・欄の行など）の印と時刻（F30・2026-10-10）。保存先から読んだ
+   * 他のタブの分だけが持つ（列挙されない＝書き戻しの JSON には出ない）。行そのものは読めないので和集合には出さないが、
+   * 登録済み・引き継ぎ済みの判定と「まだ残す行があるか」の判定に使う。印の読めない行・形の違うタブは did が空
+   */
+  opaque?: DraftOrigin[]
 }
 
 /** 控えの中身（新しい形の部分） */
@@ -47,7 +53,11 @@ export interface DraftFile<D> {
   gone: Record<string, number>
 }
 
-/** 登録・破棄の印を持つ期間（他のタブがまだ古い控えを持っていても復活させない猶予） */
+/**
+ * 登録・破棄の印を持つ期間（他のタブがまだ古い控えを持っていても復活させない猶予）。
+ * この版が読めない行（新しい版の行）を、和集合で引き継がれないまま残しておく期間にも使う（F30。端末の保存領域を
+ * 食い続けないため。読める版のタブがその間に開けば、そちらで戻る）
+ */
 const GONE_KEEP_MS = 30 * 24 * 60 * 60 * 1000
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -103,12 +113,23 @@ export function parseDraftFile<D>(
   }
   const tabs: Record<string, TabPart<D>> = {}
   for (const [tab, part] of Object.entries(o.tabs)) {
-    if (!isObj(part) || !Array.isArray(part.rows)) continue
+    if (!isObj(part)) continue
     const rows: DraftRow<D>[] = []
-    for (const r of part.rows) {
-      if (!isObj(r) || typeof r.did !== 'string' || r.did === '' || typeof r.kind !== 'string') continue
+    const opaque: DraftOrigin[] = []
+    const partAt = finite(part.at) ?? 0
+    // 行の並びとして読めないタブ（新しい版の形）も、原文のまま残す（印が無いので期限だけで判定する）
+    if (!Array.isArray(part.rows)) opaque.push({ did: '', at: partAt })
+    for (const r of Array.isArray(part.rows) ? part.rows : []) {
+      if (!isObj(r) || typeof r.did !== 'string' || r.did === '' || typeof r.kind !== 'string') {
+        opaque.push({ did: isObj(r) && typeof r.did === 'string' ? r.did : '', at: (isObj(r) ? finite(r.at) : null) ?? partAt })
+        continue
+      }
       const data = readData(r.kind, r.data)
-      if (data === null) continue
+      if (data === null) {
+        // この版が読めない行（新しい版の色・勤務帯・種類など）は落とさずに控える（F30。書き戻しでは原文のまま残す）
+        opaque.push({ did: r.did, at: finite(r.at) ?? partAt })
+        continue
+      }
       const row: DraftRow<D> = { did: r.did, at: finite(r.at) ?? 0, kind: r.kind, data }
       if (Array.isArray(r.from)) {
         const from: DraftOrigin[] = []
@@ -119,13 +140,24 @@ export function parseDraftFile<D>(
       }
       rows.push(row)
     }
-    tabs[tab] = { at: finite(part.at) ?? 0, rows }
+    tabs[tab] = keepRaw({ at: partAt, rows }, part, opaque)
   }
   return { tabs, gone }
 }
 
+/**
+ * 保存先から読んだタブの分を、書き戻しでは原文のまま出すようにする（F30・2026-10-10）。読み込みで整えた中身
+ * （この版が読めない行を落とした・欄を剥がした・勤務帯や重要度を既定に置き換えた）で書き戻すと、同じ端末の新しい版の
+ * タブの書きかけが黙って消えるため。JSON.stringify は toJSON を使う（列挙されない＝画面の扱いは今のまま）
+ */
+function keepRaw<D>(part: TabPart<D>, raw: Record<string, unknown>, opaque: DraftOrigin[]): TabPart<D> {
+  Object.defineProperty(part, 'toJSON', { value: () => raw, enumerable: false })
+  if (opaque.length > 0) Object.defineProperty(part, 'opaque', { value: opaque, enumerable: false })
+  return part
+}
+
 /** その版に登録済み・破棄済みの印が付いているか（印の時刻より後に直された版は外さない） */
-function isGone<D>(gone: Record<string, number>, r: DraftRow<D>): boolean {
+function isGone(gone: Record<string, number>, r: DraftOrigin): boolean {
   const t = gone[r.did]
   return t !== undefined && r.at <= t
 }
@@ -192,20 +224,25 @@ export function writeTabRows<D>(file: DraftFile<D> | null, tab: string, rows: Dr
   const tabs: Record<string, TabPart<D>> = {}
   const mine = new Map(rows.map((r) => [r.did, r]))
   const cover = coverOf([...Object.entries(base.tabs).filter(([t]) => t !== tab).flatMap(([, p]) => p.rows), ...rows], base.gone)
+  const keeps = (r: DraftOrigin): boolean => {
+    if (isGone(base.gone, r)) return false
+    const c = cover.get(r.did)
+    if (c !== undefined && r.at <= c) return false // 引き継がれた版（引き継いだ行が持っている）
+    const m = mine.get(r.did)
+    return m === undefined || m.at < r.at
+  }
   for (const [t, part] of Object.entries(base.tabs)) {
     if (t === tab) continue
-    const alive = part.rows.filter((r) => {
-      if (isGone(base.gone, r)) return false
-      const c = cover.get(r.did)
-      if (c !== undefined && r.at <= c) return false // 引き継がれた版（引き継いだ行が持っている）
-      const m = mine.get(r.did)
-      return m === undefined || m.at < r.at
-    })
-    if (alive.length > 0) tabs[t] = part // 残す時は元のまま（他のタブの分を書き換えない）
+    const alive = part.rows.filter(keeps)
+    // この版が読めない行は、印と時刻で同じように判定する（印の無い行は期限だけ。F30）
+    const opaqueAlive = (part.opaque ?? []).filter((r) => now - r.at < GONE_KEEP_MS && (r.did === '' || keeps(r)))
+    if (alive.length > 0 || opaqueAlive.length > 0) tabs[t] = part // 残す時は元のまま（他のタブの分を書き換えない）
   }
   if (rows.length > 0) tabs[tab] = { at: now, rows }
   const gone: Record<string, number> = {}
-  const present = new Set(Object.values(tabs).flatMap((p) => p.rows.map((r) => r.did)))
+  const present = new Set(
+    Object.values(tabs).flatMap((p) => [...p.rows.map((r) => r.did), ...(p.opaque ?? []).map((r) => r.did)]),
+  )
   for (const [k, t] of Object.entries(base.gone)) if (present.has(k) || now - t < GONE_KEEP_MS) gone[k] = t
   return { tabs, gone }
 }

@@ -10,22 +10,27 @@
 import { afterEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { registerLoadFailure } from './ts-load.mjs'
 
 const TS_UNSUPPORTED =
   'この Node では TypeScript を直接読み込めないため、与薬チェックの検証をスキップしました（Node 22.18 以降で実行してください）。'
 const DB_UNSUPPORTED =
   'この Node では解決フック（module.registerHooks）が使えないため、与薬チェックの db.ts の検証をスキップしました（Node 22.15 以降で実行してください）。'
 
+// 読み込みの例外は捨てずに控える（F69。古い Node 以外で読めない時は、スキップでなく失敗にして原因を出す）
 let M = null
+let mLoadError = null
 try {
   M = await import('../src/lib/med.ts')
-} catch {
+} catch (e) {
   M = null
+  mLoadError = e
 }
 
 // db.ts は拡張子の無い相対 import を使うので、'.ts' を補う解決フックを入れてから読む（tests/logic.test.mjs と同じ）
 const lsStore = new Map()
 let DB = null
+let dbLoadError = null
 try {
   const { registerHooks } = await import('node:module')
   if (typeof registerHooks !== 'function') throw new Error('no registerHooks')
@@ -51,8 +56,9 @@ try {
     },
   }
   DB = await import('../src/lib/db.ts')
-} catch {
+} catch (e) {
   DB = null
+  dbLoadError = e
 }
 
 const read = (p) => readFileSync(new URL(p, import.meta.url), 'utf8')
@@ -99,7 +105,7 @@ const H = (h, m = 0) => h * 60 + m
 // ══════════════════════════════════════════════════════════════
 
 if (M === null) {
-  it('与薬チェックの純ロジック', { skip: TS_UNSUPPORTED }, () => {})
+  registerLoadFailure('与薬チェックの純ロジック', mLoadError, TS_UNSUPPORTED)
 } else {
   describe('締め判定（isPastDeadline・MED_DEADLINES）', () => {
     it('締め時刻は 朝10:00・昼14:00・夕20:00・眠前23:00（定数で持つ）', () => {
@@ -631,7 +637,7 @@ async function drain() {
 }
 
 if (DB === null || M === null) {
-  it('与薬チェックの db.ts の検証', { skip: DB_UNSUPPORTED }, () => {})
+  registerLoadFailure('与薬チェックの db.ts の検証', dbLoadError ?? mLoadError, DB_UNSUPPORTED, { hooks: true })
 } else {
   describe('与薬（db.ts）: 種類ごとの入力解禁 input_enabled_med', () => {
     afterEach(drain)
@@ -1432,13 +1438,15 @@ describe('★自動チェックの追加（0016_auto_check2.sql）の配線（�
 
 describe('★変更の記録（historyView）の auto の表示', async () => {
   let HV = null
+  let hvLoadError = null
   try {
     HV = await import('../src/lib/historyView.ts')
-  } catch {
+  } catch (e) {
     HV = null
+    hvLoadError = e
   }
   if (HV === null) {
-    it('変更の記録の表示', { skip: TS_UNSUPPORTED }, () => {})
+    registerLoadFailure('変更の記録の表示', hvLoadError, TS_UNSUPPORTED)
     return
   }
   it('自動かどうか（auto）の列は変更の記録に出さない（入浴・与薬・2026-10-01 代表指示）', () => {

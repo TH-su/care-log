@@ -11,16 +11,21 @@
 import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { registerLoadFailure } from './ts-load.mjs'
 
 const TS_UNSUPPORTED =
   'この Node では TypeScript を直接読み込めないため、体重の検証をスキップしました（Node 22.18 以降で実行してください）。'
 
 let W = null
+let wLoadError = null
 try {
   W = await import('../src/lib/weightClient.ts')
-} catch {
+} catch (e) {
   W = null
+  wLoadError = e
 }
+// 読めないのが古い Node のせいでなければ失敗を1件出す（F69。下の各節は今どおりスキップになるが、全体は失敗で終わる）
+if (W === null) registerLoadFailure('体重の検証', wLoadError, TS_UNSUPPORTED)
 
 const read = (rel) => readFileSync(new URL(rel, import.meta.url), 'utf8')
 

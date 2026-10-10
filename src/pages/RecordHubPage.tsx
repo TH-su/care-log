@@ -38,7 +38,7 @@
 import { useCallback, useEffect, useId, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { getKindInputGate, getNativeInputGate, kindBlockedMessage } from '../lib/db'
+import { FORBIDDEN_REASON, getKindInputGate, getNativeInputGate, kindBlockedMessage } from '../lib/db'
 import { ErrorBlock, LoadingBlock, SectionCard } from '../components/ui'
 
 /** 入力封鎖中の理由文（ui-design.md §0.5 の定型文。文言を変えない） */
@@ -59,6 +59,17 @@ const LOAD_ERROR =
   'アプリで入力できる期間かどうかを確認できませんでした。通信状態を確認して［再試行する］を押してください。押せない場合は、下のタブで日報などほかの画面に移ってから、下のタブ「その他」→「記録」をもう一度開いてください。'
 
 type HubKey = 'vitals' | 'meals' | 'note' | 'outing' | 'bath' | 'med' | 'incident'
+
+/**
+ * 種類ごとの入力解禁の旗（null＝取得中、observed=false＝取得できなかった、forbidden＝このアカウントは記録アプリを
+ * 使えない＝許可リスト外・F61）
+ */
+type KindGate = { value: boolean; observed: boolean; forbidden?: true }
+
+/** 旗を取得できなかった時の一言。許可リスト外（F61）なら封鎖でも通信エラーでもない案内 */
+function gateUnknownText(g: KindGate, unknown: string): string {
+  return g.forbidden === true ? FORBIDDEN_REASON : unknown
+}
 
 /** 2×2 の並び順（左上→右上→左下→右下）。ルートは contracts.md のルーティング定義どおり */
 const ITEMS: { key: HubKey; to: string; label: string }[] = [
@@ -170,13 +181,15 @@ export function RecordHubPage({ inputEnabled: inputEnabledProp }: RecordHubPageP
 
   const [fetchedEnabled, setFetchedEnabled] = useState<boolean | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  /** このアカウントは記録アプリを使えない（許可リスト外・F61）。封鎖の理由文・通信エラーの代わりに案内を出す */
+  const [forbidden, setForbidden] = useState(false)
   const [reloadKey, setReloadKey] = useState(0)
   /** 入浴の旗（null＝取得中、observed=false＝取得できなかった） */
-  const [bathGate, setBathGate] = useState<{ value: boolean; observed: boolean } | null>(null)
+  const [bathGate, setBathGate] = useState<KindGate | null>(null)
   /** 与薬の旗（null＝取得中、observed=false＝取得できなかった） */
-  const [medGate, setMedGate] = useState<{ value: boolean; observed: boolean } | null>(null)
+  const [medGate, setMedGate] = useState<KindGate | null>(null)
   /** 事故・ヒヤリハットの旗（null＝取得中、observed=false＝取得できなかった） */
-  const [incidentGate, setIncidentGate] = useState<{ value: boolean; observed: boolean } | null>(null)
+  const [incidentGate, setIncidentGate] = useState<KindGate | null>(null)
 
   // 入力解禁フラグは「記録タブを表示するたびに毎回取り直す」（ui-design.md §0.5・前提情報は毎回取り直す規範）。
   // 取得できなければ入力へ進ませない（安全側フォールバック）。
@@ -186,9 +199,17 @@ export function RecordHubPage({ inputEnabled: inputEnabledProp }: RecordHubPageP
     let alive = true
     setLoadError(null)
     setFetchedEnabled(null)
+    setForbidden(false)
     getNativeInputGate()
       .then((gate) => {
         if (!alive) return
+        if (gate.forbidden === true) {
+          // 許可リスト外（F61）: 再試行しても変わらないので、通信エラーの案内（再試行）ではなく使えない理由を出す。
+          // 入力は封鎖のまま（安全側）
+          setForbidden(true)
+          setFetchedEnabled(false)
+          return
+        }
         if (!gate.observed) {
           setLoadError(LOAD_ERROR)
           return
@@ -283,7 +304,14 @@ export function RecordHubPage({ inputEnabled: inputEnabledProp }: RecordHubPageP
 
   return (
     <div className="mx-auto w-full max-w-2xl space-y-4 p-4">
-      {loadError ? (
+      {forbidden ? (
+        <div id={reasonId} role="alert" className="rounded-lg border border-danger bg-danger-bg p-4">
+          <p className="text-base text-ink">
+            <span aria-hidden="true">▲ </span>
+            {FORBIDDEN_REASON}
+          </p>
+        </div>
+      ) : loadError ? (
         <div id={reasonId}>
           <ErrorBlock message={loadError} onRetry={() => setReloadKey((n) => n + 1)} />
         </div>
@@ -338,21 +366,22 @@ export function RecordHubPage({ inputEnabled: inputEnabledProp }: RecordHubPageP
         {bathGate !== null && bathLocked ? (
           <p id={bathReasonId} role="status" className="mt-3 text-sm text-ink2">
             <span aria-hidden="true">▲ </span>
-            入浴（デイ）: {bathGate.observed ? kindBlockedMessage('bath') : BATH_GATE_UNKNOWN}
+            入浴（デイ）: {bathGate.observed ? kindBlockedMessage('bath') : gateUnknownText(bathGate, BATH_GATE_UNKNOWN)}
           </p>
         ) : null}
         {/* 与薬の封鎖の理由（入浴と同じく他の項目の理由文とは別） */}
         {medGate !== null && medLocked ? (
           <p id={medReasonId} role="status" className="mt-3 text-sm text-ink2">
             <span aria-hidden="true">▲ </span>
-            与薬チェック: {medGate.observed ? kindBlockedMessage('med') : MED_GATE_UNKNOWN}
+            与薬チェック: {medGate.observed ? kindBlockedMessage('med') : gateUnknownText(medGate, MED_GATE_UNKNOWN)}
           </p>
         ) : null}
         {/* 事故・ヒヤリハットの封鎖の理由（一覧の閲覧は「その他」からできる） */}
         {incidentGate !== null && incidentLocked ? (
           <p id={incidentReasonId} role="status" className="mt-3 text-sm text-ink2">
             <span aria-hidden="true">▲ </span>
-            事故・ヒヤリハット: {incidentGate.observed ? kindBlockedMessage('incident') : INCIDENT_GATE_UNKNOWN}
+            事故・ヒヤリハット:{' '}
+            {incidentGate.observed ? kindBlockedMessage('incident') : gateUnknownText(incidentGate, INCIDENT_GATE_UNKNOWN)}
             （一覧の閲覧は「その他」→「事故・ヒヤリハット」からできます）
           </p>
         ) : null}

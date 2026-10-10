@@ -46,7 +46,7 @@
 import { useCallback, useEffect, useId, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { getKindInputGate, getNativeInputGate } from '../lib/db'
+import { FORBIDDEN_REASON, getKindInputGate, getNativeInputGate } from '../lib/db'
 import { ErrorBlock, LoadingBlock, SectionCard } from '../components/ui'
 
 /** 入力封鎖中の理由文（ui-design.md §0.5 の定型文。文言を変えない） */
@@ -251,6 +251,12 @@ export function MorePage({ inputEnabled: inputEnabledProp }: MorePageProps = {})
     getNativeInputGate()
       .then((gate) => {
         if (!alive) return
+        if (gate.forbidden === true) {
+          // 許可リスト外（F61）: 封鎖（スプレッドシート期間）でも通信エラーでもない。再試行では変わらないので、
+          // 使えない理由をそのまま出す（入力の入口は封鎖のまま＝安全側）
+          setLoadError(FORBIDDEN_REASON)
+          return
+        }
         if (!gate.observed) {
           setLoadError(LOAD_ERROR)
           return
@@ -316,7 +322,10 @@ export function MorePage({ inputEnabled: inputEnabledProp }: MorePageProps = {})
 
   // 案内欄（エラー／ローディング／封鎖）。閲覧系のボタンは待たせずに出す＝行き止まりを作らない
   const notice = loadError ? (
-    <ErrorBlock message={loadError} onRetry={() => setReloadKey((n) => n + 1)} />
+    <ErrorBlock
+      message={loadError}
+      onRetry={loadError === FORBIDDEN_REASON ? undefined : () => setReloadKey((n) => n + 1)}
+    />
   ) : fetchedEnabled == null ? (
     <LoadingBlock label={LOADING_LABEL} />
   ) : lockedObserved ? (

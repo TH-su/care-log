@@ -15,22 +15,31 @@
 // - 保存できなかった入力は画面から消さない（キュー退避・競合・範囲外のいずれも入力を保持）
 // - 入力解禁フラグ（native_input_enabled）が false の間は全入力をディセーブル＋理由文
 // - 個人情報は console にも localStorage にも出さない
+// - 他の端末の記録は subscribeChanges で受け、表示中の期間（前回値の遡り〜当日）の vitals の変更だけを合図に
+//   背景で取り直す（F17・2026-10-10。入力中の欄・未送信・競合の行は mergeOnLoad が引き継ぐ。キーパッドは閉じない）。
+//   復帰・電波の復帰・購読のつながり直しは db.ts が流す RESYNC（行なし）で受ける（F14）
+// - 表示中の日は開いた日。日付をまたいだら、入力中・未送信が無ければ今日へ切り替え、残っていれば帯で知らせる（F18）
+// - 保存領域が一杯で送信待ちを端末に残せない時は、送信待ちとして案内せず入力を残す（F01）
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  FORBIDDEN_REASON,
   DbError,
   discardPendingRow,
   fetchLatestVital,
   fetchResidents,
   fetchTimelineChunk,
   getNativeInputGate,
+  isQueuePersisted,
+  isSelfWrite,
   newClientKey,
   pendingRow,
   queuePending,
   queueSubscribe,
   saveVitalEdits,
+  subscribeChanges,
 } from '../lib/db'
-import type { CellSaveResult, PendingCellRow, VitalTarget } from '../lib/db'
+import type { CellSaveResult, ChangeInfo, PendingCellRow, VitalTarget } from '../lib/db'
 import { addDays, fmtDayLabel, normalizeVitalInput, todayIso } from '../lib/format'
 import {
   diaBpLevel,
@@ -78,12 +87,13 @@ import {
 } from '../lib/rowSync'
 import type { Edits } from '../lib/rowSync'
 import type { ConflictColumn } from '../lib/conflict'
-import { registerUnsaved } from '../lib/leaveGuard'
+import { LEAVE_TITLE, registerUnsaved } from '../lib/leaveGuard'
 import { focusOf, useCellPresence } from '../hooks/useCellPresence'
 import type { CellPresence } from '../hooks/useCellPresence'
 import { cellKey } from '../lib/presence'
 import type { CellTarget } from '../lib/presence'
 import { BUSY_RING, BusyMark, PresenceSummary, RowBusyMark } from '../components/presence'
+import { RecorderBar } from '../components/RecorderBar'
 
 // ── 定数 ─────────────────────────────────────────────────────
 
@@ -146,11 +156,25 @@ const ERR_LOAD =
 const ERR_SAVE =
   '保存できませんでした。入力は消えていません。通信状況を確認して、もう一度入力を確定してください。'
 const MSG_QUEUED = '通信できないため送信待ちにしました。電波が戻ると自動で送信します。'
+/**
+ * 送信待ちにしたが、端末の保存領域が一杯で控えを残せなかった時（F01）。送信待ちはこのタブのメモリにだけあり、閉じる・
+ * 再読み込み・iOS の自動終了で消える。「電波が戻ると自動で送信します」とは言わず、入力も画面に残す
+ */
+const MSG_NOT_PERSISTED =
+  '送信待ちにしましたが、この端末に控えを残せませんでした（保存領域の空きが不足している可能性があります）。入力は消えていません。画面を閉じたり再読み込みしたりすると消えるので、この画面のまま電波の回復をお待ちください。'
 /** サーバーに受け付けられなかった保存（型・範囲の拒否）が送信待ちに残っている時 */
 const ERR_REJECTED =
   'サーバーに受け付けられなかった保存があります（入力は消えていません）。値を確かめて「保存し直す」を押してください。'
 const MSG_BLOCKED =
   '現在はスプレッドシートで記録する期間です（アプリ入力の開始日は施設で決定します）'
+/**
+ * 他端末の変更通知をまとめる待ち時間（ミリ秒）。連続して届いた通知は最後の1回だけ取り直す（バイタル一覧と同じ）
+ */
+const REALTIME_DEBOUNCE_MS = 1500
+/** この画面が描画する表（食事・水分・申し送りの変更では取り直さない） */
+const WATCHED_TABLE = 'vitals'
+/** 日付をまたいだかを見直す間隔（ミリ秒）。画面に戻った時・電波が戻った時にも見直す（F18） */
+const DAY_CHECK_MS = 60_000
 const MSG_GATE_UNKNOWN =
   '入力できるかどうかを確認できませんでした（通信エラー）。電波状態を確認して、「もう一度確認する」を押してください。入力は消えていません。'
 /** 保存が、他の端末の値と食い違って止まっている行にまとめられた時（送らない。くらべて選ぶへ誘導する） */
@@ -264,6 +288,32 @@ function nowHM(): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
+/**
+ * 新しい行に入れる測定時刻。表示中の日が今日の時だけ今の時刻（バイタル一覧・日報と同じ式＝F18・F34）。
+ * 日付をまたいで開いたままの前日の画面で、前日の行に今朝の時刻が入る（日付は昨日・時刻は今朝）のを防ぐ。
+ * 0時〜朝の記録は暦の日付（当日）に載せる決まり（2026-10-10 本人回答）なので、前日の行の時刻は空にする
+ */
+export function measuredAtFor(day: string): string | null {
+  return day === todayIso() ? nowHM() : null
+}
+
+/**
+ * 日付をまたいだ時の動き（F18）。表示中の日が今日なら何もしない。切り替えて失うもの・取り違えるもの（キーパッドの
+ * 入力・未保存・競合・未送信・保存中）が無ければ切り替え、あれば帯で知らせる（入力は止めない）
+ */
+export function dayRollover(shownDay: string, today: string, quiet: boolean): 'none' | 'switch' | 'notice' {
+  if (shownDay === today) return 'none'
+  return quiet ? 'switch' : 'notice'
+}
+
+/** 変更通知の行の日付（measured_on）。行が無い・取り出せない時は null（＝期間で絞れない＝取り直す側へ倒す） */
+export function changedDay(info: ChangeInfo | undefined): string | null {
+  const row = info?.row
+  if (typeof row !== 'object' || row === null) return null
+  const day = row.measured_on
+  return typeof day === 'string' && day !== '' ? day : null
+}
+
 /** UI 状態だけを localStorage から読む（壊れた値・未知値は既定へ倒す） */
 function readFloor(): string | null {
   try {
@@ -318,6 +368,11 @@ interface GridRow {
   missing?: boolean
   /** saved が古いかもしれない（競合の後に最新を取り直せなかった）。この間は「先の値」を出さない（指摘 U1） */
   stale?: boolean
+  /**
+   * 送信待ちにしたが端末に控えを残せなかった（F01。このタブのメモリにだけある）。入力（edits）は残したまま
+   * 「未保存」として出し、送信が済んだら読み込みで片付ける（送った値と同じなら edits から外れる）
+   */
+  unpersisted?: true
 }
 
 /** 行の氏名のセルの id（食い違いを解決した後のフォーカスの戻り先） */
@@ -364,13 +419,16 @@ function badText(bad: Field[]): string {
     : ''
 }
 
-/** 画面を離れると消える入力が残っている行か（構造規約 R-G）。送信待ちの内容そのものは数えない */
-function holdsInput(r: GridRow): boolean {
-  return hasEdits(r.edits) || badCells(r.buf).length > 0 || r.state === 'conflict'
+/**
+ * 画面を離れると消える入力が残っている行か（構造規約 R-G）。送信待ちの内容そのものは数えない。
+ * ただし端末に控えを残せなかった送信待ち（F01）は離れると消えるので数える
+ */
+export function holdsInput(r: GridRow): boolean {
+  return hasEdits(r.edits) || badCells(r.buf).length > 0 || r.state === 'conflict' || r.unpersisted === true
 }
 
 /** 読み込みで作り直さずに載せ替える行か（止まっている入力・送信待ち・競合がある） */
-function isHeldRow(r: GridRow): boolean {
+export function isHeldRow(r: GridRow): boolean {
   return holdsInput(r) || r.state === 'queued'
 }
 
@@ -380,7 +438,7 @@ function isHeldRow(r: GridRow): boolean {
  * 範囲外の入力の欄だけ打った文字を残す。状態は edits と最新の値の突き合わせで決め直す。
  * fresh=null は行が見当たらない（先の値が無いもの＝新しい行として裁く）
  */
-function mergeOnLoad(cur: GridRow, fresh: GridRow | null): GridRow {
+export function mergeOnLoad(cur: GridRow, fresh: GridRow | null): GridRow {
   const latest: GridRow = fresh ?? { ...cur, vitalId: null, rev: 0, saved: savedOf(null) }
   let edits = cur.edits ?? {}
   const buf = bufOf(latest.saved)
@@ -399,6 +457,8 @@ function mergeOnLoad(cur: GridRow, fresh: GridRow | null): GridRow {
     edits,
     stale: undefined,
     missing: undefined,
+    // 端末に残せなかった送信待ちの印は、送信が済んだ（または止まった）後の読み込みで外す（F01）
+    unpersisted: undefined,
     ...(latest.vitalId == null && cur.clientKey ? { clientKey: cur.clientKey } : {}),
   }
   if (r.status === 'conflict') return { ...next, state: 'conflict', message: conflictStillText(r.conflicts) }
@@ -456,7 +516,7 @@ function bufWithEdits(buf: Record<Field, string>, edits: Edits<Field>): Record<F
  * 送る状態は「送信待ち」の印つきで値を重ね、止まっている行は「あなたの入力」として取り込んで競合・未保存を
  * 出し直す（もう同じ値が載っていれば送信待ちから外す）。拒否された行は〔保存し直す〕を出す
  */
-function adoptStoreRows(next: GridRow[], day: string): void {
+export function adoptStoreRows(next: GridRow[], day: string): void {
   for (let i = 0; i < next.length; i++) {
     const cur = next[i]
     const target = targetOf(cur, day)
@@ -465,6 +525,8 @@ function adoptStoreRows(next: GridRow[], day: string): void {
     if (p === null) continue
     if (p.state === 'pending') {
       if (cur.state === 'conflict') continue
+      // 端末に控えを残せなかった送信待ち（F01）は「送信待ち」として重ねない（入力を残したまま「未保存」で見せる）
+      if (cur.unpersisted === true) continue
       const q: Partial<Record<Field, number | null>> = {}
       for (const f of FIELDS) if (f in p.values) q[f] = numOrNull(p.values[f])
       if (Object.keys(q).length === 0) continue
@@ -558,13 +620,23 @@ export function VitalsGridPage({
   actorId: propActorId,
   inputEnabled: propInputEnabled,
 }: VitalsGridPageProps = {}) {
-  const [day] = useState(() => todayIso())
+  // 表示中の日（開いた日）。日付をまたいだら今日へ切り替える（F18。業務データなので localStorage には保存しない）
+  const [day, setDay] = useState(() => todayIso())
+  /** いまの日付（端末の時計）。表示中の日と食い違ったら帯を出す（1分ごと・画面に戻った時に見直す） */
+  const [nowDay, setNowDay] = useState(() => todayIso())
+  /** 〔今日にする〕で、まだ保存していない入力が消える時の確認 */
+  const [dayAsk, setDayAsk] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [residents, setResidents] = useState<Resident[]>(propResidents ?? [])
   const [inputEnabled, setInputEnabled] = useState<boolean>(propInputEnabled ?? false)
   /** 入力できるかどうかを観測できなかった（通信エラー）。封鎖の理由文とは分けて案内する */
   const [gateUnknown, setGateUnknown] = useState(false)
+  /**
+   * このアカウントは記録アプリを使えない（許可リストに無い・無効。F61 手直し）。gateUnknown も true のまま（入力は止める）で、
+   * 案内だけを「通信エラー・もう一度確認する」ではなく、ログインし直す・管理者へ連絡する文にする（再試行では直らないため）
+   */
+  const [forbidden, setForbidden] = useState(false)
   /** サーバーに欄ごとの保存の仕組み（0011）がまだ無い＝サーバー側の更新待ち（入力を止める） */
   const [cellsMissing, setCellsMissing] = useState(false)
   const [rows, setRows] = useState<GridRow[]>([])
@@ -589,6 +661,21 @@ export function VitalsGridPage({
   /** キーパッドを出した時に画面に出ていた値（構造規約 R-E の基準） */
   const editBaseRef = useRef<{ rowId: string; field: Field; text: string } | null>(null)
   const clearResolveRef = useRef<((ok: boolean) => void) | null>(null)
+  /**
+   * 表示中の日（同期で読む控え）。日を切り替えた時に先に書き換え、切り替える前に積まれた保存・取り直しが
+   * 新しい日の行へ当たらないようにする（定時の行 id r{利用者id} は日付を含まないため＝F18）
+   */
+  const dayRef = useRef(day)
+  /** 取得の世代。応答が返るまでに次の取得（日の切替を含む）が始まっていたら、古い応答は捨てる */
+  const genRef = useRef(0)
+  /** 自分の書き込みで出た変更通知・取得の割り込みを見分ける印（保存の前後に進める。バイタル一覧と同じ作法） */
+  const selfWriteRef = useRef(0)
+  /** 行ごとの順番待ちで動いている・待っている仕事の数（保存・くらべて選ぶ。背景の取り直しと日の切替を後回しにする） */
+  const jobsRef = useRef(0)
+  /** 背景の取り直しを頼む（購読 effect の schedule を入れる。購読が無い時は null） */
+  const retryRef = useRef<(() => void) | null>(null)
+  /** キーパッドを開いている行が外れるため見送った背景の取り直しがある（欄を移る・閉じた時にやり直す） */
+  const deferredRef = useRef(false)
 
   const actorId = propActorId !== undefined ? propActorId : getActorId()
   // 他の端末が今まさに入力している欄（Presence・表示だけ。保存は妨げない）。
@@ -621,6 +708,11 @@ export function VitalsGridPage({
 
   useEffect(() => {
     selRef.current = sel
+    // キーパッドの行が外れるため見送った背景の取り直しを、欄を移った・閉じた後にやり直す（F17）
+    if (deferredRef.current) {
+      deferredRef.current = false
+      retryRef.current?.()
+    }
   }, [sel])
 
   useEffect(() => {
@@ -632,8 +724,14 @@ export function VitalsGridPage({
 
   // ── 読み込み ───────────────────────────────────────────────
 
-  const load = useCallback(async () => {
-    setLoading(true)
+  const load = useCallback(async (opts?: { background?: boolean }) => {
+    const gen = ++genRef.current
+    // 保存が割り込んだかどうかを見分けるための開始時刻（selfWriteRef は保存のたびに進む）
+    const startedAt = Date.now()
+    // 背景の取り直し（他端末の変更・復帰を受けた自動更新＝F17）では「読み込み中」にせず、キーパッドも閉じない
+    // （閉じると打ちかけの数字が消える）。利用者が押した読み込み直しは従来どおり
+    const background = opts?.background === true
+    if (!background) setLoading(true)
     setError(null)
     try {
       const from = addDays(day, -PREV_LOOKBACK_DAYS)
@@ -647,7 +745,13 @@ export function VitalsGridPage({
       ])
       const gate =
         propInputEnabled === undefined ? gateNow : { value: propInputEnabled, observed: true, cells: gateNow.cells }
-      if (!aliveRef.current) return
+      // 次の取得（日の切替を含む）が始まっていたら、この応答は捨てる
+      if (gen !== genRef.current || !aliveRef.current || day !== dayRef.current) return
+      // 取得の途中で自分の保存が入った＝この応答は保存前のサーバー値。背景の取り直しは捨ててやり直す
+      if (background && selfWriteRef.current >= startedAt) {
+        retryRef.current?.()
+        return
+      }
 
       const list = (Array.isArray(rs) ? rs : []).filter((r) => r && r.active !== false)
       const sorted = list.slice().sort(cmpResident)
@@ -721,11 +825,18 @@ export function VitalsGridPage({
           next[i] = { ...cur, prev: fresh.prev }
           continue
         }
+        // 背景の取り直しでは、画面で足したばかりの空の再検の行も残す（他の端末の変更を受けただけで、押した行が
+        // 消えない＝その行でキーパッドを開いていても閉じない。利用者が押した読み込み直しでは従来どおり外す）
+        const keepDraft = background && cur.vitalId == null && cur.kind !== 'routine' && fresh === null
         // 編集・範囲外の入力・送信待ち・応答待ち・競合のどれも無い行は、サーバーの値で作り直す
-        if (!isHeldRow(cur) && cur.state !== 'saving') continue
+        if (!isHeldRow(cur) && cur.state !== 'saving' && !keepDraft) continue
         let kept: GridRow | null
         const pending = cur.state === 'queued' && stillPending(cur, day)
-        if (cur.state === 'saving') {
+        if (cur.unpersisted === true && stillPending(cur, day)) {
+          // 端末に控えを残せなかった送信待ちが、まだ送れていない（F01）。入力と「未保存」の一言をそのまま持ち続ける
+          // （読み直しで「食い違いはありません・保存し直す」に塗り替えない。送信が済んだら下の mergeOnLoad で片付く）
+          kept = fresh ? { ...fresh, buf: cur.buf, state: cur.state, message: cur.message, edits: cur.edits, unpersisted: true } : cur
+        } else if (cur.state === 'saving') {
           // 保存の応答待ち。入力と編集を温存する（順番待ちが応答の後に計算し直す）
           kept = fresh ? { ...fresh, buf: cur.buf, state: cur.state, message: cur.message, sent: cur.sent, edits: cur.edits } : cur
         } else if (pending) {
@@ -780,26 +891,108 @@ export function VitalsGridPage({
       // 送信待ち・止まっている行を db.ts（pending store）から読んで重ねる（再マウント・再読み込みの後も同じ見え方）
       adoptStoreRows(next, day)
 
+      // 背景の取り直しで、キーパッドを開いている行が一覧から外れる（保存済みになった追加の行が v{id} の行へ置き換わる等）
+      // 時は描き直さず、キーパッドで別の欄へ移るか閉じた後に取り直す（開いている行を取り上げると、打ちかけの数字が消える）
+      const open = selRef.current
+      if (background && open !== null && !next.some((r) => r.rowId === open.rowId)) {
+        deferredRef.current = true
+        return
+      }
+
       setResidents(sorted)
       setInputEnabled(gate.value === true)
       setGateUnknown(!gate.observed)
+      // 親から既知の値を渡された時は観測済みとして扱う（許可リスト外の判定は自分で読んだ時だけ）
+      setForbidden(propInputEnabled === undefined && gateNow.forbidden === true)
       setCellsMissing(gate.cells === 'missing')
       commitRows(next)
-      setSel(null)
-      setEdit('')
+      if (!background) {
+        setSel(null)
+        setEdit('')
+      }
       setError(null)
     } catch {
-      if (!aliveRef.current) return
+      if (gen !== genRef.current || !aliveRef.current) return
       // 失敗時は既存の表示を消さない（安全側フォールバック）
       setError(ERR_LOAD)
     } finally {
-      if (aliveRef.current) setLoading(false)
+      // 最新の取得だけが「読み込み中」を降ろす（古い応答が先に降ろして表示がちらつかない）
+      if (gen === genRef.current && aliveRef.current) setLoading(false)
     }
   }, [commitRows, day, propInputEnabled, propResidents])
 
   useEffect(() => {
     void load()
   }, [load])
+
+  // ── 他端末の変更を自動で取り込む（F17・2026-10-10。バイタル一覧と同じ形） ──────────
+
+  /**
+   * 購読は画面にいる間ずっと1本にする（日を切り替えるたびに張り直さない＝張り直しの間の通知を落とさない）。
+   * そのため「取り直す処理」と「表示中の期間」は ref から読む
+   */
+  const loadRef = useRef(load)
+  const windowRef = useRef({ from: addDays(day, -PREV_LOOKBACK_DAYS), to: day })
+  useEffect(() => {
+    loadRef.current = load
+  }, [load])
+  useEffect(() => {
+    windowRef.current = { from: addDays(day, -PREV_LOOKBACK_DAYS), to: day }
+  }, [day])
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let stopped = false
+    const schedule = () => {
+      if (stopped) return
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        if (stopped || !aliveRef.current) return
+        // 保存の応答待ち・順番待ちの仕事（保存・くらべて選ぶ）がある間は取り直さない（応答の前のサーバー値で
+        // その行を描き直しかねない）。終わってから取り直す
+        const busy = jobsRef.current > 0 || rowsRef.current.some((r) => r.state === 'saving')
+        if (busy) {
+          schedule()
+          return
+        }
+        void loadRef.current({ background: true })
+      }, REALTIME_DEBOUNCE_MS)
+    }
+    retryRef.current = schedule
+
+    let unsub: (() => void) | null = null
+    try {
+      unsub = subscribeChanges((table, info?: ChangeInfo) => {
+        if (stopped || !aliveRef.current) return
+        // この画面が描画する表だけを合図にする
+        if (table !== WATCHED_TABLE) return
+        // 自分の保存で出た通知（画面へ反映済み）は取り直さない（行で見分ける）
+        if (isSelfWrite(table, info?.row)) return
+        // 行が分かる時だけ期間（前回値の遡り〜当日）で絞る。分からない時（削除・つながり直し・復帰・電波の復帰の
+        // RESYNC＝F14）は取り直す＝安全側
+        const d = changedDay(info)
+        const w = windowRef.current
+        if (d !== null && (d < w.from || d > w.to)) return
+        schedule()
+      })
+    } catch {
+      // 購読できない環境（接続未設定など）でも画面は成立させる（従来どおり手動の読み込み直しで足りる）
+      unsub = null
+    }
+    return () => {
+      stopped = true
+      retryRef.current = null
+      if (timer) clearTimeout(timer)
+      if (unsub) {
+        try {
+          unsub()
+        } catch {
+          /* 解除失敗は表示に影響しないため無視する */
+        }
+      }
+    }
+  }, [])
 
   /**
    * 送信待ちの行の印を見直す（R6。未送信件数の通知を受けた時。読み込み直しはしない）。
@@ -846,6 +1039,9 @@ export function VitalsGridPage({
         setPending(typeof n === 'number' && n >= 0 ? n : 0)
         // 裏で送信が済んだ・止まった行の「⚠ 未送信」を見直す（R6）
         settleQueuedRows()
+        // 端末に控えを残せなかった送信待ち（F01）が送れた・止まった。残していた入力は、取り直した値と
+        // 同じなら片付く（自分の送信の通知は isSelfWrite で捨てられるので、ここで取り直す）
+        if (rowsRef.current.some((r) => r.unpersisted === true && !stillPending(r, dayRef.current))) retryRef.current?.()
       })
     } catch {
       unsub = null
@@ -932,7 +1128,7 @@ export function VitalsGridPage({
       } catch {
         return
       }
-      if (!aliveRef.current) return
+      if (!aliveRef.current || day !== dayRef.current) return
       const cur = rowsRef.current.find((r) => r.rowId === rowId)
       if (!cur || cur.state !== 'conflict') return
       patchRow(rowId, mergeOnLoad(cur, latest ? rowFromVital(latest, cur.prev, cur.rowId) : null))
@@ -946,6 +1142,7 @@ export function VitalsGridPage({
    */
   const holdAsHeld = useCallback(
     async (rowId: string) => {
+      if (day !== dayRef.current) return // 切り替える前の日の行は扱わない（F18）
       const cur = rowsRef.current.find((r) => r.rowId === rowId)
       if (!cur) return
       const target = targetOf(cur, day)
@@ -1021,6 +1218,8 @@ export function VitalsGridPage({
    */
   const saveRow = useCallback(
     async (rowId: string) => {
+      // 日を切り替えた後に動き出した、切り替える前の日の保存は送らない（同じ行 id の新しい日の行へ当てない＝F18）
+      if (day !== dayRef.current) return
       const row = rowsRef.current.find((r) => r.rowId === rowId)
       if (!row) return
       // 競合中の行は、くらべて選ぶで選ぶまで保存しない（5画面共通の規約）。止めた旨と食い違いの併記を出す
@@ -1037,7 +1236,7 @@ export function VitalsGridPage({
       const cleared = (Object.keys(sendEdits) as Field[]).filter((f) => sendEdits[f]?.value === null && server[f] != null)
       if (cleared.length > 0) {
         const ok = await askClear(cleared.map((f) => `${FIELD_LABEL[f]}（${fmtVitalValue(f, server[f])}）`).join('・'))
-        if (!aliveRef.current) return
+        if (!aliveRef.current || day !== dayRef.current) return
         if (!ok) {
           const cur = rowsRef.current.find((r) => r.rowId === rowId)
           if (!cur) return
@@ -1072,15 +1271,27 @@ export function VitalsGridPage({
       const heldRow = pendingRow('vitals', target)
       const rebase = heldRow !== null && heldRow.state === 'conflict'
       const wasQueued = row.state === 'queued'
-      patchRow(rowId, { edits, clientKey, state: 'saving', message: badText(bad) })
+      patchRow(rowId, { edits, clientKey, state: 'saving', message: badText(bad), unpersisted: undefined })
+      // 送る前に印を付ける（変更通知が応答より先に届いても、自分の書き込みで取り直さない＝F17）
+      selfWriteRef.current = Date.now()
       try {
         const res = await saveVitalEdits(target, sendEdits, {
-          // 新しい行の測定時刻・記入者は「空いていれば埋める」（既にある行では何も埋めない）
-          ...(row.vitalId == null ? { fill: { measured_at: nowHM(), recorded_by: actorId ?? null } } : {}),
+          // 新しい行の測定時刻・記入者は「空いていれば埋める」（既にある行では何も埋めない）。
+          // 測定時刻は表示中の日が今日の時だけ（日付をまたいで開いたままの前日の行に今朝の時刻を入れない＝F18）
+          ...(row.vitalId == null ? { fill: { measured_at: measuredAtFor(day), recorded_by: actorId ?? null } } : {}),
           rebase,
         })
-        if (!aliveRef.current) return
+        if (!aliveRef.current || day !== dayRef.current) return
+        // サーバーへ届いた（または送信待ちにした）＝この行の変更通知は自分が出したもの
+        selfWriteRef.current = Date.now()
         const cur = rowsRef.current.find((r) => r.rowId === rowId)
+        if (res === 'queued' && !isQueuePersisted()) {
+          // 送信待ちにしたが、端末に控えを残せなかった（F01）。送ったものとして扱わない: 入力（edits）は残し、
+          // 送信待ちの重ね表示（sent）も出さず、「未保存」として理由を出す（離れる時の確認にも数える）。
+          // 送信待ちはこのタブのメモリにはあるので、電波が戻れば送られ、その後の読み込みで片付く
+          patchRow(rowId, { state: 'error', message: MSG_NOT_PERSISTED, unpersisted: true })
+          return
+        }
         if (res === 'queued') {
           // 送信待ちへ渡し終えた欄だけ消す。送信待ちの後に打つ値は、送った内容を基準に比べる（再審 low-2）
           const sentValues: Partial<Record<Field, number | null>> = {}
@@ -1104,7 +1315,7 @@ export function VitalsGridPage({
         }
         applySaveResult(rowId, row, sendEdits, res)
       } catch (e) {
-        if (!aliveRef.current) return
+        if (!aliveRef.current || day !== dayRef.current) return
         // 保存失敗: edits は残す（R-D）。〔保存し直す〕で送り直せる
         patchRow(rowId, { state: 'error', message: e instanceof DbError && e.message ? e.message : ERR_SAVE })
       }
@@ -1113,14 +1324,40 @@ export function VitalsGridPage({
   )
 
   /** 行ごとの1本の順番待ち（構造規約 R-F）。保存・保存し直し・くらべて選ぶの3択はすべてここを通す */
-  const rowQueue = useMemo(() => createRowQueue(), [])
+  const baseRowQueue = useMemo(() => createRowQueue(), [])
+  /**
+   * 順番待ちに積んだ仕事を数える（積んだ時から終わるまで）。数が残っている間は背景の取り直しと日の切替を後回しにする
+   * （応答の前のサーバー値で描き直さない・切り替える前の日の保存を新しい日の行へ当てない＝F17・F18）
+   */
+  const rowQueue = useCallback(
+    (rowId: string, job: () => Promise<void>): Promise<void> => {
+      jobsRef.current += 1
+      return baseRowQueue(rowId, async () => {
+        try {
+          await job()
+        } finally {
+          jobsRef.current -= 1
+        }
+      })
+    },
+    [baseRowQueue],
+  )
 
   /**
    * くらべて選ぶの送信（〔先の値を残す〕〔自分の値で直す〕〔両方残す〕）。通常の保存と同じ順番待ちに通す。
-   * 送信待ちで止まっている値の取り下げ・送り直しは ConflictResolver が db.ts へ頼む
+   * 送信待ちで止まっている値の取り下げ・送り直しは ConflictResolver が db.ts へ頼む。
+   * 送る前と後に自分の書込の印を付ける（選び直した後の行を、その前に出た取り直しの古い値で描き直さない）
    */
   const runResolverJob = useCallback(
-    (rowId: string, job: () => Promise<void>) => rowQueue(rowId, job),
+    (rowId: string, job: () => Promise<void>) =>
+      rowQueue(rowId, async () => {
+        selfWriteRef.current = Date.now()
+        try {
+          await job()
+        } finally {
+          selfWriteRef.current = Date.now()
+        }
+      }),
     [rowQueue],
   )
   /** 1行の保存を順番待ちに積む（積んだ時点の値は持ち越さず、動き出した時に最新から計算し直す） */
@@ -1150,6 +1387,8 @@ export function VitalsGridPage({
   const saveAsNew = useCallback(
     (rowId: string) => {
       void rowQueue(rowId, async () => {
+        // 日を切り替えた後に動き出した、切り替える前の日の仕事は何もしない（F18）
+        if (day !== dayRef.current) return
         const row = rowsRef.current.find((r) => r.rowId === rowId)
         if (!row || !row.missing) return
         const vals = valuesForBoth(FIELDS, editValues(row.edits ?? {}))
@@ -1176,19 +1415,28 @@ export function VitalsGridPage({
           clientKey = newClientKey()
           target = { routine: false, clientKey, residentId: row.residentId, day, kind: row.kind as Exclude<VitalKind, 'routine'> }
         }
-        patchRow(rowId, { state: 'saving', message: '', vitalId: row.kind === 'routine' ? row.vitalId : null, clientKey })
+        patchRow(rowId, { state: 'saving', message: '', vitalId: row.kind === 'routine' ? row.vitalId : null, clientKey, unpersisted: undefined })
+        selfWriteRef.current = Date.now()
         try {
-          // 同じ行の送信待ちの全ての欄を「空欄を見て書いた」（基準 null）にそろえて送る（F4）
+          // 同じ行の送信待ちの全ての欄を「空欄を見て書いた」（基準 null）にそろえて送る（F4）。
+          // 測定時刻は表示中の日が今日の時だけ（F18）
           const res = await saveVitalEdits(target, sendEdits, {
             rebase: true,
             asNew: true,
-            fill: { measured_at: nowHM(), recorded_by: actorId ?? null },
+            fill: { measured_at: measuredAtFor(day), recorded_by: actorId ?? null },
           })
           if (old && (res === 'queued' || (res.conflicts.length === 0 && res.held !== true))) {
             // 新しい行が書けた・送信待ちに確保できた後で、元の送信待ち（新しい行へ移した値の版）を外す（F5）
             await discardPendingRow('vitals', old, undefined, seenVers(oldPending, editValues(sendEdits)))
           }
-          if (!aliveRef.current) return
+          if (!aliveRef.current || day !== dayRef.current) return
+          selfWriteRef.current = Date.now()
+          if (res === 'queued' && !isQueuePersisted()) {
+            // 端末に控えを残せなかった（F01）。新しい行として送る入力（基準 null）を残し、「未保存」として出す。
+            // 〔保存し直す〕は同じ送り先（定時は利用者×日・それ以外はこの冪等キー）の送信待ちへまとまる
+            patchRow(rowId, { state: 'error', message: MSG_NOT_PERSISTED, missing: undefined, edits: sendEdits, unpersisted: true })
+            return
+          }
           if (res === 'queued') {
             patchRow(rowId, { state: 'queued', message: MSG_QUEUED, missing: undefined, edits: undefined })
             return
@@ -1197,7 +1445,7 @@ export function VitalsGridPage({
         } catch (e) {
           // 拒否（例外）: 元の送信待ちは残す（F5）。新しい行の送信待ちは外し、画面は元の行の控えのまま
           if (newRow) void discardPendingRow('vitals', target)
-          if (!aliveRef.current) return
+          if (!aliveRef.current || day !== dayRef.current) return
           patchRow(rowId, {
             state: 'conflict',
             message: e instanceof DbError && e.message ? e.message : ERR_SAVE,
@@ -1213,12 +1461,13 @@ export function VitalsGridPage({
   const dropMissing = useCallback(
     (rowId: string) => {
       void rowQueue(rowId, async () => {
+        if (day !== dayRef.current) return // 切り替える前の日の仕事は何もしない（F18）
         const row = rowsRef.current.find((r) => r.rowId === rowId)
         if (!row) return
         const target = targetOf(row, day)
         // 画面が見せていた版だけ外す（第3段 #9。見た後に他のタブが入れた値は外さない）
         if (target) await discardPendingRow('vitals', target, undefined, seenVers(pendingRow('vitals', target), editValues(row.edits ?? {})))
-        if (!aliveRef.current) return
+        if (!aliveRef.current || day !== dayRef.current) return
         patchRow(rowId, { edits: undefined, missing: undefined, clientKey: undefined, state: 'idle', message: '', buf: bufOf(row.saved) })
       })
     },
@@ -1413,6 +1662,108 @@ export function VitalsGridPage({
     [],
   )
 
+  // ── 日付をまたいだ時（F18・2026-10-10 本人回答: 入力中・未送信が無ければ今日へ自動で切り替える） ──────
+  // 開いたまま日付をまたぐと、前日の行へ今朝の値を入れていた（定時の行は利用者×日。前日の定時の値を上書きした）。
+  // 1分ごと・画面に戻った時・電波が戻った時に今日と比べ、切り替えて失うものが無ければ黙って今日へ移る。
+  // キーパッドを開いている・未保存・競合・未送信・保存中の行がある時は切り替えず、帯で知らせて〔今日にする〕を出す
+
+  /** 保存の応答待ち・順番待ちの仕事がある（日を切り替えると、その応答が新しい日の同じ行 id へ当たる） */
+  const isBusy = useCallback(
+    () => jobsRef.current > 0 || rowsRef.current.some((r) => r.state === 'saving'),
+    [],
+  )
+
+  /** 表示中の日を t へ切り替える（前の日の行・キーパッドは片付ける。前の日の送信待ちは db.ts に残って前の日へ送られる） */
+  const switchDay = useCallback(
+    (t: string) => {
+      dayRef.current = t // 先に書く: 前の日の取得の応答・順番待ちの仕事を新しい日の行へ当てない
+      genRef.current += 1
+      deferredRef.current = false
+      selRef.current = null
+      editBaseRef.current = null
+      setSel(null)
+      setEdit('')
+      setCompare(null)
+      setDayAsk(false)
+      setLoading(true)
+      commitRows([])
+      setNowDay(t)
+      setDay(t)
+    },
+    [commitRows],
+  )
+
+  const switchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(
+    () => () => {
+      if (switchTimerRef.current !== null) clearTimeout(switchTimerRef.current)
+    },
+    [],
+  )
+
+  /**
+   * 今日へ切り替える（〔今日にする〕・確認の後）。保存の途中なら終わるのを待ってから切り替える。
+   * まだ保存していない入力が残っていれば、確認（confirmed=false の時）を出す
+   */
+  const switchToToday = useCallback(
+    (confirmed: boolean) => {
+      if (switchTimerRef.current !== null) clearTimeout(switchTimerRef.current)
+      switchTimerRef.current = null
+      const step = () => {
+        switchTimerRef.current = null
+        const t = todayIso()
+        if (!aliveRef.current) return
+        if (dayRef.current === t) {
+          setNowDay(t)
+          return
+        }
+        if (isBusy()) {
+          switchTimerRef.current = setTimeout(step, 300)
+          return
+        }
+        if (!confirmed && rowsRef.current.some(holdsInput)) {
+          setDayAsk(true)
+          return
+        }
+        switchDay(t)
+      }
+      step()
+    },
+    [isBusy, switchDay],
+  )
+
+  /** 〔今日にする〕: 開いているキーパッドの入力は確定して保存してから切り替える */
+  const onTodayClick = useCallback(() => {
+    if (selRef.current !== null) closeKeypad(edit)
+    switchToToday(false)
+  }, [closeKeypad, edit, switchToToday])
+
+  useEffect(() => {
+    const check = () => {
+      if (!aliveRef.current) return
+      const t = todayIso()
+      setNowDay(t) // 表示中の日と食い違えば帯が出る（切り替えなかった時）
+      if (dayRef.current === t) return
+      // 切り替えて失うもの・取り違えるものが無い時だけ黙って切り替える（未送信の行も残っていないこと）。
+      // 電波が無い間は切り替えない（新しい日を読めず、入力できない画面になる。電波が戻った時に見直す）
+      const offline = typeof navigator !== 'undefined' && navigator.onLine === false
+      const quiet =
+        !offline && selRef.current === null && !isBusy() && !rowsRef.current.some((r) => isHeldRow(r) || r.unpersisted === true)
+      if (dayRollover(dayRef.current, t, quiet) === 'switch') switchDay(t)
+    }
+    const timer = setInterval(check, DAY_CHECK_MS)
+    const onVisible = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') check()
+    }
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisible)
+    if (typeof window !== 'undefined') window.addEventListener('online', check)
+    return () => {
+      clearInterval(timer)
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisible)
+      if (typeof window !== 'undefined') window.removeEventListener('online', check)
+    }
+  }, [isBusy, switchDay])
+
   /** 選んだ結果でその行を最新に描き直し、競合の表示を消す */
   const onResolved = useCallback(
     (r: ConflictResolution) => {
@@ -1440,6 +1791,13 @@ export function VitalsGridPage({
         edits: undefined,
         stale: undefined,
         missing: undefined,
+      }
+      if (r.queued && (r.choice === 'mine' || r.choice === 'both') && !isQueuePersisted()) {
+        // 選んだ内容を送信待ちにしたが、端末に控えを残せなかった（F01）。送信待ちとして案内せず、理由を出して
+        // 離れる時の確認に数える（送信が済んだら読み込みで片付く）
+        patchRow(cur.rowId, { ...base, state: 'error', message: MSG_NOT_PERSISTED, unpersisted: true })
+        focusAfterResolve(nameCellId(cur.rowId))
+        return
       }
       if (r.choice === 'mine' && r.queued) {
         patchRow(cur.rowId, { ...base, state: 'queued', message: MSG_QUEUED, sent: saved })
@@ -1529,7 +1887,34 @@ export function VitalsGridPage({
           </p>
         </div>
 
-        {gateUnknown ? (
+        {/* いまの記録者（新しい行の記入者・変更の記録に付く）を常に出し、その場で切り替えられるようにする（F38）。
+            1台を複数の職員で使うため、前の人の記録者のまま入れるのを防ぐ。印刷には出さない（部品が print:hidden） */}
+        <RecorderBar actorId={actorId ?? null} className="mt-2" />
+
+        {day !== nowDay ? (
+          // 日付をまたいだが、未保存・未送信などがあって自動では切り替えなかった（F18）。入力は止めない
+          <div role="status" className="mt-3 rounded border border-warn bg-warn-bg p-3">
+            <p className="text-base text-ink">
+              <span aria-hidden="true">▲ </span>
+              日付が変わりました（表示中: {fmtDayLabel(day)}）。入力中・未送信の記録があるか電波が無いため、自動では切り替えていません。
+            </p>
+            <button
+              type="button"
+              onClick={onTodayClick}
+              className="mt-3 min-h-tap rounded border border-primary bg-surface px-4 text-base font-bold text-primary"
+            >
+              今日（{fmtDayLabel(nowDay)}）にする
+            </button>
+          </div>
+        ) : null}
+
+        {forbidden ? (
+          // 許可リストに無い・無効なアカウント（F61）。再試行のボタンは出さない（何度押しても直らない）
+          <p role="alert" className="mt-3 rounded border border-danger bg-danger-bg p-3 text-base text-ink">
+            <span aria-hidden="true">▲ </span>
+            {FORBIDDEN_REASON}
+          </p>
+        ) : gateUnknown ? (
           // 観測できていない＝「スプシ期間」と決めつけない。通信エラーとして再確認の導線を出す
           <div role="alert" className="mt-3 rounded border border-warn bg-warn-bg p-3">
             <p className="text-base text-ink">
@@ -1805,6 +2190,19 @@ export function VitalsGridPage({
           resolve?.(false)
         }}
       />
+
+      <ConfirmDialog
+        open={dayAsk}
+        title={LEAVE_TITLE}
+        body={`表示中の日（${fmtDayLabel(day)}）に、他の端末の値と食い違って止まっている入力、またはまだ保存していない入力があります。今日に切り替えると、その入力は破棄されます（送信待ちにした記録は ${fmtDayLabel(day)} の記録として送られます）。切り替えてよろしいですか。`}
+        confirmLabel="今日に切り替える"
+        danger
+        onConfirm={() => {
+          setDayAsk(false)
+          switchToToday(true)
+        }}
+        onCancel={() => setDayAsk(false)}
+      />
     </div>
   )
 }
@@ -1989,72 +2387,78 @@ function FragmentRow({
       </tr>
       {row.message ? (
         <tr className="border-b border-border">
-          <td colSpan={FIELDS.length + 4} className="px-2 py-2">
-            <p
-              role="alert"
-              className={
-                row.state === 'conflict' || row.state === 'error'
-                  ? 'text-base text-danger'
-                  : 'text-base text-warn'
-              }
-            >
-              <span aria-hidden="true">▲ </span>
-              {row.message}
-              {/* 送信待ちの MSG_QUEUED は自動送信を待つだけなので出さない */}
-              {row.state === 'conflict' ? (
-                <button
-                  type="button"
-                  onClick={onReload}
-                  className="ml-2 min-h-tap rounded border border-danger px-3 text-base font-bold text-danger"
-                >
-                  読み込み直す
-                </button>
-              ) : null}
-              {/* 未保存・保存失敗の編集を送り直す（同じ値を入れ直しても送られないため、ボタンで送る） */}
-              {row.state === 'error' && hasEdits(row.edits) && inputEnabled ? (
-                <button
-                  type="button"
-                  onClick={onResave}
-                  aria-label={`${residentName} ${KIND_LABEL[row.kind]}のまだ保存していない入力を保存し直す`}
-                  className="ml-2 min-h-tap rounded border border-primary px-3 text-base font-bold text-primary"
-                >
-                  保存し直す
-                </button>
-              ) : null}
-              {/* 行が取り消されていた控え: 新しい行として保存するか、取り下げる（日報の「行が無い控え」と同じ） */}
-              {row.state === 'conflict' && row.missing ? (
-                <>
+          {/* 一言の行は表の幅を広げない（F01 手直し・2026-10-10）。表は自動の幅（min-w-max）なので、長い一言（端末に控えを
+              残せなかった時の案内など）の1行ぶんの幅がまたいでいる列（氏名の列）に配られ、表が 824→1866px に広がって
+              体温より右の欄が sticky の氏名の欄の下に隠れて押せなくなった。幅0＋最小100% の箱で表の幅の計算から外し、
+              一言は画面の幅で折り返して横スクロールしても左に残す（sticky）。画面だけの表示（この表は印刷しない） */}
+          <td colSpan={FIELDS.length + 4} className="p-0">
+            <div className="w-0 min-w-full">
+              <p
+                role="alert"
+                className={`sticky left-0 max-w-[calc(100vw-2rem)] px-2 py-2 ${
+                  row.state === 'conflict' || row.state === 'error'
+                    ? 'text-base text-danger'
+                    : 'text-base text-warn'
+                }`}
+              >
+                <span aria-hidden="true">▲ </span>
+                {row.message}
+                {/* 送信待ちの MSG_QUEUED は自動送信を待つだけなので出さない */}
+                {row.state === 'conflict' ? (
                   <button
                     type="button"
-                    disabled={!inputEnabled}
-                    onClick={onSaveNew}
-                    aria-label={`${residentName} ${KIND_LABEL[row.kind]}のまだ保存していない入力を新しい行として保存する`}
-                    className="ml-2 min-h-tap rounded border border-primary px-3 text-base font-bold text-primary disabled:border-border disabled:text-ink3"
+                    onClick={onReload}
+                    className="ml-2 min-h-tap rounded border border-danger px-3 text-base font-bold text-danger"
                   >
-                    新しい行として保存
+                    読み込み直す
                   </button>
+                ) : null}
+                {/* 未保存・保存失敗の編集を送り直す（同じ値を入れ直しても送られないため、ボタンで送る） */}
+                {row.state === 'error' && hasEdits(row.edits) && inputEnabled ? (
                   <button
                     type="button"
-                    onClick={onDrop}
-                    aria-label={`${residentName} ${KIND_LABEL[row.kind]}のまだ保存していない入力を取り下げる`}
-                    className="ml-2 min-h-tap rounded border border-border-strong px-3 text-base text-ink"
+                    onClick={onResave}
+                    aria-label={`${residentName} ${KIND_LABEL[row.kind]}のまだ保存していない入力を保存し直す`}
+                    className="ml-2 min-h-tap rounded border border-primary px-3 text-base font-bold text-primary"
                   >
-                    取り下げる
+                    保存し直す
                   </button>
-                </>
-              ) : null}
-              {/* 食い違いを並べて、どちらを残すか選ぶ（既存の「読み込み直す」はそのまま残す） */}
-              {row.state === 'conflict' && !row.missing ? (
-                <button
-                  type="button"
-                  onClick={onCompare}
-                  aria-label={`${residentName} ${KIND_LABEL[row.kind]}の食い違いをくらべて選ぶ`}
-                  className="ml-2 min-h-tap rounded border border-primary px-3 text-base font-bold text-primary"
-                >
-                  くらべて選ぶ
-                </button>
-              ) : null}
-            </p>
+                ) : null}
+                {/* 行が取り消されていた控え: 新しい行として保存するか、取り下げる（日報の「行が無い控え」と同じ） */}
+                {row.state === 'conflict' && row.missing ? (
+                  <>
+                    <button
+                      type="button"
+                      disabled={!inputEnabled}
+                      onClick={onSaveNew}
+                      aria-label={`${residentName} ${KIND_LABEL[row.kind]}のまだ保存していない入力を新しい行として保存する`}
+                      className="ml-2 min-h-tap rounded border border-primary px-3 text-base font-bold text-primary disabled:border-border disabled:text-ink3"
+                    >
+                      新しい行として保存
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onDrop}
+                      aria-label={`${residentName} ${KIND_LABEL[row.kind]}のまだ保存していない入力を取り下げる`}
+                      className="ml-2 min-h-tap rounded border border-border-strong px-3 text-base text-ink"
+                    >
+                      取り下げる
+                    </button>
+                  </>
+                ) : null}
+                {/* 食い違いを並べて、どちらを残すか選ぶ（既存の「読み込み直す」はそのまま残す） */}
+                {row.state === 'conflict' && !row.missing ? (
+                  <button
+                    type="button"
+                    onClick={onCompare}
+                    aria-label={`${residentName} ${KIND_LABEL[row.kind]}の食い違いをくらべて選ぶ`}
+                    className="ml-2 min-h-tap rounded border border-primary px-3 text-base font-bold text-primary"
+                  >
+                    くらべて選ぶ
+                  </button>
+                ) : null}
+              </p>
+            </div>
           </td>
         </tr>
       ) : null}

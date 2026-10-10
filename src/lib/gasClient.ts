@@ -16,6 +16,7 @@
 // 本ファイルは contracts.md の許可により supabase を直接呼ぶ（db.ts を経由しない唯一の例外）。
 
 import { supabase } from './supabase'
+import { fetchLastMasterSync, notifyMastersChanged } from './db'
 import { LS } from './types'
 import type { Resident, Staff } from './types'
 
@@ -115,33 +116,74 @@ export function readStaffGasConfig(
 // ───────────────────────── GAS 通信（読み取りのみ） ─────────────────────────
 
 /**
- * GAS へ GET する（master.gs は doGet でしか名簿を返さないため、合言葉はクエリに載せる）。
- * 通信失敗・!res.ok・JSON 破損・GAS の {error:…} 応答はすべて null。
- * console にはエラー種別だけを出し、応答本文（氏名等）は一切出さない。
+ * 名簿の読み取りに失敗した理由（F45・2026-10-10）。画面の文言を原因ごとに分けるために使う
+ * （合言葉の誤り・転送の揺れ・電波を1つの文にまとめると、原因でない確認へ誘導してしまうため）。
+ * - auth     … 合言葉が違うと断られた（master.gs の「認証エラー」）
+ * - postOnly … 本文の無い読み取りとして届いた（Google の転送の揺れで POST の本文が落ちた時・約8回に1回）
+ * - refused  … それ以外の断り（不明な action・現場用の合言葉で読めない種類など）
+ * - http / format / timeout / network … 通信・応答の形の問題
  */
-async function gasGet<T>(url: string, params: Record<string, string>): Promise<T | null> {
+export type GasReadFail = 'auth' | 'postOnly' | 'refused' | 'http' | 'format' | 'timeout' | 'network'
+
+/** master.gs の doGet が本文なしの読み取りを断る時の文言の頭。比べるだけで、画面にも console にも出さない */
+const POST_ONLY_HEAD = 'この読み取りは POST でだけ受け付けます'
+
+/**
+ * GAS の読み取り action を POST 本文で送る（F45・2026-10-10）。
+ * ★入居者マスタGAS（master.gs）は 2026-09-23 から、合言葉の要る読み取りを GET では受けない（POST 本文だけ）。
+ *   以前ここは GET（合言葉を URL のクエリに載せる）で送っていたため、合言葉の正誤に関係なく必ず断られ、
+ *   9/23 以降は利用者マスタの同期が一度も通らなかった。
+ * - text/plain の本文 {…body, token}（プリフライトを起こさない）。合言葉を URL に載せない
+ * - gasPost と違い ok:true を求めない（master.gs の getRoster の応答は {roster,…} で ok を持たない）。
+ *   {error} があれば失敗として理由を返す。gasPost は職員名簿（統合GAS・ok:true の契約）用にそのまま残す
+ * - console にはエラー種別だけを出し、応答本文（氏名等）・GAS のメッセージ本文は一切出さない
+ */
+async function gasPostRead<T>(
+  url: string,
+  body: object,
+  token: string,
+): Promise<{ ok: true; data: T } | { ok: false; reason: GasReadFail }> {
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS)
   try {
-    const u = new URL(url)
-    for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v)
-    const res = await fetch(u.toString(), { method: 'GET', redirect: 'follow', signal: ctrl.signal })
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+      body: JSON.stringify({ ...body, token }),
+      redirect: 'follow',
+      signal: ctrl.signal,
+    })
     if (!res.ok) {
       console.warn('[gasClient] GAS からの HTTP 応答が異常です（status:', res.status, '）')
-      return null
+      return { ok: false, reason: 'http' }
     }
-    const out = (await res.json()) as Record<string, unknown> | unknown[] | null
-    if (!out || typeof out !== 'object') return null
-    if (!Array.isArray(out) && typeof out.error !== 'undefined') {
-      // 認証エラー・action 不一致など。GAS のメッセージ本文は出さない
-      console.warn('[gasClient] GAS がエラー応答を返しました（合言葉または action の不一致）')
-      return null
+    let out: unknown
+    try {
+      out = await res.json()
+    } catch {
+      console.warn('[gasClient] GAS 応答を読めませんでした（形式の不一致）')
+      return { ok: false, reason: 'format' }
     }
-    return out as T
+    if (!out || typeof out !== 'object') return { ok: false, reason: 'format' }
+    if (!Array.isArray(out) && typeof (out as { error?: unknown }).error !== 'undefined') {
+      const msg = (out as { error?: unknown }).error
+      const text = typeof msg === 'string' ? msg : ''
+      if (text === '認証エラー') {
+        console.warn('[gasClient] GAS が合言葉の不一致で断りました')
+        return { ok: false, reason: 'auth' }
+      }
+      if (text.startsWith(POST_ONLY_HEAD)) {
+        console.warn('[gasClient] GAS が本文なしの読み取りとして受け取りました（転送の揺れ）')
+        return { ok: false, reason: 'postOnly' }
+      }
+      console.warn('[gasClient] GAS がエラー応答を返しました（action または合言葉の種類の不一致）')
+      return { ok: false, reason: 'refused' }
+    }
+    return { ok: true, data: out as T }
   } catch (e) {
-    const kind = e instanceof DOMException && e.name === 'AbortError' ? 'タイムアウト' : '通信エラー'
-    console.warn('[gasClient] GAS 呼び出しに失敗しました:', kind)
-    return null
+    const aborted = e != null && typeof e === 'object' && (e as { name?: unknown }).name === 'AbortError'
+    console.warn('[gasClient] GAS 呼び出しに失敗しました:', aborted ? 'タイムアウト' : '通信エラー')
+    return { ok: false, reason: aborted ? 'timeout' : 'network' }
   } finally {
     clearTimeout(timer)
   }
@@ -279,11 +321,26 @@ function projectStaffNames(raw: unknown): StaffEntry[] | null {
 
 // ───────────────────────── pull（外部公開・読み取り専用） ─────────────────────────
 
-/** 取得失敗（null）と「0件」を区別したい内部用。syncMasters はこちらを使う */
+/**
+ * 利用者名簿を POST 本文で読む（F45）。取得失敗は理由つき、0件は空配列（呼び出し側が「取得できず」に倒す）。
+ * 本文の落ちた読み取り（postOnly）は Google の転送の揺れなので、その時だけ1回だけ読み直す。
+ * since は送らない＝全件を取る（退去の判定に全員が要る）
+ */
+async function pullRosterRead(
+  url: string,
+  token: string,
+): Promise<{ ok: true; roster: RosterEntry[] } | { ok: false; reason: GasReadFail }> {
+  let r = await gasPostRead<unknown>(url, { action: 'getRoster' }, token)
+  if (!r.ok && r.reason === 'postOnly') r = await gasPostRead<unknown>(url, { action: 'getRoster' }, token)
+  if (!r.ok) return r
+  const roster = projectRoster(r.data)
+  return roster === null ? { ok: false, reason: 'format' } : { ok: true, roster }
+}
+
+/** 取得失敗（null）と「0件」を区別したい内部用 */
 async function pullRosterOrNull(url: string, token: string): Promise<RosterEntry[] | null> {
-  const out = await gasGet<Record<string, unknown>>(url, { action: 'getRoster', token })
-  if (!out) return null
-  return projectRoster(out)
+  const r = await pullRosterRead(url, token)
+  return r.ok ? r.roster : null
 }
 
 /** 取得失敗（null）と「0件」を区別したい内部用。syncMasters はこちらを使う */
@@ -338,31 +395,61 @@ async function updateStaffRow(id: number, patch: Record<string, unknown>): Promi
 }
 
 /**
- * 利用者スナップショットへ反映する（source_id + 氏名の二重照合・M-034）。
+ * 氏名が名簿と食い違って保留（要確認）にした方（F51・2026-10-10）。
+ * 名簿の氏名は画面のメモリにだけ渡す（localStorage・console に残さない＝規約3）。
+ * 設定画面の「名簿の氏名を採用する」（adoptRosterName）に渡す材料
+ */
+export interface RosterReview {
+  /** care-log の利用者 id */
+  id: number
+  /** いまの一覧の氏名 */
+  current: string
+  /** 名簿の氏名 */
+  roster: string
+}
+
+/**
+ * 利用者の反映の計画（読んだ行と名簿だけから作る純関数の結果。書き込みはまだしていない）。
+ * 書く前に「名簿から一度に外れる人数」を確かめるために、計画と実行を分けている（F43）
+ */
+export interface ResidentSyncPlan {
+  /** 差分のある行の更新（id と変える列だけ） */
+  updates: { id: number; patch: Record<string, unknown> }[]
+  /** 新しく作る行 */
+  inserts: Record<string, unknown>[]
+  /** 名簿から行ごと消えた在籍行（在籍解除にする id）。名簿が退去と明示した人（retiredByRoster）は含まない */
+  vanished: number[]
+  /** 同期前の在籍数 */
+  before: number
+  /** 在籍として増える人数（退去者の行追加は数えない） */
+  added: number
+  reactivated: number
+  /** 名簿に載ったまま「退去」に変わった人数（名簿から消えた人数とは別経路） */
+  retiredByRoster: number
+  renamed: number
+  needsReview: number
+  /** 氏名の食い違いで保留にした方（名簿の氏名つき） */
+  reviews: RosterReview[]
+}
+
+/**
+ * 利用者スナップショットへの反映を計画する（source_id + 氏名の二重照合・M-034）。
  * - source_id 一致 かつ 氏名正規化一致 → 差分のある列だけ update（表記ゆれの吸収は renamed 計数）
- * - source_id 一致 かつ 氏名が大幅不一致 → 別人の可能性。上書きせず needs_review=true で保留
- * - source_id 不一致 かつ 同名の既存行あり → ID振り直しの可能性。重複行を作らず needs_review=true で保留
+ * - source_id 一致 かつ 氏名が大幅不一致 → 別人の可能性。氏名・在籍状態は上書きせず needs_review=true で保留。
+ *   ★部屋・介護度だけは名簿どおりに直す（F51・2026-10-10 本人回答）。保留のままだと、部屋を移っても全端末で
+ *   元の階の一覧に出続けるため。氏名・かな・性別・在籍状態は、人が裁定するまで変えない
+ * - source_id 不一致 かつ 同名の**在籍中の**既存行あり → ID振り直しの可能性。重複行を作らず needs_review=true で保留。
+ *   ★退去済み（active=false）の行は氏名照合の候補にしない（F49・2026-10-10）。退去した方と同じ氏名の方が
+ *   新しく入居した時（再入居・同姓同名）に、退去行へ保留の印が立つだけで新しい方の行が作られず、
+ *   現場用の合言葉の名簿（退去者を返さない）では誰も記録できなかった。過去の記録は source_id が違うので取り違えない
  * - どちらでも当たらない → 新規 insert（upsert は使わない）
- * - 名簿に居ない在籍行 → active=false（物理削除しない。過去記録は不変）
+ * - 名簿に居ない在籍行 → vanished（実行時に active=false。物理削除しない。過去記録は不変）
  * - 任意項目（かな・居室・性別・介護度）は「名簿に値が載っている時だけ」更新する。
  *   欠落・空文字は「空にせよ」ではなく「変更なし」とみなし、既存値を温存する（原則4）。
  *   全エントリでその列が欠落している場合はその列を一切触らない（正本が返していないだけ）。
  * needs_review は立てるだけで自動解除しない（人が設定画面で裁定する保留印のため）。
  */
-async function applyResidents(entries: RosterEntry[]): Promise<SyncResult> {
-  const { data, error } = await supabase
-    .from('residents')
-    .select('id, source_id, name, kana, room, gender, care_level, active, needs_review, note_alias')
-    .limit(MAX_MASTER_ROWS)
-  if (error) throw dbError('利用者マスタの現在値を読み取れませんでした')
-  const rows = (data ?? []) as Resident[]
-  if (rows.length >= MAX_MASTER_ROWS) {
-    // 読み取り上限に達した＝スナップショットが不完全の可能性。退去判定を誤爆させないため中止する
-    throw new Error(
-      '利用者マスタの件数が想定を超えています。安全のため同期を中止しました。開発者に連絡してください（データは変更していません）。',
-    )
-  }
-
+export function planResidentSync(rows: Resident[], entries: RosterEntry[]): ResidentSyncPlan {
   // ★note_alias（申し送りでの表示名）は読むだけで**書かない**。
   //   下の patch には一切載せないこと＝マスタ同期で人が入れた表示名を消さない（2026-09-01 指示）
   const before = rows.filter((r) => r.active).length
@@ -391,11 +478,12 @@ async function applyResidents(entries: RosterEntry[]): Promise<SyncResult> {
     careLevel: entries.some((e) => hasText(e.careLevel)),
   }
   const matched = new Set<number>() // 今回の名簿に対応づいた既存行（退去判定から除外する）
-  const toInsert: Record<string, unknown>[] = []
+  const updates: { id: number; patch: Record<string, unknown> }[] = []
+  const inserts: Record<string, unknown>[] = []
+  const reviews: RosterReview[] = []
   let renamed = 0
   let needsReview = 0
   let reactivated = 0
-  /** 名簿に載ったまま「退去」に変わった人数（名簿から消えた人数とは別経路） */
   let retiredByRoster = 0
 
   for (const e of entries) {
@@ -403,9 +491,16 @@ async function applyResidents(entries: RosterEntry[]): Promise<SyncResult> {
     if (cur) {
       matched.add(cur.id)
       if (normName(cur.name) !== normName(e.name)) {
-        // 大幅不一致 → 氏名・属性は一切書き換えず保留（取り違え防止）
+        // 大幅不一致 → 氏名・在籍状態は書き換えず保留（取り違え防止）。部屋・介護度だけは名簿に合わせる（F51）
         needsReview++
-        if (!cur.needs_review) await updateResidentRow(cur.id, { needs_review: true })
+        reviews.push({ id: cur.id, current: cur.name, roster: e.name })
+        const patch: Record<string, unknown> = {}
+        if (!cur.needs_review) patch.needs_review = true
+        if (rosterHas.room && hasText(e.room) && cur.room !== e.room) patch.room = e.room
+        if (rosterHas.careLevel && hasText(e.careLevel) && cur.care_level !== e.careLevel) {
+          patch.care_level = e.careLevel
+        }
+        if (Object.keys(patch).length > 0) updates.push({ id: cur.id, patch })
         continue
       }
       const patch: Record<string, unknown> = {}
@@ -430,23 +525,24 @@ async function applyResidents(entries: RosterEntry[]): Promise<SyncResult> {
         patch.active = false // 名簿で退去になった。行は残す＝過去の記録は不変
         retiredByRoster++
       }
-      if (Object.keys(patch).length > 0) await updateResidentRow(cur.id, patch)
+      if (Object.keys(patch).length > 0) updates.push({ id: cur.id, patch })
       continue
     }
 
     // source_id では当たらない → 氏名側で二重照合。既に他エントリが押さえた行・今回の名簿に
-    // source_id が載っている行は候補から外す（1行を2人に割り当てない）
+    // source_id が載っている行は候補から外す（1行を2人に割り当てない）。
+    // 退去済みの行も外す（F49。退去した方と同じ氏名の新しい方を、新しい行として作る）
     const cand = (byName.get(normName(e.name)) ?? []).find(
-      (r) => !matched.has(r.id) && !incomingIds.has(pickText(r.source_id) ?? ''),
+      (r) => r.active && !matched.has(r.id) && !incomingIds.has(pickText(r.source_id) ?? ''),
     )
     if (cand) {
       matched.add(cand.id)
       needsReview++
-      if (!cand.needs_review) await updateResidentRow(cand.id, { needs_review: true })
+      if (!cand.needs_review) updates.push({ id: cand.id, patch: { needs_review: true } })
       continue
     }
 
-    toInsert.push({
+    inserts.push({
       source_id: e.id,
       name: e.name,
       kana: e.kana ?? null,
@@ -459,57 +555,87 @@ async function applyResidents(entries: RosterEntry[]): Promise<SyncResult> {
     })
   }
 
-  let added = 0
-  if (toInsert.length > 0) {
-    const { error: insErr } = await supabase.from('residents').insert(toInsert)
+  // 名簿から消えた在籍行（実行時に退去扱いにする）。
+  // ★名簿が退去者も返す合言葉（事務所用）なら通常はここに落ちてこない（名簿側で active=false になる）。
+  //   落ちてくるのは「名簿から行ごと消えた」場合と、退去者を返さない現場用の合言葉の名簿の退去者
+  const vanished = rows.filter((r) => r.active && !matched.has(r.id)).map((r) => r.id)
+  // 計数は「在籍として増えた人数」。退去者の行追加は在籍数を動かさないので数えない
+  const added = inserts.filter((r) => r.active === true).length
+
+  return { updates, inserts, vanished, before, added, reactivated, retiredByRoster, renamed, needsReview, reviews }
+}
+
+/** 利用者の表を読む（同期の計画の材料）。読み取り上限に達したら中止する */
+async function readResidentRows(): Promise<Resident[]> {
+  const { data, error } = await supabase
+    .from('residents')
+    .select('id, source_id, name, kana, room, gender, care_level, active, needs_review, note_alias')
+    .limit(MAX_MASTER_ROWS)
+  if (error) throw dbError('利用者マスタの現在値を読み取れませんでした')
+  const rows = (data ?? []) as Resident[]
+  if (rows.length >= MAX_MASTER_ROWS) {
+    // 読み取り上限に達した＝スナップショットが不完全の可能性。退去判定を誤爆させないため中止する
+    throw new Error(
+      '利用者マスタの件数が想定を超えています。安全のため同期を中止しました。開発者に連絡してください（データは変更していません）。',
+    )
+  }
+  return rows
+}
+
+/** 計画どおりに利用者スナップショットへ書く（更新 → 追加 → 名簿から消えた在籍行の在籍解除の順） */
+async function executeResidentPlan(plan: ResidentSyncPlan): Promise<SyncResult> {
+  for (const u of plan.updates) await updateResidentRow(u.id, u.patch)
+  if (plan.inserts.length > 0) {
+    const { error: insErr } = await supabase.from('residents').insert(plan.inserts)
     if (insErr) throw dbError('利用者マスタに新しい方を追加できませんでした')
-    // 計数は「在籍として増えた人数」。退去者の行追加は在籍数を動かさないので数えない
-    added = toInsert.filter((r) => r.active === true).length
   }
-
-  // 名簿から消えた在籍行を退去扱いにする。
-  // ★名簿が退去者も返すようになったので、通常はここに落ちてこない（名簿側で active=false になる）。
-  //   落ちてくるのは「名簿から行ごと消えた」場合＝従来どおりの安全網として残す。
-  let deactivated = retiredByRoster
-  for (const r of rows) {
-    if (!r.active || matched.has(r.id)) continue
-    await updateResidentRow(r.id, { active: false }) // 退去＝非在籍化のみ。行は残す
-    deactivated++
+  for (const id of plan.vanished) await updateResidentRow(id, { active: false }) // 退去＝非在籍化のみ。行は残す
+  const deactivated = plan.retiredByRoster + plan.vanished.length
+  return {
+    before: plan.before,
+    after: plan.before + plan.added + plan.reactivated - deactivated,
+    added: plan.added,
+    deactivated,
+    renamed: plan.renamed,
+    needsReview: plan.needsReview,
   }
+}
 
-  return { before, after: before + added + reactivated - deactivated, added, deactivated, renamed, needsReview }
+/** 職員の反映の計画（読んだ行と名簿だけから作る。書き込みはまだしていない） */
+export interface StaffSyncPlan {
+  updates: { id: number; patch: Record<string, unknown> }[]
+  inserts: Record<string, unknown>[]
+  /** 名簿から行ごと消えた在籍の職員（退職扱いにする id）。手で登録した職員（manual）と、名簿が退職と明示した人は含まない */
+  vanished: number[]
+  /** 同期前の在籍数 */
+  before: number
+  /** 「一度に外れる人数」の分母（在籍のうち、手で登録した職員を除いた人数） */
+  base: number
+  added: number
+  reactivated: number
+  retiredByRoster: number
 }
 
 /**
- * 職員スナップショットへ反映する（氏名が実質キー）。
+ * 職員スナップショットへの反映を計画する（氏名が実質キー）。
  * 氏名変更は「新氏名を新規 insert・旧氏名は名簿から消えて active=false」の形で表れるため、
  * renamed は常に 0、needsReview も常に 0（照合キーが1本しかなく保留概念が無い）。
+ * manual=true は人が手で登録した職員（シフト名簿に載らない事務職員など）。
+ * 名簿に居ないからといって退職扱いにしない（2026-08-29 追加）
  */
-async function applyStaff(names: StaffEntry[]): Promise<SyncResult> {
-  // manual=true は人が手で登録した職員（シフト名簿に載らない事務職員など）。
-  // 名簿に居ないからといって退職扱いにしない（2026-08-29 追加）
-  const { data, error } = await supabase
-    .from('staff')
-    .select('id, name, active, manual')
-    .limit(MAX_MASTER_ROWS)
-  if (error) throw dbError('職員マスタの現在値を読み取れませんでした')
-  const rows = (data ?? []) as Staff[]
-  if (rows.length >= MAX_MASTER_ROWS) {
-    throw new Error(
-      '職員マスタの件数が想定を超えています。安全のため同期を中止しました。開発者に連絡してください（データは変更していません）。',
-    )
-  }
-
+export function planStaffSync(rows: Array<Staff & { manual?: boolean }>, names: StaffEntry[]): StaffSyncPlan {
   const before = rows.filter((r) => r.active).length
+  const base = rows.filter((r) => r.active && r.manual !== true).length
 
-  const byName = new Map<string, Staff>()
+  const byName = new Map<string, Staff & { manual?: boolean }>()
   for (const r of rows) {
     const key = normName(r.name)
     if (key && !byName.has(key)) byName.set(key, r)
   }
 
   const matched = new Set<number>()
-  const toInsert: Record<string, unknown>[] = []
+  const updates: { id: number; patch: Record<string, unknown> }[] = []
+  const inserts: Record<string, unknown>[] = []
   let reactivated = 0
   /** 名簿に載ったまま「退職」に変わった人数（名簿から消えた人数とは別経路） */
   let retiredByRoster = 0
@@ -519,39 +645,55 @@ async function applyStaff(names: StaffEntry[]): Promise<SyncResult> {
     if (cur) {
       matched.add(cur.id)
       if (!cur.active && e.active) {
-        await updateStaffRow(cur.id, { active: true })
+        updates.push({ id: cur.id, patch: { active: true } })
         reactivated++
       } else if (cur.active && !e.active) {
-        await updateStaffRow(cur.id, { active: false }) // 退職。行は残す＝過去の記入者表示は不変
+        updates.push({ id: cur.id, patch: { active: false } }) // 退職。行は残す＝過去の記入者表示は不変
         retiredByRoster++
       }
       continue
     }
-    toInsert.push({ name: e.name, active: e.active })
+    inserts.push({ name: e.name, active: e.active })
   }
 
-  let added = 0
-  if (toInsert.length > 0) {
-    const { error: insErr } = await supabase.from('staff').insert(toInsert)
+  // 手で登録した職員（事務職員など）はシフト名簿に載らないのが正常なので、
+  // 「名簿に居ない」を退職の根拠にしない（2026-08-29）
+  const vanished = rows.filter((r) => r.active && !matched.has(r.id) && r.manual !== true).map((r) => r.id)
+  // 計数は「在籍として増えた人数」。退職者の行追加は在籍数を動かさない
+  const added = inserts.filter((r) => r.active === true).length
+
+  return { updates, inserts, vanished, before, base, added, reactivated, retiredByRoster }
+}
+
+/** 職員の表を読む（同期の計画の材料）。読み取り上限に達したら中止する */
+async function readStaffRows(): Promise<Array<Staff & { manual?: boolean }>> {
+  const { data, error } = await supabase
+    .from('staff')
+    .select('id, name, active, manual')
+    .limit(MAX_MASTER_ROWS)
+  if (error) throw dbError('職員マスタの現在値を読み取れませんでした')
+  const rows = (data ?? []) as Array<Staff & { manual?: boolean }>
+  if (rows.length >= MAX_MASTER_ROWS) {
+    throw new Error(
+      '職員マスタの件数が想定を超えています。安全のため同期を中止しました。開発者に連絡してください（データは変更していません）。',
+    )
+  }
+  return rows
+}
+
+/** 計画どおりに職員スナップショットへ書く（更新 → 追加 → 名簿から消えた職員の退職扱いの順） */
+async function executeStaffPlan(plan: StaffSyncPlan): Promise<SyncResult> {
+  for (const u of plan.updates) await updateStaffRow(u.id, u.patch)
+  if (plan.inserts.length > 0) {
+    const { error: insErr } = await supabase.from('staff').insert(plan.inserts)
     if (insErr) throw dbError('職員マスタに新しい職員を追加できませんでした')
-    // 計数は「在籍として増えた人数」。退職者の行追加は在籍数を動かさない
-    added = toInsert.filter((r) => r.active === true).length
   }
-
-  let deactivated = retiredByRoster
-  for (const r of rows) {
-    if (!r.active || matched.has(r.id)) continue
-    // 手で登録した職員（事務職員など）はシフト名簿に載らないのが正常なので、
-    // 「名簿に居ない」を退職の根拠にしない（2026-08-29）
-    if ((r as Staff & { manual?: boolean }).manual === true) continue
-    await updateStaffRow(r.id, { active: false }) // 退職＝非在籍化のみ。過去記録の記入者表示は変わらない
-    deactivated++
-  }
-
+  for (const id of plan.vanished) await updateStaffRow(id, { active: false }) // 退職＝非在籍化のみ。過去記録の記入者表示は変わらない
+  const deactivated = plan.retiredByRoster + plan.vanished.length
   return {
-    before,
-    after: before + added + reactivated - deactivated,
-    added,
+    before: plan.before,
+    after: plan.before + plan.added + plan.reactivated - deactivated,
+    added: plan.added,
     deactivated,
     renamed: 0,
     needsReview: 0,
@@ -571,24 +713,101 @@ async function logMasterSync(source: 'residents' | 'staff', r: SyncResult): Prom
   if (error) console.warn('[gasClient] マスタ同期の記録（master_sync_log）に失敗しました')
 }
 
+// ───────────────────────── 名簿から一度に外れる人数の歯止め（F43） ─────────────────────────
+
+/** 名簿から一度に外れる人数が、在籍のこの割合以上なら反映を止めて確認を取る（2026-10-10 本人回答: 2割） */
+export const MASS_DROP_RATIO = 0.2
+/** 名簿から一度に外れる人数が、この人数以上なら反映を止めて確認を取る（2026-10-10 本人回答: 5人） */
+export const MASS_DROP_COUNT = 5
+
+/**
+ * 名簿から一度に外れる人数が多すぎるか（在籍の2割以上か5人以上）。
+ * 名簿のシートが絞り込み・編集の途中で一部の人しか返らないと、残りの全員を一度に在籍解除にしてしまう（F43）。
+ * 0件の応答は別の守り（取得できず扱い）が止める
+ */
+export function isMassDrop(dropped: number, base: number): boolean {
+  if (!(dropped > 0)) return false
+  return dropped >= MASS_DROP_COUNT || dropped >= base * MASS_DROP_RATIO
+}
+
+/**
+ * 名簿から一度に外れる人数が多すぎるので、何も書かずに止めた（F43）。
+ * residents・staff は名簿から行ごと消えて在籍解除になる人数（名簿が退去・退職と明示した人は数えない）。
+ * 確かめた上で続ける時は、この人数を syncMasters({ confirmedDrop: { residents, staff } }) に渡す
+ * （確認した人数より増えていれば、また止まる）。message は画面にそのまま出せる
+ */
+export class MasterDropError extends Error {
+  readonly residents: number
+  readonly staff: number
+  constructor(residents: number, staff: number) {
+    const parts = [residents > 0 ? `利用者${residents}人` : '', staff > 0 ? `職員${staff}人` : '']
+      .filter((s) => s !== '')
+      .join('・')
+    super(
+      `名簿に載っていない${parts}を、一度に一覧から外す（在籍解除にする）ところでした。名簿のシートが絞り込みや編集の途中だと、一部の人しか返らないことがあります。安全のため、まだ何も変更していません。名簿を確かめてから、もう一度お試しください。`,
+    )
+    this.name = 'MasterDropError'
+    this.residents = residents
+    this.staff = staff
+  }
+}
+
 // ───────────────────────── 公開エントリポイント ─────────────────────────
+
+/** 利用者名簿を取得できなかった時の「次にどうすればよいか」（F45: 原因ごとに分ける。GAS の文言そのものは出さない） */
+function rosterFailHint(reason: GasReadFail | 'empty' | null): string {
+  switch (reason) {
+    case 'auth':
+      return '入居者マスタのGASが合言葉の違いで断りました。設定画面の「GAS接続設定」の合言葉を確かめてから'
+    case 'postOnly':
+      return '入居者マスタのGASへの送信が途中で崩れました（まれに起きる通信の揺れです）。少し待ってから'
+    case 'timeout':
+    case 'network':
+      return '通信できませんでした。電波状態を確かめてから'
+    case 'empty':
+      return '名簿が0件で返りました。名簿のシートに絞り込みや編集の途中が無いか確かめてから'
+    default:
+      return '入居者マスタのGASが読み取りに応じませんでした。設定画面の接続先が入居者マスタのURLか確かめてから'
+  }
+}
+
+/** syncMasters の結果（F51: 氏名の食い違いで保留にした方の名簿の氏名を、画面のメモリにだけ渡す） */
+export interface MasterSyncOutcome {
+  residents: SyncResult
+  staff: SyncResult
+  /** 氏名が名簿と食い違って保留（要確認）にした方。localStorage・console には残さないこと */
+  reviews: RosterReview[]
+}
+
+export interface SyncOptions {
+  /**
+   * 名簿から一度に外れる人数を人が確かめた（F43）。MasterDropError の residents・staff をそのまま渡す。
+   * 実際に外れる人数がこれ以下なら止めずに反映する（増えていればまた止まる）
+   */
+  confirmedDrop?: { residents: number; staff: number }
+}
 
 /**
  * 利用者・職員マスタを GAS から取得して Supabase スナップショットへ反映する。
  *
- * 戻り値: 系列ごとの増減計数。LS.gasUrl / LS.gasToken 未入力なら 'unconfigured'（エラーではない）。
+ * 戻り値: 系列ごとの増減計数と、氏名の食い違いで保留にした方（reviews）。
+ *   LS.gasUrl / LS.gasToken 未入力なら 'unconfigured'（エラーではない）。
  * 例外: 取得失敗・接続先URLの形式不正・Supabase 書込失敗は日本語のエラー文で throw する
  *       （contracts.md の戻り値型にエラー枠が無いため。呼び出し側＝設定画面は必ず try/catch し、
  *         e.message をそのまま画面に出せる。文面は「何が起きたか＋次にどうすればよいか」で統一）。
+ *       名簿から一度に外れる人数が多すぎる時は、何も書かずに MasterDropError を throw する（F43）。
  *
  * 安全設計:
  *  - 取得できなかった系列は 1 行も触らない（空上書き保護）。0件応答も「取得できず」に倒す。
+ *  - 両方の表を読んで反映の計画を立ててから書く。名簿から一度に外れる人数が在籍の2割以上か5人以上なら、
+ *    どちらの表にも書かずに止める（opts.confirmedDrop で人が確かめた人数までは通す）。
  *  - 片方だけ取得できた場合は、取得できた側を反映してから失敗側のエラーを throw する
  *    （反映済みの計数は master_sync_log に残る）。
  *  - 冪等: 同じ名簿で何度実行しても差分が無ければ書込は発生しない。途中で失敗しても再実行で追いつく。
- *  - TTL（起動時＋60分間隔）の判定は呼び出し側の責務。本関数は呼ばれたら常に同期する。
+ *  - 反映した後は notifyMastersChanged で他の画面へ知らせる（App の職員名簿の取り直し・F47）。
+ *  - 自動の同期（起動時＋60分間隔）は autoSyncMasters が受け持つ（F50）。本関数は呼ばれたら常に同期する。
  */
-export async function syncMasters(): Promise<{ residents: SyncResult; staff: SyncResult } | 'unconfigured'> {
+export async function syncMasters(opts: SyncOptions = {}): Promise<MasterSyncOutcome | 'unconfigured'> {
   const cfg = readGasConfig()
   if (cfg === 'unconfigured') return 'unconfigured'
   if (cfg === 'invalid') {
@@ -611,26 +830,42 @@ export async function syncMasters(): Promise<{ residents: SyncResult; staff: Syn
   }
 
   // 先に両方を取得する（DBに触れる前に失敗を確定させ、中途半端な反映を減らす）
-  const roster = await pullRosterOrNull(cfg.url, cfg.token)
+  const rosterRead = await pullRosterRead(cfg.url, cfg.token)
   const names = await pullStaffNamesOrNull(staffCfg.url, staffCfg.token)
+  const roster = rosterRead.ok ? rosterRead.roster : null
   const rosterOk = roster !== null && roster.length > 0 // 0件＝取得できずと同義に扱う
   const staffOk = names !== null && names.length > 0
+  const rosterFail: GasReadFail | 'empty' | null = rosterOk ? null : rosterRead.ok ? 'empty' : rosterRead.reason
 
   const sameEndpoint = staffCfg.url === cfg.url && staffCfg.token === cfg.token
   if (!rosterOk && !staffOk) {
     throw new Error(
-      'マスタを取得できませんでした。通信状態と、設定画面の接続先・合言葉を確認してからもう一度お試しください。安全のため、利用者・職員の一覧は変更していません。',
+      rosterFail === 'auth' || rosterFail === 'postOnly' || rosterFail === 'empty'
+        ? `マスタを取得できませんでした。${rosterFailHint(rosterFail)}、もう一度お試しください（職員名簿も取得できませんでした）。安全のため、利用者・職員の一覧は変更していません。`
+        : 'マスタを取得できませんでした。通信状態と、設定画面の接続先・合言葉を確認してからもう一度お試しください。安全のため、利用者・職員の一覧は変更していません。',
     )
   }
 
-  const residents = rosterOk ? await applyResidents(roster as RosterEntry[]) : null
+  // 両方の表を読んで反映の計画を立てる（まだ書かない）。名簿から一度に外れる人数を、書く前に確かめるため（F43）
+  const resPlan = rosterOk ? planResidentSync(await readResidentRows(), roster as RosterEntry[]) : null
+  const staffPlan = staffOk ? planStaffSync(await readStaffRows(), names as StaffEntry[]) : null
+  const resDrop = resPlan?.vanished.length ?? 0
+  const staffDrop = staffPlan?.vanished.length ?? 0
+  const ok = opts.confirmedDrop
+  const resOver = resPlan !== null && isMassDrop(resDrop, resPlan.before) && !(ok && resDrop <= ok.residents)
+  const staffOver = staffPlan !== null && isMassDrop(staffDrop, staffPlan.base) && !(ok && staffDrop <= ok.staff)
+  if (resOver || staffOver) throw new MasterDropError(resDrop, staffDrop)
+
+  const residents = resPlan ? await executeResidentPlan(resPlan) : null
   if (residents) await logMasterSync('residents', residents)
-  const staff = staffOk ? await applyStaff(names as StaffEntry[]) : null
+  const staff = staffPlan ? await executeStaffPlan(staffPlan) : null
   if (staff) await logMasterSync('staff', staff)
+  // 反映した分を、開いている画面（App の職員名簿など）へ知らせる（F47）。知らせる先が無くても何も起きない
+  if (residents || staff) notifyMastersChanged()
 
   if (!residents) {
     throw new Error(
-      '利用者マスタを取得できませんでした（職員マスタは同期しました）。設定画面の接続先・合言葉と通信状態を確認して、もう一度お試しください。利用者の一覧は変更していません。',
+      `利用者マスタを取得できませんでした（職員マスタは同期しました）。${rosterFailHint(rosterFail)}、もう一度お試しください。利用者の一覧は変更していません。`,
     )
   }
   if (!staff) {
@@ -641,5 +876,121 @@ export async function syncMasters(): Promise<{ residents: SyncResult; staff: Syn
         : '職員マスタを取得できませんでした（利用者マスタは同期しました）。設定画面の「職員名簿の接続先」と通信状態を確認して、もう一度お試しください。職員の一覧は変更していません。',
     )
   }
-  return { residents, staff }
+  return { residents, staff, reviews: resPlan?.reviews ?? [] }
+}
+
+/**
+ * 保留（要確認）の方に、名簿の氏名を採用して保留を外す（F51・2026-10-10 本人回答「名簿の氏名を採用する」ボタン）。
+ * - 書くのは name と needs_review だけで、1回の update にまとめる（別々に書くと、間で同期が走って保留が立ち直る）
+ * - 画面が見ていた氏名（current）のままで、まだ保留中の行だけを書く。他の端末が先に直していれば書かずに 'stale'
+ * - note_alias・部屋・在籍状態には触れない（部屋・介護度は同期が名簿に合わせる）
+ * rosterName は syncMasters の戻り値 reviews（画面のメモリだけ）から渡す。書けたら他の画面へ名簿の変更を知らせる。
+ * 呼ぶ前に確認ダイアログ（いまの氏名と名簿の氏名を並べる）を出すこと
+ */
+export async function adoptRosterName(id: number, current: string, rosterName: string): Promise<'adopted' | 'stale'> {
+  const name = typeof rosterName === 'string' ? rosterName.trim() : ''
+  if (!Number.isInteger(id) || id <= 0 || name === '' || typeof current !== 'string') {
+    throw new Error(
+      '名簿の氏名を採用できませんでした（対象を読み取れません）。もう一度「マスタを同期する」を押してから、やり直してください。',
+    )
+  }
+  const { data, error } = await supabase
+    .from('residents')
+    .update({ name, needs_review: false, synced_at: new Date().toISOString() })
+    .eq('id', id)
+    .eq('name', current)
+    .eq('needs_review', true)
+    .select('id')
+  if (error) throw dbError('名簿の氏名を採用できませんでした')
+  if (!Array.isArray(data) || data.length === 0) return 'stale'
+  notifyMastersChanged()
+  return 'adopted'
+}
+
+// ───────────────────────── 自動の同期（F50） ─────────────────────────
+
+/** 自動同期の間隔（起動時と60分ごと・2026-10-10 本人回答） */
+export const AUTO_SYNC_INTERVAL_MS = 60 * 60_000
+/** 自動同期に失敗した後、次に試すまでの待ち（画面の出入りのたびに GAS を叩き続けない） */
+export const AUTO_SYNC_RETRY_MS = 10 * 60_000
+/** この端末で最後に名簿が新しいと確かめた時刻・最後に自動同期を試みた時刻（epoch ms の数値だけ。氏名などは置かない） */
+const AUTO_SYNC_OK_KEY = 'cl_masterSyncOkAt'
+const AUTO_SYNC_TRY_KEY = 'cl_masterSyncTryAt'
+
+function readStamp(key: string): number | null {
+  try {
+    const v = typeof localStorage === 'undefined' ? null : localStorage.getItem(key)
+    if (v === null || !/^\d+$/.test(v)) return null
+    const n = Number(v)
+    return Number.isSafeInteger(n) ? n : null
+  } catch {
+    return null
+  }
+}
+
+function writeStamp(key: string, t: number): void {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(key, String(Math.floor(t)))
+  } catch {
+    // 書けなくても同期は続ける（次の判定で少し早く試すだけ）
+  }
+}
+
+/** この端末に名簿の接続設定があるか（自動同期を走らせる端末か）。合言葉の中身は返さない */
+export function hasMasterConnection(): boolean {
+  return typeof readGasConfig() === 'object'
+}
+
+/** 前回から間隔が空いているか（未来の時刻＝時計のずれは「空いている」とみなす） */
+function stampFresh(t: number | null, now: number, ms: number): boolean {
+  return t !== null && t <= now && now - t < ms
+}
+
+export type AutoSyncOutcome = 'unconfigured' | 'fresh' | 'busy' | MasterSyncOutcome
+
+/**
+ * 名簿の自動同期（F50・2026-10-10 本人回答: 接続設定のある端末で起動時と60分ごと）。
+ * - 接続設定の無い端末（現場の iPhone）は何もしない（'unconfigured'）。合言葉を配る運用にしない
+ * - 前回の同期から60分たっていなければ何もしない（'fresh'）。他の端末が同期した記録（master_sync_log）も見る
+ *   ＝同期は実質1台に寄る。失敗した後は10分あける
+ * - 同じ端末の複数のタブで重ならないよう、navigator.locks があれば1本にまとめる（他のタブが同期中なら 'busy'）
+ * - 名簿から一度に外れる人数が多い時は止まって MasterDropError を投げる（自動では続けない。人が設定画面で確かめる）
+ * - 失敗は syncMasters と同じ日本語の文で throw する（画面は帯で知らせる）
+ */
+export async function autoSyncMasters(now: number = Date.now()): Promise<AutoSyncOutcome> {
+  if (!hasMasterConnection()) return 'unconfigured'
+  if (stampFresh(readStamp(AUTO_SYNC_OK_KEY), now, AUTO_SYNC_INTERVAL_MS)) return 'fresh'
+  if (stampFresh(readStamp(AUTO_SYNC_TRY_KEY), now, AUTO_SYNC_RETRY_MS)) return 'fresh'
+  // 他の端末が直前に同期していれば、その時刻を控えて待つ（読めなければこの端末の控えだけで決める）
+  try {
+    const last = await fetchLastMasterSync()
+    const r = last.residents !== null ? Date.parse(last.residents) : NaN
+    const s = last.staff !== null ? Date.parse(last.staff) : NaN
+    if (Number.isFinite(r) && Number.isFinite(s)) {
+      const t = Math.min(r, s, now)
+      if (now - t < AUTO_SYNC_INTERVAL_MS) {
+        writeStamp(AUTO_SYNC_OK_KEY, t)
+        return 'fresh'
+      }
+    }
+  } catch {
+    // 同期の記録を読めない。この端末の控えだけで決める
+  }
+  const run = async (): Promise<AutoSyncOutcome> => {
+    const t0 = Date.now()
+    if (stampFresh(readStamp(AUTO_SYNC_OK_KEY), t0, AUTO_SYNC_INTERVAL_MS)) return 'fresh'
+    if (stampFresh(readStamp(AUTO_SYNC_TRY_KEY), t0, AUTO_SYNC_RETRY_MS)) return 'fresh'
+    writeStamp(AUTO_SYNC_TRY_KEY, t0)
+    const res = await syncMasters()
+    if (res === 'unconfigured') return 'unconfigured'
+    writeStamp(AUTO_SYNC_OK_KEY, Date.now())
+    return res
+  }
+  const locks = typeof navigator !== 'undefined' ? (navigator as { locks?: LockManager }).locks : undefined
+  if (locks && typeof locks.request === 'function') {
+    return (await locks.request('cl_masterSync', { ifAvailable: true }, async (lock) =>
+      lock === null ? 'busy' : run(),
+    )) as AutoSyncOutcome
+  }
+  return run()
 }

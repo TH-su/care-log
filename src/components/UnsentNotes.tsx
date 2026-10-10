@@ -6,6 +6,9 @@
 // ・1件も無い時は何も出さない（画面の見た目は変えない）
 // ・未送信件数の通知（queueSubscribe）を受けるたびに引き直す
 // ・止まっている（競合・拒否）件があれば、画面を離れる時の確認（leaveGuard）に数える
+// ・各件に申し送りの記入者を出す（F41・2026-10-10。共用の端末で、他の職員の止まった本文を自分の分と思って
+//   取り下げないように）。〔新しい行として登録〕でも記入者は元の人のまま（本人回答）
+// ・取り下げは同じ端末のほかのタブにも効く（墓標・F05）。既に登録されていた時はその旨を出す
 // 規律: トークン由来クラスのみ・色だけで意味を伝えない（記号と文字）・console 出力なし・実名や本文をコードに書かない
 
 import { useCallback, useEffect, useId, useMemo, useState } from 'react'
@@ -13,9 +16,10 @@ import type { CSSProperties } from 'react'
 import {
   DbError,
   discardPendingNote,
-  discardQueuedNoteInsert,
+  discardQueuedOp,
   hasUnpersistedNotes,
   dropRescuedNote,
+  fetchNoteRows,
   registerQueuedInsertAsNew,
   insertNoteAsNew,
   listUnsentNotes,
@@ -80,6 +84,39 @@ function stateText(u: UnsentNote): string {
   return deleting ? '⚠ 削除の送信待ち（電波が戻ると自動で送信します）' : '⚠ 変更の送信待ち（電波が戻ると自動で送信します）'
 }
 
+/**
+ * その件の申し送りの記入者（F41）。登録待ちは登録の記入者、変更は変更で選び直した記入者があればそれ、無ければ
+ * 元の申し送りの記入者（読み直した値）。undefined＝分からない（読み直す前・読めなかった）／null＝記入者なし
+ */
+function reporterOf(u: UnsentNote, rowReporter: ReadonlyMap<number, number | null>): number | null | undefined {
+  if (u.kind === 'insert') return u.op.reporter_id
+  const v = u.row.values.reporter_id
+  if (typeof v === 'number' || v === null) return v
+  if (u.row.id > 0 && rowReporter.has(u.row.id)) return rowReporter.get(u.row.id) ?? null
+  return undefined
+}
+
+/**
+ * その件の本文（取り消しなら取り消し）を入力した職員（F41 手直し）。送信待ちが欄ごとに持つ入力者（F07 の by。旧版の控えは
+ * 行の操作者）を使う。申し送りの記入者とは別（共用の端末で、職員A が打った変更を職員B が見ている時に「あなたの」と
+ * 言い切らないため）。登録待ちは、登録後に本文を直した職員が分かる時だけ（登録の本文そのものは記入者の申し送り）。
+ * undefined＝分からない（旧形式の読み替え・操作者が未選択だった）
+ */
+function typistOf(u: UnsentNote): number | null | undefined {
+  const bys = u.kind === 'insert' ? u.op.changes?.bys : u.row.bys
+  if (bys === undefined) return undefined
+  const f = Object.prototype.hasOwnProperty.call(bys, 'body')
+    ? 'body'
+    : Object.prototype.hasOwnProperty.call(bys, 'deleted_at')
+      ? 'deleted_at'
+      : u.kind === 'insert'
+        ? null
+        : (Object.keys(bys)[0] ?? null)
+  if (f === null) return undefined
+  const v = bys[f]
+  return typeof v === 'number' ? v : undefined
+}
+
 function keyOf(u: UnsentNote): string {
   return u.kind === 'edit'
     ? `e${u.row.id}-${u.row.ck ?? ''}-${u.row.fork ?? ''}`
@@ -96,6 +133,10 @@ export function UnsentNotes({ day, noteIds, actorId, staff, residentName, onChan
   const [message, setMessage] = useState<{ key: string; tone: 'ok' | 'danger' | 'warn'; text: string } | null>(null)
   const [resolve, setResolve] = useState<NoteConflictTarget | null>(null)
   const [askDrop, setAskDrop] = useState<UnsentNote | null>(null)
+  /** 一覧から消えた件についての知らせ（取り下げようとしたら既に登録されていた・F05） */
+  const [notice, setNotice] = useState<string | null>(null)
+  /** 変更の送信待ちの元の申し送りの記入者（行 id → 記入者。一覧を開いた時に読み直す・画面のメモリだけ） */
+  const [rowReporter, setRowReporter] = useState<ReadonlyMap<number, number | null>>(new Map())
 
   const refresh = useCallback(() => setAll(listUnsentNotes()), [])
   useEffect(() => queueSubscribe(() => refresh()), [refresh])
@@ -126,6 +167,35 @@ export function UnsentNotes({ day, noteIds, actorId, staff, residentName, onChan
     refresh()
     onChanged?.()
   }, [onChanged, refresh])
+
+  // 一覧を開いたら、変更の送信待ちの元の申し送りの記入者を読む（F41。読めなければ「確かめられません」のまま）
+  const editIdsKey = items
+    .filter((u) => u.kind !== 'insert' && u.row.id > 0 && !Object.prototype.hasOwnProperty.call(u.row.values, 'reporter_id'))
+    .map((u) => (u.kind === 'insert' ? 0 : u.row.id))
+    .sort((a, b) => a - b)
+    .join(',')
+  useEffect(() => {
+    if (!open || editIdsKey === '') return undefined
+    let alive = true
+    const ids = editIdsKey.split(',').map(Number)
+    fetchNoteRows(ids)
+      .then((rows) => {
+        if (!alive) return
+        const next = new Map<number, number | null>()
+        for (const r of rows) next.set(r.id, r.reporter_id)
+        setRowReporter(next)
+      })
+      .catch(() => undefined)
+    return () => {
+      alive = false
+    }
+  }, [open, editIdsKey])
+
+  /** 記入者の名前（名簿に無ければ「職員ID n」） */
+  const staffName = useCallback(
+    (id: number): string => staff?.find((s) => s.id === id)?.name ?? `職員ID ${id}`,
+    [staff],
+  )
 
   const targetLabel = useCallback(
     (u: UnsentNote): string => {
@@ -169,8 +239,22 @@ export function UnsentNotes({ day, noteIds, actorId, staff, residentName, onChan
             setMessage({ key: k, tone: 'danger', text: '▲ どの日の申し送りかを確かめられないため、新しい行にできません。「くらべて選ぶ」から選んでください' })
             return
           }
+          // 記入者は元の人のまま（F41・本人回答。押した人＝この端末の操作者の名義にしない）。
+          // 元の申し送りの記入者を読めない（行 id のある変更で、電波が無い等）時は登録しない＝別人の名義を作らない。
+          // 登録が取り下げられた後の変更（行 id の無い ck）は元の記入者が端末に残っていないので、記入者なしで登録する
+          let reporterId = reporterOf(u, rowReporter)
+          if (reporterId === undefined && u.row.id > 0) {
+            const rows = await fetchNoteRows([u.row.id]).catch(() => null)
+            // 読めた（rows がある）のに見つからない＝元の申し送りは取り消されている。元の記入者は分からないので記入者なし
+            // （別人の名義にはしない）。読めなかった（通信）時は undefined のまま＝下で止める
+            if (rows !== null) reporterId = rows.find((r) => r.id === u.row.id)?.reporter_id ?? null
+          }
+          if (reporterId === undefined && u.row.id > 0) {
+            setMessage({ key: k, tone: 'danger', text: '▲ 元の申し送りの記入者を確かめられないため、新しい行にできません。電波状態を確認して、もう一度押してください' })
+            return
+          }
           const newKey = `${noteAsNewKey(u.row.id, u.row.vers.body ?? '')}${u.row.ck ?? ''}${u.row.fork ?? ''}`
-          const res = await insertNoteAsNew({ key: newKey, meta, body, reporterId: actorId })
+          const res = await insertNoteAsNew({ key: newKey, meta, body, reporterId: reporterId ?? null })
           // 登録できた・送信待ちに確保できた後で、元の行の本文（見せた版）を外す
           if (u.kind === 'rescued') await dropRescuedNote(u.raw)
           else await discardPendingNote(u.row.target, ['body'], { body: u.row.vers.body })
@@ -183,7 +267,7 @@ export function UnsentNotes({ day, noteIds, actorId, staff, residentName, onChan
         setBusy(null)
       }
     },
-    [actorId, done],
+    [done, rowReporter],
   )
 
   /** 〔取り下げ〕（確認の後） */
@@ -193,8 +277,20 @@ export function UnsentNotes({ day, noteIds, actorId, staff, residentName, onChan
       const k = keyOf(u)
       setBusy(k)
       try {
-        if (u.kind === 'insert') await discardQueuedNoteInsert(u.op.qid, u.op.changes?.vers ?? {}) // 見せた版だけ外す（R4-2）
-        else if (u.kind === 'rescued') await dropRescuedNote(u.raw)
+        if (u.kind === 'insert') {
+          // 登録の取り下げ（F05）: 墓標を付けて、同じ端末のほかのタブ・次の起動からも外す。ほかのタブが送っている最中なら、
+          // 送り終わるのを待ってから取り下げる。既に送り終えていた（登録された）時は取り下げられないので知らせる
+          const r = await discardQueuedOp(u.op.qid)
+          // 登録の後の変更は、登録を取り下げられた時だけ、見せた版だけ外す（R4-2。見せた後に積まれた変更は残る）。
+          // 既に登録されていた（sent）時は、その変更は登録された行への普通の修正として送るべきものなので外さない
+          // （登録は残るのに、直した本文だけを黙って捨てない）
+          const vers = u.op.changes?.vers ?? {}
+          if (r === 'dropped' && Object.keys(vers).length > 0) await discardPendingNote({ clientKey: u.op.qid }, undefined, vers)
+          if (r === 'sent') {
+            // 一覧からは消えるので、一覧の上に残す（閉じるまで出す）
+            setNotice('⚠ 取り下げようとした申し送りは、既に登録されていました（取り下げられませんでした）。不要なら、日報・タイムラインの申し送りから削除してください。')
+          }
+        } else if (u.kind === 'rescued') await dropRescuedNote(u.raw)
         else await discardPendingNote(u.row.target, undefined, u.row.vers)
         done()
       } catch (e) {
@@ -214,8 +310,48 @@ export function UnsentNotes({ day, noteIds, actorId, staff, residentName, onChan
     [done],
   )
 
+  /** 記入者の表示（F41） */
+  function reporterText(u: UnsentNote): string {
+    const r = reporterOf(u, rowReporter)
+    if (r === undefined) return open ? '確かめられません' : '…'
+    if (r === null) return '記入者なし'
+    return r === actorId ? `${staffName(r)}（いまの記録者）` : staffName(r)
+  }
+
+  /** 入力した職員の表示（F41 手直し。変更・取り消しの件だけ） */
+  function typistText(u: UnsentNote): string {
+    const t = typistOf(u)
+    if (t === undefined || t === null) return '確かめられません'
+    return t === actorId ? `${staffName(t)}（いまの記録者）` : staffName(t)
+  }
+
+  /**
+   * 取り下げの確認文（F41・F05）。「あなたの」と言うのは、本文を入力した職員がいまの記録者だと分かる時だけ（手直し・
+   * 2026-10-10）。直す前は申し送りの記入者だけで分けていたため、記入者なし・記入者がいまの記録者の申し送りでは、別の職員が
+   * 打った変更でも「あなたの変更の本文」と言い切った。登録待ちは記入者で分ける（登録の本文は記入者の申し送り）
+   */
+  function dropBody(u: UnsentNote): string {
+    const what = u.kind === 'insert' ? '申し送り' : '変更'
+    const t = typistOf(u)
+    let whose: string
+    if (typeof t === 'number') {
+      whose = t === actorId ? 'あなたの' : `「${staffName(t)}」が入力した`
+    } else if (u.kind === 'insert') {
+      const r = reporterOf(u, rowReporter)
+      whose =
+        typeof r === 'number'
+          ? r === actorId
+            ? 'あなたの'
+            : `記入者「${staffName(r)}」の`
+          : 'この端末に残っている（入力した職員を確かめられない）'
+    } else {
+      whose = 'この端末に残っている（入力した職員を確かめられない）'
+    }
+    return `${whose}${what}の本文は保存されません。取り下げると、この端末（同じ端末のほかのタブを含む）の送信待ちから外れます。既に登録されていた時はお知らせします。`
+  }
+
   const unpersisted = hasUnpersistedNotes()
-  if (items.length === 0 && resolve === null && !unpersisted) return null
+  if (items.length === 0 && resolve === null && !unpersisted && notice === null) return null
   const stopped = items.filter(isStopped).length
   const listId = `${uid}-list`
   const btn = 'min-h-tap rounded border px-3 text-base disabled:border-border disabled:text-ink3'
@@ -232,6 +368,20 @@ export function UnsentNotes({ day, noteIds, actorId, staff, residentName, onChan
           <span aria-hidden="true">▲ </span>
           端末の保存領域が一杯のため、送れていない申し送りを端末に残せていません。この画面を閉じたり再読み込みしたりすると消えます。電波がつながると自動で送ります。
         </p>
+      ) : null}
+      {notice !== null ? (
+        <div className="mb-2 flex flex-wrap items-center gap-gap">
+          <p role="status" className="min-w-0 flex-1 text-base text-ink">
+            {notice}
+          </p>
+          <button
+            type="button"
+            onClick={() => setNotice(null)}
+            className={`${btn} shrink-0 border-border-strong bg-surface text-ink`}
+          >
+            閉じる
+          </button>
+        </div>
       ) : null}
       <div className="flex flex-wrap items-center justify-between gap-gap">
         <p className="text-base font-bold">
@@ -259,6 +409,17 @@ export function UnsentNotes({ day, noteIds, actorId, staff, residentName, onChan
             return (
               <li key={k} className="rounded border border-border bg-surface p-3">
                 <p className="text-sm text-ink2">{targetLabel(u)}</p>
+                {/* 記入者（F41）。共用の端末で、誰の申し送りかを見てから選べるようにする */}
+                <p className="text-sm text-ink2">
+                  {u.kind === 'insert' ? '記入者' : '申し送りの記入者'}：
+                  <span className="font-bold text-ink">{reporterText(u)}</span>
+                </p>
+                {/* この変更を打った職員（手直し）。申し送りの記入者と違うことがある（共用の端末で別の職員が直した） */}
+                {u.kind !== 'insert' ? (
+                  <p className="text-sm text-ink2">
+                    この変更を入力した職員：<span className="font-bold text-ink">{typistText(u)}</span>
+                  </p>
+                ) : null}
                 <p className="mt-1 text-sm font-bold text-ink">{stateText(u)}</p>
                 {body !== null ? (
                   <p className="mt-1 whitespace-pre-wrap break-words text-base text-ink">{body}</p>
@@ -320,7 +481,7 @@ export function UnsentNotes({ day, noteIds, actorId, staff, residentName, onChan
       <ConfirmDialog
         open={askDrop !== null}
         title="この申し送りを取り下げますか"
-        body="あなたの本文は保存されません。取り下げると、この端末からも消えます。"
+        body={askDrop === null ? '' : dropBody(askDrop)}
         confirmLabel="取り下げる"
         danger
         onConfirm={() => {

@@ -6,8 +6,9 @@
 //   - supabase へは触れず db.ts の関数だけを呼ぶ（contracts.md §共通規律）
 //   - 入力封鎖中（native_input_enabled=false）は導線を隠さずディセーブル＋理由文。
 //     送信直前にもフラグを取り直す（ui-design.md §0.5 の二重ガード。最終強制は RLS/DB 側）
-//   - 下書き cl_draftNote は「データ保護レイヤー」。タブごとに1件・送信成功／明示破棄で即削除（§6.5）。
-//     2026-09-29: 24時間の期限で黙って消すのはやめた（古い書きかけは「〇日前の書きかけ」と出して戻す）
+//   - 下書き cl_draftNote は「データ保護レイヤー」。タブごとに1件・送信成功／明示破棄で即削除（ui-design.md §6.5）。
+//     2026-09-29（本人承認 M3・L1）: 期限は設けない＝24時間の期限で黙って消すのはやめた（古い書きかけは「〇日前の
+//     書きかけ」と出して戻す。詳細は concurrent-entry.md §9・noteDrafts.ts。2026-10-10 F42 で設計文書もこれにそろえた）
 //     送信できずキューへ退避した場合は「端末に残せたことを観測できた時」だけ消す（保全ゲートの後ろ）
 //   - 個人情報を console・UI状態キー（cl_view 等）に出さない。コード・placeholder に実名を書かない
 //   - 破壊的操作（下書きの破棄・登録の取り消し）は確認ダイアログ or Undo を挟む
@@ -28,9 +29,12 @@ import {
 import { touchActivity } from '../lib/actor'
 import {
   DbError,
+  fetchAllStaff,
   fetchResidents,
   fetchStaff,
+  FORBIDDEN_REASON,
   getNativeInputGate,
+  subscribeMastersChanged,
   fetchNotesForTargetDay,
   joinNotePresence,
   insertNote,
@@ -130,6 +134,42 @@ function autoShift(d: Date): Shift {
 /** 'HH:MM'（notes.occurred_at は time 列） */
 function nowHM(d: Date): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+function pad2(n: number): string {
+  return String(n).padStart(2, '0')
+}
+
+/** 夜勤明けの時刻（この時刻より前は、前日の夜勤の続き）。勤務帯の既定（autoShift の 9 時から日勤）と同じ仮置き */
+const NIGHT_END_HOUR = 9
+
+/**
+ * 申し送りに入れる時刻（F34・2026-10-10）。帰属は暦の日付のまま（本人回答: 0時〜朝の記録は当日の日報）。
+ * ・記録日が今日: 今の時刻
+ * ・記録日が前日で勤務帯が夜勤、夜勤明け（NIGHT_END_HOUR）より前に登録した: 今の時刻（夜勤の続きの記録の時刻を落とさない）
+ * ・それ以外の過去日: 空（誤った時刻を残さない＝従来どおり）
+ * 日報（DailySheetPage の noteOccurredAt）と同じ規則（試験で本体が同じことを確かめる）
+ */
+function noteOccurredAt(day: string, shift: Shift, now: Date): string | null {
+  const iso = (d: Date): string => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+  const hm = nowHM(now)
+  if (day === iso(now)) return hm
+  const yesterday = iso(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1))
+  if (shift === 'night' && day === yesterday && now.getHours() < NIGHT_END_HOUR) return hm
+  return null
+}
+
+/** 日報の「↓16時以降の記録」の区切り（16:00 以降・F35） */
+const AFTER16_FROM = '16:00'
+
+/**
+ * 日報のどの欄に載るか（16時以降か）。日勤の申し送りで、時刻が 16:00 以降なら「日勤申し送り（16時以降）」の欄
+ * （F35・2026-10-10 本人回答「日報の『↓16時以降』の定義にそろえる」）。以前はフォームから登録すると常に 16時以降でない
+ * 扱いで、16時台の日勤の申し送りが日報の区切りより上に並び、同じ時間帯の記録が2か所に分かれていた。
+ * 時刻が空（過去日）の時は決めない（false＝従来どおり）
+ */
+function noteAfter16(shift: Shift, occurredAt: string | null): boolean {
+  return shift === 'day' && occurredAt !== null && occurredAt >= AFTER16_FROM
 }
 
 /**
@@ -238,7 +278,13 @@ function legacyForm(o: Record<string, unknown>): DraftRow<FormState>[] {
   return [{ did: legacyDraftId('form', 0, f), at, kind: 'form', data: f }]
 }
 
-/** 控えを読む（無い・読めない＝null。読めない原文は従来どおり消す） */
+/**
+ * 別の版の控え（v が 1 以外の数）を最後の読み込みで見たか（F30）。見た時は控えへ書かない
+ * （上書きすると、同じ端末の新しい版のタブ・旧ビルドへ戻した後の書きかけが消える。入力は画面に残る）
+ */
+let draftForeign = false
+
+/** 控えを読む（無い・読めない＝null。壊れた原文は従来どおり消す。別の版の控えは消さずに null＝書き込みも止める・F30） */
 function readDraftFile(): DraftFile<FormState> | null {
   let raw: string | null = null
   try {
@@ -246,11 +292,18 @@ function readDraftFile(): DraftFile<FormState> | null {
   } catch {
     return null
   }
+  draftForeign = false
   if (raw === null || raw === '') return null
   try {
     const o: unknown = JSON.parse(raw)
     if (o === null || typeof o !== 'object' || Array.isArray(o)) {
       window.localStorage.removeItem(LS.draftNote)
+      return null
+    }
+    const v = (o as Record<string, unknown>).v
+    if (typeof v === 'number' && v !== DRAFT_VERSION) {
+      // 別の版の書きかけ。読めないので戻さないが、消しも上書きもしない（その版のタブが戻せるように）
+      draftForeign = true
       return null
     }
     return parseDraftFile(o as Record<string, unknown>, readForm, legacyForm)
@@ -271,6 +324,8 @@ function readDraftFile(): DraftFile<FormState> | null {
 function writeDraftFile(rows: DraftRow<FormState>[], gone: readonly DraftOrigin[] = []): void {
   const now = Date.now()
   const file = readDraftFile()
+  // 別の版の控えがある間は書かない（消さない・上書きしない。入力は画面に残る・F30）
+  if (draftForeign) return
   const keep = new Set(rows.map((r) => r.did))
   const removed = (file?.tabs[DRAFT_TAB_ID]?.rows ?? []).filter((r) => !keep.has(r.did))
   const drop = [...goneMarksFor(removed, now), ...gone]
@@ -368,7 +423,21 @@ export function NoteFormPage() {
   const [enabled, setEnabled] = useState(false)
   /** フラグを観測できなかった（通信エラー等）。理由文ではなく再確認を促す */
   const [gateUnknown, setGateUnknown] = useState(false)
+  /** このアカウントは記録アプリを使えない（許可リストに無い・無効。F61）。封鎖・通信エラーとは別の理由文を出す */
+  const [forbidden, setForbidden] = useState(false)
+  /**
+   * 名前を引く表に使う、在籍を問わない全員（F48。null＝まだ読めていない＝在籍者だけで引く）。
+   * 「この方の記録」の退職した記入者の名前が空になっていた。記入者を選ぶ候補は在籍者（staff）のまま
+   */
+  const [allStaff, setAllStaff] = useState<Staff[] | null>(null)
   const [reload, setReload] = useState(0)
+  /**
+   * この画面を開いてから、本文を打った・対象を選んだか（F21・2026-10-10 本人回答「操作している時だけ」）。
+   * 戻した書きかけだけでは「書いています」を配らない（前の職員の書きかけを、開いただけで他の端末へ出さない）
+   */
+  const [touched, setTouched] = useState(false)
+  /** 日付が変わった時に、入力中だったので記録日を今日へ切り替えなかった（F18。帯で知らせる） */
+  const [dayRolled, setDayRolled] = useState(false)
 
   const [form, setForm] = useState<FormState>(() => defaultForm(null, new Date()))
   const [errors, setErrors] = useState<Errors>({})
@@ -443,18 +512,21 @@ export function NoteFormPage() {
 
         let gate = false
         let unknown = false
+        let denied = false
         try {
           // 「false を観測した（＝スプシ期間）」と「観測できなかった（＝通信エラー）」を区別する。
           // 後者は封鎖の理由文ではなく、再確認できる案内を出す（observed で分ける）
           const g = await getNativeInputGate()
           gate = g.value === true
           unknown = !g.observed
+          denied = g.forbidden === true
         } catch {
           unknown = true // 取得できない間は封鎖のまま（安全側）
         }
         if (!alive) return
         setEnabled(gate)
         setGateUnknown(unknown)
+        setForbidden(denied)
 
         if (!initedRef.current) {
           initedRef.current = true
@@ -505,11 +577,77 @@ export function NoteFormPage() {
     return m
   }, [residents])
 
+  // 名前を引く表は在籍を問わない一覧から作る（F48。退職した職員が書いた「この方の記録」の記入者名を空にしない）。
+  // 読めない間は在籍者だけ（従来どおり）。在籍者は新しく読んだ方を優先する
   const staffById = useMemo(() => {
     const m = new Map<number, Staff>()
+    for (const s of allStaff ?? []) m.set(s.id, s)
     for (const s of staff) m.set(s.id, s)
     return m
-  }, [staff])
+  }, [allStaff, staff])
+
+  // 名前の表を読む（開いた時と、名簿が変わった合図＝マスタ同期の後に。読めなくても画面は止めない・F48/F47）。
+  // 名簿が変わった合図では、記入者を選ぶ候補（在籍者）も取り直す（失敗したら今の候補のまま＝入力中の画面を消さない）
+  useEffect(() => {
+    let alive = true
+    const loadAll = () => {
+      void fetchAllStaff()
+        .then((list) => {
+          if (alive && Array.isArray(list)) setAllStaff(list.filter((s) => s != null && typeof s.id === 'number'))
+        })
+        .catch(() => undefined)
+    }
+    loadAll()
+    const off = subscribeMastersChanged(() => {
+      loadAll()
+      void fetchStaff()
+        .then((st) => {
+          if (alive && Array.isArray(st)) setStaff(st.filter((s) => s != null && typeof s.id === 'number'))
+        })
+        .catch(() => undefined)
+    })
+    return () => {
+      alive = false
+      off()
+    }
+  }, [])
+
+  /**
+   * 日付が変わった（F18・2026-10-10）。入力中（対象・本文）でなければ記録日を今日へ切り替える（勤務帯は今の時刻の既定に）。
+   * 入力中なら切り替えずに帯で知らせる（打っている内容の日付を勝手に変えない）。1分ごとと画面に戻った時に見直す。
+   * 前の夜に開いたままのフォームで、翌朝の記録が前日の記録日のまま（時刻も空で）登録されていたため（F34 の1台の場合も同じ）
+   */
+  const formRef = useRef(form)
+  formRef.current = form
+  const lastTodayRef = useRef(todayIso())
+  useEffect(() => {
+    if (phase !== 'ready') return
+    const check = () => {
+      const today = todayIso()
+      if (today === lastTodayRef.current) return
+      const was = lastTodayRef.current
+      lastTodayRef.current = today
+      const f = formRef.current
+      // 前の今日を記録日にしていた時だけ（自分で過去日を選んでいた時は触らない）
+      if (f.noteOn !== was) return
+      if (!f.targetPicked && f.body.trim() === '') {
+        setForm((cur) => (cur.noteOn === was ? { ...cur, noteOn: today, shift: autoShift(new Date()) } : cur))
+        setDayRolled(false)
+        return
+      }
+      setDayRolled(true)
+    }
+    check()
+    const timer = window.setInterval(check, 60_000)
+    const onVis = () => {
+      if (document.visibilityState === 'visible') check()
+    }
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVis)
+    }
+  }, [phase])
 
   /** 入力の更新。同時に該当フィールドのエラー表示と送信エラーを消す（インライン検証） */
   const update = useCallback((patch: Partial<FormState>, clear?: ErrorKey) => {
@@ -569,6 +707,7 @@ export function NoteFormPage() {
       const prev = form.body
       setPhraseUndo((s) => [...s, prev].slice(-PHRASE_UNDO_MAX))
       update({ body: next.body }, 'body')
+      setTouched(true) // 本文に手を入れた（「書いています」を配る・F21）
       if (toBlank) setBodySel({ start: next.selStart, end: next.selEnd })
     },
     [form.body, update],
@@ -611,6 +750,7 @@ export function NoteFormPage() {
     setFormError(null)
     setForm(defaultForm(null, new Date())) // 記入者は空欄に戻す（2026-09-29 本人裁定）
     setPhraseUndo([]) // 破棄した本文へ「1つ戻す」で戻れないようにする
+    setTouched(false)
     show('書きかけを破棄しました')
   }, [show])
 
@@ -620,6 +760,7 @@ export function NoteFormPage() {
       const g = await getNativeInputGate()
       setEnabled(g.value === true)
       setGateUnknown(!g.observed) // まだ観測できない＝案内を出したまま再確認できるようにする
+      setForbidden(g.forbidden === true) // 許可リストに無い（F61）
     } catch {
       setEnabled(false)
       setGateUnknown(true)
@@ -657,7 +798,8 @@ export function NoteFormPage() {
         // 取り消したのは登録した本人（この画面で選んだ記入者）。端末の既定の操作者ではなく
         // その記入者を「最後に書き換えた職員」として変更の記録に残す
         // 取り消すのは登録した本文のままの時だけ（2026-09-29。ほかの端末が直していたら取り消さない＝直した本文を消さない）
-        const res = await deleteNote({ id: note.id }, note.body, {
+        // 見た行＝登録した行（F09。登録の後に他の端末が重要度・対象などを直していたら取り消さない）
+        const res = await deleteNote({ id: note.id }, note, {
           editedBy: note.reporter_id,
           meta: { note_on: note.note_on, shift: note.shift, resident_id: note.resident_id, after16: note.after16 },
         })
@@ -711,15 +853,24 @@ export function NoteFormPage() {
         // 二重ガード: 送信直前にフラグを取り直す。取り直せない時は直前に観測した値のまま進める
         // （観測済みの解禁をオフラインで取り消さない。最終強制は RLS/DB 側）
         let gate = enabled
+        let denied = false
         try {
           const g = await getNativeInputGate()
           if (g.observed) {
             gate = g.value === true
             setGateUnknown(false)
           }
+          // 許可リストに無い・無効なアカウント（F61）。封鎖の理由文ではなく、その旨を出す
+          denied = g.forbidden === true
+          setForbidden(denied)
           // 観測できなかった時は、直前に観測した値のまま進める（案内は出し直さない）
         } catch {
           // 取り直せなかっただけなので、観測済みの値のまま進める（案内は出し直さない）
+        }
+        if (denied) {
+          setEnabled(false)
+          setFormError(FORBIDDEN_REASON)
+          return
         }
         setEnabled(gate)
         if (!gate) {
@@ -728,6 +879,8 @@ export function NoteFormPage() {
         }
 
         const now = new Date()
+        // 記録日が今日のとき（と、前日の夜勤の続きを夜勤明けより前に書いた時）だけ現在時刻を入れる（F34）
+        const occurredAt = noteOccurredAt(form.noteOn, form.shift, now)
         const payload: Omit<Note, 'id' | 'rev' | 'read_count' | 'my_read'> = {
           note_on: form.noteOn,
           shift: form.shift,
@@ -737,14 +890,15 @@ export function NoteFormPage() {
           role_tags: [...form.roleTags],
           importance: form.importance,
           body: form.body.trim(),
-          // 記録日が今日のときだけ現在時刻を入れる（過去日に誤った時刻を残さない）
-          occurred_at: form.noteOn === todayIso() ? nowHM(now) : null,
+          // 過去日に誤った時刻を残さない（記録日が今日・前日の夜勤の続きの時だけ今の時刻・F34）
+          occurred_at: occurredAt,
           ongoing: form.ongoing,
           ended_at: form.ongoing && form.endedOn !== '' ? endOfDayStamp(form.endedOn) : null,
           reporter_id: form.reporterId,
-          // 色・16時区切りはシート画面で扱う項目。この入力画面では既定のまま送る
+          // 色はシート画面で扱う項目。この入力画面では既定のまま送る
           color: null,
-          after16: false,
+          // 日勤の 16:00 以降の申し送りは、日報の「↓16時以降の記録」の欄に載せる（F35。日報で書いた時と同じ欄になる）
+          after16: noteAfter16(form.shift, occurredAt),
         }
 
         const snapshot = form
@@ -818,7 +972,8 @@ export function NoteFormPage() {
    * 配るのは書いている間（対象を選んだ・本文を打ち始めた）だけで、開いただけでは配らない
    * （相手の画面に「書いています」を出し続けない・2026-09-23）。記録者が未選択なら staffId=null（相手には「別の端末」）。
    */
-  const composing = form.targetPicked || form.body.trim() !== ''
+  // 2026-10-10（F21）: この画面を開いてから本文を打った・対象を選んだ時だけ（戻した書きかけだけでは配らない）
+  const composing = touched && (form.targetPicked || form.body.trim() !== '')
   const hereNow = (): PresenceHere | null =>
     composing
       ? { staffId: form.reporterId, day: form.noteOn, residentId: form.targetPicked ? form.residentId : null }
@@ -903,8 +1058,17 @@ export function NoteFormPage() {
 
   return (
     <div className="mx-auto w-full max-w-2xl">
+      {/* 許可リストに無い・無効なアカウント（F61）。封鎖・通信エラーとは別に、ログインし直す・管理者へ連絡する案内を出す */}
+      {forbidden && (
+        <p id={ids.blocked} className="mb-4 rounded-md border border-danger bg-danger-bg p-3 text-base text-ink">
+          <span aria-hidden="true" className="mr-2">
+            ▲
+          </span>
+          {FORBIDDEN_REASON}
+        </p>
+      )}
       {/* 入力封鎖（§0.5）: 隠さずディセーブル＋理由文。シェル側の案内と二重で示す */}
-      {!enabled && !gateUnknown && (
+      {!enabled && !gateUnknown && !forbidden && (
         <p
           id={ids.blocked}
           className="mb-4 rounded-md border border-border bg-info-bg p-3 text-base text-ink"
@@ -915,7 +1079,7 @@ export function NoteFormPage() {
           {BLOCKED_REASON}
         </p>
       )}
-      {gateUnknown && (
+      {gateUnknown && !forbidden && (
         <div className="mb-4 rounded-md border border-warn bg-warn-bg p-3">
           <p id={ids.blocked} className="text-base text-ink">
             <span aria-hidden="true" className="mr-2">
@@ -962,6 +1126,27 @@ export function NoteFormPage() {
                   <span className="shrink-0 text-base text-ink2">{dayLabel}</span>
                 </div>
                 {fieldError('noteOn')}
+                {/* 日付が変わった時に入力中だった（F18）。記録日は勝手に変えず、知らせて選んでもらう */}
+                {dayRolled && form.noteOn !== todayIso() && (
+                  <div className="mt-2 rounded-md border border-warn bg-warn-bg p-3">
+                    <p className="text-sm text-ink">
+                      <span aria-hidden="true" className="mr-1">
+                        ▲
+                      </span>
+                      日付が変わりました（記録日は {dayLabel} のままです）。今日の記録なら、記録日を今日にしてから登録してください。
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        update({ noteOn: todayIso() }, 'noteOn')
+                        setDayRolled(false)
+                      }}
+                      className="mt-2 min-h-tap rounded-md border border-primary bg-surface px-4 text-base font-bold text-primary disabled:border-border disabled:bg-surface2 disabled:text-ink3"
+                    >
+                      記録日を今日にする
+                    </button>
+                  </div>
+                )}
               </div>
 
               <div>
@@ -1017,7 +1202,8 @@ export function NoteFormPage() {
                       )
                       // 同じ職員は1つにまとめ、記録する職員を選んでいない端末は「別の端末（2台）」のように台数でまとめる（2026-09-23）
                       const names = (list: PresenceHere[]) =>
-                        presenceWhoNames(list, (id) => staffById.get(id)?.name ?? null, null).join('・')
+                        // 記入者と同じ職員の別の端末は「あなたの別の端末」と出す（F26）
+                        presenceWhoNames(list, (id) => staffById.get(id)?.name ?? null, null, form.reporterId).join('・')
                       if (sameTarget.length > 0) {
                         const n = names(sameTarget)
                         return `${n === '' ? `他 ${sameTarget.length} 名` : n}が、いま${targetText}の申し送りを書いています。同じ内容にならないか確かめてください。`
@@ -1130,6 +1316,7 @@ export function NoteFormPage() {
                     // 定型句の差し込み・1つ戻すは onChange を通らない（insertPhrase / undoPhrase が update を直接呼ぶ）
                     setPhraseUndo((s) => (s.length === 0 ? s : []))
                     update({ body: e.target.value }, 'body')
+                    setTouched(true) // 本文を打った（「書いています」を配る・F21）
                   }}
                   rows={6}
                   aria-invalid={errors.body ? true : undefined}
@@ -1320,6 +1507,7 @@ export function NoteFormPage() {
         useNoteAlias
         onPick={(id) => {
           update({ targetPicked: true, residentId: id }, 'residentId')
+          setTouched(true) // 対象を選んだ（「書いています」を配る・F21）
           setResidentPicker(false)
         }}
         onClose={() => setResidentPicker(false)}

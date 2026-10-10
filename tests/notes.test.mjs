@@ -13,6 +13,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import * as NC from './note-contract.mjs'
+import { registerLoadFailure } from './ts-load.mjs'
 
 const SRC = process.env.CL_NOTES_SRC ? pathToFileURL(`${process.env.CL_NOTES_SRC.replace(/\/$/, '')}/`).href : new URL('../src/', import.meta.url).href
 const UNSUPPORTED = 'この Node では TypeScript・解決フックを使えないため、申し送りの検証をスキップしました（Node 22.18 以降で実行してください）。'
@@ -238,7 +239,8 @@ async function saveBodyLikeScreen(id, rev, base, value) {
 // ══════════════════════════════════════════════════════════════
 
 if (DB === null) {
-  it('申し送りの検証', { skip: `${UNSUPPORTED}（${loadError?.message ?? ''}）` }, () => {})
+  // 古い Node だけスキップ。それ以外（db.ts に Node で読めない書き方・読み込み時の例外）と CI では失敗にする（F69）
+  registerLoadFailure('申し送りの検証', loadError, UNSUPPORTED, { hooks: true })
 } else {
   describe('契約: apply_note_edits（JS の写しが契約の表どおり）', () => {
     for (const c of NC.NOTE_CONTRACT_CASES) {

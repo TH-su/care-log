@@ -13,6 +13,10 @@
 //       （weight-record.html の RES_CLIENT_ONLY）。そこで同じ端末の `wtmgr_v1` から「入居者 id → masterId」の
 //       対応表だけを読み（書かない）、サーバーの記録に当てる。フェイスシート・入居者マスタと同じ読み方
 //       （2026-09-27 本番で全員「記録なし」になった不具合の根治）。サーバーと端末で masterId が食い違う人は出さない。
+//     ★サーバーにも端末にも masterId が無い入居者でも、体重管理アプリが入居者マスタから作った id（'wm_'＋masterId を
+//       決まった規則で書いたもの）なら、その id から masterId を当てる（F52・2026-10-10）。体重管理アプリを開いたことの
+//       無い端末（現場の iPhone）でも、事務所PCと同じ体重が出るようにするため。順番はサーバー＞端末＞id からの推定で、
+//       サーバーか端末がその id に masterId を持つ時は推定を使わない（食い違いを推定で上書きしない）。
 //  5. 実名・合言葉・接続先の具体値をコードに書かない。
 
 import { fmtDayLabel } from './format.ts'
@@ -269,16 +273,27 @@ export function resolveWidMids(
 }
 
 /**
+ * 体重管理アプリが入居者マスタ由来の入居者に付ける id（weight-record.html の wrMasterResId と一字一句同じ規則。
+ * 英数字・_・- 以外の文字は '_'＋文字コードの16進（0埋めしない）に置き換える）
+ */
+export function weightMasterResId(masterId: string): string {
+  return 'wm_' + String(masterId).replace(/[^A-Za-z0-9_-]/g, (c) => '_' + c.charCodeAt(0).toString(16))
+}
+
+/**
  * 取り出した記録を care-log の resident_id ごとの測定の列（日付の古い順）にする。
  * 照合の手順は 2026-09-27 までの mapWeights と同じ:
  * - care-log: source_id → resident_id（同じ source_id が重なれば後の人）
  * - 体重管理の入居者 id → resident_id は、masterId が care-log の誰かに一致した行だけで決める（一致した最後の行）
  * - 同じ日に複数の記録がある時は updatedAt が最も新しい1件を採る（同時刻なら後の行）
+ * inferable を渡すと、masterId の無い入居者 id のうち inferable(wid) が true のものは、
+ * id が weightMasterResId(source_id) と一致する care-log の人に当てる（F52）
  */
 function pickForResidents(
   snap: WeightSnapshot,
   residents: ReadonlyArray<Pick<Resident, 'id' | 'source_id'>>,
   widMids: ReadonlyMap<string, string[]> = snap.widMids,
+  inferable?: (wid: string) => boolean,
 ): Map<number, WeightEntry[]> {
   const bySource = new Map<string, number>()
   for (const r of residents) {
@@ -291,6 +306,13 @@ function pickForResidents(
     for (const mid of mids) {
       const rid = bySource.get(mid)
       if (rid !== undefined) toCareLog.set(wid, rid)
+    }
+  }
+  if (inferable) {
+    // サーバーにも端末にも masterId が無い 'wm_…' の入居者を、id の規則から当てる（F52）
+    for (const [mid, rid] of bySource) {
+      const wid = weightMasterResId(mid)
+      if (!toCareLog.has(wid) && inferable(wid)) toCareLog.set(wid, rid)
     }
   }
   const picked = new Map<number, Map<string, { e: WeightEntry; stamp: number }>>()
@@ -423,7 +445,10 @@ function pickWithLocal(
 ): WeightFetchResult {
   const local = readLocalMasterMap()
   const widMids = resolveWidMids(snap.widMids, local)
-  return { ok: true, byResident: pickForResidents(snap, residents, widMids), linked: local.size }
+  // id からの推定は、サーバーにも端末にも masterId が無い入居者だけ（食い違いで外した人を推定で拾い直さない・F52）。
+  // linked は従来どおり端末の対応表の件数（体重管理アプリをこの端末で開いたかの案内に使う）
+  const inferable = (wid: string) => !snap.widMids.has(wid) && !local.has(wid)
+  return { ok: true, byResident: pickForResidents(snap, residents, widMids, inferable), linked: local.size }
 }
 
 /** 失敗の理由を画面の文にする（応答の中身は出さない） */
