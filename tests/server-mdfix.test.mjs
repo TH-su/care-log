@@ -474,7 +474,8 @@ describe('★F09 申し送りの取り消しは「見た行」と照らす（002
     assert.deepEqual(c?.fields, ['importance'])
     const sent = srv.calls.find((q) => q.fn === 'apply_note_edits')?.args.p_edits.deleted_at
     assert.equal(sent.base, '本文O')
-    assert.deepEqual(Object.keys(sent.seen).sort(), ['body', 'color', 'ended_at', 'importance', 'ongoing', 'resident_id'])
+    // 分類（categories）は 2026-10-15 に足した（日報の分類欄に出る欄。行に分類がある時だけ送る）
+    assert.deepEqual(Object.keys(sent.seen).sort(), ['body', 'categories', 'color', 'ended_at', 'importance', 'ongoing', 'resident_id'])
     // 止まった削除は送信待ちに残り、〔くらべて選ぶ〕が食い違った欄を出せる
     const pending = DB.pendingNoteRows().get(101)
     assert.deepEqual(pending?.conflicts.find((x) => x.field === 'deleted_at')?.fields, ['importance'])
@@ -542,7 +543,11 @@ describe('★F09 申し送りの取り消しは「見た行」と照らす（002
     const db = readFileSync(new URL('../src/lib/db.ts', import.meta.url), 'utf8')
     const m = db.match(/const NOTE_SEEN_SENT: readonly string\[\] = \[([^\]]*)\]/)
     assert.ok(m, 'NOTE_SEEN_SENT が見つからない')
-    const fields = [...m[1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1])
+    // 分類（categories・0032）は 0030 の RPC に足していない（日報だけが表から読む）。端末の正規化（normalizeNote）は
+    // 列が無い行に categories を付けず（undefined）、noteSeenInput は undefined の欄を送らない＝null と見て止めることは無い。
+    // そのため RPC が返すことを求める欄から外す（2026-10-15。正規化の側の約束は dsfeat.test.mjs の 5-5 で確かめる）
+    const NORMALIZED_UNDEFINED = new Set(['categories'])
+    const fields = [...m[1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1]).filter((f) => !NORMALIZED_UNDEFINED.has(f))
     assert.ok(fields.includes('color'))
     const s = stripComments(mig('0030'))
     const lists = [...s.matchAll(/select n\.id,([\s\S]*?)from notes n/g)].map((x) => x[1])

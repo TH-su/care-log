@@ -52,7 +52,8 @@
 //   ※ SheetCell が描画する要素の種類（td/div）に依存しないよう、表は div の行で組み、
 //     各セルは幅を持つ入れ物で包んでから SheetCell を置く。
 
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { CSSProperties, ReactNode } from 'react'
 import {
   ConfirmDialog,
@@ -60,7 +61,6 @@ import {
   LoadingBlock,
   ModalShell,
   ResidentPickerModal,
-  SegmentPicker,
   StaffPickerModal,
   useToast,
 } from '../components/ui'
@@ -93,7 +93,6 @@ import {
   insertNote,
   insertOuting,
   isQueuePersisted,
-  markRead,
   newClientKey,
   pendingRow,
   saveAttendance,
@@ -115,6 +114,12 @@ import {
   pendingNoteRows,
   queueSubscribe,
   saveNoteEdits,
+  cachedMyRole,
+  canUnlockNotes,
+  fetchMyRole,
+  isNoteLockedError,
+  NOTE_LOCKED_MESSAGE,
+  subscribeMyRole,
 } from '../lib/db'
 import type {
   CellEditInput,
@@ -124,6 +129,7 @@ import type {
   NoteFirstSent,
   NoteMeta,
   NoteTarget,
+  MyRole,
   PendingCellRow,
   PendingNoteRow,
   PresenceHere,
@@ -187,12 +193,25 @@ import type { DraftFile, DraftOrigin, DraftRow } from '../lib/noteDrafts'
 import { getActorId, touchActivity } from '../lib/actor'
 import { addDays, fmtTimeHM, normalizeVitalInput, todayIso, toHalfWidth } from '../lib/format'
 import { noteIsNextMorning, noteTimeFor, recordTimeFor, timeSortKey } from '../lib/nextMorning'
+// 日報の4機能（2026-10-15 本人回答）: ロックの判定・同じ方の統合・検索・分類（純関数は lib、画面の部品は noteCategory.tsx）
+import { lockState, msUntilNextLock } from '../lib/noteLock'
+import { groupNotesByResident, noteGroupLines, noteSectionOf } from '../lib/noteGroup'
+import type { NoteGroupRow, NoteSection } from '../lib/noteGroup'
+import { matchSearch, noteSearchText, parseSearchQuery } from '../lib/noteSearch'
+import { normalizeCategories } from '../lib/noteCategory'
+import {
+  CategoryChips,
+  CategoryExtractDialog,
+  CategoryToggles,
+  ImportanceToggles,
+  NoteSearchBar,
+} from '../components/noteCategory'
+import type { ExtractItem } from '../components/noteCategory'
 import {
   IMPORTANCE_LABEL,
   LS,
   NOTE_COLOR_LABEL,
   OUTING_KIND_LABEL,
-  ROLE_TAGS,
   SHIFT_LABEL,
   VITAL_RANGE,
   diaBpLevel,
@@ -205,9 +224,9 @@ import {
 } from '../lib/types'
 import type {
   Attendance,
-  Importance,
   Level,
   Note,
+  NoteCategory,
   NoteColor,
   ImportDay,
   Outing,
@@ -435,8 +454,8 @@ const ERR_CONFLICT_STILL =
 /** サーバーに受け付けられなかった保存（型・範囲の拒否）が送信待ちに残っている時 */
 const ERR_REJECTED =
   'サーバーに受け付けられなかった保存があります（入力は消えていません）。値を確かめて「保存し直す」を押してください'
-const ERR_EMPTY_BODY = '本文は空にできません。行ごと消す場合は「詳細」から削除してください'
-const ERR_NO_ACTOR = '記録する職員が選ばれていません。設定タブの「記録する職員」から選んでください'
+// 2026-10-15: 詳細の窓を外した（削除は行の「✕」だけ）ので、案内の行き先を「✕」に直した
+const ERR_EMPTY_BODY = '本文は空にできません。行ごと消す場合は対象の欄の「✕」で削除してください'
 const MSG_QUEUED = '⚠ 未送信（電波が戻ると自動で送信します）'
 const MSG_NOT_PERSISTED =
   '▲ 送信待ちにしましたが端末に控えを残せませんでした。この画面を閉じずに電波の回復をお待ちください'
@@ -628,7 +647,10 @@ const NARROW_STICKY: CSSProperties = {
 
 /** 保存済みの申し送りで直せる欄（送った欄だけ書き、他はサーバーの値を温存する） */
 type NotePatch = Partial<
-  Pick<Note, 'body' | 'resident_id' | 'importance' | 'color' | 'after16' | 'occurred_at' | 'reporter_id' | 'role_tags' | 'shift'>
+  Pick<
+    Note,
+    'body' | 'resident_id' | 'importance' | 'color' | 'after16' | 'occurred_at' | 'reporter_id' | 'role_tags' | 'shift' | 'categories'
+  >
 >
 
 /** 送信待ちの登録の行に、登録後の変更（notes#ck:<ck>）の値を重ねる（同じなら元の行のまま） */
@@ -638,7 +660,17 @@ function overlayDraft<T extends DraftFields>(d: T, v: Record<string, unknown>): 
   if ('resident_id' in v) next.residentId = (v.resident_id as number | null) ?? null
   if ('reporter_id' in v) next.reporterId = (v.reporter_id as number | null) ?? null
   if ('color' in v) next.color = (v.color as NoteColor | null) ?? null
-  const same = next.body === d.body && next.residentId === d.residentId && next.reporterId === d.reporterId && next.color === d.color
+  // 分類（2026-10-15）: 送信待ちの登録の行へ積んだ分類を重ねる（読めない値は重ねない）
+  if ('categories' in v) {
+    const c = normalizeCategories(v.categories)
+    if (c !== null) next.categories = c
+  }
+  const same =
+    next.body === d.body &&
+    next.residentId === d.residentId &&
+    next.reporterId === d.reporterId &&
+    next.color === d.color &&
+    JSON.stringify(next.categories ?? []) === JSON.stringify(d.categories ?? [])
   return same ? d : next
 }
 
@@ -1032,6 +1064,11 @@ interface NoteDraft {
   body: string
   reporterId: number | null
   color: NoteColor | null
+  /**
+   * 分類（2026-10-15 本人回答・0032）。分類窓で選ぶ。登録の時に一緒に送る。省略＝選んでいない（[] と同じ）。
+   * 控え（cl_dailyDraft）にも残る（6値だけ・readNoteDraft が既知値で読み直す）
+   */
+  categories?: NoteCategory[]
   /** 送信待ちに退避した行。同じ内容を二重に登録しないため編集を止める */
   locked: boolean
   /** 書きかけの行の印（端末の控え cl_dailyDraft の中で、別のタブの同じ行と見分ける・2026-09-29） */
@@ -1058,11 +1095,15 @@ interface NoteDraft {
    * 省略＝送信待ち
    */
   regState?: 'pending' | 'conflict' | 'rejected'
+  /** 送信待ちの登録が時間によるロック（0033）で止められた（行の一言を「ロック中のため…」にする・2026-10-15） */
+  regLocked?: boolean
 }
 
 /** 送信待ちの登録の行の一言（再読み込みの後も、登録の送信待ちの実際から出す。F1） */
 function registrationMark(draft: NoteDraft | null | undefined): RowStatus | undefined {
   if (!draft || !draft.locked || draft.ck === undefined) return undefined
+  // ロックで止められた登録は理由をそのまま出す（事務所で解除できる。2026-10-15）
+  if (draft.regState === 'rejected' && draft.regLocked === true) return { tone: 'danger', text: `▲ ${NOTE_LOCKED_MESSAGE}` }
   if (draft.regState === 'rejected' || draft.regState === 'conflict') return { tone: 'danger', text: MSG_REG_STOPPED }
   return { tone: 'warn', text: MSG_QUEUED }
 }
@@ -1243,7 +1284,8 @@ function draftData<T extends { key: string; did?: string; from?: DraftOrigin[]; 
 }
 
 function noteHasInput(d: NoteDraft): boolean {
-  return d.body.trim() !== '' || d.targetPicked
+  // 分類だけを選んだ書きかけも入力として残す（2026-10-15）
+  return d.body.trim() !== '' || d.targetPicked || (d.categories !== undefined && d.categories.length > 0)
 }
 
 function vitalHasInput(d: VitalDraft): boolean {
@@ -1481,6 +1523,9 @@ function readNoteDraft(v: unknown): NoteDraft | null {
     locked: false,
   }
   if (reporterPicked && reporterId !== null) out.reporterPicked = true
+  // 分類（2026-10-15）。6値の配列だけを読む（読めない値は無かったことにする＝書きかけそのものは戻す）
+  const cats = normalizeCategories(o.categories)
+  if (cats !== null && cats.length > 0) out.categories = cats
   // 前に登録を試みた冪等キー（確定し直す時に同じキーで送る＝届いていれば二重にならない・R5-1/R5-2）
   if (typeof o.ck === 'string' && /^[\w.:-]{1,100}$/.test(o.ck)) {
     out.ck = o.ck
@@ -1492,6 +1537,8 @@ function readNoteDraft(v: unknown): NoteDraft | null {
       if (fs.resident_id === null || (typeof fs.resident_id === 'number' && Number.isInteger(fs.resident_id))) f.resident_id = fs.resident_id
       if (fs.reporter_id === null || (typeof fs.reporter_id === 'number' && Number.isInteger(fs.reporter_id))) f.reporter_id = fs.reporter_id
       if (fs.color === null || typeof fs.color === 'string') f.color = fs.color
+      const fsCats = normalizeCategories(fs.categories)
+      if (fsCats !== null) f.categories = fsCats
       if (Object.keys(f).length > 0) out.firstSent = f
     }
   }
@@ -1921,18 +1968,75 @@ const NOTE_TONE_CLASS: Record<NoteTone, string> = {
   night: 'dsheet-title-night',
 }
 
+/** 日報の申し送りの4欄（表示の順＝lockSig の文字の順）と、区分の値（2026-10-15 仕様 §2） */
+const NOTE_SECTION_ORDER: readonly { sec: NoteSection; shift: Shift; after16: boolean }[] = [
+  { sec: 'day', shift: 'day', after16: false },
+  { sec: 'late', shift: 'day', after16: true },
+  { sec: 'daycare', shift: 'daycare', after16: false },
+  { sec: 'night', shift: 'night', after16: false },
+]
+
+/**
+ * その日の4欄がロックの時刻を過ぎたかの印（'1'／'0' を4つ。例 '1100'＝日勤・16時以降が過ぎた）。
+ * 親はこの文字が変わった時だけ日の枠を描き直す（1分ごとに10日分を描き直さない）
+ */
+function lockSigOf(day: string, now: number): string {
+  return NOTE_SECTION_ORDER.map((x) => (lockState(day, x.shift, x.after16, now).locked ? '1' : '0')).join('')
+}
+
+/** 分類で抽出の一覧の区分の名前（表題帯の名前と同じ） */
+const NOTE_SECTION_LABEL: Record<NoteSection, string> = {
+  day: '日勤申し送り',
+  late: '日勤申し送り（16時以降）',
+  daycare: 'デイサービス',
+  night: '夜勤申し送り',
+}
+
+/**
+ * 検索で合った記録の id（語が無ければ null＝絞らない）。haystacks は記録ごとの比べる文字（noteSearchText の結果を
+ * 記録の id で控えたもの）。語を変えるたびに作り直すのは照合だけ（比べる文字は作り直さない）
+ */
+function searchMatchedIds(
+  notes: readonly Note[],
+  haystacks: ReadonlyMap<number, string>,
+  terms: readonly string[],
+): Set<number> | null {
+  if (terms.length === 0) return null
+  const out = new Set<number>()
+  for (const n of notes) if (matchSearch(haystacks.get(n.id) ?? '', terms)) out.add(n.id)
+  return out
+}
+
+/** 表題帯に出すロックの状態（2026-10-15 本人回答・仕様 §2） */
+interface NoteLockView {
+  /** ロックの時刻を過ぎた（画面の判定・猶予なし） */
+  locked: boolean
+  /** この端末で解除している（事務所・管理者だけ。再読み込みで戻る） */
+  unlocked: boolean
+  /** ロックの時刻の書き方（'17:00'・'24:00'・'翌8:00'） */
+  label: string
+}
+
 function NoteTitleBand({
   day,
   title,
   tone,
   count,
+  shown = null,
   onAdd,
+  lock,
+  onToggleUnlock,
 }: {
   day: string
   title: string
   tone: NoteTone
   count: number
+  /** 検索で絞り込んでいる時の、合った記録の数（null＝絞り込んでいない） */
+  shown?: number | null
   onAdd?: () => void
+  lock?: NoteLockView
+  /** 〔ロック解除〕〔ロックに戻す〕（事務所・管理者のログインの時だけ渡る。渡らない時はボタンを描かない） */
+  onToggleUnlock?: () => void
 }) {
   return (
     <div
@@ -1942,8 +2046,29 @@ function NoteTitleBand({
     >
       <span className="tabular">{fmtSheetDayShort(day)}</span>
       <span>{title}</span>
-      <span className="tabular">{count}件</span>
+      {/* 検索で絞り込んでいる時は「n件中m件」（記録の件数で数える＝同じ方の統合で数が変わらない）。
+          紙は絞り込まずに全部を刷るので「中m件」は画面だけ */}
+      <span className="tabular">
+        {count}件{shown === null ? null : <span className="print:hidden">中{shown}件</span>}
+      </span>
       {onAdd ? <AddRowButton label={`${title}に1行追加`} onClick={onAdd} /> : null}
+      {/* ロックの印（画面だけ。紙には出さない）。記号と文字で伝える（色に頼らない） */}
+      {lock && lock.locked ? (
+        <span className="dsheet-lock-mark print:hidden" data-note-lock={lock.unlocked ? 'unlocked' : 'locked'}>
+          {lock.unlocked ? `🔓 解除中（この端末だけ・${lock.label}でロック）` : `🔒 ロック中（${lock.label}）`}
+        </span>
+      ) : null}
+      {lock && lock.locked && onToggleUnlock ? (
+        <button
+          type="button"
+          onClick={onToggleUnlock}
+          aria-pressed={lock.unlocked}
+          aria-label={lock.unlocked ? `${title}をロックに戻す` : `${title}のロックを解除する（この端末だけ。再読み込みで戻ります）`}
+          className={`${CELL_HIT} sheet-dense-btn dsheet-add-btn shrink-0 rounded-sm border border-primary px-1 font-bold text-primary print:hidden`}
+        >
+          {lock.unlocked ? 'ロックに戻す' : 'ロック解除'}
+        </button>
+      ) : null}
     </div>
   )
 }
@@ -2037,6 +2162,17 @@ interface DaySheetProps {
   /** 日付セルのカレンダーで別の日が選ばれた */
   onPickDay: (iso: string) => void
   show: (msg: string, undo?: () => void) => void
+  /**
+   * この日の4欄（日勤・16時以降・デイ・夜勤の順）がロックの時刻を過ぎたかの印（'1'＝過ぎた・'0'＝まだ。例 '1100'）。
+   * 親が1分ごと・画面に戻った時・次のロックの時刻に作り直し、変わった時だけこの枠を描き直す（2026-10-15 仕様 §2）
+   */
+  lockSig: string
+  /** ログインの役割が事務所・管理者（〔ロック解除〕を出す）。現場・分からない時は false＝ボタンを描かない */
+  canUnlock: boolean
+  /** 検索の語（parseSearchQuery の結果。空＝絞らない・仕様 §1）。親が語の変わった時だけ作り直す */
+  searchTerms: readonly string[]
+  /** この日の画面に出している申し送り（分類で抽出の一覧に使う）。null＝枠が外れた */
+  onNotesShown: (day: string, notes: readonly Note[] | null) => void
 }
 
 /**
@@ -2340,6 +2476,95 @@ export function DailySheetPage({
   )
 
   const visibleDays = useMemo(() => (unit === '1' ? [day] : blockDays(day)), [day, unit])
+
+  // ── ログインの役割（2026-10-15 仕様 §2。〔ロック解除〕は事務所・管理者だけ）──────────────
+  // 起動時に問い合わせ、ログインし直した（db.ts が控えを捨てた）時に問い合わせ直す。分からない（null）は現場と同じ扱い
+  const [myRole, setMyRole] = useState<MyRole | null>(() => cachedMyRole() ?? null)
+  useEffect(() => {
+    let alive = true
+    const load = () => {
+      void fetchMyRole().then((r) => {
+        if (alive && aliveRef.current) setMyRole(r)
+      })
+    }
+    load()
+    const unsub = subscribeMyRole(() => {
+      // ログインし直す間は分からない＝現場と同じ扱いへ戻してから取り直す（前のログインの役割でボタンを残さない）
+      if (alive && aliveRef.current) setMyRole(null)
+      load()
+    })
+    return () => {
+      alive = false
+      unsub()
+    }
+  }, [])
+  const canUnlock = canUnlockNotes(myRole)
+
+  // ── 時間によるロックの時計（2026-10-15 仕様 §2）──────────────────────────────
+  // 1分ごと・画面に戻った時・次のロックの時刻に見直す（開いたまま時刻を越えても1分以内にロック表示へ変わる）。
+  // 各日の枠へは4欄の印（lockSigOf）だけを渡す＝印が変わった日だけ描き直す
+  const [lockNow, setLockNow] = useState(() => Date.now())
+  useEffect(() => {
+    let next: number | undefined
+    const tick = () => {
+      if (aliveRef.current) setLockNow(Date.now())
+    }
+    const schedule = () => {
+      if (next !== undefined) window.clearTimeout(next)
+      const wait = msUntilNextLock(
+        visibleDays.flatMap((d) => NOTE_SECTION_ORDER.map((x) => ({ day: d, shift: x.shift, after16: x.after16 }))),
+      )
+      // 次のロックの時刻ちょうど（+0.5秒）にも見直す。1分より先なら1分ごとの見直しに任せる
+      if (wait !== null && wait < 60_000) next = window.setTimeout(tick, wait + 500)
+    }
+    schedule()
+    const timer = window.setInterval(() => {
+      tick()
+      schedule()
+    }, 60_000)
+    const onVis = () => {
+      if (document.visibilityState === 'visible') {
+        tick()
+        schedule()
+      }
+    }
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      window.clearInterval(timer)
+      if (next !== undefined) window.clearTimeout(next)
+      document.removeEventListener('visibilitychange', onVis)
+    }
+  }, [visibleDays, lockNow])
+
+  // ── 検索（2026-10-15 仕様 §1）と分類で抽出（§3）──────────────────────────────
+  // 検索語はこの画面の state だけに持つ（localStorage に置かない＝業務データに近い）。打鍵ごとに10日分を描き直さないよう、
+  // 各日の枠へは遅らせた値（useDeferredValue）から作った語の並びを渡す（同じ語なら同じ参照＝枠は描き直さない）
+  const [searchText, setSearchText] = useState('')
+  const deferredSearch = useDeferredValue(searchText)
+  const searchTerms = useMemo(() => parseSearchQuery(deferredSearch), [deferredSearch])
+  /** 各日の枠が出している申し送り（分類で抽出の一覧・検索の件数に使う） */
+  const notesShownRef = useRef(new Map<string, readonly Note[]>())
+  const [notesShownTick, setNotesShownTick] = useState(0)
+  const handleNotesShown = useCallback((d: string, list: readonly Note[] | null) => {
+    const m = notesShownRef.current
+    if (list === null) {
+      if (!m.has(d)) return
+      m.delete(d)
+    } else {
+      if (m.get(d) === list) return
+      m.set(d, list)
+    }
+    setNotesShownTick((n) => n + 1)
+  }, [])
+  const [extractOpen, setExtractOpen] = useState(false)
+  /**
+   * 検索欄の置き場（App の表題行の右端・id は App.tsx と同じ 'cl-daily-header-slot'）。見つからない時（この画面だけを
+   * 開いた時）は日付バーの右端に置く（畳んでも隠さない）
+   */
+  const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null)
+  useLayoutEffect(() => {
+    setHeaderSlot(document.getElementById('cl-daily-header-slot'))
+  }, [])
 
   // ── いま誰がどの日の申し送りを書いているか（Presence・DBには書かない）──────
   //
@@ -2761,6 +2986,73 @@ export function DailySheetPage({
 
   const blockedReason = forbidden ? FORBIDDEN_REASON : gateUnknown ? GATE_UNKNOWN_REASON : BLOCKED_REASON
 
+  /** 表題行の右端の検索欄と〔分類で抽出〕（2026-10-15 仕様 §1・§3） */
+  const searchBar = (
+    <NoteSearchBar
+      value={searchText}
+      onChange={setSearchText}
+      onOpenExtract={() => setExtractOpen(true)}
+      summary={searchTerms.length > 0 ? '絞り込み中' : ''}
+    />
+  )
+
+  /** 分類で抽出の一覧（表示中の日の申し送り。窓を開いている間だけ作る・2026-10-15 仕様 §3） */
+  const extractItems = useMemo((): ExtractItem[] => {
+    if (!extractOpen) return []
+    void notesShownTick // 各日の枠の申し送りが変わった合図（中身は ref）
+    const resById = new Map(nameResidents.map((r) => [r.id, r]))
+    const stById = new Map(nameStaff.map((x) => [x.id, x]))
+    const out: ExtractItem[] = []
+    for (const d of visibleDays) {
+      const list = notesShownRef.current.get(d)
+      if (!list) continue
+      for (const x of NOTE_SECTION_ORDER) {
+        for (const n of list) {
+          if (noteSectionOf(n) !== x.sec) continue
+          out.push({
+            key: `${d}:${n.id}`,
+            day: d,
+            noteId: n.id,
+            dayLabel: fmtSheetDayShort(d),
+            sectionLabel: NOTE_SECTION_LABEL[x.sec],
+            target: n.resident_id === null ? 'スタッフへ（全体）' : noteTargetName(resById.get(n.resident_id), n.resident_id),
+            categories: n.categories ?? [],
+            body: n.body,
+            reporter: n.reporter_id === null ? '' : staffName(stById.get(n.reporter_id), n.reporter_id),
+          })
+        }
+      }
+    }
+    return out
+  }, [extractOpen, nameResidents, nameStaff, notesShownTick, visibleDays])
+
+  /** 抽出の一覧の行を押した: 窓を閉じて、その申し送りの行へスクロールする（検索で隠れていれば検索を消してから） */
+  const jumpToNote = useCallback((it: ExtractItem) => {
+    setExtractOpen(false)
+    const id = `cl-note-row-${it.day}-${it.noteId}`
+    const go = (tries: number) => {
+      window.requestAnimationFrame(() => {
+        const el = document.getElementById(id)
+        if (el === null || (el.closest('.dsheet-search-hide') !== null && tries > 0)) {
+          if (tries > 0) {
+            if (el !== null) setSearchText('')
+            go(tries - 1)
+          }
+          return
+        }
+        try {
+          // 自分の位置合わせ（日付の位置合わせを打ち切らないための印）
+          selfScrollUntilRef.current = performance.now() + SELF_SCROLL_GRACE_MS
+          el.scrollIntoView({ block: 'center', inline: 'nearest' })
+          el.focus({ preventScroll: true })
+        } catch {
+          // 位置合わせに失敗しても一覧は閉じている（画面を落とさない）
+        }
+      })
+    }
+    go(3)
+  }, [])
+
   // 3状態（初回だけ画面ごと差し替える。2回目以降は下の帯で知らせる＝書きかけを消さない）
   if (phase === 'loading' && !everReady) {
     return <LoadingBlock label="日報を読み込んでいます…" />
@@ -2773,7 +3065,17 @@ export function DailySheetPage({
   return (
     <div className="space-y-4">
       {/* 日付バー（前後日・カレンダー・表示単位・表示倍率）。狭い画面・1行に収まらない時は畳める（2026-09-29） */}
-      <DailyTopBar day={day} unit={unit} onGo={goDay} onUnit={goUnit} />
+      <DailyTopBar
+        day={day}
+        unit={unit}
+        onGo={goDay}
+        onUnit={goUnit}
+        // 表題行に置けない時だけ、日付バーの右端に置く（畳んでも隠さない＝狭い画面でも検索に辿り着ける）
+        search={headerSlot === null ? searchBar : null}
+      />
+      {/* 検索欄と〔分類で抽出〕は表題行（App のヘッダ）の右端（2026-10-15 仕様 §1）。ヘッダは上に残るので、
+          スクロールしても検索できる */}
+      {headerSlot !== null ? createPortal(searchBar, headerSlot) : null}
 
       {phase === 'error' && everReady && (
         <div className="flex flex-wrap items-center gap-gap rounded-md border border-danger bg-danger-bg p-3">
@@ -2935,6 +3237,10 @@ export function DailySheetPage({
                   onLoaded={handleLoaded}
                   onPickDay={goDay}
                   show={show}
+                  lockSig={lockSigOf(d, lockNow)}
+                  canUnlock={canUnlock}
+                  searchTerms={searchTerms}
+                  onNotesShown={handleNotesShown}
                 />
               </section>
             ))}
@@ -2950,6 +3256,17 @@ export function DailySheetPage({
         danger
         onConfirm={() => confirm?.onConfirm()}
         onCancel={() => setConfirm(null)}
+      />
+      <CategoryExtractDialog
+        open={extractOpen}
+        onClose={() => setExtractOpen(false)}
+        items={extractItems}
+        onJump={jumpToNote}
+        rangeLabel={
+          visibleDays.length === 1
+            ? fmtSheetDayShort(visibleDays[0])
+            : `${fmtSheetDayShort(visibleDays[0])}〜${fmtSheetDayShort(visibleDays[visibleDays.length - 1])}`
+        }
       />
       {toast}
     </div>
@@ -2985,6 +3302,10 @@ function DaySheet({
   onLoaded,
   onPickDay,
   show,
+  lockSig,
+  canUnlock,
+  searchTerms,
+  onNotesShown,
 }: DaySheetProps) {
   const [phase, setPhase] = useState<Phase>('loading')
   const [reload, setReload] = useState(0)
@@ -3046,6 +3367,27 @@ function DaySheet({
   /** くらべて選ぶ画面で開いているバイタルの id（null＝閉じている） */
   const [compareVitalId, setCompareVitalId] = useState<number | null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
+  /**
+   * この端末で〔ロック解除〕した欄（2026-10-15 仕様 §2。事務所・管理者のログインだけ）。画面の上の切替で、
+   * 保存しない（再読み込み・日の枠の差し替えで戻る）。サーバーの判定は役割で決まる（office・admin は止めない）
+   */
+  const [unlocked, setUnlocked] = useState<ReadonlySet<NoteSection>>(() => new Set())
+  const unlockedRef = useRef(unlocked)
+  unlockedRef.current = unlocked
+  /** いまその欄がロック中か（保存の直前に今の時刻で見る＝表示の更新を待たない。解除した欄は false） */
+  const isLockedNow = useCallback(
+    (shift: Shift, after16: boolean): boolean =>
+      lockState(day, shift, after16).locked && !unlockedRef.current.has(noteSectionOf({ shift, after16 })),
+    [day],
+  )
+  const toggleUnlock = useCallback((sec: NoteSection) => {
+    setUnlocked((cur) => {
+      const next = new Set(cur)
+      if (next.has(sec)) next.delete(sec)
+      else next.add(sec)
+      return next
+    })
+  }, [])
   const [residentPick, setResidentPick] = useState<PickTarget | null>(null)
   const [staffPick, setStaffPick] = useState<PickTarget | null>(null)
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
@@ -3378,6 +3720,9 @@ function DaySheet({
         // 登録の送信待ちの状態を写す（行の一言を再読み込みの後も出す・F1）
         const st = d.locked && d.ck !== undefined ? inserts.get(d.ck)?.state : undefined
         if (st !== undefined && (next.regState ?? 'pending') !== st) next = { ...next, regState: st }
+        // ロックで止められた登録か（行の一言を「ロック中のため…」にする・2026-10-15）
+        const lk = d.locked && d.ck !== undefined ? inserts.get(d.ck)?.locked === true : false
+        if (lk !== (next.regLocked === true)) next = { ...next, regLocked: lk }
         if (next !== d) changed = true
         out.push(next)
       }
@@ -3396,6 +3741,7 @@ function DaySheet({
           locked: true,
           ck: op.qid,
           regState: op.state,
+          regLocked: op.locked,
           did: newDraftId(),
         })
       }
@@ -3698,8 +4044,15 @@ function DaySheet({
     async (note: Note, patch: NotePatch, bases?: Partial<Record<keyof NotePatch, unknown>>) => {
       const key = `n${note.id}`
       if (!guardNote(key)) return
-      setRowStatus(key, null)
       const rawNote = notesRef.current.find((n) => n.id === note.id) ?? note
+      // 時間によるロック（2026-10-15 仕様 §2）: ロック中の欄の行は直さない（画面は読み取り専用にしてあるが、編集の途中で
+      // 時刻を越えた時の確定・打ちかけがここへ来る）。打った本文は捨てずに行の一言に残す（写して書き直せる）
+      if (isLockedNow(rawNote.shift, rawNote.after16)) {
+        const typed = typeof patch.body === 'string' && patch.body.trim() !== '' ? `（入力した内容：${patch.body.trim()}）` : ''
+        setRowStatus(key, { tone: 'danger', text: `▲ ${NOTE_LOCKED_MESSAGE}${typed}` })
+        return
+      }
+      setRowStatus(key, null)
       const raw = rawNote as unknown as Record<string, unknown>
       // 見ていた値＝画面に出していた値（送信待ちの値を重ねた値）。送信待ちがあれば続きの入力として重なり、別のタブの入力と
       // 食い違う時は db.ts が分けて持つ（第3巡）。送信待ちが無い欄はサーバーの値そのもの
@@ -3727,7 +4080,7 @@ function DaySheet({
         setRowStatus(key, { tone: 'danger', text: `▲ ${errText(err)}` })
       }
     },
-    [guardNote, markSelfWrite, patchNote, refreshPendingNotes, saveOk, setRowStatus],
+    [guardNote, isLockedNow, markSelfWrite, patchNote, refreshPendingNotes, saveOk, setRowStatus],
   )
 
   /**
@@ -3756,6 +4109,12 @@ function DaySheet({
     (draft: NoteDraft, patch: NotePatch, seen: Partial<Record<keyof NotePatch, unknown>>) => {
       const ck = draft.ck
       if (ck === undefined) return
+      // ロック中の欄の送信待ちの登録へは積まない（サーバーに止められる）。打った本文は一言に残す（2026-10-15）
+      if (isLockedNow(draft.shift, draft.after16)) {
+        const typed = typeof patch.body === 'string' && patch.body.trim() !== '' ? `（入力した内容：${patch.body.trim()}）` : ''
+        setRowStatus(draft.key, { tone: 'danger', text: `▲ ${NOTE_LOCKED_MESSAGE}${typed}` })
+        return
+      }
       const follow: Record<string, { value: unknown; base: unknown }> = {}
       for (const [f, v] of Object.entries(patch)) follow[f] = { value: v, base: (seen as Record<string, unknown>)[f] ?? null }
       void stageIntoRegistration(draft.key, ck, follow).then((ok) => {
@@ -3765,11 +4124,12 @@ function DaySheet({
         if (patch.resident_id !== undefined) dp.residentId = patch.resident_id
         if (patch.reporter_id !== undefined) dp.reporterId = patch.reporter_id
         if (patch.color !== undefined) dp.color = patch.color
+        if (patch.categories !== undefined) dp.categories = patch.categories
         patchNoteDraft(draft.key, dp)
         setRowStatus(draft.key, { tone: 'warn', text: ok ? MSG_QUEUED : MSG_NOT_PERSISTED })
       })
     },
-    [patchNoteDraft, setRowStatus, stageIntoRegistration],
+    [isLockedNow, patchNoteDraft, setRowStatus, stageIntoRegistration],
   )
 
   /**
@@ -3902,6 +4262,10 @@ function DaySheet({
           np.reporter_id = patch.reporterId
           seen.reporter_id = d.reporterId
         }
+        if (patch.categories !== undefined) {
+          np.categories = patch.categories
+          seen.categories = d.categories ?? []
+        }
         if (Object.keys(np).length > 0) editRegistrationRow(d, np, seen)
         return
       }
@@ -3924,6 +4288,13 @@ function DaySheet({
         setRowStatus(key, { tone: 'warn', text: MSG_BUSY })
         return
       }
+      // 時間によるロック（2026-10-15 仕様 §2）: ロック中の欄には登録しない。入力は書きかけに残し、理由を行に出す
+      // （事務所で解除してから確定し直せば送る）。画面は猶予なしで判定する（サーバーは30分の猶予）
+      if (isLockedNow(draft.shift, draft.after16)) {
+        patchNoteDraft(key, { body })
+        setRowStatus(key, { tone: 'danger', text: `▲ ${NOTE_LOCKED_MESSAGE}` })
+        return
+      }
       savingRef.current.add(key)
       setRowStatus(key, null)
       // 登録の冪等キー（登録を押した後の変更は notes#ck:<ck> に積む＝登録の op の中身は書き換えない・第3巡）
@@ -3937,7 +4308,13 @@ function DaySheet({
       const firstSent: NoteFirstSent | undefined =
         draft.ck !== undefined
           ? draft.firstSent
-          : { body: body.trim(), resident_id: draft.residentId, reporter_id: draft.reporterId, color: draft.color }
+          : {
+              body: body.trim(),
+              resident_id: draft.residentId,
+              reporter_id: draft.reporterId,
+              color: draft.color,
+              categories: draft.categories ?? [],
+            }
       patchNoteDraft(key, { body, ck, firstSent })
       /** 登録で送った欄（応答待ちの間に直した欄の見分けと、登録後の変更の基準に使う） */
       const sentFields = {
@@ -3946,12 +4323,14 @@ function DaySheet({
         targetPicked: draft.targetPicked,
         reporterId: draft.reporterId,
         color: draft.color,
+        categories: draft.categories ?? [],
       }
       const sentAsRow = {
         body: sentFields.body,
         resident_id: sentFields.residentId,
         reporter_id: sentFields.reporterId,
         color: sentFields.color,
+        categories: sentFields.categories,
       }
       /**
        * 応答の後、書きかけのいまと「登録で送った値（landed）」の差分を宛先へ積む（第4巡 R4-1）。積む（await）間に同じ行へ
@@ -3960,7 +4339,7 @@ function DaySheet({
        */
       const stageUntilSettled = async (
         stage: (edits: Record<string, { value: unknown; base: unknown }>) => Promise<boolean>,
-        landed: Pick<Note, 'body' | 'resident_id' | 'reporter_id' | 'color'>,
+        landed: Pick<Note, 'body' | 'resident_id' | 'reporter_id' | 'color' | 'categories'>,
       ): Promise<boolean> => {
         const landedRec = landed as unknown as Record<string, unknown>
         const same = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
@@ -4002,6 +4381,8 @@ function DaySheet({
           reporter_id: draft.reporterId,
           color: draft.color,
           after16: draft.after16,
+          // 分類（2026-10-15）。選んでいない書きかけは送らない（サーバーの既定値 {}）
+          ...(draft.categories !== undefined && draft.categories.length > 0 ? { categories: draft.categories } : {}),
         }, { clientKey: ck, ...(draft.ck !== undefined ? { firstSent: draft.firstSent ?? null } : {}) })
         // 応答待ちの間に直した本文・対象・記入者・色（M1）。書きかけの値はクロージャの古い本文ではなく、いまの書きかけから
         if (res === 'queued') {
@@ -4050,8 +4431,9 @@ function DaySheet({
         rebindPick(key, `n${res.id}`)
         saveOk(`n${res.id}`)
       } catch (err) {
-        // 書きかけには確定した本文と、応答待ちの間に直した値が入っている（クロージャの古い本文で上書きしない）
-        setRowStatus(key, { tone: 'danger', text: `▲ ${errText(err)}` })
+        // 書きかけには確定した本文と、応答待ちの間に直した値が入っている（クロージャの古い本文で上書きしない）。
+        // サーバーのロック（0033）で止められた時は「ロック中のため…」（DbError の文言）がそのまま出る
+        setRowStatus(key, { tone: 'danger', text: `▲ ${isNoteLockedError(err) ? NOTE_LOCKED_MESSAGE : errText(err)}` })
         // 画面が閉じた後の拒否: 書きかけの控えの書き戻しは走らないので、その日の控えへ直接残す（第5巡）
         if (!aliveRef.current) {
           const cur = noteDraftsRef.current.find((d) => d.key === key)
@@ -4064,6 +4446,7 @@ function DaySheet({
     [
       day,
       guard,
+      isLockedNow,
       markSelfWrite,
       patchNoteDraft,
       rebindPick,
@@ -4140,6 +4523,11 @@ function DaySheet({
       const note = notes.find((n) => `n${n.id}` === key)
       if (!note) return
       if (!guardNote(key)) return
+      // ロック中の欄の行は消さない（画面は「✕」を出していない。時刻を越えた直後の押し違いの守り・2026-10-15）
+      if (isLockedNow(note.shift, note.after16)) {
+        setRowStatus(key, { tone: 'danger', text: `▲ ${NOTE_LOCKED_MESSAGE}` })
+        return
+      }
       askConfirm({
         title: 'この行を削除しますか',
         body: '削除すると一覧から消えます（記録は復元できません）。よろしければ「削除する」を押してください。',
@@ -4172,36 +4560,11 @@ function DaySheet({
         },
       })
     },
-    [askConfirm, guardNote, markSelfWrite, noteDrafts, notes, patchNote, refreshPendingNotes, setRowStatus, show],
+    [askConfirm, guardNote, isLockedNow, markSelfWrite, noteDrafts, notes, patchNote, refreshPendingNotes, setRowStatus, show],
   )
 
-  const markNoteRead = useCallback(
-    (note: Note) => {
-      const key = `n${note.id}`
-      if (actorId == null) {
-        setRowStatus(key, { tone: 'warn', text: `▲ ${ERR_NO_ACTOR}` })
-        return
-      }
-      void (async () => {
-        try {
-          await markRead(note.id, actorId)
-          touchActivity()
-          // 人数は、読めていた数の時だけ1人足す（読めていない時に「既読 1人」と作らない・F66）
-          patchNote(
-            note.id,
-            typeof note.read_count === 'number' ? { my_read: true, read_count: note.read_count + 1 } : { my_read: true },
-          )
-          // 行には出さない（指示10・成功の一言は行を空けるため出さない）。
-          // 詳細の表示が「✓ 自分は既読」へ変わるうえ、押した直後は短いトーストで知らせる
-          saveOk(key)
-          show('既読にしました')
-        } catch (err) {
-          setRowStatus(key, { tone: 'danger', text: `▲ ${errText(err)}` })
-        }
-      })()
-    },
-    [actorId, patchNote, saveOk, setRowStatus, show],
-  )
+  // 既読にする操作は日報から外した（2026-10-15 本人回答。詳細の窓をやめ、分類の窓には既読を入れない）。
+  // 既読の仕組み（note_reads・タイムラインの既読）は残す
 
   // ── 発熱者・他症状者 ───────────────────────────────────────
 
@@ -5138,6 +5501,14 @@ function DaySheet({
           patchDraftOrRegistration(target.key, { residentId: id, targetPicked: true })
           return
         }
+        // まとめた行（同じ方の記録・2026-10-15）の対象欄: まとめた記録の全部を選び直す（記録ごとに送る）
+        if (target.key.startsWith('gids:')) {
+          const ids = target.key.slice(5).split(',').map(Number)
+          const list = notesRef.current.filter((n) => ids.includes(n.id))
+          if (list.length === 0) show(MSG_PICK_LOST)
+          for (const n of list) void updateNoteCell(n, { resident_id: id })
+          return
+        }
         const note = notesRef.current.find((n) => `n${n.id}` === target.key)
         if (note) void updateNoteCell(note, { resident_id: id })
         // 行き先が見つからない（開いている間に行が保存・削除された）。黙って捨てない
@@ -5229,6 +5600,38 @@ function DaySheet({
   const careNotes = useMemo(() => shownNotes.filter((n) => n.shift === 'daycare'), [shownNotes])
   const nightNotes = useMemo(() => shownNotes.filter((n) => n.shift === 'night'), [shownNotes])
   const noteIdSet = useMemo(() => new Set(notes.map((n) => n.id)), [notes])
+
+  // ── 検索（2026-10-15 仕様 §1）: 記録ごとの比べる文字は記録・名簿が変わった時だけ作る（語を打つたびに作り直さない）。
+  //    対象は本文・対象者の表示名と氏名・記入者名（全体連絡は「スタッフへ（全体）」）
+  const searchHaystacks = useMemo(() => {
+    const m = new Map<number, string>()
+    for (const n of shownNotes) {
+      const r = n.resident_id === null ? undefined : residentById.get(n.resident_id)
+      const target = n.resident_id === null ? 'スタッフへ（全体）' : noteTargetName(r, n.resident_id)
+      const reporter = n.reporter_id === null ? null : (staffById.get(n.reporter_id)?.name ?? null)
+      m.set(n.id, noteSearchText([n.body, target, r?.name, reporter]))
+    }
+    return m
+  }, [shownNotes, residentById, staffById])
+  const searchMatched = useMemo(
+    () => searchMatchedIds(shownNotes, searchHaystacks, searchTerms),
+    [shownNotes, searchHaystacks, searchTerms],
+  )
+  // 分類で抽出の一覧の材料（この日の画面に出している申し送り）を親へ渡す。枠が外れたら外す
+  useEffect(() => {
+    onNotesShown(day, phase === 'ready' ? shownNotes : null)
+  }, [day, onNotesShown, phase, shownNotes])
+  useEffect(() => () => onNotesShown(day, null), [day, onNotesShown])
+
+  /** 欄のロックの表示（lockSig は親が時刻で作る。解除はこの枠の状態） */
+  const lockViewOf = (i: number): NoteLockView => {
+    const x = NOTE_SECTION_ORDER[i]
+    return { locked: lockSig[i] === '1', unlocked: unlocked.has(x.sec), label: lockState(day, x.shift, x.after16).label }
+  }
+  const lockViews = [lockViewOf(0), lockViewOf(1), lockViewOf(2), lockViewOf(3)]
+  /** 〔ロック解除〕（事務所・管理者のログインの時だけ渡す＝現場のログインには DOM にも出さない） */
+  const unlockFor = (i: number): (() => void) | undefined =>
+    canUnlock ? () => toggleUnlock(NOTE_SECTION_ORDER[i].sec) : undefined
 
   const feverRows = useMemo(
     () => buildFeverRows(observations, residentOrder),
@@ -5499,6 +5902,9 @@ function DaySheet({
               title="日勤申し送り"
               tone="note"
               rows={dayNotes}
+              lock={lockViews[0]}
+              onToggleUnlock={unlockFor(0)}
+              matched={searchMatched}
               drafts={noteDrafts.filter((d) => d.shift === 'day' && !d.after16)}
               showReporter
               actorId={actorId}
@@ -5510,7 +5916,6 @@ function DaySheet({
               onPatchDraft={patchDraftOrRegistration}
               onUpdateNote={updateNoteCell}
               onDelete={deleteNoteRow}
-              onMarkRead={markNoteRead}
               pending={pendingNotes}
               onResolve={openNoteResolve}
               onHistory={openNoteHistory}
@@ -5532,6 +5937,9 @@ function DaySheet({
               title="日勤申し送り（16時以降）"
               tone="note"
               rows={lateNotes}
+              lock={lockViews[1]}
+              onToggleUnlock={unlockFor(1)}
+              matched={searchMatched}
               drafts={noteDrafts.filter((d) => d.shift === 'day' && d.after16)}
               showReporter
               actorId={actorId}
@@ -5543,7 +5951,6 @@ function DaySheet({
               onPatchDraft={patchDraftOrRegistration}
               onUpdateNote={updateNoteCell}
               onDelete={deleteNoteRow}
-              onMarkRead={markNoteRead}
               pending={pendingNotes}
               onResolve={openNoteResolve}
               onHistory={openNoteHistory}
@@ -5558,6 +5965,9 @@ function DaySheet({
               title="デイサービス"
               tone="care"
               rows={careNotes}
+              lock={lockViews[2]}
+              onToggleUnlock={unlockFor(2)}
+              matched={searchMatched}
               drafts={noteDrafts.filter((d) => d.shift === 'daycare')}
               showReporter
               actorId={actorId}
@@ -5569,7 +5979,6 @@ function DaySheet({
               onPatchDraft={patchDraftOrRegistration}
               onUpdateNote={updateNoteCell}
               onDelete={deleteNoteRow}
-              onMarkRead={markNoteRead}
               pending={pendingNotes}
               onResolve={openNoteResolve}
               onHistory={openNoteHistory}
@@ -5583,6 +5992,9 @@ function DaySheet({
               title="夜勤申し送り"
               tone="night"
               rows={nightNotes}
+              lock={lockViews[3]}
+              onToggleUnlock={unlockFor(3)}
+              matched={searchMatched}
               drafts={noteDrafts.filter((d) => d.shift === 'night')}
               showReporter={false}
               actorId={actorId}
@@ -5594,7 +6006,6 @@ function DaySheet({
               onPatchDraft={patchDraftOrRegistration}
               onUpdateNote={updateNoteCell}
               onDelete={deleteNoteRow}
-              onMarkRead={markNoteRead}
               pending={pendingNotes}
               onResolve={openNoteResolve}
               onHistory={openNoteHistory}
@@ -5830,16 +6241,20 @@ function DailyTopBar({
   unit,
   onGo,
   onUnit,
+  search,
 }: {
   day: string
   unit: SheetUnit
   onGo: (iso: string) => void
   onUnit: (unit: SheetUnit) => void
+  /** 右端の検索欄と〔分類で抽出〕（表題行に置けない時だけ渡る。畳んでも隠さない＝persistent。畳めない時は操作の行の右端） */
+  search: ReactNode
 }) {
   return (
     <CollapsibleBar
       storageKey={LS.dailyBarOpen}
-      full={() => <DateBar day={day} unit={unit} onGo={onGo} onUnit={onUnit} />}
+      full={(extra) => <DateBar day={day} unit={unit} onGo={onGo} onUnit={onUnit} extra={extra} />}
+      persistent={search ?? undefined}
       collapsed={(compact) => <CollapsedDateBar day={day} onGo={onGo} compact={compact} />}
       openLabel="表示と倍率の操作を開く"
       closeLabel="表示と倍率の操作を畳む"
@@ -5890,11 +6305,14 @@ function DateBar({
   unit,
   onGo,
   onUnit,
+  extra = null,
 }: {
   day: string
   unit: SheetUnit
   onGo: (iso: string) => void
   onUnit: (unit: SheetUnit) => void
+  /** 行の右端に置く表示（検索欄と〔分類で抽出〕・2026-10-15） */
+  extra?: ReactNode
 }) {
   const today = todayIso()
   return (
@@ -5973,6 +6391,7 @@ function DateBar({
       <div className="ml-auto">
         <ZoomBar />
       </div>
+      {extra}
     </div>
   )
 }
@@ -7206,7 +7625,6 @@ interface NoteBlockProps {
   onPatchDraft: (key: string, patch: Partial<NoteDraft>) => void
   onUpdateNote: (note: Note, patch: NotePatch, bases?: Partial<Record<keyof NotePatch, unknown>>) => Promise<void>
   onDelete: (key: string) => void
-  onMarkRead: (note: Note) => void
   /** 送信待ち・止まっている申し送り（行 id → 送信待ち）。行の下に印と〔くらべて選ぶ〕を出す */
   pending: Map<number, PendingNoteRow>
   /** 止まっている申し送りを〔くらべて選ぶ〕で開く */
@@ -7217,8 +7635,20 @@ interface NoteBlockProps {
   onTouch?: (key: string) => void
   /** 枠の外側の余白・区切り線を足したい時だけ渡す（デイサービス欄の .dsheet-gap-block・.dsheet-island、夜勤の .dsheet-sep-block） */
   className?: string
+  /** この欄のロックの状態（2026-10-15 本人回答・仕様 §2） */
+  lock: NoteLockView
+  /** 〔ロック解除〕〔ロックに戻す〕（事務所・管理者のログインの時だけ。現場のログインには渡さない＝ボタンを描かない） */
+  onToggleUnlock?: () => void
+  /** 検索で合った記録の id（null＝絞り込んでいない・仕様 §1） */
+  matched: ReadonlySet<number> | null
 }
 
+/**
+ * 申し送りの欄（2026-10-15 本人回答で列を「対象｜分類｜内容｜記入者｜色」に。詳細列・詳細の窓は外した）。
+ * 同じ日・同じ区分・同じ方（resident_id）の記録は1つの行にまとめて出す（noteGroup.ts。データは1件ずつのまま）。
+ * ロック中の欄は、保存済みの行を読み取り専用にし〔＋行〕を出さない。書きかけ（入力のある行）は消さずに出す
+ * （保存しようとした時に止めて理由を出す）。空の書きかけ行はロック中は出さない（書いても保存できないため）
+ */
 function NoteBlock({
   ctx,
   title,
@@ -7235,64 +7665,97 @@ function NoteBlock({
   onPatchDraft,
   onUpdateNote,
   onDelete,
-  onMarkRead,
   pending,
   onResolve,
   onHistory,
   onTouch,
   className = '',
+  lock,
+  onToggleUnlock,
+  matched,
 }: NoteBlockProps) {
   const count = rows.length
+  // 行の並びは読み込みの並び（時刻→id）のまま。保存した直後の行は末尾にあり、同じ方の行があればそこへ入る（仕様 §4）
+  const groups = useMemo(() => groupNotesByResident(rows, null), [rows])
+  const shown = matched === null ? null : countMatched(rows, matched)
+  const locked = lock.locked && !lock.unlocked
+  // ロック中は保存済みの行を読み取り専用にする（封鎖中と同じ扱い。✕・色・対象・記入者・本文も変えられない）
+  const savedCtx: SheetCtx = locked && !ctx.disabled ? { ...ctx, disabled: true } : ctx
+  // 検索で絞り込んでいる間も空の書きかけ行は出さない（結果の間に空行を挟まない）。〔＋行〕も出さない（足した空行が見えないため）
+  const searching = matched !== null
+  const shownDrafts = visibleNoteDrafts(drafts, locked || searching)
+  // 1行おきの縞は、画面に出している行で数える（検索で隠した行を数えると縞が乱れる）
+  let alt = 0
   return (
     <section aria-label={title} className={className}>
-      {/* 実物のタイトル帯（日付＋ブロック名。配色は指示8） */}
-      <NoteTitleBand day={ctx.day} title={title} tone={tone} count={count} onAdd={onAdd} />
-      {/* 2026-08-31 指示: 件数の列は出さない（件数はタイトル帯にある）。
-          対象を最左端に置き、色は記入者の右・詳細の左へ移す */}
+      {/* 実物のタイトル帯（日付＋ブロック名。配色は指示8）。ロック中は〔＋行〕を出さない */}
+      <NoteTitleBand
+        day={ctx.day}
+        title={title}
+        tone={tone}
+        count={count}
+        shown={shown}
+        onAdd={locked || searching ? undefined : onAdd}
+        lock={lock}
+        onToggleUnlock={onToggleUnlock}
+      />
+      {/* 2026-08-31 指示: 件数の列は出さない（件数はタイトル帯にある）。対象を最左端に置く。
+          2026-10-15 本人回答: 詳細の列を外し、対象の右・内容の左に分類の列（紙も同じ） */}
       <HeadRow className="dsheet-head">
         <HeadCell width="var(--w-target)">対象</HeadCell>
+        <HeadCell width="var(--w-category)">分類</HeadCell>
         <HeadCell grow>内容</HeadCell>
         {showReporter && <HeadCell width="var(--w-reporter)">記入者</HeadCell>}
         <HeadCell width="var(--w-reporter)">色</HeadCell>
-        <HeadCell width="var(--w-reporter)">詳細</HeadCell>
       </HeadRow>
 
-      {rows.map((note, i) => (
-        <NoteRow
-          key={`n${note.id}`}
-          ctx={ctx}
-          rowKey={`n${note.id}`}
-          note={note}
-          draft={null}
-          // 夜勤ブロックの記載内容は赤字の太字（指示15）
-          night={tone === 'night'}
-          // 1行おきの縞（指示16）。保存済みの行 → 追加した行 の並び順で数える
-          alt={altClass(i) !== ''}
-          showReporter={showReporter}
-          actorId={actorId}
-          expanded={expanded === `n${note.id}`}
-          onToggleExpand={onToggleExpand}
-          onCommitBody={onCommitBody}
-          onAbandonBody={onAbandonBody}
-          onPatchDraft={onPatchDraft}
-          onUpdateNote={onUpdateNote}
-          onDelete={onDelete}
-          onMarkRead={onMarkRead}
-          pending={pending}
-          onResolve={onResolve}
-          onHistory={onHistory}
-        />
-      ))}
+      {groups.map((g) => {
+        const hidden = matched !== null && !g.notes.some((n) => matched.has(n.id))
+        const i = hidden ? -1 : alt++
+        const key = g.notes.length > 1 ? g.key : `n${g.notes[0].id}`
+        return (
+          <NoteRow
+            key={g.key}
+            ctx={savedCtx}
+            rowKey={key}
+            group={g}
+            draft={null}
+            // 夜勤ブロックの記載内容は赤字の太字（指示15）
+            night={tone === 'night'}
+            // 1行おきの縞（指示16）。保存済みの行 → 追加した行 の並び順で数える
+            alt={i >= 0 && altClass(i) !== ''}
+            hidden={hidden}
+            matched={matched}
+            showReporter={showReporter}
+            actorId={actorId}
+            expanded={expanded === key}
+            onToggleExpand={onToggleExpand}
+            onCommitBody={onCommitBody}
+            onAbandonBody={onAbandonBody}
+            onPatchDraft={onPatchDraft}
+            onUpdateNote={onUpdateNote}
+            onDelete={onDelete}
+            pending={pending}
+            onResolve={onResolve}
+            onHistory={onHistory}
+            lock={lock}
+          />
+        )
+      })}
 
-      {drafts.map((d, i) => (
+      {shownDrafts.map((d) => (
         <NoteRow
           key={d.key}
-          ctx={ctx}
+          // 送信待ちの登録の行（locked）はロック中は直せない（積んだ変更はサーバーに止められる）。それ以外の書きかけは
+          // ロック中も打てる（入力を消さない。保存しようとした時に止めて理由を出す）
+          ctx={d.locked ? savedCtx : ctx}
           rowKey={d.key}
-          note={null}
+          group={null}
           draft={d}
           night={tone === 'night'}
-          alt={altClass(rows.length + i) !== ''}
+          alt={altClass(alt++) !== ''}
+          hidden={false}
+          matched={null}
           showReporter={showReporter}
           actorId={actorId}
           expanded={expanded === d.key}
@@ -7302,39 +7765,59 @@ function NoteBlock({
           onPatchDraft={onPatchDraft}
           onUpdateNote={onUpdateNote}
           onDelete={onDelete}
-          onMarkRead={onMarkRead}
           pending={pending}
           onResolve={onResolve}
           onHistory={onHistory}
           onTouch={onTouch}
+          lock={lock}
         />
       ))}
     </section>
   )
 }
 
+/** 検索で合った記録の数（表題帯の「n件中m件」の m。記録の件数で数える） */
+function countMatched(rows: readonly Note[], matched: ReadonlySet<number>): number {
+  let m = 0
+  for (const n of rows) if (matched.has(n.id)) m += 1
+  return m
+}
+
+/**
+ * 画面に出す書きかけの行。hideEmpty（ロック中〔解除していない〕・検索で絞り込み中）は、入力のある行と送信待ちの登録の行だけ
+ * （空の行は出さない＝書いても保存できない行・結果の間の空行を置かない。入力のある行は消さない）。それ以外は全部
+ */
+function visibleNoteDrafts(drafts: readonly NoteDraft[], hideEmpty: boolean): NoteDraft[] {
+  if (!hideEmpty) return drafts as NoteDraft[]
+  return drafts.filter((d) => d.locked || noteHasInput(d))
+}
+
 interface NoteRowProps
-  extends Omit<NoteBlockProps, 'title' | 'tone' | 'rows' | 'drafts' | 'onAdd' | 'expanded'> {
+  extends Omit<NoteBlockProps, 'title' | 'tone' | 'rows' | 'drafts' | 'onAdd' | 'expanded' | 'className' | 'onToggleUnlock'> {
   rowKey: string
-  note: Note | null
+  /** 保存済みの行（同じ方の記録をまとめた行。1件だけの行も同じ形）。書きかけの行では null */
+  group: NoteGroupRow | null
   draft: NoteDraft | null
   /** 夜勤申し送りの行（記載内容を赤字の太字にする・指示15） */
   night: boolean
   /** 1行おきの縞を敷く行か（指示16。行の色が付いている行では色を優先する） */
   alt: boolean
-  /** この行の詳細を開いているか（申し送りブロック内で1行だけ開く） */
+  /** 検索で合わなかった行（画面では出さない。紙には出す＝sheet.css の .dsheet-search-hide） */
+  hidden: boolean
+  /** この行の分類の窓を開いているか（申し送りブロック内で1行だけ開く） */
   expanded: boolean
 }
 
 function NoteRow({
   ctx,
   rowKey,
-  note,
+  group,
   draft,
   night,
   alt,
+  hidden,
+  matched,
   showReporter,
-  actorId,
   expanded,
   onToggleExpand,
   onCommitBody,
@@ -7342,21 +7825,29 @@ function NoteRow({
   onPatchDraft,
   onUpdateNote,
   onDelete,
-  onMarkRead,
   pending,
   onResolve,
   onHistory,
   onTouch,
+  lock,
 }: NoteRowProps) {
   // 送信待ちの登録の行（ck あり）は直せる（変更は notes#ck:<ck> に積む）。それ以外の送信待ちの行は直せない
   const disabled = ctx.disabled || (draft?.locked === true && draft.ck === undefined)
-  /** この行の送信待ち・止まった変更（保存済みの行だけ） */
-  const pend = note ? pending.get(note.id) : undefined
-  const color = note ? note.color : (draft?.color ?? null)
-  const residentId = note ? note.resident_id : (draft?.residentId ?? null)
-  const targetPicked = note !== null || (draft?.targetPicked ?? false)
-  const reporterId = note ? note.reporter_id : (draft?.reporterId ?? null)
-  const body = note ? note.body : (draft?.body ?? '')
+  const notes = group?.notes ?? []
+  const first: Note | null = notes[0] ?? null
+  /** 2件以上の記録をまとめた行（内容欄に記録ごとの本文を並べる） */
+  const multi = notes.length > 1
+  const color = first ? first.color : (draft?.color ?? null)
+  const residentId = first ? first.resident_id : (draft?.residentId ?? null)
+  const targetPicked = first !== null || (draft?.targetPicked ?? false)
+  const reporterId = first ? first.reporter_id : (draft?.reporterId ?? null)
+  const categories: NoteCategory[] = group ? group.categories : (draft?.categories ?? [])
+  /** 重要度の印（分類欄の頭に出す。まとめた行は一番重いもの・詳細列を外したので行の上に残す） */
+  const importance = notes.some((n) => n.importance === 'critical')
+    ? 'critical'
+    : notes.some((n) => n.importance === 'important')
+      ? 'important'
+      : 'normal'
 
   const target = residentId === null ? undefined : ctx.residentById.get(residentId)
   const targetText = !targetPicked
@@ -7364,32 +7855,33 @@ function NoteRow({
     : residentId === null
       ? 'スタッフへ（全体）'
       : noteTargetName(target, residentId)
-  /** 表示名を使っている行だけ、詳細の窓にマスタの氏名を添える（本名で確かめられるように） */
+  /** 表示名を使っている行だけ、分類の窓にマスタの氏名を添える（本名で確かめられるように） */
   const targetRealName = target && hasNoteAlias(target) ? target.name : null
   const reporterText = reporterId === null ? '' : staffName(ctx.staffById.get(reporterId), reporterId)
+  const nameOf = (id: number): string | null => ctx.staffById.get(id)?.name ?? null
+  const lines = group ? noteGroupLines(group, nameOf) : []
 
-  const setColor = (c: NoteColor | null) => {
-    if (note) void onUpdateNote(note, { color: c })
+  const setColor = (n: Note | null, c: NoteColor | null) => {
+    if (n) void onUpdateNote(n, { color: c })
     else if (draft) onPatchDraft(draft.key, { color: c })
   }
-
-  // 既読の人数は、数として読めた時だけ出す（F66・2026-10-10。読めなかった＝分からない値を「0人」と断定しない。
-  // 検索・カルテと同じ判定）。行の列の形（✓N／…）と幅は変えない（紙にも出る列）
-  const readCount = typeof note?.read_count === 'number' ? note.read_count : null
-  const detailLabel = note
-    ? readCount === null
-      ? `詳細を開く（${IMPORTANCE_LABEL[note.importance]}・既読の人数は確認できません）`
-      : `詳細を開く（${IMPORTANCE_LABEL[note.importance]}・既読 ${readCount}人）`
-    : '詳細を開く'
+  /** 対象を選ぶ行き先。まとめた行は、まとめた記録の全部の対象を選び直す（行＝その方の記録のため） */
+  const pickTarget = () =>
+    ctx.openResident({ for: 'noteTarget', key: multi ? `gids:${notes.map((n) => n.id).join(',')}` : rowKey })
+  const categoryLabel = `分類 ${categories.length === 0 ? 'なし' : categories.join('・')}${
+    importance === 'normal' ? '' : `・${IMPORTANCE_LABEL[importance]}`
+  }。押すと分類・重要度の窓を開きます`
 
   return (
     // 行の色（NoteColor）を選んである行は、その色をそのまま敷く（指示8の機能を維持）。
-    // 色の無い行だけ1行おきの縞を敷く＝意味のある色が縞に負けない（指示16）
+    // 色の無い行だけ1行おきの縞を敷く＝意味のある色が縞に負けない（指示16）。
+    // まとめた行は記録ごとの色をその本文の地に敷く（行全体には敷かない＝他の記録まで同じ色に見せない）
     <div
-      className={color ? NOTE_COLOR_CLASS[color] : alt ? 'sheet-alt' : undefined}
-      // くらべて選んだ後のフォーカスの戻り先（〔くらべて選ぶ〕は解決すると消えるため）
-      id={note ? `cl-note-row-${ctx.day}-${note.id}` : undefined}
-      tabIndex={note ? -1 : undefined}
+      className={`${color && !multi ? NOTE_COLOR_CLASS[color] : alt ? 'sheet-alt' : ''}${hidden ? ' dsheet-search-hide' : ''}`}
+      // くらべて選んだ後のフォーカスの戻り先（〔くらべて選ぶ〕は解決すると消えるため）。まとめた行は本文ごとに付ける
+      id={first && !multi ? `cl-note-row-${ctx.day}-${first.id}` : undefined}
+      tabIndex={first && !multi ? -1 : undefined}
+      data-note-group={multi ? notes.length : undefined}
       // 書きかけの行の本文を打った＝この行に手を入れた（「書いています」を配るのは手を入れた行だけ・F21。見た目は変わらない）
       onInput={draft !== null && !draft.locked && onTouch !== undefined ? () => onTouch(rowKey) : undefined}
     >
@@ -7397,16 +7889,36 @@ function NoteRow({
         <PickerCell
           width="var(--w-target)"
           text={targetText}
-          label={targetText === '' ? '対象を選ぶ' : `対象 ${targetText}。押すと選び直します`}
-          disabled={disabled}
-          onClick={() => ctx.openResident({ for: 'noteTarget', key: rowKey })}
-          // 対象欄からそのまま行を消せるようにする（詳細の窓まで開かずに済む）。
-          // 保存済みの行は onDelete 側で確認ダイアログを挟む
-          onDelete={() => onDelete(rowKey)}
-          deleteLabel={
-            targetText === '' ? 'この行を削除' : `${targetText}のこの申し送りを削除`
+          label={
+            targetText === ''
+              ? '対象を選ぶ'
+              : multi
+                ? `対象 ${targetText}（${notes.length}件）。押すと${notes.length}件の対象を選び直します`
+                : `対象 ${targetText}。押すと選び直します`
           }
+          disabled={disabled}
+          onClick={pickTarget}
+          // 対象欄からそのまま行を消せるようにする（2026-09-05 指示）。保存済みの行は onDelete 側で確認ダイアログを挟む。
+          // まとめた行は記録ごとに内容欄の「✕」で消す（どの記録を消すかを取り違えない）
+          onDelete={multi ? undefined : () => onDelete(rowKey)}
+          deleteLabel={targetText === '' ? 'この行を削除' : `${targetText}のこの申し送りを削除`}
         />
+        {/* 分類（2026-10-15）。押すと手前に分類の窓（分類・重要度・変更の記録）。ロック中でも開ける（中で押せなくなる） */}
+        <Cell width="var(--w-category)" pad={false} className="flex items-stretch">
+          <button
+            type="button"
+            onClick={() => onToggleExpand(rowKey)}
+            aria-haspopup="dialog"
+            aria-label={categoryLabel}
+            style={ROW_BTN_STYLE}
+            className={`${CELL_HIT} flex w-full flex-wrap items-center gap-[2px] rounded-sm px-1 text-left text-link`}
+          >
+            {/* 記号と文字で状態が分かるようにする（色だけに頼らない） */}
+            {importance !== 'normal' ? <span className="text-ink">{IMPORTANCE_LABEL[importance]}</span> : null}
+            <CategoryChips categories={categories} />
+            {categories.length === 0 && importance === 'normal' ? <span aria-hidden="true">…</span> : null}
+          </button>
+        </Cell>
         {/* 余白は SheetCell 側だけが持つ（対象・記入者と本文の左端をそろえる）。
             夜勤の記載内容は赤字の太字（指示15・sheet.css の .dsheet-night-body）。
             ※ sheet.css は `.dsheet-night-body, .dsheet-night-body *` と**子孫にも当てて**あるので、
@@ -7414,93 +7926,171 @@ function NoteRow({
               詳細度は同じ（クラス1つぶん）で、sheet.css は Tailwind の utilities より後に
               読み込まれる（main.tsx: index.css → App.tsx: sheet.css）＝後勝ちで赤太字になる */}
         <Cell grow pad={false} className={night ? 'dsheet-night-body' : ''}>
-          <SheetCell
-            value={body}
-            onCommit={disabled ? undefined : (v, m) => onCommitBody(rowKey, v, m.base)}
-            // 確定しないまま行が置き換わる・送信待ちで編集できなくなる時の打ちかけを捨てない（修正依頼7）
-            onAbandon={(v, m) => onAbandonBody(rowKey, v, m.base)}
-            width="100%"
-            align="left"
-            multiline
-            placeholder="内容"
-            ariaLabel="申し送りの内容"
-            as="div"
-            // 行の色は外側の div が敷く。既定の tone（不透明な bg-surface）だと
-            // いちばん幅の広い本文セルだけ白く抜けて、行の色が伝わらなくなる
-            tone="row"
-          />
+          {multi ? (
+            // まとめた行: 最初の本文、改行して2件目以降の本文＋「（記入者の姓）」（仕様 §4）。本文は記録ごとに直せる・消せる
+            lines.map((line, i) => {
+              const n = line.note
+              const k = `n${n.id}`
+              const dim = matched !== null && !matched.has(n.id)
+              return (
+                <div
+                  key={n.id}
+                  id={`cl-note-row-${ctx.day}-${n.id}`}
+                  tabIndex={-1}
+                  className={`flex items-start${i > 0 ? ' border-t border-border' : ''}${
+                    n.color ? ` ${NOTE_COLOR_CLASS[n.color]}` : ''
+                  }${dim ? ' dsheet-search-dim' : ''}`}
+                >
+                  <div className="min-w-0 flex-1">
+                    <SheetCell
+                      value={line.body}
+                      onCommit={disabled ? undefined : (v, m) => onCommitBody(k, v, m.base)}
+                      onAbandon={(v, m) => onAbandonBody(k, v, m.base)}
+                      width="100%"
+                      align="left"
+                      multiline
+                      placeholder="内容"
+                      ariaLabel={`申し送りの内容（${i + 1}件目）`}
+                      as="div"
+                      tone="row"
+                    />
+                  </div>
+                  {i > 0 ? (
+                    // 記入者の姓（押すとこの記録の記入者を選び直す）。記入者が無い時は紙には何も出さない
+                    <button
+                      type="button"
+                      disabled={disabled}
+                      onClick={() => ctx.openStaff({ for: 'noteReporter', key: k })}
+                      aria-label={
+                        line.suffix === ''
+                          ? `${i + 1}件目の記入者を選ぶ`
+                          : `${i + 1}件目の記入者 ${nameOf(n.reporter_id ?? -1) ?? ''}。押すと選び直します`
+                      }
+                      style={ROW_BTN_STYLE}
+                      className={`${CELL_HIT} shrink-0 rounded-sm px-1 text-left ${disabled ? 'text-ink2' : 'text-link'}${
+                        line.suffix === '' ? ' print:hidden' : ''
+                      }`}
+                    >
+                      {line.suffix === '' ? <span aria-hidden="true">（—）</span> : line.suffix}
+                    </button>
+                  ) : null}
+                  {!disabled ? (
+                    <button
+                      type="button"
+                      onClick={() => onDelete(k)}
+                      aria-label={`${targetText}の${i + 1}件目の申し送りを削除`}
+                      style={ROW_BTN_STYLE}
+                      className={`${CELL_HIT} shrink-0 rounded-sm px-1 text-ink2 print:hidden`}
+                    >
+                      <span aria-hidden="true">✕</span>
+                    </button>
+                  ) : null}
+                </div>
+              )
+            })
+          ) : (
+            <SheetCell
+              value={first ? first.body : (draft?.body ?? '')}
+              onCommit={disabled ? undefined : (v, m) => onCommitBody(rowKey, v, m.base)}
+              // 確定しないまま行が置き換わる・送信待ちで編集できなくなる時の打ちかけを捨てない（修正依頼7）
+              onAbandon={(v, m) => onAbandonBody(rowKey, v, m.base)}
+              width="100%"
+              align="left"
+              multiline
+              placeholder="内容"
+              ariaLabel="申し送りの内容"
+              as="div"
+              // 行の色は外側の div が敷く。既定の tone（不透明な bg-surface）だと
+              // いちばん幅の広い本文セルだけ白く抜けて、行の色が伝わらなくなる
+              tone="row"
+            />
+          )}
         </Cell>
         {showReporter && (
           <PickerCell
             width="var(--w-reporter)"
             text={reporterText}
-            label={reporterText === '' ? '記入者を選ぶ' : `記入者 ${reporterText}。押すと選び直します`}
+            label={
+              reporterText === ''
+                ? multi
+                  ? '1件目の記入者を選ぶ'
+                  : '記入者を選ぶ'
+                : `${multi ? '1件目の' : ''}記入者 ${reporterText}。押すと選び直します`
+            }
             disabled={disabled}
-            onClick={() => ctx.openStaff({ for: 'noteReporter', key: rowKey })}
+            onClick={() => ctx.openStaff({ for: 'noteReporter', key: first && multi ? `n${first.id}` : rowKey })}
           />
         )}
-        {/* 色は記入者の右・詳細の左（2026-08-31 指示）。
-            封鎖中・送信待ちの行は色も変えられない（同じ行の他のセルと可否をそろえる） */}
-        <Cell width="var(--w-reporter)" className="flex items-center">
-          <ColorPicker value={color} onChange={setColor} ariaLabel="この行の色" disabled={disabled} />
-        </Cell>
-        {/* 余白はボタン（px-1）だけが持つ */}
-        <Cell width="var(--w-reporter)" pad={false} className="flex items-center">
-          <button
-            type="button"
-            onClick={() => onToggleExpand(rowKey)}
-            // 行の下に開く（aria-expanded）のではなく、窓を開くボタンになった
-            aria-haspopup="dialog"
-            aria-label={detailLabel}
-            style={ROW_BTN_STYLE}
-            className={`${CELL_HIT} w-full rounded-sm px-1 text-left text-link`}
-          >
-            {/* 記号と数字で状態が分かるようにする（色だけに頼らない） */}
-            {note && note.importance !== 'normal' ? <span>{IMPORTANCE_LABEL[note.importance]}</span> : null}
-            {note && readCount !== null && readCount > 0 ? <span className="tabular"> ✓{readCount}</span> : null}
-            {!note || (note.importance === 'normal' && (readCount === null || readCount === 0)) ? <span>…</span> : null}
-          </button>
+        {/* 色は記入者の右（2026-08-31 指示）。封鎖中・送信待ち・ロック中の行は色も変えられない。
+            まとめた行は記録ごとの色を縦に並べる（色はその本文の地に敷く） */}
+        <Cell width="var(--w-reporter)" className={multi ? 'flex flex-col justify-start' : 'flex items-center'}>
+          {multi ? (
+            notes.map((n, i) => (
+              <ColorPicker
+                key={n.id}
+                value={n.color}
+                onChange={(c) => setColor(n, c)}
+                ariaLabel={`${i + 1}件目の色`}
+                disabled={disabled}
+              />
+            ))
+          ) : (
+            <ColorPicker value={color} onChange={(c) => setColor(first, c)} ariaLabel="この行の色" disabled={disabled} />
+          )}
         </Cell>
       </Row>
 
-      {/* 送信待ちの登録の行は、画面の一言が無くても送信待ち・止まった印を出す（再読み込みの後も同じ・F1） */}
-      <StatusText status={ctx.status[rowKey] ?? (note ? undefined : registrationMark(draft))} />
+      {/* 送信待ちの登録の行は、画面の一言が無くても送信待ち・止まった印を出す（再読み込みの後も同じ・F1）。
+          まとめた行は記録ごとの一言（行キー n<id>）を出す */}
+      {multi ? (
+        notes.map((n) => <StatusText key={n.id} status={ctx.status[`n${n.id}`]} />)
+      ) : (
+        <StatusText status={ctx.status[rowKey] ?? (first ? undefined : registrationMark(draft))} />
+      )}
 
       {/* 送信待ち・止まっている変更の印（2026-09-29。送信待ちの本文は行に重ねて出している）。
-          止まっている時は〔くらべて選ぶ〕を出す。何も無い行には何も出さない（見た目を変えない） */}
-      {note && pend ? (
-        // 狭い画面でも印と〔くらべて選ぶ〕が画面の中に入るよう、横にずらしても左端に留め、幅を画面に収める
-        <div className="flex flex-wrap items-center gap-gap px-1 py-1 print:hidden" style={NARROW_STICKY}>
-          <span className={`text-sm ${pend.state === 'pending' ? 'text-ink' : 'font-bold text-danger'}`}>
-            {pendingNoteText(pend.state, Object.prototype.hasOwnProperty.call(pend.values, 'deleted_at'), isNoteRpcMissing())}
-          </span>
-          {pend.state !== 'pending' ? (
-            <button
-              type="button"
-              onClick={() => onResolve(note)}
-              className="min-h-tap rounded border border-primary bg-surface px-3 text-base font-bold text-primary"
-            >
-              くらべて選ぶ
-            </button>
-          ) : null}
-        </div>
-      ) : null}
+          止まっている時は〔くらべて選ぶ〕を出す。何も無い行には何も出さない（見た目を変えない）。
+          ロック中の欄で拒否された変更は、ロックの理由を出す（2026-10-15） */}
+      {notes.map((n, i) => {
+        const pend = pending.get(n.id)
+        if (!pend) return null
+        const lockedReject = pend.state === 'rejected' && lock.locked && !lock.unlocked
+        return (
+          // 狭い画面でも印と〔くらべて選ぶ〕が画面の中に入るよう、横にずらしても左端に留め、幅を画面に収める
+          <div key={n.id} className="flex flex-wrap items-center gap-gap px-1 py-1 print:hidden" style={NARROW_STICKY}>
+            <span className={`text-sm ${pend.state === 'pending' ? 'text-ink' : 'font-bold text-danger'}`}>
+              {multi ? `${i + 1}件目: ` : ''}
+              {lockedReject
+                ? `▲ ${NOTE_LOCKED_MESSAGE}`
+                : pendingNoteText(pend.state, Object.prototype.hasOwnProperty.call(pend.values, 'deleted_at'), isNoteRpcMissing())}
+            </span>
+            {pend.state !== 'pending' ? (
+              <button
+                type="button"
+                onClick={() => onResolve(n)}
+                className="min-h-tap rounded border border-primary bg-surface px-3 text-base font-bold text-primary"
+              >
+                くらべて選ぶ
+              </button>
+            ) : null}
+          </div>
+        )
+      })}
 
-      {/* 詳細は行の下に開かず、浮いた窓（フロートウィンドウ）で出す（2026-08-31 指示）。
-          行の下に敷いていた時は下の行と地続きに見え、開いたことが分からなかった */}
+      {/* 分類の窓（2026-10-15 本人回答。詳細の窓を置き換え）。行の中に描く＝.dsheet-body の描画の省略が窓の間は外れる */}
       {expanded && (
-        <NoteDetailModal
+        <NoteCategoryModal
           onClose={() => onToggleExpand(rowKey)}
           ctx={ctx}
-          rowKey={rowKey}
-          note={note}
+          notes={notes}
+          lines={lines}
           draft={draft}
           targetText={targetText}
           targetRealName={targetRealName}
-          actorId={actorId}
+          disabled={disabled}
+          lockedNow={lock.locked && !lock.unlocked}
           onUpdateNote={onUpdateNote}
-          onDelete={onDelete}
-          onMarkRead={onMarkRead}
+          onPatchDraft={onPatchDraft}
           onHistory={onHistory}
         />
       )}
@@ -7509,79 +8099,60 @@ function NoteRow({
 }
 
 /**
- * 申し送りの詳細（フロートウィンドウ・2026-08-31 指示）。
- *
- * なぜ窓にしたか:
- *   行の下に敷いていた頃は、地色が薄いだけで下の行と同じ見た目に見え、
- *   「開いたのかどうか」が分からなかった。背面を覆う窓にして、開閉をはっきりさせる。
- *   共通の器（ui.tsx の ModalShell）を使うので、Esc で閉じる・Tab が窓の中で循環する・
- *   閉じたら元の「詳細」ボタンへフォーカスが戻る、はこの部品で書かなくても効く。
- *
- * 「ボタンを小さく・行数を少なく・幅は狭め」の当て方:
- *   ・幅は narrow（max-w-sm）
- *   ・見出しと中身を横に並べて 6ブロック → 3行に畳む
- *   ・ボタンは**横の余白と文字だけ**を詰める（px-3 text-base → px-2 text-sm）。
- *     ★高さ（min-h-tap＝44px）は縮めない。現場はタブレットの指操作で、
- *       ここを削ると押し損ねが増える＝記録の取り違えにつながるため。
+ * 申し送りの分類の窓（フロートウィンドウ・2026-10-15 本人回答。詳細の窓を置き換えた）。
+ * 中身は 分類の6つ＋〔全て〕・重要度・〔変更の記録〕だけ（既読の人数・職種タグ・行の削除は入れない＝本人回答）。
+ * まとめた行は記録ごとに分類・重要度・変更の記録を出し、記録ごとに〔対象を選び直す〕を添える（1件ずつ直せる）。
+ * 共通の器（ui.tsx の ModalShell）を使うので、Esc で閉じる・Tab が窓の中で循環する・閉じたら分類欄へフォーカスが戻る。
+ * ボタンの高さ（min-h-tap＝44px）は縮めない（現場はタブレットの指操作）
  */
-const DETAIL_BTN = 'min-h-tap shrink-0 rounded-md border px-2 text-sm'
+// max-w-full: 狭い画面・文字200%では文字を折り返して窓の幅に収める（2026-10-15 実測で「n件目の対象を選び直す」がはみ出した）
+const DETAIL_BTN = 'min-h-tap max-w-full shrink-0 rounded-md border px-2 text-sm'
 
-function NoteDetailModal({
+function NoteCategoryModal({
   onClose,
   ctx,
-  rowKey,
-  note,
+  notes,
+  lines,
   draft,
   targetText,
   targetRealName,
-  actorId,
+  disabled,
+  lockedNow,
   onUpdateNote,
-  onDelete,
-  onMarkRead,
+  onPatchDraft,
   onHistory,
 }: {
   onClose: () => void
   ctx: SheetCtx
-  rowKey: string
-  note: Note | null
+  /** 保存済みの記録（まとめた行は2件以上）。書きかけの行は空 */
+  notes: Note[]
+  lines: ReturnType<typeof noteGroupLines>
   draft: NoteDraft | null
-  /** どの行の詳細かを窓の見出しに出す（窓が行を覆うので、取り違えを防ぐ） */
+  /** どの行の窓かを見出しに出す（窓が行を覆うので、取り違えを防ぐ） */
   targetText: string
-  /**
-   * 「申し送りでの表示名」で出している行の、マスタの氏名（設定が無い行は null）。
-   * 窓の中で本名を確かめられるようにする（2026-09-01 指示の取り違え防止）。
-   */
+  /** 「申し送りでの表示名」で出している行の、マスタの氏名（設定が無い行は null・2026-09-01 指示の取り違え防止） */
   targetRealName: string | null
-  actorId: number | null
+  /** 直せない（封鎖中・ロック中・送信待ちの行） */
+  disabled: boolean
+  /** ロック中（解除していない）。押せない理由を出す */
+  lockedNow: boolean
   onUpdateNote: NoteRowProps['onUpdateNote']
-  onDelete: (key: string) => void
-  onMarkRead: (n: Note) => void
+  onPatchDraft: (key: string, patch: Partial<NoteDraft>) => void
   onHistory: (n: Note) => void
 }) {
-  // 既読の人数・自分が読んだかは、読めた時だけ断定する（F66。分からない値を「0人」「未読」と出さない）
-  const readCount = typeof note?.read_count === 'number' ? note.read_count : null
   const who = targetText === '' ? '対象は未選択' : targetText
-
-  // 保存済みの行の削除は確認ダイアログを開く。窓を先に閉じてから渡す
-  // ＝同じ画面に窓が2枚重ならない（重ねると Tab の行き先が2か所に割れる）
-  const requestDelete = () => {
-    onClose()
-    onDelete(rowKey)
-  }
-
+  const multi = notes.length > 1
   return (
-    <ModalShell open onClose={onClose} label={`申し送りの詳細（${who}）`} narrow>
+    <ModalShell open onClose={onClose} label={`申し送りの分類（${who}）`} narrow>
       <div className="flex items-center justify-between gap-gap border-b border-border px-3 py-2">
         <h2 className="min-w-0 flex-1 text-base font-bold text-ink">
           <span className="block truncate">
-            申し送りの詳細
+            申し送りの分類
             <span className="ml-2 text-sm font-normal text-ink2">{who}</span>
           </span>
           {/* 表示名で出している行は、マスタの氏名も添える（本名で確かめられるように） */}
           {targetRealName !== null && (
-            <span className="block truncate text-sm font-normal text-ink2">
-              利用者名 {targetRealName}
-            </span>
+            <span className="block truncate text-sm font-normal text-ink2">利用者名 {targetRealName}</span>
           )}
         </h2>
         <button
@@ -7595,122 +8166,90 @@ function NoteDetailModal({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        {note ? (
-          <div className="space-y-2">
-            {/* 1行目: 重要度 */}
-            <div className="flex flex-wrap items-center gap-gap">
-              <span className="shrink-0 text-sm text-ink2">重要度</span>
-              <div className="min-w-0 flex-1">
-                <SegmentPicker
-                  ariaLabel="重要度"
-                  value={note.importance}
-                  options={(['normal', 'important', 'critical'] as Importance[]).map((v) => ({
-                    value: v,
-                    label: IMPORTANCE_LABEL[v],
-                  }))}
-                  onChange={(v) => {
-                    const imp = v as Importance
-                    void onUpdateNote(note, { importance: imp })
-                  }}
-                />
-              </div>
-            </div>
-
-            {/* 2行目: 職種タグ */}
-            <div className="flex flex-wrap items-center gap-gap">
-              <span className="shrink-0 text-sm text-ink2">職種タグ</span>
-              {ROLE_TAGS.map((tag) => {
-                const on = note.role_tags.includes(tag)
-                return (
-                  <button
-                    key={tag}
-                    type="button"
-                    aria-pressed={on}
-                    disabled={ctx.disabled}
-                    onClick={() => {
-                      const next = on
-                        ? note.role_tags.filter((t) => t !== tag)
-                        : [...note.role_tags, tag]
-                      void onUpdateNote(note, { role_tags: next })
-                    }}
-                    className={`min-h-tap shrink-0 rounded-full border px-2 text-sm ${
-                      on ? 'border-primary bg-primary font-bold text-primary-ink' : 'border-border text-ink'
-                    }`}
-                  >
-                    <span aria-hidden="true">{on ? '✓ ' : ''}</span>
-                    {tag}
-                  </button>
-                )
-              })}
-            </div>
-
-            {/* 3行目: 既読・削除・この行の色 */}
-            <div className="flex flex-wrap items-center gap-gap border-t border-border pt-2">
-              <span className="tabular text-sm text-ink2">
-                {readCount === null ? '既読の人数は確認できません' : `既読 ${readCount}人`}
-              </span>
-              {note.my_read === true ? (
-                <span className="text-sm text-ok">
-                  <span aria-hidden="true">✓ </span>自分は既読
-                </span>
-              ) : note.my_read === undefined && actorId != null ? (
-                // 記録する職員を選んでいるのに、読んだかどうかを読めなかった（通信など）。押させない
-                // （既に読んでいた人が押すと人数を作ってしまう）。記録する職員が未選択の時は従来どおり押せないボタンを出す
-                <span className="text-sm text-ink2">自分の既読は確認できません</span>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => onMarkRead(note)}
-                  disabled={actorId == null}
-                  className={`${DETAIL_BTN} border-primary font-bold text-primary disabled:border-border disabled:text-ink3`}
-                >
-                  既読にする
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={requestDelete}
-                disabled={ctx.disabled}
-                className={`${DETAIL_BTN} border-danger font-bold text-danger disabled:border-border disabled:text-ink3`}
-              >
-                <span aria-hidden="true">▲ </span>この行を削除
-              </button>
-              {note.color && <span className="text-sm text-ink2">色: {NOTE_COLOR_LABEL[note.color]}</span>}
-              {/* この申し送りの変更の記録（2026-09-29・H4。窓を閉じてから開く＝窓を2枚重ねない） */}
-              <button
-                type="button"
-                onClick={() => {
-                  onClose()
-                  onHistory(note)
-                }}
-                className={`${DETAIL_BTN} border-border-strong text-link`}
-              >
-                変更の記録
-              </button>
-            </div>
+        {lockedNow ? (
+          <p className="mb-2 text-sm text-warn">
+            <span aria-hidden="true">🔒 </span>
+            この欄はロック中のため変更できません（事務所で解除できます）。
+          </p>
+        ) : null}
+        {notes.length > 0 ? (
+          <div className="space-y-3">
+            {notes.map((n, i) => {
+              const head = multi ? `${i + 1}件目の` : ''
+              const line = lines[i]
+              return (
+                <div key={n.id} className={`space-y-2${i > 0 ? ' border-t border-border pt-3' : ''}`}>
+                  {multi ? (
+                    <p className="text-sm text-ink">
+                      <span className="font-bold">{i + 1}件目</span>
+                      <span className="ml-2 break-words text-ink2">
+                        {n.body.length > 40 ? `${n.body.slice(0, 40)}…` : n.body}
+                        {line?.suffix ?? ''}
+                      </span>
+                    </p>
+                  ) : null}
+                  {/* 分類（6つ＋〔全て〕。複数選べる） */}
+                  <CategoryToggles
+                    value={n.categories ?? []}
+                    disabled={disabled}
+                    label={head}
+                    onChange={(next) => void onUpdateNote(n, { categories: next })}
+                  />
+                  {/* 重要度（見出しは上に置く＝狭い画面・文字200%でもボタンが窓の幅に収まる） */}
+                  <div className="space-y-1">
+                    <span className="block text-sm text-ink2">重要度</span>
+                    <ImportanceToggles
+                      value={n.importance}
+                      disabled={disabled}
+                      label={head}
+                      onChange={(imp) => void onUpdateNote(n, { importance: imp })}
+                    />
+                  </div>
+                  <div className="flex flex-wrap items-center gap-gap">
+                    {/* この申し送りの変更の記録（2026-09-29・H4。窓を閉じてから開く＝窓を2枚重ねない） */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onClose()
+                        onHistory(n)
+                      }}
+                      className={`${DETAIL_BTN} border-border-strong text-link`}
+                    >
+                      {head}変更の記録
+                    </button>
+                    {multi ? (
+                      // まとめた行の記録ごとの対象（1件だけ別の方へ付け替える。行の対象欄はまとめた全部を選び直す）
+                      <button
+                        type="button"
+                        disabled={disabled}
+                        onClick={() => {
+                          onClose()
+                          ctx.openResident({ for: 'noteTarget', key: `n${n.id}` })
+                        }}
+                        className={`${DETAIL_BTN} border-border-strong text-link disabled:text-ink3`}
+                      >
+                        {head}対象を選び直す
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              )
+            })}
           </div>
-        ) : (
+        ) : draft ? (
           <div className="space-y-2">
+            <CategoryToggles
+              value={draft.categories ?? []}
+              // 送信待ちの登録の行（ck あり）は登録後の変更として積む（呼び手の onPatchDraft が振り分ける）
+              disabled={disabled}
+              onChange={(next) => onPatchDraft(draft.key, { categories: next })}
+            />
             <p className="text-sm text-ink2">
               <span aria-hidden="true">ⓘ </span>
-              この行はまだ保存されていません。重要度・職種タグ・既読は保存後に設定できます。
+              この行はまだ保存されていません。分類は保存の時に一緒に送ります。重要度・変更の記録は保存後に使えます。
             </p>
-            {draft?.locked ? (
-              <p className="text-sm text-warn">
-                <span aria-hidden="true">▲ </span>
-                {MSG_LOCKED_DELETE}
-              </p>
-            ) : null}
-            <button
-              type="button"
-              onClick={requestDelete}
-              disabled={draft?.locked ?? false}
-              className={`${DETAIL_BTN} border-border-strong text-ink disabled:border-border disabled:text-ink3`}
-            >
-              この行を取り消す
-            </button>
           </div>
-        )}
+        ) : null}
       </div>
     </ModalShell>
   )

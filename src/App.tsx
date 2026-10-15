@@ -1217,6 +1217,12 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
               <span className="truncate text-sm text-ink2">{facility}</span>
             )}
           </div>
+          {/* 日報の検索欄と〔分類で抽出〕の置き場（2026-10-15 本人回答「表題行の右端に検索欄」）。中身は日報の画面が
+              ここへ描く（DailySheetPage の createPortal）。日報以外の画面では置かない。紙には出さない */}
+          {/* 狭い画面（640px 未満）では1行を取る（見出しの横に詰めると、見出しが縮んで検索欄と重なった・2026-10-15 実測） */}
+          {location.pathname === '/' && (
+            <div id="cl-daily-header-slot" className="flex min-w-0 basis-full items-center sm:basis-auto print:hidden" />
+          )}
           {/* 表示倍率（100/125/150%）は各シート画面の操作バー側に1つだけ置く
               （契約 §5〜§7）。ヘッダにも出すと ZoomBar が同一画面に2つ並び、
               片方で切り替えても他方は選択表示が変わらず「現在の倍率」が食い違うため */}

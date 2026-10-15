@@ -1144,7 +1144,8 @@ if (DB === null) {
 
     it('F1: 送信待ちの登録の行は、画面の一言が無くても（再読み込みの後も）送信待ち・止まった印を出す', () => {
       const src = read('pages/DailySheetPage.tsx')
-      assert.match(src, /<StatusText status=\{ctx\.status\[rowKey\] \?\? \(note \? undefined : registrationMark\(draft\)\)\} \/>/)
+      // 2026-10-15: 行は同じ方の記録をまとめた形（first＝まとめた最初の記録。書きかけの行では null）
+      assert.match(src, /<StatusText status=\{ctx\.status\[rowKey\] \?\? \(first \? undefined : registrationMark\(draft\)\)\} \/>/)
       assert.match(src, /regState: op\.state/)
     })
 

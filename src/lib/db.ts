@@ -70,6 +70,7 @@ import type {
 } from './types'
 import { validateNoteAlias } from './types'
 import { rememberCreatedAt } from './nextMorning'
+import { isNoteCategory, normalizeCategories } from './noteCategory'
 import {
   BATH_CANCEL_REASONS,
   BATH_RESULTS,
@@ -176,8 +177,9 @@ const MEAL_COLS = 'id,resident_id,meal_on,meal_slot,main_amount,side_amount,stat
 const FLUID_COLS = 'id,resident_id,taken_on,taken_at,amount_ml,kind,recorded_by,rev,created_at'
 // ended_by（継続を終了した職員・0001 からある列）は F08（2026-10-10）で読むようにした。〔くらべて選ぶ〕の基準と表示が
 // 「未入力」のままだと、2台目の終了が何度送っても競合のまま終わらなかったため
+// categories（分類・0032）は 2026-10-15 に足した。**0032 を当ててからこの版を公開する**（当てる前は列が無く読めない）
 const NOTE_COLS =
-  'id,note_on,shift,facility,category,resident_id,role_tags,importance,body,occurred_at,ongoing,ended_at,ended_by,reporter_id,color,after16,rev,created_at'
+  'id,note_on,shift,facility,category,resident_id,role_tags,categories,importance,body,occurred_at,ongoing,ended_at,ended_by,reporter_id,color,after16,rev,created_at'
 const OUTING_COLS = 'id,resident_id,kind,start_on,start_at,end_on,end_at,companion,note,recorded_by,rev'
 const ATTENDANCE_COLS = 'day,staff_id,role,sort'
 const IMPORT_DAY_COLS = 'source,day,imported_at,src_rows,inserted,updated,skipped,native_skip,unmatched'
@@ -230,6 +232,7 @@ export type DbErrorKind =
   | 'network' // 通信できない
   | 'server' // サーバー側で拒否された（制約違反など）
   | 'forbidden' // このアカウントは記録アプリを使えない（許可リストに無い・無効。403 / 42501・F61）
+  | 'locked' // 申し送りの欄が時間でロック中（0033 のトリガ・P0001 'note_locked: …'。事務所のログインで解除できる）
 
 /** 画面にそのまま出せる日本語メッセージ（何が起きたか＋次にどうすればよいか）を持つエラー */
 export class DbError extends Error {
@@ -278,6 +281,7 @@ const MSG = {
     'このアカウントでは記録アプリを使えません（許可リストに無い、または無効になっています）。施設の Google アカウントでログインし直すか、管理者に連絡してください。',
   outdated:
     'この端末のアプリは古い版のため、記録できません（記録の形が新しくなりました）。〔更新〕を押して新しい版にしてください。送れていない記録は端末に残っていて、更新した後に送られます。',
+  noteLocked: 'ロック中のため保存できませんでした（事務所で解除できます）',
 } as const
 
 /** 許可リスト外のアカウントへの案内（F61。画面が入力解禁の forbidden を受けた時に出す） */
@@ -285,6 +289,21 @@ export const FORBIDDEN_REASON: string = MSG.forbidden
 
 /** 古い版の端末への案内（F28③。入力解禁の outdated・書込の入口で止めた時に出す） */
 export const OUTDATED_REASON: string = MSG.outdated
+
+/** 申し送りの欄がロック中でサーバーに止められた時の案内（0033・DbError の kind 'locked' の文言） */
+export const NOTE_LOCKED_MESSAGE: string = MSG.noteLocked
+
+/**
+ * サーバーのロック（0033 のトリガ）で止められた時に、このモジュールの中で使う印のコード。
+ * SQLSTATE は P0001（plpgsql の raise の既定）で、他の raise と見分けるため message の先頭 'note_locked:' と組で判定し、
+ * 判定できたらこのコードに置き換えて持ち回る（送信待ちの止まった記録 StoppedOp.errCode にもこの値が入る）
+ */
+export const NOTE_LOCKED_CODE = 'note_locked'
+
+/** 例外がサーバーのロック（0033）で止められたことを表すか（画面が文言・表示を出し分ける時に使う） */
+export function isNoteLockedError(e: unknown): boolean {
+  return e instanceof DbError && e.kind === 'locked'
+}
 
 function serverMsg(action: '読み込め' | '保存でき' | '操作でき', code: string): string {
   const tail = code === '' ? '' : `（コード: ${code}）`
@@ -297,6 +316,8 @@ function serverMsg(action: '読み込め' | '保存でき' | '操作でき', cod
  * 再ログインの導線（fireAuthExpired）へは回さない（同じアカウントで入り直しても直らず、送り直しを繰り返すため）
  */
 function rejectError(action: '読み込め' | '保存でき' | '操作でき', code: string, status = 0): DbError {
+  // 時間によるロック（0033）。errCode が P0001＋'note_locked:' を NOTE_LOCKED_CODE に置き換えて渡してくる
+  if (code === NOTE_LOCKED_CODE) return new DbError('locked', MSG.noteLocked)
   if (status === 403 || code === '42501') return new DbError('forbidden', MSG.forbidden)
   return new DbError('server', serverMsg(action, code))
 }
@@ -309,7 +330,17 @@ interface Res<T> {
 }
 
 function errCode(res: Res<unknown>): string {
+  if (isNoteLockedRes(res)) return NOTE_LOCKED_CODE
   return typeof res.error?.code === 'string' ? res.error.code : ''
+}
+
+/**
+ * サーバーの時間によるロック（0033 の notes_lock_guard）で止められた応答か。SQLSTATE P0001 と message の先頭
+ * 'note_locked:' の組で見分ける（P0001 だけでは他の raise と区別できない）
+ */
+function isNoteLockedRes(res: Res<unknown>): boolean {
+  const e = res.error
+  return e !== null && e.code === 'P0001' && typeof e.message === 'string' && e.message.startsWith('note_locked:')
 }
 
 /** ログインの有効期限切れ・未ログイン（401 / PGRST30x） */
@@ -479,6 +510,10 @@ function fireAuthExpired(): void {
 
 /** ログインの出来事を受けて送り直す（attachAuthWatch と試験の差し込み口から呼ぶ） */
 async function onAuthEvent(event: string): Promise<void> {
+  // ログインし直した・抜けた・二段階認証を済ませた: 控えた役割を捨てる（次の fetchMyRole で取り直す。2026-10-15）
+  if (event === 'SIGNED_IN' || event === 'SIGNED_OUT' || event === 'USER_UPDATED' || event === 'MFA_CHALLENGE_VERIFIED') {
+    forgetMyRole()
+  }
   if (event !== 'SIGNED_IN' && event !== 'TOKEN_REFRESHED') return
   // ログインし直した: 拒否で止まった退避 op を1回だけ送り直す（F37。権限が直った後なら届く。TOKEN_REFRESHED では解かない）。
   // 許可リスト外の印（F61）も外す（別のアカウントで入り直した。次の入力解禁の確認で確かめ直す）
@@ -497,6 +532,98 @@ function attachAuthWatch(sb: SupabaseClient): void {
   sb.auth.onAuthStateChange((event) => {
     void onAuthEvent(event)
   })
+}
+
+// ── ログインの役割（care-backend の public.my_account()・2026-10-15） ─────────────
+//
+// 申し送りのロックの解除ボタン（事務所・管理者だけ）を出すかに使う。役割の正本は care-backend の allowed_accounts.role
+// （admin は二段階認証でない時 office に丸める＝サーバーが済ませて返す。端末では判定し直さない）。
+// care-log の移行は my_account を作らない（care-backend の正本と衝突させない）。関数が無い・読めない・許可リスト外は
+// null（＝役割不明。画面は現場と同じ扱い＝解除ボタンを出さない）。
+// 控えはメモリだけ（localStorage に書かない）。起動中は1回だけ問い合わせ、ログインし直し（SIGNED_IN 等）で捨てて取り直す。
+// 通信できない・ログインの期限切れの時は控えずに null を返す（次に呼ばれた時にもう一度問い合わせる）。
+
+/** ログインの役割（care-backend の allowed_accounts.role） */
+export type MyRole = 'admin' | 'office' | 'field'
+const MY_ROLES: readonly MyRole[] = ['admin', 'office', 'field']
+/** 控えた役割（undefined＝まだ問い合わせていない・捨てた） */
+let myRoleCache: MyRole | null | undefined = undefined
+let myRoleInFlight: Promise<MyRole | null> | null = null
+/** 捨てた回数（問い合わせ中に捨てられた時、古い応答で控えを書かない） */
+let myRoleEpoch = 0
+const myRoleSubs = new Set<() => void>()
+/** 役割の問い合わせの応答待ちの上限（ms。待ち続けて画面の判定を止めない） */
+const MY_ROLE_TIMEOUT_MS = 10_000
+
+/**
+ * いまのログインの役割（'admin'|'office'|'field'）。分からない時は null（関数が無い・許可リスト外・読めない・通信できない）。
+ * 起動中は控えた値を返す（ログインし直すと取り直す）。例外は投げない
+ */
+export async function fetchMyRole(): Promise<MyRole | null> {
+  if (myRoleCache !== undefined) return myRoleCache
+  if (myRoleInFlight !== null) return myRoleInFlight
+  const epoch = myRoleEpoch
+  const keep = (role: MyRole | null): MyRole | null => {
+    if (epoch === myRoleEpoch) myRoleCache = role
+    return role
+  }
+  const run: Promise<MyRole | null> = (async (): Promise<MyRole | null> => {
+    try {
+      const sb = await getClient()
+      const res = await withTimeout(
+        () => sb.rpc('my_account') as unknown as PromiseLike<Res<unknown>>,
+        MY_ROLE_TIMEOUT_MS,
+      )
+      if (res.error !== null) {
+        // 通信できない・ログインの期限切れ・控えが無い間は控えない（後でもう一度問い合わせる）
+        if (isTransient(res) || isAuthFail(res) || (await sessionMissing(sb))) return null
+        // 関数が無い（care-backend の土台が無い DB）・権限が無いなど＝役割不明として控える
+        return keep(null)
+      }
+      // 許可リスト外は null が返る。ログインの控えが無い（anon で出た）時は控えない
+      if (res.data === null && (await sessionMissing(sb))) return null
+      return keep(oneOf(asRecord(res.data)?.role, MY_ROLES))
+    } catch {
+      return null
+    } finally {
+      // 同じ回（捨てられていない）の問い合わせは1本だけなので、それを外す（捨てた後の新しい問い合わせは外さない）
+      if (epoch === myRoleEpoch) myRoleInFlight = null
+    }
+  })()
+  myRoleInFlight = run
+  return run
+}
+
+/** 控えた役割をすぐ返す（まだ問い合わせていない・捨てた後は undefined。描画中に待たずに読む時に使う） */
+export function cachedMyRole(): MyRole | null | undefined {
+  return myRoleCache
+}
+
+/** 控えた役割を捨てる（ログインし直した時に db.ts が呼ぶ。画面から呼んでもよい）。購読者に知らせる */
+export function forgetMyRole(): void {
+  myRoleEpoch += 1
+  myRoleCache = undefined
+  myRoleInFlight = null
+  for (const cb of myRoleSubs) {
+    try {
+      cb()
+    } catch {
+      // 購読側の例外でデータアクセス層を巻き込まない
+    }
+  }
+}
+
+/** 役割の控えが捨てられた（ログインし直した）時に呼ばれる。画面はここで fetchMyRole を呼び直す。戻り値で購読をやめる */
+export function subscribeMyRole(cb: () => void): () => void {
+  myRoleSubs.add(cb)
+  return () => {
+    myRoleSubs.delete(cb)
+  }
+}
+
+/** 役割が事務所以上（ロックの解除ボタンを出してよい）か。null（分からない）は現場と同じ扱い＝false */
+export function canUnlockNotes(role: MyRole | null | undefined): boolean {
+  return role === 'office' || role === 'admin'
 }
 
 // ── 受信データの正規化（multi-device-sync 原則10: 受信データを信じない） ──────
@@ -691,6 +818,11 @@ function normalizeNote(row: unknown): Note | null {
   // 継続を終了した職員（F08）。列を返さない経路（0017 の応答・タイムラインの RPC）では付けない＝「分からない」。
   // 分からないのに null を基準にして送ると、自分で競合を作るため（null と区別する）
   if (Object.prototype.hasOwnProperty.call(r, 'ended_by')) note.ended_by = idNum(r.ended_by)
+  // 分類（0032）。列を返さない経路（タイムラインの RPC）では付けない＝分からない（[] は「分類なし」）。
+  // 6値以外の要素は捨てる（サーバーの check があるので通常は来ない。読めない値で行ごと落とさない）
+  if (Object.prototype.hasOwnProperty.call(r, 'categories')) {
+    note.categories = normalizeCategories(Array.isArray(r.categories) ? r.categories.filter(isNoteCategory) : []) ?? []
+  }
   return note
 }
 
@@ -1136,7 +1268,7 @@ export type CellTable = 'vitals' | 'meals'
  * 申し送りの行キーは notes#<id>（既にある行の変更・取り消しだけ。新規登録は従来の insert・client_key の経路）
  */
 type RowTable = CellTable | 'notes'
-/** 申し送りで送れる欄（0017 apply_note_edits の許可リストから取り消し deleted_at を除いたもの） */
+/** 申し送りで送れる欄（0017 apply_note_edits の許可リストから取り消し deleted_at を除いたもの。categories は 0032） */
 export type NoteEditField =
   | 'body'
   | 'resident_id'
@@ -1146,11 +1278,12 @@ export type NoteEditField =
   | 'occurred_at'
   | 'reporter_id'
   | 'role_tags'
+  | 'categories'
   | 'shift'
   | 'ongoing'
   | 'ended_at'
   | 'ended_by'
-/** 0017 の許可リスト（取り消し deleted_at を含む。deleted_at の基準は「見た本文」） */
+/** 0017 の許可リスト（取り消し deleted_at を含む。deleted_at の基準は「見た本文」。categories は 0032） */
 const NOTE_CELL_FIELDS: readonly string[] = [
   'body',
   'resident_id',
@@ -1160,6 +1293,7 @@ const NOTE_CELL_FIELDS: readonly string[] = [
   'occurred_at',
   'reporter_id',
   'role_tags',
+  'categories',
   'shift',
   'ongoing',
   'ended_at',
@@ -1597,6 +1731,9 @@ function cellValueOf(field: string, v: unknown): CellValue | undefined {
     }
     case 'role_tags':
       return Array.isArray(v) && v.every((t) => typeof t === 'string') ? [...(v as string[])] : undefined
+    // 分類（0032）: 6値だけ・NOTE_CATEGORIES の並び・重複なしにそろえる（6値以外が混ざれば読めない値）
+    case 'categories':
+      return normalizeCategories(v) ?? undefined
     case 'ended_at':
     case 'deleted_at':
       return typeof v === 'string' && !Number.isNaN(Date.parse(v)) ? v : undefined
@@ -1794,7 +1931,7 @@ function normalizeCellEntry(raw: unknown): { rowKey: string; entry: CellEntry } 
   return { rowKey: cellRowKey(table, key), entry }
 }
 
-/** 取り消しの「見た行」に書ける欄（deleted_at を除く申し送りの欄。0027 の c_seen_fields と同じ） */
+/** 取り消しの「見た行」に書ける欄（deleted_at を除く申し送りの欄。0027 の c_seen_fields と同じ＋0032 の categories） */
 const NOTE_SEEN_FIELD_LIST = [
   'body',
   'resident_id',
@@ -1804,6 +1941,7 @@ const NOTE_SEEN_FIELD_LIST = [
   'occurred_at',
   'reporter_id',
   'role_tags',
+  'categories',
   'shift',
   'ongoing',
   'ended_at',
@@ -1812,9 +1950,11 @@ const NOTE_SEEN_FIELD_LIST = [
 const NOTE_SEEN_FIELDS: readonly string[] = NOTE_SEEN_FIELD_LIST
 /**
  * 端末が取り消しの「見た行」として送る欄（F09）。画面で見分けられ、変わっていたら消してはいけない欄に絞る
- * （記入者・職種・区分・時刻・16時以降・終了者まで照らすと、見えない理由で止まる件が増える）。サーバー（0027）は12欄すべてを受ける
+ * （記入者・職種・区分・時刻・16時以降・終了者まで照らすと、見えない理由で止まる件が増える）。サーバー（0027）は12欄すべてを受ける。
+ * 分類（categories・0032）は日報の分類欄に出る＝見分けられる欄なので照らす（2026-10-15。他の端末が分類だけを変えた後の
+ * 古い表示から消さない）。列を返さない経路（タイムラインの RPC）の行は categories が undefined＝照らさない（noteSeenInput）
  */
-const NOTE_SEEN_SENT: readonly string[] = ['body', 'resident_id', 'importance', 'color', 'ongoing', 'ended_at']
+const NOTE_SEEN_SENT: readonly string[] = ['body', 'resident_id', 'importance', 'color', 'categories', 'ongoing', 'ended_at']
 
 /**
  * 取り消しの「見た行」（F09）を検め直す。read は1欄の値の読み方（画面から＝cellValueOf・保存先から＝storedCellValue）。
@@ -3240,7 +3380,9 @@ async function sendDueOps(sb: SupabaseClient, force: boolean, boost = false): Pr
       // 回数は拒否だけを数える（F31。通信不能で増えた tries を拒否の上限に使わない）
       op.rejects = (op.rejects ?? 0) + 1
       if (lastSendCode !== '') op.errCode = lastSendCode
-      if (op.rejects >= MAX_TRIES) op.blocked = 'rejected'
+      // 時間によるロック（0033）は待っても解けない（事務所が解除して保存し直すまで）。自動の送り直しで回さず、その場で
+      // 止まった記録にする（消さない。送れていない記録の一覧に残る）
+      if (op.rejects >= MAX_TRIES || lastSendCode === NOTE_LOCKED_CODE) op.blocked = 'rejected'
       else op.nextAt = Date.now() + backoff(op.tries)
     } else {
       // 通信不能・認証切れ: 回数では諦めず、間隔だけ広げて待つ
@@ -6417,7 +6559,7 @@ export async function deleteNote(
 
 /**
  * 取り消しの「見た行」（F09）。画面に出ていた行（Note や RPC の行）をそのまま渡してよい。照らすのは画面で見分けられる欄
- * （本文・対象・重要度・色・継続・終了時刻＝NOTE_SEEN_SENT）で、行に無い欄（undefined）は照らさない
+ * （本文・対象・重要度・色・分類・継続・終了時刻＝NOTE_SEEN_SENT）で、行に無い欄（undefined）は照らさない
  */
 export type NoteSeenRow = { body: string } & { [K in (typeof NOTE_SEEN_FIELD_LIST)[number]]?: unknown }
 
@@ -6533,6 +6675,8 @@ export interface QueuedNoteInsert {
   qid: string
   /** pending＝送信待ち（電波が戻れば送る）／rejected＝サーバーに受け付けられず自動の再送を止めた／conflict＝止まった */
   state: 'pending' | 'conflict' | 'rejected'
+  /** 時間によるロック（0033）で止められた登録か（rejected の理由。画面は「ロック中のため…」を出す） */
+  locked: boolean
   note_on: string | null
   shift: Shift | null
   resident_id: number | null
@@ -6580,6 +6724,7 @@ export function listUnsentNotes(): UnsentNote[] {
       op: {
         qid: op.qid,
         state: op.blocked ?? 'pending',
+        locked: op.errCode === NOTE_LOCKED_CODE,
         note_on: dateStr(p.note_on),
         shift: oneOf(p.shift, SHIFTS),
         resident_id: idNum(p.resident_id),
@@ -7028,7 +7173,7 @@ export async function softDeleteFluid(
 // ── 申し送り ─────────────────────────────────────────────────────────────────
 
 /** 登録で送った欄のうち、登録の後に書きかけで直せる欄の値（「その冪等キーで最初に送った中身」を画面の控えに持つ形・R6-3） */
-export type NoteFirstSent = Partial<Record<'body' | 'resident_id' | 'reporter_id' | 'color', unknown>>
+export type NoteFirstSent = Partial<Record<'body' | 'resident_id' | 'reporter_id' | 'color' | 'categories', unknown>>
 
 /**
  * 申し送りの新規登録。opts.clientKey を渡すと、その冪等キーで送る（画面が同じ行の登録を後から直す＝
@@ -7042,10 +7187,14 @@ export async function insertNote(
 ): Promise<Note | Queued> {
   if (n.body.trim() === '') throw new DbError('server', MSG.emptyBody)
   const given = opts?.clientKey
+  // 分類（0032）は6値の並び・重複なしにそろえて送る（6値以外は捨てる。省いた時は送らない＝サーバーの既定値 '{}'）
+  const src: Record<string, unknown> = { ...(n as unknown as Record<string, unknown>) }
+  if (src.categories === undefined) delete src.categories
+  else src.categories = regValue(src, 'categories')
   const payload =
     typeof given === 'string' && given !== ''
-      ? { ...cleanPayload(n as unknown as Record<string, unknown>), client_key: given }
-      : withClientKey(n as unknown as Record<string, unknown>)
+      ? { ...cleanPayload(src), client_key: given }
+      : withClientKey(src)
   const ckRaw = str(payload.client_key)
   if (ckRaw === null || ckRaw === '') return insertRow('notes', payload, normalizeNote)
   const ck = ckRaw
@@ -7078,9 +7227,11 @@ async function insertNoteUnderKey(
     // 別のタブの登録を見ていない入力は〔くらべて選ぶ〕に出る・R6(B)・R6-1）
     const edits: CellEditInput<NoteEditField> = {}
     for (const f of NOTE_REG_FIELDS) {
-      const v = payload[f] ?? null
-      if (sameValue(v, queued.payload[f])) continue
-      edits[f] = { value: v, base: first !== undefined ? (first[f] ?? null) : null }
+      // 分類を送らない登録（旧い呼び方）は、分類の食い違いを作らない
+      if (f === 'categories' && !(f in payload)) continue
+      const v = regValue(payload, f)
+      if (sameValue(v, regValue(queued.payload, f))) continue
+      edits[f] = { value: v, base: first !== undefined ? regValue(first, f) : null }
     }
     if (Object.keys(edits).length > 0) {
       const ok = await stageNoteEdits({ clientKey: ck }, edits, { meta: noteMetaOfPayload(payload) })
@@ -7102,7 +7253,7 @@ async function insertNoteUnderKey(
 let noteInsertTimeoutMs = 20_000
 
 /** 登録の後に書きかけで直せる欄（同じ冪等キーの登録どうしの食い違いを比べる欄・R6） */
-const NOTE_REG_FIELDS = ['body', 'resident_id', 'reporter_id', 'color'] as const
+const NOTE_REG_FIELDS = ['body', 'resident_id', 'reporter_id', 'color', 'categories'] as const
 /** この端末が冪等キーごとに最初に送った登録の中身（食い違いの基準に使う。メモリだけ・R6） */
 const firstSentNote = new Map<string, Record<string, unknown>>()
 function rememberNoteSent(ck: string, payload: Record<string, unknown>): void {
@@ -7110,6 +7261,14 @@ function rememberNoteSent(ck: string, payload: Record<string, unknown>): void {
 }
 function sameValue(a: unknown, b: unknown): boolean {
   return JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
+}
+/**
+ * 登録の中身の1欄の値（食い違いを比べる形）。分類（0032）は6値の並びにそろえ、無い時は []（登録で送らなければ
+ * サーバーの既定値 '{}' で入る＝「分類なし」と同じ。null を基準にすると偽の競合になる）。ほかの欄は無ければ null
+ */
+function regValue(src: Record<string, unknown>, f: (typeof NOTE_REG_FIELDS)[number]): unknown {
+  if (f === 'categories') return normalizeCategories(Array.isArray(src[f]) ? (src[f] as unknown[]).filter(isNoteCategory) : []) ?? []
+  return src[f] ?? null
 }
 function noteMetaOfPayload(p: Record<string, unknown>): NoteMeta {
   return {
@@ -7134,9 +7293,9 @@ async function stageNoteDupDiff(
   const edits: CellEditInput<NoteEditField> = {}
   for (const f of NOTE_REG_FIELDS) {
     if (!(f in payload)) continue
-    const v = payload[f] ?? null
-    if (sameValue(v, row[f])) continue
-    const b = first !== undefined ? (first[f] ?? null) : null
+    const v = regValue(payload, f)
+    if (sameValue(v, regValue(row, f))) continue
+    const b = first !== undefined ? regValue(first, f) : null
     if (first !== undefined && sameValue(v, b)) continue
     edits[f] = { value: v, base: b }
   }
@@ -9980,6 +10139,10 @@ export const __testHooks = import.meta.env?.PROD === true ? undefined : {
     // 差し替えは「別の起動」とみなし、起動単位の状態（操作者・edited_by 列が無い印）を初期化する
     editorId = null
     editedByUnsupported = false
+    // ログインの役割の控え（2026-10-15）も起動単位なので捨てる（購読者には知らせない）
+    myRoleEpoch += 1
+    myRoleCache = undefined
+    myRoleInFlight = null
     const state = opts?.cellRpc === undefined ? 'ready' : opts.cellRpc
     cellRpcState = sb === null ? null : state
     cellRpcCheckedAt = sb === null || state === null ? 0 : Date.now()

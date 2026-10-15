@@ -806,6 +806,8 @@ const NOTE_FIELD_NAME: Record<string, string> = {
   occurred_at: '時刻',
   reporter_id: '記入者',
   role_tags: '職種タグ',
+  // 申し送りの分類（体調・食事など・0032・2026-10-15）
+  categories: '分類',
   shift: '勤務帯',
   ongoing: '継続',
   ended_at: '継続の終了',
@@ -870,6 +872,7 @@ function noteValueText(
     case 'ongoing':
       return v === true ? 'はい' : 'いいえ'
     case 'role_tags':
+    case 'categories':
       return Array.isArray(v) && v.length > 0 ? v.join('・') : 'なし'
     case 'occurred_at':
       return fmtTimeValue(v)

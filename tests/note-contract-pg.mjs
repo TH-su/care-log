@@ -1,4 +1,4 @@
-// tests/note-contract.mjs の表を、素の Postgres（0001〜0011・0017・0027 適用済み）で流す実行器。
+// tests/note-contract.mjs の表を、素の Postgres（0001〜0011・0017・0027・0032 適用済み）で流す実行器。
 // npm test には含めない（DB が要る）。使い捨てのクラスタでだけ動かす（本番に向けない）。
 //
 //   CARELOG_PG_URL=postgres://postgres@127.0.0.1:<port>/<db> node tests/note-contract-pg.mjs
@@ -42,11 +42,11 @@ for (const c of NOTE_CONTRACT_CASES) {
       const r = { ...NOTE_BASE_ROW, ...c.row }
       await client.query(
         `insert into notes (id, note_on, shift, resident_id, body, importance, color, after16, occurred_at, reporter_id,
-                            role_tags, ongoing, ended_at, ended_by, deleted_at)
+                            role_tags, ongoing, ended_at, ended_by, deleted_at, categories)
          overriding system value
-         values (101, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+         values (101, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
         [r.note_on, r.shift, r.resident_id, r.body, r.importance, r.color, r.after16, r.occurred_at, r.reporter_id,
-          r.role_tags, r.ongoing, r.ended_at, r.ended_by, c.deleted ? '2026-11-01T00:00:00Z' : null],
+          r.role_tags, r.ongoing, r.ended_at, r.ended_by, c.deleted ? '2026-11-01T00:00:00Z' : null, r.categories ?? []],
       )
     }
     const hist0 = Number((await client.query(`select count(*)::int n from record_history where table_name = 'notes' and row_id = 101`)).rows[0].n)
@@ -90,5 +90,5 @@ for (const c of NOTE_CONTRACT_CASES) {
   }
 }
 await client.end()
-console.log(`\n${NOTE_CONTRACT_CASES.length - failed}/${NOTE_CONTRACT_CASES.length} 件が 0017（0027 で改訂）と一致`)
+console.log(`\n${NOTE_CONTRACT_CASES.length - failed}/${NOTE_CONTRACT_CASES.length} 件が 0017（0027・0032 で改訂）と一致`)
 process.exit(failed === 0 ? 0 : 1)

@@ -2,6 +2,7 @@
 //
 // ・fakeApplyNoteEdits … 0017＋0027 の判定規則を JS で写した偽物（tests/logic.test.mjs の偽クライアントが使う）
 //     0027（2026-10-10）: 取り消しの seen（見た行）の照合（F09）・継続の終了の組と row の ended_by（F08）
+//     0032（2026-10-15）: 分類 categories（集合として比べる・6値の並びで書く・6値以外は check で拒否）
 // ・NOTE_CONTRACT_CASES … 同じ入力に対して 0017 と偽物が同じ答えを返すことを押さえる表。
 //     npm test は偽物で、素の Postgres（0001〜0011・0017 適用済み）では tests/note-contract-pg.mjs で
 //     同じ表を流し、どちらも expect と一致することを確かめる（規則の食い違いをここで捕まえる）。
@@ -22,12 +23,15 @@ export const NOTE_FIELDS = [
   'occurred_at',
   'reporter_id',
   'role_tags',
+  'categories',
   'shift',
   'ongoing',
   'ended_at',
   'ended_by',
   'deleted_at',
 ]
+/** 分類の6値（0032 の check・c_categories と同じ並び） */
+export const NOTE_CATEGORY_VALUES = ['体調', '食事', '薬', '支援調整', '消耗品', '家族']
 const ID_FIELDS = new Set(['resident_id', 'reporter_id', 'ended_by'])
 const BOOL_FIELDS = new Set(['after16', 'ongoing'])
 const NOTE_ROW = [
@@ -38,6 +42,7 @@ const NOTE_ROW = [
   'category',
   'resident_id',
   'role_tags',
+  'categories',
   'importance',
   'body',
   'occurred_at',
@@ -74,6 +79,12 @@ function jsonbText(v) {
 /** (nullif(x, '')::列の型)::text の写し */
 export function canonNote(field, v) {
   if (field === 'role_tags') return v === null || v === undefined ? null : jsonbText(v)
+  // 0032: 分類は集合として比べる（重複を除いて並べ直した配列の ::text。配列でない値はそのままの ::text）
+  if (field === 'categories') {
+    if (v === null || v === undefined) return null
+    if (!Array.isArray(v)) return jsonbText(v)
+    return jsonbText([...new Set(v.map((x) => jsonText(x)))].sort())
+  }
   const text = jsonText(v)
   if (text === null || text === '') return null
   if (ID_FIELDS.has(field)) {
@@ -104,6 +115,11 @@ export function canonNote(field, v) {
 /** 比較用の文字列 → 行に入れる値 */
 function typed(field, v) {
   if (field === 'role_tags') return [...v]
+  // 0032: 重複を除き、6値の並びで書く（6値以外は後ろ・check が拒否する）
+  if (field === 'categories') {
+    const pos = (x) => (NOTE_CATEGORY_VALUES.includes(x) ? NOTE_CATEGORY_VALUES.indexOf(x) : NOTE_CATEGORY_VALUES.length)
+    return [...new Set(v)].sort((a, b) => pos(a) - pos(b) || (a < b ? -1 : a > b ? 1 : 0))
+  }
   const c = canonNote(field, v)
   if (c === null) return null
   if (ID_FIELDS.has(field)) return Number(c)
@@ -122,6 +138,7 @@ function rowJson(row) {
   const out = {}
   for (const k of NOTE_ROW) out[k] = row[k] ?? null
   if (!Array.isArray(out.role_tags)) out.role_tags = []
+  if (!Array.isArray(out.categories)) out.categories = []
   return out
 }
 
@@ -130,6 +147,9 @@ function checkRow(db, row) {
     if (!allowed.includes(row[k])) throw new PgError('23514', `new row for relation "notes" violates check constraint "notes_${k}_check"`)
   }
   if (row.body === null || row.body === '') throw new PgError('23514', 'new row for relation "notes" violates check constraint "notes_body_check"')
+  if (!(row.categories ?? []).every((c) => NOTE_CATEGORY_VALUES.includes(c))) {
+    throw new PgError('23514', 'new row for relation "notes" violates check constraint "notes_categories_check"')
+  }
   for (const k of ['edited_by', 'reporter_id', 'ended_by']) {
     const v = row[k]
     if (v !== null && v !== undefined && !db.staff.has(v)) {
@@ -155,6 +175,9 @@ export function fakeApplyNoteEdits(db, args) {
     if (!isObj(e) || !has(e, 'value')) throw bad(`欄の値を読み取れませんでした（${f}）`)
     if (f === 'role_tags' && (!Array.isArray(e.value) || e.value.some((t) => typeof t !== 'string'))) {
       throw bad('職種タグを読み取れませんでした')
+    }
+    if (f === 'categories' && (!Array.isArray(e.value) || e.value.some((t) => typeof t !== 'string'))) {
+      throw bad('分類を読み取れませんでした')
     }
   }
   if (has(edits, 'body') && (jsonText(edits.body.value) ?? '') === '') throw new PgError('23514', '本文が空です')
@@ -231,7 +254,7 @@ export function fakeApplyNoteEdits(db, args) {
   }
   // 返り値の競合は欄の並び（NOTE_FIELDS）にそろえる（0017 の返り値の作り方と同じ）
   conf.sort((x, y) => NOTE_FIELDS.indexOf(x) - NOTE_FIELDS.indexOf(y))
-  const before = found ? { ...row, role_tags: [...(row.role_tags ?? [])] } : null
+  const before = found ? { ...row, role_tags: [...(row.role_tags ?? [])], categories: [...(row.categories ?? [])] } : null
   if (live && write.length > 0) {
     const next = { ...row }
     for (const f of write) next[f] = typed(f, edits[f].value)
@@ -279,6 +302,7 @@ const BASE_ROW = {
   occurred_at: null,
   reporter_id: 1,
   role_tags: [],
+  categories: [],
   ongoing: false,
   ended_at: null,
   ended_by: null,
@@ -627,6 +651,95 @@ export const NOTE_CONTRACT_CASES = [
     row: { body: '本文Z' },
     edits: {},
     expect: { status: 'noop', applied: [], settled: [], conflicts: [], row: { body: '本文Z' }, after: { revDelta: 0 } },
+  },
+
+  // ── 0032: 分類（categories） ──
+  {
+    name: '0032 分類: 基準（空）のまま → 書く・6値の並びにそろえて重複を除く・返り値の row に categories',
+    row: {},
+    edits: { categories: { value: ['家族', '体調', '家族'], base: [] } },
+    editor: 2,
+    expect: {
+      status: 'applied',
+      applied: ['categories'],
+      settled: [],
+      conflicts: [],
+      row: { categories: ['体調', '家族'] },
+      after: { revDelta: 1, history: 1, editedBy: 2, body: '本文O' },
+    },
+  },
+  {
+    name: '0032 分類: 並びだけ違う基準は同じ値とみなす（偽の競合にしない）',
+    row: { categories: ['体調', '薬'] },
+    edits: { categories: { value: ['体調', '薬', '家族'], base: ['薬', '体調'] } },
+    expect: { status: 'applied', applied: ['categories'], settled: [], conflicts: [], row: { categories: ['体調', '薬', '家族'] }, after: { revDelta: 1 } },
+  },
+  {
+    name: '0032 分類: もう載っている（並びが違っても同じ集合）→ settled・書かない',
+    row: { categories: ['食事', '消耗品'] },
+    edits: { categories: { value: ['消耗品', '食事'], base: [] } },
+    expect: { status: 'noop', applied: [], settled: ['categories'], conflicts: [], row: { categories: ['食事', '消耗品'] }, after: { revDelta: 0, history: 0 } },
+  },
+  {
+    name: '0032 分類: 他の端末が先に変えた → 競合（server はいまの分類）・書かない',
+    row: { categories: ['薬'] },
+    edits: { categories: { value: ['体調'], base: [] } },
+    expect: {
+      status: 'conflict',
+      applied: [],
+      settled: [],
+      conflicts: [{ field: 'categories', reason: 'changed', server: ['薬'] }],
+      row: { categories: ['薬'] },
+      after: { revDelta: 0 },
+    },
+  },
+  {
+    name: '0032 分類: 全部外す（空の配列）→ 書く',
+    row: { categories: ['体調', '食事', '薬', '支援調整', '消耗品', '家族'] },
+    edits: { categories: { value: [], base: ['体調', '食事', '薬', '支援調整', '消耗品', '家族'] } },
+    expect: { status: 'applied', applied: ['categories'], settled: [], conflicts: [], row: { categories: [] }, after: { revDelta: 1 } },
+  },
+  {
+    name: '0032 分類: 6値以外 → 拒否（23514）・何も書かない',
+    row: {},
+    edits: { categories: { value: ['体調', '睡眠'], base: [] } },
+    expect: { error: '23514', after: { revDelta: 0, history: 0 } },
+  },
+  {
+    name: '0032 分類: 配列でない値 → 拒否（22023）',
+    row: {},
+    edits: { categories: { value: '体調', base: [] } },
+    expect: { error: '22023', after: { revDelta: 0 } },
+  },
+  {
+    name: '0032 分類: null → 拒否（22023・列の not null を壊さない）',
+    row: {},
+    edits: { categories: { value: null, base: [] } },
+    expect: { error: '22023', after: { revDelta: 0 } },
+  },
+  {
+    name: '0032 分類と本文を一緒に → 両方書く（欄の並びは body・categories）',
+    row: {},
+    edits: { body: { value: '本文A', base: '本文O' }, categories: { value: ['支援調整'], base: [] } },
+    expect: { status: 'applied', applied: ['body', 'categories'], settled: [], conflicts: [], row: { body: '本文A', categories: ['支援調整'] }, after: { revDelta: 1, history: 1 } },
+  },
+  {
+    name: '0032 取り消し: 見た行の分類が変わっていれば止める（fields に categories）',
+    row: { categories: ['家族'] },
+    edits: { deleted_at: { value: '2026-11-01T01:00:00Z', base: '本文O', seen: { categories: [] } } },
+    expect: {
+      status: 'conflict',
+      applied: [],
+      settled: [],
+      conflicts: [{ field: 'deleted_at', reason: 'changed', server: '本文O', fields: ['categories'] }],
+      after: { revDelta: 0, deleted: false },
+    },
+  },
+  {
+    name: '0032 取り消し: 見た行の分類のまま（並びだけ違う）→ 取り消す',
+    row: { categories: ['体調', '家族'] },
+    edits: { deleted_at: { value: '2026-11-01T01:00:00Z', base: '本文O', seen: { categories: ['家族', '体調'] } } },
+    expect: { status: 'applied', applied: ['deleted_at'], settled: [], conflicts: [], row: null, after: { revDelta: 1, deleted: true } },
   },
 ]
 

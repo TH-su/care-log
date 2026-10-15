@@ -91,6 +91,10 @@
   --w-datelink-base: 7.3125rem; /* 117px */
   --w-target-base: 8.625rem; /* 138px */
   --w-reporter-base: 3.75rem; /* 60px */
+  /* 日報の申し送りの「分類」列（2026-10-15 本人回答。詳細列 60px を外して対象の右に置く）。
+     札「支援調整」（4字）1枚＋余白が1行に入る幅。札が多い時は列の中で折り返す（行が伸びる）。
+     内容の列は残りの幅を取る（flex）ので、表の幅（A3 の紙の幅）は変わらない＝他の列は動かない */
+  --w-category-base: 5.5rem; /* 88px */
 
   /* 列幅（日報のブロック・2026-08-28 追加指示）
      --w-block  : 左端のブロック名／件数セル（「外出者」「0名」）
@@ -151,6 +155,7 @@
   --w-datelink: calc(var(--w-datelink-base) * var(--sheet-zoom, 1));
   --w-target: calc(var(--w-target-base) * var(--sheet-zoom, 1));
   --w-reporter: calc(var(--w-reporter-base) * var(--sheet-zoom, 1));
+  --w-category: calc(var(--w-category-base) * var(--sheet-zoom, 1));
 
   --w-block: calc(var(--w-block-base) * var(--sheet-zoom, 1));
   --w-facility: calc(var(--w-facility-base) * var(--sheet-zoom, 1));
@@ -717,6 +722,23 @@
   --msheet-c-breakfast: #c1121f;
   --msheet-c-lunch: #0b7a30;
   --msheet-c-dinner: var(--c-ink);
+
+  /* 申し送りの分類の札（2026-10-15 本人回答「分類ごとに鮮やかな色で色分け」）。札には必ず文字を入れる
+     （色は補助。白黒印刷・色覚の違いでも文字で読める）。番号は NOTE_CATEGORIES の並び
+     1 体調・2 食事・3 薬・4 支援調整・5 消耗品・6 家族。札の地と文字のコントラスト（計算値・4.5:1 以上）:
+     ライト 5.5 / 8.0 / 8.2 / 6.2 / 7.7 / 5.9、ダーク 6.2 / 10.2 / 8.0 / 7.9 / 12.0 / 8.0 */
+  --dsheet-cat-1-bg: #d50000;
+  --dsheet-cat-1-ink: #ffffff;
+  --dsheet-cat-2-bg: #ff8f00;
+  --dsheet-cat-2-ink: #1f1300;
+  --dsheet-cat-3-bg: #7b1fa2;
+  --dsheet-cat-3-ink: #ffffff;
+  --dsheet-cat-4-bg: #0057d9;
+  --dsheet-cat-4-ink: #ffffff;
+  --dsheet-cat-5-bg: #00c853;
+  --dsheet-cat-5-ink: #00210d;
+  --dsheet-cat-6-bg: #c2185b;
+  --dsheet-cat-6-ink: #ffffff;
 }
 :root[data-mode='dark'] {
   --dsheet-c-note-bg: #4a1e2c;
@@ -735,6 +757,18 @@
   --msheet-c-breakfast: #ff7a7e;
   --msheet-c-lunch: #5fe08c;
   --msheet-c-dinner: var(--c-ink);
+  --dsheet-cat-1-bg: #ff5252;
+  --dsheet-cat-1-ink: #1f0000;
+  --dsheet-cat-2-bg: #ffb300;
+  --dsheet-cat-2-ink: #1f1300;
+  --dsheet-cat-3-bg: #ce93d8;
+  --dsheet-cat-3-ink: #1e0526;
+  --dsheet-cat-4-bg: #64b5f6;
+  --dsheet-cat-4-ink: #001a33;
+  --dsheet-cat-5-bg: #69f0ae;
+  --dsheet-cat-5-ink: #00210d;
+  --dsheet-cat-6-bg: #ff80ab;
+  --dsheet-cat-6-ink: #2b0012;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-mode='light']) {
@@ -754,6 +788,18 @@
     --msheet-c-breakfast: #ff7a7e;
     --msheet-c-lunch: #5fe08c;
     --msheet-c-dinner: var(--c-ink);
+    --dsheet-cat-1-bg: #ff5252;
+    --dsheet-cat-1-ink: #1f0000;
+    --dsheet-cat-2-bg: #ffb300;
+    --dsheet-cat-2-ink: #1f1300;
+    --dsheet-cat-3-bg: #ce93d8;
+    --dsheet-cat-3-ink: #1e0526;
+    --dsheet-cat-4-bg: #64b5f6;
+    --dsheet-cat-4-ink: #001a33;
+    --dsheet-cat-5-bg: #69f0ae;
+    --dsheet-cat-5-ink: #00210d;
+    --dsheet-cat-6-bg: #ff80ab;
+    --dsheet-cat-6-ink: #2b0012;
   }
 }
 
@@ -1218,3 +1264,82 @@ main:has(.dsheet-frame) {
   font-weight: var(--fw-bold);
   color: var(--c-ink);
 }
+
+/* ── 申し送りの分類・検索・ロック（2026-10-15 本人回答・仕様 §1〜§4）──────────────
+   札（.dsheet-cat）は分類の色の地に文字。分類欄では列の中で折り返す（行が伸びる）。
+   印刷は地を塗らず、分類の色の枠＋黒い文字にする（白黒の印刷でも文字で読める。カラー印刷では枠の色で分かる）。
+   列の並び・幅は画面と紙で同じ（対象｜分類｜内容｜記入者｜色）。 */
+.dsheet-cat-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+.dsheet-cat {
+  display: inline-block;
+  padding: 0 0.25em;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  font-weight: var(--fw-bold);
+  line-height: 1.35;
+  white-space: nowrap;
+}
+.dsheet-cat-1 { background: var(--dsheet-cat-1-bg); color: var(--dsheet-cat-1-ink); border-color: var(--dsheet-cat-1-bg); }
+.dsheet-cat-2 { background: var(--dsheet-cat-2-bg); color: var(--dsheet-cat-2-ink); border-color: var(--dsheet-cat-2-bg); }
+.dsheet-cat-3 { background: var(--dsheet-cat-3-bg); color: var(--dsheet-cat-3-ink); border-color: var(--dsheet-cat-3-bg); }
+.dsheet-cat-4 { background: var(--dsheet-cat-4-bg); color: var(--dsheet-cat-4-ink); border-color: var(--dsheet-cat-4-bg); }
+.dsheet-cat-5 { background: var(--dsheet-cat-5-bg); color: var(--dsheet-cat-5-ink); border-color: var(--dsheet-cat-5-bg); }
+.dsheet-cat-6 { background: var(--dsheet-cat-6-bg); color: var(--dsheet-cat-6-ink); border-color: var(--dsheet-cat-6-bg); }
+/* 分類窓のボタン: 印の無い札は面の地に分類の色の枠（印の付いた札は上の塗り） */
+.dsheet-cat-btn {
+  border: 2px solid transparent;
+}
+.dsheet-cat-off {
+  background: var(--c-surface);
+  color: var(--c-ink);
+}
+.dsheet-cat-off-1 { border-color: var(--dsheet-cat-1-bg); }
+.dsheet-cat-off-2 { border-color: var(--dsheet-cat-2-bg); }
+.dsheet-cat-off-3 { border-color: var(--dsheet-cat-3-bg); }
+.dsheet-cat-off-4 { border-color: var(--dsheet-cat-4-bg); }
+.dsheet-cat-off-5 { border-color: var(--dsheet-cat-5-bg); }
+.dsheet-cat-off-6 { border-color: var(--dsheet-cat-6-bg); }
+.dsheet-cat-btn.dsheet-cat-on {
+  border-width: 2px;
+  border-radius: 9999px;
+  padding: 0 var(--sp-3);
+  line-height: inherit;
+  font-weight: var(--fw-bold);
+  white-space: normal;
+}
+@media print {
+  .dsheet-cat {
+    background: transparent;
+    color: #000;
+  }
+}
+
+/* 検索欄（日付バーの右端・画面だけ）。狭い画面では欄が縮む（44px の高さは保つ） */
+.dsheet-search-input {
+  max-width: min(14rem, 60vw);
+}
+/* ブラウザ標準の消去の「×」は出さない（自前の〔×〕と2つ並ぶため。自前の方は 44px・読み上げ名つき） */
+.dsheet-search-input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+  display: none;
+}
+/* 検索で合わなかった行は画面では出さない（紙には全部を出す＝紙が一部だけになるのを防ぐ）。
+   まとめた行の中の合わない本文は薄くする（画面だけ） */
+@media screen {
+  .dsheet-search-hide {
+    display: none;
+  }
+  .dsheet-search-dim {
+    opacity: 0.45;
+  }
+}
+/* 表題帯のロックの印（🔒 ロック中（17:00））。文字は帯の色を継ぐ */
+.dsheet-lock-mark {
+  font-weight: var(--fw-bold);
+}
+

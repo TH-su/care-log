@@ -113,9 +113,10 @@ describe('外出者・外泊者・発熱者・他症状者の行の「✕」', (
     const rb = fnSrc(src, 'RowDeleteButton')
     assert.match(rb, /style=\{ROW_BTN_STYLE\}/)
     assert.match(rb, /className=\{`\$\{CELL_HIT\} shrink-0 rounded-sm px-1 text-ink2 print:hidden`\}/)
-    // 申し送りの対象欄は onDelete のまま（deleteScreenOnly を付けない＝印刷の見た目を変えない）
+    // 申し送りの対象欄は onDelete のまま（deleteScreenOnly を付けない＝印刷の見た目を変えない）。
+    // 2026-10-15: 同じ方の記録をまとめた行（multi）は、記録ごとに内容欄の「✕」で消す（対象欄の「✕」は1件の行だけ）
     const nr = fnSrc(src, 'NoteRow')
-    assert.match(nr, /onDelete=\{\(\) => onDelete\(rowKey\)\}/)
+    assert.match(nr, /onDelete=\{multi \? undefined : \(\) => onDelete\(rowKey\)\}/)
     assert.doesNotMatch(nr, /deleteScreenOnly/)
   })
 })

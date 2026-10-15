@@ -1,15 +1,22 @@
 // 申し送りの変更を画面で扱うための純関数（2026-09-29・申し送りを消さない作り替え）。
 // DB・DOM・localStorage に触れない。個人情報を持たない（受け取った値を組み替えるだけ）。
 
-import type { Note, NoteColor } from './types'
+import type { Note, NoteCategory, NoteColor } from './types'
 
-/** 日報の書きかけ行のうち、登録の後にも直せる欄（本文・対象・記入者・色） */
+/** 日報の書きかけ行のうち、登録の後にも直せる欄（本文・対象・記入者・色・分類） */
 export interface DraftFields {
   body: string
   residentId: number | null
   targetPicked: boolean
   reporterId: number | null
   color: NoteColor | null
+  /** 分類（0032・2026-10-15）。省略＝分類を選んでいない（[] と同じ扱い） */
+  categories?: NoteCategory[]
+}
+
+/** 分類の比べ方（並びは NOTE_CATEGORIES にそろえて持つので、文字にして比べる。省略は []） */
+function catKey(v: readonly NoteCategory[] | undefined): string {
+  return JSON.stringify(v ?? [])
 }
 
 /** 1欄の編集（value＝あなたの値・base＝編集を始めた時にサーバーから来ていた生の値） */
@@ -23,7 +30,7 @@ export type FieldEdit = { value: unknown; base: unknown }
 export function followUpEdits(
   sent: DraftFields,
   now: DraftFields,
-  inserted: Pick<Note, 'body' | 'resident_id' | 'reporter_id' | 'color'>,
+  inserted: Pick<Note, 'body' | 'resident_id' | 'reporter_id' | 'color' | 'categories'>,
 ): Record<string, FieldEdit> {
   const out: Record<string, FieldEdit> = {}
   const body = now.body.trim()
@@ -35,6 +42,10 @@ export function followUpEdits(
     out.reporter_id = { value: now.reporterId, base: inserted.reporter_id }
   }
   if (now.color !== sent.color && now.color !== inserted.color) out.color = { value: now.color, base: inserted.color }
+  // 分類（2026-10-15）: 応答待ちの間に選び直した分類。登録できた行の分類（無ければ []）を基準にする
+  if (catKey(now.categories) !== catKey(sent.categories) && catKey(now.categories) !== catKey(inserted.categories)) {
+    out.categories = { value: [...(now.categories ?? [])], base: [...(inserted.categories ?? [])] }
+  }
   return out
 }
 
@@ -44,7 +55,8 @@ export function overlayNote(note: Note, values: Record<string, unknown> | null |
   const out: Record<string, unknown> = { ...note }
   let changed = false
   for (const [k, v] of Object.entries(values)) {
-    if (k === 'deleted_at' || !(k in note)) continue
+    // 分類（0032）は行に無くても重ねる（列を返さない経路で読んだ行にも、送信待ちの分類を出す）
+    if (k === 'deleted_at' || (!(k in note) && k !== 'categories')) continue
     out[k] = v
     changed = true
   }

@@ -106,6 +106,9 @@ const TABLE_LABEL: Record<string, Record<string, string>> = {
     shift: '勤務帯',
     facility: '施設',
     category: '分類',
+    // 申し送りの分類（体調・食事など・0032）。取込の分類（category）と同じ呼び名だが、取込は categories を書かないので
+    // 同じ変更の記録に並ぶことは無い
+    categories: '分類',
     role_tags: '職種',
     importance: '重要度',
     body: '本文',

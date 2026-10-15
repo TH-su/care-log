@@ -370,20 +370,13 @@ describe('★F64 他の端末の欄の移動・トーストのたびに10日ぶ�
 
 // ══════════════════════════════════════════════════════════════
 describe('★F66 既読の人数を確かめられない申し送りに「既読 0人」と出さない', () => {
-  it('人数は数として読めた時だけ出す（行の読み上げ名と詳細の窓の両方）', () => {
-    assert.doesNotMatch(daily, /read_count \?\? 0/)
-    assert.equal((daily.match(/typeof note\?\.read_count === 'number' \? note\.read_count : null/g) ?? []).length, 2)
-    assert.match(daily, /既読の人数は確認できません/)
-  })
-  it('自分が読んだか分からない時（記録者は選んでいる）は〔既読にする〕を出さない・押した後も分からない人数を作らない', () => {
-    assert.match(daily, /note\.my_read === undefined && actorId != null \? \(/)
-    assert.match(
-      cbSrc(daily, 'markNoteRead'),
-      /typeof note\.read_count === 'number' \? \{ my_read: true, read_count: note\.read_count \+ 1 \} : \{ my_read: true \}/,
-    )
-  })
-  it('行の列（✓N／…）の形は変えない（紙にも出る列）', () => {
-    assert.match(daily, /\{note && readCount !== null && readCount > 0 \? <span className="tabular"> ✓\{readCount\}<\/span> : null\}/)
+  // 2026-10-15 本人回答: 日報の詳細列と詳細の窓をやめ、既読の人数・〔既読にする〕は日報に出さない（分類の窓に入れない）。
+  // 既読の仕組み（db.ts の markRead・タイムライン・検索・カルテの既読の表示）は残す。F66 の約束はそちらで続く
+  it('日報は既読の人数を出さない（「既読 0人」を作る経路が無い）・既読の仕組みは db.ts とタイムラインに残る', () => {
+    assert.doesNotMatch(daily, /read_count/)
+    assert.doesNotMatch(daily, /markRead\(/)
+    assert.match(read('lib/db.ts'), /export async function markRead\(noteId: number, staffId: number\): Promise<void>/)
+    assert.match(read('pages/TimelinePage.tsx'), /read_count/)
   })
 })
 

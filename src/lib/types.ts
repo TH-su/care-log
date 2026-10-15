@@ -173,10 +173,23 @@ export interface Note {
   color: NoteColor | null
   /** 日勤の「↓16時以降の記録」より後に書かれた行（現行スプシの区切りを再現する） */
   after16: boolean
+  /**
+   * 分類（2026-10-15 本人回答・0032 で追加・省略可）。NOTE_CATEGORIES の値だけを、その並びで持つ（空＝分類なし）。
+   * 列を返さない経路（タイムラインの RPC timeline_chunk）では付かない＝分からない（[] は「分類なし」）。
+   * 新規登録で省くと送らない（サーバーの既定値 '{}'）
+   */
+  categories?: NoteCategory[]
   rev: number
   read_count?: number
   my_read?: boolean
 }
+
+/**
+ * 申し送りの分類の6値（2026-10-15 本人回答）。並びは画面・印刷・保存の並び。値は文字そのもの（職種タグと同じ）。
+ * サーバーの notes_categories_check（0032）と同じ6値。増やす時は移行で check を同時に直す
+ */
+export const NOTE_CATEGORIES = ['体調', '食事', '薬', '支援調整', '消耗品', '家族'] as const
+export type NoteCategory = (typeof NOTE_CATEGORIES)[number]
 
 /** 申し送り行の色。既定は用途に紐づくが、記入者が後から変更できる（現行スプシの手動着色に相当） */
 export type NoteColor = 'pink' | 'yellow' | 'blue' | 'green' | 'orange'
