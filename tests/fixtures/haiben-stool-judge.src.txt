@@ -1,0 +1,86 @@
+//@ 写し元: haiben-record/haiben-record.html（排便記録アプリ）
+//@ コミット: ce3653404aac62e658be7b57404a4a9f7d52fea9
+//@ 行: 4436〜4515（function elH から lastR の終わりまで。一字一句そのまま）
+//@ 用途: tests/excretion-parity.test.mjs が vm で評価し、src/lib/excretionClient.ts の写しと同じ入力で比べる
+//@ 写し元が手元にある時は、写し元の同じ範囲がこのファイルと一致するかも確かめる（食い違えば写しの見直しが要る）
+//@----
+function elH(dt,rid){
+  if(!dt)return null;
+  // recordオブジェクトが渡された場合は tsUTC を最優先（格納済みなら絶対値で比較できTZ事故に強い）
+  if(typeof dt==='object'&&dt!==null){
+    if(!rid&&dt.residentId!=null)rid=dt.residentId;
+    if(typeof dt.tsUTC==='number'&&!isNaN(dt.tsUTC)){
+      return(_freezeIfHosp(rid)-dt.tsUTC)/36e5;
+    }
+    dt=dt.datetime||(dt.date&&dt.time?(dt.date+'T'+dt.time):'');
+    if(!dt)return null;
+  }
+  var t=new Date(dt).getTime();
+  if(isNaN(t))return null;
+  // 🏥 入院中の場合は時間を入院日時で凍結（マイナス◯日表示の進行を止める）
+  return(_freezeIfHosp(rid)-t)/36e5}
+function _freezeIfHosp(rid){
+  if(rid==null)return Date.now();
+  var r=D.residents.find(function(x){return x.id===rid});
+  if(!r||!Array.isArray(r.hospitalizations))return Date.now();
+  // 現在入院中なら、admissionAt 時点を「現在」として返す
+  var now=Date.now();
+  for(var i=0;i<r.hospitalizations.length;i++){
+    var h=r.hospitalizations[i];
+    if(!h||!h.admissionAt)continue;
+    var ad=new Date(h.admissionAt).getTime();if(isNaN(ad)||now<ad)continue;
+    if(h.dischargeAt){
+      var dc=new Date(h.dischargeAt).getTime();
+      if(!isNaN(dc)&&now>=dc)continue;
+    }
+    return ad; // 入院中：入院日時で時間凍結
+  }
+  return now;
+}
+function fmtEl(h){if(h===null)return'未記録';if(h<1)return Math.round(h*60)+'分前';
+  const d=Math.floor(h/24),hr=Math.floor(h%24),mn=Math.round((h%1)*60);
+  if(d===0)return hr+'時間'+(mn>0?mn+'分':'')+'前';return d+'日'+(hr>0?hr+'時間':'')+'前'}
+function resCfg(rid){var r=rid?D.residents.find(function(x){return x.id===rid}):null;var c=(r&&r.cfg)?r.cfg:{};
+  return{urineWarnH:(c.urineWarnH!=null?c.urineWarnH:D.cfg.urineWarnH),urineDangerH:(c.urineDangerH!=null?c.urineDangerH:D.cfg.urineDangerH),
+    stoolWarnD:(c.stoolWarnD!=null?c.stoolWarnD:D.cfg.stoolWarnD),stoolDangerD:(c.stoolDangerD!=null?c.stoolDangerD:D.cfg.stoolDangerD)}}
+function badgeCls(h,t,rid){if(h===null)return'eb-ng';var cfg=resCfg(rid);
+  if(t==='u'){if(h>=cfg.urineDangerH)return'eb-ng';if(h>=cfg.urineWarnH)return'eb-w';return'eb-ok'}
+  const d=h/24;if(d>=cfg.stoolDangerD)return'eb-ng';if(d>=cfg.stoolWarnD)return'eb-w';return'eb-ok'}
+/* 排便記録（stool/both・datetime 昇順）から「排便1回分」とみなすリセット点の全系列を返す。
+   判定は未排便アラート（lastR）と同一の基準：
+   「少量」のみの記録は間隔リセットしない。最初の少量から48時間以内（暦日ではなく経過時間）に
+   3回連続で少量が続いた場合、その3回目を排便1回分（リセット）として扱う
+   （2026-10-16 代表者の運用に合わせ 24時間・4回目 → 48時間・3回目）。中等量・多量は従来どおり1件で
+   リセット扱い。stoolAmtが空欄の場合も従来どおりリセット扱い。
+   ⚠️ ループ内の比較基準は datetime のまま（tsUTC に揃えると TZ 正規化済みの旧記録で判定が動く）。
+   lastR と intervalStats の両方がこの1本を使う（判定の写しを作らない）。 */
+var STOOL_SMALL_N=3,STOOL_SMALL_WIN_H=48;
+function stoolResetSeries(arr){
+  var out=[];if(!arr||!arr.length)return out;
+  var chainStart=null,chainCount=0;
+  for(var i=0;i<arr.length;i++){
+    var r=arr[i];
+    if(r.stoolAmt==='少量'){
+      if(!chainStart){chainStart=r;chainCount=1}
+      else{
+        var dt=r.datetime?(new Date(r.datetime)-new Date(chainStart.datetime))/3600000:0;
+        if(dt>STOOL_SMALL_WIN_H){chainStart=r;chainCount=1}
+        else{chainCount++;if(chainCount>=STOOL_SMALL_N){out.push(r);chainStart=null;chainCount=0}}
+      }
+    }else{
+      out.push(r);chainStart=null;chainCount=0;
+    }
+  }
+  return out;
+}
+function lastR(rid,t){
+  // インデックス（昇順済み）から該当タイプのみを抽出
+  var pool=recsByRes(rid);
+  var arr=[];for(var k=0;k<pool.length;k++){var rr=pool[k];if(t==='u'?(rr.type==='urine'||rr.type==='both'):(rr.type==='stool'||rr.type==='both'))arr.push(rr)}
+  if(t==='u')return arr.length?arr[arr.length-1]:null;
+  // 排便: リセット判定は stoolResetSeries に統合（振る舞いは従来どおり＝最後のリセット点）。
+  // arr は recsByRes（datetime 昇順済みインデックス）から順序を保って抽出済みのため
+  // 再ソート不要（重複ソートを排除し描画コストを削減）。
+  var ser=stoolResetSeries(arr);
+  return ser.length?ser[ser.length-1]:null;
+}

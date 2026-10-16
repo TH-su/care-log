@@ -11,6 +11,9 @@
 //     （読めない時は施設の既定）・与薬（fetchMedDay＋fetchMedSlots＋fetchMedFirstDay＋getKindInputGate。読めない時は与薬を出さない）
 //     は読めなくても画面を止めない（何を出していないかを一行で知らせる）
 // 今日と時刻は日本時間（alertsModel.ts の jstClock）。1分ごとに時刻を進め、水分不足（16時から）と与薬の「未」を描き直す。
+// 排便なし◯日（2026-10-16）: 排便記録アプリの GAS から読むだけ（excretionClient.ts の fetchExcretion。画面のメモリに数分だけ持つ）。
+//   照合（氏名＋居室）・数え方は excretionClient.ts。読めない・接続設定が無い・照合できない方がいる時は一行で知らせ、画面は止めない。
+//   〔最新を読み込む〕では取り直す。押すとカルテの排泄欄（karte-excretion）へ移る。
 // UI 状態は階だけを localStorage（ALERTS_FLOOR_KEY）に置く（既知の形だけ・原則11）。氏名・記録は置かない。console に出さない。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -29,6 +32,8 @@ import {
 import { buildMedDayRows, medMissingAllowed } from '../lib/med'
 import type { MedDayRow } from '../lib/med'
 import { buildDayAlerts, fluidTotalsOf } from '../lib/vitalAlerts'
+import { excretionFailMessage, fetchExcretion, MSG_EXCRETION_UNCONFIGURED, stoolAlertReasons } from '../lib/excretionClient'
+import type { HbSnapshot } from '../lib/excretionClient'
 import type { AlertReason, ResidentTargets } from '../lib/vitalAlerts'
 import { vitalThresholds } from '../lib/vitalThresholds'
 import { fmtDayLabel } from '../lib/format'
@@ -38,6 +43,7 @@ import {
   addDaysIso,
   ALERTS_FLOOR_KEY,
   alertHref,
+  appendReasons,
   FLOOR_ALL,
   FLOOR_OTHER,
   floorOf,
@@ -100,6 +106,13 @@ interface Loaded {
 
 type LoadState = { status: 'loading' } | { status: 'error' } | { status: 'ready'; data: Loaded }
 
+/** 排便記録の読み込み（画面は止めない） */
+type StoolState =
+  | { status: 'loading' }
+  | { status: 'unconfigured' }
+  | { status: 'error'; message: string }
+  | { status: 'ready'; snap: HbSnapshot }
+
 const hm = (min: number) => `${Math.floor(min / 60)}:${String(min % 60).padStart(2, '0')}`
 
 export function AlertsPage() {
@@ -107,6 +120,7 @@ export function AlertsPage() {
   const [floor, setFloorState] = useState<string>(readFloor)
   const [state, setState] = useState<LoadState>({ status: 'loading' })
   const [tick, setTick] = useState(0)
+  const [stool, setStool] = useState<StoolState>({ status: 'loading' })
   const aliveRef = useRef(true)
   const day = clock.day
 
@@ -178,6 +192,26 @@ export function AlertsPage() {
     }
   }, [day, tick])
 
+  // 排便記録（開いた時・日付が変わった時はメモリの控え〔5分〕があれば使う。〔最新を読み込む〕＝tick が進んだ時は取り直す）
+  useEffect(() => {
+    let cancelled = false
+    setStool({ status: 'loading' })
+    fetchExcretion({ force: tick > 0 })
+      .then((r) => {
+        if (cancelled || !aliveRef.current) return
+        if (r === null) setStool({ status: 'unconfigured' })
+        else if (!r.ok) setStool({ status: 'error', message: excretionFailMessage(r.reason) })
+        else setStool({ status: 'ready', snap: r.snap })
+      })
+      .catch(() => {
+        if (cancelled || !aliveRef.current) return
+        setStool({ status: 'error', message: excretionFailMessage('network') })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [day, tick])
+
   const reload = useCallback(() => {
     setClock(nowClock())
     setTick((n) => n + 1)
@@ -240,7 +274,14 @@ export function AlertsPage() {
     })
   }, [data, ordered, clock])
 
-  const alerts = useMemo(() => {
+  // 排便なし◯日（照合できた方の注意・危険だけ）と、照合できなかった方の人数
+  const stoolExtra = useMemo(() => {
+    if (!data || stool.status !== 'ready') return null
+    return stoolAlertReasons(stool.snap, shown, data.residents, Date.now())
+    // 時刻（clock・1分ごと）が進むたびに数え直す＝日数が日をまたいで進む
+  }, [data, stool, shown, clock])
+
+  const baseAlerts = useMemo(() => {
     if (!data) return []
     return buildDayAlerts({
       day: data.day,
@@ -256,6 +297,11 @@ export function AlertsPage() {
       targets: data.targets ?? new Map(),
     })
   }, [data, clock, shown, medRows])
+
+  const alerts = useMemo(
+    () => (stoolExtra === null ? baseAlerts : appendReasons(baseAlerts, shown.map((r) => r.id), stoolExtra.reasons)),
+    [baseAlerts, stoolExtra, shown],
+  )
 
   const byId = useMemo(() => {
     const m = new Map<number, Resident>()
@@ -275,6 +321,9 @@ export function AlertsPage() {
       <p className="mt-1 text-sm text-ink2">
         基準を外れたバイタル（平熱との差・個別の下限を含む）、摂取低下、水分不足（{fromHour}時から）、最重要の申し送り、与薬の「未」を出します。
         押すとカルテのその欄へ移ります。
+      </p>
+      <p className="mt-1 text-sm text-ink2">
+        排便記録のアプリの記録から「排便なし◯日」（注意・危険。数え方は排便記録のアプリと同じ）も出します。
       </p>
 
       <div className="mt-3">
@@ -302,6 +351,7 @@ export function AlertsPage() {
           <>
             {data?.targets === null ? <PartialNote text={NOTE_TARGETS} /> : null}
             {data?.med === null ? <PartialNote text={NOTE_MEDS} /> : null}
+            <StoolNote state={stool} unlinked={stoolExtra?.unlinked ?? 0} />
             {day === clock.day && clock.nowMin < fromHour * 60 ? (
               <p className="mb-2 text-sm text-ink2">
                 <span aria-hidden="true">ⓘ </span>水分不足は{fromHour}時から出します。
@@ -367,6 +417,28 @@ const SECTION_WORD: Record<AlertReason['section'], string> = {
   meals: '食事・水分',
   notes: '申し送り',
   meds: '与薬',
+  excretion: '排泄',
+}
+
+/** 排便記録の読み込みの一言（読めた・照合できた時は何も出さない） */
+function StoolNote({ state, unlinked }: { state: StoolState; unlinked: number }) {
+  if (state.status === 'loading') {
+    return (
+      <p role="status" className="mb-2 text-sm text-ink2">
+        <span aria-hidden="true">ⓘ </span>排便記録を読み込み中です…（「排便なし」は読み込み後に出します）
+      </p>
+    )
+  }
+  if (state.status === 'unconfigured') return <PartialNote text={`${MSG_EXCRETION_UNCONFIGURED}。「排便なし」は出していません。`} />
+  if (state.status === 'error') return <PartialNote text={`${state.message}（「排便なし」は出していません）`} />
+  if (unlinked > 0) {
+    return (
+      <PartialNote
+        text={`排便記録と照合できない方が ${unlinked} 名います（その方の「排便なし」は出していません。理由はカルテの排泄欄で確かめられます）。`}
+      />
+    )
+  }
+  return null
 }
 
 /** 理由1つ（押すとカルテのその欄へ）。危険・注意は文字でも示す（色だけに頼らない） */

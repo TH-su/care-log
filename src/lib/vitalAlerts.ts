@@ -349,11 +349,12 @@ export function mealShade(m: Meal | undefined, t: VitalThresholds = vitalThresho
 // A5 今日の要注意
 // ══════════════════════════════════════════════════════════════
 
-/** 理由の種類（並びはこの順） */
-export type AlertKind = 'vital' | 'mealLow' | 'fluidShort' | 'criticalNote' | 'medMissing'
+/** 理由の種類（並びはこの順）。stoolNone（排便なし◯日・2026-10-16）は排便記録アプリから読んだ判定で、
+ *  buildDayAlerts は作らない（AlertsPage が alertsModel.ts の appendReasons で後ろに足す） */
+export type AlertKind = 'vital' | 'mealLow' | 'fluidShort' | 'criticalNote' | 'medMissing' | 'stoolNone'
 
-/** 押した時に移るカルテの欄 */
-export type AlertSection = 'vitals' | 'meals' | 'notes' | 'meds'
+/** 押した時に移るカルテの欄（excretion＝排泄・2026-10-16） */
+export type AlertSection = 'vitals' | 'meals' | 'notes' | 'meds' | 'excretion'
 
 export interface AlertReason {
   kind: AlertKind

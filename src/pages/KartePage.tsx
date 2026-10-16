@@ -23,6 +23,9 @@
 //   ・〔温度板を印刷〕（A7・A4 縦1枚）。押した時だけ印刷の部品を置く（Ctrl+P のカルテの印刷は今までどおり）
 //   ・今日の要注意（/alerts）から ?sec=<欄の id> で開いた時は、その欄へ移る（id は KARTE_JUMPS の許可リストで照合）
 //   ・基準値（app_settings の上書き・A8）は loadVitalThresholds をカルテの読み込みと一緒に待ってから描く
+// - 排泄（2026-10-16 追加）は excretionClient.ts の fetchExcretion で排便記録アプリの GAS から読むだけ。
+//   接続設定（hbcr_api_*）は excretionClient が読むだけで、この画面は localStorage に触れない。記録は画面のメモリだけ。
+//   照合（氏名＋居室）・「最後の排便から◯日」の数え方（排便記録アプリの写し）は excretionClient.ts。照合できない時は理由を出す
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
@@ -53,7 +56,7 @@ import {
   historyColumnLabel,
   incidentDetailChangeLabels,
 } from '../lib/historyView'
-import { addDays, fmtDayLabel, isoDate, todayIso } from '../lib/format'
+import { addDays, fmtDayLabel, fmtTimeHM, isoDate, todayIso } from '../lib/format'
 import { fmtRecordTime, noteIsNextMorning, timeSortKey, vitalIsNextMorning } from '../lib/nextMorning'
 import { typesText } from '../lib/incident'
 import { BATH_SHOWN_LABEL, bathShownOf } from '../lib/bath'
@@ -107,6 +110,16 @@ import {
   weightRowsInRange,
 } from '../lib/weightClient'
 import type { WeightEntry, WeightRow } from '../lib/weightClient'
+import {
+  EXCRETION_LIST_DAYS,
+  EXCRETION_TIMEOUT_MS,
+  excretionFailMessage,
+  excretionViewFor,
+  fetchExcretion,
+  MSG_EXCRETION_UNCONFIGURED,
+  stoolStatusText,
+} from '../lib/excretionClient'
+import type { ExcretionDay, ExcretionView, HbSnapshot } from '../lib/excretionClient'
 import {
   Chip,
   EmptyBlock,
@@ -1892,6 +1905,136 @@ function NoteCard({ note, reporterName }: NoteCardProps) {
   )
 }
 
+// ══════════════════════════════════════════════════════════════
+// 排泄（排便記録アプリの記録を読むだけ・2026-10-16 追加）
+// ══════════════════════════════════════════════════════════════
+
+type ExcretionState =
+  | { status: 'loading' }
+  | { status: 'unconfigured' }
+  | { status: 'error'; message: string }
+  | { status: 'ready'; snap: HbSnapshot }
+
+/** 'YYYY-MM-DDTHH:MM' → '10/16（金） 9:30' */
+function fmtStoolAt(dt: string): string {
+  const day = dt.slice(0, 10)
+  const t = dt.slice(11, 16)
+  return `${fmtDayLabel(day)}${/^\d{2}:\d{2}$/.test(t) ? ` ${fmtTimeHM(t)}` : ''}`
+}
+
+/** 一覧の1日「10/16（金） 排尿 6回」＋排便・下剤の行 */
+function ExcretionDayItem({ d }: { d: ExcretionDay }) {
+  const empty = d.stools.length === 0 && d.laxatives.length === 0
+  return (
+    <li className="rounded-md border border-border bg-surface p-3">
+      <p className="flex flex-wrap items-baseline gap-x-3">
+        <span className="tabular text-sm font-bold text-ink">{fmtDayLabel(d.day)}</span>
+        <span className="text-sm text-ink2">
+          排尿 <span className="tabular">{d.urine}</span>回
+        </span>
+      </p>
+      {empty ? (
+        <p className="mt-1 text-sm text-ink3">排便・下剤の記録なし</p>
+      ) : (
+        <ul className="mt-1 space-y-1">
+          {d.stools.map((x, i) => (
+            <li key={`s${i}`} className="flex flex-wrap gap-x-2 text-base text-ink">
+              <span className="tabular text-sm text-ink2">{x.time ? fmtTimeHM(x.time) : '時刻なし'}</span>
+              <span className="font-bold">排便</span>
+              <span>{x.amount || '量の記載なし'}</span>
+              {x.cons ? <span className="text-ink2">{x.cons}</span> : null}
+            </li>
+          ))}
+          {d.laxatives.map((x, i) => (
+            <li key={`l${i}`} className="flex flex-wrap gap-x-2 text-base text-ink">
+              <span className="tabular text-sm text-ink2">{x.time ? fmtTimeHM(x.time) : '時刻なし'}</span>
+              <span className="font-bold">下剤</span>
+              <span>{x.medicine || '薬名の記載なし'}</span>
+              {x.tablets ? <span className="tabular">{x.tablets}錠</span> : null}
+            </li>
+          ))}
+        </ul>
+      )}
+    </li>
+  )
+}
+
+const STOOL_BOX_CLASS: Record<'ok' | 'warn' | 'danger', string> = {
+  ok: 'border-border-strong bg-surface2',
+  warn: 'border-warn bg-warn-bg',
+  danger: 'border-danger bg-danger-bg',
+}
+
+interface ExcretionSectionProps {
+  state: ExcretionState
+  view: ExcretionView | null
+  onReload(): void
+}
+
+/** 最後の排便から◯日（注意・危険）と、直近14日の排便・下剤・排尿の回数 */
+function ExcretionSection({ state, view, onReload }: ExcretionSectionProps) {
+  return (
+    <SectionCard title="排泄" className="mt-4" id="karte-excretion">
+      <p className="text-sm text-ink2">
+        排便記録のアプリの記録です（この画面では読むだけです）。少量は1回だけでは数えず、48時間以内に少量が3回続いたら3回目で排便1回とみなします（排便記録のアプリと同じ数え方）。
+      </p>
+      <div className="mt-2">
+        {state.status === 'loading' ? (
+          <LoadingBlock label={`排便記録を読み込み中です…（排便記録のサーバーが混んでいる時は${EXCRETION_TIMEOUT_MS / 1000}秒ほどかかります）`} />
+        ) : state.status === 'error' ? (
+          <ErrorBlock message={state.message} onRetry={onReload} />
+        ) : state.status === 'unconfigured' ? (
+          <p className="text-base text-ink2">
+            <span aria-hidden="true">ⓘ </span>
+            {MSG_EXCRETION_UNCONFIGURED}
+          </p>
+        ) : view === null ? null : !view.linked ? (
+          <p className="text-base text-warn">
+            <span aria-hidden="true">▲ </span>
+            {view.message}
+          </p>
+        ) : (
+          <>
+            <div className={`rounded-md border p-3 ${STOOL_BOX_CLASS[view.status.level]}`}>
+              <p className="text-base font-bold text-ink">
+                {view.status.level === 'ok' ? null : (
+                  <span className={view.status.level === 'danger' ? 'text-danger' : 'text-warn'} aria-hidden="true">
+                    {view.status.level === 'danger' ? '▲▲ ' : '▲ '}
+                  </span>
+                )}
+                {stoolStatusText(view.status)}
+              </p>
+              <p className="mt-1 text-sm text-ink2">
+                {view.status.lastAt ? <>最後の排便 {fmtStoolAt(view.status.lastAt)}・</> : null}
+                注意 <span className="tabular">{view.status.warnD}</span>日以上・危険 <span className="tabular">{view.status.dangerD}</span>
+                日以上（排便記録のアプリの設定）
+              </p>
+            </div>
+            <h3 className="mt-3 text-sm font-bold text-ink2">直近{EXCRETION_LIST_DAYS}日（新しい日が上）</h3>
+            <ul className="mt-2 space-y-2">
+              {view.days.map((d) => (
+                <ExcretionDayItem key={d.day} d={d} />
+              ))}
+            </ul>
+          </>
+        )}
+      </div>
+      {state.status === 'error' ? null : (
+        <div className="mt-3 flex flex-wrap gap-gap print:hidden">
+          <button
+            type="button"
+            onClick={onReload}
+            disabled={state.status === 'loading'}
+            className="min-h-tap rounded border border-border-strong px-4 text-base text-ink disabled:text-ink3"
+          >
+            排便記録を読み直す
+          </button>
+        </div>
+      )}
+    </SectionCard>
+  )
+}
+
 interface NotesSectionProps {
   notes: Note[]
   staffById: Map<number, string>
@@ -2668,6 +2811,7 @@ export const KARTE_JUMPS: ReadonlyArray<{ id: string; label: string }> = [
   { id: 'karte-vitals', label: 'バイタル' },
   { id: 'karte-weight', label: '体重' },
   { id: 'karte-meals', label: '食事・水分' },
+  { id: 'karte-excretion', label: '排泄' },
   { id: 'karte-notes', label: '申し送り' },
   { id: 'karte-bath', label: '入浴' },
   { id: 'karte-med', label: '与薬' },
@@ -2763,6 +2907,10 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
   const [staffList, setStaffList] = useState<Staff[]>(staff ?? [])
   const [weight, setWeight] = useState<WeightState>({ status: 'loading' })
   const [weightTick, setWeightTick] = useState(0)
+  const [excretion, setExcretion] = useState<ExcretionState>({ status: 'loading' })
+  const [excretionTick, setExcretionTick] = useState(0)
+  // 「再試行する」「排便記録を読み直す」で増えた excretionTick を一度だけ「取り直し」として使うための控え
+  const forcedExcretionTickRef = useRef(0)
   const aliveRef = useRef(true)
   // 「再試行する」で増えた weightTick を一度だけ「取り直し」として使うための控え
   const forcedWeightTickRef = useRef(0)
@@ -2913,6 +3061,34 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
   const weightPanel = useMemo(
     () => (weight.status === 'ready' ? buildWeightPanel(weight.list, fromIso, toIso) : null),
     [weight, fromIso, toIso],
+  )
+
+  // 排泄（排便記録アプリの GAS から読むだけ）。期間では取り直さない（直近14日に固定）。
+  // カルテの再試行（tick）・「排便記録を読み直す」（excretionTick）で取り直す。利用者を替えた時はメモリの控えから照合し直す
+  useEffect(() => {
+    let cancelled = false
+    setExcretion({ status: 'loading' })
+    const force = excretionTick !== forcedExcretionTickRef.current
+    forcedExcretionTickRef.current = excretionTick
+    fetchExcretion({ force })
+      .then((r) => {
+        if (cancelled || !aliveRef.current) return
+        if (r === null) setExcretion({ status: 'unconfigured' })
+        else if (!r.ok) setExcretion({ status: 'error', message: excretionFailMessage(r.reason) })
+        else setExcretion({ status: 'ready', snap: r.snap })
+      })
+      .catch(() => {
+        if (cancelled || !aliveRef.current) return
+        setExcretion({ status: 'error', message: excretionFailMessage('network') })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [tick, excretionTick])
+
+  const excretionView = useMemo(
+    () => (excretion.status === 'ready' && resident ? excretionViewFor(excretion.snap, resident, residents, Date.now()) : null),
+    [excretion, resident, residents],
   )
 
   // 個別の目標（A3・A9）。読めない時はカルテは施設の基準のまま出す（表が無い DB は空＝施設の既定）
@@ -3219,6 +3395,7 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
             />
           </div>
           <div className={LANE}>
+            <ExcretionSection state={excretion} view={excretionView} onReload={() => setExcretionTick((n) => n + 1)} />
             <NotesSection notes={data.notes} staffById={staffById} />
             <BathSection baths={data.baths} staffById={staffById} />
             <MedSection meds={data.meds} />

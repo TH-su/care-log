@@ -7,7 +7,7 @@
 // ・理由を押した先はカルテのその欄（/karte/:id?sec=<欄の id>）。カルテは許可リストの id だけを受ける（karteSecOf）
 // 個人情報は扱わない（数値ID・日付・時刻だけ）。
 
-import type { AlertSection } from '../lib/vitalAlerts'
+import type { AlertReason, AlertSection, ResidentAlerts } from '../lib/vitalAlerts'
 
 /** 階の UI 状態の保存先（今日の要注意の画面だけが使う） */
 export const ALERTS_FLOOR_KEY = 'cl_alertsFloor'
@@ -60,6 +60,7 @@ export const KARTE_SECTION_ID: Readonly<Record<AlertSection, string>> = {
   meals: 'karte-meals',
   notes: 'karte-notes',
   meds: 'karte-med',
+  excretion: 'karte-excretion',
 }
 
 /** 理由を押した時の行き先（カルテのその欄） */
@@ -80,6 +81,34 @@ export function mergeNotes<T extends { id: number }>(notes: readonly T[] | null 
     if (!n || typeof n.id !== 'number' || seen.has(n.id)) continue
     seen.add(n.id)
     out.push(n)
+  }
+  return out
+}
+
+/**
+ * buildDayAlerts の結果に、別に作った理由（排便なし◯日・2026-10-16）を方ごとに後ろへ足す。
+ * 並びは residentIds の順（buildDayAlerts と同じ）。足す理由しか無い方も、その順の位置に入る。
+ * residentIds に居ない方の理由は足さない。元の配列・理由は書き換えない（写しを返す）
+ */
+export function appendReasons(
+  alerts: readonly ResidentAlerts[],
+  residentIds: readonly number[],
+  extra: ReadonlyMap<number, readonly AlertReason[]>,
+): ResidentAlerts[] {
+  const byId = new Map<number, AlertReason[]>()
+  for (const a of alerts) byId.set(a.residentId, a.reasons.slice())
+  for (const [rid, rs] of extra) {
+    if (rs.length === 0) continue
+    const cur = byId.get(rid) ?? []
+    byId.set(rid, [...cur, ...rs])
+  }
+  const out: ResidentAlerts[] = []
+  const seen = new Set<number>()
+  for (const rid of residentIds) {
+    if (seen.has(rid)) continue
+    seen.add(rid)
+    const rs = byId.get(rid)
+    if (rs && rs.length > 0) out.push({ residentId: rid, reasons: rs })
   }
   return out
 }

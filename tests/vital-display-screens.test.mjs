@@ -347,10 +347,11 @@ describe('カルテの配線（A1・A2・A3・A6・A7・A9・個別の目標）'
     assert.match(s, /\{role === undefined \? null : canEdit \? \(/)
   })
 
-  it('個別の目標の欄は移動ボタンの欄（SectionCard の id）を増やさない（既存の8つのまま）', () => {
+  it('個別の目標の欄は移動ボタンの欄（SectionCard の id）を増やさない（2026-10-16 に排泄を足して9つ。個別の目標は無いまま）', () => {
     const s = read('../src/pages/KartePage.tsx')
     const listSrc = s.slice(s.indexOf('export const KARTE_JUMPS'), s.indexOf('function findShellHeader'))
-    assert.equal([...listSrc.matchAll(/id: '([^']+)'/g)].length, 8)
+    assert.equal([...listSrc.matchAll(/id: '([^']+)'/g)].length, 9)
+    assert.equal(/目標/.test(listSrc), false)
   })
 
   it('?sec= で欄へ移る（許可リストは KARTE_JUMPS の id）', () => {

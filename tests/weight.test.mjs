@@ -593,7 +593,7 @@ describe('カルテ上部の移動ボタン（静的検査・2026-09-27）', () 
     const src = read('../src/pages/KartePage.tsx')
     const listSrc = src.slice(src.indexOf('export const KARTE_JUMPS'), src.indexOf('function findShellHeader'))
     const ids = [...listSrc.matchAll(/id: '([^']+)'/g)].map((m) => m[1])
-    assert.equal(ids.length, 8)
+    assert.equal(ids.length, 9) // 2026-10-16 に排泄（karte-excretion）を足した
     const cards = [...src.matchAll(/<SectionCard [^>]*id="([^"]+)"/g)].map((m) => m[1])
     assert.deepEqual(cards, ids)
   })
@@ -601,7 +601,7 @@ describe('カルテ上部の移動ボタン（静的検査・2026-09-27）', () 
   it('ボタンの順番は、カルテが実際に欄を描く順（KarteDetail の JSX）と同じ', () => {
     const src = read('../src/pages/KartePage.tsx')
     const body = src.slice(src.indexOf('function KarteDetail('), src.indexOf('export function KartePage('))
-    const comps = ['<VitalsSection', '<WeightSection', '<MealsSection', '<NotesSection', '<BathSection', '<MedSection', '<IncidentSection', '<HistorySection']
+    const comps = ['<VitalsSection', '<WeightSection', '<MealsSection', '<ExcretionSection', '<NotesSection', '<BathSection', '<MedSection', '<IncidentSection', '<HistorySection']
     const pos = comps.map((c) => body.indexOf(c))
     assert.ok(pos.every((i, n) => i > 0 && (n === 0 || i > pos[n - 1])), JSON.stringify(pos))
     // 各欄の関数が付けている id が、ボタンの並びと同じ順
@@ -609,7 +609,7 @@ describe('カルテ上部の移動ボタン（静的検査・2026-09-27）', () 
       const f = src.slice(src.indexOf(`function ${fn}(`))
       return /<SectionCard [^>]*id="([^"]+)"/.exec(f)[1]
     }
-    const ids = ['VitalsSection', 'WeightSection', 'MealsSection', 'NotesSection', 'BathSection', 'MedSection', 'IncidentSection', 'HistorySection'].map(idOf)
+    const ids = ['VitalsSection', 'WeightSection', 'MealsSection', 'ExcretionSection', 'NotesSection', 'BathSection', 'MedSection', 'IncidentSection', 'HistorySection'].map(idOf)
     const listSrc = src.slice(src.indexOf('export const KARTE_JUMPS'), src.indexOf('function findShellHeader'))
     assert.deepEqual(ids, [...listSrc.matchAll(/id: '([^']+)'/g)].map((m) => m[1]))
   })
