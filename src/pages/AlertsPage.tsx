@@ -13,6 +13,7 @@
 // 今日と時刻は日本時間（alertsModel.ts の jstClock）。1分ごとに時刻を進め、水分不足（16時から）と与薬の「未」を描き直す。
 // 排便なし◯日（2026-10-16）: 排便記録アプリの GAS から読むだけ（excretionClient.ts の fetchExcretion。画面のメモリに数分だけ持つ）。
 //   照合（氏名＋居室）・数え方は excretionClient.ts。読めない・接続設定が無い・照合できない方がいる時は一行で知らせ、画面は止めない。
+//   今日の食事の記録が「入院」の方は出さない。照合できない方の一行は同じ氏名・居室の食い違いだけを数える（2026-10-17）。
 //   〔最新を読み込む〕では取り直す。押すとカルテの排泄欄（karte-excretion）へ移る。
 // UI 状態は階だけを localStorage（ALERTS_FLOOR_KEY）に置く（既知の形だけ・原則11）。氏名・記録は置かない。console に出さない。
 
@@ -32,7 +33,7 @@ import {
 import { buildMedDayRows, medMissingAllowed } from '../lib/med'
 import type { MedDayRow } from '../lib/med'
 import { buildDayAlerts, fluidTotalsOf } from '../lib/vitalAlerts'
-import { excretionFailMessage, fetchExcretion, MSG_EXCRETION_UNCONFIGURED, stoolAlertReasons } from '../lib/excretionClient'
+import { excretionFailMessage, fetchExcretion, hospitalIdsOn, MSG_EXCRETION_UNCONFIGURED, stoolAlertReasons } from '../lib/excretionClient'
 import type { HbSnapshot } from '../lib/excretionClient'
 import type { AlertReason, ResidentTargets } from '../lib/vitalAlerts'
 import { vitalThresholds } from '../lib/vitalThresholds'
@@ -277,7 +278,8 @@ export function AlertsPage() {
   // 排便なし◯日（照合できた方の注意・危険だけ）と、照合できなかった方の人数
   const stoolExtra = useMemo(() => {
     if (!data || stool.status !== 'ready') return null
-    return stoolAlertReasons(stool.snap, shown, data.residents, Date.now())
+    // 今日の食事の記録が「入院」の方は出さない（本人回答 2026-10-17）
+    return stoolAlertReasons(stool.snap, shown, data.residents, Date.now(), hospitalIdsOn(data.meals, data.day))
     // 時刻（clock・1分ごと）が進むたびに数え直す＝日数が日をまたいで進む
   }, [data, stool, shown, clock])
 
@@ -434,7 +436,7 @@ function StoolNote({ state, unlinked }: { state: StoolState; unlinked: number })
   if (unlinked > 0) {
     return (
       <PartialNote
-        text={`排便記録と照合できない方が ${unlinked} 名います（その方の「排便なし」は出していません。理由はカルテの排泄欄で確かめられます）。`}
+        text={`排便記録と照合できない方が ${unlinked} 名います（同じお名前の方がいる・居室が食い違う。その方の「排便なし」は出していません。理由はカルテの排泄欄で確かめられます）。`}
       />
     )
   }

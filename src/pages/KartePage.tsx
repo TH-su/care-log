@@ -116,7 +116,9 @@ import {
   excretionFailMessage,
   excretionViewFor,
   fetchExcretion,
+  isHospitalDay,
   MSG_EXCRETION_UNCONFIGURED,
+  MSG_STOOL_HOSPITAL,
   stoolStatusText,
 } from '../lib/excretionClient'
 import type { ExcretionDay, ExcretionView, HbSnapshot } from '../lib/excretionClient'
@@ -1995,21 +1997,30 @@ function ExcretionSection({ state, view, onReload }: ExcretionSectionProps) {
           </p>
         ) : (
           <>
-            <div className={`rounded-md border p-3 ${STOOL_BOX_CLASS[view.status.level]}`}>
-              <p className="text-base font-bold text-ink">
-                {view.status.level === 'ok' ? null : (
-                  <span className={view.status.level === 'danger' ? 'text-danger' : 'text-warn'} aria-hidden="true">
-                    {view.status.level === 'danger' ? '▲▲ ' : '▲ '}
-                  </span>
-                )}
-                {stoolStatusText(view.status)}
-              </p>
-              <p className="mt-1 text-sm text-ink2">
-                {view.status.lastAt ? <>最後の排便 {fmtStoolAt(view.status.lastAt)}・</> : null}
-                注意 <span className="tabular">{view.status.warnD}</span>日以上・危険 <span className="tabular">{view.status.dangerD}</span>
-                日以上（排便記録のアプリの設定）
-              </p>
-            </div>
+            {view.hospital ? (
+              <div className="rounded-md border border-border-strong bg-surface2 p-3">
+                <p className="text-base font-bold text-ink">
+                  <span aria-hidden="true">ⓘ </span>
+                  {MSG_STOOL_HOSPITAL}
+                </p>
+              </div>
+            ) : (
+              <div className={`rounded-md border p-3 ${STOOL_BOX_CLASS[view.status.level]}`}>
+                <p className="text-base font-bold text-ink">
+                  {view.status.level === 'ok' ? null : (
+                    <span className={view.status.level === 'danger' ? 'text-danger' : 'text-warn'} aria-hidden="true">
+                      {view.status.level === 'danger' ? '▲▲ ' : '▲ '}
+                    </span>
+                  )}
+                  {stoolStatusText(view.status)}
+                </p>
+                <p className="mt-1 text-sm text-ink2">
+                  {view.status.lastAt ? <>最後の排便 {fmtStoolAt(view.status.lastAt)}・</> : null}
+                  注意 <span className="tabular">{view.status.warnD}</span>日以上・危険 <span className="tabular">{view.status.dangerD}</span>
+                  日以上（排便記録のアプリの設定）
+                </p>
+              </div>
+            )}
             <h3 className="mt-3 text-sm font-bold text-ink2">直近{EXCRETION_LIST_DAYS}日（新しい日が上）</h3>
             <ul className="mt-2 space-y-2">
               {view.days.map((d) => (
@@ -3087,8 +3098,12 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
   }, [tick, excretionTick])
 
   const excretionView = useMemo(
-    () => (excretion.status === 'ready' && resident ? excretionViewFor(excretion.snap, resident, residents, Date.now()) : null),
-    [excretion, resident, residents],
+    () =>
+      excretion.status === 'ready' && resident
+        ? // 表示の日（今日）の食事の記録が「入院」なら日数を出さない（本人回答 2026-10-17）
+          excretionViewFor(excretion.snap, resident, residents, Date.now(), isHospitalDay(data.meals, residentId, toIso))
+        : null,
+    [excretion, resident, residents, data.meals, residentId, toIso],
   )
 
   // 個別の目標（A3・A9）。読めない時はカルテは施設の基準のまま出す（表が無い DB は空＝施設の既定）

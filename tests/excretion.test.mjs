@@ -371,7 +371,8 @@ describe('判定と一覧', { skip: X === null ? TS_UNSUPPORTED : false }, () =>
     assert.deepEqual(reasons.get(1)[0], { kind: 'stoolNone', section: 'excretion', severity: 'danger', label: '排便なし3日', time: null, recordId: null })
     assert.equal(reasons.get(2)[0].severity, 'warn')
     assert.equal(reasons.get(2)[0].label, '排便なし1日')
-    assert.equal(unlinked, 5) // 03 居室違い・04 同名・05/06 同名・07 見つからない
+    // 数えるのは同じ氏名・居室の食い違いだけ（03 居室違い・04 排便記録で同名・05/06 care-log で同名）。07 見つからないは数えない（2026-10-17）
+    assert.equal(unlinked, 4)
     const base = [{ residentId: 2, reasons: [{ kind: 'vital', section: 'vitals', severity: 'warn', label: '体温 37.6↑', time: '09:00', recordId: 5 }] }]
     const merged = AM.appendReasons(base, [1, 2, 3], reasons)
     assert.deepEqual(merged.map((a) => a.residentId), [1, 2])
@@ -380,6 +381,92 @@ describe('判定と一覧', { skip: X === null ? TS_UNSUPPORTED : false }, () =>
     assert.equal(AM.alertHref(1, 'excretion'), '/karte/1?sec=karte-excretion')
     // residentIds に居ない方の理由は足さない
     assert.deepEqual(AM.appendReasons([], [2], reasons).map((a) => a.residentId), [2])
+  })
+})
+
+describe('入院中の扱いと「照合できない方」の数え方（本人回答 2026-10-17）', { skip: X === null ? TS_UNSUPPORTED : false }, () => {
+  const NOW = new Date(2026, 9, 16, 15, 0).getTime()
+  const DAY = '2026-10-16'
+  const meal = (rid, day, slot, status) => ({ resident_id: rid, meal_on: day, meal_slot: slot, status })
+  const meals = [
+    meal(1, DAY, 'breakfast', 'hospital'), // 朝だけ入院（昼・夕は記録なし）＝入院
+    meal(2, DAY, 'breakfast', 'eaten'),
+    meal(2, DAY, 'lunch', 'eaten'), // 入院でない日
+    meal(3, '2026-10-15', 'breakfast', 'hospital'), // 前の日だけ入院＝今日は入院でない
+    meal(3, DAY, 'breakfast', 'eaten'),
+    meal(5, DAY, 'breakfast', 'out'),
+    meal(5, DAY, 'lunch', 'hospital'), // 外出と入院が混ざる＝どれか1つでも入院なら入院
+  ]
+
+  it('isHospitalDay: その日の食事の記録のどれか1つでも入院なら入院・記録の無い日は入院とみなさない', () => {
+    assert.equal(X.isHospitalDay(meals, 1, DAY), true)
+    assert.equal(X.isHospitalDay(meals, 2, DAY), false)
+    assert.equal(X.isHospitalDay(meals, 3, DAY), false)
+    assert.equal(X.isHospitalDay(meals, 3, '2026-10-15'), true)
+    assert.equal(X.isHospitalDay(meals, 4, DAY), false) // 食事の記録なし
+    assert.equal(X.isHospitalDay(meals, 5, DAY), true)
+    assert.equal(X.isHospitalDay([], 1, DAY), false)
+    assert.equal(X.isHospitalDay(null, 1, DAY), false)
+    assert.equal(X.isHospitalDay([null, meal(1, DAY, 'lunch', null)], 1, DAY), false)
+    assert.deepEqual([...X.hospitalIdsOn(meals, DAY)].sort(), [1, 5])
+    assert.deepEqual([...X.hospitalIdsOn(undefined, DAY)], [])
+  })
+
+  it('今日の要注意: 今日の食事が入院の方は「排便なし」を出さない（入院でない方は出す）', () => {
+    const snap = X.parseExcretionPayload({
+      residents: HB_RES,
+      records: [
+        { id: 's1', residentId: 11, type: 'stool', datetime: dtOf(NOW - 80 * H1), date: dtOf(NOW - 80 * H1).slice(0, 10), stoolAmt: '多量' },
+        { id: 's2', residentId: 12, type: 'stool', datetime: dtOf(NOW - 80 * H1), date: dtOf(NOW - 80 * H1).slice(0, 10), stoolAmt: '多量' },
+      ],
+    })
+    const shown = CL.filter((r) => r.active)
+    const none = X.stoolAlertReasons(snap, shown, shown, NOW)
+    assert.equal(none.reasons.has(1), true)
+    const withHosp = X.stoolAlertReasons(snap, shown, shown, NOW, X.hospitalIdsOn(meals, DAY))
+    assert.equal(withHosp.reasons.has(1), false) // 利用者01 は朝だけ入院＝出さない
+    assert.equal(withHosp.reasons.has(2), true) // 利用者02 は入院でない
+    assert.equal(withHosp.unlinked, none.unlinked) // 入院は照合できない人数に関係しない
+  })
+
+  it('カルテ: 入院の日は view.hospital（日数の代わりの文）・14日の一覧はそのまま', () => {
+    const snap = X.parseExcretionPayload({
+      residents: HB_RES,
+      records: [{ id: 's1', residentId: 11, type: 'stool', datetime: dtOf(NOW - 80 * H1), date: dtOf(NOW - 80 * H1).slice(0, 10), stoolAmt: '多量' }],
+    })
+    const v = X.excretionViewFor(snap, CL[0], CL, NOW, X.isHospitalDay(meals, 1, DAY))
+    assert.equal(v.linked, true)
+    assert.equal(v.hospital, true)
+    assert.equal(v.days.length, 14)
+    assert.equal(v.days.some((d) => d.stools.length > 0), true)
+    assert.equal(X.MSG_STOOL_HOSPITAL, '入院中のため判定しません（食事の記録が入院）')
+    const v2 = X.excretionViewFor(snap, CL[0], CL, NOW)
+    assert.equal(v2.hospital, false)
+  })
+
+  it('照合できない方に数えるのは同じ氏名（どちら側でも）と居室の食い違いだけ', () => {
+    assert.equal(X.isCountedUnlinked('dupCareLog'), true)
+    assert.equal(X.isCountedUnlinked('dupHaiben'), true)
+    assert.equal(X.isCountedUnlinked('roomMismatch'), true)
+    assert.equal(X.isCountedUnlinked('notFound'), false)
+    assert.equal(X.isCountedUnlinked('inactive'), false)
+    // 見つからない方だけなら 0 名
+    const snap = X.parseExcretionPayload({ residents: [{ id: 11, name: '利用者01', room: '101' }] })
+    const shown = [CL[0], CL[1], CL[6]] // 01 照合できる・02/07 見つからない
+    assert.equal(X.stoolAlertReasons(snap, shown, shown, Date.now()).unlinked, 0)
+    // カルテの方ごとの「見つかりません」の表示は残す
+    const v = X.excretionViewFor(snap, CL[1], shown, Date.now())
+    assert.match(v.message, /排便記録に同じお名前の方が見つかりません/)
+  })
+
+  it('配線: 要注意は今日の食事から入院の方を渡し、一行は 0 名なら出さない。カルテは表示の日（toIso）の食事で判定', () => {
+    const page = read('../src/pages/AlertsPage.tsx')
+    assert.match(page, /stoolAlertReasons\(stool\.snap, shown, data\.residents, Date\.now\(\), hospitalIdsOn\(data\.meals, data\.day\)\)/)
+    assert.match(page, /if \(unlinked > 0\) \{/)
+    const karte = read('../src/pages/KartePage.tsx')
+    assert.match(karte, /isHospitalDay\(data\.meals, residentId, toIso\)/)
+    assert.match(karte, /\{view\.hospital \? \(/)
+    assert.match(karte, /\{MSG_STOOL_HOSPITAL\}/)
   })
 })
 

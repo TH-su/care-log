@@ -27,7 +27,7 @@
 //  受け取った記録のうち 16日より前の日付のもの（古い記録を最近書き直したもの）は捨てる（数える範囲を一定にする）。
 
 import { nameKey } from './types.ts'
-import type { Resident } from './types.ts'
+import type { Meal, Resident } from './types.ts'
 import type { AlertReason } from './vitalAlerts.ts'
 
 /** 排便記録アプリが localStorage に置く接続先のキー（haiben-record.html の API_KEY / API_KEY_BAK / API_KEY_BAK2 と同じ） */
@@ -613,9 +613,39 @@ export function stoolAlertLabel(s: StoolStatus): string {
   return `排便なし${s.days}日${s.atLeast ? '以上' : ''}`
 }
 
+// ───────────────────────── 入院中の扱い（本人回答 2026-10-17） ─────────────────────────
+// 排便記録アプリの入院の時計止めは端末にしか無い（サーバーに入院の履歴が無い）ため、care-log の食事の記録で見分ける。
+// その日の食事の記録のどれか1つでも状態が「入院」なら入院中とみなす。食事の記録が無い日は入院とみなさない。
+
+/** その方のその日の食事の記録に、状態が「入院」のものが1つでもあるか */
+export function isHospitalDay(
+  meals: ReadonlyArray<Pick<Meal, 'resident_id' | 'meal_on' | 'status'>> | null | undefined,
+  residentId: number,
+  day: string,
+): boolean {
+  if (!Array.isArray(meals)) return false
+  return meals.some((m) => m != null && m.resident_id === residentId && m.meal_on === day && m.status === 'hospital')
+}
+
+/** その日に入院中の方（利用者ID の集まり）。今日の要注意で使う */
+export function hospitalIdsOn(meals: ReadonlyArray<Pick<Meal, 'resident_id' | 'meal_on' | 'status'>> | null | undefined, day: string): Set<number> {
+  const out = new Set<number>()
+  if (!Array.isArray(meals)) return out
+  for (const m of meals) if (m != null && m.meal_on === day && m.status === 'hospital') out.add(m.resident_id)
+  return out
+}
+
+/** 入院中の方の排泄欄に日数の代わりに出す文 */
+export const MSG_STOOL_HOSPITAL = '入院中のため判定しません（食事の記録が入院）'
+
+/** 今日の要注意の「照合できない方」に数える理由（排便記録に見つからない方は数えない・本人回答 2026-10-17） */
+export function isCountedUnlinked(reason: ExcretionMatchFail): boolean {
+  return reason === 'dupCareLog' || reason === 'dupHaiben' || reason === 'roomMismatch'
+}
+
 export type ExcretionView =
   | { linked: false; message: string; reason: ExcretionMatchFail }
-  | { linked: true; status: StoolStatus; days: ExcretionDay[] }
+  | { linked: true; status: StoolStatus; days: ExcretionDay[]; hospital: boolean }
 
 /** care-log の1人について、照合→判定→一覧までをまとめる */
 export function excretionViewFor(
@@ -623,31 +653,36 @@ export function excretionViewFor(
   target: Pick<Resident, 'id' | 'name' | 'room' | 'active'>,
   careLog: ReadonlyArray<Pick<Resident, 'id' | 'name' | 'room' | 'active'>>,
   now: number,
+  hospital = false,
 ): ExcretionView {
   const m = matchExcretionResident(target, careLog, snap.residents)
   if (!m.ok) return { linked: false, message: excretionMatchMessage(m), reason: m.reason }
   const pool = snap.recs.get(m.hb.id) ?? []
-  return { linked: true, status: stoolStatusOf(pool, m.hb, snap.cfg, now), days: excretionDays(pool, now) }
+  return { linked: true, status: stoolStatusOf(pool, m.hb, snap.cfg, now), days: excretionDays(pool, now), hospital }
 }
 
 /**
  * 今日の要注意（/alerts）に足す「排便なし◯日」（注意・危険の方だけ）。targets は画面に出している方（階で絞った在籍の方）、
- * careLog は同じ氏名の数を数えるための在籍の全員。照合できない方は理由を出さず、人数だけ返す（画面で一行知らせる）
+ * careLog は同じ氏名の数を数えるための在籍の全員。hospital は今日の食事の記録が入院の方（理由を出さない）。
+ * 照合できない方は理由を出さず、人数だけ返す（画面で一行知らせる）。人数に数えるのは同じ氏名・居室の食い違いだけで、
+ * 排便記録に見つからない方は数えない（isCountedUnlinked）
  */
 export function stoolAlertReasons(
   snap: HbSnapshot,
   targets: ReadonlyArray<Pick<Resident, 'id' | 'name' | 'room' | 'active'>>,
   careLog: ReadonlyArray<Pick<Resident, 'id' | 'name' | 'room' | 'active'>>,
   now: number,
+  hospital: ReadonlySet<number> = new Set(),
 ): { reasons: Map<number, AlertReason[]>; unlinked: number } {
   const reasons = new Map<number, AlertReason[]>()
   let unlinked = 0
   for (const t of targets) {
     const m = matchExcretionResident(t, careLog, snap.residents)
     if (!m.ok) {
-      unlinked++
+      if (isCountedUnlinked(m.reason)) unlinked++
       continue
     }
+    if (hospital.has(t.id)) continue
     const st = stoolStatusOf(snap.recs.get(m.hb.id) ?? [], m.hb, snap.cfg, now)
     if (st.level === 'ok') continue
     reasons.set(t.id, [
