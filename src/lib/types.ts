@@ -1,5 +1,8 @@
 // 型・定数・しきい値の正本（凍結契約）。
 // ビルダーはこのファイルを変更しない。変更が必要になったら実装せずチーフへ差し戻す。
+// （2026-10-16 A8: しきい値の数値だけを vitalThresholds.ts へ移した＝親の指示で判定関数の中身を差し替え。型と値は同じ）
+
+import { diaBpLevelBy, pulseLevelBy, spo2LevelBy, sysBpLevelBy, tempLevelBy, vitalThresholds } from './vitalThresholds.ts'
 
 // routine=定時1回/日 ・ recheck=再検枠 ・ observation=発熱者（経過観察） ・ symptom=他症状者
 // （observation / symptom は現行スプシの申し送りシート上部2ブロックに対応。1人1日複数行を許す）
@@ -669,38 +672,23 @@ export interface DayData {
 }
 
 // ── しきい値（現行スプシの条件付き書式の凡例を定数化。値の変更は本人承認が必要） ──
+// 数値の正本は vitalThresholds.ts（A8・2026-10-16）。ここは「いまの基準値」（既定値か app_settings の上書き）で判定するだけ
 export type Level = 'danger-high' | 'warn-high' | 'warn-low' | 'danger-low' | null
 
 export function tempLevel(v: number | null): Level {
-  if (v == null) return null
-  if (v >= 38.1) return 'danger-high'
-  if (v >= 37.5) return 'warn-high'
-  if (v <= 35.5) return 'danger-low'
-  return null
+  return tempLevelBy(v, vitalThresholds())
 }
 export function sysBpLevel(v: number | null): Level {
-  if (v == null) return null
-  if (v >= 151) return 'danger-high'
-  if (v < 90) return 'warn-low'
-  return null
+  return sysBpLevelBy(v, vitalThresholds())
 }
 export function diaBpLevel(v: number | null): Level {
-  if (v == null) return null
-  if (v >= 91) return 'danger-high'
-  if (v < 50) return 'warn-low'
-  return null
+  return diaBpLevelBy(v, vitalThresholds())
 }
 export function pulseLevel(v: number | null): Level {
-  if (v == null) return null
-  if (v >= 101) return 'danger-high'
-  if (v < 40) return 'warn-low'
-  return null
+  return pulseLevelBy(v, vitalThresholds())
 }
 export function spo2Level(v: number | null): Level {
-  if (v == null) return null
-  if (v < 90) return 'danger-low'
-  if (v < 93) return 'warn-low'
-  return null
+  return spo2LevelBy(v, vitalThresholds())
 }
 
 // 色だけに頼らない記号（↑↑=危険高値 ↑=注意高値 ↓=注意低値 ↓↓=危険低値）
@@ -721,11 +709,11 @@ export function vitalHasAlert(v: Vital): boolean {
   )
 }
 
-// 食事の低摂取判定（仮置き: 主+副の合計が6以下。★本人確認事項）
+// 食事の低摂取判定（仮置き: 主+副の合計が6以下。★本人確認事項。値の正本は vitalThresholds.ts の lowIntakeMax）
 export function isLowIntake(m: Meal): boolean {
   if (m.status && m.status !== 'eaten') return false
   if (m.main_amount == null && m.side_amount == null) return false
-  return (m.main_amount ?? 0) + (m.side_amount ?? 0) <= 6
+  return (m.main_amount ?? 0) + (m.side_amount ?? 0) <= vitalThresholds().lowIntakeMax
 }
 
 // バイタル入力の許容範囲（DB の check 制約と一致させる）

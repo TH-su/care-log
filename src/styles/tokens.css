@@ -310,3 +310,77 @@
     --c-focus: #F3BE6F;
   }
 }
+
+/* ── 摂取量の濃淡（A6・2026-10-16 本人回答「摂取量に応じたマスの地の濃淡＋半分以下は斜線」）──────────
+   段階の番号は vitalAlerts.ts の intakeShade・mealShade の stage（4＝全量 … 0＝ほとんど食べていない）。
+   **食べた量が少ないほど地の色が濃い（黄色が強い）**。全量（4）は地を塗らない＝いつもの表（縞・白地）のまま。
+   色だけに頼らない: 数字は消さない・半分以下は斜線（.cl-shade-hatch・sheet.css）を重ねる・印刷は灰色の階調＋斜線。
+   使い方: 地は background-color: var(--cl-shade-N-bg)、その上の文字は var(--cl-shade-N-ink)。
+   食事一覧は朝＝赤・昼＝緑の文字色（sheet.css の --msheet-c-*）をそのまま載せるので、地はそれらとも 4.5:1 以上に
+   なる明るさに限った（明るい地は相対輝度 0.814 以上・暗い地は 0.043 以下。差は彩度で付ける）。
+   コントラスト（計算値・tests/vitals-display.test.mjs が実値から検算する。最小の組）:
+     ライト 段階0〜3 × 文字（ink / 朝 / 昼 / 低摂取の warn）: 最小 4.51（昼の緑 × 段階0）
+     ダーク 段階0〜3 × 文字（ink / 朝 / 昼 / warn）: 最小 4.69（朝の赤 × 段階0）
+     印刷   段階0〜3 × 文字（黒 / 朝 / 昼 / warn）: 最小 4.54（昼の緑 × 段階0）
+   ダークは :root[data-mode='dark']（設定で選んだ時）と prefers-color-scheme（OS 追従の時）の両方で定義する
+   （この表のダークの切り替えは data-mode 属性＝App.tsx・SettingsPage。sheet.css の土日の色と同じ3か所） */
+:root {
+  --cl-shade-0-bg: #ffea80;
+  --cl-shade-1-bg: #ffef9f;
+  --cl-shade-2-bg: #fff5cc;
+  --cl-shade-3-bg: #fffcee;
+  --cl-shade-4-bg: transparent;
+  --cl-shade-0-ink: #14191f;
+  --cl-shade-1-ink: #14191f;
+  --cl-shade-2-ink: #14191f;
+  --cl-shade-3-ink: #14191f;
+  --cl-shade-4-ink: #14191f;
+  /* 斜線の線の色（地の上に 1px の線。数字の読みを邪魔しない程よい濃さ） */
+  --cl-shade-hatch-line: #b8912f;
+}
+:root[data-mode='dark'] {
+  --cl-shade-0-bg: #443608;
+  --cl-shade-1-bg: #3a300c;
+  --cl-shade-2-bg: #302a12;
+  --cl-shade-3-bg: #262418;
+  --cl-shade-4-bg: transparent;
+  --cl-shade-0-ink: #e9eef2;
+  --cl-shade-1-ink: #e9eef2;
+  --cl-shade-2-ink: #e9eef2;
+  --cl-shade-3-ink: #e9eef2;
+  --cl-shade-4-ink: #e9eef2;
+  --cl-shade-hatch-line: #8f7a3c;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-mode='light']) {
+    --cl-shade-0-bg: #443608;
+    --cl-shade-1-bg: #3a300c;
+    --cl-shade-2-bg: #302a12;
+    --cl-shade-3-bg: #262418;
+    --cl-shade-4-bg: transparent;
+    --cl-shade-0-ink: #e9eef2;
+    --cl-shade-1-ink: #e9eef2;
+    --cl-shade-2-ink: #e9eef2;
+    --cl-shade-3-ink: #e9eef2;
+    --cl-shade-4-ink: #e9eef2;
+    --cl-shade-hatch-line: #8f7a3c;
+  }
+}
+/* 印刷は表示モードに関係なく白い紙に灰色の階調（白黒の印刷でも濃淡と斜線で読める）。ダークの定義より後に置いて上書きする */
+@media print {
+  :root,
+  :root[data-mode],
+  :root:not([data-mode='light']) {
+    --cl-shade-0-bg: #eaeaea;
+    --cl-shade-1-bg: #ededed;
+    --cl-shade-2-bg: #f2f2f2;
+    --cl-shade-3-bg: #f8f8f8;
+    --cl-shade-4-bg: transparent;
+    --cl-shade-0-ink: #000000;
+    --cl-shade-1-ink: #000000;
+    --cl-shade-2-ink: #000000;
+    --cl-shade-3-ink: #000000;
+    --cl-shade-4-ink: #000000;
+    --cl-shade-hatch-line: #4d4d4d;
+  }
+}

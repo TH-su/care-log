@@ -1343,3 +1343,126 @@ main:has(.dsheet-frame) {
   font-weight: var(--fw-bold);
 }
 
+
+/* ══════════════════════════════════════════════════════════════
+   バイタル・食事・水分の見やすさ（A1〜A9・2026-10-16 本人回答）— 一覧・一括・日報の画面の部品
+   色の値は tokens.css の --cl-shade-*（A6）と既存のトークンだけを使う（ここに生の色を書かない）。
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── A6 摂取量の濃淡（段階 0〜4・vitalAlerts.ts の mealShade）──────────────
+   地だけを塗る（文字の色は画面の側＝食事一覧の朝＝赤・昼＝緑はそのまま。地はそれらとも 4.5:1 以上＝tokens.css）。
+   斜線（.cl-shade-hatch）は「半分以下」。カルテ（KartePage）も同じクラス名を使う。
+   印刷: 背景は既定では紙に出ないので、濃淡と斜線のあるマスだけ print-color-adjust: exact で刷る
+   （灰色の階調と濃い灰色の斜線は tokens.css の @media print。白黒の印刷でも斜線で「半分以下」が分かる） */
+.cl-shade-bg-0 { background-color: var(--cl-shade-0-bg); }
+.cl-shade-bg-1 { background-color: var(--cl-shade-1-bg); }
+.cl-shade-bg-2 { background-color: var(--cl-shade-2-bg); }
+.cl-shade-bg-3 { background-color: var(--cl-shade-3-bg); }
+.cl-shade-bg-4 { background-color: var(--cl-shade-4-bg); }
+.cl-shade-hatch {
+  background-image: repeating-linear-gradient(
+    135deg,
+    var(--cl-shade-hatch-line) 0,
+    var(--cl-shade-hatch-line) 1px,
+    transparent 1px,
+    transparent 6px
+  );
+}
+.cl-shade-bg-0,
+.cl-shade-bg-1,
+.cl-shade-bg-2,
+.cl-shade-bg-3,
+.cl-shade-hatch {
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+
+/* ── A2 摂取低下の印（食事一覧の水分の欄の左に「▼」＋続いている日数。紙にも出す）── */
+.msheet-lowday {
+  color: var(--c-warn);
+  font-weight: var(--fw-bold);
+}
+@media print {
+  .msheet-lowday {
+    color: #000;
+  }
+}
+
+/* ── A3 水分の横棒（目標に対する割合。画面だけ＝紙は今のまま）──────────────
+   .cl-fluid-bar は入れ物（地＝罫線の色）、中の span の幅が割合（style の width）。
+   一覧（食事一覧の水分の欄）では欄の下端に細く敷く（.cl-fluid-bar-cell）。数字はそのまま上に出る */
+.cl-fluid-bar {
+  display: block;
+  position: relative;
+  height: 0.375rem;
+  border-radius: 9999px;
+  background: var(--c-border);
+  overflow: hidden;
+}
+.cl-fluid-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--c-info);
+}
+.cl-fluid-bar-cell {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  bottom: 1px;
+  height: 3px;
+  pointer-events: none;
+}
+@media print {
+  .cl-fluid-bar {
+    display: none;
+  }
+}
+
+/* ── A1 平熱との差の印（「平+1.2↑」。日報・バイタル一括の体温の欄の下に小さく。画面だけ）── */
+.vmark-usual {
+  display: block;
+  font-family: var(--font-num);
+  font-size: 0.85em;
+  font-weight: var(--fw-bold);
+  line-height: 1.2;
+  color: var(--c-warn);
+  white-space: nowrap;
+}
+@media print {
+  .vmark-usual {
+    display: none;
+  }
+}
+
+/* ── A4 直近7日の体温と SpO2 の細い線（バイタル一覧の居室の欄・氏名の左隣。画面だけ）──────────
+   全員同じ縦軸（体温 35.5〜38.5℃・SpO2 88〜100%）。体温＝実線（上半分）・SpO2＝点線（下半分）で、色だけに頼らない */
+.vspark {
+  display: block;
+  flex: 0 0 auto;
+  width: calc(1.75rem * var(--sheet-zoom, 1));
+  height: calc(var(--sheet-row-h) - 4px);
+  color: var(--c-ink2);
+  overflow: visible;
+}
+.vspark-temp {
+  stroke: var(--c-danger);
+}
+.vspark-spo2 {
+  stroke: var(--c-info);
+}
+@media print {
+  .vspark {
+    display: none;
+  }
+}
+
+/* SheetCell の小さな追加の印（A1「平」・画面だけ） */
+.sheet-extra-mark {
+  color: var(--c-warn);
+  font-weight: var(--fw-bold);
+}
+@media print {
+  .sheet-extra-mark {
+    display: none;
+  }
+}

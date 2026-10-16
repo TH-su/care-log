@@ -52,7 +52,7 @@
 //   ※ SheetCell が描画する要素の種類（td/div）に依存しないよう、表は div の行で組み、
 //     各セルは幅を持つ入れ物で包んでから SheetCell を置く。
 
-import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createContext, memo, useCallback, useContext, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { CSSProperties, ReactNode } from 'react'
 import {
@@ -199,6 +199,10 @@ import { groupNotesByResident, noteGroupLines, noteSectionOf } from '../lib/note
 import type { NoteGroupRow, NoteSection } from '../lib/noteGroup'
 import { matchSearch, noteSearchText, parseSearchQuery } from '../lib/noteSearch'
 import { normalizeCategories } from '../lib/noteCategory'
+// 発熱者・他症状者のバイタル欄の印（A1 平熱との差・A9 SpO2 の個別の下限）。平熱と目標は画面を開いた時に1回読んで控える
+import { fetchResidentTargets, fetchUsualTemps, loadVitalThresholds } from '../lib/db'
+import { judgeTemp, spo2LevelFor } from '../lib/vitalAlerts'
+import type { ResidentTargets } from '../lib/vitalAlerts'
 import {
   CategoryChips,
   CategoryExtractDialog,
@@ -218,9 +222,7 @@ import {
   hasNoteAlias,
   noteDisplayName,
   pulseLevel,
-  spo2Level,
   sysBpLevel,
-  tempLevel,
 } from '../lib/types'
 import type {
   Attendance,
@@ -2235,6 +2237,36 @@ export function DailySheetPage({
     }
   }, [])
 
+  // 発熱者・他症状者のバイタル欄の印（A1・A9）に使う平熱と個別の目標。表の読み込みとは別に読む（待たせない・失敗しても
+  // 表は出す＝印が今の基準だけになる）。平熱は選んだ日について1回（db.ts が日ごとに控える）、目標と基準値は開いた時に1回。
+  // 欄には文脈（VitalMarksContext）で渡す＝1日ぶんの枠（DaySheetMemo）を描き直さず、バイタルの欄だけが描き直る
+  const [vitalMarks, setVitalMarks] = useState<VitalMarks>(NO_VITAL_MARKS)
+  useEffect(() => {
+    let alive = true
+    void loadVitalThresholds().then(() => {
+      if (alive) setVitalMarks((m) => ({ ...m }))
+    })
+    fetchResidentTargets()
+      .then((targets) => {
+        if (alive) setVitalMarks((m) => ({ ...m, targets }))
+      })
+      .catch(() => {
+        // 読めない時は施設の基準（SpO2 93%・90%）で印を出す
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+  useEffect(() => {
+    let alive = true
+    void fetchUsualTemps(day).then((usual) => {
+      if (alive) setVitalMarks((m) => ({ ...m, usual }))
+    })
+    return () => {
+      alive = false
+    }
+  }, [day])
+
   // 端末に残った期限切れの控えを掃除する（開いている日だけでなく、全ての日ぶんを1度だけ見る）
   useEffect(() => {
     sweepDailyDrafts()
@@ -3063,6 +3095,7 @@ export function DailySheetPage({
   }
 
   return (
+    <VitalMarksContext.Provider value={vitalMarks}>
     <div className="space-y-4">
       {/* 日付バー（前後日・カレンダー・表示単位・表示倍率）。狭い画面・1行に収まらない時は畳める（2026-09-29） */}
       <DailyTopBar
@@ -3270,6 +3303,7 @@ export function DailySheetPage({
       />
       {toast}
     </div>
+    </VitalMarksContext.Provider>
   )
 }
 
@@ -6990,6 +7024,16 @@ function setCellPresence(place: VitalSetPlace | undefined, columns: VitalCellFie
   }
 }
 
+/** 発熱者・他症状者の欄の印に使う平熱（A1）と個別の目標（A9）。DailySheetPage が読み、VitalSetCells が読む */
+interface VitalMarks {
+  /** 利用者ID → 平熱（5回未満は null。読めない時は空＝A1 を出さない） */
+  usual: ReadonlyMap<number, number | null>
+  /** 利用者ID → 個別の目標（無い方・読めない時は施設の基準） */
+  targets: ReadonlyMap<number, ResidentTargets>
+}
+const NO_VITAL_MARKS: VitalMarks = { usual: new Map(), targets: new Map() }
+const VitalMarksContext = createContext<VitalMarks>(NO_VITAL_MARKS)
+
 /** 1枠（時 KT SpO2 BP P）の描画。保存済みなら update、空き枠なら insert を呼ぶ */
 function VitalSetCells({
   name,
@@ -7017,6 +7061,7 @@ function VitalSetCells({
   /** 入力の書式・範囲エラー（保存はしない） */
   onError: (message: string) => void
 }) {
+  const marks = useContext(VitalMarksContext)
   const val = (f: keyof VitalSetInput): string => {
     if (input) return input[f]
     if (!vital) return ''
@@ -7080,6 +7125,11 @@ function VitalSetCells({
     width: string,
     label: string,
     level: Level,
+    /**
+     * A1 の印（「平熱+1.2↑」・両方当たる時の注記「平熱+1.6」）。値の下に「平+1.2↑」と縮めて小さく出す（欄の幅 54px に
+     * 収めるため・画面だけ）。読み上げは ariaLabel に全文を足す
+     */
+    usualMark: string | null = null,
   ) => (
     // 左右余白は SheetCell の中のボタンが持つ（ここで重ねると記号が入る幅が無くなる）
     <Cell width={width} pad={false}>
@@ -7089,21 +7139,31 @@ function VitalSetCells({
         width="100%"
         align="right"
         level={level}
-        ariaLabel={`${name} ${label}`}
+        ariaLabel={`${name} ${label}${usualMark ? `（${usualMark.replace('↑', '')}・平熱より高い）` : ''}`}
         as="div"
         // 行の地色（縞・書きかけの行）を透かす。しきい値がある時は SheetCell 側で
         // level の色が優先されるので、意味のある色は縞に負けない（指示16）
         tone="row"
         {...setCellPresence(place, SET_FIELD_COLUMNS[f])}
       />
+      {usualMark ? (
+        <span className="vmark-usual px-1 text-right" aria-hidden="true">
+          {usualMark.replace('平熱', '平')}
+        </span>
+      ) : null}
     </Cell>
   )
+
+  // A1: 平熱との差（今の印はそのまま。印が無くて平熱+1.0℃以上なら「平+1.2↑」、両方なら注記「平+1.6」）。
+  // A9: SpO2 は個別の下限がある方はその下限で判定する（無い方は今の 93%・90%）
+  const tj = vital ? judgeTemp(vital.temp, marks.usual.get(vital.resident_id)) : null
+  const tempUsual = tj ? (tj.level ? tj.note : tj.overUsual ? tj.mark : null) : null
 
   return (
     <>
       {cell('at', 'var(--w-pulse)', '時刻', null)}
-      {cell('temp', 'var(--w-temp)', VITAL_FIELD_LABEL.temp, vital ? tempLevel(vital.temp) : null)}
-      {cell('spo2', 'var(--w-spo2)', VITAL_FIELD_LABEL.spo2, vital ? spo2Level(vital.spo2) : null)}
+      {cell('temp', 'var(--w-temp)', VITAL_FIELD_LABEL.temp, tj ? tj.level : null, tempUsual)}
+      {cell('spo2', 'var(--w-spo2)', VITAL_FIELD_LABEL.spo2, vital ? spo2LevelFor(vital.spo2, marks.targets.get(vital.resident_id)) : null)}
       {cell('bp', W_BP, '血圧', vital ? bpLevel(vital.sys_bp, vital.dia_bp) : null)}
       {cell('pulse', 'var(--w-pulse)', VITAL_FIELD_LABEL.pulse, vital ? pulseLevel(vital.pulse) : null)}
     </>

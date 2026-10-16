@@ -1,7 +1,8 @@
 // 利用者一覧（/karte）と個人カルテ（/karte/:id）。
 // 契約: docs/design/contracts.md（ルーティング・db.ts API・共通部品） ／ 詳細: docs/design/ui-design.md §5
 //
-// この画面は読み取り専用（書き込み経路を持たない＝multi-device-sync 原則9「読み取りで書かない」。
+// この画面は記録について読み取り専用（記録の書き込み経路を持たない＝multi-device-sync 原則9「読み取りで書かない」。
+// 例外は事務・管理者が使う「個別の目標」の保存だけ＝下の 2026-10-16 の項。
 // 既読付与も行わない＝表示だけで note_reads を作らない）。
 // - 取得は db.ts の fetchResidents / fetchAllStaff / fetchKarte / fetchRecordHistory のみ
 //   （記入者名は退職者も含む全員から引く＝F48・2026-10-10。退職者が書いた過去の記録の記入者を「—」にしない）
@@ -12,13 +13,38 @@
 //   取得した体重は画面のメモリだけに持つ（期間切替では取り直さない。利用者・再試行・「体重を読み直す」で取り直す）
 // - Tailwind はトークン由来クラスのみ。色・px の直書きと arbitrary value は書かない
 // - console 出力を持たない（個人情報の漏出経路を作らない）
+// - バイタル・食事・水分の見やすさ（2026-10-16 本人回答・A1〜A9）:
+//   ・体温のグラフに平熱（fetchUsualTemps＝直近30日の定時の中央値）の点線と、平熱+1.0℃以上の印（A1）
+//   ・SpO2 は個別の下限（A9）があればそれで判定し、下限の線を引く
+//   ・食事の表のマスの地の濃淡（A6・tokens.css の --cl-shade-0〜4-bg/ink と .cl-shade-hatch。色だけに頼らず数字は残す）、
+//     ▼摂取低下（A2）、水分の目標との比と横棒（A3）
+//   ・「個別の目標」の欄（水分の目標・SpO2 の個別の下限）。**この画面で唯一の書き込み**（saveResidentTargets）。
+//     書けるのは事務・管理者のログイン（canEditTargets）だけで、現場には入力欄を出さず値だけを見せる（サーバーの RLS でも止まる）
+//   ・〔温度板を印刷〕（A7・A4 縦1枚）。押した時だけ印刷の部品を置く（Ctrl+P のカルテの印刷は今までどおり）
+//   ・今日の要注意（/alerts）から ?sec=<欄の id> で開いた時は、その欄へ移る（id は KARTE_JUMPS の許可リストで照合）
+//   ・基準値（app_settings の上書き・A8）は loadVitalThresholds をカルテの読み込みと一緒に待ってから描く
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import { flushSync } from 'react-dom'
-import { Link, useParams } from 'react-router-dom'
-import { diffHistoryRow, fetchAllStaff, fetchKarte, fetchRecordHistory, fetchResidents } from '../lib/db'
-import type { RecordHistoryEntry } from '../lib/db'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
+import {
+  cachedMyRole,
+  canEditTargets,
+  DbError,
+  diffHistoryRow,
+  fetchAllStaff,
+  fetchKarte,
+  fetchMyRole,
+  fetchRecordHistory,
+  fetchResidents,
+  fetchResidentTargets,
+  fetchUsualTempDetails,
+  loadVitalThresholds,
+  saveResidentTargets,
+  subscribeMyRole,
+} from '../lib/db'
+import type { MyRole, RecordHistoryEntry } from '../lib/db'
 import {
   clampLines,
   fmtChangedAt,
@@ -40,7 +66,6 @@ import {
   fluidSeries,
   KARTE_AXES,
   layoutAxisLabels,
-  LOW_INTAKE_MAX,
   mealDays,
   mealIntakeSeries,
   offRangeSpeech,
@@ -48,6 +73,26 @@ import {
   splitThresholds,
 } from '../lib/chart'
 import type { AxisSpec } from '../lib/chart'
+import { vitalThresholds } from '../lib/vitalThresholds'
+// バイタル・食事・水分の見やすさ（A1・A2・A3・A6・A9・2026-10-16）の判定。数の決め方は vitalAlerts.ts（純関数・試験あり）
+import {
+  fluidProgress,
+  fluidTargetOf,
+  fmtMl,
+  fmtUsualTemp,
+  judgeTemp,
+  mealLowLabel,
+  mealLowStreaks,
+  mealShade,
+  spo2LevelFor,
+  spo2Limits,
+  validateResidentTargets,
+} from '../lib/vitalAlerts'
+import type { ResidentTargets, ResidentTargetsInput } from '../lib/vitalAlerts'
+import { karteSecOf } from './alertsModel'
+// 温度板（A7）。ボタンを押した時だけ置く（TempSheet.tsx の冒頭）
+import { TempSheetPrint } from '../components/print/TempSheet'
+import { buildTempSheet, sheetDays } from '../components/print/tempSheetModel'
 import {
   fetchWeights,
   fmtKg,
@@ -85,9 +130,7 @@ import {
   diaBpLevel,
   isLowIntake,
   pulseLevel,
-  spo2Level,
   sysBpLevel,
-  tempLevel,
 } from '../lib/types'
 import type {
   BathRecord,
@@ -292,6 +335,12 @@ function fmtNum(v: number, digits: number): string {
 function fmtDayShort(iso: string): string {
   const m = /^\d{4}-(\d{2})-(\d{2})$/.exec(iso)
   return m ? `${Number(m[1])}/${Number(m[2])}` : fmtDayLabel(iso)
+}
+
+/** 温度板の印刷の時刻 '2026/10/16 17:05'（端末の時刻） */
+function fmtPrintedAt(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${p(d.getMinutes())}`
 }
 
 /** 外出・外泊がその日にかかっているか（帰着未定＝end_on null は開始日以降ずっと継続中とみなす） */
@@ -515,6 +564,10 @@ interface SeriesSpec {
   levelMark?: string
   /** タップした値の表示で記号の代わりに出す言葉（未指定は levelMark／LEVEL_MARK） */
   levelLabel?: string
+  /** 点ごとの記号（体温の「平熱+1.2↑」・A1）。返した文字が levelMark／LEVEL_MARK より優先。null は既定の記号 */
+  markOf?(v: number): string | null
+  /** 点ごとの注記（体温の「平熱+1.2」）。タップした値の表示と数値の表に添える。null は添えない */
+  noteOf?(v: number): string | null
 }
 
 interface BandSpec {
@@ -531,6 +584,10 @@ interface RefLineSpec {
   y: number
   label: string
   className: string
+  /** 線の刻み（未指定は今までの '4 3'。平熱は点線 '1.5 3'） */
+  dash?: string
+  /** 文字を左の列ではなく線の右端の上に置く（平熱。左の列の幅を変えないため） */
+  inline?: boolean
 }
 
 interface PanelSpec {
@@ -550,6 +607,8 @@ interface PanelSpec {
   caption?: string
   /** 読み上げの「しきい値を外れた記録」の言い換え（食事は「低摂取（6以下）の日」） */
   alertWord?: string
+  /** 読み上げに足す説明（平熱・個別の下限。グラフの中の線の文字は読み上げられないため言葉でも伝える） */
+  speech?: string
 }
 
 /** グラフを描く枠の実測値（幅・軸の文字の大きさ・左の列でいちばん長い文字の幅・画面の高さから決めたグラフの高さ） */
@@ -711,7 +770,7 @@ function VitalChart({ panel, days, box, height }: VitalChartProps) {
       splitThresholds(
         [
           ...panel.bands.map((b) => ({ value: b.labelAt, label: b.label })),
-          ...panel.refs.map((r) => ({ value: r.y, label: r.label })),
+          ...panel.refs.filter((r) => !r.inline).map((r) => ({ value: r.y, label: r.label })),
         ],
         domain,
       ),
@@ -774,7 +833,7 @@ function VitalChart({ panel, days, box, height }: VitalChartProps) {
         if (v == null) return
         const lv = s.level(v)
         if (!lv) return
-        const text = s.levelMark ?? LEVEL_MARK[lv]
+        const text = s.markOf?.(v) ?? s.levelMark ?? LEVEL_MARK[lv]
         const w = Math.ceil(text.length * markCharW) + 2
         const cx = Math.min(width - w / 2, Math.max(padL + w / 2, x(i)))
         let base = y(v) - 7
@@ -833,7 +892,8 @@ function VitalChart({ panel, days, box, height }: VitalChartProps) {
       const v = s.values.get(day)
       if (v == null) return `${s.label} —（未測定）`
       const lv = s.level(v)
-      return `${s.label} ${fmtNum(v, panel.digits)}${panel.unit}${lv ? ` ${s.levelLabel ?? s.levelMark ?? LEVEL_MARK[lv]}` : ''}`
+      const note = s.noteOf?.(v) ?? null
+      return `${s.label} ${fmtNum(v, panel.digits)}${panel.unit}${lv ? ` ${s.levelLabel ?? s.levelMark ?? LEVEL_MARK[lv]}` : ''}${note ? `（${note}）` : ''}`
     })
     return `${fmtDayLabel(day)}　${parts.join('　')}`
   }, [selected, days, panel])
@@ -853,7 +913,7 @@ function VitalChart({ panel, days, box, height }: VitalChartProps) {
       .join('')
     // 範囲外のしきい値は SVG の中の文字（role=img のため読み上げられない）と同じことを言葉で伝える
     const off = offRangeSpeech(thresholds.above, thresholds.below)
-    return `${head}${body}${off}詳しい数値はこの下の「数値の表を開く」で確認できます。`
+    return `${head}${panel.speech ?? ''}${body}${off}詳しい数値はこの下の「数値の表を開く」で確認できます。`
   }, [panel, days, thresholds])
 
   return (
@@ -899,9 +959,23 @@ function VitalChart({ panel, days, box, height }: VitalChartProps) {
               x2={padL + plotW}
               y1={y(r.y)}
               y2={y(r.y)}
-              strokeDasharray="4 3"
+              strokeDasharray={r.dash ?? '4 3'}
               className={`stroke-1 ${r.className}`}
             />
+          ))}
+        {/* 線の右端の上に置く文字（平熱。左の列の幅を変えない） */}
+        {panel.refs
+          .filter((r) => r.inline && r.y >= domain[0] && r.y <= domain[1])
+          .map((r) => (
+            <text
+              key={`refl-${r.label}`}
+              x={padL + plotW - 2}
+              y={Math.max(padT + fs, y(r.y) - 4)}
+              textAnchor="end"
+              className="text-2xs font-bold fill-ink2"
+            >
+              {r.label}
+            </text>
           ))}
 
         {/* 左の列: しきい値の数値（範囲外は「38.1↑」「35.5↓」＝しきい値がその向きにある）と目盛の数値 */}
@@ -1097,9 +1171,11 @@ function VitalPanel({ panel, days, box, height }: VitalPanelProps) {
                         </th>
                         {panel.series.map((s) => {
                           const v = s.values.get(d) ?? null
+                          const note = v == null ? null : (s.noteOf?.(v) ?? null)
                           return (
                             <td key={s.label} className="py-2 pr-2 text-right">
                               <LevelCell value={v} level={s.level(v)} digits={panel.digits} />
+                              {note ? <span className="ml-1 text-sm font-bold text-warn">{note}</span> : null}
                             </td>
                           )
                         })}
@@ -1123,9 +1199,17 @@ interface VitalsSectionProps {
   weightPanel?: PanelSpec | null
   /** 印刷中（グラフは今までと同じ高さ 160px で描く） */
   printing: boolean
+  /** 平熱（A1。5回未満・読めない時は null、読み込み中は undefined） */
+  usual: number | null | undefined
+  /** 平熱の行が無かった（定時の体温が無い・読めない）。null の理由の言い分けだけに使う */
+  usualAbsent?: boolean
+  /** 平熱を出すのに数えた定時の体温の回数（無ければ null） */
+  usualSamples?: number | null
+  /** 個別の目標（A9 の SpO2 の下限。無ければ undefined） */
+  target: ResidentTargets | undefined
 }
 
-function VitalsSection({ vitals, days, weightPanel, printing }: VitalsSectionProps) {
+function VitalsSection({ vitals, days, weightPanel, printing, usual, usualAbsent = false, usualSamples = null, target }: VitalsSectionProps) {
   const { ref, probeRef, box } = useChartBox()
   const chartH = printing ? CHART_H_PRINT : box.h
 
@@ -1136,6 +1220,17 @@ function VitalsSection({ vitals, days, weightPanel, printing }: VitalsSectionPro
     const dia = dailySeries(sorted, 'dia_bp')
     const pulse = dailySeries(sorted, 'pulse')
     const spo2 = dailySeries(sorted, 'spo2')
+    // 帯・基準線の数値は vitalThresholds.ts の「いまの基準値」から（A8・2026-10-16。既定値なら今までと同じ数・同じ文字）
+    const th = vitalThresholds()
+    // A1: 平熱（直近30日の定時の中央値）の点線と、平熱+1.0℃以上の印。今の 37.5↑・38.1↑↑・35.5↓↓ の印はそのまま（重い方を出す）
+    const usualText = fmtUsualTemp(usual)
+    const rise = th.usualTempRise.toFixed(1)
+    const tempLevelOf = (v: number | null): Level => {
+      const j = judgeTemp(v, usual, th)
+      return j.level ?? (j.overUsual ? 'warn-high' : null)
+    }
+    // A9: SpO2 の個別の下限（医師の指示がある方だけ）。無い方は施設の基準（帯）のまま
+    const lim = spo2Limits(target, th)
     return [
       {
         key: 'temp',
@@ -1149,15 +1244,32 @@ function VitalsSection({ vitals, days, weightPanel, printing }: VitalsSectionPro
             values: temp,
             strokeClass: 'stroke-primary',
             fillClass: 'fill-primary',
-            level: tempLevel,
+            level: tempLevelOf,
+            markOf: (v) => judgeTemp(v, usual, th).mark,
+            noteOf: (v) => {
+              const j = judgeTemp(v, usual, th)
+              return j.overUsual && j.diff !== null ? `平熱+${j.diff.toFixed(1)}` : null
+            },
           },
         ],
         bands: [
-          { lo: 38.1, hi: 45, className: 'fill-danger-bg', label: '38.1', labelAt: 38.1 },
-          { lo: 37.5, hi: 38.1, className: 'fill-warn-bg', label: '37.5', labelAt: 37.5 },
-          { lo: 30, hi: 35.5, className: 'fill-info-bg', label: '35.5', labelAt: 35.5 },
+          { lo: th.temp.dangerHigh, hi: 45, className: 'fill-danger-bg', label: th.temp.dangerHigh.toFixed(1), labelAt: th.temp.dangerHigh },
+          { lo: th.temp.warnHigh, hi: th.temp.dangerHigh, className: 'fill-warn-bg', label: th.temp.warnHigh.toFixed(1), labelAt: th.temp.warnHigh },
+          { lo: 30, hi: th.temp.dangerLow, className: 'fill-info-bg', label: th.temp.dangerLow.toFixed(1), labelAt: th.temp.dangerLow },
         ],
-        refs: [],
+        refs:
+          usual != null && usualText !== null
+            ? [{ y: usual, label: `平熱${usualText}`, className: 'stroke-ink2', dash: '1.5 3', inline: true }]
+            : [],
+        legend:
+          usualText !== null
+            ? `点線＝平熱 ${usualText}℃（30日の定時の中央値${usualSamples !== null ? `・${usualSamples}回` : ''}）。平熱+${rise}↑＝平熱より${rise}℃以上高い`
+            : usual === null
+              ? usualAbsent
+                ? '平熱は出せません（直近30日の定時の体温が無いか、読み込めませんでした）'
+                : '平熱はまだ出していません（直近30日の定時の測定が5回未満）'
+              : undefined,
+        speech: usualText !== null ? `平熱は${usualText}℃（直近30日の定時の中央値）で、点線で示しています。` : undefined,
       },
       {
         key: 'bp',
@@ -1184,11 +1296,11 @@ function VitalsSection({ vitals, days, weightPanel, printing }: VitalsSectionPro
             level: diaBpLevel,
           },
         ],
-        bands: [{ lo: 151, hi: 300, className: 'fill-danger-bg', label: '上151', labelAt: 151 }],
+        bands: [{ lo: th.sysBp.dangerHigh, hi: 300, className: 'fill-danger-bg', label: `上${th.sysBp.dangerHigh}`, labelAt: th.sysBp.dangerHigh }],
         refs: [
-          { y: 91, label: '下91', className: 'stroke-danger' },
-          { y: 90, label: '上90', className: 'stroke-warn' },
-          { y: 50, label: '下50', className: 'stroke-warn' },
+          { y: th.diaBp.dangerHigh, label: `下${th.diaBp.dangerHigh}`, className: 'stroke-danger' },
+          { y: th.sysBp.warnLow, label: `上${th.sysBp.warnLow}`, className: 'stroke-warn' },
+          { y: th.diaBp.warnLow, label: `下${th.diaBp.warnLow}`, className: 'stroke-warn' },
         ],
         legend: '実線=上（収縮期）／破線=下（拡張期）',
       },
@@ -1208,8 +1320,8 @@ function VitalsSection({ vitals, days, weightPanel, printing }: VitalsSectionPro
           },
         ],
         bands: [
-          { lo: 101, hi: 250, className: 'fill-danger-bg', label: '101', labelAt: 101 },
-          { lo: 20, hi: 40, className: 'fill-warn-bg', label: '40', labelAt: 40 },
+          { lo: th.pulse.dangerHigh, hi: 250, className: 'fill-danger-bg', label: String(th.pulse.dangerHigh), labelAt: th.pulse.dangerHigh },
+          { lo: 20, hi: th.pulse.warnLow, className: 'fill-warn-bg', label: String(th.pulse.warnLow), labelAt: th.pulse.warnLow },
         ],
         refs: [],
       },
@@ -1225,17 +1337,27 @@ function VitalsSection({ vitals, days, weightPanel, printing }: VitalsSectionPro
             values: spo2,
             strokeClass: 'stroke-primary',
             fillClass: 'fill-primary',
-            level: spo2Level,
+            level: (v) => spo2LevelFor(v, target, th),
           },
         ],
-        bands: [
-          { lo: 50, hi: 90, className: 'fill-info-bg', label: '90', labelAt: 90 },
-          { lo: 90, hi: 93, className: 'fill-warn-bg', label: '93', labelAt: 93 },
-        ],
-        refs: [],
+        // 個別の下限がある方は、施設の基準の帯の代わりに個別の下限の線（注意・危険）を引く
+        bands: lim.individual
+          ? []
+          : [
+              { lo: 50, hi: th.spo2.dangerBelow, className: 'fill-info-bg', label: String(th.spo2.dangerBelow), labelAt: th.spo2.dangerBelow },
+              { lo: th.spo2.dangerBelow, hi: th.spo2.warnBelow, className: 'fill-warn-bg', label: String(th.spo2.warnBelow), labelAt: th.spo2.warnBelow },
+            ],
+        refs: lim.individual
+          ? [
+              { y: lim.warnBelow, label: `個別${lim.warnBelow}`, className: 'stroke-warn' },
+              { y: lim.dangerBelow, label: `個別${lim.dangerBelow}`, className: 'stroke-info' },
+            ]
+          : [],
+        legend: lim.individual ? `個別の下限（医師の指示）: ${lim.warnBelow}%未満で注意・${lim.dangerBelow}%未満で危険` : undefined,
+        speech: lim.individual ? `この方は個別の下限があり、${lim.warnBelow}%未満で注意、${lim.dangerBelow}%未満で危険です。` : undefined,
       },
     ]
-  }, [vitals])
+  }, [vitals, usual, usualAbsent, usualSamples, target])
 
   const hasAny = vitals.length > 0
 
@@ -1429,9 +1551,11 @@ const SLOT_HEAD: Record<MealSlot, string> = { breakfast: '朝', lunch: '昼', di
 
 interface MealCellProps {
   meal: Meal | undefined
+  /** マスの地に濃淡を付けている（A6）。欠食の文字はマスの文字色（濃淡の色）のまま出す */
+  shaded?: boolean
 }
 
-function MealCell({ meal }: MealCellProps) {
+function MealCell({ meal, shaded = false }: MealCellProps) {
   if (!meal) {
     return (
       <>
@@ -1444,7 +1568,7 @@ function MealCell({ meal }: MealCellProps) {
   }
   if (meal.status && meal.status !== 'eaten') {
     // 欠食（外出・入院・拒食）は文字で示す（色だけに頼らない）
-    return <span className="text-ink2">{MEAL_STATUS_LABEL[meal.status]}</span>
+    return <span className={shaded ? '' : 'text-ink2'}>{MEAL_STATUS_LABEL[meal.status]}</span>
   }
   const main = meal.main_amount
   const side = meal.side_amount
@@ -1472,6 +1596,24 @@ function MealCell({ meal }: MealCellProps) {
   )
 }
 
+/** 水分の日合計と目標との比（A3）「800／1,200ml（67%）」と横棒（棒は飾り＝読み上げは文字で伝える） */
+function FluidCell({ total, target }: { total: number; target: ResidentTargets | undefined }) {
+  const fp = fluidProgress(total, target)
+  // 文字は「800／1,200ml（67%）」。狭い画面では（67%）の前で折り返す（食事のマスを押しつぶさない）
+  const cut = fp.label.indexOf('（')
+  return (
+    <span className="inline-flex flex-col items-end gap-1">
+      <span className="flex flex-wrap justify-end">
+        <span className="whitespace-nowrap">{cut > 0 ? fp.label.slice(0, cut) : fp.label}</span>
+        {cut > 0 ? <span className="whitespace-nowrap">{fp.label.slice(cut)}</span> : null}
+      </span>
+      <span aria-hidden="true" data-fluid-bar="" className="block h-2 w-24 overflow-hidden rounded-full border border-border-strong bg-surface2">
+        <span className="block h-full bg-primary" style={{ width: `${Math.round(fp.bar * 100)}%` }} />
+      </span>
+    </span>
+  )
+}
+
 interface MealsSectionProps {
   meals: Meal[]
   fluids: FluidIntake[]
@@ -1479,9 +1621,22 @@ interface MealsSectionProps {
   days: string[]
   /** 印刷中（グラフは今までと同じ高さ 160px で描く） */
   printing: boolean
+  /** 個別の目標（A3 の水分の目標。無ければ undefined＝施設の既定） */
+  target: ResidentTargets | undefined
 }
 
-function MealsSection({ meals, fluids, outings, days, printing }: MealsSectionProps) {
+/**
+ * 食事のマスの地の濃淡（A6）。地は sheet.css の .cl-shade-bg-N（= var(--cl-shade-N-bg)。食事一覧と同じクラス＝印刷の灰色の階調も
+ * 同じ）、文字は var(--cl-shade-N-ink)。トークンが無い間は無効な値になり、素のまま（地なし・文字色そのまま）で出る
+ */
+function shadeClass(stage: number): string {
+  return `cl-shade-bg-${stage}`
+}
+function shadeStyle(stage: number): { color: string } {
+  return { color: `var(--cl-shade-${stage}-ink)` }
+}
+
+function MealsSection({ meals, fluids, outings, days, printing, target }: MealsSectionProps) {
   const { ref, probeRef, box } = useChartBox()
   const chartH = printing ? CHART_H_PRINT : box.h
   // 日ごとの食事（同じ枠に複数行がある場合は id の大きい＝後から入った行）と水分の合計。表とグラフで同じ集計を使う
@@ -1499,8 +1654,20 @@ function MealsSection({ meals, fluids, outings, days, printing }: MealsSectionPr
       }))
   }, [byDay, outings, days])
 
+  // A2: 摂取低下の連続日数（日 → 何日目。カルテが読んだ期間の中で数える＝期間の最初の日は前の日を数えていない）
+  const lowStreak = useMemo(() => {
+    const out = new Map<string, number>()
+    for (const byDay of mealLowStreaks(meals).values()) {
+      for (const [d, x] of byDay) if (x.streak > 0) out.set(d, x.streak)
+    }
+    return out
+  }, [meals])
+  const fluidTarget = fluidTargetOf(target)
+
   // 食事・水分のグラフ（2026-10-08 追加。バイタルと同じ日付軸・同じ部品）。
   // 主食＋副食は朝・昼・夕の1食あたりの日平均（1本の線で長い期間の傾向を読む。1食ごとの ▲低摂取 は下の表で見る）
+  // 低摂取の数は vitalThresholds.ts の「いまの基準値」（表の ▲＝isLowIntake と同じ値。A8・2026-10-16）
+  const lowMax = vitalThresholds().lowIntakeMax
   const panels = useMemo<PanelSpec[]>(
     () => [
       {
@@ -1515,15 +1682,15 @@ function MealsSection({ meals, fluids, outings, days, printing }: MealsSectionPr
             values: mealIntakeSeries(byDay),
             strokeClass: 'stroke-primary',
             fillClass: 'fill-primary',
-            level: (v) => (v != null && v <= LOW_INTAKE_MAX ? 'warn-low' : null),
+            level: (v) => (v != null && v <= lowMax ? 'warn-low' : null),
             levelMark: '▲',
             levelLabel: '▲低摂取',
           },
         ],
         bands: [],
-        refs: [{ y: LOW_INTAKE_MAX, label: `低摂取${LOW_INTAKE_MAX}`, className: 'stroke-warn' }],
+        refs: [{ y: lowMax, label: `低摂取${lowMax}`, className: 'stroke-warn' }],
         legend: '0〜20（主食0〜10＋副食0〜10）。拒食は0、外出・入院の食事は除く',
-        alertWord: `低摂取（${LOW_INTAKE_MAX}以下）の日`,
+        alertWord: `低摂取（${lowMax}以下）の日`,
         caption: '主食＋副食の1食あたりの日平均（新しい日が上。拒食は0、外出・入院の食事は除く）',
       },
       {
@@ -1548,13 +1715,18 @@ function MealsSection({ meals, fluids, outings, days, printing }: MealsSectionPr
         caption: '水分量の1日の合計（新しい日が上）',
       },
     ],
-    [byDay],
+    [byDay, lowMax],
   )
 
   return (
     <SectionCard title="食事・水分" className="mt-4" id="karte-meals">
       <p className="text-sm text-ink2">
         主食／副食は 0〜10 の数値です。▲ は低摂取（主+副が6以下）、— は記録なしを表します。
+      </p>
+      <p className="mt-1 text-sm text-ink2">
+        マスの地は食べた量（濃いほど多い）、斜線は半分以下（主+副が10以下・拒食）です。▼摂取低下は1日に2食以上が半分以下の日です。
+        水分は1日の目標（<span className="tabular">{fmtMl(fluidTarget.ml)}</span>ml・{fluidTarget.individual ? '個別の目標' : '施設の既定'}
+        ）との比です。
       </p>
       {rows.length === 0 ? (
         <div className="mt-3">
@@ -1598,12 +1770,24 @@ function MealsSection({ meals, fluids, outings, days, printing }: MealsSectionPr
                   <tr key={r.day} className="border-b border-border">
                     <th scope="row" className="py-2 pr-2 text-left font-normal text-ink">
                       {fmtDayLabel(r.day)}
+                      {lowStreak.has(r.day) ? (
+                        <span className="block text-sm font-bold text-warn">{mealLowLabel(lowStreak.get(r.day) ?? 0)}</span>
+                      ) : null}
                     </th>
-                    {TABLE_SLOTS.map((s) => (
-                      <td key={s} className="py-2 pr-2 text-right">
-                        <MealCell meal={r.meals.get(s)} />
-                      </td>
-                    ))}
+                    {TABLE_SLOTS.map((s) => {
+                      const meal = r.meals.get(s)
+                      const shade = mealShade(meal)
+                      return (
+                        <td
+                          key={s}
+                          className={`whitespace-nowrap py-2 pr-2 text-right${shade ? ` ${shadeClass(shade.stage)}` : ''}${shade?.hatched ? ' cl-shade-hatch' : ''}`}
+                          style={shade ? shadeStyle(shade.stage) : undefined}
+                        >
+                          <MealCell meal={meal} shaded={shade !== null} />
+                          {shade?.hatched ? <span className="sr-only">（半分以下）</span> : null}
+                        </td>
+                      )
+                    })}
                     <td className="tabular py-2 pr-2 text-right text-ink">
                       {r.fluid == null ? (
                         <>
@@ -1613,7 +1797,7 @@ function MealsSection({ meals, fluids, outings, days, printing }: MealsSectionPr
                           </span>
                         </>
                       ) : (
-                        r.fluid
+                        <FluidCell total={r.fluid} target={target} />
                       )}
                     </td>
                     <td className="py-2">
@@ -2156,6 +2340,309 @@ function HistorySection({ residentId, staffById }: HistorySectionProps) {
 }
 
 // ══════════════════════════════════════════════════════════════
+// 個別の目標（A3 の水分・A9 の SpO2。resident_targets・0034・2026-10-16）
+// ══════════════════════════════════════════════════════════════
+// 誰でも値を見られる。書けるのは事務・管理者のログイン（canEditTargets）だけで、現場には入力欄を出さない
+// （サーバーの RLS でも止まる）。保存は saveResidentTargets（rev 照合）。他の端末が先に変えていた（'conflict'）時は
+// 最新を読み直して見せ、「入力した値で保存し直す」か「最新の値に合わせる」かを選んでもらう。失敗の文言はそのまま出し、
+// 入力は消さない。氏名・値は localStorage に置かない。
+
+/** 入力欄の文字 → 値（空＝施設の既定に戻す null。数字以外は NaN＝検証で止める） */
+function parseTargetField(raw: string): number | null {
+  const t = raw.trim()
+  if (t === '') return null
+  return /^\d+$/.test(t) ? Number(t) : Number.NaN
+}
+
+const fieldOf = (v: number | null | undefined): string => (v == null ? '' : String(v))
+
+const TARGETS_NOT_NUMBER = '数字（半角・整数）で入れてください。空にすると施設の既定に戻ります。入力は消えていません。'
+const TARGETS_SAVE_FAILED = '個別の目標を保存できませんでした。通信状況を確認して、もう一度お試しください。入力は消えていません。'
+const TARGETS_CONFLICT =
+  '他の端末で先に個別の目標が変わりました。最新の値を下に出しています。入力した値で保存し直すか、最新の値に合わせるかを選んでください。'
+const TARGETS_RELOAD_FAILED = '他の端末で先に変わったようですが、最新の値を読み込めませんでした。少し待ってから、もう一度保存してください。入力は消えていません。'
+
+interface TargetsCardProps {
+  residentId: number
+  /** この方の目標（無い＝施設の既定。読み込み中・読めなかった時も undefined） */
+  target: ResidentTargets | undefined
+  /** 目標を読み込めたか（'loading'・'ready'・'error'） */
+  state: 'loading' | 'ready' | 'error'
+  onReload(): void
+  /** 保存・読み直しで分かった最新の目標を親へ返す（null＝この方の目標の行が無い） */
+  onLatest(t: ResidentTargets | null): void
+  /** 平熱（null＝出せない・undefined＝読み込み中） */
+  usual: number | null | undefined
+  /** 平熱の行が無かった（定時の体温が無い・読めない） */
+  usualAbsent: boolean
+  /** 平熱を出すのに数えた定時の体温の回数（無ければ null） */
+  usualSamples: number | null
+  role: MyRole | null | undefined
+}
+
+function describeTargets(t: ResidentTargets | null | undefined): string {
+  const f = fluidTargetOf(t)
+  const lim = spo2Limits(t)
+  return `水分 ${fmtMl(f.ml)}ml/日（${f.individual ? '個別' : '施設の既定'}）・SpO2 ${lim.warnBelow}%未満で注意／${lim.dangerBelow}%未満で危険（${lim.individual ? '個別' : '施設の基準'}）`
+}
+
+function TargetsCard({ residentId, target, state, onReload, onLatest, usual, usualAbsent, usualSamples, role }: TargetsCardProps) {
+  const canEdit = canEditTargets(role)
+  const uid = useId()
+  const [open, setOpen] = useState(false)
+  const [fluidIn, setFluidIn] = useState('')
+  const [warnIn, setWarnIn] = useState('')
+  const [dangerIn, setDangerIn] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState<{ tone: 'ok' | 'warn' | 'danger'; text: string } | null>(null)
+  /** 競合の後に読み直した最新（undefined＝競合していない・null＝最新は「目標なし」） */
+  const [latest, setLatest] = useState<ResidentTargets | null | undefined>(undefined)
+  const aliveRef = useRef(true)
+  useEffect(() => {
+    aliveRef.current = true
+    return () => {
+      aliveRef.current = false
+    }
+  }, [])
+  // 利用者が変わったら入力・案内を持ち越さない
+  useEffect(() => {
+    setOpen(false)
+    setMsg(null)
+    setLatest(undefined)
+  }, [residentId])
+
+  const f = fluidTargetOf(target)
+  const lim = spo2Limits(target)
+  const usualText = fmtUsualTemp(usual)
+
+  const startEdit = () => {
+    setFluidIn(fieldOf(target?.fluid_target_ml))
+    setWarnIn(fieldOf(target?.spo2_warn_below))
+    setDangerIn(fieldOf(target?.spo2_danger_below))
+    setMsg(null)
+    setLatest(undefined)
+    setOpen(true)
+  }
+
+  const save = async (current: ResidentTargets | null) => {
+    if (busy) return
+    const input: ResidentTargetsInput = {
+      fluid_target_ml: parseTargetField(fluidIn),
+      spo2_warn_below: parseTargetField(warnIn),
+      spo2_danger_below: parseTargetField(dangerIn),
+    }
+    if ([input.fluid_target_ml, input.spo2_warn_below, input.spo2_danger_below].some((v) => v !== null && Number.isNaN(v))) {
+      setMsg({ tone: 'danger', text: TARGETS_NOT_NUMBER })
+      return
+    }
+    const check = validateResidentTargets(input)
+    if (!check.ok) {
+      setMsg({ tone: 'danger', text: `${check.message}入力は消えていません。` })
+      return
+    }
+    setBusy(true)
+    setMsg(null)
+    try {
+      const res = await saveResidentTargets(residentId, input, current)
+      if (!aliveRef.current) return
+      if (res === 'conflict') {
+        // 最新を読み直して見せる（入力はそのまま）
+        try {
+          const map = await fetchResidentTargets()
+          if (!aliveRef.current) return
+          const now = map.get(residentId) ?? null
+          onLatest(now)
+          setLatest(now)
+          setMsg({ tone: 'warn', text: TARGETS_CONFLICT })
+        } catch {
+          if (aliveRef.current) setMsg({ tone: 'danger', text: TARGETS_RELOAD_FAILED })
+        }
+        return
+      }
+      onLatest(res)
+      setLatest(undefined)
+      setOpen(false)
+      setMsg({ tone: 'ok', text: '個別の目標を保存しました。' })
+    } catch (e) {
+      if (aliveRef.current) setMsg({ tone: 'danger', text: e instanceof DbError ? e.message : TARGETS_SAVE_FAILED })
+    } finally {
+      if (aliveRef.current) setBusy(false)
+    }
+  }
+
+  const useLatest = () => {
+    setFluidIn(fieldOf(latest?.fluid_target_ml))
+    setWarnIn(fieldOf(latest?.spo2_warn_below))
+    setDangerIn(fieldOf(latest?.spo2_danger_below))
+    setLatest(undefined)
+    setMsg(null)
+  }
+
+  const inputCls = 'mt-1 min-h-tap w-32 rounded border border-border-strong bg-surface px-3 text-base text-ink tabular'
+  const msgCls =
+    msg?.tone === 'ok' ? 'border-ok bg-ok-bg text-ink' : msg?.tone === 'warn' ? 'border-warn bg-warn-bg text-ink' : 'border-danger bg-danger-bg text-ink'
+
+  return (
+    <SectionCard title="個別の目標" className="mt-4">
+      {state === 'error' ? (
+        <p className="mb-2 text-sm text-warn">
+          <span aria-hidden="true">▲ </span>
+          個別の目標を読み込めませんでした。施設の基準で表示しています。
+          <button type="button" onClick={onReload} className="ml-2 min-h-tap rounded border border-border-strong px-3 text-sm text-link print:hidden">
+            読み直す
+          </button>
+        </p>
+      ) : null}
+      <dl className="space-y-1 text-base text-ink">
+        <div className="flex flex-wrap items-baseline gap-x-2">
+          <dt className="text-sm text-ink2">水分の目標</dt>
+          <dd className="tabular font-bold">{state === 'loading' ? '読み込み中…' : `${fmtMl(f.ml)}ml/日`}</dd>
+          {state === 'loading' ? null : <dd className="text-sm text-ink2">{f.individual ? '個別の目標' : '施設の既定'}</dd>}
+        </div>
+        <div className="flex flex-wrap items-baseline gap-x-2">
+          <dt className="text-sm text-ink2">SpO2 の下限</dt>
+          <dd className="tabular font-bold">
+            {state === 'loading' ? '読み込み中…' : `${lim.warnBelow}%未満で注意・${lim.dangerBelow}%未満で危険`}
+          </dd>
+          {state === 'loading' ? null : (
+            <dd className="text-sm text-ink2">{lim.individual ? '個別の下限（医師の指示）' : '施設の基準'}</dd>
+          )}
+        </div>
+        <div className="flex flex-wrap items-baseline gap-x-2">
+          <dt className="text-sm text-ink2">平熱</dt>
+          <dd className="tabular font-bold">
+            {usual === undefined ? '読み込み中…' : usualText !== null ? `${usualText}℃` : usualAbsent ? '出せません' : 'まだありません'}
+          </dd>
+          <dd className="text-sm text-ink2">
+            {usual === undefined
+              ? ''
+              : usualText !== null
+                ? `直近30日の定時の体温の中央値${usualSamples !== null ? `（${usualSamples}回）` : ''}`
+                : usualAbsent
+                  ? '直近30日の定時の体温が無いか、読み込めませんでした'
+                  : '直近30日の定時の測定が5回未満'}
+          </dd>
+        </div>
+      </dl>
+
+      {msg ? (
+        <p role={msg.tone === 'danger' ? 'alert' : 'status'} className={`mt-2 rounded border p-2 text-sm ${msgCls}`}>
+          {msg.tone === 'danger' ? <span aria-hidden="true">▲ </span> : null}
+          {msg.text}
+        </p>
+      ) : null}
+
+      {role === undefined ? null : canEdit ? (
+        open ? (
+          <form
+            className="mt-3 space-y-2 print:hidden"
+            onSubmit={(e) => {
+              e.preventDefault()
+              void save(latest !== undefined ? latest : (target ?? null))
+            }}
+          >
+            <div>
+              <label htmlFor={`${uid}-fluid`} className="block text-sm text-ink2">
+                水分の目標（ml/日・空にすると施設の既定）
+              </label>
+              <input
+                id={`${uid}-fluid`}
+                type="text"
+                inputMode="numeric"
+                autoComplete="off"
+                value={fluidIn}
+                onChange={(e) => setFluidIn(e.target.value)}
+                className={inputCls}
+              />
+            </div>
+            <fieldset>
+              <legend className="text-sm text-ink2">SpO2 の個別の下限（医師の指示がある方だけ・2つとも空にすると施設の基準）</legend>
+              <div className="flex flex-wrap gap-x-4">
+                <div>
+                  <label htmlFor={`${uid}-warn`} className="block text-sm text-ink2">
+                    注意（この値未満）%
+                  </label>
+                  <input
+                    id={`${uid}-warn`}
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="off"
+                    value={warnIn}
+                    onChange={(e) => setWarnIn(e.target.value)}
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label htmlFor={`${uid}-danger`} className="block text-sm text-ink2">
+                    危険（この値未満）%
+                  </label>
+                  <input
+                    id={`${uid}-danger`}
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="off"
+                    value={dangerIn}
+                    onChange={(e) => setDangerIn(e.target.value)}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
+            </fieldset>
+            {latest !== undefined ? (
+              <p className="text-sm text-ink">
+                最新の値: <span className="font-bold">{describeTargets(latest)}</span>
+              </p>
+            ) : null}
+            <div className="flex flex-wrap gap-gap">
+              <button
+                type="submit"
+                disabled={busy}
+                className="inline-flex min-h-tap items-center rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink disabled:border-border disabled:bg-surface2 disabled:text-ink3"
+              >
+                {busy ? '保存中…' : latest !== undefined ? '入力した値で保存し直す' : '保存する'}
+              </button>
+              {latest !== undefined ? (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={useLatest}
+                  className="inline-flex min-h-tap items-center rounded border border-border-strong bg-surface px-4 text-base text-ink disabled:text-ink3"
+                >
+                  最新の値に合わせる
+                </button>
+              ) : null}
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  setOpen(false)
+                  setLatest(undefined)
+                  setMsg(null)
+                }}
+                className="inline-flex min-h-tap items-center rounded border border-border-strong bg-surface px-4 text-base text-ink disabled:text-ink3"
+              >
+                やめる
+              </button>
+            </div>
+          </form>
+        ) : (
+          <button
+            type="button"
+            onClick={startEdit}
+            disabled={state === 'loading'}
+            className="mt-3 inline-flex min-h-tap items-center rounded border border-border-strong bg-surface px-4 text-base text-link disabled:text-ink3 print:hidden"
+          >
+            個別の目標を変える
+          </button>
+        )
+      ) : (
+        <p className="mt-2 text-sm text-ink2">個別の目標を変えられるのは事務・管理者のログインだけです（このログインでは見るだけです）。</p>
+      )}
+    </SectionCard>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════
 // 個人カルテ（/karte/:id）
 // ══════════════════════════════════════════════════════════════
 
@@ -2283,6 +2770,21 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
   const [barTop, setBarTop] = useState(0)
   /** 印刷中（グラフは今までと同じ 160px・今までの幅で描く＝紙の大きさを変えない） */
   const [printing, setPrinting] = useState(false)
+  /** 温度板（A7）の印刷の部品を置いているか（押した時だけ置き、印刷が終わったら外す） */
+  const [sheetOpen, setSheetOpen] = useState(false)
+  /** 個別の目標（全員分を1回で読む。この方の分だけ使う） */
+  const [targets, setTargets] = useState<Map<number, ResidentTargets>>(new Map())
+  const [targetsState, setTargetsState] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [targetsTick, setTargetsTick] = useState(0)
+  /** 平熱（A1。undefined＝読み込み中・null＝出せない） */
+  const [usual, setUsual] = useState<number | null | undefined>(undefined)
+  /** 平熱の応答にこの方の行が無かった（30日に定時の体温が1回も無い・関数が無い・読めない）。5回未満（行はあるが null）と言い分ける */
+  const [usualAbsent, setUsualAbsent] = useState(false)
+  /** 平熱を出すのに数えた定時の体温の回数（読み込み中・読めない時は null） */
+  const [usualSamples, setUsualSamples] = useState<number | null>(null)
+  /** ログインの役割（個別の目標の入力欄を出すか。undefined＝まだ分からない） */
+  const [role, setRole] = useState<MyRole | null | undefined>(cachedMyRole())
+  const [searchParams] = useSearchParams()
 
   const toIso = todayIso()
   const fromIso = rangeFromIso(range, toIso)
@@ -2349,8 +2851,9 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
     let cancelled = false
     setLoading(true)
     setError(null)
-    fetchKarte(residentId, fromIso, toIso)
-      .then((res) => {
+    // 基準値（app_settings の上書き・A8）も一緒に待ってから描く（loadVitalThresholds は失敗しても既定値で返る）
+    Promise.all([fetchKarte(residentId, fromIso, toIso), loadVitalThresholds()])
+      .then(([res]) => {
         if (cancelled || !aliveRef.current) return
         setData({
           vitals: ownedBy<Vital>(res?.vitals, residentId),
@@ -2411,6 +2914,91 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
     () => (weight.status === 'ready' ? buildWeightPanel(weight.list, fromIso, toIso) : null),
     [weight, fromIso, toIso],
   )
+
+  // 個別の目標（A3・A9）。読めない時はカルテは施設の基準のまま出す（表が無い DB は空＝施設の既定）
+  useEffect(() => {
+    let cancelled = false
+    setTargetsState('loading')
+    fetchResidentTargets()
+      .then((map) => {
+        if (cancelled || !aliveRef.current) return
+        setTargets(map)
+        setTargetsState('ready')
+      })
+      .catch(() => {
+        if (cancelled || !aliveRef.current) return
+        setTargetsState('error')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [tick, targetsTick])
+
+  // 平熱（A1。今日を含む直近30日の定時の中央値。db.ts が日ごとに1回だけ問い合わせて控える。失敗しても例外は来ない）
+  useEffect(() => {
+    let cancelled = false
+    fetchUsualTempDetails(toIso).then((m) => {
+      if (cancelled || !aliveRef.current) return
+      const d = m.get(residentId)
+      setUsual(d !== undefined ? d.usual : null)
+      setUsualAbsent(d === undefined)
+      setUsualSamples(d !== undefined ? d.samples : null)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [residentId, toIso, tick])
+
+  // ログインの役割（ログインし直したら取り直す）
+  useEffect(() => {
+    let alive = true
+    const load = () => {
+      fetchMyRole().then((r) => {
+        if (alive) setRole(r)
+      })
+    }
+    load()
+    const off = subscribeMyRole(load)
+    return () => {
+      alive = false
+      off()
+    }
+  }, [])
+
+  const target = targets.get(residentId)
+  const onLatestTarget = useCallback(
+    (t: ResidentTargets | null) => {
+      setTargets((prev) => {
+        const next = new Map(prev)
+        if (t === null) next.delete(residentId)
+        else next.set(residentId, t)
+        return next
+      })
+    },
+    [residentId],
+  )
+
+  // 今日の要注意（/alerts）から ?sec=<欄の id> で開いた時は、カルテを描いた後にその欄へ移る（利用者・欄ごとに1回）
+  const secParam = karteSecOf(
+    searchParams.get('sec'),
+    KARTE_JUMPS.map((j) => j.id),
+  )
+  const jumpedRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (loading || error || secParam === null) return
+    const key = `${residentId}|${secParam}`
+    if (jumpedRef.current === key) return
+    jumpedRef.current = key
+    // グラフの高さを測って描き直すのを待ってから移る（2フレーム後）
+    let raf2 = 0
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => jumpToSection(secParam, barRef.current))
+    })
+    return () => {
+      cancelAnimationFrame(raf1)
+      cancelAnimationFrame(raf2)
+    }
+  }, [loading, error, secParam, residentId])
 
   // 記入者名の対応表（退職者も含む全員・F48。App から渡る名簿は在籍者だけなので、渡されていても全員を読む。
   // 渡された名簿は読めるまでの間と、読めなかった時の控え。取得できなくてもカルテ本体は表示する）
@@ -2540,7 +3128,51 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
           <p className="tabular mt-1 text-sm text-ink3">
             {fmtDayLabel(fromIso)} 〜 {fmtDayLabel(toIso)}
           </p>
+          {/* 温度板（A7）: 今日までの2週間を A4 縦1枚に。表示中の期間に関係なく直近14日（期間は最短でも2週） */}
+          <button
+            type="button"
+            disabled={loading || error !== null}
+            onClick={() => {
+              // 前の印刷の部品が残っていても（印刷の終わりを知らせない端末）、外してから置き直して押し直せるようにする
+              if (sheetOpen) {
+                setSheetOpen(false)
+                requestAnimationFrame(() => setSheetOpen(true))
+              } else setSheetOpen(true)
+            }}
+            className="mt-2 inline-flex min-h-tap items-center rounded border border-primary bg-surface px-4 text-base font-bold text-primary disabled:border-border disabled:text-ink3 print:hidden"
+          >
+            温度板を印刷
+          </button>
+          {sheetOpen ? (
+            <TempSheetPrint
+              model={buildTempSheet({
+                days: sheetDays(toIso),
+                residentId,
+                vitals: data.vitals,
+                meals: data.meals,
+                fluids: data.fluids,
+                usual: usual ?? null,
+                target: target ?? null,
+              })}
+              name={resident.name}
+              room={resident.room}
+              printedAt={fmtPrintedAt(new Date())}
+              onDone={() => setSheetOpen(false)}
+            />
+          ) : null}
         </div>
+
+        <TargetsCard
+          residentId={residentId}
+          target={target}
+          state={targetsState}
+          onReload={() => setTargetsTick((n) => n + 1)}
+          onLatest={onLatestTarget}
+          usual={usual}
+          usualAbsent={usualAbsent}
+          usualSamples={usualSamples}
+          role={role}
+        />
 
         {loading ? (
           <div className="mt-3">
@@ -2556,7 +3188,16 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
       {loading || error ? null : (
         <>
           <div className={wideLane}>
-            <VitalsSection vitals={data.vitals} days={days} weightPanel={weightPanel} printing={printing} />
+            <VitalsSection
+              vitals={data.vitals}
+              days={days}
+              weightPanel={weightPanel}
+              printing={printing}
+              usual={usual}
+              usualAbsent={usualAbsent}
+          usualSamples={usualSamples}
+              target={target}
+            />
           </div>
           <div className={LANE}>
             <WeightSection
@@ -2574,6 +3215,7 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
               outings={data.outings}
               days={days}
               printing={printing}
+              target={target}
             />
           </div>
           <div className={LANE}>

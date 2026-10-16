@@ -95,6 +95,10 @@ import { cellKey } from '../lib/presence'
 import type { CellTarget } from '../lib/presence'
 import { BUSY_RING, BusyMark, PresenceSummary, RowBusyMark } from '../components/presence'
 import { RecorderBar } from '../components/RecorderBar'
+// 平熱との差（A1）・SpO2 の個別の下限（A9）。平熱と目標は画面を開いた時に1回読んで控える。基準値の上書き（A8）も1回読む
+import { fetchResidentTargets, fetchUsualTemps, loadVitalThresholds } from '../lib/db'
+import { judgeTemp, spo2Limits, spo2LevelFor } from '../lib/vitalAlerts'
+import type { ResidentTargets } from '../lib/vitalAlerts'
 
 // ── 定数 ─────────────────────────────────────────────────────
 
@@ -637,6 +641,12 @@ export function VitalsGridPage({
   /** サーバーに欄ごとの保存の仕組み（0011）がまだ無い＝サーバー側の更新待ち（入力を止める） */
   const [cellsMissing, setCellsMissing] = useState(false)
   const [rows, setRows] = useState<GridRow[]>([])
+  /** 平熱（A1・利用者ID → 平熱。5回未満は null）。表示中の日ごとに1回読んで控える。読めない時は空＝A1 を出さない */
+  const [usualTemps, setUsualTemps] = useState<Map<number, number | null>>(() => new Map())
+  /** 個別の目標（A9 の SpO2 の下限。無い方・読めない時は施設の基準 93%・90%） */
+  const [targets, setTargets] = useState<Map<number, ResidentTargets>>(() => new Map())
+  /** 基準値（app_settings の上書き）を読み終えた印（読み終えたら描き直して新しい基準で印を出す） */
+  const [, setThresholdsVer] = useState(0)
   const [floor, setFloor] = useState<string>(() => readFloor() ?? '1')
   const [sel, setSel] = useState<{ rowId: string; field: Field } | null>(null)
   const [edit, setEdit] = useState('')
@@ -921,6 +931,35 @@ export function VitalsGridPage({
   useEffect(() => {
     void load()
   }, [load])
+
+  // 基準値（A8）と個別の目標（A9）は画面を開いた時に1回だけ読む（入力を待たせない・失敗しても入力はできる）
+  useEffect(() => {
+    let alive = true
+    void loadVitalThresholds().then(() => {
+      if (alive) setThresholdsVer((n) => n + 1)
+    })
+    fetchResidentTargets()
+      .then((m) => {
+        if (alive) setTargets(m)
+      })
+      .catch(() => {
+        // 読めない時は施設の基準（93%・90%）で判定する
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  // 平熱（A1）は表示中の日ごとに1回（db.ts が日ごとに控える。例外は投げない）
+  useEffect(() => {
+    let alive = true
+    void fetchUsualTemps(day).then((m) => {
+      if (alive) setUsualTemps(m)
+    })
+    return () => {
+      alive = false
+    }
+  }, [day])
 
   // ── 他端末の変更を自動で取り込む（F17・2026-10-10。バイタル一覧と同じ形） ──────────
 
@@ -2056,6 +2095,8 @@ export function VitalsGridPage({
                     sel={sel}
                     edit={edit}
                     day={day}
+                    usualTemp={usualTemps.get(row.residentId)}
+                    target={targets.get(row.residentId)}
                     presence={presence}
                     onOpenCell={(field) => openCell(row.rowId, field, edit)}
                     onAddRecheck={() => addRecheck(row.residentId)}
@@ -2215,6 +2256,10 @@ interface FragmentRowProps {
   edit: string
   /** この画面の日（今日） */
   day: string
+  /** A1: この方の平熱（5回未満・読めない時は null／undefined＝平熱との差の印を出さない） */
+  usualTemp?: number | null
+  /** A9: この方の個別の目標（SpO2 の下限。無ければ施設の基準） */
+  target?: ResidentTargets
   /** 他の端末が入力中の欄・行の表示（Presence） */
   presence: CellPresence
   onOpenCell: (field: Field) => void
@@ -2241,6 +2286,59 @@ function vitalTarget(day: string, row: GridRow, field: Field): CellTarget {
     kind: row.kind,
     id: row.kind === 'routine' ? null : row.vitalId,
   }
+}
+
+/**
+ * 確定済みの値の表示（LevelCell）に、A1（平熱との差）と A9（SpO2 の個別の下限）を足したもの。
+ * 体温: 今の印（37.5↑・38.1↑↑・35.5↓↓）はそのまま。印が無くて平熱+1.0℃以上なら値の下に「平熱+1.2↑」、
+ *       両方当たる時は今の印＋値の下に「平熱+1.6」（注記）。SpO2: 個別の下限がある方はその下限で ↓・↓↓
+ */
+function VitalValue({
+  field,
+  value,
+  usualTemp,
+  target,
+}: {
+  field: Field
+  value: number
+  usualTemp: number | null | undefined
+  target: ResidentTargets | undefined
+}) {
+  if (field === 'temp') {
+    const j = judgeTemp(value, usualTemp)
+    const usualText = j.level ? j.note : j.overUsual ? j.mark : null
+    return (
+      <>
+        <LevelCell value={value} level={j.level} digits={FIELD_DIGITS.temp} />
+        {usualText ? (
+          <>
+            {/* 読み上げはボタンの aria-label（newMarkWord）が持つ */}
+            <span className="vmark-usual" aria-hidden="true">
+              {usualText}
+            </span>
+          </>
+        ) : null}
+      </>
+    )
+  }
+  if (field === 'spo2') {
+    return <LevelCell value={value} level={spo2LevelFor(value, target)} digits={FIELD_DIGITS.spo2} />
+  }
+  return <LevelCell value={value} level={LEVEL_FN[field](value)} digits={FIELD_DIGITS[field]} />
+}
+
+/** 読み上げに足す A1・A9 の語（「（平熱+1.2・平熱より高い）」「（個別の下限 95% を下回る）」）。当たらなければ '' */
+function newMarkWord(field: Field, value: number, usualTemp: number | null | undefined, target: ResidentTargets | undefined): string {
+  if (field === 'temp') {
+    const j = judgeTemp(value, usualTemp)
+    const t = j.level ? j.note : j.overUsual ? j.mark : null
+    return t ? `（${t.replace('↑', '')}・平熱より高い）` : ''
+  }
+  if (field === 'spo2') {
+    const lim = spo2Limits(target)
+    return lim.individual && spo2LevelFor(value, target) ? `（個別の下限 ${lim.warnBelow}% を下回る）` : ''
+  }
+  return ''
 }
 
 const STATE_MARK: Record<RowState, string> = {
@@ -2271,6 +2369,8 @@ function FragmentRow({
   sel,
   edit,
   day,
+  usualTemp,
+  target,
   presence,
   onOpenCell,
   onAddRecheck,
@@ -2321,7 +2421,7 @@ function FragmentRow({
                 onClick={() => onOpenCell(f)}
                 aria-label={`${room ?? '居室未設定'} ${residentName} ${KIND_LABEL[row.kind]} ${FIELD_LABEL[f]}${
                   raw === '' ? '　未入力' : `　${raw}`
-                }`}
+                }${parsed != null && !selected && !bad ? newMarkWord(f, parsed, usualTemp, target) : ''}`}
                 aria-describedby={busy ? busyId : undefined}
                 className={[
                   busy ? `relative ${BUSY_RING}` : '',
@@ -2349,7 +2449,7 @@ function FragmentRow({
                 ) : parsed == null || selected || bad ? (
                   <span className="tabular block font-bold">{raw}</span>
                 ) : (
-                  <LevelCell value={parsed} level={LEVEL_FN[f](parsed)} digits={FIELD_DIGITS[f]} />
+                  <VitalValue field={f} value={parsed} usualTemp={usualTemp} target={target} />
                 )}
                 {busy ? <BusyMark busy={busy} id={busyId} /> : null}
               </button>

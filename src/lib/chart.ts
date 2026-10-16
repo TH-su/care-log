@@ -7,6 +7,7 @@
 // React に依存しない（tests/chart.test.mjs から node で直接読む）。個人情報は持たない。
 
 import type { FluidIntake, Meal, MealSlot } from './types'
+import { DEFAULT_VITAL_THRESHOLDS } from './vitalThresholds.ts'
 
 // ══════════════════════════════════════════════════════════════
 // 縦軸
@@ -324,5 +325,8 @@ export function fluidSeries(byDay: Map<string, MealDay>): Map<string, number> {
   return out
 }
 
-/** 低摂取の目安（主＋副がこの値以下。表の ▲ と同じ isLowIntake の値） */
-export const LOW_INTAKE_MAX = 6
+/**
+ * 低摂取の目安（主＋副がこの値以下。表の ▲ と同じ isLowIntake の値）。正本は vitalThresholds.ts の既定値（読み込み時の写し。
+ * app_settings の上書きは反映しない＝上書きを効かせる画面は vitalThresholds().lowIntakeMax を読む）
+ */
+export const LOW_INTAKE_MAX: number = DEFAULT_VITAL_THRESHOLDS.lowIntakeMax

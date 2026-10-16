@@ -55,6 +55,7 @@ export const HISTORY_TABLE_LABEL: Record<string, string> = {
   med_slots: '服薬の時間帯',
   med_admin: '与薬',
   incidents: '事故・ヒヤリハット',
+  resident_targets: '個別の目標',
 }
 
 const VITAL_KIND_NAME: Record<string, string> = {
@@ -139,6 +140,12 @@ const TABLE_LABEL: Record<string, Record<string, string>> = {
   med_slots: {
     slots: '服薬の時間帯',
     note: '備考',
+  },
+  // 個別の目標（0034。事務・管理者だけが変える。null＝施設の既定）
+  resident_targets: {
+    fluid_target_ml: '水分の目標（ml）',
+    spo2_warn_below: 'SpO2 の注意の下限',
+    spo2_danger_below: 'SpO2 の危険の下限',
   },
   med_admin: {
     admin_on: '日付',

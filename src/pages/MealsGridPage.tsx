@@ -40,7 +40,7 @@ import {
 } from '../lib/db'
 import type { ChangeInfo, PendingCellRow } from '../lib/db'
 import { getActorId, touchActivity } from '../lib/actor'
-import { fmtDayLabel, toHalfWidth, todayIso } from '../lib/format'
+import { addDays, fmtDayLabel, toHalfWidth, todayIso } from '../lib/format'
 import { recordTimeFor } from '../lib/nextMorning'
 import { MEAL_SLOT_LABEL, MEAL_STATUS_LABEL, OUTING_KIND_LABEL } from '../lib/types'
 import type { FluidIntake, Meal, MealSlot, MealStatus, Outing, Resident } from '../lib/types'
@@ -86,6 +86,11 @@ import type { BusyText, CellTarget } from '../lib/presence'
 import { BUSY_RING_OUTSIDE, BusyMark, PresenceSummary, RowBusyMark } from '../components/presence'
 import type { LeaveCell } from '../hooks/useCellPresence'
 import { RecorderBar } from '../components/RecorderBar'
+// 摂取低下（A2）・濃淡（A6）・水分の目標（A3）。基準値は app_settings の上書きを起動中に1回読む（A8）
+import { fetchMealsSheet, fetchResidentTargets, loadVitalThresholds } from '../lib/db'
+import { MEAL_CHART_SLOTS } from '../lib/chart'
+import { fluidProgress, mealLowLabel, mealLowStreaks, mealShade } from '../lib/vitalAlerts'
+import type { ResidentTargets } from '../lib/vitalAlerts'
 
 // ── 定数 ─────────────────────────────────────────────────────
 
@@ -97,6 +102,8 @@ const FLUID_STEPS = [100, 150, 200] as const
 const FLUID_MAX_ML = 2000
 /** 食事枠の並び（DB の meal_slot と同じ語彙） */
 const SLOTS: MealSlot[] = ['breakfast', 'lunch', 'dinner', 'snack']
+/** 摂取低下（A2）の「N日目」を数えるために、表示中の日より前に読む日数（食事一覧と同じ 7日） */
+const LOW_LOOKBACK_DAYS = 7
 /** 食事の状態4値（QA監査 low「4値セレクタへ」） */
 const STATUSES: MealStatus[] = ['eaten', 'out', 'hospital', 'refused']
 
@@ -507,6 +514,14 @@ interface MealRowProps {
   rowBusy: string | null
   /** この端末がまとまりに入った（'focus'）・離れた（'blur'）・押しただけ（'touch'）を Presence へ伝える */
   onPresence: (residentId: number, field: 'main_amount' | 'side_amount' | 'status') => LeaveCell | null
+  /** 朝・昼・夕の枠か（A6 の濃淡を出す。間食は出さない） */
+  shadeSlot: boolean
+  /** A2: この日の摂取低下が続いている日数（0＝低下でない） */
+  lowStreak: number
+  /** A2: 続きが読んだ範囲の初日まで届いている（それより前から続いているかもしれない＝「N日目以上」） */
+  lowCapped: boolean
+  /** A3: この方の個別の目標（無ければ施設の既定 1,200ml） */
+  target: ResidentTargets | undefined
 }
 
 const MealRow = memo(function MealRow({
@@ -537,6 +552,10 @@ const MealRow = memo(function MealRow({
   busyStatus,
   rowBusy,
   onPresence,
+  shadeSlot,
+  lowStreak,
+  lowCapped,
+  target,
 }: MealRowProps) {
   // 加算チップに無い量（80ml・500ml など）を1回で記録するための任意量入力（ui-design §6）
   const [extra, setExtra] = useState('')
@@ -569,6 +588,11 @@ const MealRow = memo(function MealRow({
     }
   }
 
+  // A6: 主食＋副食の量に応じた地の濃淡（少ないほど濃い）＋半分以下は斜線。数字は消さずに地だけを塗る
+  const shade = shadeSlot ? mealShade({ main_amount: main, side_amount: side, status } as Meal) : null
+  // A3: 水分の目標に対する割合（未送信の分も含める＝一覧の合計と同じ）
+  const fluidProg = fluidProgress(fluidMl + queuedMl, target)
+
   const addExtra = () => {
     const ml = parseFluidMl(extra)
     if (ml == null) {
@@ -594,6 +618,25 @@ const MealRow = memo(function MealRow({
           {/* 他の端末がこの方の食事を入力中（「✎」・読み上げは「入力中: 職員B」） */}
           {rowBusy !== null ? <RowBusyMark text={rowBusy} /> : null}
         </span>
+        {shade ? (
+          // A6: この食事の主食・副食（地の濃淡＋半分以下は斜線。読み上げは文字で）
+          <span
+            className={`tabular shrink-0 rounded border border-border px-2 text-sm font-bold cl-shade-bg-${shade.stage}${
+              shade.hatched ? ' cl-shade-hatch' : ''
+            }`}
+            style={{ color: `var(--cl-shade-${shade.stage}-ink)` }}
+          >
+            {status === 'refused' ? '拒食' : `主${main ?? '—'}・副${side ?? '—'}`}
+            {shade.hatched ? <span className="sr-only">（主食と副食の合計が半分以下）</span> : null}
+          </span>
+        ) : null}
+        {lowStreak > 0 ? (
+          // A2: 1日に2食以上が半分以下の日（続いている日数）
+          // 文字200%・狭い画面では折り返す（縮めない札にすると画面の右へはみ出した＝実測）
+          <span className="min-w-0 text-sm font-bold text-warn">
+            {lowCapped ? `▼摂取低下（${lowStreak}日目以上）` : mealLowLabel(lowStreak)}
+          </span>
+        ) : null}
         {outingLabel ? (
           <Chip tone="info">
             <span aria-hidden="true">ⓘ </span>
@@ -660,6 +703,16 @@ const MealRow = memo(function MealRow({
               未送信 {queuedMl}ml
             </span>
           ) : null}
+        </div>
+        {/* A3: 目標に対する割合（「800／1,200ml（67%）」と横棒） */}
+        <div className="mt-1 flex flex-wrap items-center gap-gap">
+          <span className="tabular text-sm text-ink2">
+            目標 {fluidProg.label}
+            {fluidProg.individual ? '（個別の目標）' : ''}
+          </span>
+          <span className="cl-fluid-bar w-32 max-w-full" aria-hidden="true">
+            <span style={{ width: `${Math.round(fluidProg.bar * 100)}%` }} />
+          </span>
         </div>
         {lostMl > 0 ? (
           // 送信待ちにしたが端末に控えを残せなかった水分（F01）。トーストだけで終わらせず、送れるまで行に残す
@@ -847,6 +900,14 @@ export function MealsGridPage({
    * だが、閉じると消えるので別に持ち、危険の色で出す（送信待ちの概算として案内しない）
    */
   const [lostFluids, setLostFluids] = useState<Record<number, { base: number; ml: number }>>({})
+  /** 表示中の日より前 LOW_LOOKBACK_DAYS 日の食事（A2 の連続日数を数えるためだけ。読めなくても入力は止めない） */
+  const [priorMeals, setPriorMeals] = useState<Meal[]>([])
+  /** 摂取低下を数えた範囲の日数（前の日を読めた時は 7＋1・読めない間は 1＝その日だけ） */
+  const [lowReadDays, setLowReadDays] = useState(1)
+  /** 方ごとの個別の目標（A3 の水分。無い方・読めない時は施設の既定 1,200ml） */
+  const [targets, setTargets] = useState<Map<number, ResidentTargets>>(() => new Map())
+  /** 基準値（app_settings の上書き）を読み終えた印。判定の控え（useMemo）をこの時だけ作り直す */
+  const [thresholdsVer, setThresholdsVer] = useState(0)
   /** くらべて選ぶ画面に渡す内容（開いた時点で固定する） */
   const [compare, setCompare] = useState<{
     key: string
@@ -1275,6 +1336,44 @@ export function MealsGridPage({
   useEffect(() => {
     void load()
   }, [load])
+
+  // 基準値（A8）と個別の目標（A3）は画面を開いた時に1回だけ読む（入力を待たせない・失敗しても入力はできる）
+  useEffect(() => {
+    let alive = true
+    void loadVitalThresholds().then(() => {
+      if (alive) setThresholdsVer((n) => n + 1)
+    })
+    fetchResidentTargets()
+      .then((m) => {
+        if (alive) setTargets(m)
+      })
+      .catch(() => {
+        // 読めない時は施設の既定（1,200ml）で出す
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  // 表示中の日より前の食事（A2 の連続日数用）。日を切り替えた時だけ読み直す
+  useEffect(() => {
+    let alive = true
+    // 前の日の分は捨てる（日を切り替えた直後に、つながっていない前の日で数えない）
+    setPriorMeals([])
+    setLowReadDays(1)
+    fetchMealsSheet(addDays(day, -LOW_LOOKBACK_DAYS), addDays(day, -1))
+      .then((r) => {
+        if (!alive) return
+        setPriorMeals(asArray<Meal>(r?.meals).filter((m) => m != null && typeof m.meal_on === 'string' && m.meal_on < day))
+        setLowReadDays(LOW_LOOKBACK_DAYS + 1)
+      })
+      .catch(() => {
+        if (alive) setPriorMeals([])
+      })
+    return () => {
+      alive = false
+    }
+  }, [day])
 
   // ── 他端末の変更を自動で取り込む（F17・2026-10-10。食事一覧と同じ形） ──
   // 当日の食事・水分・外出の変更だけを合図にし、連続通知は最後の1回にまとめてから背景で取り直す（入力中・未送信・
@@ -2058,6 +2157,43 @@ export function MealsGridPage({
     return map
   }, [fluids])
 
+  /**
+   * 摂取低下（A2）の、表示中の日の連続日数（利用者ID → 日数）。表示中の日の朝・昼・夕（サーバー値＋未保存の控え）と、
+   * その前の食事で数える。食事・控えが変わった時だけ作り直す
+   */
+  const lowStreakByResident = useMemo(() => {
+    const today: Meal[] = []
+    const keys = new Set([...Object.keys(meals), ...Object.keys(pending)])
+    for (const k of keys) {
+      // キーは mealKey（「利用者ID:枠」）
+      const [ridRaw, slot] = k.split(':')
+      const rid = Number(ridRaw)
+      if (!Number.isFinite(rid) || !MEAL_CHART_SLOTS.includes(slot as MealSlot)) continue
+      const base = meals[k] ?? null
+      const ov = pending[k] ?? {}
+      today.push({
+        id: base?.id ?? 0,
+        resident_id: rid,
+        meal_on: day,
+        meal_slot: slot as MealSlot,
+        main_amount: ov.main_amount !== undefined ? ov.main_amount : (base?.main_amount ?? null),
+        side_amount: ov.side_amount !== undefined ? ov.side_amount : (base?.side_amount ?? null),
+        status: ov.status !== undefined ? ov.status : (base?.status ?? null),
+        note: null,
+        recorded_by: null,
+        rev: base?.rev ?? 0,
+      })
+    }
+    const all = mealLowStreaks([...priorMeals, ...today])
+    const out = new Map<number, number>()
+    for (const [rid, days] of all) {
+      const d = days.get(day)
+      if (d && d.streak > 0) out.set(rid, d.streak)
+    }
+    return out
+    // thresholdsVer: 基準値の上書き（app_settings）を読み終えたら数え直す（mealLowStreaks は「いまの基準値」を読む）
+  }, [meals, pending, priorMeals, day, thresholdsVer])
+
   const showLoading = loading && residents.length === 0
   const showEmpty = !loading && residents.length === 0
 
@@ -2194,6 +2330,10 @@ export function MealsGridPage({
                   busyStatus={presence.cellBusy(at('status'))}
                   rowBusy={presence.rowBusy('meals', day, r.id)}
                   onPresence={onPresence}
+                  shadeSlot={MEAL_CHART_SLOTS.includes(slot)}
+                  lowStreak={lowStreakByResident.get(r.id) ?? 0}
+                  lowCapped={(lowStreakByResident.get(r.id) ?? 0) >= lowReadDays}
+                  target={targets.get(r.id)}
                   main={ov.main_amount !== undefined ? ov.main_amount : (row?.main_amount ?? null)}
                   side={ov.side_amount !== undefined ? ov.side_amount : (row?.side_amount ?? null)}
                   status={ov.status !== undefined ? ov.status : (row?.status ?? null)}

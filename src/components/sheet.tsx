@@ -543,6 +543,11 @@ export interface SheetCellProps {
   width?: string
   /** しきい値。渡すと LEVEL_MARK の記号と色を自動で併記する */
   level?: Level
+  /**
+   * しきい値の印の後ろに足す小さな印（A1 の平熱との差「平」など・画面だけ＝印刷では出さない）。
+   * 読み上げは呼び出し側が ariaLabel に全文を入れる（ここは aria-hidden）
+   */
+  extraMark?: string | null
   tone?: SheetTone
   /** 未入力時に薄く出す見本文字（実名・記録本文を書かない） */
   placeholder?: string
@@ -588,6 +593,7 @@ export function SheetCell({
   align = 'left',
   width,
   level = null,
+  extraMark = null,
   tone = 'plain',
   placeholder,
   multiline = false,
@@ -777,6 +783,11 @@ export function SheetCell({
         {level ? (
           <span aria-hidden="true" className="sheet-mark">
             {LEVEL_MARK[level]}
+          </span>
+        ) : null}
+        {extraMark ? (
+          <span aria-hidden="true" className="sheet-mark sheet-extra-mark">
+            {extraMark}
           </span>
         ) : null}
         {markWord ? <span className="sr-only">{markWord}</span> : null}

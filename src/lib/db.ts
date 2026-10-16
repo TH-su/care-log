@@ -102,6 +102,11 @@ import type { PresenceHere, PresenceSeen } from './presence'
 // 古い版の入力止め（min_client_build・F28③）。appVersion は supabase に依存しない純粋なモジュール
 import { clientBuildAllowed } from './appVersion'
 import type { BuildStamp } from './appVersion'
+// 基準値（A8）・個別の目標（A3・A9）・平熱（A1）。0034_resident_targets_usual_temp.sql
+import { applyVitalThresholds, parseVitalThresholds, VITAL_THRESHOLDS_SETTING_KEY, vitalThresholds } from './vitalThresholds'
+import type { VitalThresholds } from './vitalThresholds'
+import { validateResidentTargets } from './vitalAlerts'
+import type { ResidentTargets, ResidentTargetsInput } from './vitalAlerts'
 
 // ── 契約で定義された戻り値 ───────────────────────────────────────────────────
 export type Conflict = 'conflict'
@@ -10074,6 +10079,262 @@ export function hasUnpersistedQueue(): boolean {
   return queue.length > 0 || cellRows.size > 0
 }
 
+// ── 基準値・個別の目標・平熱（A1・A3・A8・A9。2026-10-16・0034_resident_targets_usual_temp.sql） ─────────────
+//
+// 基準値（app_settings 'vital_thresholds'）: loadVitalThresholds が起動中に1回読み、vitalThresholds.ts の「いまの基準値」を
+//   差し替える（types.ts の tempLevel などがそれを読む）。読めない時は既定値のまま（次に呼ばれた時にもう一度読む）。
+//   壊れた値は既定値（parseVitalThresholds）。
+// 平熱（RPC vital_usual_temps）: fetchUsualTemps(日) が日ごとに1回だけ問い合わせて控える（日報・一覧で1回取る）。
+//   関数が無い DB（0034 未適用）・読めない時は空（＝平熱なし＝A1 の印を出さない）。例外は投げない。
+// 個別の目標（表 resident_targets）: fetchResidentTargets は表が無い DB では空（＝施設の既定）。
+//   saveResidentTargets は送信待ちを通さない直接の書き（事務所の稀な操作。圏外なら network のエラーで止め、入力は画面に残す）。
+//   書けるのは office・admin のログインだけ（サーバーの RLS でも止まる＝42501）。止まった時は TARGETS_FORBIDDEN_MESSAGE。
+
+/** 個別の目標を変えられないログインで保存しようとした時の案内（DbError の kind 'forbidden'） */
+export const TARGETS_FORBIDDEN_MESSAGE =
+  '個別の目標を保存できませんでした。変えられるのは事務・管理者のログインだけです（現場のログインでは見るだけです）。'
+
+const TARGETS_MSG = {
+  missing: '個別の目標はまだ保存できません（サーバー側の設定待ち）。管理者に連絡してください。入力は消えていません。',
+  badCurrent: '個別の目標を読み取れませんでした。画面を読み直してから、もう一度お試しください。入力は消えていません。',
+  badValue: '個別の目標の値がサーバーの範囲に合いませんでした。値を確かめてから、もう一度お試しください。入力は消えていません。',
+} as const
+
+/** 個別の目標を変えてよい役割か（事務・管理者。canUnlockNotes と同じ役割）。null（分からない）は false */
+export function canEditTargets(role: MyRole | null | undefined): boolean {
+  return canUnlockNotes(role)
+}
+
+const RESIDENT_TARGETS_COLS = 'id,resident_id,fluid_target_ml,spo2_warn_below,spo2_danger_below,rev'
+
+/** 0 以上の整数か null（数でない・負は null＝施設の既定に落とす） */
+function intOrNull(v: unknown): number | null {
+  const n = num(v)
+  return n !== null && Number.isInteger(n) && n >= 0 ? n : null
+}
+
+function normalizeResidentTargets(row: unknown): ResidentTargets | null {
+  const r = asRecord(row)
+  if (!r) return null
+  const id = idNum(r.id)
+  const residentId = idNum(r.resident_id)
+  const rev = num(r.rev)
+  if (id === null || residentId === null || rev === null) return null
+  return {
+    id,
+    resident_id: residentId,
+    fluid_target_ml: intOrNull(r.fluid_target_ml),
+    spo2_warn_below: intOrNull(r.spo2_warn_below),
+    spo2_danger_below: intOrNull(r.spo2_danger_below),
+    rev,
+  }
+}
+
+/** 基準値の読み込み（起動中に1回。読めなかった時は控えず、次に呼ばれた時にもう一度読む） */
+let thresholdsInFlight: Promise<VitalThresholds> | null = null
+/** 控えを捨てた回数（読み込み中に捨てられた時、古い読み込みで控えを外さない） */
+let thresholdsEpoch = 0
+
+/**
+ * app_settings の 'vital_thresholds' を読み、いまの基準値へ当てる（例外は投げない）。戻り値は当てた後の基準値。
+ * 画面は起動時（描く前）に1回呼ぶ。2回目からは同じ結果を返す
+ */
+export function loadVitalThresholds(): Promise<VitalThresholds> {
+  if (thresholdsInFlight !== null) return thresholdsInFlight
+  const epoch = thresholdsEpoch
+  const run = (async (): Promise<VitalThresholds> => {
+    try {
+      const raw = await getAppSetting(VITAL_THRESHOLDS_SETTING_KEY)
+      const parsed = parseVitalThresholds(raw)
+      applyVitalThresholds(parsed.value)
+      return parsed.value
+    } catch {
+      // 読めない（通信・ログイン切れ・未設定）: いまの基準値のまま。控えを外して次にもう一度読む
+      if (epoch === thresholdsEpoch) thresholdsInFlight = null
+      return vitalThresholds()
+    }
+  })()
+  thresholdsInFlight = run
+  return run
+}
+
+/** 平熱の控え（日 → 利用者ID → 平熱と測定の回数。5回未満は平熱 null） */
+export interface UsualTempDetail {
+  usual: number | null
+  samples: number
+}
+const usualTempCache = new Map<string, Promise<Map<number, UsualTempDetail>>>()
+
+/** 控えた平熱を捨てる（日を省くと全部。記録を直した後に取り直したい時に呼ぶ） */
+export function forgetUsualTemps(day?: string): void {
+  if (day === undefined) usualTempCache.clear()
+  else usualTempCache.delete(day)
+}
+
+/**
+ * その日を含む直近30日の定時の体温の中央値（平熱・A1）を、利用者ID → 平熱（5回未満は null）で返す。
+ * 日ごとに1回だけ問い合わせて控える。関数が無い DB・読めない時は空の Map（＝平熱なし）。例外は投げない
+ */
+export async function fetchUsualTemps(day: string): Promise<Map<number, number | null>> {
+  const details = await fetchUsualTempDetails(day)
+  const out = new Map<number, number | null>()
+  for (const [id, d] of details) out.set(id, d.usual)
+  return out
+}
+
+/**
+ * fetchUsualTemps と同じ問い合わせ（同じ控え）で、平熱に加えて数えた測定の回数（samples）も返す。
+ * カルテの「平熱 36.6℃（30日の定時の中央値・n回）」に使う。例外は投げない
+ */
+export function fetchUsualTempDetails(day: string): Promise<Map<number, UsualTempDetail>> {
+  const hit = usualTempCache.get(day)
+  if (hit !== undefined) return hit
+  // 控えを外す時に、自分が入れた控えだけを外す（捨てて取り直した後の新しい控えを外さない）
+  const ref: { p: Promise<Map<number, UsualTempDetail>> | null } = { p: null }
+  const run = (async (): Promise<Map<number, UsualTempDetail>> => {
+    const out = new Map<number, UsualTempDetail>()
+    const drop = () => {
+      if (ref.p !== null && usualTempCache.get(day) === ref.p) usualTempCache.delete(day)
+    }
+    try {
+      assertDay(day)
+      const sb = await getClient()
+      const res = (await sb.rpc('vital_usual_temps', { p_day: day })) as Res<unknown>
+      if (res.error !== null) {
+        // 関数が無い（0034 未適用）は控える（問い合わせ直しても同じ）。それ以外は控えずに次にもう一度
+        if (!isMissingRpc(res)) drop()
+        return out
+      }
+      const rows = Array.isArray(res.data) ? res.data : []
+      for (const row of rows.slice(0, MAX_ROWS)) {
+        const r = asRecord(row)
+        const id = idNum(r?.resident_id)
+        if (id === null) continue
+        const u = num(r?.usual_temp)
+        const n = num(r?.samples)
+        out.set(id, {
+          usual: u !== null && u >= 30 && u <= 45 ? Math.round(u * 10) / 10 : null,
+          samples: n !== null && n >= 0 && Number.isInteger(n) ? n : 0,
+        })
+      }
+      // ログインの控えが無い間（anon で読んだ＝見えなかっただけ）の0件は控えない（F58）
+      if (out.size === 0 && (await sessionMissing(sb))) drop()
+      return out
+    } catch {
+      drop()
+      return out
+    }
+  })()
+  ref.p = run
+  usualTempCache.set(day, run)
+  return run
+}
+
+/**
+ * 個別の目標（利用者ID → 目標。取り消した行は除く）。表が無い DB（0034 未適用）では空（＝施設の既定）。
+ * 読めない時は例外（DbError）
+ */
+export async function fetchResidentTargets(): Promise<Map<number, ResidentTargets>> {
+  const sb = await getClient()
+  const res = (await sb
+    .from('resident_targets')
+    .select(RESIDENT_TARGETS_COLS)
+    .is('deleted_at', null)
+    .order('resident_id', { ascending: true })
+    .order('id', { ascending: true })
+    .limit(MAX_ROWS)) as Res<unknown>
+  if (res.error !== null) {
+    if (isMissingTable(res)) return new Map()
+    throw readError(res)
+  }
+  const out = new Map<number, ResidentTargets>()
+  for (const t of list(res.data, normalizeResidentTargets)) {
+    const prev = out.get(t.resident_id)
+    if (prev === undefined || t.id > prev.id) out.set(t.resident_id, t)
+  }
+  return out
+}
+
+/** 個別の目標の保存の失敗を案内へ写す（42501・403＝役割で止まった／表が無い／範囲外／通信・ログイン） */
+function targetsWriteError(res: Res<unknown>): DbError {
+  if (isAuthFail(res)) {
+    fireAuthExpired()
+    return new DbError('auth', MSG.authWrite)
+  }
+  if (isTransient(res)) return new DbError('network', MSG.networkWrite)
+  if (isMissingTable(res)) return new DbError('server', TARGETS_MSG.missing)
+  const code = errCode(res)
+  if (code === '23514') return new DbError('server', TARGETS_MSG.badValue)
+  if (code === '42501' || res.status === 403) {
+    // 事務・管理者と分かっているのに拒否された＝許可リストから外れた（記録アプリ全体の案内）。それ以外は役割で止まった
+    const role = cachedMyRole()
+    return new DbError('forbidden', canEditTargets(role) ? MSG.forbidden : TARGETS_FORBIDDEN_MESSAGE)
+  }
+  return rejectError('保存でき', code, res.status)
+}
+
+/**
+ * 個別の目標を保存する（upsert は使わない）。current＝画面が読んだその方の目標（無ければ null）。
+ * ・current が null … insert（client_key 付き）。他の端末が先に足していれば 'conflict'
+ * ・current がある … rev 照合の update。他の端末が先に変えていれば 'conflict'
+ * 値を全部 null にすると「個別の目標なし」（行は残す。物理削除はしない）。
+ * 書けるのは事務・管理者のログインだけ（現場と分かっていれば送らずに止める。サーバーの RLS でも止まる）。
+ * 送信待ちには載せない（圏外・ログイン切れは DbError で止め、入力は画面に残す）
+ */
+export async function saveResidentTargets(
+  residentId: number,
+  input: ResidentTargetsInput,
+  current: ResidentTargets | null,
+  opts?: WriteOpts,
+): Promise<ResidentTargets | Conflict> {
+  const check = validateResidentTargets(input)
+  if (!check.ok) throw new DbError('server', check.message)
+  if (idNum(residentId) === null || (current !== null && current.resident_id !== residentId)) {
+    throw new DbError('server', TARGETS_MSG.badCurrent)
+  }
+  if (!isSupabaseConfigured()) throw new DbError('unconfigured', MSG.unconfigured)
+  assertBuildCurrent() // 古い版の止め（F28③）は受ける。入力解禁の旗の封鎖は受けない（設定の操作のため・服薬の時間帯と同じ）
+  // 現場と分かっているログインは送らずに止める（分からない＝null はサーバーに判定させる）
+  if ((await fetchMyRole()) === 'field') throw new DbError('forbidden', TARGETS_FORBIDDEN_MESSAGE)
+  const values = {
+    fluid_target_ml: input.fluid_target_ml,
+    spo2_warn_below: input.spo2_warn_below,
+    spo2_danger_below: input.spo2_danger_below,
+  }
+  const sb = await getClient()
+  if (current === null) {
+    const payload = withEditor(withClientKey({ resident_id: residentId, ...values }), opts?.editedBy)
+    const res = (await bounded(sb.from('resident_targets').insert(payload).select(RESIDENT_TARGETS_COLS).maybeSingle())) as Res<unknown>
+    if (res.error !== null) {
+      if (isUniqueViolation(res)) return CONFLICT // 他の端末が先にこの方の目標を足した
+      throw targetsWriteError(res)
+    }
+    const row = normalizeResidentTargets(res.data)
+    if (row === null) throw new DbError('server', MSG.broken)
+    return row
+  }
+  const patch = withEditor(values, opts?.editedBy)
+  const res = (await bounded(
+    sb
+      .from('resident_targets')
+      .update(patch)
+      .eq('id', current.id)
+      .eq('rev', current.rev)
+      .is('deleted_at', null)
+      .select(RESIDENT_TARGETS_COLS)
+      .maybeSingle(),
+  )) as Res<unknown>
+  if (res.error !== null) throw targetsWriteError(res)
+  if (res.data === null) {
+    // ログインの控えが無い間（anon キーで出た）の0行は競合ではない（F58）
+    if (await sessionMissing(sb)) throw new DbError('network', MSG.networkWrite)
+    return CONFLICT // 0行 = 他の端末が先に変えた（または取り消した）
+  }
+  const row = normalizeResidentTargets(res.data)
+  if (row === null) throw new DbError('server', MSG.broken)
+  return row
+}
+
 // ── テスト専用の差し込み口（裁定11: 1つにまとめる） ─────────────────────────────
 //
 // **tests/logic.test.mjs だけが使う。本番コードから呼ばないこと。**
@@ -10118,6 +10379,11 @@ export const __testHooks = import.meta.env?.PROD === true ? undefined : {
   ): void {
     testClient = sb
     memberDenied = false
+    // 基準値・平熱の控え（0034）も差し替えのたびに捨てる（試験どうしで持ち越さない）
+    thresholdsInFlight = null
+    thresholdsEpoch += 1
+    usualTempCache.clear()
+    applyVitalThresholds(null)
     // 事故の detail の重ね（0028）の確かめは、差し替えのたびに未確認へ戻す（次の追記で incidents_detail_merge_ready を呼ぶ）
     detailMergeState = null
     detailMergeCheckedAt = 0

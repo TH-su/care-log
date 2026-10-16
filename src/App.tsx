@@ -11,7 +11,7 @@
  *     「封鎖」と「観測できなかった（通信エラー）」を自分で区別する。この prop は初期値として使う）
  *   ④記録者の既定（設定タブから明示的に切り替える時だけ StaffPickerModal。起動時は出さない）
  *   ⑤シェル（スティッキーヘッダ＝画面名・未送信n件・操作者チップ／
- *     タブ＝<1024px下部5つ・≥1024px左レール8つ。sheet-contracts.md §2）
+ *     タブ＝<1024px下部5つ・≥1024px左レール9つ＝2026-10-16 に「要注意」を足した。sheet-contracts.md §2）
  *     ※表示倍率（ZoomBar）は各シート画面の操作バーが1つだけ持つ（二重表示にしない）
  *
  * 読み込み方式について:
@@ -114,6 +114,8 @@ const IncidentSummaryPage = lazy(() =>
   import('./pages/IncidentSummaryPage').then((m) => ({ default: m.IncidentSummaryPage })),
 )
 const KartePage = lazy(() => import('./pages/KartePage').then((m) => ({ default: m.KartePage })))
+// 今日の要注意（A5・2026-10-16 追加）。下部タブ「その他」と左レールから入る
+const AlertsPage = lazy(() => import('./pages/AlertsPage').then((m) => ({ default: m.AlertsPage })))
 const SearchPage = lazy(() => import('./pages/SearchPage').then((m) => ({ default: m.SearchPage })))
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })))
 const LoginPage = lazy(() => import('./pages/AuthGates').then((m) => ({ default: m.LoginPage })))
@@ -141,6 +143,7 @@ const VIEWS = [
   'medMonth',
   'incident',
   'incidentSummary',
+  'alerts',
 ] as const
 type View = (typeof VIEWS)[number]
 const DEFAULT_VIEW: View = 'daily'
@@ -159,6 +162,7 @@ const VIEW_PATH: Record<View, string> = {
   medMonth: '/med/month',
   incident: '/incident',
   incidentSummary: '/incident/summary',
+  alerts: '/alerts',
 }
 
 function readView(): View | null {
@@ -195,6 +199,7 @@ function viewOf(pathname: string): View | null {
   // 事故・ヒヤリハット: 月次集計だけ別の既知値。入力・編集（/incident/new・/incident/:id）は一覧の配下
   if (pathname === '/incident/summary') return 'incidentSummary'
   if (pathname === '/incident' || pathname.startsWith('/incident/')) return 'incident'
+  if (pathname === '/alerts') return 'alerts'
   return null
 }
 
@@ -270,7 +275,7 @@ if (typeof window !== 'undefined') applyStoredMode()
 
 // ── ナビゲーション定義（sheet-contracts.md §2・位置は画面間で一貫）───
 // <1024px: 下部タブ5つ。入りきらない画面は「その他」（MorePage）から入る
-// ≥1024px: 左レール8つ。幅に余裕があるので全画面を直接出す
+// ≥1024px: 左レール9つ（2026-10-16 に「要注意」を足した）。幅に余裕があるので全画面を直接出す
 type IconName = View
 type NavItem = { view: View; to: string; label: string }
 
@@ -287,6 +292,8 @@ const NAV_RAIL: NavItem[] = [
   { view: 'vitalsSheet', to: '/sheet/vitals', label: 'バイタル' },
   { view: 'mealsSheet', to: '/sheet/meals', label: '食事' },
   { view: 'karte', to: '/karte', label: 'カルテ' },
+  // 今日の要注意（2026-10-16 追加。既存の8つの並びは変えず、カルテの次に足す）
+  { view: 'alerts', to: '/alerts', label: '要注意' },
   { view: 'search', to: '/search', label: '検索' },
   { view: 'timeline', to: '/timeline', label: 'タイムライン' },
   { view: 'record', to: '/record', label: '記録' },
@@ -305,6 +312,7 @@ const MORE_VIEWS: View[] = [
   'medMonth',
   'incident',
   'incidentSummary',
+  'alerts',
 ]
 
 const ICON_PATHS: Record<IconName, ReactNode> = {
@@ -399,6 +407,13 @@ const ICON_PATHS: Record<IconName, ReactNode> = {
       <path d="M5 20V10M10 20V5M15 20v-7M20 20v-4" />
     </>
   ),
+  // 今日の要注意（旗）
+  alerts: (
+    <>
+      <path d="M6 21V4" />
+      <path d="M6 4h11l-2.5 4L17 12H6" />
+    </>
+  ),
 }
 
 /** タブのアイコン（文字ラベルと必ず併記する。単独では意味を持たせない） */
@@ -446,6 +461,7 @@ function screenTitle(pathname: string): string {
   if (pathname === '/incident') return '事故・ヒヤリハット'
   if (pathname === '/incident/summary') return '事故・ヒヤリ 月次集計'
   if (pathname.startsWith('/incident/')) return '事故・ヒヤリハットの記録'
+  if (pathname === '/alerts') return '今日の要注意'
   if (pathname === '/karte' || pathname.startsWith('/karte/')) return 'カルテ'
   if (pathname === '/search') return '検索'
   if (pathname === '/settings') return '設定'
@@ -1438,6 +1454,7 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
             <Route path="/incident/:id" element={<IncidentFormPage actorId={actorId} staff={staff} />} />
             <Route path="/karte" element={<KartePage staff={staff} />} />
             <Route path="/karte/:id" element={<KartePage staff={staff} />} />
+            <Route path="/alerts" element={<AlertsPage />} />
             <Route path="/search" element={<SearchPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/login" element={<Navigate to="/" replace />} />
@@ -1481,7 +1498,7 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
         </ul>
       </nav>
 
-      {/* ≥1024px: 左レール8つ（順序は下部タブと同じ並びで始める）。
+      {/* ≥1024px: 左レール9つ（順序は下部タブと同じ並びで始める）。
           縦に入りきらない画面高でも全項目へ届くようスクロールさせる */}
       <nav
         aria-label="メインナビゲーション"

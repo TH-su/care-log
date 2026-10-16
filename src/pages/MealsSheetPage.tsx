@@ -65,6 +65,10 @@ import {
 import { readSheetPref, SheetFrame, writeSheetPref, ZoomBar } from '../components/sheet'
 import { discardPendingRow, fetchLatestMeal, pendingRow, saveMealEdits } from '../lib/db'
 import type { PendingCellRow } from '../lib/db'
+// 摂取低下（A2）・濃淡（A6）・水分の目標（A3）。基準値は app_settings の上書きを起動中に1回読む（A8）
+import { fetchResidentTargets, loadVitalThresholds } from '../lib/db'
+import { fluidProgress, mealLowLabel, mealLowStreaks, mealShade } from '../lib/vitalAlerts'
+import type { ResidentTargets } from '../lib/vitalAlerts'
 import { focusOf, useCellPresence } from '../hooks/useCellPresence'
 import { cellKey } from '../lib/presence'
 import type { CellTarget } from '../lib/presence'
@@ -118,6 +122,25 @@ const FLOOR_OTHER = 'other'
 const FLOOR_ALL = 'all'
 /** 1日あたりの列数（朝主・朝副・昼主・昼副・夕主・夕副・水分） */
 const COLS_PER_DAY = 7
+/**
+ * 摂取低下（A2）の「N日目」を数えるために、表示の初日より前に読む日数。表示の初日に続いている低下は、この日数＋1 日目
+ * まで正しく数える（それより長く続いていても、この日数＋1 で頭打ち）。前の日の食事は表には出さない（数えるだけ）
+ */
+const LOW_LOOKBACK_DAYS = 7
+
+/** from〜to の日数（両端を含む。'YYYY-MM-DD'） */
+function dayCount(from: string, to: string): number {
+  return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000) + 1
+}
+
+/**
+ * 摂取低下（A2）の全文。連続が読んだ範囲の初日まで届いている（それより前から続いているかもしれない）時は「N日目以上」
+ * （表示の日数で前に読む日が変わっても、同じ日に違う日数を言い切らない）。0 以下は ''
+ */
+function lowStreakText(streak: number, day: string, readFrom: string): string {
+  if (!(streak >= 1)) return ''
+  return streak >= dayCount(readFrom, day) ? `▼摂取低下（${streak}日目以上）` : mealLowLabel(streak)
+}
 
 /** 変更通知の連続受信をまとめる待ち時間（ミリ秒。useTimeline.ts と同値） */
 const REALTIME_DEBOUNCE_MS = 1500
@@ -776,6 +799,17 @@ export function MealsSheetPage({
    * 1名1日ずつ消し込む（キュー全体の件数では判定しない＝観測ベース・multi-device-sync 原則6）。
    */
   const [queuedFluids, setQueuedFluids] = useState<Record<string, { base: number; ml: number }>>({})
+  /**
+   * 表示の初日より前 LOW_LOOKBACK_DAYS 日の食事（A2 の連続日数を数えるためだけ。表には出さない）。
+   * 表とは別に読む（読めなくても表は出す＝連続日数が表示の中だけで数えた値になるだけ）
+   */
+  const [priorMeals, setPriorMeals] = useState<Meal[]>([])
+  /** 摂取低下を数えた範囲の初日（前の日を読めた時は表示の初日の7日前・読めない間は表示の初日） */
+  const [lowReadFrom, setLowReadFrom] = useState('')
+  /** 方ごとの個別の目標（A3 の水分。無い方・読めない時は施設の既定 1,200ml） */
+  const [targets, setTargets] = useState<Map<number, ResidentTargets>>(() => new Map())
+  /** 基準値（app_settings の上書き）を読み終えた印。判定の控え（useMemo）をこの時だけ作り直す */
+  const [thresholdsVer, setThresholdsVer] = useState(0)
 
   const [edit, setEdit] = useState<EditTarget | null>(null)
   const [editText, setEditText] = useState('')
@@ -1294,6 +1328,46 @@ export function MealsSheetPage({
   useEffect(() => {
     void load()
   }, [load])
+
+  // 基準値（A8）と個別の目標（A3）は画面を開いた時に1回だけ読む（表の読み込みを待たせない・失敗しても表は出す）
+  useEffect(() => {
+    let alive = true
+    void loadVitalThresholds().then(() => {
+      if (alive) setThresholdsVer((n) => n + 1)
+    })
+    fetchResidentTargets()
+      .then((m) => {
+        if (alive) setTargets(m)
+      })
+      .catch(() => {
+        // 読めない時は施設の既定（1,200ml）で出す。目標の表示は補助なので一覧の案内は出さない
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  // 表示の初日より前の食事（A2 の連続日数用）。期間を送った時だけ読み直す
+  useEffect(() => {
+    let alive = true
+    const priorTo = addDays(fromIso, -1)
+    const priorFrom = addDays(fromIso, -LOW_LOOKBACK_DAYS)
+    // 前の期間の分は捨てる（期間を送った直後に、つながっていない前の日で数えない）
+    setPriorMeals([])
+    setLowReadFrom(fromIso)
+    fetchMealsSheet(priorFrom, priorTo)
+      .then((r) => {
+        if (!alive) return
+        setPriorMeals(asArray<Meal>(r?.meals).filter((m) => m != null && typeof m.meal_on === 'string' && m.meal_on < fromIso))
+        setLowReadFrom(priorFrom)
+      })
+      .catch(() => {
+        if (alive) setPriorMeals([])
+      })
+    return () => {
+      alive = false
+    }
+  }, [fromIso])
 
   // App 側が利用者一覧を差し替えた場合は表示を合わせる
   useEffect(() => {
@@ -2125,6 +2199,24 @@ export function MealsSheetPage({
     return map
   }, [fluids])
 
+  /**
+   * 摂取低下（A2）の連続日数（利用者ID → 日 → 結果）。表に出している値（サーバー値＋未保存の控え）と、表示より前の食事で数える。
+   * 食事・控え・期間が変わった時だけ作り直す（セルごとには計算しない）
+   */
+  const lowStreaks = useMemo(() => {
+    const shown: Meal[] = []
+    const keys = new Set([...Object.keys(meals), ...Object.keys(pending)])
+    for (const k of keys) {
+      const [ridRaw, day, slot] = k.split('|')
+      const rid = Number(ridRaw)
+      if (!Number.isFinite(rid) || !day || !SLOTS.includes(slot as MealSlot)) continue
+      if (day < fromIso || day > toIso) continue
+      shown.push(effectiveMeal(meals[k] ?? null, pending[k] ?? {}, rid, day, slot as MealSlot))
+    }
+    return mealLowStreaks([...priorMeals, ...shown])
+    // thresholdsVer: 基準値の上書き（app_settings）を読み終えたら数え直す（mealLowStreaks は「いまの基準値」を読む）
+  }, [meals, pending, priorMeals, fromIso, toIso, thresholdsVer])
+
   // ── セル操作 ──
 
   const openAmount = useCallback(
@@ -2630,11 +2722,34 @@ export function MealsSheetPage({
                     style={{ width: W_NAME, minWidth: W_NAME, maxWidth: W_NAME, left: W_ROOM }}
                     className={`${CELL_BASE} sheet-fix-end sticky z-10 truncate ${altClass(rowIndex) || 'bg-surface'} px-1 text-ink`}
                   >
-                    {r.name}
-                    {/* 他の端末がこの方の食事を入力中（「✎」・読み上げは「入力中: 職員B」）。欄が画面外でも気づけるように */}
                     {(() => {
-                      const text = presence.rowBusy('meals', dayList, r.id)
-                      return text === null ? null : <RowBusyMark text={text} />
+                      // A2: いちばん新しい日（表の左端の日）の摂取低下の続いている日数を氏名の右に「▼14」（紙にも出す）。
+                      // 日ごとの印は各日の水分の欄の「▼」。全文は読み上げ（sr-only）と水分の欄の吹き出し
+                      const nameLow = lowStreaks.get(r.id)?.get(toIso)?.streak ?? 0
+                      const capped = nameLow > 0 && nameLow >= dayCount(lowReadFrom || fromIso, toIso)
+                      return (
+                        <span className="flex min-w-0 items-center gap-1">
+                          <span className="min-w-0 truncate">
+                            {r.name}
+                            {/* 他の端末がこの方の食事を入力中（「✎」・読み上げは「入力中: 職員B」）。欄が画面外でも気づけるように */}
+                            {(() => {
+                              const text = presence.rowBusy('meals', dayList, r.id)
+                              return text === null ? null : <RowBusyMark text={text} />
+                            })()}
+                          </span>
+                          {nameLow > 0 ? (
+                            <span className="sheet-mark msheet-lowday shrink-0">
+                              <span aria-hidden="true">
+                                ▼{nameLow > 1 ? nameLow : ''}
+                                {capped ? '+' : ''}
+                              </span>
+                              <span className="sr-only">
+                                {`（${fmtDayLabel(toIso)} ${lowStreakText(nameLow, toIso, lowReadFrom || fromIso)}）`}
+                              </span>
+                            </span>
+                          ) : null}
+                        </span>
+                      )
                     })()}
                   </td>
 
@@ -2645,6 +2760,10 @@ export function MealsSheetPage({
                     const queuedMl = queuedFluids[fkey]?.ml ?? 0
                     const totalMl = (fl?.ml ?? 0) + queuedMl
                     const fluidOpen = fluidTarget != null && fluidTarget.key === fkey
+                    // A2: 1日に2食以上が半分以下の日（続いている日数。0＝低下でない）
+                    const lowStreak = lowStreaks.get(r.id)?.get(d)?.streak ?? 0
+                    // A3: 水分の目標に対する割合（先の日は出さない。画面だけ＝紙は今のまま）
+                    const fluidProg = d <= today ? fluidProgress(totalMl, targets.get(r.id)) : null
 
                     return (
                       <Fragment key={d}>
@@ -2655,8 +2774,17 @@ export function MealsSheetPage({
                           const eff = effectiveMeal(base, patch, r.id, d, slot)
                           const mark = PHASE_MARK[phases[key] ?? 'idle']
                           const low = isLowIntake(eff)
-                          // 低摂取は淡い背景＋記号「▲」（SheetCell の tone='low' と同じ見た目）
+                          // 低摂取は記号「▲」と文字色（SheetCell の tone='low' と同じ見た目）
                           const toneClass = low ? 'text-warn font-bold' : SLOT_TEXT[slot]
+                          // A6: 主食＋副食の量に応じた地の濃淡（少ないほど濃い）＋半分以下は斜線。外出・入院・未記入は塗らない。
+                          // 低摂取（▲）のマスも地はこの濃淡に置き換える（▲ と文字色はそのまま。低摂取は必ず半分以下＝斜線が付く）
+                          const shade = mealShade(eff)
+                          const shadeClass = shade
+                            ? `cl-shade-bg-${shade.stage}${shade.hatched ? ' cl-shade-hatch' : ''}`
+                            : low
+                              ? 'bg-warn-bg'
+                              : ''
+                          const halfWord = shade?.hatched ? '。主食と副食の合計が半分以下' : ''
                           const absentStatus =
                             eff.status != null && eff.status !== 'eaten' ? eff.status : null
                           const slotLabel = MEAL_SLOT_LABEL[slot]
@@ -2679,7 +2807,7 @@ export function MealsSheetPage({
                               key={slot}
                               colSpan={2}
                               style={{ width: W_MEAL2, minWidth: W_MEAL2, height: ROW_H }}
-                              className={`${CELL_BASE} relative ${low ? 'bg-warn-bg' : ''} ${busy ? BUSY_RING : ''}`}
+                              className={`${CELL_BASE} relative ${shadeClass} ${busy ? BUSY_RING : ''}`}
                             >
                               {busy && busyId ? <BusyMark busy={busy} id={busyId} /> : null}
                               {absentStatus ? (
@@ -2688,7 +2816,7 @@ export function MealsSheetPage({
                                   ref={btnRefFor(`${key}|main_amount`)}
                                   type="button"
                                   disabled={!canInput}
-                                  aria-label={`${r.name} ${dayLabel} ${slotLabel} ${MEAL_STATUS_LABEL[absentStatus]}。食事の状態を変える`}
+                                  aria-label={`${r.name} ${dayLabel} ${slotLabel} ${MEAL_STATUS_LABEL[absentStatus]}${halfWord}。食事の状態を変える`}
                                   aria-describedby={busyId}
                                   onClick={() => openAmount(target, 'main_amount', eff.main_amount)}
                                   // tokens.css の 44px 下限を打ち消す（22px 行の密度を保つ）
@@ -2715,7 +2843,7 @@ export function MealsSheetPage({
                                     editInvalid={editInvalid}
                                     inputRef={editInputRef}
                                     buttonRef={btnRefFor(`${key}|main_amount`)}
-                                    ariaLabel={`${r.name} ${dayLabel} ${slotLabel} 主食 ${eff.main_amount ?? '未入力'}${low ? '。低摂取' : ''}`}
+                                    ariaLabel={`${r.name} ${dayLabel} ${slotLabel} 主食 ${eff.main_amount ?? '未入力'}${low ? '。低摂取' : ''}${halfWord}`}
                                     describedBy={busyId}
                                     onOpen={() => openAmount(target, 'main_amount', eff.main_amount)}
                                     onText={setEditText}
@@ -2792,7 +2920,9 @@ export function MealsSheetPage({
                           <button
                             ref={btnRefFor(`f|${fkey}`)}
                             type="button"
-                            aria-label={`${r.name} ${dayLabel} 水分 合計${totalMl}ml${queuedMl > 0 ? '。未送信を含む' : ''}。内訳と追加を開く`}
+                            aria-label={`${r.name} ${dayLabel} 水分 合計${totalMl}ml${queuedMl > 0 ? '。未送信を含む' : ''}${
+                              fluidProg ? `。目標に対して ${fluidProg.label}` : ''
+                            }${lowStreak > 0 ? `。${lowStreakText(lowStreak, d, lowReadFrom || fromIso)}` : ''}。内訳と追加を開く`}
                             aria-expanded={fluidOpen}
                             onClick={() => openFluid(r.id, d)}
                             // tokens.css の 44px 下限を打ち消す（22px 行の密度を保つ）
@@ -2804,7 +2934,20 @@ export function MealsSheetPage({
                                 ⚠
                               </span>
                             ) : null}
+                            {/* A2 の日ごとの印「▼」（紙にも出す）。続いている日数は氏名の右（いちばん新しい日の分）と、
+                                読み上げ・吹き出しの全文「▼摂取低下（2日目）」が持つ（数字を並べると水分の合計と続いて読めた＝実測） */}
+                            {lowStreak > 0 ? (
+                              <span className="sheet-mark msheet-lowday" aria-hidden="true">
+                                ▼
+                              </span>
+                            ) : null}
                             {totalMl > 0 ? totalMl : ''}
+                            {/* A3 の横棒（欄の下端に細く・画面だけ） */}
+                            {fluidProg ? (
+                              <span className="cl-fluid-bar cl-fluid-bar-cell" aria-hidden="true">
+                                <span style={{ width: `${Math.round(fluidProg.bar * 100)}%` }} />
+                              </span>
+                            ) : null}
                           </button>
 
                           {fluidOpen && fluidTarget ? (
@@ -2813,6 +2956,21 @@ export function MealsSheetPage({
                               onClose={() => closeFluid(true)}
                             >
                               <p className="text-base font-bold text-ink">{`${dayLabel} 水分 合計 ${totalMl}ml`}</p>
+                              {fluidProg ? (
+                                // A3: 目標に対する割合（「800／1,200ml（67%）」と横棒）
+                                <div className="mt-1">
+                                  <p className="tabular text-sm text-ink2">
+                                    {`目標 ${fluidProg.label}`}
+                                    {fluidProg.individual ? '（個別の目標）' : ''}
+                                  </p>
+                                  <span className="cl-fluid-bar mt-1" aria-hidden="true">
+                                    <span style={{ width: `${Math.round(fluidProg.bar * 100)}%` }} />
+                                  </span>
+                                </div>
+                              ) : null}
+                              {lowStreak > 0 ? (
+                                <p className="mt-1 text-sm font-bold text-warn">{lowStreakText(lowStreak, d, lowReadFrom || fromIso)}</p>
+                              ) : null}
                               {queuedMl > 0 ? (
                                 <p className="mt-1 text-sm text-warn">
                                   <span aria-hidden="true">⚠ </span>
@@ -2881,6 +3039,14 @@ export function MealsSheetPage({
       <p className="text-sm text-ink2">
         朝は赤系・昼は緑系・夕は通常色の文字です。<span aria-hidden="true">▲</span>
         は低摂取、<span aria-hidden="true">⚠</span>は未送信を表します。文字を大きくするときは上の倍率で切り替えてください。
+        {/* A6・A2 の凡例（紙にも出す） */}
+        食事のマスは地の色が濃いほど食べた量が少なく、斜線は主食と副食の合計が半分以下です。水分の欄の
+        <span aria-hidden="true">▼</span>
+        は1日に2食以上が半分以下の日で、氏名の右の
+        <span aria-hidden="true">▼</span>
+        と数字は、いちばん新しい日まで続いている日数です（＋はそれより前から続いている）。
+        {/* A3 の凡例（棒は画面だけなので、説明も紙に出さない） */}
+        <span className="print:hidden">水分の欄の下の細い棒は、1日の目標に対する割合です（押すと目標の量と割合が出ます）。</span>
       </p>
 
       <ConflictResolver

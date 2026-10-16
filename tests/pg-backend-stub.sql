@@ -2,6 +2,7 @@
 -- 本番の Supabase には流さない（本番には care-backend の移行と pg_cron が最初からある）。2026-10-10 監査 F13。
 --   ・private.is_member() … 0012〜0014・0019・0029 の member_only が使う。試験では current_setting('test.member') が 'false' の時だけ非会員
 --   ・private.my_role() … 0033 の申し送りのロックが使う。試験では current_setting('test.role')（空＝null）
+--   ・private.has_role(variadic text[]) … 0034 の個別の目標の書き込みの許可が使う（本物と同じ本文＝my_role() を見る）
 --   ・private.my_tenant()・public.kv_entries … 0012・0015・0016 が週間計画の写し（care_schedule_v2）を読む
 --   ・cron.job・cron.schedule・cron.unschedule … 0015・0016 の定時ジョブの登録を受けるだけ（ジョブは動かさない）。
 --     0015 の `create extension if not exists pg_cron` は、素の Postgres に pg_cron が無いので pg-run-all.mjs が当てる時だけ外す
@@ -19,6 +20,13 @@ create or replace function private.my_role() returns text language sql stable as
   select nullif(current_setting('test.role', true), '')
 $$;
 grant execute on function private.my_role() to authenticated;
+
+-- private.has_role(variadic text[]) … 0034 の個別の目標（resident_targets）の書き込みの許可が使う。本物（care-backend 0001）と同じ本文
+--   （my_role() が roles のどれかなら true・null なら false）
+create or replace function private.has_role(variadic roles text[]) returns boolean language sql stable set search_path = '' as $$
+  select coalesce(private.my_role() = any(roles), false)
+$$;
+grant execute on function private.has_role(text[]) to authenticated;
 
 create or replace function private.my_tenant() returns uuid language sql stable as $$
   select '00000000-0000-0000-0000-0000000000aa'::uuid

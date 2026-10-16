@@ -111,6 +111,10 @@ import type { CellPresence } from '../hooks/useCellPresence'
 import type { CellTarget } from '../lib/presence'
 import { PresenceSummary, RowBusyMark } from '../components/presence'
 import { RecorderBar } from '../components/RecorderBar'
+// 平熱との差（A1）・SpO2 の個別の下限（A9）・直近7日の細い線（A4）。平熱と目標は1回読んで控える。基準値の上書き（A8）も1回読む
+import { fetchResidentTargets, fetchUsualTemps, loadVitalThresholds } from '../lib/db'
+import { judgeTemp, spo2Limits, spo2LevelFor } from '../lib/vitalAlerts'
+import type { ResidentTargets } from '../lib/vitalAlerts'
 import '../styles/sheet.css'
 
 // ── 定数 ─────────────────────────────────────────────────────
@@ -201,6 +205,18 @@ const FLOOR_OTHER = 'other'
 
 /** 横並びする日数の既定（契約 §6: バイタルは4日） */
 const DEFAULT_DAYS: SheetDays = 4
+
+/**
+ * A4 の細い線（居室の欄・氏名の左隣。画面だけ）。表示の右端の日（anchor）までの直近7日の定時の値を、全員同じ縦軸で描く。
+ * 表示の日数が7日より短い時は、足りない前の日を別に読む（表には出さない）
+ */
+const SPARK_DAYS = 7
+/**
+ * 縦軸（全員同じ）。範囲の外は端にそろえる。線の高さは 8px ほどしかないので、見分けたい所（体温は 35.5〜38.5℃・
+ * SpO2 は 88〜100%）に絞る（広く取ると 36℃台の上がり下がりが1px に潰れて線が平らに見えた＝実測）
+ */
+const SPARK_TEMP: readonly [number, number] = [35.5, 38.5]
+const SPARK_SPO2: readonly [number, number] = [88, 100]
 
 /**
  * 他端末の変更通知をまとめる待ち時間（ミリ秒）。連続して届いた通知は最後の1回だけ取り直す
@@ -785,6 +801,14 @@ export function VitalsSheetPage({
   } | null>(null)
   /** 期間を切り替えると外に出てしまう「止まっている入力」がある時の確認（はいで実行する処理） */
   const [leaveAsk, setLeaveAsk] = useState<(() => void) | null>(null)
+  /** 平熱（A1・利用者ID → 平熱。5回未満は null）。表示の右端の日について1回読んで控える。読めない時は空＝A1 を出さない */
+  const [usualTemps, setUsualTemps] = useState<Map<number, number | null>>(() => new Map())
+  /** 個別の目標（A9 の SpO2 の下限。無い方・読めない時は施設の基準 93%・90%） */
+  const [targets, setTargets] = useState<Map<number, ResidentTargets>>(() => new Map())
+  /** 基準値（app_settings の上書き）を読み終えた印（読み終えたら描き直して新しい基準で印を出す） */
+  const [, setThresholdsVer] = useState(0)
+  /** A4 の線のために、表示の初日より前に読んだ定時の値（表示の日数が7日より短い時だけ。表には出さない） */
+  const [sparkPrior, setSparkPrior] = useState<Vital[]>([])
 
   const aliveRef = useRef(true)
   const recsRef = useRef<Map<string, Rec>>(new Map())
@@ -1011,6 +1035,56 @@ export function VitalsSheetPage({
     void load()
   }, [load])
 
+  // 基準値（A8）と個別の目標（A9）は画面を開いた時に1回だけ読む（表の読み込みを待たせない・失敗しても表は出す）
+  useEffect(() => {
+    let alive = true
+    void loadVitalThresholds().then(() => {
+      if (alive) setThresholdsVer((n) => n + 1)
+    })
+    fetchResidentTargets()
+      .then((m) => {
+        if (alive) setTargets(m)
+      })
+      .catch(() => {
+        // 読めない時は施設の基準（93%・90%）で判定する
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  // 平熱（A1）は表示の右端の日について1回（db.ts が日ごとに控える。例外は投げない）
+  useEffect(() => {
+    let alive = true
+    void fetchUsualTemps(anchor).then((m) => {
+      if (alive) setUsualTemps(m)
+    })
+    return () => {
+      alive = false
+    }
+  }, [anchor])
+
+  // A4: 表示の日数が7日より短い時だけ、足りない前の日の定時の値を読む（読めなくても表は出す＝線がその日だけ欠ける）
+  useEffect(() => {
+    const sparkFrom = addDays(anchor, -(SPARK_DAYS - 1))
+    if (sparkFrom >= fromIso) {
+      setSparkPrior([])
+      return
+    }
+    let alive = true
+    fetchVitalsSheet(sparkFrom, addDays(fromIso, -1))
+      .then((rows) => {
+        if (!alive) return
+        setSparkPrior((Array.isArray(rows) ? rows : []).filter((v) => v != null && v.kind === 'routine'))
+      })
+      .catch(() => {
+        if (alive) setSparkPrior([])
+      })
+    return () => {
+      alive = false
+    }
+  }, [anchor, fromIso])
+
   // 未送信件数（送信失敗キュー）の可視化
   useEffect(() => {
     try {
@@ -1204,6 +1278,39 @@ export function VitalsSheetPage({
     }
     return out
   }, [visibleResidents])
+
+  /**
+   * A4 の線の値（利用者ID → 直近7日の体温・SpO2。古い日が左）。表示中の日は画面の定時の行（サーバーで観測できた値）から、
+   * 表示より前の日は sparkPrior から取る。表示中の方の分だけ・行や期間が変わった時だけ作り直す
+   */
+  const sparkByResident = useMemo(() => {
+    const sparkDays: string[] = []
+    for (let i = SPARK_DAYS - 1; i >= 0; i--) sparkDays.push(addDays(anchor, -i))
+    const prior = new Map<string, Vital>()
+    for (const v of sparkPrior) {
+      const k = `${v.resident_id}|${v.measured_on}`
+      const cur = prior.get(k)
+      if (!cur || v.id > cur.id) prior.set(k, v)
+    }
+    const out = new Map<number, Spark>()
+    for (const r of visibleResidents) {
+      const temp: (number | null)[] = []
+      const spo2: (number | null)[] = []
+      for (const d of sparkDays) {
+        if (d >= fromIso) {
+          const rec = recs.get(recKey(r.id, d, 'routine', 0))
+          temp.push(rec?.saved.temp ?? null)
+          spo2.push(rec?.saved.spo2 ?? null)
+        } else {
+          const v = prior.get(`${r.id}|${d}`)
+          temp.push(v?.temp ?? null)
+          spo2.push(v?.spo2 ?? null)
+        }
+      }
+      out.set(r.id, { temp, spo2 })
+    }
+    return out
+  }, [anchor, fromIso, recs, sparkPrior, visibleResidents])
 
   /** 「再検」ボタン: その入居者の直下に再検欄を1本足す（画面内の状態・保存しない） */
   const addRecheckRow = useCallback(
@@ -2173,6 +2280,9 @@ export function VitalsSheetPage({
                     // 1行おきの縞（2行目・4行目…に付ける）。行を目で追いやすくする
                     alt={i % 2 === 1}
                     dayList={dayList}
+                    spark={isRoutine ? (sparkByResident.get(row.residentId) ?? null) : null}
+                    usualTemp={usualTemps.get(row.residentId)}
+                    spo2Target={targets.get(row.residentId)}
                     recs={recs}
                     editable={editable}
                     removable={removable}
@@ -2193,6 +2303,14 @@ export function VitalsSheetPage({
           </table>
         </SheetFrame>
       )}
+
+      {/* A4 の凡例（線は画面だけなので、説明も紙に出さない）。色だけに頼らない＝実線・点線と上下の位置で区別する */}
+      {visibleResidents.length > 0 ? (
+        <p className="pt-2 text-sm text-ink2 print:hidden">
+          居室の右の細い線は、直近{SPARK_DAYS}日の定時の体温（上・実線）と SpO2（下・点線）です。目盛りは全員同じです（体温{' '}
+          {SPARK_TEMP[0]}〜{SPARK_TEMP[1]}℃・SpO2 {SPARK_SPO2[0]}〜{SPARK_SPO2[1]}%）。
+        </p>
+      ) : null}
 
       <ConfirmDialog
         open={leaveAsk !== null}
@@ -2246,6 +2364,103 @@ export function VitalsSheetPage({
   )
 }
 
+// ── A1・A9 の読み上げの語・A4 の細い線 ─────────────────────────
+
+/** A4 の線の値（古い日が左・7日分。値が無い日は null） */
+interface Spark {
+  temp: (number | null)[]
+  spo2: (number | null)[]
+}
+
+/**
+ * 読み上げに足す A1・A9 の語（「（平熱+1.2・平熱より高い）」「（個別の下限 95% を下回る）」）。当たらなければ ''。
+ * この表の欄（SheetCell）には今の4段階の印しか出せないので、平熱との差は読み上げにだけ足す（見た目の印は積み残し）
+ */
+function newMarkWord(field: Field, value: number, usualTemp: number | null | undefined, target: ResidentTargets | undefined): string {
+  if (field === 'temp') {
+    const j = judgeTemp(value, usualTemp)
+    const t = j.level ? j.note : j.overUsual ? j.mark : null
+    return t ? `（${t.replace('↑', '')}・平熱より高い）` : ''
+  }
+  if (field === 'spo2') {
+    const lim = spo2Limits(target)
+    return lim.individual && spo2LevelFor(value, target) ? `（個別の下限 ${lim.warnBelow}% を下回る）` : ''
+  }
+  return ''
+}
+
+/** 値の並びを線の座標へ（値の無い日で線を切る）。y0〜y1 が縦の範囲（上が大きい値） */
+function sparkPath(values: (number | null)[], axis: readonly [number, number], y0: number, y1: number, w: number): string {
+  const step = values.length > 1 ? w / (values.length - 1) : 0
+  let d = ''
+  let pen = false
+  values.forEach((v, i) => {
+    if (v == null || !Number.isFinite(v)) {
+      pen = false
+      return
+    }
+    const t = (Math.min(axis[1], Math.max(axis[0], v)) - axis[0]) / (axis[1] - axis[0])
+    const x = Math.round(i * step * 10) / 10
+    const y = Math.round((y1 - t * (y1 - y0)) * 10) / 10
+    d += `${pen ? 'L' : 'M'}${x} ${y}`
+    pen = true
+  })
+  return d
+}
+
+/** 1点だけ（前後に値が無い日）の値は線にならないので点で出す */
+function sparkDots(values: (number | null)[], axis: readonly [number, number], y0: number, y1: number, w: number): { x: number; y: number }[] {
+  const step = values.length > 1 ? w / (values.length - 1) : 0
+  const out: { x: number; y: number }[] = []
+  values.forEach((v, i) => {
+    if (v == null || !Number.isFinite(v)) return
+    const prev = i > 0 ? values[i - 1] : null
+    const next = i < values.length - 1 ? values[i + 1] : null
+    if (prev != null || next != null) return
+    const t = (Math.min(axis[1], Math.max(axis[0], v)) - axis[0]) / (axis[1] - axis[0])
+    out.push({ x: Math.round(i * step * 10) / 10, y: Math.round((y1 - t * (y1 - y0)) * 10) / 10 })
+  })
+  return out
+}
+
+/** 読み上げの要約（「直近7日 体温 36.2〜37.8℃・SpO2 93〜97%」） */
+function sparkLabel(spark: Spark): string {
+  const rng = (xs: (number | null)[], digits: number) => {
+    const v = xs.filter((x): x is number => x != null && Number.isFinite(x))
+    if (v.length === 0) return null
+    const lo = Math.min(...v).toFixed(digits)
+    const hi = Math.max(...v).toFixed(digits)
+    return lo === hi ? lo : `${lo}〜${hi}`
+  }
+  const t = rng(spark.temp, 1)
+  const o = rng(spark.spo2, 0)
+  if (t === null && o === null) return `直近${SPARK_DAYS}日の定時の記録なし`
+  return `直近${SPARK_DAYS}日 体温 ${t === null ? '記録なし' : `${t}℃`}・SpO2 ${o === null ? '記録なし' : `${o}%`}`
+}
+
+/** A4: 直近7日の体温（上半分・実線）と SpO2（下半分・点線）の細い線。全員同じ縦軸。画面だけ（.vspark は print で隠す） */
+function VitalSpark({ spark }: { spark: Spark }) {
+  const W = 28
+  const tPath = sparkPath(spark.temp, SPARK_TEMP, 1, 9, W)
+  const oPath = sparkPath(spark.spo2, SPARK_SPO2, 11, 19, W)
+  const tDots = sparkDots(spark.temp, SPARK_TEMP, 1, 9, W)
+  const oDots = sparkDots(spark.spo2, SPARK_SPO2, 11, 19, W)
+  return (
+    <svg className="vspark" viewBox={`-1 0 ${W + 2} 20`} preserveAspectRatio="none" role="img" aria-label={sparkLabel(spark)}>
+      {tPath ? <path className="vspark-temp" d={tPath} fill="none" strokeWidth="1.5" vectorEffect="non-scaling-stroke" /> : null}
+      {oPath ? (
+        <path className="vspark-spo2" d={oPath} fill="none" strokeWidth="1.5" strokeDasharray="2 1.5" vectorEffect="non-scaling-stroke" />
+      ) : null}
+      {tDots.map((p) => (
+        <circle key={`t${p.x}`} className="vspark-temp" cx={p.x} cy={p.y} r="0.9" fill="currentColor" />
+      ))}
+      {oDots.map((p) => (
+        <circle key={`o${p.x}`} className="vspark-spo2" cx={p.x} cy={p.y} r="0.9" fill="currentColor" />
+      ))}
+    </svg>
+  )
+}
+
 // ── 1行（＝1名×1枠。横に日が並ぶ）＋その行の警告行 ───────────
 
 interface FragmentRowProps {
@@ -2258,6 +2473,12 @@ interface FragmentRowProps {
   /** 「全」表示で階が変わる入居者の最初の行（上に太線を引く・食事一覧と同じ .msheet-floor-start）。読み上げ用の文字も添える */
   floorStart?: string | null
   dayList: string[]
+  /** A4: 直近7日の体温・SpO2（定時の行だけ。居室の欄に細い線で出す・画面だけ） */
+  spark?: Spark | null
+  /** A1: この方の平熱（5回未満・読めない時は null／undefined＝平熱との差を出さない） */
+  usualTemp?: number | null
+  /** A9: この方の個別の目標（SpO2 の下限。無ければ施設の基準） */
+  spo2Target?: ResidentTargets
   recs: Map<string, Rec>
   editable: boolean
   /** この再検行に「✕」を出すか（一番下の空の再検行だけ true） */
@@ -2287,6 +2508,9 @@ function FragmentRow({
   alt,
   floorStart = null,
   dayList,
+  spark = null,
+  usualTemp,
+  spo2Target,
   recs,
   editable,
   removable = false,
@@ -2316,7 +2540,17 @@ function FragmentRow({
         >
           {/* 階の切れ目は太線で示すが、線は読み上げに乗らないので変わり目の行だけ文字で添える（食事一覧と同じ） */}
           {floorStart ? <span className="sr-only">ここから{floorStart}</span> : null}
-          {isRoutine ? (room ?? '—') : ''}
+          {isRoutine && spark ? (
+            // A4: 居室の右（氏名の左隣）に直近7日の細い線。紙は今のまま（線は print:hidden・居室は中央）
+            <span className="flex items-center justify-between gap-0.5 print:justify-center">
+              <span className="min-w-0 truncate">{room ?? '—'}</span>
+              <VitalSpark spark={spark} />
+            </span>
+          ) : isRoutine ? (
+            (room ?? '—')
+          ) : (
+            ''
+          )}
         </th>
         <td
           // 食い違いを解決した後のフォーカスの戻り先（タブ順には入れない）
@@ -2383,8 +2617,13 @@ function FragmentRow({
               const raw = rec?.buf[f] ?? ''
               const parsed = normalizeVitalInput(raw, f)
               const bad = parsed != null && outOfRange(f, parsed)
-              // 範囲外・未確定の入力にはしきい値の色を付けない（誤った意味づけを避ける）
-              const level = parsed != null && !bad ? LEVEL_FN[f](parsed) : null
+              // 範囲外・未確定の入力にはしきい値の色を付けない（誤った意味づけを避ける）。
+              // SpO2 は個別の下限がある方はその下限で（A9）。体温の印は今のまま（A1 の平熱との差は読み上げに足す）
+              const ok = parsed != null && !bad
+              const level = !ok ? null : f === 'spo2' ? spo2LevelFor(parsed, spo2Target) : LEVEL_FN[f](parsed)
+              const newMark = ok ? newMarkWord(f, parsed, usualTemp, spo2Target) : ''
+              // A1 の見た目の印（今の印が無くて平熱+1.0℃以上の時だけ「平」。両方当たる時は今の印のまま＝注記は読み上げ）
+              const usualMark = ok && f === 'temp' && level === null && judgeTemp(parsed, usualTemp).overUsual ? '平' : null
               // この欄（Presence の照合）。再検は行 id で指す（まだ行が無い枠は id なし）
               const target: CellTarget = {
                 table: 'vitals',
@@ -2406,6 +2645,7 @@ function FragmentRow({
                   align="center"
                   width={FIELD_WIDTH[f]}
                   level={level}
+                  extraMark={usualMark}
                   // 背景を持たないセル（tone='row'）にして、行の縞を透けさせる。
                   // しきい値の色がある時は SheetCell が level の色をセルに置く＝縞より上に来る
                   tone="row"
@@ -2413,7 +2653,7 @@ function FragmentRow({
                   groupEnd={i === FIELDS.length - 1}
                   ariaLabel={`${room ?? '居室未設定'} ${name} ${fmtDayLabel(day)} ${
                     KIND_LABEL[row.kind]
-                  } ${FIELD_LABEL[f]}`}
+                  } ${FIELD_LABEL[f]}${newMark}`}
                 />
               )
             })}
