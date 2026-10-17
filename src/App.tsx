@@ -60,6 +60,7 @@ import {
   notePreloadError,
 } from './lib/appVersion'
 import { deviceTimeZoneWarning } from './lib/format'
+import { installUserActivity, waitUserQuiet } from './lib/userActivity'
 
 // ── 接続設定（VITE_ 変数）──────────────────────────────────────────
 // 型は src/vite-env.d.ts（vite/client）で付くが、未設定・非 Vite 実行でも落ちないようキャスト経由で読む。
@@ -175,6 +176,8 @@ const PREFETCH_START_MS = 1_500
 let pagePreloading = 0
 // 先読みの部品の失敗の合図を、下の notePreloadError（F28②）より先に受けて止める（画面の失敗として残さない）。
 // この受け口は notePreloadError の受け口より先に登録する（同じ window の後の受け口だけを止められるため）
+// 人が画面を触っているかを最初から覚える（先読みを触っている間は止める）
+installUserActivity()
 if (typeof window !== 'undefined')
   window.addEventListener('vite:preloadError', (e) => {
     if (pagePreloading > 0) e.stopImmediatePropagation()
@@ -205,7 +208,20 @@ function whenIdle(fn: () => void, delay: number): () => void {
   }
 }
 
-/** 画面の部品を1つずつ先読みする。stopped() が true になったら止める。見えない・オフラインの間は待つ */
+/** 端末が手すきになるまで待つ（requestIdleCallback の無い Safari は少しだけ待つ） */
+function idleTurn(): Promise<void> {
+  return new Promise((resolve) => {
+    const w = window as Window & { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number }
+    if (typeof w.requestIdleCallback === 'function') w.requestIdleCallback(() => resolve(), { timeout: 1_000 })
+    else window.setTimeout(resolve, 50)
+  })
+}
+
+/**
+ * 画面の部品を1つずつ先読みする。stopped() が true になったら止める。見えない・オフラインの間は待つ。
+ * 人が画面を触っている間も待ち、1つ読むごとに端末が手すきになるのを待つ（部品の組み立てがスクロールと重なると
+ * iPhone でカクつく・2026-10-18）
+ */
 async function preloadPages(stopped: () => boolean): Promise<void> {
   if (!isDevBuild(CLIENT_BUILD)) {
     // 新しい版が公開されていれば、古い名前の部品を取りに行かない
@@ -217,6 +233,8 @@ async function preloadPages(stopped: () => boolean): Promise<void> {
       if (stopped()) return
       await new Promise((r) => window.setTimeout(r, 5_000))
     }
+    await waitUserQuiet()
+    await idleTurn()
     if (stopped()) return
     pagePreloading += 1
     try {

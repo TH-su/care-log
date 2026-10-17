@@ -109,22 +109,72 @@ export function metaHit(meta: CacheMeta, table: string, day: string | null): boo
   return table === 'notes' && meta.notesUpTo === true
 }
 
-/** 2つの値が同じ中身か（Map・Set も中身で比べる。比べられない値は違うとみなす） */
+/**
+ * 2つの値が同じ中身か（Map・Set も中身で比べる。比べられない値は違うとみなす）。
+ * 文字列に直して比べず、中身を順にたどって比べる（2026-10-18 iPhone のカクつき対策）。取り直しのたびに数百KB〜数MBの
+ * 控えを2回ずつ文字列に直すと、画面を開いた直後のスクロール中に iPhone の描画が止まっていた。たどる比べ方は
+ * 違いを見つけた所で止まり、同じ時も文字列を作らない。JSON で比べるより厳しい側にしか外れない
+ * （undefined の欄の有無・関数・NaN などは「違う」とみなす＝画面を描き直すだけで、古い値を見せることはない）
+ */
 export function sameValue(a: unknown, b: unknown): boolean {
-  if (a === b) return true
   try {
-    return stableJson(a) === stableJson(b)
+    return deepSame(a, b, 0)
   } catch {
     return false
   }
 }
 
-function stableJson(v: unknown): string {
-  return JSON.stringify(v, (_k, x: unknown) => {
-    if (x instanceof Map) return { __map: [...x.entries()] }
-    if (x instanceof Set) return { __set: [...x.values()] }
-    return x
-  })
+/** たどる深さの上限（循環した値でも止まる。超えたら違うとみなす） */
+const MAX_DEPTH = 64
+
+function deepSame(a: unknown, b: unknown, depth: number): boolean {
+  if (a === b) return true
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false
+  if (depth > MAX_DEPTH) return false
+  if (Array.isArray(a)) {
+    if (!Array.isArray(b) || a.length !== b.length) return false
+    for (let i = 0; i < a.length; i++) if (!deepSame(a[i], b[i], depth + 1)) return false
+    return true
+  }
+  if (Array.isArray(b)) return false
+  if (a instanceof Map) {
+    if (!(b instanceof Map) || a.size !== b.size) return false
+    // 入った順も同じ時だけ同じ（文字列で比べていた時と同じ。画面は並び順で描く）
+    const ib = b.entries()
+    for (const [ka, va] of a) {
+      const nb = ib.next()
+      if (nb.done === true) return false
+      const [kb, vb] = nb.value as [unknown, unknown]
+      if (!deepSame(ka, kb, depth + 1) || !deepSame(va, vb, depth + 1)) return false
+    }
+    return true
+  }
+  if (b instanceof Map) return false
+  if (a instanceof Set) {
+    if (!(b instanceof Set) || a.size !== b.size) return false
+    const ib = b.values()
+    for (const va of a) {
+      const nb = ib.next()
+      if (nb.done === true || !deepSame(va, nb.value, depth + 1)) return false
+    }
+    return true
+  }
+  if (b instanceof Set) return false
+  if (a instanceof Date) return b instanceof Date && a.getTime() === b.getTime()
+  if (b instanceof Date) return false
+  if (Object.getPrototypeOf(a) !== Object.getPrototypeOf(b)) return false
+  const ka = Object.keys(a)
+  const kb = Object.keys(b)
+  if (ka.length !== kb.length) return false
+  const ra = a as Record<string, unknown>
+  const rb = b as Record<string, unknown>
+  for (let i = 0; i < ka.length; i++) {
+    const k = ka[i]
+    // 欄の並びも同じ時だけ同じ（文字列で比べていた時と同じ厳しさ）
+    if (k !== kb[i]) return false
+    if (!deepSame(ra[k], rb[k], depth + 1)) return false
+  }
+  return true
 }
 
 function defaultIsEmpty(v: unknown): boolean {
@@ -468,7 +518,8 @@ export function createPrefetchQueue(opts: { concurrency?: number; canRun: () => 
 
 /**
  * 先読みしてよい端末の状態か（純関数。呼び手が今の値を集めて渡す）。
- * 画面が隠れている・オフライン・データ節約の設定・送信待ちを送っている（再送を邪魔しない）・ログインしていない間は false。
+ * 画面が隠れている・オフライン・データ節約の設定・送信待ちを送っている（再送を邪魔しない）・ログインしていない・
+ * 人が画面を触っている（スクロール・入力の描画を止めない。2026-10-18 iPhone のカクつき対策）間は false。
  * 止まっている送信待ち（競合・拒否で人の判断を待つもの）は数えない（残っている間ずっと先読みが止まらないように）
  */
 export function prefetchAllowed(s: {
@@ -477,8 +528,10 @@ export function prefetchAllowed(s: {
   saveData: boolean
   sending: boolean
   signedIn: boolean
+  /** 人が画面を触っている（userActivity.isUserBusy）。省略は触っていない */
+  busy?: boolean
 }): boolean {
-  return s.visible && s.online && !s.saveData && !s.sending && s.signedIn
+  return s.visible && s.online && !s.saveData && !s.sending && s.signedIn && s.busy !== true
 }
 
 /** 全体で使う控え（画面と先読みが共有する） */

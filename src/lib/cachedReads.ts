@@ -16,7 +16,8 @@
 //
 // 先読み（startPrefetch）: 最初の画面が描けて落ち着いてから、名簿 → 今日の要注意 → 日報の今の区切り → バイタル・食事の
 //   一覧の既定 → タイムラインの最初の10日・与薬・入浴・事故 → 外部の GAS（排泄・体重）の順に、同時に2本まで。
-//   止める条件は dataCache.prefetchAllowed（画面が隠れている・オフライン・データ節約・送信待ちを送っている・ログインしていない）。
+//   止める条件は dataCache.prefetchAllowed（画面が隠れている・オフライン・データ節約・送信待ちを送っている・ログインしていない・
+//   人が画面を触っている〔userActivity・触るのをやめて少し経ったら再開〕）。
 //   古いの印が付いたら、少し待ってから同じ順で取り直す（印の無い控えは通信しない）。
 //
 // 個人情報: 控えはメモリだけ（localStorage・IndexedDB に置かない）。console に出さない。
@@ -39,6 +40,7 @@ import type { CacheMeta, PrefetchTask } from './dataCache'
 import { clearExcretionCache, fetchExcretion } from './excretionClient'
 import { clearWeightCache, fetchWeights } from './weightClient'
 import { addDays, todayIso } from './format'
+import { installUserActivity, isUserBusy, onUserQuiet } from './userActivity'
 import { defaultIncidentRange } from './incident'
 import { LS, SHEET_DAYS } from './types'
 // 今日の要注意と同じ日の数え方（日本時間の今日・UTC で数える日の足し引き）。純粋な部品
@@ -471,8 +473,10 @@ export function startPrefetch(ctx: PrefetchContext): PrefetchController {
       saveData: nav?.connection?.saveData === true,
       sending,
       signedIn: true, // App はログインしている間だけ呼ぶ（ログアウトで stop）
+      busy: isUserBusy(),
     })
   }
+  installUserActivity()
   const queue = createPrefetchQueue({ concurrency: 2, canRun })
   queue.push(prefetchPlan(ctx))
 
@@ -499,6 +503,8 @@ export function startPrefetch(ctx: PrefetchContext): PrefetchController {
   if (typeof window !== 'undefined') window.addEventListener('online', kick)
   // 送信待ちの数が変わった（送れた・積んだ）時に見直す（送っている間は止めている＝再送を邪魔しない）
   const offQueue = queueSubscribe(() => kick())
+  // 触るのをやめたら、触っている間に止めた先読みを再開する
+  const offQuiet = onUserQuiet(kick)
 
   return {
     stop() {
@@ -506,6 +512,7 @@ export function startPrefetch(ctx: PrefetchContext): PrefetchController {
       queue.clear()
       offStale()
       offQueue()
+      offQuiet()
       if (refreshTimer !== null) clearTimeout(refreshTimer)
       if (sendWait !== null) clearTimeout(sendWait)
       if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVis)
