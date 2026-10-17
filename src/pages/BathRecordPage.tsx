@@ -36,10 +36,6 @@ import { Link } from 'react-router-dom'
 import {
   FORBIDDEN_REASON,
   DbError,
-  fetchAllResidents,
-  fetchBathDay,
-  fetchBathPlan,
-  fetchStaff,
   getAppSetting,
   getKindInputGate,
   hasPendingBath,
@@ -53,6 +49,18 @@ import {
   subscribeBathChanges,
   updateBath,
 } from '../lib/db'
+// 名簿・記録・予定は読み込みの控え（裏での先読み・2026-10-17）を通す。控えがあれば先に描き、裏で取り直す。
+// 入力解禁の旗は控えずに毎回取り直す（旗が返るまでは今までどおり入力できない）
+import {
+  fetchAllResidents,
+  fetchBathDay,
+  fetchBathPlan,
+  fetchStaff,
+  peekAllResidents,
+  peekBathDay,
+  peekBathPlan,
+  peekStaff,
+} from '../lib/cachedReads'
 import type { BathPlanResult, StoppedOp } from '../lib/db'
 import { resolveActor, touchActivity } from '../lib/actor'
 import {
@@ -177,8 +185,8 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
   /** 開いたまま日付が変わり、入力中・未送信があったので切り替えなかった時の、その時の表示日（帯を出す・F18） */
   const [rolloverDay, setRolloverDay] = useState<string | null>(null)
 
-  const [residents, setResidents] = useState<Resident[] | null>(null)
-  const [staff, setStaff] = useState<Staff[] | null>(staffProp ?? null)
+  const [residents, setResidents] = useState<Resident[] | null>(() => peekAllResidents() ?? null)
+  const [staff, setStaff] = useState<Staff[] | null>(() => staffProp ?? peekStaff() ?? null)
   const [gate, setGate] = useState<{ value: boolean; observed: boolean; forbidden?: true } | null>(null)
   const [baseError, setBaseError] = useState<string | null>(null)
   const [baseTick, setBaseTick] = useState(0)
@@ -290,8 +298,10 @@ export function BathRecordPage({ staff: staffProp, actorId }: BathRecordPageProp
     // 世代を進める＝日付を変える前に投げた読み直しの応答を捨てる（F20）
     const gen = ++genRef.current
     setDayError(null)
-    setRecords(null)
-    setPlan(null)
+    // その日の記録・予定の控え（裏での先読み）があれば先に出す（下の取り直しで差し替える）
+    const cRecords = peekBathDay(day)
+    setRecords(cRecords === undefined ? null : cRecords.filter((r) => r.bath_on === day))
+    setPlan(peekBathPlan(day, activeResidents) ?? null)
     inFlightRef.current += 1
     loadRecords(day)
       .then((rs) => {

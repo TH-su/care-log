@@ -19,6 +19,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { fetchUsualTemps, getKindInputGate, loadVitalThresholds } from '../lib/db'
+// 名簿・記録・与薬・個別の目標は読み込みの控え（裏での先読み・2026-10-17）を通す。入力解禁の旗は控えずに毎回取り直す
 import {
   fetchMedDay,
   fetchMedFirstDay,
@@ -26,10 +28,13 @@ import {
   fetchResidents,
   fetchResidentTargets,
   fetchTimelineChunk,
-  fetchUsualTemps,
-  getKindInputGate,
-  loadVitalThresholds,
-} from '../lib/db'
+  peekMedDay,
+  peekMedFirstDay,
+  peekMedSlots,
+  peekResidents,
+  peekResidentTargets,
+  peekTimelineChunk,
+} from '../lib/cachedReads'
 import { buildMedDayRows, medMissingAllowed } from '../lib/med'
 import type { MedDayRow } from '../lib/med'
 import { buildDayAlerts, fluidTotalsOf } from '../lib/vitalAlerts'
@@ -140,8 +145,49 @@ export function AlertsPage() {
   // 今日の記録（画面を開いた時・再試行・日付が変わった時）
   useEffect(() => {
     let cancelled = false
+    /** 取り直した結果を描いた（控えで先に描くのは、取り直しが返る前だけ） */
+    let freshShown = false
     setState((cur) => (cur.status === 'ready' && cur.data.day === day ? cur : { status: 'loading' }))
     const from = addDaysIso(day, -(MEAL_DAYS - 1))
+    const toLoaded = (
+      residents: Resident[],
+      chunk: { vitals: Vital[]; meals: Meal[]; fluids: FluidIntake[]; notes: Note[]; pinned: Note[] },
+      usual: Map<number, number | null>,
+      targets: Map<number, ResidentTargets> | null,
+      med: MedRaw | null,
+    ): Loaded => ({
+      day,
+      residents: residents.filter((r) => r != null && r.active !== false),
+      vitals: chunk.vitals.filter((v) => v.measured_on === day),
+      meals: chunk.meals,
+      fluids: chunk.fluids,
+      notes: mergeNotes(chunk.notes, chunk.pinned),
+      usual,
+      targets,
+      med,
+    })
+    // 控え（裏での先読み）が全部そろっていれば、取り直しを待たずに先に描く。与薬の入力解禁の旗（「未」を出すか）は
+    // 控えずに取り直す（1往復だけ待つ）。そろっていない時は今までどおり取り直しを待つ
+    const cRes = peekResidents()
+    const cChunk = peekTimelineChunk(from, day, null)
+    const cTargets = peekResidentTargets()
+    const cMed = peekMedDay(day)
+    const cSlots = cRes === undefined ? undefined : peekMedSlots(cRes)
+    const cFirst = peekMedFirstDay()
+    if (cRes && cChunk && cTargets && cMed && cSlots && cFirst !== undefined) {
+      void Promise.all([getKindInputGate('med'), loadVitalThresholds(), fetchUsualTemps(day)])
+        .then(([gate, , usual]) => {
+          if (cancelled || freshShown || !aliveRef.current) return
+          const med: MedRaw = {
+            records: cMed.filter((r) => r.admin_on === day),
+            slots: cSlots,
+            firstDay: cFirst,
+            enabled: gate.observed && gate.value === true,
+          }
+          setState({ status: 'ready', data: toLoaded(cRes, cChunk, usual, cTargets, med) })
+        })
+        .catch(() => undefined) // 先に描けないだけ（下の取り直しが描く）
+    }
     const residentsP = fetchResidents()
     const coreP = Promise.all([residentsP, fetchTimelineChunk(from, day, null)])
     const loadMed = async (): Promise<MedRaw> => {
@@ -169,23 +215,12 @@ export function AlertsPage() {
     Promise.all([coreP, extrasP])
       .then(([[residents, chunk], [, usual, targets, med]]) => {
         if (cancelled || !aliveRef.current) return
-        setState({
-          status: 'ready',
-          data: {
-            day,
-            residents: residents.filter((r) => r != null && r.active !== false),
-            vitals: chunk.vitals.filter((v) => v.measured_on === day),
-            meals: chunk.meals,
-            fluids: chunk.fluids,
-            notes: mergeNotes(chunk.notes, chunk.pinned),
-            usual,
-            targets,
-            med,
-          },
-        })
+        freshShown = true
+        setState({ status: 'ready', data: toLoaded(residents, chunk, usual, targets, med) })
       })
       .catch(() => {
         if (cancelled || !aliveRef.current) return
+        freshShown = true
         setState({ status: 'error' })
       })
     return () => {

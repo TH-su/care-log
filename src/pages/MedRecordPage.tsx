@@ -46,12 +46,6 @@ import { Link, useNavigate } from 'react-router-dom'
 import {
   FORBIDDEN_REASON,
   DbError,
-  fetchAllResidents,
-  fetchAllStaff,
-  fetchMedDay,
-  fetchMedFirstDay,
-  fetchMedSlots,
-  fetchStaff,
   getKindInputGate,
   hasPendingMed,
   insertMedAdmin,
@@ -66,6 +60,22 @@ import {
   updateMedAdmin,
 } from '../lib/db'
 import type { StoppedOp } from '../lib/db'
+// 名簿・記録・時間帯は読み込みの控え（裏での先読み・2026-10-17）を通す。控えがあれば先に描き、裏で取り直す。
+// 入力解禁の旗は控えずに毎回取り直す（旗が返るまでは今までどおり入力できない）
+import {
+  fetchAllResidents,
+  fetchAllStaff,
+  fetchMedDay,
+  fetchMedFirstDay,
+  fetchMedSlots,
+  fetchStaff,
+  peekAllResidents,
+  peekAllStaff,
+  peekMedDay,
+  peekMedFirstDay,
+  peekMedSlots,
+  peekStaff,
+} from '../lib/cachedReads'
 import { resolveActor, touchActivity } from '../lib/actor'
 import {
   buildMedDayRows,
@@ -294,10 +304,10 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
   /** 開いたまま日付が変わり、入力中・未送信があったので切り替えなかった時の、その時の表示日（帯を出す・F18） */
   const [rolloverDay, setRolloverDay] = useState<string | null>(null)
 
-  const [residents, setResidents] = useState<Resident[] | null>(null)
-  const [staff, setStaff] = useState<Staff[] | null>(staffProp ?? null)
+  const [residents, setResidents] = useState<Resident[] | null>(() => peekAllResidents() ?? null)
+  const [staff, setStaff] = useState<Staff[] | null>(() => staffProp ?? peekStaff() ?? null)
   /** 記入者の名前を引く名簿（退職者も含む・F47。読めなければ null＝在籍の名簿で引く） */
-  const [allStaff, setAllStaff] = useState<Staff[] | null>(null)
+  const [allStaff, setAllStaff] = useState<Staff[] | null>(() => peekAllStaff() ?? null)
   const [gate, setGate] = useState<{ value: boolean; observed: boolean; forbidden?: true } | null>(null)
   const [baseError, setBaseError] = useState<string | null>(null)
   const [baseTick, setBaseTick] = useState(0)
@@ -435,8 +445,18 @@ export function MedRecordPage({ staff: staffProp, actorId }: MedRecordPageProps 
     // 世代を進める＝日付を変える前に投げた読み直しの応答を捨てる（F20）
     const gen = ++genRef.current
     setDayError(null)
-    setRecords(null)
-    setSlots(null)
+    // その日の記録・時間帯・始めた日の控え（裏での先読み）がそろっていれば先に出す（下の取り直しで差し替える）
+    const cRecords = peekMedDay(day)
+    const cSlots = peekMedSlots(activeResidents)
+    const cFirst = peekMedFirstDay()
+    if (cRecords !== undefined && cSlots !== undefined && cFirst !== undefined) {
+      setRecords(cRecords.filter((r) => r.admin_on === day))
+      setSlots(cSlots)
+      setStartDay(cFirst)
+    } else {
+      setRecords(null)
+      setSlots(null)
+    }
     inFlightRef.current += 1
     Promise.all([loadRecords(day), fetchMedSlots(activeResidents), fetchMedFirstDay()])
       .then(([rs, ss, first]) => {

@@ -10,7 +10,9 @@
 // - 取得失敗時は表示中のデータを消さない（安全側フォールバック）。個人情報は console にも localStorage にも出さない
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { fetchTimelineChunk, isSelfWrite, subscribeChanges } from '../lib/db'
+import { isSelfWrite, subscribeChanges } from '../lib/db'
+// 取得は読み込みの控え（裏での先読み・2026-10-17）を通す（同じ署名・毎回取りに行き、結果を控える）
+import { fetchTimelineChunk, peekTimelineChunk } from '../lib/cachedReads'
 import { fluidIsNextMorning, noteIsNextMorning, timeSortKey, vitalIsNextMorning } from '../lib/nextMorning'
 import { addDays, isoDate, todayIso } from '../lib/format'
 import type {
@@ -623,9 +625,17 @@ export function useTimeline(staffId: number | null): UseTimelineResult {
       void loadWindow(w.from, windowTo(w), daysRef.current.length > 0)
     } else {
       const to = todayIso()
-      void loadWindow(addDays(to, -(CHUNK_DAYS - 1)), to)
+      const from = addDays(to, -(CHUNK_DAYS - 1))
+      // 最初の10日の控え（裏での先読み）があれば即表示し、裏で取り直す（resetToLatest と同じ形）
+      const cached = peekTimelineChunk(from, to, staffId)
+      if (cached !== undefined) {
+        winRef.current = { from, to }
+        commitDays(placeOutings(assembleDays(from, to, cached)))
+        setLoading(false)
+      }
+      void loadWindow(from, to, cached !== undefined)
     }
-  }, [staffId, loadWindow, windowTo])
+  }, [staffId, loadWindow, windowTo, commitDays])
 
   // Realtime: 表示ウィンドウ内の日だけ取り直す（連続通知はまとめる）。自分の書き込み・窓の外の変更は取り直さず、
   // 日が分かる変更はその日を含むチャンクだけを取り直す（F67）。行の分からない通知（RESYNC 等）は窓全体（F14）

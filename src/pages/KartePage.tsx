@@ -37,10 +37,8 @@ import {
   DbError,
   diffHistoryRow,
   fetchAllStaff,
-  fetchKarte,
   fetchMyRole,
   fetchRecordHistory,
-  fetchResidents,
   fetchResidentTargets,
   fetchUsualTempDetails,
   loadVitalThresholds,
@@ -48,6 +46,9 @@ import {
   subscribeMyRole,
 } from '../lib/db'
 import type { MyRole, RecordHistoryEntry } from '../lib/db'
+// 名簿とカルテ本体は読み込みの控え（裏での先読み・2026-10-17）を通す。一覧で方の行に指が触れた時にその方のカルテを
+// 先読みし、開いた方のカルテは控えに残す（次に開いた時は控えを先に出し、裏で取り直す）
+import { fetchKarte, fetchResidents, peekKarte, peekResidents, prefetchKarte } from '../lib/cachedReads'
 import {
   clampLines,
   fmtChangedAt,
@@ -400,8 +401,11 @@ interface ResidentsState {
 }
 
 function useResidents(provided?: Resident[]): ResidentsState {
-  const [residents, setResidents] = useState<Resident[]>(provided ?? [])
-  const [loading, setLoading] = useState(!provided)
+  // 名簿の控え（裏での先読み）があれば最初の描画から出す（下で取り直す）
+  const [residents, setResidents] = useState<Resident[]>(
+    () => provided ?? asArray<Resident>(peekResidents()).filter((r) => r != null && typeof r.id === 'number'),
+  )
+  const [loading, setLoading] = useState(() => !provided && peekResidents() === undefined)
   const [error, setError] = useState<string | null>(null)
   const [tick, setTick] = useState(0)
   const aliveRef = useRef(true)
@@ -421,7 +425,8 @@ function useResidents(provided?: Resident[]): ResidentsState {
       return
     }
     let cancelled = false
-    setLoading(true)
+    // 控えで出せている時は「読み込み中」に戻さない（一覧は今のまま、裏で取り直す）
+    setLoading(peekResidents() === undefined)
     setError(null)
     fetchResidents()
       .then((rows) => {
@@ -451,6 +456,15 @@ function useResidents(provided?: Resident[]): ResidentsState {
 // 利用者一覧（/karte）
 // ══════════════════════════════════════════════════════════════
 
+/** マウスが行に乗り続けたら先読みするまでの時間（ms） */
+const KARTE_HOVER_WARM_MS = 200
+
+/** その方のカルテ（いま選んでいる期間）を裏で先読みする（同じ方を続けて触っても1回・失敗は黙る） */
+function warmKarte(residentId: number): void {
+  const toIso = todayIso()
+  prefetchKarte(residentId, rangeFromIso(readRange(), toIso), toIso)
+}
+
 interface ResidentListProps {
   state: ResidentsState
 }
@@ -459,6 +473,23 @@ function ResidentList({ state }: ResidentListProps) {
   const { residents, loading, error, reload } = state
   const [q, setQ] = useState('')
   const fieldId = useId()
+  // マウスが行に乗り続けた時だけ先読みする（一覧の上を通り過ぎただけで全員分を取りに行かない）
+  const hoverRef = useRef<number | null>(null)
+  const hoverCancel = useCallback(() => {
+    if (hoverRef.current !== null) window.clearTimeout(hoverRef.current)
+    hoverRef.current = null
+  }, [])
+  const hoverStart = useCallback(
+    (residentId: number) => {
+      hoverCancel()
+      hoverRef.current = window.setTimeout(() => {
+        hoverRef.current = null
+        warmKarte(residentId)
+      }, KARTE_HOVER_WARM_MS)
+    },
+    [hoverCancel],
+  )
+  useEffect(() => hoverCancel, [hoverCancel])
 
   // 居室昇順（fetchResidents の並びを尊重しつつ、欠損は末尾に寄せる）
   const ordered = useMemo(() => {
@@ -531,6 +562,11 @@ function ResidentList({ state }: ResidentListProps) {
                 <li key={r.id}>
                   <Link
                     to={`/karte/${r.id}`}
+                    // 行に指が触れた（押し始め・フォーカス・マウスが乗り続けた）時に、その方のカルテを裏で先読みする
+                    onPointerDown={() => warmKarte(r.id)}
+                    onFocus={() => warmKarte(r.id)}
+                    onMouseEnter={() => hoverStart(r.id)}
+                    onMouseLeave={hoverCancel}
                     className="flex min-h-tap w-full items-center gap-gap rounded border border-border bg-surface px-3 py-2 text-base text-ink"
                   >
                     <span className="tabular w-14 shrink-0 text-sm text-ink3">{r.room ?? '—'}</span>
@@ -3008,28 +3044,42 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
   // カルテ本体（resident_id＋期間指定の取得。全件ロードの経路を作らない）
   useEffect(() => {
     let cancelled = false
+    /** 取り直した結果を描いた（控えで先に描くのは、取り直しが返る前だけ） */
+    let freshShown = false
     setLoading(true)
     setError(null)
+    const toData = (res: Awaited<ReturnType<typeof fetchKarte>> | undefined): KarteData => ({
+      vitals: ownedBy<Vital>(res?.vitals, residentId),
+      meals: ownedBy<Meal>(res?.meals, residentId),
+      fluids: ownedBy<FluidIntake>(res?.fluids, residentId),
+      // 本人分の申し送りだけを出す（「スタッフへ（全体）」は resident_id が null）
+      notes: asArray<Note>(res?.notes).filter((n) => n != null && n.resident_id === residentId),
+      outings: ownedBy<Outing>(res?.outings, residentId),
+      baths: ownedBy<BathRecord>(res?.baths, residentId),
+      meds: ownedBy<MedAdmin>(res?.meds, residentId),
+      // 本人分だけ（対象者なしのヒヤリハットは resident_id が null＝カルテには出ない）
+      incidents: asArray<Incident>(res?.incidents).filter((i) => i != null && i.resident_id === residentId),
+    })
+    // その方のカルテの控え（行に触れた時の先読み・前に開いた時の結果）があれば、基準値を当ててから先に描く
+    const cached = peekKarte(residentId, fromIso, toIso)
+    if (cached !== undefined) {
+      void loadVitalThresholds().then(() => {
+        if (cancelled || freshShown || !aliveRef.current) return
+        setData(toData(cached))
+        setLoading(false)
+      })
+    }
     // 基準値（app_settings の上書き・A8）も一緒に待ってから描く（loadVitalThresholds は失敗しても既定値で返る）
     Promise.all([fetchKarte(residentId, fromIso, toIso), loadVitalThresholds()])
       .then(([res]) => {
         if (cancelled || !aliveRef.current) return
-        setData({
-          vitals: ownedBy<Vital>(res?.vitals, residentId),
-          meals: ownedBy<Meal>(res?.meals, residentId),
-          fluids: ownedBy<FluidIntake>(res?.fluids, residentId),
-          // 本人分の申し送りだけを出す（「スタッフへ（全体）」は resident_id が null）
-          notes: asArray<Note>(res?.notes).filter((n) => n != null && n.resident_id === residentId),
-          outings: ownedBy<Outing>(res?.outings, residentId),
-          baths: ownedBy<BathRecord>(res?.baths, residentId),
-          meds: ownedBy<MedAdmin>(res?.meds, residentId),
-          // 本人分だけ（対象者なしのヒヤリハットは resident_id が null＝カルテには出ない）
-          incidents: asArray<Incident>(res?.incidents).filter((i) => i != null && i.resident_id === residentId),
-        })
+        freshShown = true
+        setData(toData(res))
         setError(null)
       })
       .catch(() => {
         if (cancelled || !aliveRef.current) return
+        freshShown = true
         // 取得できなかった場合は前の表示を残さず空にする（別期間の値を混ぜて誤読させない）
         setData(EMPTY_KARTE)
         setError(ERR_KARTE)

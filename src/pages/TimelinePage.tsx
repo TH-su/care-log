@@ -24,12 +24,9 @@ import { useTimeline } from '../hooks/useTimeline'
 import {
   DbError,
   deleteNote,
-  fetchAllResidents,
-  fetchAllStaff,
   fetchNoteReaders,
   isNoteRpcMissing,
   isQueuePersisted,
-  fetchResidents,
   getNativeInputEnabled,
   markRead,
   noteDeleted,
@@ -39,6 +36,15 @@ import {
   setOutingEnd,
 } from '../lib/db'
 import type { CellSaveResult, NoteMeta, PendingNoteRow, Queued } from '../lib/db'
+// 名簿は読み込みの控え（裏での先読み・2026-10-17）を通す。控えがあれば最初の描画から名前を引ける（取り直しは毎回する）
+import {
+  fetchAllResidents,
+  fetchAllStaff,
+  fetchResidents,
+  peekAllResidents,
+  peekAllStaff,
+  peekResidents,
+} from '../lib/cachedReads'
 import { NoteConflictResolver } from '../components/ConflictResolver'
 import type { NoteConflictTarget } from '../components/ConflictResolver'
 import { NoteHistoryDialog } from '../components/NoteHistoryDialog'
@@ -289,7 +295,7 @@ export function TimelinePage({
     useTimeline(actorId)
 
   // 利用者マスタ（氏名・居室の表示用。バイタル・食事の全員表の行は在籍者だけ）
-  const [loadedResidents, setLoadedResidents] = useState<Resident[] | null>(null)
+  const [loadedResidents, setLoadedResidents] = useState<Resident[] | null>(() => peekResidents() ?? null)
   const [residentsError, setResidentsError] = useState(false)
   const [residentsReload, setResidentsReload] = useState(0)
 
@@ -314,7 +320,7 @@ export function TimelinePage({
 
   // 名前の引き当てに使う利用者（退居者も含む全員・F48・2026-10-10）。退居された方の過去の申し送り・バイタル等の対象が
   // 「利用者ID n」になっていた。全員表の行（residents）は在籍者のまま。読めなければ在籍者だけで引く（今までどおり）
-  const [allResidents, setAllResidents] = useState<Resident[] | null>(null)
+  const [allResidents, setAllResidents] = useState<Resident[] | null>(() => peekAllResidents() ?? null)
   useEffect(() => {
     let alive = true
     fetchAllResidents()
@@ -339,7 +345,7 @@ export function TimelinePage({
   // 職員マスタ（記入者名の表示用）。退職者も含む全員から引く（F48: App から渡る名簿は在籍者だけで、退職者が書いた
   // 過去の申し送りの記入者が「ID n」になっていた）。渡された名簿は読めるまでの間と、読めなかった時の控えにする。
   // 取れなくても「記入者ID n」に落として画面は成立させる
-  const [loadedStaff, setLoadedStaff] = useState<Staff[] | null>(null)
+  const [loadedStaff, setLoadedStaff] = useState<Staff[] | null>(() => peekAllStaff() ?? null)
   useEffect(() => {
     let alive = true
     fetchAllStaff()

@@ -78,13 +78,8 @@ import {
 import {
   DbError,
   discardPendingRow,
-  fetchAllResidents,
-  fetchAllStaff,
   fetchDailyReport,
-  fetchDailyReports,
   fetchLatestVital,
-  fetchResidents,
-  fetchStaff,
   FORBIDDEN_REASON,
   getAppSetting,
   notifyMastersChanged,
@@ -121,6 +116,19 @@ import {
   NOTE_LOCKED_MESSAGE,
   subscribeMyRole,
 } from '../lib/db'
+// 名簿と10日まとめ取りは読み込みの控え（裏での先読み・2026-10-17）を通す（同じ署名・毎回取りに行き、結果を控える）。
+// 区切りを開く時は、変更通知で古くなっていない控えの日をこの画面の取り置きへ移して使う（取り置きの世代・捨てる契機は
+// 今までどおり。この画面が日を捨てる時は控えにも古いの印を付ける＝区切りを戻った時に編集前の内容を見せない）
+import {
+  fetchAllResidents,
+  fetchAllStaff,
+  fetchDailyReports,
+  fetchResidents,
+  fetchStaff,
+  markDailyStale,
+  peekDailyReport,
+} from '../lib/cachedReads'
+import { sameValue } from '../lib/dataCache'
 import type {
   CellEditInput,
   DailyReport,
@@ -2404,16 +2412,18 @@ export function DailySheetPage({
     (): string[] => [...new Set([...cacheRef.current.keys(), ...loadingDaysRef.current.keys()])],
     [],
   )
-  /** 1日ぶんの取り置きを捨てる（取りには行かない＝次に開いた時に取り直す） */
+  /** 1日ぶんの取り置きを捨てる（取りには行かない＝次に開いた時に取り直す）。読み込みの控えのその日にも古いの印を付ける */
   const dropCachedDay = useCallback((d: string) => {
     cacheRef.current.delete(d)
     cacheGenDayRef.current.set(d, (cacheGenDayRef.current.get(d) ?? 0) + 1)
+    markDailyStale(d)
   }, [])
   /** 取り置きを全部捨てる（走っているまとめ取りも使い回さない＝〔最新に更新〕を押した直後の古い応答を入れない） */
   const dropAllCached = useCallback(() => {
     cacheRef.current.clear()
     inFlightRef.current.clear()
     cacheGenAllRef.current += 1
+    markDailyStale(null)
   }, [])
 
   // 記録者が変わると既読の見え方（my_read）が変わるので、取り置きは捨てる。
@@ -2434,7 +2444,42 @@ export function DailySheetPage({
    */
   const loadBlock = useCallback(
     async (days: readonly string[]): Promise<void> => {
-      const want = days.filter((d) => !cacheRef.current.has(d))
+      // 読み込みの控え（裏での先読み）に、取り置きに無い日が全部そろっていて変更通知で古くなっていなければ、取り置きへ移して
+      // 先に出す（取りに行くのを待たない）。そろっていない時は今までどおり取りに行く
+      const missing = days.filter((d) => !cacheRef.current.has(d))
+      const hits = new Map<string, DailyReport>()
+      for (const d of missing) {
+        const hit = peekDailyReport(actorId, d)
+        if (hit !== undefined) hits.set(d, hit)
+      }
+      if (missing.length > 0 && hits.size === missing.length) {
+        const gens = new Map(missing.map((d) => [d, cacheGen(d)]))
+        for (const [d, r] of hits) cacheRef.current.set(d, r)
+        // 持ち過ぎない（古い順に捨てる。まとめ取りの後と同じ上限）
+        while (cacheRef.current.size > MAX_CACHE_DAYS) {
+          const oldest = cacheRef.current.keys().next().value
+          if (oldest === undefined) break
+          cacheRef.current.delete(oldest)
+        }
+        // 裏で取り直して、先に出した控えと中身が違う日があれば「他の端末で記録が更新されました」の帯で知らせる
+        // （表は差し替えない＝この画面の約束どおり。取り直した結果は取り置きに入れない＝世代〔F15〕の外に置く）。
+        // その間にこの画面が捨てた・書いた日は比べない（この画面の今までの流れが受け持つ）
+        void fetchDailyReports(missing, actorId)
+          .then((fresh) => {
+            if (!aliveRef.current) return
+            for (const [d, shown] of hits) {
+              if (cacheGen(d) !== gens.get(d)) continue
+              const f = fresh.get(d)
+              if (f !== undefined && !sameValue(f, shown)) {
+                setStale(true)
+                return
+              }
+            }
+          })
+          .catch(() => undefined) // 取り直せなかった（圏外など）。電波が戻った時の帯は今までどおり出る
+        return
+      }
+      const want = missing
       if (want.length === 0) return
       const key = want.join(',')
       const running = inFlightRef.current.get(key)

@@ -82,48 +82,152 @@ type Deps = {
 }
 
 // スプシ模倣の一覧（sheet-contracts.md §2）
-const DailySheetPage = lazy(() =>
-  import('./pages/DailySheetPage').then((m) => ({ default: m.DailySheetPage })),
-)
-const VitalsSheetPage = lazy(() =>
-  import('./pages/VitalsSheetPage').then((m) => ({ default: m.VitalsSheetPage })),
-)
-const MealsSheetPage = lazy(() =>
-  import('./pages/MealsSheetPage').then((m) => ({ default: m.MealsSheetPage })),
-)
-const MorePage = lazy(() => import('./pages/MorePage').then((m) => ({ default: m.MorePage })))
+const loadDailySheetPage = () => import('./pages/DailySheetPage')
+const DailySheetPage = lazy(() => loadDailySheetPage().then((m) => ({ default: m.DailySheetPage })))
+const loadVitalsSheetPage = () => import('./pages/VitalsSheetPage')
+const VitalsSheetPage = lazy(() => loadVitalsSheetPage().then((m) => ({ default: m.VitalsSheetPage })))
+const loadMealsSheetPage = () => import('./pages/MealsSheetPage')
+const MealsSheetPage = lazy(() => loadMealsSheetPage().then((m) => ({ default: m.MealsSheetPage })))
+const loadMorePage = () => import('./pages/MorePage')
+const MorePage = lazy(() => loadMorePage().then((m) => ({ default: m.MorePage })))
 
 // 既存画面（1つも削除しない。TimelinePage は中身を変えずパスだけ /timeline へ移す）
-const TimelinePage = lazy(() => import('./pages/TimelinePage').then((m) => ({ default: m.TimelinePage })))
-const RecordHubPage = lazy(() => import('./pages/RecordHubPage').then((m) => ({ default: m.RecordHubPage })))
-const VitalsGridPage = lazy(() => import('./pages/VitalsGridPage').then((m) => ({ default: m.VitalsGridPage })))
-const MealsGridPage = lazy(() => import('./pages/MealsGridPage').then((m) => ({ default: m.MealsGridPage })))
-const NoteFormPage = lazy(() => import('./pages/NoteFormPage').then((m) => ({ default: m.NoteFormPage })))
-const OutingFormPage = lazy(() => import('./pages/OutingFormPage').then((m) => ({ default: m.OutingFormPage })))
+const loadTimelinePage = () => import('./pages/TimelinePage')
+const TimelinePage = lazy(() => loadTimelinePage().then((m) => ({ default: m.TimelinePage })))
+const loadRecordHubPage = () => import('./pages/RecordHubPage')
+const RecordHubPage = lazy(() => loadRecordHubPage().then((m) => ({ default: m.RecordHubPage })))
+const loadVitalsGridPage = () => import('./pages/VitalsGridPage')
+const VitalsGridPage = lazy(() => loadVitalsGridPage().then((m) => ({ default: m.VitalsGridPage })))
+const loadMealsGridPage = () => import('./pages/MealsGridPage')
+const MealsGridPage = lazy(() => loadMealsGridPage().then((m) => ({ default: m.MealsGridPage })))
+const loadNoteFormPage = () => import('./pages/NoteFormPage')
+const NoteFormPage = lazy(() => loadNoteFormPage().then((m) => ({ default: m.NoteFormPage })))
+const loadOutingFormPage = () => import('./pages/OutingFormPage')
+const OutingFormPage = lazy(() => loadOutingFormPage().then((m) => ({ default: m.OutingFormPage })))
 // デイの入浴記録（2026-09-26 追加）。記録は記録ハブから、月次表は「その他」から入る
-const BathRecordPage = lazy(() => import('./pages/BathRecordPage').then((m) => ({ default: m.BathRecordPage })))
-const BathMonthPage = lazy(() => import('./pages/BathMonthPage').then((m) => ({ default: m.BathMonthPage })))
+const loadBathRecordPage = () => import('./pages/BathRecordPage')
+const BathRecordPage = lazy(() => loadBathRecordPage().then((m) => ({ default: m.BathRecordPage })))
+const loadBathMonthPage = () => import('./pages/BathMonthPage')
+const BathMonthPage = lazy(() => loadBathMonthPage().then((m) => ({ default: m.BathMonthPage })))
 // 与薬チェック（2026-09-26 追加）。記録は記録ハブから、服薬の時間帯・月次表は「その他」から入る
-const MedRecordPage = lazy(() => import('./pages/MedRecordPage').then((m) => ({ default: m.MedRecordPage })))
-const MedSlotsPage = lazy(() => import('./pages/MedSlotsPage').then((m) => ({ default: m.MedSlotsPage })))
-const MedMonthPage = lazy(() => import('./pages/MedMonthPage').then((m) => ({ default: m.MedMonthPage })))
+const loadMedRecordPage = () => import('./pages/MedRecordPage')
+const MedRecordPage = lazy(() => loadMedRecordPage().then((m) => ({ default: m.MedRecordPage })))
+const loadMedSlotsPage = () => import('./pages/MedSlotsPage')
+const MedSlotsPage = lazy(() => loadMedSlotsPage().then((m) => ({ default: m.MedSlotsPage })))
+const loadMedMonthPage = () => import('./pages/MedMonthPage')
+const MedMonthPage = lazy(() => loadMedMonthPage().then((m) => ({ default: m.MedMonthPage })))
 // 事故・ヒヤリハット（2026-09-26 追加）。一覧は「その他」と記録ハブから、月次集計は「その他」から入る
-const IncidentListPage = lazy(() => import('./pages/IncidentListPage').then((m) => ({ default: m.IncidentListPage })))
-const IncidentFormPage = lazy(() => import('./pages/IncidentFormPage').then((m) => ({ default: m.IncidentFormPage })))
-const IncidentSummaryPage = lazy(() =>
-  import('./pages/IncidentSummaryPage').then((m) => ({ default: m.IncidentSummaryPage })),
-)
-const KartePage = lazy(() => import('./pages/KartePage').then((m) => ({ default: m.KartePage })))
+const loadIncidentListPage = () => import('./pages/IncidentListPage')
+const IncidentListPage = lazy(() => loadIncidentListPage().then((m) => ({ default: m.IncidentListPage })))
+const loadIncidentFormPage = () => import('./pages/IncidentFormPage')
+const IncidentFormPage = lazy(() => loadIncidentFormPage().then((m) => ({ default: m.IncidentFormPage })))
+const loadIncidentSummaryPage = () => import('./pages/IncidentSummaryPage')
+const IncidentSummaryPage = lazy(() => loadIncidentSummaryPage().then((m) => ({ default: m.IncidentSummaryPage })))
+const loadKartePage = () => import('./pages/KartePage')
+const KartePage = lazy(() => loadKartePage().then((m) => ({ default: m.KartePage })))
 // 今日の要注意（A5・2026-10-16 追加）。下部タブ「その他」と左レールから入る
-const AlertsPage = lazy(() => import('./pages/AlertsPage').then((m) => ({ default: m.AlertsPage })))
-const SearchPage = lazy(() => import('./pages/SearchPage').then((m) => ({ default: m.SearchPage })))
-const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })))
+const loadAlertsPage = () => import('./pages/AlertsPage')
+const AlertsPage = lazy(() => loadAlertsPage().then((m) => ({ default: m.AlertsPage })))
+const loadSearchPage = () => import('./pages/SearchPage')
+const SearchPage = lazy(() => loadSearchPage().then((m) => ({ default: m.SearchPage })))
+const loadSettingsPage = () => import('./pages/SettingsPage')
+const SettingsPage = lazy(() => loadSettingsPage().then((m) => ({ default: m.SettingsPage })))
 const LoginPage = lazy(() => import('./pages/AuthGates').then((m) => ({ default: m.LoginPage })))
 const NotConfiguredPage = lazy(() =>
   import('./pages/AuthGates').then((m) => ({ default: m.NotConfiguredPage })),
 )
 // 名簿の自動同期（F50・2026-10-10）。部品が db を読むので、他の画面と同じく遅延読込にする
 const MasterAutoSync = lazy(() => import('./components/MasterSync').then((m) => ({ default: m.MasterAutoSync })))
+
+// ── 裏での先読み（2026-10-17 本人依頼「待ち時間なしで画面を開く」）──────────────────────────
+// 最初の画面を描いて落ち着いてから、残りの画面の部品（React.lazy と同じ import 関数＝モジュールの控えを共有する）と、
+// 各画面のデータ（src/lib/cachedReads.ts の startPrefetch・メモリの控え）を低い優先度で読む。
+// 部品の先読みは1つずつ・失敗しても黙って次へ進む（失敗は React.lazy 側の失敗として残さない＝画面を開いた時に取り直す）。
+// 新しい版が公開されている（version.json が違う）・古い版・画面が隠れている・オフライン・データ節約の間は読まない
+/** 画面の部品を先読みする順（よく開く画面から） */
+const PAGE_PRELOADS: readonly (() => Promise<unknown>)[] = [
+  loadDailySheetPage,
+  loadVitalsSheetPage,
+  loadMealsSheetPage,
+  loadKartePage,
+  loadAlertsPage,
+  loadTimelinePage,
+  loadMorePage,
+  loadRecordHubPage,
+  loadVitalsGridPage,
+  loadMealsGridPage,
+  loadNoteFormPage,
+  loadMedRecordPage,
+  loadBathRecordPage,
+  loadIncidentListPage,
+  loadSearchPage,
+  loadSettingsPage,
+  loadOutingFormPage,
+  loadMedSlotsPage,
+  loadMedMonthPage,
+  loadBathMonthPage,
+  loadIncidentFormPage,
+  loadIncidentSummaryPage,
+]
+/** 最初の画面を描いてから先読みを始めるまで（ms）。起動直後の読み込みと重ねない */
+const PREFETCH_START_MS = 1_500
+/** 先読みの部品を取っている数（その間の部品の取得失敗の合図は、画面の失敗の見分け〔F28②〕に数えない） */
+let pagePreloading = 0
+// 先読みの部品の失敗の合図を、下の notePreloadError（F28②）より先に受けて止める（画面の失敗として残さない）。
+// この受け口は notePreloadError の受け口より先に登録する（同じ window の後の受け口だけを止められるため）
+if (typeof window !== 'undefined')
+  window.addEventListener('vite:preloadError', (e) => {
+    if (pagePreloading > 0) e.stopImmediatePropagation()
+  })
+
+/** 端末が先読みしてよい状態か（画面が見えている・オンライン・データ節約でない） */
+function preloadAllowed(): boolean {
+  if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return false
+  if (typeof navigator === 'undefined') return true
+  const nav = navigator as Navigator & { connection?: { saveData?: boolean } }
+  return nav.onLine !== false && nav.connection?.saveData !== true
+}
+
+/** delay の後、端末が手すきになったら fn を呼ぶ。戻り値で取り消す */
+function whenIdle(fn: () => void, delay: number): () => void {
+  let idle: number | null = null
+  const w = window as Window & {
+    requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number
+    cancelIdleCallback?: (id: number) => void
+  }
+  const t = window.setTimeout(() => {
+    if (typeof w.requestIdleCallback === 'function') idle = w.requestIdleCallback(fn, { timeout: 2_000 })
+    else fn()
+  }, delay)
+  return () => {
+    window.clearTimeout(t)
+    if (idle !== null) w.cancelIdleCallback?.(idle)
+  }
+}
+
+/** 画面の部品を1つずつ先読みする。stopped() が true になったら止める。見えない・オフラインの間は待つ */
+async function preloadPages(stopped: () => boolean): Promise<void> {
+  if (!isDevBuild(CLIENT_BUILD)) {
+    // 新しい版が公開されていれば、古い名前の部品を取りに行かない
+    const remote = await fetchPublishedBuild()
+    if (remote === null || isOtherBuildPublished(CLIENT_BUILD, remote)) return
+  }
+  for (const load of PAGE_PRELOADS) {
+    while (!preloadAllowed()) {
+      if (stopped()) return
+      await new Promise((r) => window.setTimeout(r, 5_000))
+    }
+    if (stopped()) return
+    pagePreloading += 1
+    try {
+      await load()
+    } catch {
+      continue // 取れなかった（通信・版の入れ替え）。黙って次へ（画面を開いた時に画面が自分で取る）
+    } finally {
+      pagePreloading -= 1
+    }
+  }
+}
 
 // ── UI状態の復元（dev-principles 原則11: 既知値のホワイトリスト照合）──
 // 既定（不正値・未知値のフォールバック先）は日報シート。
@@ -1021,6 +1125,75 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
   // だけ差し替える。失敗した時は今の名簿を残す（全画面のエラー・読み込み中には戻さない＝入力中の日報を消さない）。
   // 記録者の既定は、名簿から外れても黙って外さない（下の案内で選び直しを促す）
   useEffect(() => (staff === null ? undefined : db.watchStaffRoster(staff, setStaff)), [db, staff])
+
+  // ── 裏での先読み（2026-10-17）。名簿を読めた（＝ログインして最初の画面を描ける）後に始める ──
+  const staffReady = staff !== null
+  /** 新しい版・古い版の帯が出ている間は部品を先読みしない（描画のたびに最新を見る） */
+  const buildBlockedRef = useRef(false)
+  buildBlockedRef.current = newBuild || outdated
+  useEffect(() => {
+    if (!staffReady) return undefined
+    let cancelled = false
+    const cancelIdle = whenIdle(() => {
+      void preloadPages(() => cancelled || buildBlockedRef.current)
+    }, PREFETCH_START_MS)
+    return () => {
+      cancelled = true
+      cancelIdle()
+    }
+  }, [staffReady])
+  /** 読み込みの控えの部品（読めたら持つ。ログアウトで捨てる時に使う） */
+  const cacheModRef = useRef<typeof import('./lib/cachedReads') | null>(null)
+  /** 先読みを始めた時の記録者（変わったら控えを全部捨てて始め直す） */
+  const prefetchActorRef = useRef<number | null | undefined>(undefined)
+  useEffect(() => {
+    if (!staffReady) return undefined
+    const prev = prefetchActorRef.current
+    prefetchActorRef.current = actorId
+    // 記録者が変わった＝控えを全部捨てる（日報・タイムラインの既読の見え方が変わる）
+    if (prev !== undefined && prev !== actorId) cacheModRef.current?.resetDataCache()
+    let cancelled = false
+    let stop: (() => void) | null = null
+    const cancelIdle = whenIdle(
+      () => {
+        void import('./lib/cachedReads')
+          .then((m) => {
+            if (cancelled) return
+            cacheModRef.current = m
+            const ctl = m.startPrefetch({ actorId })
+            stop = () => ctl.stop()
+          })
+          .catch(() => undefined) // 部品を読めなくても画面は今までどおり自分で取る
+      },
+      prev === undefined ? PREFETCH_START_MS : 0,
+    )
+    return () => {
+      cancelled = true
+      cancelIdle()
+      stop?.()
+    }
+  }, [staffReady, actorId])
+  // 控えの部品は先に読んでおく（ログアウト・記録者の変更の時に、先読みを始める前でも控えを捨てられるように）。
+  // 控えを新しく保つ変更通知の受け口（App 全体で1本ずつ）もすぐ張る（最初の画面が控えに入れた分から追う）。
+  // ログアウト（この部品が外れる）で受け口を外し、控えを全部捨てる（次にログインした人へ前の人の控えを見せない）
+  useEffect(() => {
+    let alive = true
+    let offSync: (() => void) | null = null
+    void import('./lib/cachedReads')
+      .then((m) => {
+        if (!alive) return
+        cacheModRef.current = m
+        offSync = m.startCacheSync()
+      })
+      .catch(() => undefined)
+    return () => {
+      alive = false
+      offSync?.()
+      const m = cacheModRef.current
+      if (m !== null) m.resetDataCache()
+      else void import('./lib/cachedReads').then((mm) => mm.resetDataCache()).catch(() => undefined)
+    }
+  }, [])
 
   // 更新・削除の「最後にこの行を書き換えた職員」（edited_by）として、名簿と照合済みの操作者を渡す。
   // 新規記録の記入者（recorded_by）と同じ操作者。未選択の間は null＝送らない

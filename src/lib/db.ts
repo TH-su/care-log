@@ -3016,7 +3016,36 @@ function mergeBaseline(a: unknown, b: unknown): number[] {
   return out
 }
 
+// ── この端末の書込の知らせ（2026-10-17 裏での先読み） ─────────────────────────────
+// 読み込みの控え（src/lib/dataCache.ts）は、他の端末の変更を Realtime で、この端末の書込をここで受けて「古い」の印を付ける。
+// 書けて版が確定した時（markSelfRow）と、送信待ちに積んだ時（enqueue）に呼ぶ。行は日付の列で当たる控えを選ぶためだけに渡す
+// （受け口は値を持ち出さない）。受け口の例外は飲む（書込の処理を巻き込まない）
+
+const localWriteHooks = new Set<(table: string, row: Record<string, unknown> | null) => void>()
+
+function notifyLocalWrite(table: string, row: unknown): void {
+  if (localWriteHooks.size === 0) return
+  const rec = asRecord(row)
+  for (const fn of [...localWriteHooks]) {
+    try {
+      fn(table, rec)
+    } catch {
+      // 控えの印の失敗で書込を止めない
+    }
+  }
+}
+
+/** この端末の書込（確定・送信待ちに積んだ）を受ける。戻り値の関数で外す */
+export function subscribeLocalWrites(fn: (table: string, row: Record<string, unknown> | null) => void): () => void {
+  localWriteHooks.add(fn)
+  return () => {
+    localWriteHooks.delete(fn)
+  }
+}
+
 async function enqueue(op: PendingOp): Promise<Queued> {
+  // 送信待ちに積んだ書込も「自分の書込」として知らせる（読み込みの控えを古いにする・2026-10-17 先読み）
+  notifyLocalWrite(op.table, op.payload)
   const target = findMergeTarget(op)
   if (target !== null) {
     const prevPayload = target.payload
@@ -3076,6 +3105,13 @@ const SEND_LOCK_WAIT_MS = 10_000
 let flushTail: Promise<void> = Promise.resolve()
 /** まだ動き出していない送信（その間に頼まれた送信は、ここへまとめる） */
 let pendingFlush: { force: boolean; boost: boolean; waitMs: number; run: Promise<void> } | null = null
+/** いま送信待ちを送っている数（裏での先読みは、この間は始めない＝再送を邪魔しない・2026-10-17） */
+let flushRunning = 0
+
+/** いま送信待ちを送っているか（送り始める前の順番待ちも含む）。裏での先読みが止まる条件に使う。止まっている送信待ちは数えない */
+export function isQueueFlushing(): boolean {
+  return flushRunning > 0 || pendingFlush !== null
+}
 
 /**
  * 退避してある書込を送り直す。サーバーに載ったことを観測できた分だけキューから消す。
@@ -3105,7 +3141,12 @@ function scheduleFlush(force: boolean, waitMs: number, boost = false): Promise<v
   slot.run = flushTail
     .then(async () => {
       if (pendingFlush === slot) pendingFlush = null
-      await runFlush(slot.force, slot.waitMs, slot.boost)
+      flushRunning += 1
+      try {
+        await runFlush(slot.force, slot.waitMs, slot.boost)
+      } finally {
+        flushRunning -= 1
+      }
     })
     .catch(() => undefined)
   pendingFlush = slot
@@ -8452,6 +8493,7 @@ function selfRowKey(table: string, row: Record<string, unknown>): string | null 
 function markSelfRow(table: string, row: unknown, rev: number | null, ttlMs?: number): void {
   const rec = asRecord(row)
   if (rec === null) return
+  notifyLocalWrite(table, rec)
   const key = selfRowKey(table, rec)
   if (key === null) return
   const now = Date.now()
@@ -10311,6 +10353,7 @@ export async function saveResidentTargets(
     }
     const row = normalizeResidentTargets(res.data)
     if (row === null) throw new DbError('server', MSG.broken)
+    notifyLocalWrite('resident_targets', row) // 読み込みの控えを古いにする（2026-10-17）
     return row
   }
   const patch = withEditor(values, opts?.editedBy)
@@ -10332,6 +10375,7 @@ export async function saveResidentTargets(
   }
   const row = normalizeResidentTargets(res.data)
   if (row === null) throw new DbError('server', MSG.broken)
+  notifyLocalWrite('resident_targets', row) // 読み込みの控えを古いにする（2026-10-17）
   return row
 }
 

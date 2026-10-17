@@ -42,8 +42,6 @@ import {
   DbError,
   discardPendingRow,
   fetchLatestVital,
-  fetchResidents,
-  fetchVitalsSheet,
   isSelfWrite,
   getNativeInputGate,
   isQueuePersisted,
@@ -55,6 +53,16 @@ import {
   subscribeChanges,
 } from '../lib/db'
 import type { CellSaveResult, ChangeInfo, PendingCellRow, VitalTarget } from '../lib/db'
+// 名簿・一覧・個別の目標は読み込みの控え（裏での先読み・2026-10-17）を通す（同じ署名・毎回取りに行き、結果を控える）。
+// 開いた時は控えを先に描き（読み込み中のまま＝入力はできない）、取り直した結果と入力解禁の旗で描き直す
+import {
+  fetchResidents,
+  fetchResidentTargets,
+  fetchVitalsSheet,
+  peekResidents,
+  peekResidentTargets,
+  peekVitalsSheet,
+} from '../lib/cachedReads'
 import { addDays, fmtDayLabel, normalizeVitalInput, todayIso, toHalfWidth } from '../lib/format'
 import { recordTimeFor } from '../lib/nextMorning'
 import {
@@ -112,7 +120,7 @@ import type { CellTarget } from '../lib/presence'
 import { PresenceSummary, RowBusyMark } from '../components/presence'
 import { RecorderBar } from '../components/RecorderBar'
 // 平熱との差（A1）・SpO2 の個別の下限（A9）・直近7日の細い線（A4）。平熱と目標は1回読んで控える。基準値の上書き（A8）も1回読む
-import { fetchResidentTargets, fetchUsualTemps, loadVitalThresholds } from '../lib/db'
+import { fetchUsualTemps, loadVitalThresholds } from '../lib/db'
 import { judgeTemp, spo2Limits, spo2LevelFor } from '../lib/vitalAlerts'
 import type { ResidentTargets } from '../lib/vitalAlerts'
 import '../styles/sheet.css'
@@ -804,7 +812,7 @@ export function VitalsSheetPage({
   /** 平熱（A1・利用者ID → 平熱。5回未満は null）。表示の右端の日について1回読んで控える。読めない時は空＝A1 を出さない */
   const [usualTemps, setUsualTemps] = useState<Map<number, number | null>>(() => new Map())
   /** 個別の目標（A9 の SpO2 の下限。無い方・読めない時は施設の基準 93%・90%） */
-  const [targets, setTargets] = useState<Map<number, ResidentTargets>>(() => new Map())
+  const [targets, setTargets] = useState<Map<number, ResidentTargets>>(() => peekResidentTargets() ?? new Map())
   /** 基準値（app_settings の上書き）を読み終えた印（読み終えたら描き直して新しい基準で印を出す） */
   const [, setThresholdsVer] = useState(0)
   /** A4 の線のために、表示の初日より前に読んだ定時の値（表示の日数が7日より短い時だけ。表には出さない） */
@@ -885,26 +893,11 @@ export function VitalsSheetPage({
     const background = opts?.background === true
     if (!background) setLoading(true)
     setError(null)
-    try {
-      // 入力解禁フラグは「観測できた値」と「観測できなかった」を区別するため、
-      // 親から既知値をもらっていても必ず自分で取り直す（前提情報は毎回取り直す規範）。
-      // 親（App.tsx）は取得失敗時も false を渡してくるので、prop を観測済みとして扱うと
-      // 通信障害を「スプレッドシートで記録する期間です」と誤って案内してしまう
-      const [rs, gate, vitals] = await Promise.all([
-        propResidents ? Promise.resolve(propResidents) : fetchResidents(),
-        getNativeInputGate(),
-        fetchVitalsSheet(fromIso, anchor),
-      ])
-      if (gen !== genRef.current || !aliveRef.current) return
-      // 取得の途中で自分の保存が入った＝この応答は保存前のサーバー値。
-      // そのまま描くと、保存できた値が旧値に戻り rev も古くなる（次の編集が競合になる）。
-      // 背景の取り直しは捨ててやり直す（利用者が押した読み込み直しは待たせずそのまま反映する）
-      if (background && selfWriteRef.current >= startedAt) {
-        const retry = retryRef.current
-        if (retry) retry()
-        return
-      }
-
+    /**
+     * 名簿と一覧の行から、表の行（定時・再検）と再検の行数を組む（取り直した結果と控えの両方で使う）。
+     * 未送信・競合・応答待ちの入力の控え（recsRef）と送信待ち（pending store）はここで重ねる
+     */
+    const build = (rs: Resident[] | null | undefined, vitals: Vital[] | null | undefined) => {
       const list = (Array.isArray(rs) ? rs : []).filter((r) => r && r.active !== false)
       const sorted = list.slice().sort(cmpResident)
       const rows = Array.isArray(vitals) ? vitals.filter((v) => v != null) : []
@@ -1010,6 +1003,53 @@ export function VitalsSheetPage({
         rowCounts.set(r.id, Math.max(saved > 0 ? saved + 1 : 0, opened))
       }
 
+      return { sorted, next, rowCounts }
+    }
+    // 開いた時・期間を送った時（背景の取り直しでない時）、控え（裏での先読み）がそろっていれば先に描く。
+    // 読み込み中のまま（入力できない）にして、入力解禁の旗と取り直した結果を待つ。
+    // 送信待ち・止まっている行・編集中・応答待ちの行が1つでもある時は先に描かない（送信待ちの重ね・突き合わせ〔止まった行の
+    // 片付けを含む〕は、取り直した結果でだけ行う）
+    const pristine = (): boolean => {
+      try {
+        if (queuePending() !== 0) return false
+      } catch {
+        return false
+      }
+      for (const r of recsRef.current.values()) if (isHeldRec(r) || r.state === 'saving') return false
+      return true
+    }
+    if (!background && pristine()) {
+      const cRs = propResidents ?? peekResidents()
+      const cVitals = peekVitalsSheet(fromIso, anchor)
+      if (cRs !== undefined && cVitals !== undefined) {
+        const c = build(cRs, cVitals)
+        setResidents(c.sorted)
+        commitRecs(c.next)
+        commitRecheckRows(c.rowCounts)
+      }
+    }
+    try {
+      // 入力解禁フラグは「観測できた値」と「観測できなかった」を区別するため、
+      // 親から既知値をもらっていても必ず自分で取り直す（前提情報は毎回取り直す規範）。
+      // 親（App.tsx）は取得失敗時も false を渡してくるので、prop を観測済みとして扱うと
+      // 通信障害を「スプレッドシートで記録する期間です」と誤って案内してしまう
+      const [rs, gate, vitals] = await Promise.all([
+        propResidents ? Promise.resolve(propResidents) : fetchResidents(),
+        getNativeInputGate(),
+        fetchVitalsSheet(fromIso, anchor),
+      ])
+      if (gen !== genRef.current || !aliveRef.current) return
+      // 取得の途中で自分の保存が入った＝この応答は保存前のサーバー値。
+      // そのまま描くと、保存できた値が旧値に戻り rev も古くなる（次の編集が競合になる）。
+      // 背景の取り直しは捨ててやり直す（利用者が押した読み込み直しは待たせずそのまま反映する）
+      if (background && selfWriteRef.current >= startedAt) {
+        const retry = retryRef.current
+        if (retry) retry()
+        return
+      }
+
+      const built = build(rs, vitals)
+      const { sorted, next, rowCounts } = built
       setResidents(sorted)
       setInputEnabled(gate.value === true)
       setGateUnknown(!gate.observed)
@@ -1072,6 +1112,9 @@ export function VitalsSheetPage({
       return
     }
     let alive = true
+    // 前の日の控え（裏での先読み）があれば先に線を引く（下の取り直しで差し替える）
+    const cPrior = peekVitalsSheet(sparkFrom, addDays(fromIso, -1))
+    if (cPrior !== undefined) setSparkPrior(cPrior.filter((v) => v != null && v.kind === 'routine'))
     fetchVitalsSheet(sparkFrom, addDays(fromIso, -1))
       .then((rows) => {
         if (!alive) return

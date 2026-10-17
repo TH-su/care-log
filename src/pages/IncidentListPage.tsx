@@ -16,8 +16,6 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import {
   DbError,
-  fetchAllResidents,
-  fetchIncidents,
   FORBIDDEN_REASON,
   getKindInputGate,
   kindBlockedMessage,
@@ -26,6 +24,8 @@ import {
   queueSubscribe,
   subscribeIncidentChanges,
 } from '../lib/db'
+// 名簿と一覧は読み込みの控え（裏での先読み・2026-10-17）を通す。控えがあれば最初の描画から出し、裏で取り直す
+import { fetchAllResidents, fetchIncidents, peekAllResidents, peekIncidents } from '../lib/cachedReads'
 import { cityReportState, defaultIncidentRange, incidentCounts, typesText } from '../lib/incident'
 import { fmtClock } from '../lib/med'
 import { fmtDayLabel, todayIso } from '../lib/format'
@@ -65,11 +65,15 @@ export function IncidentListPage() {
   const [status, setStatus] = useState<'all' | IncidentStatus>('all')
   const [rangeMsg, setRangeMsg] = useState<string | null>(null)
 
-  const [residents, setResidents] = useState<Resident[] | null>(null)
+  const [residents, setResidents] = useState<Resident[] | null>(() => peekAllResidents() ?? null)
   const [gate, setGate] = useState<{ value: boolean; observed: boolean; forbidden?: true } | null>(null)
   const [baseError, setBaseError] = useState<string | null>(null)
   const [baseTick, setBaseTick] = useState(0)
-  const [list, setList] = useState<Incident[] | null>(null)
+  /** 既定の絞り込み（期間だけ・全区分・全状態）の一覧の控え（裏での先読み）。あれば最初の描画から出す */
+  const [initialCached] = useState(() =>
+    peekIncidents({ fromIso: initial.from, toIso: initial.to, kind: null, status: null }),
+  )
+  const [list, setList] = useState<Incident[] | null>(() => initialCached ?? null)
   const [listError, setListError] = useState<string | null>(null)
   const [tick, setTick] = useState(0)
   const [queueTick, setQueueTick] = useState(0)
@@ -96,7 +100,7 @@ export function IncidentListPage() {
   // 取り直し（tick）では、表示中の一覧を残したまま差し替える（F14・2026-10-10。復帰・再接続のたびに読み込み中へ戻ると、
   // 一覧がちらつき、スクロールの位置も失う）
   const queryKey = `${from}|${to}|${kind}|${status}`
-  const shownQueryRef = useRef<string | null>(null)
+  const shownQueryRef = useRef<string | null>(initialCached !== undefined ? queryKey : null)
   useEffect(() => {
     let alive = true
     setListError(null)

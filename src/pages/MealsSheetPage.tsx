@@ -36,9 +36,7 @@ import type {
 import {
   FORBIDDEN_REASON,
   DbError,
-  fetchMealsSheet,
   isSelfWrite,
-  fetchResidents,
   getNativeInputGate,
   hasUnpersistedQueue,
   insertFluid,
@@ -48,6 +46,16 @@ import {
   subscribeChanges,
 } from '../lib/db'
 import type { ChangeInfo } from '../lib/db'
+// 名簿・一覧・個別の目標は読み込みの控え（裏での先読み・2026-10-17）を通す（同じ署名・毎回取りに行き、結果を控える）。
+// 開いた時、送信待ち・編集中の行が無ければ控えを先に描き（読み込み中のまま＝入力はできない）、取り直した結果で描き直す
+import {
+  fetchMealsSheet,
+  fetchResidents,
+  fetchResidentTargets,
+  peekMealsSheet,
+  peekResidents,
+  peekResidentTargets,
+} from '../lib/cachedReads'
 import { getActorId, touchActivity } from '../lib/actor'
 import { addDays, fmtDayLabel, todayIso, toHalfWidth } from '../lib/format'
 import { fluidIsNextMorning, fmtRecordTime, recordTimeFor, timeSortKey } from '../lib/nextMorning'
@@ -66,7 +74,7 @@ import { readSheetPref, SheetFrame, writeSheetPref, ZoomBar } from '../component
 import { discardPendingRow, fetchLatestMeal, pendingRow, saveMealEdits } from '../lib/db'
 import type { PendingCellRow } from '../lib/db'
 // 摂取低下（A2）・濃淡（A6）・水分の目標（A3）。基準値は app_settings の上書きを起動中に1回読む（A8）
-import { fetchResidentTargets, loadVitalThresholds } from '../lib/db'
+import { loadVitalThresholds, queuePending } from '../lib/db'
 import { fluidProgress, mealLowLabel, mealLowStreaks, mealShade } from '../lib/vitalAlerts'
 import type { ResidentTargets } from '../lib/vitalAlerts'
 import { focusOf, useCellPresence } from '../hooks/useCellPresence'
@@ -807,7 +815,7 @@ export function MealsSheetPage({
   /** 摂取低下を数えた範囲の初日（前の日を読めた時は表示の初日の7日前・読めない間は表示の初日） */
   const [lowReadFrom, setLowReadFrom] = useState('')
   /** 方ごとの個別の目標（A3 の水分。無い方・読めない時は施設の既定 1,200ml） */
-  const [targets, setTargets] = useState<Map<number, ResidentTargets>>(() => new Map())
+  const [targets, setTargets] = useState<Map<number, ResidentTargets>>(() => peekResidentTargets() ?? new Map())
   /** 基準値（app_settings の上書き）を読み終えた印。判定の控え（useMemo）をこの時だけ作り直す */
   const [thresholdsVer, setThresholdsVer] = useState(0)
 
@@ -1159,6 +1167,35 @@ export function MealsSheetPage({
     const background = opts?.background === true
     if (!background) setLoading(true)
     setError(null)
+    // 開いた時・期間を送った時（背景の取り直しでない時）、送信待ち・編集中・競合の行が1つも無ければ、控え（裏での先読み）を
+    // 先に描く（読み込み中のまま＝入力できない）。送信待ちの重ね・編集の突き合わせは、下の取り直しの結果でだけ行う
+    if (
+      !background &&
+      queuePending() === 0 &&
+      Object.keys(phasesRef.current).length === 0 &&
+      Object.keys(editsRef.current).length === 0 &&
+      Object.keys(queuedRef.current).length === 0
+    ) {
+      const cRs = residentsPropRef.current ?? peekResidents()
+      const cSheet = peekMealsSheet(fromIso, toIso)
+      if (cRs !== undefined && cSheet !== undefined) {
+        setResidents(asArray<Resident>(cRs).filter((r) => r != null && r.active !== false))
+        const cMeals: Record<string, Meal> = {}
+        for (const m of asArray<Meal>(cSheet.meals)) {
+          if (!m || typeof m.meal_on !== 'string') continue
+          if (!SLOTS.includes(m.meal_slot)) continue
+          const k = mealKey(m.resident_id, m.meal_on, m.meal_slot)
+          const shown = mealsRef.current[k]
+          cMeals[k] = shown && isOlderRow(shown, m) ? shown : m
+        }
+        commitMeals(cMeals)
+        commitFluids(
+          asArray<FluidIntake>(cSheet.fluids).filter(
+            (f) => f != null && typeof f.taken_on === 'string' && typeof f.amount_ml === 'number',
+          ),
+        )
+      }
+    }
     try {
       const fromProps = residentsPropRef.current
       const [rs, sheet] = await Promise.all([
@@ -1352,9 +1389,15 @@ export function MealsSheetPage({
     let alive = true
     const priorTo = addDays(fromIso, -1)
     const priorFrom = addDays(fromIso, -LOW_LOOKBACK_DAYS)
-    // 前の期間の分は捨てる（期間を送った直後に、つながっていない前の日で数えない）
-    setPriorMeals([])
-    setLowReadFrom(fromIso)
+    // 前の期間の分は捨てる（期間を送った直後に、つながっていない前の日で数えない）。控え（裏での先読み）があれば先に使う
+    const cPrior = peekMealsSheet(priorFrom, priorTo)
+    if (cPrior !== undefined) {
+      setPriorMeals(asArray<Meal>(cPrior.meals).filter((m) => m != null && typeof m.meal_on === 'string' && m.meal_on < fromIso))
+      setLowReadFrom(priorFrom)
+    } else {
+      setPriorMeals([])
+      setLowReadFrom(fromIso)
+    }
     fetchMealsSheet(priorFrom, priorTo)
       .then((r) => {
         if (!alive) return
