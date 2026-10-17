@@ -339,6 +339,52 @@ describe('★先読み 順番待ちと止める条件', { skip: C === null }, ()
     assert.equal(C.prefetchAllowed({ ...base, saveData: true }), false)
     assert.equal(C.prefetchAllowed({ ...base, sending: true }), false)
     assert.equal(C.prefetchAllowed({ ...base, signedIn: false }), false)
+    // 人が画面を触っている間も止める（2026-10-18 iPhone のカクつき対策）
+    assert.equal(C.prefetchAllowed({ ...base, busy: true }), false)
+    assert.equal(C.prefetchAllowed({ ...base, busy: false }), true)
+  })
+
+  it('中身の比べ方（sameValue）: たどって比べる。文字列で比べた時より緩くならない', () => {
+    const S = C.sameValue
+    assert.equal(S({ a: [1, { b: 'x' }], m: new Map([[1, new Set([2])]]) }, { a: [1, { b: 'x' }], m: new Map([[1, new Set([2])]]) }), true)
+    assert.equal(S([1, 2], [1, 2, 3]), false)
+    assert.equal(S({ a: 1 }, { a: '1' }), false)
+    assert.equal(S({ a: null }, { a: undefined }), false)
+    assert.equal(S({ a: 1, b: 2 }, { b: 2, a: 1 }), false) // 欄の並びが違えば違う（画面を描き直すだけ）
+    assert.equal(S(new Map([[1, 'a'], [2, 'b']]), new Map([[2, 'b'], [1, 'a']])), false) // 入った順が違えば違う
+    assert.equal(S(new Map([[1, 'a']]), { 1: 'a' }), false)
+    assert.equal(S([1], { 0: 1 }), false)
+    assert.equal(S(new Date(0), new Date(0)), true)
+    assert.equal(S(new Date(0), new Date(1)), false)
+    assert.equal(S(Number.NaN, Number.NaN), false)
+    // 循環した値でも止まる（違うとみなす）
+    const x = { n: null }
+    x.n = x
+    const y = { n: null }
+    y.n = y
+    assert.equal(S(x, y), false)
+  })
+})
+
+describe('★人が画面を触っている間の先読みの停止（userActivity）', () => {
+  it('最後に触ってから QUIET_MS の間は触っているとみなす', async () => {
+    const U = await import('../src/lib/userActivity.ts')
+    assert.equal(U.isBusyAt(10_000, null), false)
+    assert.equal(U.isBusyAt(10_000, 10_000 - U.QUIET_MS + 1), true)
+    assert.equal(U.isBusyAt(10_000, 10_000 - U.QUIET_MS), false)
+    assert.equal(U.isUserBusy(), false) // 受け口を張っていない node では触っていない
+    await U.waitUserQuiet() // 触っていなければすぐ返る
+  })
+
+  it('配線: 先読みの止める条件に触っているかを渡し、触るのをやめたら再開する。部品の先読みも触っている間は待つ', () => {
+    const r = read('src/lib/cachedReads.ts')
+    assert.match(r, /busy: isUserBusy\(\)/)
+    assert.match(r, /onUserQuiet\(kick\)/)
+    assert.match(r, /offQuiet\(\)/)
+    const a = read('src/App.tsx')
+    assert.match(a, /await waitUserQuiet\(\)\s*\n\s*await idleTurn\(\)/)
+    const u = read('src/lib/userActivity.ts')
+    assert.match(u, /passive: true/)
   })
 })
 
