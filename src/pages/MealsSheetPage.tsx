@@ -2851,7 +2851,9 @@ export function MealsSheetPage({
                               key={slot}
                               colSpan={2}
                               style={{ width: W_MEAL2, minWidth: W_MEAL2, height: ROW_H }}
-                              className={`${CELL_BASE} relative ${shadeClass} ${busy ? BUSY_RING : ''}`}
+                              // 位置の基準（relative）は「✎」を置く時だけ付ける（2026-10-18 iPhone のカクつき対策）。全部のマスに付けると
+                              // 11日×38人で約1,250個の重ねて描く単位ができ、指で動かすたびの描き直しが重くなる。吹き出しは fixed なので要らない
+                              className={`${CELL_BASE} ${shadeClass} ${busy ? `relative ${BUSY_RING}` : ''}`}
                             >
                               {busy && busyId ? <BusyMark busy={busy} id={busyId} /> : null}
                               {absentStatus ? (
