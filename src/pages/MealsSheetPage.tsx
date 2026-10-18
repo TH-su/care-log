@@ -179,7 +179,6 @@ const W_MEAL2 = 'calc(var(--w-meal) * 2)'
 const W_FLUID = 'calc(var(--w-meal) * 2)'
 const ROW_H = 'var(--sheet-row-h)'
 const HEAD_H = 'var(--sheet-head-h)'
-const HEAD_H2 = 'calc(var(--sheet-head-h) * 2)'
 const SHEET_FONT = 'var(--sheet-font)'
 
 /**
@@ -2641,12 +2640,15 @@ export function MealsSheetPage({
                 </Fragment>
               ))}
             </colgroup>
-            <thead>
+            {/* 見出しの3段は thead ごと上に固定する（2026-10-18 iPhone のカクつき対策）。セル1つずつを sticky にすると
+                11日で約120個の固定の層ができ、iPhone の Safari が指で動かすたびに重ねて描き直していた（層の数は約半分になる）。
+                左上の2つ（居室・入居者）だけは横にも固定するので、セル自身も sticky（left）のまま */}
+            <thead className="sticky top-0 z-20">
               <tr style={{ height: HEAD_H }}>
                 <th
                   scope="col"
                   rowSpan={3}
-                  style={{ width: W_ROOM, minWidth: W_ROOM, left: 0, top: 0 }}
+                  style={{ width: W_ROOM, minWidth: W_ROOM, left: 0 }}
                   className={`${CELL_BASE} sticky z-30 bg-surface2 font-bold text-ink2`}
                 >
                   居室
@@ -2654,7 +2656,7 @@ export function MealsSheetPage({
                 <th
                   scope="col"
                   rowSpan={3}
-                  style={{ width: W_NAME, minWidth: W_NAME, left: W_ROOM, top: 0 }}
+                  style={{ width: W_NAME, minWidth: W_NAME, left: W_ROOM }}
                   className={`${CELL_BASE} sheet-fix-end sticky z-30 bg-surface2 text-left font-bold text-ink2`}
                 >
                   入居者
@@ -2669,8 +2671,7 @@ export function MealsSheetPage({
                       key={d}
                       scope="colgroup"
                       colSpan={COLS_PER_DAY}
-                      style={{ top: 0 }}
-                      className={`${CELL_BASE} ${DAY_END} sticky z-20 font-bold ${tone === '' ? 'bg-surface2 text-ink' : tone}`}
+                      className={`${CELL_BASE} ${DAY_END} font-bold ${tone === '' ? 'bg-surface2 text-ink' : tone}`}
                     >
                       {fmtDayLabel(d)}
                       {d === today ? <span className="sr-only">（本日）</span> : null}
@@ -2686,8 +2687,8 @@ export function MealsSheetPage({
                         key={s}
                         scope="col"
                         colSpan={2}
-                        style={{ width: W_MEAL2, minWidth: W_MEAL2, top: HEAD_H }}
-                        className={`${CELL_BASE} sticky z-20 bg-surface2 font-bold ${SLOT_TEXT[s]}`}
+                        style={{ width: W_MEAL2, minWidth: W_MEAL2 }}
+                        className={`${CELL_BASE} bg-surface2 font-bold ${SLOT_TEXT[s]}`}
                       >
                         <span aria-hidden="true">{MEAL_SLOT_LABEL[s]}</span>
                         <span className="sr-only">
@@ -2698,8 +2699,8 @@ export function MealsSheetPage({
                     <th
                       scope="col"
                       rowSpan={2}
-                      style={{ width: W_FLUID, minWidth: W_FLUID, top: HEAD_H }}
-                      className={`${CELL_BASE} ${DAY_END} sticky z-20 bg-surface2 font-bold text-ink`}
+                      style={{ width: W_FLUID, minWidth: W_FLUID }}
+                      className={`${CELL_BASE} ${DAY_END} bg-surface2 font-bold text-ink`}
                     >
                       <span aria-hidden="true">水分</span>
                       <span className="sr-only">{fmtDayLabel(d)} 水分の1日合計（ml）</span>
@@ -2714,8 +2715,8 @@ export function MealsSheetPage({
                       <Fragment key={s}>
                         <th
                           scope="col"
-                          style={{ width: W_MEAL, minWidth: W_MEAL, top: HEAD_H2 }}
-                          className={`${CELL_BASE} sticky z-20 bg-surface2 font-normal text-ink2`}
+                          style={{ width: W_MEAL, minWidth: W_MEAL }}
+                          className={`${CELL_BASE} bg-surface2 font-normal text-ink2`}
                         >
                           <span aria-hidden="true">主</span>
                           <span className="sr-only">
@@ -2724,9 +2725,9 @@ export function MealsSheetPage({
                         </th>
                         <th
                           scope="col"
-                          style={{ width: W_MEAL, minWidth: W_MEAL, top: HEAD_H2 }}
+                          style={{ width: W_MEAL, minWidth: W_MEAL }}
                           // 日の切れ目の太線は、2・3段目をまたぐ「水分」の見出しが持つ（2026-10-09：ここ〔夕の副食〕に付けると夕と水分の間に線が出ていた）
-                          className={`${CELL_BASE} sticky z-20 bg-surface2 font-normal text-ink2`}
+                          className={`${CELL_BASE} bg-surface2 font-normal text-ink2`}
                         >
                           <span aria-hidden="true">副</span>
                           <span className="sr-only">
