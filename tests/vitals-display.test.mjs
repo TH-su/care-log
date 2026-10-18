@@ -205,9 +205,11 @@ describe('1. A6 の色のトークン（tokens.css）', () => {
 
 // ══════════════════════════════════════════════════════════════════════
 describe('2. 部品のクラス（sheet.css）', () => {
-  it('斜線は repeating-linear-gradient の線・濃淡と斜線のマスは印刷でも刷る（print-color-adjust: exact）', () => {
+  it('斜線は 8px 角の模様を敷き詰める（repeating は iPhone で重い）・濃淡と斜線のマスは印刷でも刷る（print-color-adjust: exact）', () => {
     const hatch = ruleBody(css, '.cl-shade-hatch')
-    assert.match(hatch, /repeating-linear-gradient\(\s*135deg,\s*var\(--cl-shade-hatch-line\)/)
+    assert.match(hatch, /(?<!repeating-)linear-gradient\(\s*135deg,\s*var\(--cl-shade-hatch-line\)/)
+    assert.doesNotMatch(hatch, /repeating-linear-gradient/)
+    assert.match(hatch, /background-size: 8px 8px;/)
     for (let i = 0; i <= 4; i++) assert.match(css, new RegExp(`\\.cl-shade-bg-${i} \\{ background-color: var\\(--cl-shade-${i}-bg\\); \\}`))
     assert.match(css, /\.cl-shade-bg-3,\s*\.cl-shade-hatch \{\s*-webkit-print-color-adjust: exact;\s*print-color-adjust: exact;/)
   })
