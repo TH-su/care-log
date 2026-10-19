@@ -881,9 +881,9 @@ describe('職員を選ぶ欄は入職順（シフト作成アプリの order・0
   })
   it('職員の読み取りは入職日の順（空は末尾）→名前の順で並べる（0036。0035 の order は並びに使わない）', () => {
     const src = readFileSync(new URL('../src/lib/db.ts', import.meta.url), 'utf8')
-    assert.equal((src.match(/\.order\('hire_date', \{ ascending: true, nullsFirst: false \}\)\s*\n\s*\.order\('name', \{ ascending: true \}\)/g) ?? []).length, 2)
+    assert.equal((src.match(/\.order\('hire_date', \{ ascending: true, nullsFirst: false \}\)[\s\S]{0,200}?\.order\('name', \{ ascending: true \}\)/g) ?? []).length, 2)
     assert.doesNotMatch(src, /\.order\('hire_order'/)
-    assert.match(src, /const STAFF_COLS = 'id,name,active,hire_order,hire_date(,hire_date_manual)?'/)
+    assert.match(src, /const STAFF_COLS = 'id,name,active,hire_order,hire_date(,hire_date_manual)?(,master_no,master_no_manual)?'/)
   })
 })
 
@@ -1032,7 +1032,7 @@ describe('入職日を手で決める（0037・2026-10-19）', { skip: G === nul
   })
   it('db は入職日と手で入れた印を読み、保存の口を持つ。設定画面は欄を置き、入力は事務・管理者だけ', () => {
     const db = readFileSync(new URL('../src/lib/db.ts', import.meta.url), 'utf8')
-    assert.match(db, /const STAFF_COLS = 'id,name,active,hire_order,hire_date,hire_date_manual'/)
+    assert.match(db, /const STAFF_COLS = 'id,name,active,hire_order,hire_date,hire_date_manual(,master_no,master_no_manual)?'/)
     assert.match(db, /export async function saveStaffHireDate\(id: number, date: string \| null\): Promise<Staff>/)
     assert.match(db, /update\(\{ hire_date: date, hire_date_manual: date !== null \}\)/)
     const comp = readFileSync(new URL('../src/components/StaffHireDates.tsx', import.meta.url), 'utf8')
@@ -1041,5 +1041,84 @@ describe('入職日を手で決める（0037・2026-10-19）', { skip: G === nul
     assert.doesNotMatch(comp, /localStorage/)
     const settings = readFileSync(new URL('../src/pages/SettingsPage.tsx', import.meta.url), 'utf8')
     assert.match(settings, /<StaffHireDates \/>/)
+  })
+})
+
+describe('同じ入職日の中は職員マスタの職員No の順（0038・2026-10-19）', { skip: G === null }, () => {
+  it('職員No（ゼロ埋め・全角も）を数にして取り込み、結べた職員に書く。手で入れた入職日の行にも書く', () => {
+    const dates = G.projectStaffHireDates(
+      { ok: true, rows: [
+        { name: '甲山 一郎', hireDate: '2015-07-01', legacyNo: '001', retireDate: '' },
+        { name: '乙川 二郎', hireDate: '2015-07-01', legacyNo: '００２', retireDate: '' },
+        { name: '丙田 三郎', hireDate: '2015-07-01', legacyNo: '', retireDate: '' },
+      ] },
+      '2026-10-19',
+    )
+    const plan = G.planStaffMasterNos(
+      [
+        { id: 1, name: '甲山 一郎', master_no: null },
+        { id: 2, name: '乙川 二郎', master_no: 2 },
+        { id: 3, name: '丙田 三郎', master_no: null },
+        { id: 4, name: '甲山 一郎 ', master_no: null, hire_date_manual: true },
+      ],
+      dates,
+    )
+    // 4 は 1 と同じ鍵＝ケアログ側で同じ氏名が2人＝どちらも結ばない（取り違えを避ける）
+    assert.deepEqual(plan, [])
+    const plan2 = G.planStaffMasterNos(
+      [
+        { id: 1, name: '甲山 一郎', master_no: null },
+        { id: 2, name: '乙川 二郎', master_no: 2 },
+        { id: 3, name: '丙田 三郎', master_no: null },
+      ],
+      dates,
+    )
+    assert.deepEqual(plan2, [{ id: 1, master_no: 1 }])
+  })
+  it('職員の読み取りは 入職日 → 職員No → 名前 の順。一覧に職員No を出す', () => {
+    const db = readFileSync(new URL('../src/lib/db.ts', import.meta.url), 'utf8')
+    assert.equal((db.match(/\.order\('hire_date', \{ ascending: true, nullsFirst: false \}\)[\s\S]{0,200}?\.order\('master_no', \{ ascending: true, nullsFirst: false \}\)\s*\n\s*\.order\('name', \{ ascending: true \}\)/g) ?? []).length, 2)
+    const comp = readFileSync(new URL('../src/components/StaffHireDates.tsx', import.meta.url), 'utf8')
+    assert.match(comp, /同じ入職日の中の順：/)
+    assert.match(comp, /saveStaffMasterNo\(s\.id, null\)|saveNo\(s, null\)/)
+  })
+})
+
+describe('同じ入職日の中の順: 手入力・職員No の形・結果の一文（0038・2026-10-19）', { skip: G === null }, () => {
+  it('手で入れた順（master_no_manual）は名簿の同期で上書きしない', () => {
+    const dates = G.projectStaffHireDates(
+      { ok: true, rows: [{ name: '甲山 一郎', hireDate: '2015-07-01', legacyNo: '5', retireDate: '' }] },
+      '2026-10-19',
+    )
+    assert.deepEqual(G.planStaffMasterNos([{ id: 1, name: '甲山 一郎', master_no: 2, master_no_manual: true }], dates), [])
+    assert.deepEqual(G.planStaffMasterNos([{ id: 1, name: '甲山 一郎', master_no: 2, master_no_manual: false }], dates), [{ id: 1, master_no: 5 }])
+  })
+  it('職員No は数字だけか英字2字＋区切りまで。日付・ほかの文字が混ざる値は使わない', () => {
+    assert.equal(G.parseStaffMasterNo('012'), 12)
+    assert.equal(G.parseStaffMasterNo('１２'), 12)
+    assert.equal(G.parseStaffMasterNo(7), 7)
+    assert.equal(G.parseStaffMasterNo('S-003'), 3)
+    assert.equal(G.parseStaffMasterNo('2015-03'), null)
+    assert.equal(G.parseStaffMasterNo('第3号'), null)
+    assert.equal(G.parseStaffMasterNo(''), null)
+    assert.equal(G.parseStaffMasterNo(null), null)
+  })
+  it('入職日と職員No は同じ1人に結ぶ（姓だけの受け皿でも同じ方）', () => {
+    const dates = G.projectStaffHireDates(
+      { ok: true, rows: [
+        { name: '乙川 二郎', hireDate: '2016-04-01', legacyNo: '9', retireDate: '' },
+        { name: '乙川 花子', hireDate: '2012-01-01', legacyNo: '1', retireDate: '2014-03-31' },
+      ] },
+      '2026-10-19',
+    )
+    const rows = [{ id: 7, name: '乙川', hire_date: null, master_no: null }]
+    assert.deepEqual(G.planStaffHireDates(rows, dates), [{ id: 7, hire_date: '2016-04-01' }])
+    assert.deepEqual(G.planStaffMasterNos(rows, dates), [{ id: 7, master_no: 9 }])
+  })
+  it('結果の一文: 職員No を書いた人数・書けなかった時の理由を出す', () => {
+    const base = { status: 'done', active: 3, known: 3, written: 0 }
+    assert.match(G.hireDateSyncText({ ...base, nosWritten: 2 }), /職員No）を 2 名に書きました/)
+    assert.match(G.hireDateSyncText({ ...base, nosWritten: null }), /0038/)
+    assert.doesNotMatch(G.hireDateSyncText({ ...base, nosWritten: 0 }), /職員No/)
   })
 })

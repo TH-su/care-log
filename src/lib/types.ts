@@ -115,6 +115,10 @@ export interface Staff {
   hire_date?: string | null
   /** 入職日を設定画面で手で入れた（0037）。名簿の同期はこの行の入職日を上書きしない */
   hire_date_manual?: boolean
+  /** 同じ入職日の中の順（0038）。名簿の同期が職員マスタの職員No を書く。空は末尾 */
+  master_no?: number | null
+  /** true = 設定画面で手で入れた順（名簿の同期で上書きしない・0038） */
+  master_no_manual?: boolean
 }
 
 export interface Vital {

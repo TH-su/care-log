@@ -173,7 +173,7 @@ const OUTING_KINDS: readonly OutingKind[] = ['outing', 'overnight']
 
 // select する列は types.ts と一致させる（* を使わず、監査列・import_key を端末へ持ち出さない）
 const RESIDENT_COLS = 'id,source_id,name,kana,room,gender,care_level,active,needs_review,note_alias'
-const STAFF_COLS = 'id,name,active,hire_order,hire_date,hire_date_manual'
+const STAFF_COLS = 'id,name,active,hire_order,hire_date,hire_date_manual,master_no,master_no_manual'
 // created_at（バイタル・水分・申し送り）は、夜勤明けに前日の欄へ書いた記録の「翌」の判定に使うので読む
 // （F34・2026-10-10。行の型には載せず nextMorning.ts に id で控える。与薬の MED_ADMIN_COLS と同じ扱い）
 const VITAL_COLS =
@@ -721,6 +721,11 @@ function normalizeStaff(row: unknown): Staff | null {
     hire_order: ho !== null && Number.isInteger(ho) ? ho : null,
     hire_date: hd,
     hire_date_manual: r.hire_date_manual === true,
+    master_no: (() => {
+      const n = num(r.master_no)
+      return n !== null && Number.isInteger(n) ? n : null
+    })(),
+    master_no_manual: r.master_no_manual === true,
   }
 }
 
@@ -4573,6 +4578,27 @@ export async function saveStaffHireDate(id: number, date: string | null): Promis
     .eq('id', id)
     .select(STAFF_COLS)
     .maybeSingle()) as Res<unknown>
+  return staffWriteResult(res)
+}
+
+/**
+ * 同じ入職日の中の順を設定画面から保存する（事務・管理者・0038）。no=null で「職員マスタに戻す」
+ * （手入力の印を外し、次の名簿の同期で職員マスタの職員No が入る）
+ */
+export async function saveStaffMasterNo(id: number, no: number | null): Promise<Staff> {
+  assertBuildCurrent()
+  if (no !== null && !(Number.isInteger(no) && no >= 0 && no <= 999_999_999)) throw new DbError('server', '順は 0 以上の整数で入れてください。')
+  const sb = await getClient()
+  const res = (await sb
+    .from('staff')
+    .update({ master_no: no, master_no_manual: no !== null })
+    .eq('id', id)
+    .select(STAFF_COLS)
+    .maybeSingle()) as Res<unknown>
+  return staffWriteResult(res)
+}
+
+function staffWriteResult(res: Res<unknown>): Staff {
   if (res.error !== null) {
     if (isAuthFail(res)) {
       fireAuthExpired()
@@ -4598,6 +4624,8 @@ export async function fetchStaff(): Promise<Staff[]> {
     // 入職日の順（0036・2026-10-19 本人指示。職員マスタの入職日）。入職日の無い職員は末尾に名前の順。
     // ★0035 の hire_order（シフト作成アプリの order）は画面で並べた順で入職日の順ではなかったので、並びには使わない
     .order('hire_date', { ascending: true, nullsFirst: false })
+    // 同じ入職日の中は職員マスタの職員No の順（0038・2026-10-19 本人確認: 開設時の職員が名前の順に並んでいた）
+    .order('master_no', { ascending: true, nullsFirst: false })
     .order('name', { ascending: true })
     .limit(MAX_ROWS)) as Res<unknown>
   if (res.error !== null) throw readError(res)
@@ -4619,6 +4647,8 @@ export async function fetchAllStaff(): Promise<Staff[]> {
     // 入職日の順（0036・2026-10-19 本人指示。職員マスタの入職日）。入職日の無い職員は末尾に名前の順。
     // ★0035 の hire_order（シフト作成アプリの order）は画面で並べた順で入職日の順ではなかったので、並びには使わない
     .order('hire_date', { ascending: true, nullsFirst: false })
+    // 同じ入職日の中は職員マスタの職員No の順（0038・2026-10-19 本人確認: 開設時の職員が名前の順に並んでいた）
+    .order('master_no', { ascending: true, nullsFirst: false })
     .order('name', { ascending: true })
     .limit(MAX_ROWS)) as Res<unknown>
   if (res.error !== null) throw readError(res)

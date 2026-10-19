@@ -679,7 +679,7 @@ export function planStaffSync(
 async function readStaffRows(): Promise<Array<Staff & { manual?: boolean; hire_order?: number | null }>> {
   const { data, error } = await supabase
     .from('staff')
-    .select('id, name, active, manual, hire_order, hire_date, hire_date_manual')
+    .select('id, name, active, manual, hire_order, hire_date, hire_date_manual, master_no, master_no_manual')
     .limit(MAX_MASTER_ROWS)
   if (error) throw dbError('職員マスタの現在値を読み取れませんでした')
   const rows = (data ?? []) as Array<Staff & { manual?: boolean; hire_order?: number | null }>
@@ -785,6 +785,8 @@ export function hireNameKey(s: string | null | undefined): string {
 /** 職員マスタの1人分（入職日の照合に使う分だけ） */
 export interface StaffMasterHire {
   hireDate: string
+  /** 職員No の数字の部分（無い・形が数字と違う時は null）。同じ入職日の中の順に使う（0038） */
+  masterNo: number | null
   /** 退職日が今日以前（＝退職済み）。同じ氏名・同じ姓の方が2人いる時に、在籍中の1人を選ぶために使う */
   retired: boolean
 }
@@ -807,7 +809,12 @@ export function projectStaffHireDates(raw: unknown, today: string = new Date().t
     if (!key) continue
     const d = typeof rec.hireDate === 'string' ? rec.hireDate.trim() : ''
     const r = typeof rec.retireDate === 'string' ? rec.retireDate.trim() : ''
-    const entry: StaffMasterHire = { hireDate: /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : '', retired: /^\d{4}-\d{2}-\d{2}$/.test(r) && r <= today }
+    const masterNo = parseStaffMasterNo(rec.legacyNo)
+    const entry: StaffMasterHire = {
+      hireDate: /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : '',
+      masterNo,
+      retired: /^\d{4}-\d{2}-\d{2}$/.test(r) && r <= today,
+    }
     const g = groups.get(key)
     if (g) g.push(entry)
     else groups.set(key, [entry])
@@ -820,21 +827,50 @@ export function projectStaffHireDates(raw: unknown, today: string = new Date().t
   return out
 }
 
-/** 職員の行へ書く入職日の計画（純関数）。職員マスタに日付がある時だけ書く（空で上書きしない）。同じ値なら書かない */
-export function planStaffHireDates(
-  rows: Array<{ id: number; name: string; hire_date?: string | null; hire_date_manual?: boolean }>,
+/**
+ * 職員No を数にする（純関数）。「12」「012」「１２」のような数字だけ、または「S-012」のように頭に英字2字までと
+ * 区切りが付くだけの形を受ける。日付やほかの文字が混ざる値（「2015-03」など）は並びを狂わせるので null にする
+ */
+export function parseStaffMasterNo(v: unknown): number | null {
+  if (typeof v !== 'string' && typeof v !== 'number') return null
+  const t = String(v).normalize('NFKC').trim()
+  const m = /^[A-Za-z]{0,2}[-_ ]?(\d{1,9})$/.exec(t)
+  return m ? Number(m[1]) : null
+}
+
+/**
+ * 職員の行へ書く職員No の計画（純関数・0038）。入職日と同じ結び付け方（matchStaffMaster）で結べた職員に、
+ * 職員マスタに番号がある時だけ書く（空で上書きしない）。同じ値なら書かない。設定画面で手で入れた順の行は書かない。
+ * 手で入れた入職日の行には書く（職員No は同じ入職日の中の順で、入職日とは別の値のため）
+ */
+export function planStaffMasterNos(
+  rows: Array<{ id: number; name: string; master_no?: number | null; master_no_manual?: boolean }>,
   dates: Map<string, StaffMasterHire>,
-): { id: number; hire_date: string }[] {
-  const out: { id: number; hire_date: string }[] = []
+): { id: number; master_no: number }[] {
+  const matched = matchStaffMaster(rows, dates)
+  const out: { id: number; master_no: number }[] = []
+  for (const r of rows) {
+    if (r.master_no_manual === true) continue
+    const m = matched.get(r.id)
+    if (m && m.masterNo !== null && m.masterNo !== (r.master_no ?? null)) out.push({ id: r.id, master_no: m.masterNo })
+  }
+  return out
+}
+
+/**
+ * ケアログの職員の行 → 結べた職員マスタの1人（入職日と職員No はこの1つの結び付け方だけを使う。別々に結ぶと、
+ * 入職日はAさん・職員No はBさん、という取り違えが起こりうるため）。
+ * ケアログ側で同じ氏名が2人以上なら結ばない。完全一致が無い時だけ姓だけの受け皿を使う（2026-10-19）:
+ * 職員マスタの氏名のうち「その名前で始まる人」を探し、在籍中の方がちょうど1人ならその方（退職した同じ姓の方が
+ * いても結べる・2026-10-19 本人確認: 退職した同じ姓の方がいて結ばれない職員がいた）、在籍中が0人で全体が
+ * ちょうど1人ならその方。かつケアログ側にも、その方の氏名で始まる名前が1人しかいない時に結ぶ
+ */
+function matchStaffMaster(rows: Array<{ id: number; name: string }>, dates: Map<string, StaffMasterHire>): Map<number, StaffMasterHire> {
   const seen = new Map<string, number>()
   for (const r of rows) {
     const key = hireNameKey(r.name)
     if (key) seen.set(key, (seen.get(key) ?? 0) + 1)
   }
-  // 姓だけの名前（シフトの名簿に姓だけで載っている職員）の受け皿（2026-10-19）:
-  // 完全一致が無い時だけ、職員マスタの氏名のうち「その名前で始まる人」を探す。在籍中の方がちょうど1人なら
-  // その方（退職した同じ姓の方がいても結べる・2026-10-19 本人確認: 退職した同じ姓の方がいて結ばれない職員がいた）、在籍中が0人で
-  // 全体がちょうど1人ならその方。かつケアログ側にも、その方の氏名で始まる名前が1人しかいない時に結ぶ
   const masterKeys = [...dates.keys()]
   const careKeys = [...seen.keys()]
   const surnameMatch = (key: string): string | null => {
@@ -845,16 +881,32 @@ export function planStaffHireDates(
     const rivals = careKeys.filter((c) => m.startsWith(c) || c === m)
     return rivals.length === 1 ? m : null
   }
+  const out = new Map<number, StaffMasterHire>()
+  for (const r of rows) {
+    const key = hireNameKey(r.name)
+    if (!key || (seen.get(key) ?? 0) > 1) continue
+    let hit = dates.get(key)
+    if (hit === undefined) {
+      const m = surnameMatch(key)
+      if (m !== null) hit = dates.get(m)
+    }
+    if (hit) out.set(r.id, hit)
+  }
+  return out
+}
+
+/** 職員の行へ書く入職日の計画（純関数）。職員マスタに日付がある時だけ書く（空で上書きしない）。同じ値なら書かない */
+export function planStaffHireDates(
+  rows: Array<{ id: number; name: string; hire_date?: string | null; hire_date_manual?: boolean }>,
+  dates: Map<string, StaffMasterHire>,
+): { id: number; hire_date: string }[] {
+  const out: { id: number; hire_date: string }[] = []
+  // 姓だけの名前（シフトの名簿に姓だけで載っている職員）の受け皿は matchStaffMaster にまとめた（職員No と同じ結び付け方）
+  const matched = matchStaffMaster(rows, dates)
   for (const r of rows) {
     if (r.hire_date_manual === true) continue // 設定画面で手で入れた入職日は上書きしない（0037）
-    const key = hireNameKey(r.name)
-    if (!key || (seen.get(key) ?? 0) > 1) continue // ケアログ側で同じ氏名が2人以上＝結ばない
-    let d = dates.get(key)?.hireDate
-    if (d === undefined) {
-      const m = surnameMatch(key)
-      if (m !== null) d = dates.get(m)?.hireDate
-    }
-    if (d !== undefined && d !== (r.hire_date ?? null)) out.push({ id: r.id, hire_date: d })
+    const d = matched.get(r.id)?.hireDate
+    if (d && d !== (r.hire_date ?? null)) out.push({ id: r.id, hire_date: d })
   }
   return out
 }
@@ -873,6 +925,8 @@ export interface HireDateSync {
   written: number
   /** 在籍のうち入職日が分からない方の氏名（設定画面の結果にだけ出す。保存・console に残さない） */
   unknownNames?: string[]
+  /** 同じ入職日の中の順（職員No）を今回書いた人数。null = 書けなかった（0038 の列が無い 等） */
+  nosWritten?: number | null
 }
 
 /** 職員マスタの一覧の待ち時間（職員マスタの画面と同じ45秒。名簿の15秒では間に合わないことがある） */
@@ -901,7 +955,18 @@ async function syncStaffHireDates(): Promise<HireDateSync> {
   if (!dates || dates.size === 0) return { status: 'no-rows', ...countKnownHireDates(rows, []), written: 0 }
   const plan = planStaffHireDates(rows, dates)
   for (const p of plan) await updateStaffRow(p.id, { hire_date: p.hire_date })
-  return { status: 'done', ...countKnownHireDates(rows, plan), written: plan.length }
+  // 同じ入職日の中の順（職員No・0038）。列が無い DB（0038 未適用）では書けないので、失敗しても入職日の結果は返し、
+  // 書けなかったことは結果の一文に出す（成功と見分けがつかないと、順が変わらない理由が分からないため）
+  let nosWritten: number | null = 0
+  try {
+    for (const p of planStaffMasterNos(rows, dates)) {
+      await updateStaffRow(p.id, { master_no: p.master_no })
+      nosWritten++
+    }
+  } catch {
+    nosWritten = null
+  }
+  return { status: 'done', ...countKnownHireDates(rows, plan), written: plan.length, nosWritten }
 }
 
 /** 入職日の取り込みの結果を、設定画面に出す一文にする（純関数） */
@@ -920,6 +985,12 @@ export function hireDateSyncText(r: HireDateSync | null | undefined): string {
     unknown > 0
       ? `分からない ${unknown} 名${names}は、末尾に名前の順で並びます。職員マスタの氏名の書き方（字体・姓だけか）と、同じ氏名の方が2人いないかを確かめてください。`
       : ''
+  }${
+    r.nosWritten === null
+      ? '同じ入職日の中の順（職員No）は書けませんでした（データベースの更新 0038 が済んでいない可能性があります）。'
+      : typeof r.nosWritten === 'number' && r.nosWritten > 0
+        ? `同じ入職日の中の順（職員No）を ${r.nosWritten} 名に書きました。`
+        : ''
   }`
 }
 
