@@ -911,7 +911,7 @@ describe('職員の入職日は職員マスタから取る（0036・2026-10-19�
       ],
     })
     assert.equal(m.size, 2)
-    assert.deepEqual([...m.values()].sort(), ['2018-10-15', '2020-04-01'])
+    assert.deepEqual([...m.values()].map((v) => v.hireDate).sort(), ['2018-10-15', '2020-04-01'])
     assert.equal(G.projectStaffHireDates({ ok: true }), null)
   })
   it('結べた職員にだけ書く。同じ日付なら書かない・職員マスタに無ければ空にしない・ケアログで同じ氏名が2人なら書かない', () => {
@@ -941,7 +941,7 @@ describe('入職日の取り込みの結果を同期の結果に出す（2026-10
       ],
       [{ id: 1, hire_date: '2020-04-01' }],
     )
-    assert.deepEqual(r, { active: 3, known: 2 })
+    assert.deepEqual(r, { active: 3, known: 2, unknownNames: ['職員C'] })
   })
   it('理由ごとの一文（接続設定なし・読めない・日付なし・結果）', () => {
     assert.match(G.hireDateSyncText({ status: 'no-config', active: 0, known: 0, written: 0 }), /接続設定がないため/)
@@ -949,7 +949,7 @@ describe('入職日の取り込みの結果を同期の結果に出す（2026-10
     assert.match(G.hireDateSyncText({ status: 'no-rows', active: 3, known: 0, written: 0 }), /見つかりませんでした/)
     assert.equal(
       G.hireDateSyncText({ status: 'done', active: 3, known: 2, written: 1 }),
-      '在籍 3 名のうち 2 名の入職日が分かりました（今回書いた 1 名）。分からない 1 名（職員マスタと氏名の書き方が違う・同じ氏名が2人いる）は、末尾に名前の順で並びます。',
+      '在籍 3 名のうち 2 名の入職日が分かりました（今回書いた 1 名）。分からない 1 名は、末尾に名前の順で並びます。職員マスタの氏名の書き方（字体・姓だけか）と、同じ氏名の方が2人いないかを確かめてください。',
     )
     assert.equal(G.hireDateSyncText(null), '')
   })
@@ -982,5 +982,42 @@ describe('姓だけの名前は、職員マスタにその姓で始まる人が1
       dates,
     )
     assert.deepEqual(plan, [{ id: 1, hire_date: '2015-04-01' }, { id: 4, hire_date: '2018-04-01' }])
+  })
+})
+
+describe('入職日の照合: 退職した同じ氏名・同じ姓の方と、字体の違い（2026-10-19 本人確認）', { skip: G === null }, () => {
+  const today = '2026-10-19'
+  it('同じ氏名が2人でも、在籍中の方が1人ならその方に結ぶ（退職日が今日以前の方は退職済み）', () => {
+    const m = G.projectStaffHireDates(
+      { ok: true, rows: [
+        { name: '甲山 一郎', hireDate: '2010-04-01', retireDate: '2015-03-31' },
+        { name: '甲山 一郎', hireDate: '2020-04-01', retireDate: '' },
+        { name: '乙川 二郎', hireDate: '2011-04-01', retireDate: '' },
+        { name: '乙川 二郎', hireDate: '2012-04-01', retireDate: '' },
+      ] },
+      today,
+    )
+    assert.equal(m.get(G.hireNameKey('甲山一郎')).hireDate, '2020-04-01')
+    assert.equal(m.has(G.hireNameKey('乙川二郎')), false)
+  })
+  it('姓だけの名前: 同じ姓が職員マスタに2人いても、在籍中が1人ならその方に結ぶ', () => {
+    const dates = G.projectStaffHireDates(
+      { ok: true, rows: [
+        { name: '丙田 花子', hireDate: '2008-04-01', retireDate: '2019-03-31' },
+        { name: '丙田 太郎', hireDate: '2016-04-01', retireDate: '' },
+      ] },
+      today,
+    )
+    assert.deepEqual(G.planStaffHireDates([{ id: 1, name: '丙田', hire_date: null }], dates), [{ id: 1, hire_date: '2016-04-01' }])
+  })
+  it('字体の違い（﨑と崎・髙と高・邊と辺）は同じ文字として結ぶ。保存する氏名は変えない', () => {
+    assert.equal(G.hireNameKey('甲﨑 一'), G.hireNameKey('甲崎一'))
+    assert.equal(G.hireNameKey('髙橋'), G.hireNameKey('高橋'))
+    assert.equal(G.hireNameKey('渡邊'), G.hireNameKey('渡辺'))
+    const dates = G.projectStaffHireDates({ ok: true, rows: [{ name: '甲﨑 一', hireDate: '2014-04-01', retireDate: '' }] }, today)
+    assert.deepEqual(G.planStaffHireDates([{ id: 7, name: '甲崎 一', hire_date: null }], dates), [{ id: 7, hire_date: '2014-04-01' }])
+  })
+  it('結果の一文に分からない方の氏名を出す', () => {
+    assert.match(G.hireDateSyncText({ status: 'done', active: 3, known: 1, written: 0, unknownNames: ['職員X', '職員Y'] }), /分からない 2 名（職員X・職員Y）は/)
   })
 })

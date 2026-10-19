@@ -748,28 +748,74 @@ export function readStaffMasterConfig(): GasConfig | null {
 }
 
 /**
- * 職員マスタの一覧（action 'list'）から「氏名 → 入職日」だけを取り出す（ほかの列は持たない・残さない）。
- * 同じ氏名が2人以上いる名前は結べないので外す（取り違えを避ける）。入職日が YYYY-MM-DD でない行は外す
+ * 氏名の照合用の鍵（入職日の取り込み専用）。normName（NFKC・空白を除く）に加えて、氏名でよく使い分けられる
+ * 字体の違いをそろえる（例 﨑/嵜→崎・髙→高・邊/邉→辺）。照合にだけ使い、保存・表示する氏名は変えない。
+ * ★取り違えを防ぐ守り（同じ鍵が2人以上なら結ばない）は、そろえた後の鍵で数える（2026-10-19 本人確認: 字体の違いで結ばれない職員がいた）
  */
-export function projectStaffHireDates(raw: unknown): Map<string, string> | null {
+const NAME_VARIANTS: Record<string, string> = {
+  '﨑': '崎', '嵜': '崎', '碕': '崎',
+  '髙': '高',
+  '邊': '辺', '邉': '辺',
+  '齋': '斎', '齊': '斉',
+  '濵': '浜', '濱': '浜',
+  '澤': '沢',
+  '櫻': '桜',
+  '廣': '広',
+  '嶋': '島', '嶌': '島',
+  '德': '徳',
+  '惠': '恵',
+  '瀨': '瀬',
+  '冨': '富',
+  '曻': '昇',
+  '國': '国',
+  '眞': '真',
+  '藏': '蔵',
+  '槇': '槙',
+  '舘': '館',
+  '萬': '万',
+  '龍': '竜',
+}
+export function hireNameKey(s: string | null | undefined): string {
+  const k = normName(s)
+  let out = ''
+  for (const ch of k) out += NAME_VARIANTS[ch] ?? ch
+  return out
+}
+
+/** 職員マスタの1人分（入職日の照合に使う分だけ） */
+export interface StaffMasterHire {
+  hireDate: string
+  /** 退職日が今日以前（＝退職済み）。同じ氏名・同じ姓の方が2人いる時に、在籍中の1人を選ぶために使う */
+  retired: boolean
+}
+
+/**
+ * 職員マスタの一覧（action 'list'）から「氏名の鍵 → 入職日・退職済みか」だけを取り出す（ほかの列は持たない・残さない）。
+ * 同じ鍵が2人以上いる時は、在籍中の方がちょうど1人ならその方を採る（退職した同じ氏名の方がいても結べるように）。
+ * それ以外は結べないので外す（取り違えを避ける）。入職日が YYYY-MM-DD でない行は外す
+ */
+export function projectStaffHireDates(raw: unknown, today: string = new Date().toISOString().slice(0, 10)): Map<string, StaffMasterHire> | null {
   const rows = raw && typeof raw === 'object' && Array.isArray((raw as { rows?: unknown }).rows) ? (raw as { rows: unknown[] }).rows : null
   if (!rows) return null
-  const out = new Map<string, string>()
-  const dup = new Set<string>()
+  const groups = new Map<string, StaffMasterHire[]>()
   for (const item of rows) {
     if (!item || typeof item !== 'object') continue
     const rec = item as Record<string, unknown>
     const name = pickText(rec.name)
     if (!name) continue
-    const key = normName(name)
+    const key = hireNameKey(name)
     if (!key) continue
-    if (out.has(key) || dup.has(key)) {
-      out.delete(key)
-      dup.add(key)
-      continue
-    }
     const d = typeof rec.hireDate === 'string' ? rec.hireDate.trim() : ''
-    if (/^\d{4}-\d{2}-\d{2}$/.test(d)) out.set(key, d)
+    const r = typeof rec.retireDate === 'string' ? rec.retireDate.trim() : ''
+    const entry: StaffMasterHire = { hireDate: /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : '', retired: /^\d{4}-\d{2}-\d{2}$/.test(r) && r <= today }
+    const g = groups.get(key)
+    if (g) g.push(entry)
+    else groups.set(key, [entry])
+  }
+  const out = new Map<string, StaffMasterHire>()
+  for (const [key, g] of groups) {
+    const pick = g.length === 1 ? g[0] : g.filter((x) => !x.retired).length === 1 ? g.find((x) => !x.retired)! : null
+    if (pick && pick.hireDate) out.set(key, pick)
   }
   return out
 }
@@ -777,33 +823,35 @@ export function projectStaffHireDates(raw: unknown): Map<string, string> | null 
 /** 職員の行へ書く入職日の計画（純関数）。職員マスタに日付がある時だけ書く（空で上書きしない）。同じ値なら書かない */
 export function planStaffHireDates(
   rows: Array<{ id: number; name: string; hire_date?: string | null }>,
-  dates: Map<string, string>,
+  dates: Map<string, StaffMasterHire>,
 ): { id: number; hire_date: string }[] {
   const out: { id: number; hire_date: string }[] = []
   const seen = new Map<string, number>()
   for (const r of rows) {
-    const key = normName(r.name)
+    const key = hireNameKey(r.name)
     if (key) seen.set(key, (seen.get(key) ?? 0) + 1)
   }
-  // 姓だけの名前（シフトの名簿に「坂本」のように姓だけで載っている職員）の受け皿（2026-10-19）:
-  // 完全一致が無い時だけ、職員マスタの氏名のうち「その名前で始まる人がちょうど1人」で、かつケアログ側にも
-  // その職員マスタの氏名で始まる名前の人が1人しかいない時に結ぶ（2人以上なら取り違えを避けて結ばない）
+  // 姓だけの名前（シフトの名簿に姓だけで載っている職員）の受け皿（2026-10-19）:
+  // 完全一致が無い時だけ、職員マスタの氏名のうち「その名前で始まる人」を探す。在籍中の方がちょうど1人なら
+  // その方（退職した同じ姓の方がいても結べる・2026-10-19 本人確認: 退職した同じ姓の方がいて結ばれない職員がいた）、在籍中が0人で
+  // 全体がちょうど1人ならその方。かつケアログ側にも、その方の氏名で始まる名前が1人しかいない時に結ぶ
   const masterKeys = [...dates.keys()]
   const careKeys = [...seen.keys()]
   const surnameMatch = (key: string): string | null => {
     const hits = masterKeys.filter((m) => m !== key && m.startsWith(key))
-    if (hits.length !== 1) return null
-    const m = hits[0]
+    const live = hits.filter((m) => dates.get(m)?.retired !== true)
+    const m = live.length === 1 ? live[0] : live.length === 0 && hits.length === 1 ? hits[0] : null
+    if (m === null) return null
     const rivals = careKeys.filter((c) => m.startsWith(c) || c === m)
     return rivals.length === 1 ? m : null
   }
   for (const r of rows) {
-    const key = normName(r.name)
+    const key = hireNameKey(r.name)
     if (!key || (seen.get(key) ?? 0) > 1) continue // ケアログ側で同じ氏名が2人以上＝結ばない
-    let d = dates.get(key)
+    let d = dates.get(key)?.hireDate
     if (d === undefined) {
       const m = surnameMatch(key)
-      if (m !== null) d = dates.get(m)
+      if (m !== null) d = dates.get(m)?.hireDate
     }
     if (d !== undefined && d !== (r.hire_date ?? null)) out.push({ id: r.id, hire_date: d })
   }
@@ -822,19 +870,23 @@ export interface HireDateSync {
   known: number
   /** 今回書いた人数 */
   written: number
+  /** 在籍のうち入職日が分からない方の氏名（設定画面の結果にだけ出す。保存・console に残さない） */
+  unknownNames?: string[]
 }
 
 /** 職員マスタの一覧の待ち時間（職員マスタの画面と同じ45秒。名簿の15秒では間に合わないことがある） */
 export const STAFF_MASTER_TIMEOUT_MS = 45_000
 
-/** 在籍の職員のうち入職日が分かる人数（純関数・試験用） */
+/** 在籍の職員のうち入職日が分かる人数と、分からない方の氏名（純関数・試験用） */
 export function countKnownHireDates(
   rows: Array<{ id: number; name: string; active?: boolean; hire_date?: string | null }>,
   written: { id: number; hire_date: string }[],
-): { active: number; known: number } {
+): { active: number; known: number; unknownNames: string[] } {
   const w = new Set(written.map((x) => x.id))
   const act = rows.filter((r) => r.active !== false)
-  return { active: act.length, known: act.filter((r) => w.has(r.id) || (r.hire_date ?? null) !== null).length }
+  const known = act.filter((r) => w.has(r.id) || (r.hire_date ?? null) !== null)
+  const unknownNames = act.filter((r) => !(w.has(r.id) || (r.hire_date ?? null) !== null)).map((r) => r.name)
+  return { active: act.length, known: known.length, unknownNames }
 }
 
 /** 職員マスタの入職日を読んで職員の表に書く（接続設定が無い・読めない時は書かずに理由を返す） */
@@ -862,8 +914,11 @@ export function hireDateSyncText(r: HireDateSync | null | undefined): string {
   }
   if (r.status === 'no-rows') return '職員マスタに入職日のある職員が見つかりませんでした。入職日は変えていません。'
   const unknown = r.active - r.known
+  const names = r.unknownNames && r.unknownNames.length > 0 ? `（${r.unknownNames.join('・')}）` : ''
   return `在籍 ${r.active} 名のうち ${r.known} 名の入職日が分かりました（今回書いた ${r.written} 名）。${
-    unknown > 0 ? `分からない ${unknown} 名（職員マスタと氏名の書き方が違う・同じ氏名が2人いる）は、末尾に名前の順で並びます。` : ''
+    unknown > 0
+      ? `分からない ${unknown} 名${names}は、末尾に名前の順で並びます。職員マスタの氏名の書き方（字体・姓だけか）と、同じ氏名の方が2人いないかを確かめてください。`
+      : ''
   }`
 }
 
