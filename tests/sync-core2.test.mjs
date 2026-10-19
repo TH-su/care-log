@@ -761,6 +761,46 @@ if (D === null) {
   })
 
 
+  describe('検索: 重要度だけで引ける・「重要以上」は ▲重要と‼最重要（2026-10-19 本人指示）', () => {
+    afterEach(reset)
+
+    const seedNotes = (srv) => {
+      srv.db.staff.push({ id: 1, name: '職員01', active: true })
+      for (const [id, importance] of [[601, 'normal'], [602, 'important'], [603, 'critical'], [604, 'critical']]) {
+        srv.db.notes.push({ ...NC.NOTE_BASE_ROW, id, importance, note_on: '2026-09-15', reporter_id: 1, deleted_at: null, ended_by: null })
+      }
+    }
+
+    it('語が空でも重要度を選べば、その重要度の申し送りを返す（本文・記入者のどちらでも）', async () => {
+      const srv = server()
+      seedNotes(srv)
+      D.__testHooks.setClient(srv.client)
+      const crit = await D.searchNotes({ q: '', target: 'body', fromIso: '2026-09-01', toIso: '2026-09-30', importance: 'critical' })
+      assert.deepEqual(crit.map((n) => n.id).sort(), [603, 604])
+      const high = await D.searchNotes({ q: '', target: 'reporter', fromIso: '2026-09-01', toIso: '2026-09-30', importance: ['important', 'critical'] })
+      assert.deepEqual(high.map((n) => n.id).sort(), [602, 603, 604])
+    })
+
+    it('語も重要度も無い時は何も引かない（全件を読む経路を作らない）', async () => {
+      const srv = server()
+      seedNotes(srv)
+      D.__testHooks.setClient(srv.client)
+      assert.deepEqual(await D.searchNotes({ q: '', target: 'body', fromIso: '2026-09-01', toIso: '2026-09-30' }), [])
+      assert.equal(srv.calls.filter((c) => c.table === 'notes').length, 0)
+    })
+
+    it('語と重要度を両方入れた時は両方で絞る', async () => {
+      const srv = server()
+      seedNotes(srv)
+      D.__testHooks.setClient(srv.client)
+      const got = await D.searchNotes({ q: '職員01', target: 'reporter', fromIso: '2026-09-01', toIso: '2026-09-30', importance: ['important', 'critical'] })
+      assert.deepEqual(got.map((n) => n.id).sort(), [602, 603, 604])
+      const none = await D.searchNotes({ q: '職員99', target: 'reporter', fromIso: '2026-09-01', toIso: '2026-09-30', importance: 'critical' })
+      assert.deepEqual(none, [])
+    })
+  })
+
+
   describe('★F56 事故・外出の新規登録で、同じ日・同じ方の既存の記録を引ける（参考表示の元。保存は止めない）', () => {
     afterEach(reset)
 

@@ -1,6 +1,7 @@
 // インクリメンタル検索（docs/design/ui-design.md §4）。
 // 対象は「利用者名／本文／記入者」の3種。利用者名は fetchResidents をメモリに保持して
 // 端末内で即時に絞り込み（通信なし）、本文・記入者は db.ts の searchNotes を叩く。
+// 本文・記入者で重要度を選んだ時は、語が空でもその重要度の申し送りを新しい順に出す（2026-10-19 本人指示）。
 //
 // この画面の規律:
 //   - 読み取り専用。書き込み経路を持たない（multi-device-sync 原則9「読み取りで書かない」。既読も付けない）
@@ -67,6 +68,7 @@ const DEFAULT_PERIOD: PeriodKey = '3m'
 
 const IMPORTANCE_OPTIONS: { value: string; label: string }[] = [
   { value: 'all', label: 'すべて' },
+  { value: 'high', label: '重要以上' },
   { value: 'normal', label: IMPORTANCE_LABEL.normal },
   { value: 'important', label: IMPORTANCE_LABEL.important },
   { value: 'critical', label: IMPORTANCE_LABEL.critical },
@@ -78,6 +80,13 @@ const SHIFT_OPTIONS: { value: string; label: string }[] = [
   { value: 'daycare', label: SHIFT_LABEL.daycare },
   { value: 'night', label: SHIFT_LABEL.night },
 ]
+
+/** 重要度の選択 → 検索の条件（'all' は条件なし。'high' は ▲重要と‼最重要の両方） */
+export function importanceFilter(v: string): Importance | Importance[] | undefined {
+  if (v === 'high') return ['important', 'critical']
+  if (v === 'normal' || v === 'important' || v === 'critical') return v
+  return undefined
+}
 
 /** 通信エラー時の定型文（§4「何が起きたか＋次にどうすればよいか」） */
 const ERR_SEARCH =
@@ -94,8 +103,8 @@ const PLACEHOLDER: Record<Target, string> = {
 
 const HINT: Record<Target, string> = {
   resident: '利用者名を1文字以上入力すると、その場で絞り込みます。',
-  body: '申し送りの本文を2文字以上入力すると検索します。',
-  reporter: '記入者の氏名を2文字以上入力すると、その方が書いた申し送りを検索します。',
+  body: '申し送りの本文を2文字以上入力すると検索します。重要度を選ぶと、語を入れなくてもその重要度の申し送りを新しい順に表示します。',
+  reporter: '記入者の氏名を2文字以上入力すると、その方が書いた申し送りを検索します。重要度を選ぶと、語を入れなくてもその重要度の申し送りを新しい順に表示します。',
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -424,7 +433,9 @@ export function SearchPage({ residents: residentsProp }: SearchPageProps = {}) {
   useEffect(() => {
     if (target === 'resident') return
     const q = query.trim()
-    if (charCount(q) < MIN_QUERY) {
+    const level = importanceFilter(importance)
+    // 語が空で重要度を選んでいる時は、重要度だけで引く（1文字だけの時は従来どおり2文字を待つ）
+    if (!(charCount(q) >= MIN_QUERY || (q === '' && level !== undefined))) {
       setResult(IDLE_RESULT)
       return
     }
@@ -438,7 +449,7 @@ export function SearchPage({ residents: residentsProp }: SearchPageProps = {}) {
       target,
       fromIso: periodFromIso(period, toIso),
       toIso,
-      importance: importance === 'all' ? undefined : (importance as Importance),
+      importance: level,
       shift: shift === 'all' ? undefined : (shift as Shift),
       limit: FETCH_LIMIT,
     })
@@ -495,7 +506,8 @@ export function SearchPage({ residents: residentsProp }: SearchPageProps = {}) {
   const showFilters = target !== 'resident'
   const minLen = target === 'resident' ? MIN_RESIDENT_QUERY : MIN_QUERY
   const typed = target === 'resident' ? residentQuery : query
-  const tooShort = charCount(typed) < minLen
+  const importanceOnly = target !== 'resident' && typed === '' && importanceFilter(importance) !== undefined
+  const tooShort = charCount(typed) < minLen && !importanceOnly
 
   return (
     <div className="mx-auto w-full max-w-2xl pb-8">
