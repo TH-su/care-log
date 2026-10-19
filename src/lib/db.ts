@@ -173,7 +173,7 @@ const OUTING_KINDS: readonly OutingKind[] = ['outing', 'overnight']
 
 // select する列は types.ts と一致させる（* を使わず、監査列・import_key を端末へ持ち出さない）
 const RESIDENT_COLS = 'id,source_id,name,kana,room,gender,care_level,active,needs_review,note_alias'
-const STAFF_COLS = 'id,name,active'
+const STAFF_COLS = 'id,name,active,hire_order'
 // created_at（バイタル・水分・申し送り）は、夜勤明けに前日の欄へ書いた記録の「翌」の判定に使うので読む
 // （F34・2026-10-10。行の型には載せず nextMorning.ts に id で控える。与薬の MED_ADMIN_COLS と同じ扱い）
 const VITAL_COLS =
@@ -712,7 +712,8 @@ function normalizeStaff(row: unknown): Staff | null {
   const id = idNum(r.id)
   const name = str(r.name)
   if (id === null || name === null) return null
-  return { id, name, active: bool(r.active, true) }
+  const ho = num(r.hire_order)
+  return { id, name, active: bool(r.active, true), hire_order: ho !== null && Number.isInteger(ho) ? ho : null }
 }
 
 function normalizeVital(row: unknown): Vital | null {
@@ -4555,6 +4556,8 @@ export async function fetchStaff(): Promise<Staff[]> {
     .from('staff')
     .select(STAFF_COLS)
     .eq('active', true)
+    // 入職順（0035・2026-10-19 本人指示）。入職順の無い職員（手で登録した方など）は末尾に名前の順
+    .order('hire_order', { ascending: true, nullsFirst: false })
     .order('name', { ascending: true })
     .limit(MAX_ROWS)) as Res<unknown>
   if (res.error !== null) throw readError(res)
@@ -4573,6 +4576,8 @@ export async function fetchAllStaff(): Promise<Staff[]> {
   const res = (await sb
     .from('staff')
     .select(STAFF_COLS)
+    // 入職順（0035・2026-10-19 本人指示）。入職順の無い職員（手で登録した方など）は末尾に名前の順
+    .order('hire_order', { ascending: true, nullsFirst: false })
     .order('name', { ascending: true })
     .limit(MAX_ROWS)) as Res<unknown>
   if (res.error !== null) throw readError(res)

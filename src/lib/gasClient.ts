@@ -56,6 +56,8 @@ export interface RosterEntry {
 export interface StaffEntry {
   name: string
   active: boolean
+  /** 入職順（シフト作成アプリの職員の一覧の order）。数でなければ null（並べる時は末尾） */
+  order: number | null
 }
 
 /** マスタ同期1系列分の増減計数（M-024: 増減を両方向とも数える） */
@@ -313,8 +315,9 @@ function projectStaffNames(raw: unknown): StaffEntry[] | null {
      *   氏名で照合するため、名前が消えると誰が書いたか分からなくなる。
      */
     const retired = rec.active === false || pickText(rec.status) === '退職'
-    // 氏名と在籍状態だけを射影（rules/empCode/employment/qualifications 等は取り込まない）
-    names.push({ name, active: !retired })
+    // 氏名・在籍状態・入職順（order）だけを射影（rules/empCode/employment/qualifications 等は取り込まない）
+    const order = typeof rec.order === 'number' && Number.isFinite(rec.order) ? Math.trunc(rec.order) : null
+    names.push({ name, active: !retired, order })
   }
   return names
 }
@@ -623,7 +626,10 @@ export interface StaffSyncPlan {
  * manual=true は人が手で登録した職員（シフト名簿に載らない事務職員など）。
  * 名簿に居ないからといって退職扱いにしない（2026-08-29 追加）
  */
-export function planStaffSync(rows: Array<Staff & { manual?: boolean }>, names: StaffEntry[]): StaffSyncPlan {
+export function planStaffSync(
+  rows: Array<Staff & { manual?: boolean; hire_order?: number | null }>,
+  names: StaffEntry[],
+): StaffSyncPlan {
   const before = rows.filter((r) => r.active).length
   const base = rows.filter((r) => r.active && r.manual !== true).length
 
@@ -644,16 +650,20 @@ export function planStaffSync(rows: Array<Staff & { manual?: boolean }>, names: 
     const cur = byName.get(normName(e.name))
     if (cur) {
       matched.add(cur.id)
+      const patch: Record<string, unknown> = {}
       if (!cur.active && e.active) {
-        updates.push({ id: cur.id, patch: { active: true } })
+        patch.active = true
         reactivated++
       } else if (cur.active && !e.active) {
-        updates.push({ id: cur.id, patch: { active: false } }) // 退職。行は残す＝過去の記入者表示は不変
+        patch.active = false // 退職。行は残す＝過去の記入者表示は不変
         retiredByRoster++
       }
+      // 入職順（2026-10-19）: 名簿に数がある時だけ書く（数が無い名簿で既にある値を空に戻さない＝空上書き保護）
+      if (e.order !== null && e.order !== (cur.hire_order ?? null)) patch.hire_order = e.order
+      if (Object.keys(patch).length > 0) updates.push({ id: cur.id, patch })
       continue
     }
-    inserts.push({ name: e.name, active: e.active })
+    inserts.push(e.order !== null ? { name: e.name, active: e.active, hire_order: e.order } : { name: e.name, active: e.active })
   }
 
   // 手で登録した職員（事務職員など）はシフト名簿に載らないのが正常なので、
@@ -666,13 +676,13 @@ export function planStaffSync(rows: Array<Staff & { manual?: boolean }>, names: 
 }
 
 /** 職員の表を読む（同期の計画の材料）。読み取り上限に達したら中止する */
-async function readStaffRows(): Promise<Array<Staff & { manual?: boolean }>> {
+async function readStaffRows(): Promise<Array<Staff & { manual?: boolean; hire_order?: number | null }>> {
   const { data, error } = await supabase
     .from('staff')
-    .select('id, name, active, manual')
+    .select('id, name, active, manual, hire_order')
     .limit(MAX_MASTER_ROWS)
   if (error) throw dbError('職員マスタの現在値を読み取れませんでした')
-  const rows = (data ?? []) as Array<Staff & { manual?: boolean }>
+  const rows = (data ?? []) as Array<Staff & { manual?: boolean; hire_order?: number | null }>
   if (rows.length >= MAX_MASTER_ROWS) {
     throw new Error(
       '職員マスタの件数が想定を超えています。安全のため同期を中止しました。開発者に連絡してください（データは変更していません）。',

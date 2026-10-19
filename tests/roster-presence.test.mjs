@@ -857,3 +857,31 @@ describe('F52 カルテの体重の端末差（wm_ の id から当てる）', {
     assert.equal(s.byResident.has(1), false)
   })
 })
+
+describe('職員を選ぶ欄は入職順（シフト作成アプリの order・0035・2026-10-19）', { skip: G === null }, () => {
+  it('名簿の order を入職順として取り込み、変わった時だけ書く。数が無い名簿では既にある値を空に戻さない', () => {
+    const rows = [
+      { id: 1, name: '職員A', active: true, hire_order: 3 },
+      { id: 2, name: '職員B', active: true, hire_order: null },
+      { id: 3, name: '職員C', active: true, hire_order: 7 },
+    ]
+    const plan = G.planStaffSync(rows, [
+      { name: '職員A', active: true, order: 3 },
+      { name: '職員B', active: true, order: 5 },
+      { name: '職員C', active: true, order: null },
+      { name: '職員D', active: true, order: 9 },
+    ])
+    assert.deepEqual(plan.updates, [{ id: 2, patch: { hire_order: 5 } }])
+    assert.deepEqual(plan.inserts, [{ name: '職員D', active: true, hire_order: 9 }])
+  })
+  it('退職と入職順の変更が同時なら1回の更新にまとめる', () => {
+    const plan = G.planStaffSync([{ id: 1, name: '職員A', active: true, hire_order: 1 }], [{ name: '職員A', active: false, order: 2 }])
+    assert.deepEqual(plan.updates, [{ id: 1, patch: { active: false, hire_order: 2 } }])
+    assert.equal(plan.retiredByRoster, 1)
+  })
+  it('職員の読み取りは入職順（空は末尾）→名前の順で並べる', () => {
+    const src = readFileSync(new URL('../src/lib/db.ts', import.meta.url), 'utf8')
+    assert.equal((src.match(/\.order\('hire_order', \{ ascending: true, nullsFirst: false \}\)\s*\n\s*\.order\('name', \{ ascending: true \}\)/g) ?? []).length, 2)
+    assert.match(src, /const STAFF_COLS = 'id,name,active,hire_order'/)
+  })
+})

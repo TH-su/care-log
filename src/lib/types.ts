@@ -109,6 +109,8 @@ export interface Staff {
   id: number
   name: string
   active: boolean
+  /** 入職順（シフト作成アプリの職員の一覧の order・0035）。空はシフトの名簿に居ない職員。旧サーバー・旧経路では省略 */
+  hire_order?: number | null
 }
 
 export interface Vital {
