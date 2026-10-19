@@ -173,7 +173,7 @@ const OUTING_KINDS: readonly OutingKind[] = ['outing', 'overnight']
 
 // select する列は types.ts と一致させる（* を使わず、監査列・import_key を端末へ持ち出さない）
 const RESIDENT_COLS = 'id,source_id,name,kana,room,gender,care_level,active,needs_review,note_alias'
-const STAFF_COLS = 'id,name,active,hire_order,hire_date'
+const STAFF_COLS = 'id,name,active,hire_order,hire_date,hire_date_manual'
 // created_at（バイタル・水分・申し送り）は、夜勤明けに前日の欄へ書いた記録の「翌」の判定に使うので読む
 // （F34・2026-10-10。行の型には載せず nextMorning.ts に id で控える。与薬の MED_ADMIN_COLS と同じ扱い）
 const VITAL_COLS =
@@ -714,7 +714,14 @@ function normalizeStaff(row: unknown): Staff | null {
   if (id === null || name === null) return null
   const ho = num(r.hire_order)
   const hd = typeof r.hire_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(r.hire_date) ? r.hire_date : null
-  return { id, name, active: bool(r.active, true), hire_order: ho !== null && Number.isInteger(ho) ? ho : null, hire_date: hd }
+  return {
+    id,
+    name,
+    active: bool(r.active, true),
+    hire_order: ho !== null && Number.isInteger(ho) ? ho : null,
+    hire_date: hd,
+    hire_date_manual: r.hire_date_manual === true,
+  }
 }
 
 function normalizeVital(row: unknown): Vital | null {
@@ -4547,6 +4554,37 @@ export async function setResidentNoteAlias(
   }
   const row = normalizeResident(res.data)
   if (row === null) throw new DbError('server', MSG.broken)
+  return row
+}
+
+/**
+ * 職員の入職日を手で決める（0037・2026-10-19 本人指示）。設定画面の「職員の入職日（並び順）」から、事務・管理者の
+ * ログインの時だけ呼ぶ。date を入れると手で入れた印を付け、名簿の同期はこの行の入職日を上書きしない。
+ * null は〔職員マスタに戻す〕＝入職日を空にして印を外す（次の名簿の同期で職員マスタの日付が入る）。
+ * 送信待ちには積まない（事務所の稀な操作。圏外ならエラーで止め、画面の入力は残す）
+ */
+export async function saveStaffHireDate(id: number, date: string | null): Promise<Staff> {
+  assertBuildCurrent()
+  if (date !== null && !/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new DbError('server', '入職日は 年-月-日 の形で入れてください。')
+  const sb = await getClient()
+  const res = (await sb
+    .from('staff')
+    .update({ hire_date: date, hire_date_manual: date !== null })
+    .eq('id', id)
+    .select(STAFF_COLS)
+    .maybeSingle()) as Res<unknown>
+  if (res.error !== null) {
+    if (isAuthFail(res)) {
+      fireAuthExpired()
+      throw new DbError('auth', MSG.authWrite)
+    }
+    if (isTransient(res)) throw new DbError('network', MSG.networkWrite)
+    throw writeError(res)
+  }
+  if (res.data === null) throw new DbError('server', '職員が見つかりませんでした（ほかの端末で変わった可能性があります）。一覧を読み直してください。')
+  const row = normalizeStaff(res.data)
+  if (row === null) throw new DbError('server', MSG.broken)
+  notifyMastersChanged()
   return row
 }
 

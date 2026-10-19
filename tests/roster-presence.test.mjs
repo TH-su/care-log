@@ -883,7 +883,7 @@ describe('職員を選ぶ欄は入職順（シフト作成アプリの order・0
     const src = readFileSync(new URL('../src/lib/db.ts', import.meta.url), 'utf8')
     assert.equal((src.match(/\.order\('hire_date', \{ ascending: true, nullsFirst: false \}\)\s*\n\s*\.order\('name', \{ ascending: true \}\)/g) ?? []).length, 2)
     assert.doesNotMatch(src, /\.order\('hire_order'/)
-    assert.match(src, /const STAFF_COLS = 'id,name,active,hire_order,hire_date'/)
+    assert.match(src, /const STAFF_COLS = 'id,name,active,hire_order,hire_date(,hire_date_manual)?'/)
   })
 })
 
@@ -1019,5 +1019,27 @@ describe('入職日の照合: 退職した同じ氏名・同じ姓の方と、�
   })
   it('結果の一文に分からない方の氏名を出す', () => {
     assert.match(G.hireDateSyncText({ status: 'done', active: 3, known: 1, written: 0, unknownNames: ['職員X', '職員Y'] }), /分からない 2 名（職員X・職員Y）は/)
+  })
+})
+
+describe('入職日を手で決める（0037・2026-10-19）', { skip: G === null }, () => {
+  it('手で入れた入職日（hire_date_manual）は名簿の同期で上書きしない', () => {
+    const dates = G.projectStaffHireDates({ ok: true, rows: [{ name: '甲山 一郎', hireDate: '2015-04-01', retireDate: '' }] }, '2026-10-19')
+    const plan = G.planStaffHireDates([{ id: 1, name: '甲山 一郎', hire_date: '2001-04-01', hire_date_manual: true }], dates)
+    assert.deepEqual(plan, [])
+    const plan2 = G.planStaffHireDates([{ id: 1, name: '甲山 一郎', hire_date: null, hire_date_manual: false }], dates)
+    assert.deepEqual(plan2, [{ id: 1, hire_date: '2015-04-01' }])
+  })
+  it('db は入職日と手で入れた印を読み、保存の口を持つ。設定画面は欄を置き、入力は事務・管理者だけ', () => {
+    const db = readFileSync(new URL('../src/lib/db.ts', import.meta.url), 'utf8')
+    assert.match(db, /const STAFF_COLS = 'id,name,active,hire_order,hire_date,hire_date_manual'/)
+    assert.match(db, /export async function saveStaffHireDate\(id: number, date: string \| null\): Promise<Staff>/)
+    assert.match(db, /update\(\{ hire_date: date, hire_date_manual: date !== null \}\)/)
+    const comp = readFileSync(new URL('../src/components/StaffHireDates.tsx', import.meta.url), 'utf8')
+    assert.match(comp, /const canEdit = canEditTargets\(role\)/)
+    assert.match(comp, /\{canEdit \? \(/)
+    assert.doesNotMatch(comp, /localStorage/)
+    const settings = readFileSync(new URL('../src/pages/SettingsPage.tsx', import.meta.url), 'utf8')
+    assert.match(settings, /<StaffHireDates \/>/)
   })
 })

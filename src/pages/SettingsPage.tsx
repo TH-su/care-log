@@ -57,6 +57,7 @@ import {
 } from '../lib/stoppedOps'
 import { UnsentNotes } from '../components/UnsentNotes'
 import { MasterSyncStatus } from '../components/MasterSync'
+import { StaffHireDates } from '../components/StaffHireDates'
 import {
   Chip,
   ConfirmDialog,
@@ -1376,6 +1377,9 @@ export function SettingsPage() {
       </SectionCard>
 
       {/* ③ 要確認（needs_review） */}
+      {/* 職員の入職日（並び順）。結び付かなかった職員の入職日を事務・管理者が手で決める（2026-10-19） */}
+      <StaffHireDates />
+
       <SectionCard title="要確認の利用者">
         <p className="text-base text-ink2">
           名簿と一覧の照合で保留になった方です。氏名の書き換えは自動では行いません（部屋・介護度は名簿どおりに直します）。

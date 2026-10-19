@@ -679,7 +679,7 @@ export function planStaffSync(
 async function readStaffRows(): Promise<Array<Staff & { manual?: boolean; hire_order?: number | null }>> {
   const { data, error } = await supabase
     .from('staff')
-    .select('id, name, active, manual, hire_order, hire_date')
+    .select('id, name, active, manual, hire_order, hire_date, hire_date_manual')
     .limit(MAX_MASTER_ROWS)
   if (error) throw dbError('職員マスタの現在値を読み取れませんでした')
   const rows = (data ?? []) as Array<Staff & { manual?: boolean; hire_order?: number | null }>
@@ -822,7 +822,7 @@ export function projectStaffHireDates(raw: unknown, today: string = new Date().t
 
 /** 職員の行へ書く入職日の計画（純関数）。職員マスタに日付がある時だけ書く（空で上書きしない）。同じ値なら書かない */
 export function planStaffHireDates(
-  rows: Array<{ id: number; name: string; hire_date?: string | null }>,
+  rows: Array<{ id: number; name: string; hire_date?: string | null; hire_date_manual?: boolean }>,
   dates: Map<string, StaffMasterHire>,
 ): { id: number; hire_date: string }[] {
   const out: { id: number; hire_date: string }[] = []
@@ -846,6 +846,7 @@ export function planStaffHireDates(
     return rivals.length === 1 ? m : null
   }
   for (const r of rows) {
+    if (r.hire_date_manual === true) continue // 設定画面で手で入れた入職日は上書きしない（0037）
     const key = hireNameKey(r.name)
     if (!key || (seen.get(key) ?? 0) > 1) continue // ケアログ側で同じ氏名が2人以上＝結ばない
     let d = dates.get(key)?.hireDate

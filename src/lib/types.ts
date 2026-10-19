@@ -113,6 +113,8 @@ export interface Staff {
   hire_order?: number | null
   /** 入職日（職員マスタの入職日・0036・YYYY-MM-DD）。選ぶ欄はこの順。空は職員マスタで結べない職員。旧サーバー・旧経路では省略 */
   hire_date?: string | null
+  /** 入職日を設定画面で手で入れた（0037）。名簿の同期はこの行の入職日を上書きしない */
+  hire_date_manual?: boolean
 }
 
 export interface Vital {
