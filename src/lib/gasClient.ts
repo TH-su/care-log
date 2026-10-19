@@ -679,7 +679,7 @@ export function planStaffSync(
 async function readStaffRows(): Promise<Array<Staff & { manual?: boolean; hire_order?: number | null }>> {
   const { data, error } = await supabase
     .from('staff')
-    .select('id, name, active, manual, hire_order')
+    .select('id, name, active, manual, hire_order, hire_date')
     .limit(MAX_MASTER_ROWS)
   if (error) throw dbError('職員マスタの現在値を読み取れませんでした')
   const rows = (data ?? []) as Array<Staff & { manual?: boolean; hire_order?: number | null }>
@@ -721,6 +721,90 @@ async function logMasterSync(source: 'residents' | 'staff', r: SyncResult): Prom
     renamed: r.renamed,
   })
   if (error) console.warn('[gasClient] マスタ同期の記録（master_sync_log）に失敗しました')
+}
+
+// ───────────────────────── 職員の入職日（職員マスタ・0036・2026-10-19） ─────────────────────────
+
+/** 職員マスタの接続設定（職員マスタの画面が localStorage の stfm_cfg に置く {url, token}）。読むだけ。無い・壊れている時は null */
+export function readStaffMasterConfig(): GasConfig | null {
+  let raw: string | null = null
+  try {
+    raw = localStorage.getItem('stfm_cfg')
+  } catch {
+    return null
+  }
+  if (!raw) return null
+  let o: unknown
+  try {
+    o = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (!o || typeof o !== 'object') return null
+  const url = typeof (o as { url?: unknown }).url === 'string' ? (o as { url: string }).url.trim() : ''
+  const token = typeof (o as { token?: unknown }).token === 'string' ? (o as { token: string }).token.trim() : ''
+  if (!url || !token || !GAS_ENDPOINT_RE.test(url)) return null
+  return { url, token }
+}
+
+/**
+ * 職員マスタの一覧（action 'list'）から「氏名 → 入職日」だけを取り出す（ほかの列は持たない・残さない）。
+ * 同じ氏名が2人以上いる名前は結べないので外す（取り違えを避ける）。入職日が YYYY-MM-DD でない行は外す
+ */
+export function projectStaffHireDates(raw: unknown): Map<string, string> | null {
+  const rows = raw && typeof raw === 'object' && Array.isArray((raw as { rows?: unknown }).rows) ? (raw as { rows: unknown[] }).rows : null
+  if (!rows) return null
+  const out = new Map<string, string>()
+  const dup = new Set<string>()
+  for (const item of rows) {
+    if (!item || typeof item !== 'object') continue
+    const rec = item as Record<string, unknown>
+    const name = pickText(rec.name)
+    if (!name) continue
+    const key = normName(name)
+    if (!key) continue
+    if (out.has(key) || dup.has(key)) {
+      out.delete(key)
+      dup.add(key)
+      continue
+    }
+    const d = typeof rec.hireDate === 'string' ? rec.hireDate.trim() : ''
+    if (/^\d{4}-\d{2}-\d{2}$/.test(d)) out.set(key, d)
+  }
+  return out
+}
+
+/** 職員の行へ書く入職日の計画（純関数）。職員マスタに日付がある時だけ書く（空で上書きしない）。同じ値なら書かない */
+export function planStaffHireDates(
+  rows: Array<{ id: number; name: string; hire_date?: string | null }>,
+  dates: Map<string, string>,
+): { id: number; hire_date: string }[] {
+  const out: { id: number; hire_date: string }[] = []
+  const seen = new Map<string, number>()
+  for (const r of rows) {
+    const key = normName(r.name)
+    if (key) seen.set(key, (seen.get(key) ?? 0) + 1)
+  }
+  for (const r of rows) {
+    const key = normName(r.name)
+    if (!key || (seen.get(key) ?? 0) > 1) continue // ケアログ側で同じ氏名が2人以上＝結ばない
+    const d = dates.get(key)
+    if (d !== undefined && d !== (r.hire_date ?? null)) out.push({ id: r.id, hire_date: d })
+  }
+  return out
+}
+
+/** 職員マスタの入職日を読んで職員の表に書く。書いた件数を返す（接続設定が無い・読めない時は 0） */
+async function syncStaffHireDates(): Promise<number> {
+  const cfg = readStaffMasterConfig()
+  if (!cfg) return 0
+  const out = await gasPost<{ rows?: unknown }>(cfg.url, { action: 'list' }, cfg.token)
+  if (!out) return 0
+  const dates = projectStaffHireDates(out)
+  if (!dates || dates.size === 0) return 0
+  const plan = planStaffHireDates(await readStaffRows(), dates)
+  for (const p of plan) await updateStaffRow(p.id, { hire_date: p.hire_date })
+  return plan.length
 }
 
 // ───────────────────────── 名簿から一度に外れる人数の歯止め（F43） ─────────────────────────
@@ -870,8 +954,16 @@ export async function syncMasters(opts: SyncOptions = {}): Promise<MasterSyncOut
   if (residents) await logMasterSync('residents', residents)
   const staff = staffPlan ? await executeStaffPlan(staffPlan) : null
   if (staff) await logMasterSync('staff', staff)
+  // 入職日（0036・2026-10-19）: 職員マスタの接続設定がある端末だけ、入職日を読んで氏名で結べた職員に書く。
+  // 失敗しても同期全体は止めない（入職日は並び順にだけ使う。読めなければ今の値のまま）
+  let hireDates = 0
+  try {
+    hireDates = await syncStaffHireDates()
+  } catch {
+    hireDates = 0
+  }
   // 反映した分を、開いている画面（App の職員名簿など）へ知らせる（F47）。知らせる先が無くても何も起きない
-  if (residents || staff) notifyMastersChanged()
+  if (residents || staff || hireDates > 0) notifyMastersChanged()
 
   if (!residents) {
     throw new Error(

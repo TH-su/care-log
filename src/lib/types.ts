@@ -111,6 +111,8 @@ export interface Staff {
   active: boolean
   /** 入職順（シフト作成アプリの職員の一覧の order・0035）。空はシフトの名簿に居ない職員。旧サーバー・旧経路では省略 */
   hire_order?: number | null
+  /** 入職日（職員マスタの入職日・0036・YYYY-MM-DD）。選ぶ欄はこの順。空は職員マスタで結べない職員。旧サーバー・旧経路では省略 */
+  hire_date?: string | null
 }
 
 export interface Vital {

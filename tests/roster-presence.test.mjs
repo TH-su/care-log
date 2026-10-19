@@ -879,9 +879,53 @@ describe('職員を選ぶ欄は入職順（シフト作成アプリの order・0
     assert.deepEqual(plan.updates, [{ id: 1, patch: { active: false, hire_order: 2 } }])
     assert.equal(plan.retiredByRoster, 1)
   })
-  it('職員の読み取りは入職順（空は末尾）→名前の順で並べる', () => {
+  it('職員の読み取りは入職日の順（空は末尾）→名前の順で並べる（0036。0035 の order は並びに使わない）', () => {
     const src = readFileSync(new URL('../src/lib/db.ts', import.meta.url), 'utf8')
-    assert.equal((src.match(/\.order\('hire_order', \{ ascending: true, nullsFirst: false \}\)\s*\n\s*\.order\('name', \{ ascending: true \}\)/g) ?? []).length, 2)
-    assert.match(src, /const STAFF_COLS = 'id,name,active,hire_order'/)
+    assert.equal((src.match(/\.order\('hire_date', \{ ascending: true, nullsFirst: false \}\)\s*\n\s*\.order\('name', \{ ascending: true \}\)/g) ?? []).length, 2)
+    assert.doesNotMatch(src, /\.order\('hire_order'/)
+    assert.match(src, /const STAFF_COLS = 'id,name,active,hire_order,hire_date'/)
+  })
+})
+
+describe('職員の入職日は職員マスタから取る（0036・2026-10-19）', { skip: G === null }, () => {
+  it('職員マスタの接続設定（stfm_cfg）を読むだけ。無い・壊れている・URL の形が違う時は null', () => {
+    localStorage.removeItem('stfm_cfg')
+    assert.equal(G.readStaffMasterConfig(), null)
+    localStorage.setItem('stfm_cfg', '{x')
+    assert.equal(G.readStaffMasterConfig(), null)
+    localStorage.setItem('stfm_cfg', JSON.stringify({ url: 'https://example.com/x', token: 't' }))
+    assert.equal(G.readStaffMasterConfig(), null)
+    localStorage.setItem('stfm_cfg', JSON.stringify({ url: 'https://script.google.com/macros/s/AKfyc_x/exec', token: 't' }))
+    assert.deepEqual(G.readStaffMasterConfig(), { url: 'https://script.google.com/macros/s/AKfyc_x/exec', token: 't' })
+    localStorage.removeItem('stfm_cfg')
+  })
+  it('一覧から氏名→入職日だけを取り出す。同じ氏名が2人なら外す・日付の形が違えば外す', () => {
+    const m = G.projectStaffHireDates({
+      ok: true,
+      rows: [
+        { name: '職員A', hireDate: '2020-04-01', birthDate: '1980-01-01' },
+        { name: '職員 B', hireDate: '2018-10-15' },
+        { name: '職員C', hireDate: '2021-01-01' },
+        { name: '職員C', hireDate: '2022-02-02' },
+        { name: '職員D', hireDate: 'R2.4.1' },
+      ],
+    })
+    assert.equal(m.size, 2)
+    assert.deepEqual([...m.values()].sort(), ['2018-10-15', '2020-04-01'])
+    assert.equal(G.projectStaffHireDates({ ok: true }), null)
+  })
+  it('結べた職員にだけ書く。同じ日付なら書かない・職員マスタに無ければ空にしない・ケアログで同じ氏名が2人なら書かない', () => {
+    const dates = G.projectStaffHireDates({ ok: true, rows: [{ name: '職員A', hireDate: '2020-04-01' }, { name: '職員B', hireDate: '2018-10-15' }, { name: '職員E', hireDate: '2019-01-01' }] })
+    const plan = G.planStaffHireDates(
+      [
+        { id: 1, name: '職員A', hire_date: null },
+        { id: 2, name: '職員B', hire_date: '2018-10-15' },
+        { id: 3, name: '職員C', hire_date: '2017-01-01' },
+        { id: 4, name: '職員E', hire_date: null },
+        { id: 5, name: '職員E', hire_date: null },
+      ],
+      dates,
+    )
+    assert.deepEqual(plan, [{ id: 1, hire_date: '2020-04-01' }])
   })
 })
