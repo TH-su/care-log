@@ -501,7 +501,7 @@ export function SettingsPage() {
 
   // マスタ同期
   const [syncing, setSyncing] = useState(false)
-  const [syncResult, setSyncResult] = useState<{ residents: SyncResult; staff: SyncResult } | null>(null)
+  const [syncResult, setSyncResult] = useState<{ residents: SyncResult; staff: SyncResult; hireText?: string } | null>(null)
   const [syncError, setSyncError] = useState<string | null>(null)
   /**
    * 名簿から一度に外れる人数が多くて止まった時の人数（F43）。確かめた後にこの人数を渡して続ける。
@@ -921,12 +921,12 @@ export function SettingsPage() {
     setReviewMsg(null)
     try {
       // 動的 import: 接続未設定でもこの画面のモジュール評価が通るようにする
-      const { syncMasters } = await import('../lib/gasClient')
+      const { syncMasters, hireDateSyncText } = await import('../lib/gasClient')
       const res = await syncMasters(confirmedDrop === undefined ? undefined : { confirmedDrop })
       if (res === 'unconfigured') {
         setSyncError(MSG.unconfigured)
       } else {
-        setSyncResult({ residents: res.residents, staff: res.staff })
+        setSyncResult({ residents: res.residents, staff: res.staff, hireText: hireDateSyncText(res.hireDates) })
         // 要確認の行の「名簿の氏名」（F51）。画面の state だけに持つ
         setReviews(Array.isArray(res.reviews) ? res.reviews : [])
         setResidentsReload((n) => n + 1) // 要確認の一覧を取り直す
@@ -1362,6 +1362,12 @@ export function SettingsPage() {
           <div className="mt-3 space-y-2">
             <SyncResultBlock title="利用者" result={syncResult.residents} />
             <SyncResultBlock title="職員" result={syncResult.staff} />
+            {syncResult.hireText ? (
+              <p className="text-sm text-ink" role="status">
+                <span className="font-bold">入職日（職員を選ぶ欄の並び）：</span>
+                {syncResult.hireText}
+              </p>
+            ) : null}
             <p className="text-sm text-ink2">
               「要確認」は、名簿のIDと氏名が食い違っていて自動では反映できなかった件数です。下の「要確認の利用者」で内容を確認してください。
             </p>

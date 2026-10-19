@@ -195,9 +195,9 @@ async function gasPostRead<T>(
  * GAS へ POST する（統合GAS の pull は POST のみ。text/plain でプリフライトを避ける）。
  * body に載せるのは読み取り action と token だけ。書込 action を渡す経路は作らない。
  */
-async function gasPost<T>(url: string, body: object, token: string): Promise<T | null> {
+async function gasPost<T>(url: string, body: object, token: string, timeoutMs: number = TIMEOUT_MS): Promise<T | null> {
   const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS)
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
   try {
     const res = await fetch(url, {
       method: 'POST',
@@ -785,26 +785,86 @@ export function planStaffHireDates(
     const key = normName(r.name)
     if (key) seen.set(key, (seen.get(key) ?? 0) + 1)
   }
+  // 姓だけの名前（シフトの名簿に「坂本」のように姓だけで載っている職員）の受け皿（2026-10-19）:
+  // 完全一致が無い時だけ、職員マスタの氏名のうち「その名前で始まる人がちょうど1人」で、かつケアログ側にも
+  // その職員マスタの氏名で始まる名前の人が1人しかいない時に結ぶ（2人以上なら取り違えを避けて結ばない）
+  const masterKeys = [...dates.keys()]
+  const careKeys = [...seen.keys()]
+  const surnameMatch = (key: string): string | null => {
+    const hits = masterKeys.filter((m) => m !== key && m.startsWith(key))
+    if (hits.length !== 1) return null
+    const m = hits[0]
+    const rivals = careKeys.filter((c) => m.startsWith(c) || c === m)
+    return rivals.length === 1 ? m : null
+  }
   for (const r of rows) {
     const key = normName(r.name)
     if (!key || (seen.get(key) ?? 0) > 1) continue // ケアログ側で同じ氏名が2人以上＝結ばない
-    const d = dates.get(key)
+    let d = dates.get(key)
+    if (d === undefined) {
+      const m = surnameMatch(key)
+      if (m !== null) d = dates.get(m)
+    }
     if (d !== undefined && d !== (r.hire_date ?? null)) out.push({ id: r.id, hire_date: d })
   }
   return out
 }
 
-/** 職員マスタの入職日を読んで職員の表に書く。書いた件数を返す（接続設定が無い・読めない時は 0） */
-async function syncStaffHireDates(): Promise<number> {
+/**
+ * 入職日の取り込みの結果（同期の結果に出す・2026-10-19 本人確認「依頼前と変わっていない」を受けて足した）。
+ * 何が起きたかが画面に出ないと、接続設定の無い端末で同期した・読めなかった、の見分けがつかないため
+ */
+export interface HireDateSync {
+  status: 'no-config' | 'read-failed' | 'no-rows' | 'done'
+  /** 在籍の職員の人数（ケアログ側） */
+  active: number
+  /** そのうち入職日が分かった人数（今回書いた分と、前から同じ値だった分の合計） */
+  known: number
+  /** 今回書いた人数 */
+  written: number
+}
+
+/** 職員マスタの一覧の待ち時間（職員マスタの画面と同じ45秒。名簿の15秒では間に合わないことがある） */
+export const STAFF_MASTER_TIMEOUT_MS = 45_000
+
+/** 在籍の職員のうち入職日が分かる人数（純関数・試験用） */
+export function countKnownHireDates(
+  rows: Array<{ id: number; name: string; active?: boolean; hire_date?: string | null }>,
+  written: { id: number; hire_date: string }[],
+): { active: number; known: number } {
+  const w = new Set(written.map((x) => x.id))
+  const act = rows.filter((r) => r.active !== false)
+  return { active: act.length, known: act.filter((r) => w.has(r.id) || (r.hire_date ?? null) !== null).length }
+}
+
+/** 職員マスタの入職日を読んで職員の表に書く（接続設定が無い・読めない時は書かずに理由を返す） */
+async function syncStaffHireDates(): Promise<HireDateSync> {
   const cfg = readStaffMasterConfig()
-  if (!cfg) return 0
-  const out = await gasPost<{ rows?: unknown }>(cfg.url, { action: 'list' }, cfg.token)
-  if (!out) return 0
+  if (!cfg) return { status: 'no-config', active: 0, known: 0, written: 0 }
+  const out = await gasPost<{ rows?: unknown }>(cfg.url, { action: 'list' }, cfg.token, STAFF_MASTER_TIMEOUT_MS)
+  if (!out) return { status: 'read-failed', active: 0, known: 0, written: 0 }
   const dates = projectStaffHireDates(out)
-  if (!dates || dates.size === 0) return 0
-  const plan = planStaffHireDates(await readStaffRows(), dates)
+  const rows = await readStaffRows()
+  if (!dates || dates.size === 0) return { status: 'no-rows', ...countKnownHireDates(rows, []), written: 0 }
+  const plan = planStaffHireDates(rows, dates)
   for (const p of plan) await updateStaffRow(p.id, { hire_date: p.hire_date })
-  return plan.length
+  return { status: 'done', ...countKnownHireDates(rows, plan), written: plan.length }
+}
+
+/** 入職日の取り込みの結果を、設定画面に出す一文にする（純関数） */
+export function hireDateSyncText(r: HireDateSync | null | undefined): string {
+  if (!r) return ''
+  if (r.status === 'no-config') {
+    return 'この端末には職員マスタの接続設定がないため、入職日は読みませんでした。職員マスタのアプリを使っている端末（事務所PC など）で〔マスタを同期〕を押してください。'
+  }
+  if (r.status === 'read-failed') {
+    return '職員マスタを読めませんでした（通信・合言葉・応答の遅れ）。入職日は変えていません。時間をおいてもう一度〔マスタを同期〕を押してください。'
+  }
+  if (r.status === 'no-rows') return '職員マスタに入職日のある職員が見つかりませんでした。入職日は変えていません。'
+  const unknown = r.active - r.known
+  return `在籍 ${r.active} 名のうち ${r.known} 名の入職日が分かりました（今回書いた ${r.written} 名）。${
+    unknown > 0 ? `分からない ${unknown} 名（職員マスタと氏名の書き方が違う・同じ氏名が2人いる）は、末尾に名前の順で並びます。` : ''
+  }`
 }
 
 // ───────────────────────── 名簿から一度に外れる人数の歯止め（F43） ─────────────────────────
@@ -871,6 +931,8 @@ export interface MasterSyncOutcome {
   staff: SyncResult
   /** 氏名が名簿と食い違って保留（要確認）にした方。localStorage・console には残さないこと */
   reviews: RosterReview[]
+  /** 入職日の取り込みの結果（0036） */
+  hireDates?: HireDateSync
 }
 
 export interface SyncOptions {
@@ -956,14 +1018,14 @@ export async function syncMasters(opts: SyncOptions = {}): Promise<MasterSyncOut
   if (staff) await logMasterSync('staff', staff)
   // 入職日（0036・2026-10-19）: 職員マスタの接続設定がある端末だけ、入職日を読んで氏名で結べた職員に書く。
   // 失敗しても同期全体は止めない（入職日は並び順にだけ使う。読めなければ今の値のまま）
-  let hireDates = 0
+  let hireDates: HireDateSync
   try {
     hireDates = await syncStaffHireDates()
   } catch {
-    hireDates = 0
+    hireDates = { status: 'read-failed', active: 0, known: 0, written: 0 }
   }
   // 反映した分を、開いている画面（App の職員名簿など）へ知らせる（F47）。知らせる先が無くても何も起きない
-  if (residents || staff || hireDates > 0) notifyMastersChanged()
+  if (residents || staff || hireDates.written > 0) notifyMastersChanged()
 
   if (!residents) {
     throw new Error(
@@ -978,7 +1040,7 @@ export async function syncMasters(opts: SyncOptions = {}): Promise<MasterSyncOut
         : '職員マスタを取得できませんでした（利用者マスタは同期しました）。設定画面の「職員名簿の接続先」と通信状態を確認して、もう一度お試しください。職員の一覧は変更していません。',
     )
   }
-  return { residents, staff, reviews: resPlan?.reviews ?? [] }
+  return { residents, staff, reviews: resPlan?.reviews ?? [], hireDates }
 }
 
 /**

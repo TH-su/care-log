@@ -929,3 +929,58 @@ describe('職員の入職日は職員マスタから取る（0036・2026-10-19�
     assert.deepEqual(plan, [{ id: 1, hire_date: '2020-04-01' }])
   })
 })
+
+describe('入職日の取り込みの結果を同期の結果に出す（2026-10-19）', { skip: G === null }, () => {
+  it('在籍のうち入職日が分かる人数を数える（今回書いた分と前からある分）', () => {
+    const r = G.countKnownHireDates(
+      [
+        { id: 1, name: '職員A', active: true, hire_date: null },
+        { id: 2, name: '職員B', active: true, hire_date: '2019-01-01' },
+        { id: 3, name: '職員C', active: true, hire_date: null },
+        { id: 4, name: '職員D', active: false, hire_date: null },
+      ],
+      [{ id: 1, hire_date: '2020-04-01' }],
+    )
+    assert.deepEqual(r, { active: 3, known: 2 })
+  })
+  it('理由ごとの一文（接続設定なし・読めない・日付なし・結果）', () => {
+    assert.match(G.hireDateSyncText({ status: 'no-config', active: 0, known: 0, written: 0 }), /接続設定がないため/)
+    assert.match(G.hireDateSyncText({ status: 'read-failed', active: 0, known: 0, written: 0 }), /読めませんでした/)
+    assert.match(G.hireDateSyncText({ status: 'no-rows', active: 3, known: 0, written: 0 }), /見つかりませんでした/)
+    assert.equal(
+      G.hireDateSyncText({ status: 'done', active: 3, known: 2, written: 1 }),
+      '在籍 3 名のうち 2 名の入職日が分かりました（今回書いた 1 名）。分からない 1 名（職員マスタと氏名の書き方が違う・同じ氏名が2人いる）は、末尾に名前の順で並びます。',
+    )
+    assert.equal(G.hireDateSyncText(null), '')
+  })
+  it('職員マスタの一覧は45秒まで待つ・設定画面は結果の一文を出す', () => {
+    assert.equal(G.STAFF_MASTER_TIMEOUT_MS, 45_000)
+    const settings = readFileSync(new URL('../src/pages/SettingsPage.tsx', import.meta.url), 'utf8')
+    assert.match(settings, /hireText: hireDateSyncText\(res\.hireDates\)/)
+    assert.match(settings, /入職日（職員を選ぶ欄の並び）：/)
+  })
+})
+
+describe('姓だけの名前は、職員マスタにその姓で始まる人が1人だけの時に結ぶ（2026-10-19）', { skip: G === null }, () => {
+  it('姓だけ→職員マスタの1人に結ぶ。同じ姓が2人なら結ばない。ケアログ側に同じ姓で始まる名前が2つあれば結ばない', () => {
+    const dates = G.projectStaffHireDates({
+      ok: true,
+      rows: [
+        { name: '甲山 一郎', hireDate: '2015-04-01' },
+        { name: '乙川 花子', hireDate: '2016-04-01' },
+        { name: '乙川 次郎', hireDate: '2017-04-01' },
+        { name: '丙田 三郎', hireDate: '2018-04-01' },
+      ],
+    })
+    const plan = G.planStaffHireDates(
+      [
+        { id: 1, name: '甲山', hire_date: null },
+        { id: 2, name: '乙川', hire_date: null },
+        { id: 3, name: '丙田', hire_date: null },
+        { id: 4, name: '丙田 三郎', hire_date: null },
+      ],
+      dates,
+    )
+    assert.deepEqual(plan, [{ id: 1, hire_date: '2015-04-01' }, { id: 4, hire_date: '2018-04-01' }])
+  })
+})
