@@ -364,12 +364,15 @@ notify pgrst, 'reload schema';
 -- ---------------------------------------------------------------------
 -- 適用後の確認（SQL エディタで実行して目視する）
 --
--- 1) 生存確認（アプリが呼ぶ形）: select public.apply_note_edits(null, '{}');  → {"status": "probe", "version": 1}
--- 2) security invoker のままか: select prosecdef, proconfig from pg_proc where proname = 'apply_note_edits';
+-- 1) 分類の check に「予定」が入ったか、関数に「予定」が入ったか（どちらも true）:
+--    select (select pg_get_constraintdef(oid) like '%予定%' from pg_constraint where conname = 'notes_categories_check') as check_ok,
+--           (select prosrc like '%予定%' from pg_proc where proname = 'apply_note_edits') as function_ok;
+-- 2) 生存確認（アプリが呼ぶ形）: select public.apply_note_edits(null, '{}');  → {"status": "probe", "version": 1}
+-- 3) security invoker のままか: select prosecdef, proconfig from pg_proc where proname = 'apply_note_edits';
 --    → f ／ {"search_path=public, pg_temp"}
--- 3) seen がオブジェクトでない取り消しは拒否されること（例外「取り消しの指定を読み取れませんでした」）
---    select public.apply_note_edits(0, '{"deleted_at": {"value": "2026-01-01T00:00:00Z", "base": "x", "seen": 1}}');
 --
--- 戻す時（必要な時だけ。0017 の判定に戻る。業務データには影響しない）: 0017 の create function の節を
---   drop function → create function ごと流し直す（0017 のファイルをそのまま流してよい）。
+-- 戻す時（必要な時だけ。アプリを前の版に戻してから）:
+--   先に「予定」を外す（6つの check に戻すと、予定の残る行があって check の付け直しが失敗するため）:
+--     update notes set categories = array_remove(categories, '予定') where '予定' = any(categories);
+--   その後に 0032 のファイルをそのまま流し直す（check と apply_note_edits が 6つに戻る）。
 -- ---------------------------------------------------------------------
