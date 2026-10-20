@@ -2,15 +2,17 @@
 // データは1件ずつのまま（同期・競合の仕組みは変えない）。まとめるのは表示（画面と印刷）だけ。
 //
 //   区分 … 日勤（day・16時前）／16時以降（day・after16）／デイ（daycare）／夜勤（night）
-//   束ねる鍵 … 記録日（note_on）・区分・対象（resident_id）。対象なし（null）は束ねない（1件ずつの行）
+//   束ねる鍵 … 記録日（note_on）・区分・対象（resident_id）。対象なし（null）と「予定」の記録は束ねない（1件ずつの行・
+//             「予定」は 2026-10-20 本人指示＝事務所の予定は1件ずつ見えるように）
 //   並び … 日報と同じ（時刻 timeSortKey〔夜勤明けの「翌」は夜の後ろ〕→ id）。まとめた行は最初の記録の位置に出す
-//   内容 … 最初の本文、改行して2件目以降の本文。2件目以降は末尾に「（記入者の姓）」（記入者が無ければ付けない）
+//   内容 … 最初の本文、改行して2件目以降の本文。記入者の列がある区分では、記録ごとに記入者の枠を区切って出す
+//          （2026-10-20 本人指示）。記入者の列が無い区分（夜勤）だけ、2件目以降の末尾に「（記入者の姓）」を付ける
 //
 // 拡張子付きで import する（tests から直接読めるようにするため）。個人情報は扱わない。
 
 import type { Note, NoteCategory } from './types.ts'
 import { noteIsNextMorning, timeSortKey } from './nextMorning.ts'
-import { unionCategories } from './noteCategory.ts'
+import { hasSchedule, unionCategories } from './noteCategory.ts'
 
 /** 日報の区分（表題帯の単位） */
 export type NoteSection = 'day' | 'late' | 'daycare' | 'night'
@@ -60,8 +62,9 @@ export function groupNotesByResident(
   const byKey = new Map<string, NoteGroupRow>()
   for (const n of list) {
     const section = noteSectionOf(n)
-    if (n.resident_id === null) {
-      rows.push({ key: `n:${n.id}`, note_on: n.note_on, section, resident_id: null, notes: [n], categories: [] })
+    if (n.resident_id === null || hasSchedule(n.categories)) {
+      // 対象なしの行と「予定」の記録は1件ずつの行（同じ方の記録でもまとめない）
+      rows.push({ key: `n:${n.id}`, note_on: n.note_on, section, resident_id: n.resident_id, notes: [n], categories: [] })
       continue
     }
     const key = `g:${n.note_on}|${section}|${n.resident_id}`

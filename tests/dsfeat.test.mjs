@@ -322,13 +322,51 @@ if (pureError !== null) {
   })
 
   // ════════════════════════════════════════════════════════════════════
+  describe('3b. 「予定」の記録は同じ方でもまとめない（2026-10-20）', () => {
+    it('同じ日・同じ区分・同じ方でも、予定の付いた記録は1件ずつの行。ほかの記録は今までどおりまとめる', () => {
+      const base = { note_on: '2026-10-20', shift: 'day', after16: false, resident_id: 5, reporter_id: 1, body: 'x', occurred_at: '10:00' }
+      const rows = GROUP.groupNotesByResident([
+        { ...base, id: 1, categories: ['体調'] },
+        { ...base, id: 2, categories: ['予定'] },
+        { ...base, id: 3, categories: [] },
+        { ...base, id: 4, categories: ['食事', '予定'] },
+      ])
+      assert.deepEqual(rows.map((r) => r.notes.map((n) => n.id)), [[1, 3], [2], [4]])
+      assert.deepEqual(rows[1].categories, ['予定'])
+      assert.equal(rows[1].resident_id, 5)
+    })
+  })
+
+  // ════════════════════════════════════════════════════════════════════
   describe('4. 分類の純関数（noteCategory.ts）', () => {
     const { normalizeCategories, toggleCategory, toggleAllCategories, hasAllCategories, unionCategories, sameCategories, isNoteCategory } = CAT
     const ALL = ['体調', '食事', '薬', '支援調整', '消耗品', '家族']
+    const ALL7 = [...ALL, '予定']
 
-    it('6値はサーバーの check（0032）・JS の写し（note-contract）と同じ並び', () => {
-      assert.deepEqual([...TYPES.NOTE_CATEGORIES], ALL)
-      assert.deepEqual(NC.NOTE_CATEGORY_VALUES, ALL)
+    it('7値（2026-10-20 に「予定」を追加）はサーバーの check（0039）・JS の写し（note-contract）と同じ並び', () => {
+      assert.deepEqual([...TYPES.NOTE_CATEGORIES], ALL7)
+      assert.deepEqual(NC.NOTE_CATEGORY_VALUES, ALL7)
+      assert.deepEqual([...TYPES.CONTENT_CATEGORIES], ALL)
+    })
+
+    it('〔全て〕は内容の6つだけ。「予定」の印は付いていれば残し、付いていなければ付けない', () => {
+      assert.deepEqual(toggleAllCategories(['予定']), ALL7)
+      assert.deepEqual(toggleAllCategories(ALL7), ['予定'])
+      assert.equal(hasAllCategories(ALL), true)
+      assert.equal(hasAllCategories(['予定']), false)
+    })
+
+    it('予定を付けたらピンク・外したらピンクのままなら色なし（手で変えた色は残す）', () => {
+      const { scheduleColorPatch, hasSchedule } = CAT
+      assert.deepEqual(scheduleColorPatch([], ['予定'], null), { color: 'pink' })
+      assert.deepEqual(scheduleColorPatch(['体調'], ['体調', '予定'], 'blue'), { color: 'pink' })
+      assert.deepEqual(scheduleColorPatch([], ['予定'], 'pink'), {})
+      assert.deepEqual(scheduleColorPatch(['予定'], [], 'pink'), { color: null })
+      assert.deepEqual(scheduleColorPatch(['予定'], [], 'blue'), {})
+      assert.deepEqual(scheduleColorPatch(['体調'], ['食事'], null), {})
+      assert.deepEqual(scheduleColorPatch(undefined, ['予定'], undefined), { color: 'pink' })
+      assert.equal(hasSchedule(undefined), false)
+      assert.equal(hasSchedule(['予定']), true)
     })
 
     it('normalizeCategories: 6値の並び・重複なしにそろえる／配列でない・6値以外が混ざれば null', () => {

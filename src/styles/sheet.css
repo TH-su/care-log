@@ -739,6 +739,11 @@
   --dsheet-cat-5-ink: #00210d;
   --dsheet-cat-6-bg: #c2185b;
   --dsheet-cat-6-ink: #ffffff;
+  /* 7 予定（2026-10-20）: 行のピンクに合わせた淡いピンクの地に濃い文字・濃いピンクの枠（家族の濃いピンクと見分ける）。
+     地と文字のコントラスト（計算値）ライト 8.3:1・ダーク 11.6:1 */
+  --dsheet-cat-7-bg: #fce4ec;
+  --dsheet-cat-7-ink: #880e4f;
+  --dsheet-cat-7-line: #d81b60;
 }
 :root[data-mode='dark'] {
   --dsheet-c-note-bg: #4a1e2c;
@@ -769,6 +774,9 @@
   --dsheet-cat-5-ink: #00210d;
   --dsheet-cat-6-bg: #ff80ab;
   --dsheet-cat-6-ink: #2b0012;
+  --dsheet-cat-7-bg: #5c1f35;
+  --dsheet-cat-7-ink: #ffd6e4;
+  --dsheet-cat-7-line: #ff80ab;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-mode='light']) {
@@ -800,6 +808,9 @@
     --dsheet-cat-5-ink: #00210d;
     --dsheet-cat-6-bg: #ff80ab;
     --dsheet-cat-6-ink: #2b0012;
+    --dsheet-cat-7-bg: #5c1f35;
+    --dsheet-cat-7-ink: #ffd6e4;
+    --dsheet-cat-7-line: #ff80ab;
   }
 }
 
@@ -1289,6 +1300,7 @@ main:has(.dsheet-frame) {
 .dsheet-cat-4 { background: var(--dsheet-cat-4-bg); color: var(--dsheet-cat-4-ink); border-color: var(--dsheet-cat-4-bg); }
 .dsheet-cat-5 { background: var(--dsheet-cat-5-bg); color: var(--dsheet-cat-5-ink); border-color: var(--dsheet-cat-5-bg); }
 .dsheet-cat-6 { background: var(--dsheet-cat-6-bg); color: var(--dsheet-cat-6-ink); border-color: var(--dsheet-cat-6-bg); }
+.dsheet-cat-7 { background: var(--dsheet-cat-7-bg); color: var(--dsheet-cat-7-ink); border-color: var(--dsheet-cat-7-line); }
 /* 分類窓のボタン: 印の無い札は面の地に分類の色の枠（印の付いた札は上の塗り） */
 .dsheet-cat-btn {
   border: 2px solid transparent;
@@ -1303,6 +1315,7 @@ main:has(.dsheet-frame) {
 .dsheet-cat-off-4 { border-color: var(--dsheet-cat-4-bg); }
 .dsheet-cat-off-5 { border-color: var(--dsheet-cat-5-bg); }
 .dsheet-cat-off-6 { border-color: var(--dsheet-cat-6-bg); }
+.dsheet-cat-off-7 { border-color: var(--dsheet-cat-7-line); }
 .dsheet-cat-btn.dsheet-cat-on {
   border-width: 2px;
   border-radius: 9999px;

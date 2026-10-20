@@ -2,7 +2,8 @@
 // 画面の状態は持たない（呼び手 DailySheetPage が持つ）。DB・localStorage には触れない。個人情報は受け取った表示だけ。
 //
 //   CategoryChips      … 分類欄の札（分類ごとに鮮やかな色＋必ず文字。色は sheet.css の --dsheet-cat-* トークン）
-//   CategoryToggles    … 分類窓の6つのボタン＋〔全て〕（押すと6つ全部に印・もう一度で全部外す）
+//   CategoryToggles    … 分類窓の6つのボタン＋〔全て〕（押すと6つ全部に印・もう一度で全部外す）＋〔予定〕（2026-10-20。
+//                        〔全て〕では付け外ししない。事務・管理者以外のログインでは押せない＝scheduleDisabled）
 //   ImportanceToggles  … 分類窓の重要度（通常／▲重要／‼最重要。ロック中は押せない形にするため自前のボタン）
 //   NoteSearchBar      … 日付バーの右端の検索欄（×で消去）と〔分類で抽出〕。画面のみ（print:hidden）
 //   CategoryExtractDialog … 分類を選んで、表示中の範囲の該当する申し送りを一覧する窓（行を押すとその行へ移る）
@@ -11,11 +12,11 @@
 
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { ModalShell } from './ui'
-import { NOTE_CATEGORIES, IMPORTANCE_LABEL } from '../lib/types'
+import { CONTENT_CATEGORIES, NOTE_CATEGORIES, IMPORTANCE_LABEL, SCHEDULE_CATEGORY } from '../lib/types'
 import type { Importance, NoteCategory } from '../lib/types'
 import { hasAllCategories, toggleAllCategories, toggleCategory } from '../lib/noteCategory'
 
-/** 分類 → 札の色の番号（sheet.css の .dsheet-cat-1〜6。並びは NOTE_CATEGORIES と同じ） */
+/** 分類 → 札の色の番号（sheet.css の .dsheet-cat-1〜7。並びは NOTE_CATEGORIES と同じ。7＝予定） */
 export function categoryClass(c: NoteCategory): string {
   return `dsheet-cat dsheet-cat-${NOTE_CATEGORIES.indexOf(c) + 1}`
 }
@@ -35,40 +36,44 @@ export function CategoryChips({ categories }: { categories: readonly NoteCategor
 }
 
 /**
- * 分類の6つのボタン＋〔全て〕。value は今の分類（6値の並び）。onChange は新しい分類（6値の並び）
- * label は読み上げの頭（まとめた行で記録ごとに出す時に「2件目の」などを渡す）
+ * 分類の6つのボタン＋〔全て〕＋〔予定〕。value は今の分類（7値の並び）。onChange は新しい分類（7値の並び）
+ * label は読み上げの頭（まとめた行で記録ごとに出す時に「2件目の」などを渡す）。
+ * scheduleDisabled は〔予定〕だけを押せなくする（事務・管理者以外のログイン・2026-10-20 本人回答）
  */
 export function CategoryToggles({
   value,
   disabled,
   onChange,
   label = '',
+  scheduleDisabled = false,
 }: {
   value: readonly NoteCategory[]
   disabled: boolean
   onChange: (next: NoteCategory[]) => void
   label?: string
+  scheduleDisabled?: boolean
 }) {
   const all = hasAllCategories(value)
+  const toggleBtn = (c: NoteCategory, off: boolean) => {
+    const on = value.includes(c)
+    return (
+      <button
+        key={c}
+        type="button"
+        aria-pressed={on}
+        disabled={off}
+        onClick={() => onChange(toggleCategory(value, c))}
+        // 印の付いた札は分類の色で塗る（文字と ✓ でも分かる）。付いていない札は白地に分類の色の枠
+        className={`dsheet-cat-btn min-h-tap shrink-0 rounded-full px-3 text-base ${on ? `${categoryClass(c)} dsheet-cat-on` : `dsheet-cat-off dsheet-cat-off-${NOTE_CATEGORIES.indexOf(c) + 1}`} disabled:opacity-50`}
+      >
+        <span aria-hidden="true">{on ? '✓ ' : ''}</span>
+        {c}
+      </button>
+    )
+  }
   return (
     <div role="group" aria-label={`${label}分類`} className="flex flex-wrap items-center gap-gap">
-      {NOTE_CATEGORIES.map((c) => {
-        const on = value.includes(c)
-        return (
-          <button
-            key={c}
-            type="button"
-            aria-pressed={on}
-            disabled={disabled}
-            onClick={() => onChange(toggleCategory(value, c))}
-            // 印の付いた札は分類の色で塗る（文字と ✓ でも分かる）。付いていない札は白地に分類の色の枠
-            className={`dsheet-cat-btn min-h-tap shrink-0 rounded-full px-3 text-base ${on ? `${categoryClass(c)} dsheet-cat-on` : `dsheet-cat-off dsheet-cat-off-${NOTE_CATEGORIES.indexOf(c) + 1}`} disabled:opacity-50`}
-          >
-            <span aria-hidden="true">{on ? '✓ ' : ''}</span>
-            {c}
-          </button>
-        )
-      })}
+      {CONTENT_CATEGORIES.map((c) => toggleBtn(c, disabled))}
       {/* 〔全て〕は別の見た目（四角・太字・濃い枠）。6つ全部に印が付いている時は押すと全部外す */}
       <button
         type="button"
@@ -82,6 +87,11 @@ export function CategoryToggles({
       >
         <span aria-hidden="true">{all ? '✓ ' : ''}</span>全て
       </button>
+      {/* 〔予定〕（2026-10-20）。〔全て〕の外に置く＝〔全て〕では付け外ししない */}
+      {toggleBtn(SCHEDULE_CATEGORY, disabled || scheduleDisabled)}
+      {scheduleDisabled && !disabled ? (
+        <span className="text-sm text-ink2">予定は事務・管理者のログインで付け外しできます</span>
+      ) : null}
     </div>
   )
 }

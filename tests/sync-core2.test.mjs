@@ -105,6 +105,10 @@ function fakeSupabase(handler, auth = {}) {
         q.filters.push(['ilike', k, v])
         return b
       },
+      overlaps(k, v) {
+        q.filters.push(['ov', k, v])
+        return b
+      },
       order() {
         return b
       },
@@ -167,7 +171,19 @@ const noTimer = { set: () => 1, clear: () => undefined }
 
 const match = (row, filters) =>
   filters.every(([op, k, v]) =>
-    op === 'eq' ? row[k] === v : op === 'is' ? (row[k] ?? null) === v : op === 'in' ? v.includes(row[k]) : op === 'gte' ? row[k] >= v : op === 'lte' ? row[k] <= v : true,
+    op === 'eq'
+      ? row[k] === v
+      : op === 'is'
+        ? (row[k] ?? null) === v
+        : op === 'in'
+          ? v.includes(row[k])
+          : op === 'gte'
+            ? row[k] >= v
+            : op === 'lte'
+              ? row[k] <= v
+              : op === 'ov'
+                ? (row[k] ?? []).some((x) => v.includes(x))
+                : true,
   )
 
 /**
@@ -787,6 +803,21 @@ if (D === null) {
       D.__testHooks.setClient(srv.client)
       assert.deepEqual(await D.searchNotes({ q: '', target: 'body', fromIso: '2026-09-01', toIso: '2026-09-30' }), [])
       assert.equal(srv.calls.filter((c) => c.table === 'notes').length, 0)
+    })
+
+    it('分類だけでも引ける。2つ以上は「どれかが付いている」申し送り（2026-10-20）', async () => {
+      const srv = server()
+      srv.db.staff.push({ id: 1, name: '職員01', active: true })
+      for (const [id, categories] of [[701, ['体調']], [702, ['食事']], [703, ['体調', '予定']], [704, []]]) {
+        srv.db.notes.push({ ...NC.NOTE_BASE_ROW, id, categories, note_on: '2026-09-15', reporter_id: 1, deleted_at: null, ended_by: null })
+      }
+      D.__testHooks.setClient(srv.client)
+      const one = await D.searchNotes({ q: '', target: 'body', fromIso: '2026-09-01', toIso: '2026-09-30', categories: ['予定'] })
+      assert.deepEqual(one.map((n) => n.id), [703])
+      const two = await D.searchNotes({ q: '', target: 'body', fromIso: '2026-09-01', toIso: '2026-09-30', categories: ['体調', '食事'] })
+      assert.deepEqual(two.map((n) => n.id).sort(), [701, 702, 703])
+      // 7値以外は送らない（全部が知らない値なら分類で絞らない＝語も重要度も無いので何も引かない）
+      assert.deepEqual(await D.searchNotes({ q: '', target: 'body', fromIso: '2026-09-01', toIso: '2026-09-30', categories: ['睡眠'] }), [])
     })
 
     it('語と重要度を両方入れた時は両方で絞る', async () => {

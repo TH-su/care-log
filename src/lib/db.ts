@@ -58,6 +58,7 @@ import type {
   MealSlot,
   MealStatus,
   Note,
+  NoteCategory,
   NoteColor,
   Outing,
   OutingKind,
@@ -4926,14 +4927,17 @@ export async function searchNotes(p: {
   toIso: string
   /** 1つならその重要度だけ・配列ならそのどれか（「重要以上」＝important と critical・2026-10-19） */
   importance?: Importance | Importance[]
+  /** 分類（どれかが付いている申し送り・2026-10-20 本人回答）。空・省略は分類で絞らない */
+  categories?: readonly NoteCategory[]
   shift?: Shift
   limit?: number
 }): Promise<Note[]> {
   const q = p.q.trim()
   const levels = p.importance === undefined ? [] : Array.isArray(p.importance) ? p.importance : [p.importance]
-  // 語が空でも、重要度を選んでいれば「その重要度の申し送りを新しい順に」返す（2026-10-19 本人指示）。
-  // 語も重要度も無い時は従来どおり何も返さない（全件を読む経路を作らない）
-  if (q === '' && levels.length === 0) return []
+  const cats = (p.categories ?? []).filter(isNoteCategory)
+  // 語が空でも、重要度か分類を選んでいれば「その申し送りを新しい順に」返す（2026-10-19・10-20 本人指示）。
+  // 語も重要度も分類も無い時は従来どおり何も返さない（全件を読む経路を作らない）
+  if (q === '' && levels.length === 0 && cats.length === 0) return []
   const cap = Math.min(Math.max(1, p.limit ?? SEARCH_ROWS), MAX_ROWS)
   const sb = await getClient()
 
@@ -4959,6 +4963,7 @@ export async function searchNotes(p: {
   }
   if (levels.length === 1) query = query.eq('importance', levels[0])
   else if (levels.length > 1) query = query.in('importance', levels)
+  if (cats.length > 0) query = query.overlaps('categories', cats)
   if (p.shift !== undefined) query = query.eq('shift', p.shift)
 
   const res = (await query

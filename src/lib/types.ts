@@ -198,11 +198,20 @@ export interface Note {
 }
 
 /**
- * 申し送りの分類の6値（2026-10-15 本人回答）。並びは画面・印刷・保存の並び。値は文字そのもの（職種タグと同じ）。
- * サーバーの notes_categories_check（0032）と同じ6値。増やす時は移行で check を同時に直す
+ * 申し送りの分類の7値（2026-10-15 本人回答・2026-10-20「予定」を追加）。並びは画面・印刷・保存の並び。
+ * 値は文字そのもの（職種タグと同じ）。サーバーの notes_categories_check（0039）と同じ7値。増やす時は移行で check を同時に直す
  */
-export const NOTE_CATEGORIES = ['体調', '食事', '薬', '支援調整', '消耗品', '家族'] as const
+export const NOTE_CATEGORIES = ['体調', '食事', '薬', '支援調整', '消耗品', '家族', '予定'] as const
 export type NoteCategory = (typeof NOTE_CATEGORIES)[number]
+
+/**
+ * 事務所が使う「予定」の分類（2026-10-20 本人指示）。付けると行がピンク（color 'pink'）になり、
+ * 同じ方の記録でも1つの行にまとめない。付け外しできるのは事務・管理者のログインだけ（画面で止める）
+ */
+export const SCHEDULE_CATEGORY: NoteCategory = '予定'
+
+/** 記録の内容の分類（〔全て〕が付け外しする6つ。「予定」は含めない＝2026-10-20 本人回答） */
+export const CONTENT_CATEGORIES: readonly NoteCategory[] = NOTE_CATEGORIES.filter((c) => c !== SCHEDULE_CATEGORY)
 
 /** 申し送り行の色。既定は用途に紐づくが、記入者が後から変更できる（現行スプシの手動着色に相当） */
 export type NoteColor = 'pink' | 'yellow' | 'blue' | 'green' | 'orange'

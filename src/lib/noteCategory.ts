@@ -1,14 +1,15 @@
 // 申し送りの「分類」（notes.categories・0032）の純関数（副作用なし）。
-// 値の正本は types.ts の NOTE_CATEGORIES（体調・食事・薬・支援調整・消耗品・家族）。サーバーの check と同じ6値。
+// 値の正本は types.ts の NOTE_CATEGORIES（体調・食事・薬・支援調整・消耗品・家族・予定）。サーバーの check と同じ7値。
+// 〔全て〕が付け外しするのは内容の6つ（CONTENT_CATEGORIES）だけで、「予定」の印はそのまま残す（2026-10-20 本人回答）。
 // 並びはいつも NOTE_CATEGORIES の順・重複なしにそろえる（サーバーは集合として比べるが、送る値をそろえておくと
 // 画面の比較・印刷の並びが端末ごとに揺れない）。
 // 拡張子付きで import する（tests から直接読めるようにするため・historyView.ts と同じ）。
 // 個人情報は扱わない。
 
-import { NOTE_CATEGORIES } from './types.ts'
-import type { NoteCategory } from './types.ts'
+import { CONTENT_CATEGORIES, NOTE_CATEGORIES, SCHEDULE_CATEGORY } from './types.ts'
+import type { NoteCategory, NoteColor } from './types.ts'
 
-/** 6値のどれかか */
+/** 7値のどれかか */
 export function isNoteCategory(v: unknown): v is NoteCategory {
   return typeof v === 'string' && (NOTE_CATEGORIES as readonly string[]).includes(v)
 }
@@ -32,15 +33,42 @@ export function toggleCategory(list: readonly NoteCategory[], c: NoteCategory): 
   return NOTE_CATEGORIES.filter((x) => have.has(x))
 }
 
-/** 6つ全部に印が付いているか */
+/** 内容の6つ全部に印が付いているか（「予定」は数えない） */
 export function hasAllCategories(list: readonly NoteCategory[]): boolean {
   const have = new Set<string>(list)
-  return NOTE_CATEGORIES.every((c) => have.has(c))
+  return CONTENT_CATEGORIES.every((c) => have.has(c))
 }
 
-/** 〔全て〕: 6つ全部に印が付いていれば全部外す、そうでなければ全部に付ける */
+/**
+ * 〔全て〕: 内容の6つ全部に印が付いていれば6つを外す、そうでなければ6つに付ける。
+ * 「予定」の印は付いていれば残し、付いていなければ付けない（2026-10-20 本人回答「〔全て〕は今の6つだけ」）
+ */
 export function toggleAllCategories(list: readonly NoteCategory[]): NoteCategory[] {
-  return hasAllCategories(list) ? [] : [...NOTE_CATEGORIES]
+  const keep = hasSchedule(list)
+  const next = hasAllCategories(list) ? [] : [...CONTENT_CATEGORIES]
+  return NOTE_CATEGORIES.filter((c) => (c === SCHEDULE_CATEGORY ? keep : next.includes(c)))
+}
+
+/** 「予定」の印が付いているか（undefined＝分からない は付いていない扱い） */
+export function hasSchedule(list: readonly NoteCategory[] | undefined): boolean {
+  return (list ?? []).includes(SCHEDULE_CATEGORY)
+}
+
+/**
+ * 分類を変えた時に一緒に送る行の色（2026-10-20 本人回答）。
+ * 「予定」を付けた → ピンク（もうピンクなら送らない）。「予定」を外した → 色がピンクのままなら色なしに戻す
+ * （予定を付けた後に手で別の色へ変えていれば、その色を残す）。「予定」が変わらなければ何も送らない
+ */
+export function scheduleColorPatch(
+  prev: readonly NoteCategory[] | undefined,
+  next: readonly NoteCategory[],
+  color: NoteColor | null | undefined,
+): { color?: NoteColor | null } {
+  const before = hasSchedule(prev)
+  const after = hasSchedule(next)
+  if (!before && after) return color === 'pink' ? {} : { color: 'pink' }
+  if (before && !after) return color === 'pink' ? { color: null } : {}
+  return {}
 }
 
 /** 複数の記録の分類の和集合（まとめた行の分類欄に出す・6値の並び）。undefined（分からない）は空として足す */

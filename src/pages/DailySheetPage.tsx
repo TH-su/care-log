@@ -206,7 +206,7 @@ import { lockState, msUntilNextLock } from '../lib/noteLock'
 import { groupNotesByResident, noteGroupLines, noteSectionOf } from '../lib/noteGroup'
 import type { NoteGroupRow, NoteSection } from '../lib/noteGroup'
 import { matchSearch, noteSearchText, parseSearchQuery } from '../lib/noteSearch'
-import { normalizeCategories } from '../lib/noteCategory'
+import { normalizeCategories, scheduleColorPatch } from '../lib/noteCategory'
 // 発熱者・他症状者のバイタル欄の印（A1 平熱との差・A9 SpO2 の個別の下限）。平熱と目標は画面を開いた時に1回読んで控える
 import { fetchResidentTargets, fetchUsualTemps, loadVitalThresholds } from '../lib/db'
 import { judgeTemp, spo2LevelFor } from '../lib/vitalAlerts'
@@ -1753,18 +1753,21 @@ function Cell({
   width,
   grow = false,
   pad = true,
+  bare = false,
   children,
   className = '',
 }: {
   width?: string
   grow?: boolean
   pad?: boolean
+  /** 右の罫線を引かない（中身が自分で列の罫線を持つ時。まとめた行の内容欄・2026-10-20） */
+  bare?: boolean
   children: ReactNode
   className?: string
 }) {
   return (
     <div
-      className={`min-w-0 border-r border-border ${pad ? 'px-1' : ''} ${grow ? 'flex-1' : 'shrink-0'} ${className}`}
+      className={`min-w-0 ${bare ? '' : 'border-r border-border'} ${pad ? 'px-1' : ''} ${grow ? 'flex-1' : 'shrink-0'} ${className}`}
       style={grow ? undefined : { width }}
     >
       {children}
@@ -5854,6 +5857,7 @@ function DaySheet({
     onSaveOrphan: saveOrphanAsNew,
     onDropOrphan: dropOrphan,
     presence,
+    canSchedule: canUnlock,
   }
 
   /** バイタル欄（発熱者・他症状者）の受け渡し。サーバー側の更新待ちの間はバイタルのセルだけ読み取り専用にする */
@@ -6218,6 +6222,8 @@ interface SheetCtx {
   onDropOrphan: (vitalId: number) => void
   /** 他の端末がバイタルの欄を入力中かの表示と、この端末が欄に入った／離れたの通知（Presence） */
   presence: CellPresence
+  /** 「予定」の分類を付け外しできるログイン（事務・管理者・2026-10-20 本人回答） */
+  canSchedule: boolean
 }
 
 /**
@@ -7942,6 +7948,12 @@ function NoteRow({
   const first: Note | null = notes[0] ?? null
   /** 2件以上の記録をまとめた行（内容欄に記録ごとの本文を並べる） */
   const multi = notes.length > 1
+  /**
+   * まとめた行で、記録ごとに記入者の枠を区切って出す（2026-10-20 本人指示。記入者の列がある区分だけ）。
+   * 内容欄の中に記録ごとの「本文｜記入者｜色」の小さな行を置き、外側の記入者・色の列は出さない
+   * （罫線の位置は列見出しと同じ＝内容欄は右の罫線を引かず、本文・記入者・色の枠がそれぞれ右の罫線を持つ）
+   */
+  const perLineReporter = multi && showReporter
   const color = first ? first.color : (draft?.color ?? null)
   const residentId = first ? first.resident_id : (draft?.residentId ?? null)
   const targetPicked = first !== null || (draft?.targetPicked ?? false)
@@ -8030,22 +8042,24 @@ function NoteRow({
               本文を描く SheetCell が自前で持つ文字色（tone='row' → .text-ink）にも届く。
               詳細度は同じ（クラス1つぶん）で、sheet.css は Tailwind の utilities より後に
               読み込まれる（main.tsx: index.css → App.tsx: sheet.css）＝後勝ちで赤太字になる */}
-        <Cell grow pad={false} className={night ? 'dsheet-night-body' : ''}>
+        <Cell grow pad={false} bare={perLineReporter} className={night ? 'dsheet-night-body' : ''}>
           {multi ? (
             // まとめた行: 最初の本文、改行して2件目以降の本文＋「（記入者の姓）」（仕様 §4）。本文は記録ごとに直せる・消せる
             lines.map((line, i) => {
               const n = line.note
               const k = `n${n.id}`
               const dim = matched !== null && !matched.has(n.id)
+              const lineReporter = n.reporter_id === null ? '' : staffName(ctx.staffById.get(n.reporter_id), n.reporter_id)
               return (
                 <div
                   key={n.id}
                   id={`cl-note-row-${ctx.day}-${n.id}`}
                   tabIndex={-1}
-                  className={`flex items-start${i > 0 ? ' border-t border-border' : ''}${
+                  className={`flex ${perLineReporter ? 'items-stretch' : 'items-start'}${i > 0 ? ' border-t border-border' : ''}${
                     n.color ? ` ${NOTE_COLOR_CLASS[n.color]}` : ''
                   }${dim ? ' dsheet-search-dim' : ''}`}
                 >
+                  <div className={`flex min-w-0 flex-1 items-start${perLineReporter ? ' border-r border-border' : ''}`}>
                   <div className="min-w-0 flex-1">
                     <SheetCell
                       value={line.body}
@@ -8060,8 +8074,9 @@ function NoteRow({
                       tone="row"
                     />
                   </div>
-                  {i > 0 ? (
-                    // 記入者の姓（押すとこの記録の記入者を選び直す）。記入者が無い時は紙には何も出さない
+                  {i > 0 && !perLineReporter ? (
+                    // 記入者の列が無い区分（夜勤）だけ: 2件目以降の末尾に記入者の姓（押すとこの記録の記入者を選び直す）。
+                    // 記入者が無い時は紙には何も出さない
                     <button
                       type="button"
                       disabled={disabled}
@@ -8090,6 +8105,32 @@ function NoteRow({
                       <span aria-hidden="true">✕</span>
                     </button>
                   ) : null}
+                  </div>
+                  {perLineReporter ? (
+                    <>
+                      {/* この記録の記入者（押すとこの記録だけ選び直す） */}
+                      <PickerCell
+                        width="var(--w-reporter)"
+                        text={lineReporter}
+                        label={
+                          lineReporter === ''
+                            ? `${i + 1}件目の記入者を選ぶ`
+                            : `${i + 1}件目の記入者 ${lineReporter}。押すと選び直します`
+                        }
+                        disabled={disabled}
+                        onClick={() => ctx.openStaff({ for: 'noteReporter', key: k })}
+                      />
+                      {/* この記録の色（その記録の小さな行の地に敷く） */}
+                      <Cell width="var(--w-reporter)" className="flex items-center">
+                        <ColorPicker
+                          value={n.color}
+                          onChange={(c) => setColor(n, c)}
+                          ariaLabel={`${i + 1}件目の色`}
+                          disabled={disabled}
+                        />
+                      </Cell>
+                    </>
+                  ) : null}
                 </div>
               )
             })
@@ -8111,7 +8152,7 @@ function NoteRow({
             />
           )}
         </Cell>
-        {showReporter && (
+        {showReporter && !perLineReporter && (
           <PickerCell
             width="var(--w-reporter)"
             text={reporterText}
@@ -8128,6 +8169,7 @@ function NoteRow({
         )}
         {/* 色は記入者の右（2026-08-31 指示）。封鎖中・送信待ち・ロック中の行は色も変えられない。
             まとめた行は記録ごとの色を縦に並べる（色はその本文の地に敷く） */}
+        {perLineReporter ? null : (
         <Cell width="var(--w-reporter)" className={multi ? 'flex flex-col justify-start' : 'flex items-center'}>
           {multi ? (
             notes.map((n, i) => (
@@ -8143,6 +8185,7 @@ function NoteRow({
             <ColorPicker value={color} onChange={(c) => setColor(first, c)} ariaLabel="この行の色" disabled={disabled} />
           )}
         </Cell>
+        )}
       </Row>
 
       {/* 送信待ちの登録の行は、画面の一言が無くても送信待ち・止まった印を出す（再読み込みの後も同じ・F1）。
@@ -8298,7 +8341,9 @@ function NoteCategoryModal({
                     value={n.categories ?? []}
                     disabled={disabled}
                     label={head}
-                    onChange={(next) => void onUpdateNote(n, { categories: next })}
+                    scheduleDisabled={!ctx.canSchedule}
+                    // 「予定」を付けた・外した時は行の色も一緒に送る（ピンク・2026-10-20）
+                    onChange={(next) => void onUpdateNote(n, { categories: next, ...scheduleColorPatch(n.categories, next, n.color) })}
                   />
                   {/* 重要度（見出しは上に置く＝狭い画面・文字200%でもボタンが窓の幅に収まる） */}
                   <div className="space-y-1">
@@ -8347,7 +8392,10 @@ function NoteCategoryModal({
               value={draft.categories ?? []}
               // 送信待ちの登録の行（ck あり）は登録後の変更として積む（呼び手の onPatchDraft が振り分ける）
               disabled={disabled}
-              onChange={(next) => onPatchDraft(draft.key, { categories: next })}
+              scheduleDisabled={!ctx.canSchedule}
+              onChange={(next) =>
+                onPatchDraft(draft.key, { categories: next, ...scheduleColorPatch(draft.categories, next, draft.color) })
+              }
             />
             <p className="text-sm text-ink2">
               <span aria-hidden="true">ⓘ </span>

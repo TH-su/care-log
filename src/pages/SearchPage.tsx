@@ -1,7 +1,8 @@
 // インクリメンタル検索（docs/design/ui-design.md §4）。
 // 対象は「利用者名／本文／記入者」の3種。利用者名は fetchResidents をメモリに保持して
 // 端末内で即時に絞り込み（通信なし）、本文・記入者は db.ts の searchNotes を叩く。
-// 本文・記入者で重要度を選んだ時は、語が空でもその重要度の申し送りを新しい順に出す（2026-10-19 本人指示）。
+// 本文・記入者で重要度・分類を選んだ時は、語が空でもその申し送りを新しい順に出す（2026-10-19・10-20 本人指示）。
+// 分類は日報の分類窓と同じボタン（体調〜家族・〔全て〕・予定）。2つ以上選ぶと「どれかが付いている」申し送り。
 //
 // この画面の規律:
 //   - 読み取り専用。書き込み経路を持たない（multi-device-sync 原則9「読み取りで書かない」。既読も付けない）
@@ -15,11 +16,12 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { CompositionEvent, FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { Chip, EmptyBlock, ErrorBlock, LoadingBlock, SegmentPicker } from '../components/ui'
+import { CategoryChips, CategoryToggles } from '../components/noteCategory'
 import { DbError, fetchAllStaff, fetchResidents, searchNotes } from '../lib/db'
 import { addDays, fmtDayLabel, isoDate, todayIso } from '../lib/format'
 import { fmtRecordTime, noteIsNextMorning } from '../lib/nextMorning'
 import { IMPORTANCE_LABEL, noteDisplayName, SHIFT_LABEL } from '../lib/types'
-import type { Importance, Note, Resident, Shift, Staff } from '../lib/types'
+import type { Importance, Note, NoteCategory, Resident, Shift, Staff } from '../lib/types'
 
 // ══════════════════════════════════════════════════════════════
 // 定数
@@ -103,8 +105,8 @@ const PLACEHOLDER: Record<Target, string> = {
 
 const HINT: Record<Target, string> = {
   resident: '利用者名を1文字以上入力すると、その場で絞り込みます。',
-  body: '申し送りの本文を2文字以上入力すると検索します。重要度を選ぶと、語を入れなくてもその重要度の申し送りを新しい順に表示します。',
-  reporter: '記入者の氏名を2文字以上入力すると、その方が書いた申し送りを検索します。重要度を選ぶと、語を入れなくてもその重要度の申し送りを新しい順に表示します。',
+  body: '申し送りの本文を2文字以上入力すると検索します。重要度・分類を選ぶと、語を入れなくてもその申し送りを新しい順に表示します。',
+  reporter: '記入者の氏名を2文字以上入力すると、その方が書いた申し送りを検索します。重要度・分類を選ぶと、語を入れなくてもその申し送りを新しい順に表示します。',
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -273,6 +275,7 @@ function NoteResultCard({
         {asArray<string>(note.role_tags).map((t) => (
           <Chip key={t}>{t}</Chip>
         ))}
+        <CategoryChips categories={note.categories ?? []} />
         {note.importance === 'important' && <Chip tone="warn">{IMPORTANCE_LABEL.important}</Chip>}
         {note.importance === 'critical' && <Chip tone="danger">{IMPORTANCE_LABEL.critical}</Chip>}
         {note.ongoing && <Chip tone="info">継続</Chip>}
@@ -344,6 +347,7 @@ export function SearchPage({ residents: residentsProp }: SearchPageProps = {}) {
   const [period, setPeriod] = useState<PeriodKey>(DEFAULT_PERIOD)
   const [importance, setImportance] = useState<string>('all')
   const [shift, setShift] = useState<string>('all')
+  const [categories, setCategories] = useState<NoteCategory[]>([])
 
   // ── 利用者マスタ（メモリ保持・即時絞込用）──
   const [loadedResidents, setLoadedResidents] = useState<Resident[] | null>(
@@ -434,8 +438,8 @@ export function SearchPage({ residents: residentsProp }: SearchPageProps = {}) {
     if (target === 'resident') return
     const q = query.trim()
     const level = importanceFilter(importance)
-    // 語が空で重要度を選んでいる時は、重要度だけで引く（1文字だけの時は従来どおり2文字を待つ）
-    if (!(charCount(q) >= MIN_QUERY || (q === '' && level !== undefined))) {
+    // 語が空で重要度か分類を選んでいる時は、それだけで引く（1文字だけの時は従来どおり2文字を待つ）
+    if (!(charCount(q) >= MIN_QUERY || (q === '' && (level !== undefined || categories.length > 0)))) {
       setResult(IDLE_RESULT)
       return
     }
@@ -450,6 +454,7 @@ export function SearchPage({ residents: residentsProp }: SearchPageProps = {}) {
       fromIso: periodFromIso(period, toIso),
       toIso,
       importance: level,
+      categories: categories.length > 0 ? categories : undefined,
       shift: shift === 'all' ? undefined : (shift as Shift),
       limit: FETCH_LIMIT,
     })
@@ -468,7 +473,7 @@ export function SearchPage({ residents: residentsProp }: SearchPageProps = {}) {
         const msg = e instanceof DbError && e.message ? e.message : ERR_SEARCH
         setResult({ status: 'error', notes: [], truncated: false, error: msg })
       })
-  }, [target, query, period, importance, shift, retryTick])
+  }, [target, query, period, importance, categories, shift, retryTick])
 
   // ── 利用者名の絞込（メモリ内・即時）──
   // 変換中は確定済みの語で絞る（未確定のローマ字で結果が踊らないようにする）
@@ -506,8 +511,9 @@ export function SearchPage({ residents: residentsProp }: SearchPageProps = {}) {
   const showFilters = target !== 'resident'
   const minLen = target === 'resident' ? MIN_RESIDENT_QUERY : MIN_QUERY
   const typed = target === 'resident' ? residentQuery : query
-  const importanceOnly = target !== 'resident' && typed === '' && importanceFilter(importance) !== undefined
-  const tooShort = charCount(typed) < minLen && !importanceOnly
+  const filterOnly =
+    target !== 'resident' && typed === '' && (importanceFilter(importance) !== undefined || categories.length > 0)
+  const tooShort = charCount(typed) < minLen && !filterOnly
 
   return (
     <div className="mx-auto w-full max-w-2xl pb-8">
@@ -583,6 +589,12 @@ export function SearchPage({ residents: residentsProp }: SearchPageProps = {}) {
                   onChange={setImportance}
                   ariaLabel="重要度"
                 />
+              </div>
+            </div>
+            <div>
+              <span className="block text-sm text-ink2">分類（2つ以上選ぶと、どれかが付いている申し送り）</span>
+              <div className="mt-1">
+                <CategoryToggles value={categories} disabled={false} onChange={setCategories} label="検索する" />
               </div>
             </div>
             <div>

@@ -31,7 +31,7 @@ export const NOTE_FIELDS = [
   'deleted_at',
 ]
 /** 分類の6値（0032 の check・c_categories と同じ並び） */
-export const NOTE_CATEGORY_VALUES = ['体調', '食事', '薬', '支援調整', '消耗品', '家族']
+export const NOTE_CATEGORY_VALUES = ['体調', '食事', '薬', '支援調整', '消耗品', '家族', '予定']
 const ID_FIELDS = new Set(['resident_id', 'reporter_id', 'ended_by'])
 const BOOL_FIELDS = new Set(['after16', 'ongoing'])
 const NOTE_ROW = [
