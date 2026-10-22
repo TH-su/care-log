@@ -692,6 +692,26 @@ export const DAYCARE_CASES = [
     },
   },
   {
+    id: '0042-2b',
+    name: '現場: 過去の日の時刻の入った行を別の方へ付け替える・取り消した時刻の入った行を戻すのは 42501／時刻の無い行の付け替えは通る（反証レビュー4巡目 F6）',
+    async run(h) {
+      const T = `(now() at time zone 'Asia/Tokyo')::date`
+      await h.pg(`insert into public.daycare_attendance (id, resident_id, day, arrived_at, left_at, client_key) overriding system value values
+        (711, 1, ${T} - 1, '09:30', null, 'g2b-1'),
+        (712, 2, ${T} - 1, null, null, 'g2b-2')`)
+      await h.pg(`insert into public.daycare_attendance (id, resident_id, day, arrived_at, client_key, deleted_at, deleted_by) overriding system value values (713, 3, ${T} - 1, '09:00', 'g2b-3', now(), 1)`)
+      const up = (sql) => h.as({ appRole: 'field' }, (q) => q(sql))
+      const code = (r) => (Array.isArray(r) ? 'ok' : r.error)
+      return {
+        moveTimed: code(await up(`update public.daycare_attendance set resident_id = 4 where id = 711 returning id`)),
+        restoreTimed: code(await up(`update public.daycare_attendance set deleted_at = null, deleted_by = null where id = 713 returning id`)),
+        moveBlank: code(await up(`update public.daycare_attendance set resident_id = 5 where id = 712 returning id`)),
+        officeRestore: code(await h.as({ appRole: 'office' }, (q) => q(`update public.daycare_attendance set deleted_at = null, deleted_by = null where id = 713 returning id`))),
+      }
+    },
+    expect: { moveTimed: '42501', restoreTimed: '42501', moveBlank: 'ok', officeRestore: 'ok' },
+  },
+  {
     id: '0042-3',
     name: '事務所（office）と役割なしの接続は、過去の日の時刻を入力・修正・取り消しできる',
     async run(h) {

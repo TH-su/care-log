@@ -553,6 +553,9 @@ MasterSyncStatus()                           // 設定画面の「最終同期: 
   帰宅の取り消し・時刻の入った行の soft delete・業務日の移し替え）を 42501・'daycare_past_times_office_only: …' で止める。office・admin・役割 null
   （所有者・cron・service_role）と my_role() の無い DB は止めない。過去の日の欠席（時刻なし）・欠席の取り消し・備考・入浴は現場も書ける。
   ポリシー・既存の関数は変えない。画面（DaycarePage）は同じ規則で出し分ける（事務所だけ時刻を入れる・直す小窓）
+- `0043_daycare_past_guard_more.sql`（2026-10-22・反証レビュー4巡目・冪等）: 0042 の関数 daycare_attendance_past_guard を差し替えるだけ
+  （0042 は main に入ったので書き換えない）。現場のログインの、過去の日の時刻の入った行の別の方への付け替え（resident_id）と、取り消した
+  時刻の入った行の戻し（deleted_at を空にする）も 42501。**0041 → 0042 → 0043 の順に当てる**
 - 日報の発熱者（2026-10-22・代表者の決定）: `fetchDailyReport`・`fetchDailyReports` は発熱者・他症状者の問い合わせだけ `client_key` も読み、
   `DailyReport.daycareVitalIds`（観察のうちデイの測定 dc: の行 id）を添える（行には client_key を載せない）。日報の画面は読み込みで基準値を待ち、
   `dailyFeverObservations`（daycare.ts）で、その日に1回でも発熱（37.5℃以上・タイムラインの「▲発熱」と同じ判定）のあった方のデイの測定だけを

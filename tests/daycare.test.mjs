@@ -450,6 +450,9 @@ if (DC === null) {
       assert.deepEqual(DC.dailyFeverObservations(list, [1, 2, 3, 5]).map((v) => v.id), [1, 2, 4])
       assert.deepEqual(DC.dailyFeverObservations(list, undefined).map((v) => v.id), [1, 2, 3, 4, 5], '分からない時は今までどおり全部')
       assert.deepEqual(DC.dailyFeverObservations(list, []).map((v) => v.id), [1, 2, 3, 4, 5], 'デイの測定が無い日はそのまま')
+      // 日報で直している最中の行（止まった控え・送信待ち）がある方は、発熱が無くてもその日のデイの測定を載せ続ける（4巡目 F1・F9）
+      assert.deepEqual(DC.dailyFeverObservations(list, [1, 2, 3, 5], new Set([3])).map((v) => v.id), [1, 2, 3, 4, 5])
+      assert.deepEqual(DC.dailyFeverObservations(list, [1, 2, 3, 5], new Set([4])).map((v) => v.id), [1, 2, 4], 'デイ以外の行は印に関係なく今までどおり')
     })
   })
 
@@ -1130,8 +1133,10 @@ if (DC === null) {
     })
     it('日報の発熱者（静的）: 読み込みで基準値を待ち、デイの測定は発熱のあった方だけ・温度板とタイムラインは変えない', () => {
       const d = code('../src/pages/DailySheetPage.tsx')
-      assert.match(d, /const \[report\] = await Promise\.all\(\[loadDay\(day\), loadVitalThresholds\(\)\]\)/)
-      assert.match(d, /dailyFeverObservations\(report\.observations\.filter\(\(v\) => v != null\)\.map\(newer\)\.map\(withPending\), report\.daycareVitalIds\)/)
+      assert.match(d, /const \[report\] = await Promise\.all\(\[\s*loadDay\(day\),\s*Promise\.race\(\[loadVitalThresholds\(\), new Promise\(\(r\) => setTimeout\(r, THRESHOLD_WAIT_MS\)\)\]\),\s*\]\)/)
+      assert.match(d, /const obs = dailyFeverObservations\(obsAll, report\?\.daycareVitalIds, editing\)/)
+      // 直している最中の行（止まった控え・送信待ち）は隠さない（4巡目 F1・F9）
+      assert.match(d, /if \(vitalConflictsRef\.current\[v\.id\] !== undefined \|\| pendingRow\('vitals', vitalTargetOf\(v\.id\)\) !== null\) editing\.add\(v\.id\)/)
       const db = code('../src/lib/db.ts')
       assert.match(db, /\.select\(`\$\{VITAL_COLS\},client_key`\)\s*\.gte\('measured_on', from\)\s*\.lte\('measured_on', to\)\s*\.in\('kind', \['observation', 'symptom'\]\)/)
       assert.match(db, /\.select\(`\$\{VITAL_COLS\},client_key`\)\s*\.eq\('measured_on', dayIso\)\s*\.in\('kind', \['observation', 'symptom'\]\)/)
@@ -1150,8 +1155,27 @@ if (DC === null) {
       assert.match(t, /if \(canEditPastDaycareTimes\(role\)\) openTime\(row, 'leave'\)/)
       assert.match(t, /onClick=\{\(\) => askCancelLeave\(row\)\}\s*disabled=\{disabled \|\| !timesOk\}/)
       assert.match(t, /disabled=\{disabled \|\| \(rowHasTimes && !timesOk\)\}/)
-      assert.match(t, /if \(e instanceof DbError && e\.kind === 'forbidden' && dayRef\.current < todayIso\(\)\) return MSG_PAST_TIME/)
+      assert.match(t, /if \(timesTouched && e instanceof DbError && e\.kind === 'forbidden' && dayRef\.current < todayIso\(\)\) return MSG_PAST_TIME/)
+      assert.match(t, /text: errText\(e, touchesTimes\(patch, row\.attendance\)\)/)
+      assert.match(t, /text: errText\(e, touchesTimes\(patch, row\)\)/)
       assert.match(t, /type="time"/)
+    })
+    it('反証レビュー4巡目の直し（静的）: 帯の後に入れた値も片づけてから移る・違う日の静かな読み直しは失敗を出す・拒まれた値は帯で知らせる・0042 は付け替えと復活も見る', () => {
+      const v = code('../src/pages/DaycareVitalsPage.tsx')
+      // F2: 捨てるのは入力を残した測定だけ・残りはもう一度片づけてから移る
+      assert.match(v, /for \(const i of msg\.issues\) \{\s*if \(!i\.kept\) continue/)
+      assert.match(v, /setPageMsg\(null\)\s*afterRelease\(msg\.go\)\s*\}/)
+      // F3: 表示中と違う日を読む時は静かにしない
+      assert.match(v, /const quiet = quiet0 && dataRef\.current !== null && dataRef\.current\.day === target/)
+      // F4: 拒まれて送信待ちに残った値は kept=false の項目として帯に出す（黙って移らない）
+      assert.match(v, /clearSentDraft\(key, edits\)\s*const where = 'サーバーに受け付けられませんでした。[^']*'\s*return \{ key, kept: false,/)
+      // F6: 0042 は main に入ったので書き換えず、0043 で関数を差し替える（表・ポリシー・トリガには触れない）
+      const m = sql('../supabase/migrations/0043_daycare_past_guard_more.sql')
+      assert.doesNotMatch(m, /do \$\$/)
+      assert.doesNotMatch(m, /create policy|drop policy|alter table|create (or replace )?trigger/i)
+      assert.match(m, /create or replace function public\.daycare_attendance_past_guard\(\)/)
+      assert.match(m, /and \(new\.resident_id = old\.resident_id or \(old\.arrived_at is null and old\.left_at is null\)\)/)
+      assert.match(m, /and not \(new\.deleted_at is null and old\.deleted_at is not null\s+and \(new\.arrived_at is not null or new\.left_at is not null\)\)/)
     })
     it('画面は端末に業務データを書かない（localStorage は絞り込みの既知値だけ）', () => {
       for (const f of ['../src/pages/DaycarePage.tsx', '../src/pages/DaycareVitalsPage.tsx']) {

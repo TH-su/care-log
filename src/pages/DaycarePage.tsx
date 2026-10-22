@@ -510,11 +510,19 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     return true
   }
 
-  const errText = (e: unknown) => {
-    // 過去の日に DB（0042 のトリガ）で止まった時は「このアカウントでは使えません」ではなく、時刻は事務所で、と出す
-    if (e instanceof DbError && e.kind === 'forbidden' && dayRef.current < todayIso()) return MSG_PAST_TIME
+  /**
+   * 失敗の文言。timesTouched＝到着・帰宅の時刻を変える書き込み（到着・帰宅・時刻を消す欠席・取り消し）。過去の日のその書き込みが
+   * DB（0042 のトリガ）で止まった時だけ「このアカウントでは使えません」ではなく「時刻は事務所で」と出す（入浴など時刻と関係ない
+   * 書き込みの拒否は今までどおりの文言＝反証レビュー4巡目 F7）
+   */
+  const errText = (e: unknown, timesTouched = false) => {
+    if (timesTouched && e instanceof DbError && e.kind === 'forbidden' && dayRef.current < todayIso()) return MSG_PAST_TIME
     return e instanceof DbError ? e.message : '保存できませんでした。通信状態を確認して、もう一度押してください。'
   }
+  /** その書き込みで到着・帰宅の時刻が変わるか（いまの行と比べる。時刻の無い方の欠席は変わらない） */
+  const touchesTimes = (patch: Partial<Pick<DaycareAttendance, 'arrived_at' | 'left_at'>>, cur: DaycareAttendance | null) =>
+    (patch.arrived_at !== undefined && hmOf(patch.arrived_at) !== hmOf(cur?.arrived_at ?? null)) ||
+    (patch.left_at !== undefined && hmOf(patch.left_at) !== hmOf(cur?.left_at ?? null))
 
   /** 到着の時刻・帰宅の時刻・欠席を書く（行が無ければ追加・あれば変えた列だけ）。戻り値は書いた後の行（送信待ち・競合は null） */
   const writeAttendance = async (
@@ -542,7 +550,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       if (!ok) return 'failed'
       return r === 'queued' ? null : (r as DaycareAttendance)
     } catch (e) {
-      setMsg(id, { tone: 'danger', text: errText(e) })
+      setMsg(id, { tone: 'danger', text: errText(e, touchesTimes(patch, row.attendance)) })
       return 'failed'
     }
   }
@@ -586,7 +594,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       const r = await updateDaycareAttendance(row, patch, { editedBy: actorId })
       afterWrite(row.resident_id, r)
     } catch (e) {
-      setMsg(row.resident_id, { tone: 'danger', text: errText(e) })
+      setMsg(row.resident_id, { tone: 'danger', text: errText(e, touchesTimes(patch, row)) })
     }
   }
 
