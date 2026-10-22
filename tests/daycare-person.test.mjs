@@ -318,7 +318,9 @@ if (DP === null) {
       assert.doesNotMatch(page, /localStorage/)
       assert.doesNotMatch(code('../src/lib/daycarePerson.ts'), /localStorage/)
       const migs = readdirSync(new URL('../supabase/migrations/', import.meta.url)).filter((f) => f.endsWith('.sql')).sort()
-      assert.equal(migs.at(-1), '0043_daycare_past_guard_more.sql', '段階2a は移行を足さない')
+      // 段階2a は移行を足さない（0043 の次は段階2b の活動 0044 だけ＝2a の分は無い）
+      const after = migs.filter((f) => f > '0043_daycare_past_guard_more.sql')
+      assert.deepEqual(after.filter((f) => f !== '0044_daycare_activity.sql'), [], '段階2a は移行を足さない')
     })
   })
 }

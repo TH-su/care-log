@@ -58,6 +58,7 @@ export const HISTORY_TABLE_LABEL: Record<string, string> = {
   resident_targets: '個別の目標',
   daycare_attendance: 'デイの到着・欠席',
   daycare_days: 'デイの予定の写し',
+  daycare_activity_log: 'デイの活動',
 }
 
 const VITAL_KIND_NAME: Record<string, string> = {
