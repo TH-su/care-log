@@ -103,10 +103,12 @@ export function readPersonDay(raw: string | null, today: string): string {
 }
 
 /**
- * 送信待ちの水分の消し込み（既存の食事・水分の一括入力と同じ）。held.base＝退避した時のサーバーの合計、held.ml＝まだ載っていない量、
- * now＝取り直したサーバーの合計。載ったと観測できた分だけ減らし、残りが無ければ null
+ * 送信待ちの水分の消し込み。held.base＝前に見たサーバーの合計（画面から外した行を除く）、held.ml＝まだ載っていない量、
+ * now＝取り直したサーバーの合計（同じく外した行を除く）。増えた分だけ「載った」と見て減らし、残りが無ければ null。
+ * 合計が減った時（この端末や他の端末の取り消し）は載った分を 0 と見て基準だけ下げる（送信待ちの量を増やさない＝2a の確認の反証 中1）
  */
 export function settleQueuedFluid(held: { base: number; ml: number }, now: number): { base: number; ml: number } | null {
-  const remain = held.ml - (now - held.base)
+  const landed = Math.max(0, now - held.base)
+  const remain = held.ml - landed
   return remain > 0 ? { base: now, ml: remain } : null
 }

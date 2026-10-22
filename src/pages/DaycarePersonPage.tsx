@@ -169,14 +169,14 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
    * 合計と一覧に重ねて出し、取り直した合計で載った分だけ減らす（既存の食事・水分の一括入力と同じ消し込み＝2a の反証 中4）
    */
   const [queuedFluids, setQueuedFluids] = useState<Record<string, { base: number; ml: number; lost: boolean }>>({})
-  /** 取り消しを送信待ちにした水分の行（サーバーから消えるまで画面から外す・同じ行の取り消しを二重に積まない） */
-  const [hiddenFluidIds, setHiddenFluidIds] = useState<Set<number>>(new Set())
+  /** 取り消しを送信待ちにした水分の行（id → その行の日。その日の読み込みでサーバーから消えるまで画面から外す・同じ行の取り消しを二重に積まない） */
+  const [hiddenFluidIds, setHiddenFluidIds] = useState<Map<number, string>>(new Map())
   const [fluidOther, setFluidOther] = useState('')
   const [fluidBusy, setFluidBusy] = useState(false)
   const [delFluid, setDelFluid] = useState<FluidIntake | null>(null)
   const [ex, setEx] = useState<ExState>({ status: 'loading' })
   const [exTick, setExTick] = useState(0)
-  const [, setQueueTick] = useState(0)
+  const [queueTick, setQueueTick] = useState(0)
   const { toast, show } = useToast()
   const genRef = useRef(0)
   const dayRef = useRef(day)
@@ -260,6 +260,14 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
 
   useEffect(() => {
     setFluidOther('')
+    // 人・日の切り替えと〔最新に更新〕では、その場限りの知らせ（保存しました・保存できませんでした）を外す。
+    // 送信待ち・食い違い・拒否の知らせは残し、届いた・解けたと分かった時に外す（下の出し直し）
+    setMealState((prev) => {
+      const next: Record<string, SaveState> = {}
+      for (const [k, v] of Object.entries(prev)) if (v.kind !== 'saved' && v.kind !== 'error') next[k] = v
+      return next
+    })
+    setFluidMsg((m) => (m !== null && m.queued !== undefined ? m : null))
     void load(day, false)
   }, [day, residentId, reloadKey, load])
 
@@ -460,24 +468,39 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
     await saveMeal(t, patch, { rebase: base, undoable: false })
   }
 
-  // 読み込みの後: 送信待ちで止まっている（食い違い）・拒まれた昼食・おやつを、欄の下の知らせとして出し直す
-  // （読み直し・人や日の切り替え・開き直しの後も、止まっている値を保存済みのように見せない＝重大1）
+  // 読み込みの後と、送信待ちが動いた時（背景の再送で止まった・拒まれた・届いた）: 昼食・おやつの欄の下の知らせを、送信待ちの今の状態に合わせて出し直す
+  // （止まった値を保存済みのように見せない＝重大1。画面を開いたまま背景で止まった時も切り替える＝2a の確認の反証 中2）
   useEffect(() => {
     if (data === null) return
-    for (const slot of ['lunch', 'snack'] as const) {
-      const t: MealTarget = { residentId, day: data.day, slot }
-      const p = pendingRow('meals', t)
-      if (p === null || p.state === 'pending') continue
-      setMealState((prev) => {
+    setMealState((prev) => {
+      let next = prev
+      for (const slot of ['lunch', 'snack'] as const) {
+        const t: MealTarget = { residentId, day: data.day, slot }
         const k = mealKeyOf(t)
         const cur = prev[k]
-        if (cur !== undefined && (cur.kind === 'conflict' || cur.kind === 'held' || cur.kind === 'rejected' || cur.kind === 'saving')) return prev
-        const st: SaveState =
-          p.state === 'rejected' ? { kind: 'rejected', target: t } : p.conflicts.length > 0 ? { kind: 'conflict', conflicts: p.conflicts, target: t } : { kind: 'held', target: t }
-        return { ...prev, [k]: st }
-      })
-    }
-  }, [data, residentId])
+        if (cur !== undefined && cur.kind === 'saving') continue
+        const p = pendingRow('meals', t)
+        let st: SaveState | undefined = cur
+        if (p !== null && p.state !== 'pending') {
+          if (p.state === 'rejected') st = cur !== undefined && cur.kind === 'rejected' ? cur : { kind: 'rejected', target: t }
+          else if (p.conflicts.length > 0)
+            st =
+              cur !== undefined && cur.kind === 'conflict' && JSON.stringify(cur.conflicts) === JSON.stringify(p.conflicts)
+                ? cur
+                : { kind: 'conflict', conflicts: p.conflicts, target: t }
+          else st = cur !== undefined && cur.kind === 'held' ? cur : { kind: 'held', target: t }
+        } else if (cur !== undefined && (cur.kind === 'conflict' || cur.kind === 'held' || cur.kind === 'rejected' || (cur.kind === 'queued' && p === null))) {
+          // 届いた（送信待ちから消えた）・別のタブで解かれた: 送信待ち・食い違い・拒否の知らせを外す
+          st = undefined
+        }
+        if (st === cur) continue
+        if (next === prev) next = { ...prev }
+        if (st === undefined) delete next[k]
+        else next[k] = st
+      }
+      return next
+    })
+  }, [data, residentId, queueTick])
 
   /** 割合・おやつのボタン: 状態が「食べた」以外（拒食・外出・入院）なら「食べた」に戻して送る（2a の反証 中5） */
   const withEaten = (status: string | null | undefined, patch: Partial<Record<MealField, number | string | null>>) =>
@@ -492,29 +515,34 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
         : data.fluids.filter((f) => f.resident_id === residentId && f.taken_on === data.day && !hiddenFluidIds.has(f.id)),
     [data, residentId, hiddenFluidIds],
   )
-  // 読み込みの後: 送信待ちの水分は、取り直した合計で載った分だけ減らす（観測ベース）。取り消しを送った行はサーバーから消えたら外す
+  // 読み込みの後: 送信待ちの水分は、取り直した合計（取り消しを送信待ちにして外した行を除く）で載った分だけ減らす（観測ベース）。
+  // 未送信が1件も無ければ、送信待ちの水分も残さない（届いた後に読み直している＝消し込みの取りこぼしの安全網）。
+  // 取り消しを送った行は、その行の日の読み込みでサーバーから消えたら外す（別の日を読んだだけでは外さない＝2a の確認の反証 軽4）
   useEffect(() => {
     if (data === null) return
+    const visible = data.fluids.filter((f) => !hiddenFluidIds.has(f.id))
+    const nothingQueued = queuePending() === 0
     setQueuedFluids((prev) => {
-      let changed = false
-      const next = { ...prev }
+      let next = prev
       for (const [k, held] of Object.entries(prev)) {
         const [ridText, d] = k.split(':')
-        if (d !== data.day) continue
-        const now = fluidTotalOf(data.fluids, Number(ridText), d)
-        const r = settleQueuedFluid(held, now)
+        if (d !== data.day && !nothingQueued) continue
+        const r = nothingQueued ? null : settleQueuedFluid(held, fluidTotalOf(visible, Number(ridText), d))
+        if (r !== null && r.base === held.base && r.ml === held.ml) continue
+        if (next === prev) next = { ...prev }
         if (r === null) delete next[k]
         else next[k] = { ...held, ...r }
-        changed = true
       }
-      return changed ? next : prev
+      return next
     })
     setHiddenFluidIds((prev) => {
-      if (prev.size === 0) return prev
-      const still = new Set([...prev].filter((id) => data.fluids.some((f) => f.id === id)))
-      return still.size === prev.size ? prev : still
+      const gone = [...prev].filter(([id, d]) => d === data.day && !data.fluids.some((f) => f.id === id))
+      if (gone.length === 0) return prev
+      const still = new Map(prev)
+      for (const [id] of gone) still.delete(id)
+      return still
     })
-  }, [data])
+  }, [data, hiddenFluidIds])
   // 送信待ちにした旨の一言は、届いたと観測できたら外す（「電波が戻ると自動で送信します」を送った後に残さない）
   useEffect(() => {
     setFluidMsg((m) => {
@@ -551,7 +579,16 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
         setQueuedFluids((prev) => {
           const held = prev[key]
           // base は最初に退避した時点のサーバーの合計を保つ（重ねて退避しても基準をずらさない）
-          const base = held !== undefined ? held.base : data === null || data.day !== d ? 0 : fluidTotalOf(data.fluids, rid, d)
+          const base =
+            held !== undefined
+              ? held.base
+              : data === null || data.day !== d
+                ? 0
+                : fluidTotalOf(
+                    data.fluids.filter((x) => !hiddenFluidIds.has(x.id)),
+                    rid,
+                    d,
+                  )
           return { ...prev, [key]: { base, ml: (held?.ml ?? 0) + ml, lost: (held?.lost ?? false) || !persisted } }
         })
         setFluidMsg({ key, tone: persisted ? 'info' : 'danger', text: `＋${fmtMl(ml)}：${persisted ? MSG_QUEUED : MSG_NOT_PERSISTED}`, queued: { add: true } })
@@ -581,7 +618,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
       const r = await softDeleteFluid(f.id, f.rev, { editedBy: actorId })
       if (r === 'queued') {
         // 取り消しを送信待ちにした: 画面からは先に外す（同じ行の取り消しを二重に積まない）。控えを残せたかで文言を分ける
-        setHiddenFluidIds((prev) => new Set([...prev, f.id]))
+        setHiddenFluidIds((prev) => new Map([...prev, [f.id, f.taken_on]]))
         const persisted = isQueuePersisted()
         setFluidMsg({ key, tone: persisted ? 'info' : 'danger', text: `${fmtMl(f.amount_ml)} の取り消し：${persisted ? MSG_QUEUED : MSG_NOT_PERSISTED}`, queued: { delId: f.id } })
       } else if (r === true) {
@@ -811,7 +848,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
             onClick={() => void saveMeal(targetOf('lunch'), { status: lunch?.status === 'refused' ? 'eaten' : 'refused' })}
             className={chipCls(lunch?.status === 'refused')}
           >
-            拒食
+            {lunch?.status === 'refused' ? '拒食を取り消す' : '拒食'}
           </button>
         </div>
         <MealStatusLine

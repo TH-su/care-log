@@ -119,6 +119,11 @@ if (DP === null) {
       assert.deepEqual(DP.settleQueuedFluid({ base: 150, ml: 350 }, 350), { base: 350, ml: 150 }, '一部（200）だけ載った')
       assert.equal(DP.settleQueuedFluid({ base: 150, ml: 200 }, 350), null, '全部載った')
       assert.equal(DP.settleQueuedFluid({ base: 150, ml: 200 }, 500), null, '別の端末の分も増えた')
+      // 合計が減った時（取り消し）は送信待ちの量を増やさず、基準だけ下げる（2a の確認の反証 中1）
+      assert.deepEqual(DP.settleQueuedFluid({ base: 150, ml: 200 }, 0), { base: 0, ml: 200 }, '先に 150 の行が取り消された')
+      assert.equal(DP.settleQueuedFluid({ base: 0, ml: 200 }, 200), null, 'その後に 200 が載った')
+      // 確認の反証の例A: 外した行を除いた合計で数えると、取り消し（−150）と追加（＋100）が両方届いた後に残らない
+      assert.equal(DP.settleQueuedFluid({ base: 200, ml: 100 }, 300), null, '外した行を除いた基準 200 → 300')
     })
   })
 
@@ -256,7 +261,13 @@ if (DP === null) {
     it('2a の反証の直し（重大1・中2〜5）', () => {
       // 重大1: 重ねて出すのは送信待ち（pending）だけ。止まった・拒まれた値は欄の下で知らせ、読み込みの後に出し直す
       assert.match(page, /if \(p === null \|\| p\.state !== 'pending'\) return cur/)
-      assert.match(page, /p\.state === 'rejected' \? \{ kind: 'rejected', target: t \} : p\.conflicts\.length > 0 \? \{ kind: 'conflict', conflicts: p\.conflicts, target: t \} : \{ kind: 'held', target: t \}/)
+      assert.match(page, /if \(p !== null && p\.state !== 'pending'\) \{\s*if \(p\.state === 'rejected'\) st = /)
+      // 確認の反証 中2: 出し直しは読み込みの後だけでなく、送信待ちが動いた時（背景の再送で止まった・拒まれた・届いた）にも走る
+      assert.match(page, /\}, \[data, residentId, queueTick\]\)/)
+      assert.match(page, /\(cur\.kind === 'queued' && p === null\)\)\) \{[\s\S]{0,120}?st = undefined/)
+      // 確認の反証 軽3（この直しで入った退行）: 人・日の切り替えと〔最新に更新〕で、その場限りの知らせを外す
+      assert.match(page, /if \(v\.kind !== 'saved' && v\.kind !== 'error'\) next\[k\] = v/)
+      assert.match(page, /setFluidMsg\(\(m\) => \(m !== null && m\.queued !== undefined \? m : null\)\)/)
       assert.doesNotMatch(page, /〔最新に更新〕で読み直してください/)
       // 中2: 〔元に戻す〕はオンラインで実際に書けた時だけ・送信待ちでは出さない
       assert.match(page, /if \(r === 'queued'\) \{[\s\S]{0,300}?setMealFor\(t, \{ kind: 'queued', persisted: isQueuePersisted\(\) \}\)\s*return\s*\}/)
@@ -268,8 +279,16 @@ if (DP === null) {
       assert.match(page, /fluidMsg !== null && fluidMsg\.key === personKey/)
       // 中4: 送信待ちの水分を合計と一覧に重ね、取り直しで消し込む。取り消しの送信待ちは行を先に外す
       assert.match(page, /const fluidTotal = fluidTotalOf\(fluidsOf, residentId, data\.day\) \+ \(queuedNow\?\.ml \?\? 0\)/)
-      assert.match(page, /const r = settleQueuedFluid\(held, now\)/)
-      assert.match(page, /setHiddenFluidIds\(\(prev\) => new Set\(\[\.\.\.prev, f\.id\]\)\)/)
+      // 確認の反証 中1: 消し込みの合計は、取り消しを送信待ちにして外した行を除く（退避の時の基準も同じ）。未送信0件なら残さない
+      assert.match(page, /const visible = data\.fluids\.filter\(\(f\) => !hiddenFluidIds\.has\(f\.id\)\)/)
+      assert.match(page, /settleQueuedFluid\(held, fluidTotalOf\(visible, Number\(ridText\), d\)\)/)
+      assert.match(page, /data\.fluids\.filter\(\(x\) => !hiddenFluidIds\.has\(x\.id\)\)/)
+      assert.match(page, /const nothingQueued = queuePending\(\) === 0/)
+      // 確認の反証 軽4: 外した行は、その行の日の読み込みで消えた時だけ戻す
+      assert.match(page, /setHiddenFluidIds\(\(prev\) => new Map\(\[\.\.\.prev, \[f\.id, f\.taken_on\]\]\)\)/)
+      assert.match(page, /\(\[id, d\]\) => d === data\.day && !data\.fluids\.some\(\(f\) => f\.id === id\)/)
+      // 確認の反証 軽7: 〔拒食〕の文言は #15 の形（拒食の時は〔拒食を取り消す〕）に戻す
+      assert.match(page, /\{lunch\?\.status === 'refused' \? '拒食を取り消す' : '拒食'\}/)
       // 中5: 拒食・外出・入院の行は、割合・おやつのボタンで「食べた」に戻して送る
       assert.match(page, /status === null \|\| status === undefined \|\| status === 'eaten' \? patch : \{ \.\.\.patch, status: 'eaten' \}/)
       assert.match(page, /onClick=\{\(\) => void saveMeal\(targetOf\('lunch'\), withEaten\(lunch\?\.status, \{ \[f\]: n \}\)\)\}/)
