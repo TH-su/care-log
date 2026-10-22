@@ -3,10 +3,11 @@
 // 決まり（段階2の計画 v1 の 2.2・代表者の承認 2026-10-22）:
 // ・〔申し送りにする〕で、記録から文を組み立てた申し送り（区分「デイ」shift='daycare'）を1件作る。notes の表は変えない
 // ・分類は記録の種類から: 食事・水分 →「食事」、バイタル・排泄 →「体調」、活動 → 付けない
-// ・冪等キー: dcn:<業務日>:<利用者id>:<記録>:<世代>。記録は vital・lunch・snack・ex・fl<水分の id>・ac<活動の id>。
-//   世代は「その記録の印をこれまで何回付けたか」（取り消した申し送りも数える）。notes の client_key は取り消した行も
-//   押さえたまま全体で一意なので、世代を進めることで外した後に付け直せる。同じ記録に2台で同時に印を付けると同じ鍵になり、
-//   申し送りは1件にまとまる（重複させない）
+// ・冪等キー: dcn:<業務日>:<利用者id>:<記録>:<世代>-<送るたびの印>。記録は vital・lunch・snack・ex・fl<水分の id>・ac<活動の id>。
+//   世代は「その記録の印をこれまで何回付けたか」（取り消した申し送りも数える・いちばん新しい印を選ぶのに使う）。
+//   送るたびの印（短い乱数）で、別の端末・取り消した申し送りの鍵には決して当たらない（当たると insertNote は先の行を
+//   「届いた」として返し、ひと言・記入者や印そのものが黙って消える＝2c の反証 重大2・中3・中4）。同じ送信の送り直しは
+//   同じ鍵なので二重にならない。2台で同じ記録に同時に付けた時は2件になる（消えるより増える側＝多端末の規約の原則5）
 // ・元の記録を後から直した・取り消した時: 申し送りはその時点の文のまま残し、印の横に知らせる（isStale）
 // 個人情報は扱わない（氏名は文に入れない。申し送りは利用者の欄 resident_id で結ぶ）。
 
@@ -38,15 +39,19 @@ export function markDayPrefix(day: string, residentId: number): string {
   return `dcn:${day}:${residentId}:`
 }
 
-/** 印の鍵（世代つき） */
-export function markKey(day: string, residentId: number, r: MarkRecord, gen: number): string {
-  return `${markPrefix(day, residentId, r)}${gen}`
+/** 送るたびの印の形（英小文字と数字・1〜16字） */
+const TOKEN_RE = /^[0-9a-z]{1,16}$/
+
+/** 印の鍵（世代と送るたびの印つき）。token は送る操作ごとに作る（同じ送信の送り直しは同じ token） */
+export function markKey(day: string, residentId: number, r: MarkRecord, gen: number, token: string): string {
+  if (!TOKEN_RE.test(token)) throw new Error('印の鍵の token の形が違います')
+  return `${markPrefix(day, residentId, r)}${gen}-${token}`
 }
 
-/** 鍵を読む（形が違えば null）。what は vital・lunch・snack・ex・fl<id>・ac<id> */
+/** 鍵を読む（形が違えば null）。what は vital・lunch・snack・ex・fl<id>・ac<id>。token の無い鍵（#21 の版）も読む */
 export function parseMarkKey(key: string | null | undefined): { day: string; residentId: number; what: string; gen: number } | null {
   if (typeof key !== 'string') return null
-  const m = /^dcn:(\d{4}-\d{2}-\d{2}):(\d+):(vital|lunch|snack|ex|fl\d+|ac\d+):(\d+)$/.exec(key)
+  const m = /^dcn:(\d{4}-\d{2}-\d{2}):(\d+):(vital|lunch|snack|ex|fl\d+|ac\d+):(\d+)(?:-[0-9a-z]{1,16})?$/.exec(key)
   if (m === null) return null
   const residentId = Number(m[2])
   const gen = Number(m[4])
@@ -78,19 +83,37 @@ export function markCategories(kind: MarkKind): NoteCategory[] {
 /** ひと言の上限（申し送りの本文として長すぎないように） */
 export const MARK_COMMENT_MAX = 100
 
-/** 申し送りの本文: 記録の文 ＋（ひと言があれば）「。」でつなぐ。ひと言の前後の空白は落とす */
+/**
+ * 申し送りの本文: 記録の文 ＋（ひと言があれば）「。」でつなぐ。ひと言は入れたまま載せる（前後の空白だけ落とす。
+ * 全角・半角や記号を書き換えない＝開発の大前提の原則6・2c の反証 軽10）
+ */
 export function markBody(text: string, comment: string): string {
-  const c = comment.normalize('NFKC').replace(/\s+/g, ' ').trim()
+  const c = comment.trim()
   return c === '' ? text : `${text}。${c}`
 }
 
 /**
- * 申し送りの文が、いまの記録の文と違うか（元の記録を後から直した・取り消した）。
- * 本文が「いまの文」そのもの、または「いまの文。ひと言」なら同じ。current が null（記録が無くなった）なら違う
+ * 申し送りの文が、いまの記録の文と違うか（元の記録を後から直した・取り消した、または申し送りの記録の部分を直した）。
+ * 本文がいまの文で始まり、その後ろが「。」・空白・終わりなら同じ（日報でひと言を足しただけの申し送りを「違う」にしない
+ * ＝2c の反証 中5）。数字の続き（150 と 1500 など）は違う。current が null（記録が無くなった）なら違う
  */
 export function isStale(body: string, current: string | null): boolean {
   if (current === null) return true
-  return !(body === current || body.startsWith(`${current}。`))
+  if (body === current) return false
+  if (!body.startsWith(current)) return true
+  return !/^[。\s　]/.test(body.slice(current.length))
+}
+
+/**
+ * いまの申し送りから、記録の文の後ろに足された部分（ひと言・日報で足した文）を取り出す（〔申し送りを直す〕で引き継ぐ
+ * ＝2c の反証 中5）。記録の文には「。」が入らないので、最初の「。」の後ろ。無ければ、いまの文で始まる時はその後ろ。
+ * どちらでもなければ空（小窓に「いまの申し送り」を出して、職員が入れ直せるようにする）
+ */
+export function markTail(body: string, current: string | null): string {
+  const i = body.indexOf('。')
+  if (i >= 0) return body.slice(i + 1).trim()
+  if (current !== null && body.startsWith(current)) return body.slice(current.length).trim()
+  return ''
 }
 
 /** ひと言の検査（長すぎは理由の文） */

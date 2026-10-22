@@ -60,10 +60,14 @@ if (M === null) {
   registerLoadFailure('デイ 段階2c（申し送りの印）の試験', loadError, 'この Node は型の除去か解決フックを持たない（古い Node）', { hooks: true })
 } else {
   describe('純ロジック（daycareNoteMark.ts）', () => {
-    it('鍵: dcn:<日>:<利用者id>:<記録>:<世代>。水分・活動は行の id（別の回の水分は別の鍵＝別の申し送り）', () => {
-      assert.equal(M.markKey('2026-10-22', 7, { kind: 'lunch' }, 1), 'dcn:2026-10-22:7:lunch:1')
-      assert.equal(M.markKey('2026-10-22', 7, { kind: 'fluid', id: 31 }, 2), 'dcn:2026-10-22:7:fl31:2')
-      assert.equal(M.markKey('2026-10-22', 7, { kind: 'activity', id: 5 }, 1), 'dcn:2026-10-22:7:ac5:1')
+    it('鍵: dcn:<日>:<利用者id>:<記録>:<世代>-<送るたびの印>。水分・活動は行の id（別の回の水分は別の鍵＝別の申し送り）', () => {
+      assert.equal(M.markKey('2026-10-22', 7, { kind: 'lunch' }, 1, 'k3x9'), 'dcn:2026-10-22:7:lunch:1-k3x9')
+      assert.equal(M.markKey('2026-10-22', 7, { kind: 'fluid', id: 31 }, 2, 'a1'), 'dcn:2026-10-22:7:fl31:2-a1')
+      assert.equal(M.markKey('2026-10-22', 7, { kind: 'activity', id: 5 }, 1, 'zz'), 'dcn:2026-10-22:7:ac5:1-zz')
+      assert.throws(() => M.markKey('2026-10-22', 7, { kind: 'lunch' }, 1, 'A-B'), /token/)
+      // 2c の反証 重大2・中3・中4: 同じ世代でも送るたびの印が違えば別の鍵（別の端末・取り消した申し送りに当たらない）
+      assert.notEqual(M.markKey('2026-10-22', 7, { kind: 'snack' }, 1, 'aaaa'), M.markKey('2026-10-22', 7, { kind: 'snack' }, 1, 'bbbb'))
+      assert.deepEqual(M.parseMarkKey('dcn:2026-10-22:7:lunch:3-k3x9'), { day: '2026-10-22', residentId: 7, what: 'lunch', gen: 3 })
       assert.notEqual(M.markPrefix('2026-10-22', 7, { kind: 'fluid', id: 31 }), M.markPrefix('2026-10-22', 7, { kind: 'fluid', id: 32 }))
       assert.equal(M.markDayPrefix('2026-10-22', 7), 'dcn:2026-10-22:7:')
       assert.deepEqual(M.parseMarkKey('dcn:2026-10-22:7:fl31:2'), { day: '2026-10-22', residentId: 7, what: 'fl31', gen: 2 })
@@ -77,8 +81,7 @@ if (M === null) {
       assert.equal(M.nextGen(p, []), 1)
       assert.equal(M.nextGen(p, ['dcn:2026-10-22:7:lunch:1']), 2, '1 を取り消した後は 2')
       assert.equal(M.nextGen(p, ['dcn:2026-10-22:7:lunch:1', 'dcn:2026-10-22:7:lunch:3', 'dcn:2026-10-22:7:snack:9', 'dcn:2026-10-22:8:lunch:5']), 4)
-      // 2台で同じ記録に同時に印: どちらも同じ鍵（世代1）を作る＝申し送りは1件にまとまる（これは仕様。直さない）
-      assert.equal(M.markKey('2026-10-22', 7, { kind: 'lunch' }, M.nextGen(p, [])), M.markKey('2026-10-22', 7, { kind: 'lunch' }, M.nextGen(p, [])))
+      assert.equal(M.nextGen(p, ['dcn:2026-10-22:7:lunch:2-k3x9', 'dcn:2026-10-22:7:lunch:1']), 3, 'token つきの鍵も #21 の版の鍵も数える')
     })
     it('分類: 食事・おやつ・水分→食事／バイタル・排泄→体調／活動→付けない', () => {
       assert.deepEqual(M.markCategories('lunch'), ['食事'])
@@ -88,13 +91,23 @@ if (M === null) {
       assert.deepEqual(M.markCategories('ex'), ['体調'])
       assert.deepEqual(M.markCategories('activity'), [])
     })
-    it('本文はひと言を「。」でつなぐ。元の記録が変わったかは、本文がいまの文（＋ひと言）かで見る', () => {
+    it('本文はひと言を「。」でつなぐ（ひと言は入れたまま・書き換えない）。いまの記録と違うかは、本文がいまの文で始まるかで見る', () => {
       assert.equal(M.markBody('昼食 主食 7割・副食 5割', ''), '昼食 主食 7割・副食 5割')
       assert.equal(M.markBody('昼食 主食 7割・副食 5割', '  完食に近い　'), '昼食 主食 7割・副食 5割。完食に近い')
+      // 2c の反証 軽10（原則6）: 全角・半角・記号を書き換えない
+      assert.equal(M.markBody('おやつ 半分', 'ｶﾅ ＡＢＣ ㈱  2つ'), 'おやつ 半分。ｶﾅ ＡＢＣ ㈱  2つ')
       assert.equal(M.isStale('昼食 主食 7割・副食 5割。完食に近い', '昼食 主食 7割・副食 5割'), false)
       assert.equal(M.isStale('昼食 主食 7割・副食 5割', '昼食 主食 7割・副食 5割'), false)
       assert.equal(M.isStale('昼食 主食 7割・副食 5割', '昼食 主食 9割・副食 5割'), true)
       assert.equal(M.isStale('昼食 主食 7割', null), true, '記録が無くなった')
+      // 2c の反証 中5: 日報で空白に続けて足しただけの申し送りは「違う」にしない。数字の続き（150 と 1500）は違う
+      assert.equal(M.isStale('昼食 主食 7割・副食 5割 声かけで完食', '昼食 主食 7割・副食 5割'), false)
+      assert.equal(M.isStale('水分 10:30 1500 ml', '水分 10:30 150 ml'), true)
+      assert.equal(M.isStale('昼食 主食 10割・副食 5割', '昼食 主食 1割・副食 5割'), true)
+      // 〔申し送りを直す〕で引き継ぐ部分（ひと言・日報で足した文）
+      assert.equal(M.markTail('昼食 主食 7割・副食 5割。むせ込みあり', '昼食 主食 5割・副食 5割'), 'むせ込みあり')
+      assert.equal(M.markTail('昼食 主食 7割・副食 5割 声かけで完食', '昼食 主食 7割・副食 5割'), '声かけで完食')
+      assert.equal(M.markTail('昼食 主食 7割・副食 5割', '昼食 主食 5割・副食 5割'), '')
       assert.equal(M.markCommentError('あ'.repeat(100)), null)
       assert.match(M.markCommentError('あ'.repeat(101)), /100 字まで/)
     })
@@ -208,7 +221,8 @@ if (M === null) {
       assert.deepEqual([...new Set(writes.map((w) => w.slice(0, -1)))].sort(), ['deleteNote', 'insertNote', 'saveNoteEdits'])
       assert.doesNotMatch(comp, /supabase|\.from\(|\.rpc\(|localStorage/)
       // 冪等キーは世代つきの鍵・区分はデイ・「16時以降」は付けない・分類は記録の種類から
-      assert.match(comp, /insertNote\(payload, \{ clientKey: markKey\(d, rid, rec, gen\) \}\)/)
+      assert.match(comp, /insertNote\(payload, \{ clientKey: markKey\(d, rid, rec, gen, token\) \}\)/)
+      assert.match(comp, /const token = Math\.random\(\)\.toString\(36\)\.slice\(2, 10\) \|\| '0'/)
       assert.match(comp, /shift: 'daycare' as const,/)
       assert.match(comp, /after16: false,/)
       assert.match(comp, /markCategories\(rec\.kind\)\.length > 0 \? \{ categories: markCategories\(rec\.kind\) \} : \{\}/)
@@ -217,13 +231,24 @@ if (M === null) {
       assert.match(comp, /\{ body: \{ value: markBody\(text, comment\), base: row\.note\.body \} \}/)
       assert.match(comp, /<ConfirmDialog\s+open=\{delRow !== null\}/)
     })
-    it('送る直前に読み直して世代を決める・生きている印があれば2件目を作らない・読めていなければ付けない・取り消した行が返ったら世代を進める', () => {
+    it('送る直前に読み直して世代を決める・生きている印があれば2件目を作らない・読めていなければ付けない', () => {
       assert.match(comp, /const fresh = await load\(d, rid\)/)
       assert.match(comp, /if \(known === null\) \{\s+say\(k, \{ tone: 'warn', text: MSG_NOT_READ \}\)/)
       assert.match(comp, /if \(known\.some\(\(r\) => !r\.deleted && r\.clientKey\.startsWith\(prefix\)\)\) \{/)
-      assert.match(comp, /let gen = nextGen\(prefix, keys\)/)
+      assert.match(comp, /const gen = nextGen\(prefix, keys\)/)
       assert.match(comp, /pendingDaycareNoteMarks\(markDayPrefix\(d, rid\)\)/)
-      assert.match(comp, /if \(deletedIds\.has\(id\) \|\| \(after !== null && after\.some\(\(r\) => r\.note\.id === id && r\.deleted\)\)\) \{/)
+      // 送るたびの印で別の鍵に当たらないので、取り消した行が返った時の送り直しは要らない（消した）
+      assert.doesNotMatch(comp, /deletedIds/)
+    })
+    it('2c の反証 重大1: 小窓・確認は開いた時の人・日へ送る。人・日が替わったら閉じる', () => {
+      assert.match(comp, /const sendAdd = async \(rid: number, d: string, rec: MarkRecord, text: string, comment: string\) => \{/)
+      assert.doesNotMatch(comp.slice(comp.indexOf('const sendAdd'), comp.indexOf('const sendRemove')), /const rid = residentId/)
+      assert.match(comp, /void sendAdd\(cur\.rid, cur\.d, cur\.rec, cur\.text, cur\.comment\)/)
+      assert.match(comp, /void sendFix\(cur\.rid, cur\.d, cur\.rec, cur\.row, cur\.text, cur\.comment\)/)
+      assert.match(comp, /void sendRemove\(delRow\.rid, delRow\.d, delRow\.rec, delRow\.row\)/)
+      assert.match(comp, /useEffect\(\(\) => \{\s+setDlg\(null\)\s+setDelRow\(null\)\s+\}, \[day, residentId\]\)/)
+      // 中5: 〔申し送りを直す〕は足された部分を引き継ぐ
+      assert.match(comp, /comment: markTail\(live\.note\.body, text\)/)
     })
     it('17時のロック: 現場のログインは記録日の 17:00 から付け外し・直しをしない（事務所はできる・サーバーが正）', () => {
       assert.match(comp, /const lockedForMe = lockState\(day, 'daycare', false, now\)\.locked && !canUnlockNotes\(role\)/)

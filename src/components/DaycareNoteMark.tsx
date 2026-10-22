@@ -36,6 +36,7 @@ import {
   MARK_COMMENT_MAX,
   isStale,
   markBody,
+  markTail,
   markCategories,
   markCommentError,
   markDayPrefix,
@@ -102,9 +103,20 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
   const [busy, setBusy] = useState<Set<string>>(new Set())
   const [, setTick] = useState(0)
   const [now, setNow] = useState(Date.now())
-  /** 小窓: add＝申し送りにする／fix＝申し送りを直す */
-  const [dlg, setDlg] = useState<{ mode: 'add' | 'fix'; rec: MarkRecord; text: string; comment: string; row: DaycareNoteMarkRow | null } | null>(null)
-  const [delRow, setDelRow] = useState<{ rec: MarkRecord; row: DaycareNoteMarkRow } | null>(null)
+  /**
+   * 小窓: add＝申し送りにする／fix＝申し送りを直す。rid・d＝小窓を開いた時の人・日（送り先。開いたまま「戻る」で人が
+   * 替わっても、開いた時の方へ送る＝2c の反証 重大1。人・日が替わったら小窓は閉じる）
+   */
+  const [dlg, setDlg] = useState<{
+    mode: 'add' | 'fix'
+    rid: number
+    d: string
+    rec: MarkRecord
+    text: string
+    comment: string
+    row: DaycareNoteMarkRow | null
+  } | null>(null)
+  const [delRow, setDelRow] = useState<{ rid: number; d: string; rec: MarkRecord; row: DaycareNoteMarkRow } | null>(null)
   const genRef = useRef(0)
   const here = useRef({ residentId, day })
   here.current = { residentId, day }
@@ -128,6 +140,12 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
     setMsgs({})
     void load(day, residentId)
   }, [day, residentId, refreshKey, load])
+
+  // 人・日が替わったら、開いている小窓・確認を閉じる（前の方の文を次の方へ送らない＝2c の反証 重大1）
+  useEffect(() => {
+    setDlg(null)
+    setDelRow(null)
+  }, [day, residentId])
 
   // 他の端末の申し送りの変更・送信待ちの減り（届いた）で読み直す。ロックの時刻の見直し（1分ごと）
   useEffect(() => {
@@ -196,22 +214,16 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
     return null
   }
 
-  /** その記録のいまの印（生きている申し送りのうち世代のいちばん新しいもの） */
-  const liveOf = (rec: MarkRecord): DaycareNoteMarkRow | null => {
-    if (rows === null) return null
+  /** その記録の生きている印（世代の新しい順・同じ世代は後に作った順）。2台で同時に付けた時は2件ありうる */
+  const livesOf = (rec: MarkRecord): DaycareNoteMarkRow[] => {
+    if (rows === null) return []
     const prefix = markPrefix(day, residentId, rec)
-    let best: DaycareNoteMarkRow | null = null
-    for (const r of rows) {
-      if (r.deleted || !r.clientKey.startsWith(prefix)) continue
-      if (best === null || (parseMarkKey(r.clientKey)?.gen ?? 0) > (parseMarkKey(best.clientKey)?.gen ?? 0)) best = r
-    }
-    return best
+    const genOf = (r: DaycareNoteMarkRow) => parseMarkKey(r.clientKey)?.gen ?? 0
+    return rows.filter((r) => !r.deleted && r.clientKey.startsWith(prefix)).sort((a, b) => genOf(b) - genOf(a) || b.note.id - a.note.id)
   }
 
-  /** 〔送る〕: 送る直前に読み直して世代を決め、区分「デイ」の申し送りを1件作る（送り先は押した時の人・日） */
-  const sendAdd = async (rec: MarkRecord, text: string, comment: string) => {
-    const rid = residentId
-    const d = day
+  /** 〔送る〕: 送る直前に読み直して世代を決め、区分「デイ」の申し送りを1件作る（送り先は小窓を開いた時の人・日） */
+  const sendAdd = async (rid: number, d: string, rec: MarkRecord, text: string, comment: string) => {
     const k = `${rid}:${d}:${markPrefix(d, rid, rec)}`
     const why = precheck()
     if (why !== null) {
@@ -233,9 +245,10 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
         say(k, { tone: 'info', text: '別の端末が先に申し送りにしていました（申し送りは1件のままです）。' })
         return
       }
-      const deletedIds = new Set(known.filter((r) => r.deleted).map((r) => r.note.id))
       const keys = [...known.map((r) => r.clientKey), ...pendingDaycareNoteMarks(markDayPrefix(d, rid)).map((p) => p.clientKey)]
-      let gen = nextGen(prefix, keys)
+      const gen = nextGen(prefix, keys)
+      // 送るたびの印: 別の端末・取り消した申し送りの鍵に当たらない（当たると先の行が「届いた」として返り、黙って消える）
+      const token = Math.random().toString(36).slice(2, 10) || '0'
       const body = markBody(text, comment)
       const payload = {
         note_on: d,
@@ -256,16 +269,7 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
         after16: false,
         ...(markCategories(rec.kind).length > 0 ? { categories: markCategories(rec.kind) } : {}),
       }
-      let res = await insertNote(payload, { clientKey: markKey(d, rid, rec, gen) })
-      // 返った行が取り消し済み（読み直しの後に別の端末が同じ世代を付けて外した）: 世代を進めて1回だけ送り直す
-      if (res !== 'queued') {
-        const id = res.id
-        const after = deletedIds.has(id) ? null : await load(d, rid)
-        if (deletedIds.has(id) || (after !== null && after.some((r) => r.note.id === id && r.deleted))) {
-          gen = nextGen(prefix, [...keys, markKey(d, rid, rec, gen), ...(after ?? []).map((r) => r.clientKey)])
-          res = await insertNote(payload, { clientKey: markKey(d, rid, rec, gen) })
-        }
-      }
+      const res = await insertNote(payload, { clientKey: markKey(d, rid, rec, gen, token) })
       if (res === 'queued') {
         setTick((x) => x + 1)
         say(k, { tone: isQueuePersisted() ? 'info' : 'danger', text: `申し送り：${queuedText()}` })
@@ -281,11 +285,9 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
     }
   }
 
-  /** 〔外す〕: その申し送りを取り消す（見た行のままの時だけ・F09） */
-  const sendRemove = async (rec: MarkRecord, row: DaycareNoteMarkRow) => {
+  /** 〔外す〕: その申し送りを取り消す（見た行のままの時だけ・F09）。rid・d は確認を開いた時の人・日（知らせの置き場所） */
+  const sendRemove = async (rid: number, d: string, rec: MarkRecord, row: DaycareNoteMarkRow) => {
     setDelRow(null)
-    const rid = residentId
-    const d = day
     const k = `${rid}:${d}:${markPrefix(d, rid, rec)}`
     const why = precheck()
     if (why !== null) {
@@ -314,10 +316,8 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
     }
   }
 
-  /** 〔申し送りを直す〕: いまの記録の文で本文を直す（基準は見た本文） */
-  const sendFix = async (rec: MarkRecord, row: DaycareNoteMarkRow, text: string, comment: string) => {
-    const rid = residentId
-    const d = day
+  /** 〔申し送りを直す〕: いまの記録の文で本文を直す（基準は見た本文）。rid・d は小窓を開いた時の人・日 */
+  const sendFix = async (rid: number, d: string, rec: MarkRecord, row: DaycareNoteMarkRow, text: string, comment: string) => {
     const k = `${rid}:${d}:${markPrefix(d, rid, rec)}`
     const why = precheck()
     if (why !== null) {
@@ -360,7 +360,8 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
   const button = (rec: MarkRecord, text: string | null, known = true): ReactNode => {
     const k = msgKey(rec)
     const prefix = markPrefix(day, residentId, rec)
-    const live = liveOf(rec)
+    const lives = livesOf(rec)
+    const live = lives[0] ?? null
     const pend = pendAll.find((p) => p.clientKey.startsWith(prefix)) ?? null
     const pendDel = live === null ? null : pendingNoteRow({ id: live.note.id })
     const msg = msgs[k] ?? null
@@ -374,9 +375,15 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
         <div className="space-y-1">
           <div className="flex flex-wrap items-center gap-gap">
             <span className="inline-flex min-h-tap items-center rounded-full border border-ok bg-ok-bg px-3 text-sm text-ink">
-              <span aria-hidden="true">✉ </span>申し送り済み{removing ? '（外す操作は送信待ち）' : ''}
+              <span aria-hidden="true">✉ </span>申し送り済み{lives.length > 1 ? `（${lives.length}件）` : ''}
+              {removing ? '（外す操作は送信待ち）' : ''}
             </span>
-            <button type="button" disabled={blocked !== null || isBusy || removing} onClick={() => setDelRow({ rec, row: live })} className={smallCls}>
+            <button
+              type="button"
+              disabled={blocked !== null || isBusy || removing}
+              onClick={() => setDelRow({ rid: residentId, d: day, rec, row: live })}
+              className={smallCls}
+            >
               外す
             </button>
           </div>
@@ -388,13 +395,13 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
           {stale ? (
             <div role="status" className="flex flex-wrap items-center gap-gap rounded border border-warn bg-warn-bg p-2 text-sm text-ink">
               <span>
-                <span aria-hidden="true">ⓘ </span>元の記録が変わりました（申し送りは前の内容のまま）。
+                <span aria-hidden="true">ⓘ </span>申し送りの文が、いまの記録と違います（申し送りは前の内容のまま。元の記録か申し送りが直されました）。
               </span>
               {text !== null ? (
                 <button
                   type="button"
                   disabled={blocked !== null || isBusy || removing}
-                  onClick={() => setDlg({ mode: 'fix', rec, text, comment: '', row: live })}
+                  onClick={() => setDlg({ mode: 'fix', rid: residentId, d: day, rec, text, comment: markTail(live.note.body, text), row: live })}
                   className={smallCls}
                 >
                   申し送りを直す
@@ -423,7 +430,7 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
           onClick={() => {
             const why = precheck() ?? (rows === null ? MSG_NOT_READ : null)
             if (why !== null) say(k, { tone: 'warn', text: why })
-            else setDlg({ mode: 'add', rec, text, comment: '', row: null })
+            else setDlg({ mode: 'add', rid: residentId, d: day, rec, text, comment: '', row: null })
           }}
           className={smallCls}
           aria-label={`「${text}」を申し送りにする`}
@@ -485,8 +492,8 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
                 onClick={() => {
                   const cur = dlg
                   setDlg(null)
-                  if (cur.mode === 'fix' && cur.row !== null) void sendFix(cur.rec, cur.row, cur.text, cur.comment)
-                  else void sendAdd(cur.rec, cur.text, cur.comment)
+                  if (cur.mode === 'fix' && cur.row !== null) void sendFix(cur.rid, cur.d, cur.rec, cur.row, cur.text, cur.comment)
+                  else void sendAdd(cur.rid, cur.d, cur.rec, cur.text, cur.comment)
                 }}
                 className="min-h-tap rounded border-2 border-primary bg-primary px-4 text-base font-bold text-primary-ink disabled:border-border-strong disabled:bg-surface disabled:text-ink3"
               >
@@ -502,7 +509,7 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
         body={delRow === null ? '' : `申し送り「${delRow.row.note.body}」を取り消します。`}
         confirmLabel="外す"
         danger
-        onConfirm={() => delRow !== null && void sendRemove(delRow.rec, delRow.row)}
+        onConfirm={() => delRow !== null && void sendRemove(delRow.rid, delRow.d, delRow.rec, delRow.row)}
         onCancel={() => setDelRow(null)}
       />
     </>
