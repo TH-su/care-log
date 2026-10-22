@@ -14,7 +14,16 @@
 //
 // 拡張子付きで import する（tests から node で直接読めるようにするため）。個人情報は扱わない（型と計算だけ）。
 
-import { DAYCARE_VITAL_KEY_PREFIX, VITAL_RANGE, diaBpLevel, pulseLevel, sysBpLevel, tempLevel } from './types.ts'
+import {
+  BATH_CANCEL_REASON_LABEL,
+  BATH_RESULT_LABEL,
+  DAYCARE_VITAL_KEY_PREFIX,
+  VITAL_RANGE,
+  diaBpLevel,
+  pulseLevel,
+  sysBpLevel,
+  tempLevel,
+} from './types.ts'
 import type {
   BathRecord,
   DaycareAbsentReason,
@@ -473,6 +482,46 @@ export function absentBathAction(existing: BathRecord | null, bathingPlanned: bo
   }
   // 自動の行（全身浴・休業日の訪問）は確認なしで直す。人が記録した入浴は確認を挟む
   return { kind: 'update', record: existing, confirm: !existing.auto }
+}
+
+// ══════════════════════════════════════════════════════════════
+// デイの画面の入浴の状態（2026-10-22 親セッション経由の本番の実測: 12:30 の自動の「全身浴」は誰も確かめないまま残っていた）
+// 自動の記録（auto=true）は「確かめていない予定値」として見分け、〔予定どおり実施〕の1タップで人の記録にする。
+// ※入浴の画面（既存 BathRecordPage）は 2026-10-01 代表指示どおり自動の印を出さないまま（この区別はデイの画面だけ）
+// ══════════════════════════════════════════════════════════════
+
+export type DaycareBathStatus =
+  /** 入浴の予定も記録も無い */
+  | { kind: 'noPlan' }
+  /** 入浴の予定があり、まだ記録が無い（12:30 より前など） */
+  | { kind: 'todo' }
+  /** 自動の記録（cron が予定から作った・まだ誰も確かめていない） */
+  | { kind: 'auto'; record: BathRecord }
+  /** 人が記録した入浴（全身浴・シャワー浴・部分浴・清拭・訪問介護で入浴） */
+  | { kind: 'done'; record: BathRecord }
+  /** 人が記録した「入浴していない」（中止・欠席） */
+  | { kind: 'notBathed'; record: BathRecord }
+
+export function daycareBathStatus(record: BathRecord | null, bathingPlanned: boolean): DaycareBathStatus {
+  if (record === null) return bathingPlanned ? { kind: 'todo' } : { kind: 'noPlan' }
+  if (record.auto) return { kind: 'auto', record }
+  if (record.result === 'cancel') return { kind: 'notBathed', record }
+  return { kind: 'done', record }
+}
+
+/** 画面の一言（記号＋文字。色だけに頼らない） */
+export function daycareBathLabel(st: DaycareBathStatus): string {
+  if (st.kind === 'noPlan') return '予定なし'
+  if (st.kind === 'todo') return '— 未'
+  if (st.kind === 'auto') return `▲ 未確認（自動の記録: ${BATH_RESULT_LABEL[st.record.result]}）`
+  if (st.kind === 'done') return `✓ ${BATH_RESULT_LABEL[st.record.result]}`
+  const r = st.record.cancel_reason
+  return `入浴していない（${r === null ? '理由なし' : BATH_CANCEL_REASON_LABEL[r]}）`
+}
+
+/** まだ人が確かめていない（予定あり・未記録か、自動の記録のまま） */
+export function bathNeedsCheck(st: DaycareBathStatus): boolean {
+  return st.kind === 'todo' || st.kind === 'auto'
 }
 
 // ══════════════════════════════════════════════════════════════

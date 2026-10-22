@@ -58,17 +58,22 @@ import { RecorderBar } from '../components/RecorderBar'
 import { ConfirmDialog, ErrorBlock, LoadingBlock, ModalShell, ResidentPickerModal, useToast } from '../components/ui'
 import {
   attendanceState,
+  bathNeedsCheck,
   buildDaycareBoard,
+  daycareBathLabel,
+  daycareBathStatus,
   fmtPlanTimes,
   nowHm,
   vitalNeedsRecheck,
 } from '../lib/daycare'
 import type { DaycareBoardRow, KeyedVital } from '../lib/daycare'
-import { resultForBathed, bathShownOf, BATH_SHOWN_LABEL } from '../lib/bath'
+import { resultForBathed } from '../lib/bath'
 import { addDays, fmtDayLabel, todayIso } from '../lib/format'
-import { DAYCARE_ABSENT_REASONS, DAYCARE_ABSENT_REASON_LABEL } from '../lib/types'
+import { BATH_CANCEL_REASON_LABEL, BATH_RESULT_LABEL, DAYCARE_ABSENT_REASONS, DAYCARE_ABSENT_REASON_LABEL } from '../lib/types'
 import type {
+  BathCancelReason,
   BathRecord,
+  BathResult,
   DaycareAbsentReason,
   DaycareAttendance,
   DaycareDay,
@@ -225,6 +230,8 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   const [rowMsg, setRowMsg] = useState<Map<number, RowMsg>>(new Map())
   const [pickerOpen, setPickerOpen] = useState(false)
   const [absentFor, setAbsentFor] = useState<DaycareBoardRow | null>(null)
+  /** 入浴の区分・中止を選ぶ小窓の対象 */
+  const [bathFor, setBathFor] = useState<DaycareBoardRow | null>(null)
   const [confirm, setConfirm] = useState<{ title: string; body: string; label: string; danger?: boolean; run: () => void } | null>(null)
   const [, setQueueTick] = useState(0)
   const genRef = useRef(0)
@@ -575,7 +582,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   const noteBathAfterAbsentCancel = (id: number) => {
     const b = bathOf(id)
     if (b !== null && b.result === 'cancel' && b.cancel_reason === 'absent') {
-      setMsg(id, { tone: 'info', text: '欠席を取り消しました。入浴の記録は「入浴していない（欠席）」のままです。入浴した場合は、下の〔入浴した〕を押してください。' })
+      setMsg(id, { tone: 'info', text: '欠席を取り消しました。入浴の記録は「入浴していない（欠席）」のままです。入浴した場合は、下の〔区分・中止を選ぶ〕で記録し直してください。' })
     }
   }
 
@@ -623,8 +630,12 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     })
   }
 
-  // ── 入浴（既存の入浴記録をそのまま使う。「入浴した／入浴していない」の2つ＝入浴の画面と同じ） ──
-  const onBath = async (row: DaycareBoardRow, bathed: boolean) => {
+  // ── 入浴（既存の入浴記録 bath_records と insertBath／updateBath をそのまま使う） ──
+  // 〔予定どおり実施〕: 記録が無ければ「全身浴」（休業日は訪問介護で入浴）を追加、自動の記録（確かめていない予定値）なら
+  //   同じ区分のまま人の記録にする（updateBath が auto=false と記入者を一緒に送る＝確かめた印）。
+  // 〔区分・中止を選ぶ〕: 全身浴・シャワー浴・部分浴・清拭・入浴していない（理由）。押し直しで直せる（取り消しは入浴の画面）。
+  // cron（private.care_auto_bath_on）と input_enabled_bath は変えない
+  const writeBath = async (row: DaycareBoardRow, result: BathResult, reason: BathCancelReason | null, word: string) => {
     if (!precheck(row)) return
     const id = row.residentId
     const cur = bathOf(id)
@@ -635,11 +646,11 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     setRowBusy(id, true)
     try {
       await ensureOpened()
-      const result = bathed ? resultForBathed(day, closedDates) : 'cancel'
+      const cancel_reason = result === 'cancel' ? reason : null
       const r =
         cur === null
-          ? await insertBath({ resident_id: id, bath_on: day, result, cancel_reason: null, note: null, recorded_by: actorId })
-          : await updateBath(cur, { result, cancel_reason: null }, { editedBy: actorId })
+          ? await insertBath({ resident_id: id, bath_on: day, result, cancel_reason, note: null, recorded_by: actorId })
+          : await updateBath(cur, { result, cancel_reason }, { editedBy: actorId })
       if (r === 'conflict') {
         setMsg(id, { tone: 'warn', text: MSG_CONFLICT })
         scheduleReload()
@@ -648,13 +659,26 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       } else {
         setData((prev) => (prev === null || prev.day !== r.bath_on ? prev : { ...prev, baths: [...prev.baths.filter((b) => b.resident_id !== id), r] }))
         setMsg(id, null)
-        show(`${nameOf(id)}さんの入浴を「${bathed ? '入浴した' : '入浴していない'}」で記録しました`)
+        show(`${nameOf(id)}さんの入浴を「${word}」で記録しました（直す時は〔区分・中止を選ぶ〕）`)
       }
     } catch (e) {
       setMsg(id, { tone: 'danger', text: errText(e) })
     } finally {
       setRowBusy(id, false)
     }
+  }
+
+  /** 〔予定どおり実施〕（1タップ）。自動の記録は区分をそのままに人の記録へ、記録が無ければ全身浴（休業日は訪問介護で入浴） */
+  const onBathAsPlanned = (row: DaycareBoardRow) => {
+    const cur = bathOf(row.residentId)
+    const result: BathResult = cur !== null && cur.auto && cur.result !== 'cancel' ? cur.result : resultForBathed(day, closedDates)
+    void writeBath(row, result, null, `予定どおり実施（${BATH_RESULT_LABEL[result]}）`)
+  }
+
+  const onBathPick = (row: DaycareBoardRow, result: BathResult, reason: BathCancelReason | null) => {
+    setBathFor(null)
+    const word = result === 'cancel' ? `入浴していない（${reason === null ? '理由なし' : BATH_CANCEL_REASON_LABEL[reason]}）` : BATH_RESULT_LABEL[result]
+    void writeBath(row, result, reason, word)
   }
 
   const addExtra = (id: number | null) => {
@@ -745,6 +769,10 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     return latest !== null && vitalNeedsRecheck(latest, targets.get(id))
   }
   const vitalsWaiting = board.rows.filter((r) => r.state === 'present' && !vitalsDone(r.residentId)).length
+  // 入浴を確かめていない方（在席・帰宅で、予定ありの未記録か自動の記録のまま）
+  const bathUnchecked = board.rows.filter(
+    (r) => (r.state === 'present' || r.state === 'left') && bathNeedsCheck(daycareBathStatus(bathOf(r.residentId), r.bathingPlanned)),
+  ).length
 
   const tiles: { label: string; value: number; tone?: 'warn' }[] = [
     { label: '予定', value: c.planned },
@@ -753,6 +781,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     { label: '欠席', value: c.absent },
     { label: '未到着', value: c.waiting },
     { label: 'バイタル未', value: vitalsWaiting, tone: vitalsWaiting > 0 ? 'warn' : undefined },
+    { label: '入浴 未確認', value: bathUnchecked, tone: bathUnchecked > 0 ? 'warn' : undefined },
   ]
 
   return (
@@ -760,7 +789,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       {header}
       <PlanBanners data={data} notInRoster={board.notInRoster} unconfirmed={board.unconfirmed} today={today} />
 
-      <ul className="grid grid-cols-3 gap-gap sm:grid-cols-6" aria-label="件数">
+      <ul className="grid grid-cols-3 gap-gap sm:grid-cols-4 lg:grid-cols-7" aria-label="件数">
         {tiles.map((t) => (
           <li key={t.label} className={`rounded-lg border bg-surface p-3 ${t.tone === 'warn' ? 'border-warn' : 'border-border'}`}>
             <span className="block font-num text-2xl font-bold text-ink">{t.value}</span>
@@ -788,6 +817,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
             const pending = hasPendingDaycareAttendance(row.residentId, day, row.attendance?.id ?? null)
             const isBusy = busy.has(row.residentId) || pending
             const bath = bathOf(row.residentId)
+            const bst = daycareBathStatus(bath, row.bathingPlanned)
             const m = rowMsg.get(row.residentId)
             const name = nameOf(row.residentId)
             const disabled = !canWrite || isFuture || isBusy
@@ -886,37 +916,42 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                       <span className="font-bold">{vAbn ? '▲ 要確認' : vDone ? '✓ 済' : '— 未'}</span>
                     </Link>
                     ) : null}
-                    <span className="inline-flex min-h-tap items-center text-base text-ink2">
-                      入浴&nbsp;
-                      <span className="font-bold text-ink">
-                        {bath === null
-                          ? row.bathingPlanned
-                            ? '— 未'
-                            : '予定なし'
-                          : `${bath.result === 'cancel' ? '' : '✓ '}${BATH_SHOWN_LABEL[bathShownOf(bath.result)]}${
-                              bath.result === 'cancel' && bath.cancel_reason === 'absent' ? '（欠席）' : ''
-                            }`}
-                      </span>
+                    <span
+                      className={`inline-flex min-h-tap items-center rounded-full px-3 text-base ${
+                        bst.kind === 'auto'
+                          ? 'border-2 border-warn bg-warn-bg text-ink'
+                          : bst.kind === 'todo'
+                            ? 'border border-dashed border-border-strong text-ink'
+                            : bst.kind === 'done'
+                              ? 'border border-ok bg-ok-bg text-ink'
+                              : 'border border-border bg-surface2 text-ink'
+                      }`}
+                    >
+                      入浴&nbsp;<span className="font-bold">{daycareBathLabel(bst)}</span>
                     </span>
                     {row.state === 'present' || row.state === 'left' ? (
-                      <span className="flex gap-gap" role="group" aria-label={`${name}さんの入浴`}>
+                      <span className="flex flex-wrap gap-gap" role="group" aria-label={`${name}さんの入浴`}>
+                        {bathNeedsCheck(bst) ? (
+                          <button
+                            type="button"
+                            onClick={() => onBathAsPlanned(row)}
+                            disabled={disabled}
+                            aria-label={`${name}さんの入浴を予定どおり実施として記録`}
+                            className="min-h-tap rounded-full border border-primary bg-primary px-4 text-base font-bold text-primary-ink disabled:border-border disabled:bg-surface2 disabled:text-ink3"
+                          >
+                            予定どおり実施
+                          </button>
+                        ) : null}
                         <button
                           type="button"
-                          onClick={() => void onBath(row, true)}
+                          onClick={() => {
+                            if (precheck(row)) setBathFor(row)
+                          }}
                           disabled={disabled}
-                          aria-pressed={bath !== null && bath.result !== 'cancel'}
-                          className="min-h-tap rounded border border-primary px-3 text-base text-primary disabled:border-border disabled:text-ink3"
+                          aria-label={`${name}さんの入浴の区分・中止を選ぶ`}
+                          className="min-h-tap rounded-full border border-border-strong px-4 text-base text-ink disabled:text-ink3"
                         >
-                          入浴した
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void onBath(row, false)}
-                          disabled={disabled}
-                          aria-pressed={bath !== null && bath.result === 'cancel'}
-                          className="min-h-tap rounded border border-border-strong px-3 text-base text-ink disabled:text-ink3"
-                        >
-                          入浴していない
+                          {bst.kind === 'done' || bst.kind === 'notBathed' ? '直す（区分・中止）' : '区分・中止を選ぶ'}
                         </button>
                       </span>
                     ) : null}
@@ -981,6 +1016,49 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
             </ul>
             <div className="mt-4 flex justify-end">
               <button type="button" onClick={() => setAbsentFor(null)} className="min-h-tap rounded border border-border-strong px-4 text-base text-ink">
+                キャンセル
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </ModalShell>
+
+      <ModalShell open={bathFor !== null} label="入浴の区分・中止" onClose={() => setBathFor(null)}>
+        {bathFor !== null ? (
+          <div className="p-4">
+            <h2 className="text-lg font-bold text-ink">入浴の記録（{nameOf(bathFor.residentId)}さん）</h2>
+            <p className="mt-2 text-sm text-ink2">押した区分で記録します（押し直すと直せます）。</p>
+            <h3 className="mt-3 text-base font-bold text-ink">入浴した</h3>
+            <ul className="mt-2 grid grid-cols-1 gap-gap sm:grid-cols-3">
+              {(['full', 'shower', 'partial'] as const).map((res) => (
+                <li key={res}>
+                  <button
+                    type="button"
+                    onClick={() => onBathPick(bathFor, res === 'full' ? resultForBathed(day, closedDates) : res, null)}
+                    className="min-h-14 w-full rounded border border-primary bg-surface px-3 text-lg text-primary"
+                  >
+                    {BATH_RESULT_LABEL[res]}
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <h3 className="mt-4 text-base font-bold text-ink">入浴していない（中止の理由）</h3>
+            <ul className="mt-2 grid grid-cols-1 gap-gap sm:grid-cols-2">
+              {(['condition', 'refusal', 'facility', null] as const).map((rs) => (
+                <li key={rs ?? 'none'}>
+                  <button
+                    type="button"
+                    onClick={() => onBathPick(bathFor, 'cancel', rs)}
+                    className="min-h-14 w-full rounded border border-border-strong bg-surface px-3 text-lg text-ink"
+                  >
+                    {rs === null ? '理由を選ばない' : BATH_CANCEL_REASON_LABEL[rs]}
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-3 text-sm text-ink2">欠席の時は、この小窓ではなく行の〔欠席〕から記録してください（入浴も「欠席」になります）。</p>
+            <div className="mt-4 flex justify-end">
+              <button type="button" onClick={() => setBathFor(null)} className="min-h-tap rounded border border-border-strong px-4 text-base text-ink">
                 キャンセル
               </button>
             </div>

@@ -267,6 +267,11 @@ subscribeDaycareChanges(cb): () => void                        // daycare_attend
     欠席の入浴は input_enabled_bath にも従う（旗は重ねて効く）
   - 週間計画（kv_entries の care_schedule_v2）は読むだけ（daycare_plan・daycare_open_day の中＝サーバー）。端末から kv_ の関数を呼ばない
   - 外部利用者は段階1〜3の対象外（「名簿に無い方 n 名」と数だけ出す）。residents に何も書かない
+  - 入浴（2026-10-22 本番の実測＝12:30 の自動の「全身浴」は誰も確かめないまま残っていた・親セッション経由の依頼）: デイの画面は
+    自動の記録（auto=true）を「▲ 未確認（自動の記録）」と見分けて出し、〔予定どおり実施〕の1タップで同じ区分のまま updateBath する
+    （auto=false と記入者が付く＝確かめた印）。記録が無ければ全身浴（休業日は訪問介護で入浴）を insertBath。〔区分・中止を選ぶ〕で
+    全身浴・シャワー浴・部分浴・清拭・入浴していない（理由）。cron（private.care_auto_bath_on）・input_enabled_bath・入浴の画面
+    （2026-10-01 代表指示どおり自動の印を出さない）は変えない。件数のタイルに「入浴 未確認」
   - 純ロジック（キー・状態・一覧・テンキー・範囲・欠席の入浴の扱い・前回値）は `src/lib/daycare.ts`
 
 - 事故・ヒヤリハット（incidents）は入浴・与薬と同じ送り方（client_key・rev 照合・送信待ち cl_sendQueue・edited_by・soft delete）。入力解禁は input_enabled_incident。

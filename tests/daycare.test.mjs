@@ -348,6 +348,26 @@ if (DC === null) {
     })
   })
 
+  describe('デイの画面の入浴の状態（自動の記録＝確かめていない予定値を見分ける）', () => {
+    it('予定なし・未・自動（未確認）・人の記録・入浴していない', () => {
+      assert.equal(DC.daycareBathStatus(null, false).kind, 'noPlan')
+      assert.equal(DC.daycareBathStatus(null, true).kind, 'todo')
+      assert.equal(DC.daycareBathStatus(bath({ auto: true }), true).kind, 'auto')
+      assert.equal(DC.daycareBathStatus(bath({ auto: false, result: 'shower' }), true).kind, 'done')
+      assert.equal(DC.daycareBathStatus(bath({ auto: false, result: 'cancel', cancel_reason: 'absent' }), true).kind, 'notBathed')
+      assert.equal(DC.daycareBathLabel(DC.daycareBathStatus(bath({ auto: true }), true)), '▲ 未確認（自動の記録: 全身浴）')
+      assert.equal(DC.daycareBathLabel(DC.daycareBathStatus(bath({ auto: false, result: 'partial' }), true)), '✓ 部分浴・清拭')
+      assert.equal(DC.daycareBathLabel(DC.daycareBathStatus(bath({ auto: false, result: 'cancel', cancel_reason: 'absent' }), true)), '入浴していない（欠席）')
+      assert.equal(DC.daycareBathLabel(DC.daycareBathStatus(bath({ auto: false, result: 'cancel', cancel_reason: null }), true)), '入浴していない（理由なし）')
+    })
+    it('確かめていない＝予定ありの未記録か自動の記録のまま', () => {
+      assert.equal(DC.bathNeedsCheck(DC.daycareBathStatus(null, true)), true)
+      assert.equal(DC.bathNeedsCheck(DC.daycareBathStatus(bath({ auto: true }), true)), true)
+      assert.equal(DC.bathNeedsCheck(DC.daycareBathStatus(bath({ auto: false }), true)), false)
+      assert.equal(DC.bathNeedsCheck(DC.daycareBathStatus(null, false)), false)
+    })
+  })
+
   describe('前回値・絞り込み', () => {
     it('前回値は欄ごとに直近（種類を問わない・その日のデイの測定を除く）', () => {
       const rows = [
@@ -621,6 +641,19 @@ if (DC === null) {
       assert.equal(r.status, 'blocked')
       assert.match(r.message, /入浴の記録はまだ使い始めていません/)
       assert.equal(s.db.bath_records.length, 0)
+      await reset()
+    })
+  })
+
+  describe('〔予定どおり実施〕: 自動の記録を同じ区分のまま人の記録にする（既存の updateBath・cron は変えない）', () => {
+    it('自動の「全身浴」→ 区分はそのまま・auto=false・記入者つき・rev が進む（確かめた印）', async () => {
+      const s = fakeServer()
+      s.db.bath_records.push({ id: 70, resident_id: 1, bath_on: T, result: 'full', cancel_reason: null, note: null, recorded_by: null, rev: 1, auto: true, deleted_at: null })
+      DB.__testHooks.setClient(s.client)
+      const cur = (await DB.fetchBathDay(T)).find((b) => b.resident_id === 1)
+      assert.equal(cur.auto, true)
+      const r = await DB.updateBath(cur, { result: cur.result, cancel_reason: null }, { editedBy: 2 })
+      assert.deepEqual([r.result, r.auto, r.recorded_by, r.rev], ['full', false, 2, 2])
       await reset()
     })
   })
