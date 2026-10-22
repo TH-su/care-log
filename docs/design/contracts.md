@@ -241,6 +241,7 @@ fetchDaycarePlan(dayIso): Promise<DaycarePlanResult>          // RPC daycare_pla
                                                                // { source: 'kv'|'none'|'unknown', rows, rev, updatedAt, missing }（関数が無い＝unknown・missing=true）
 fetchDaycareDay(dayIso): Promise<DaycareDay | null>           // その日の予定の写し（daycare_days）。表が無いと DbError('server')
 openDaycareDay(dayIso, staffId): Promise<DaycareDay>          // RPC daycare_open_day。開所の最初のタップ（今日だけ）で写しを作る。既にあればそのまま
+                                                               // （写しが unknown の日は、画面が読めた時にもう一度呼ぶ＝サーバーが1回だけ置き換える）
 fetchDaycareAttendance(dayIso): Promise<DaycareAttendance[]>  // 到着・帰宅・欠席（削除済みを除く）
 insertDaycareAttendance(a): Promise<DaycareAttendance | Conflict | Queued>   // client_key 付き。1人1日1件の 23505（自分のキーでない）は 'conflict'
 updateDaycareAttendance(current, patch, opts?): Promise<DaycareAttendance | Conflict | Queued>  // rev 照合・変えた列だけ（欠席の付け外しは理由・時刻もそろえる）
@@ -541,7 +542,9 @@ MasterSyncStatus()                           // 設定画面の「最終同期: 
 - `0041_daycare_stage1.sql`（2026-10-22・代表承認・冪等）: app_settings に input_enabled_daycare（'false'）・bath_records.cancel_reason の check に
   'absent'（同じ名前で差し替え）・daycare_days（1日1行・予定の写し plan_rows jsonb・plan_source kv/none/unknown・update は unknown の行だけ）・
   daycare_attendance（1人1日1件の部分unique・client_key 全体unique・欠席の理由と時刻の check・rev／変更の記録トリガ（day））・
-  RPC daycare_plan(p_date)（予定1件ごとに1行・照合 match と重複 dup・氏名を返さない）・RPC daycare_open_day(p_day, p_staff)（今日だけ）・
+  RPC daycare_plan(p_date)（予定1件ごとに1行・照合 match と重複 dup・bath_resident_id＝12:30 の自動の入浴が行を作る相手（cron と同じ規則）・
+  氏名を返さない）・RPC daycare_open_day(p_day, p_staff)（今日だけ・security definer＋private.is_member() の確認。daycare_days に職員の
+  直接の insert・update のポリシーは無い＝写しはこの関数だけが書く）・
   RLS＋restrictive の member_only・delete ポリシーなし・Realtime（daycare_attendance。「載っていなければ足す」一時の関数で冪等）。
   vitals・0011・cron・週間計画には触れない。**DB を先に当て、旗は false のまま公開する**（旗を true にする前に min_client_build を上げる）
 - **適用順は 0001 → 0002 → 0003 → 0004 → 0005**。0003〜0005 は互いに独立だが、
