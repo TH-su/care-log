@@ -66,6 +66,9 @@ const flush = async (n = 6) => {
 
 // ── 偽の Supabase（メモリの表。通信しない） ─────────────────────────────────
 
+/** 偽のクライアントの my_account が返すログインの役割（既定は事務所＝名簿の同期をする端末。0040） */
+let testRole = 'office'
+
 /**
  * 表ごとの行を持つ偽のクライアント。select・insert・update と eq の絞り込み、order・limit だけを受ける。
  * calls に発行した要求を控える（書き込みが0件かを確かめるため）。fail(q) が { error } を返せばそれを返す
@@ -145,7 +148,18 @@ function memSupabase(tables = {}, fail = () => null) {
     }
     return b
   }
-  return { db, calls, from }
+  // ログインの役割（care-backend の public.my_account() の真似。db.ts の fetchMyRole が読む）
+  // （calls には控えない＝「書き込みが0件か」の数え方を変えない。問い合わせた回数は rpcCalls に数える）
+  const rpcCalls = []
+  const rpc = (fn) => {
+    rpcCalls.push(fn)
+    return Promise.resolve(
+      fn === 'my_account'
+        ? { data: { role: testRole }, error: null, status: 200 }
+        : { data: null, error: { message: 'no rpc', code: 'PGRST202' }, status: 404 },
+    )
+  }
+  return { db, calls, from, rpc, rpcCalls }
 }
 
 /** 偽のクライアントを gasClient（stub 経由）と db.ts（setClient）の両方に置く */
@@ -218,6 +232,8 @@ const two = (n) => String(n).padStart(2, '0')
 afterEach(() => {
   globalThis.fetch = realFetch
   lsStore.clear()
+  testRole = 'office'
+  if (D) D.forgetMyRole() // 役割の控え（メモリ）を次の試験へ持ち越さない
   if (D) D.__testHooks.setClient(null)
   globalThis.__clStubSupabase = undefined
 })
@@ -1120,5 +1136,93 @@ describe('同じ入職日の中の順: 手入力・職員No の形・結果の�
     assert.match(G.hireDateSyncText({ ...base, nosWritten: 2 }), /職員No）を 2 名に書きました/)
     assert.match(G.hireDateSyncText({ ...base, nosWritten: null }), /0038/)
     assert.doesNotMatch(G.hireDateSyncText({ ...base, nosWritten: 0 }), /職員No/)
+  })
+})
+
+// ══════════════════════════════════════════════════════════════
+// 0040（代表者の決定 2026-10-22）: 現場のログインの端末では名簿の同期をしない（自動・手動とも）・名簿の氏名を採用しない
+// ══════════════════════════════════════════════════════════════
+describe('現場のログインでは名簿の同期をしない（0040・代表者の決定 2026-10-22）', { skip }, () => {
+  const base = () =>
+    memSupabase({ residents: [res(1, 'R001', '利用者01', { needs_review: true })], staff: [{ id: 1, name: '職員01', active: true }] })
+  const writes = (sb) => sb.calls.filter((q) => q.action !== 'select').length
+
+  it('自動の同期: 接続設定があっても、現場（field）のログインでは GAS も DB も触らずに officeOnly を返す', async () => {
+    configure()
+    testRole = 'field'
+    const sb = base()
+    useClient(sb)
+    const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }, { id: 'R002', name: '利用者02' }], staff: ['職員01', '職員02'] })
+    assert.equal(await G.autoSyncMasters(), 'officeOnly')
+    assert.equal(gas.requests.length, 0)
+    assert.equal(writes(sb), 0)
+    assert.equal(sb.db.residents.length, 1)
+    assert.deepEqual(sb.rpcCalls, ['my_account']) // 役割はメモリの控え＝1回だけ問い合わせる
+    assert.equal(await G.autoSyncMasters(), 'officeOnly')
+    assert.deepEqual(sb.rpcCalls, ['my_account'])
+  })
+
+  it('手動の同期: 現場（field）のログインでは、GAS も DB も触らずに分かる日本語の文で止める', async () => {
+    configure()
+    testRole = 'field'
+    const sb = base()
+    useClient(sb)
+    const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: ['職員01'] })
+    await assert.rejects(G.syncMasters(), (e) => {
+      assert.equal(e.message, G.MASTER_OFFICE_ONLY_MSG)
+      assert.match(e.message, /事務・管理者のログインでだけ/)
+      return true
+    })
+    assert.equal(gas.requests.length, 0)
+    assert.equal(writes(sb), 0)
+  })
+
+  it('役割が分からない（my_account が null・関数が無い）ログインも同期しない（書けない側に倒す）', async () => {
+    configure()
+    const sb = base()
+    sb.rpc = () => Promise.resolve({ data: null, error: { message: 'no rpc', code: 'PGRST202' }, status: 404 })
+    useClient(sb)
+    const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: ['職員01'] })
+    assert.equal(await G.autoSyncMasters(), 'officeOnly')
+    await assert.rejects(G.syncMasters(), (e) => e.message === G.MASTER_OFFICE_ONLY_MSG)
+    assert.equal(gas.requests.length, 0)
+    assert.equal(writes(sb), 0)
+  })
+
+  it('名簿の氏名の採用（adoptRosterName）も現場（field）のログインでは書かない', async () => {
+    testRole = 'field'
+    const sb = base()
+    useClient(sb)
+    await assert.rejects(G.adoptRosterName(1, '利用者01', '利用者01改'), (e) => e.message === G.MASTER_OFFICE_ONLY_MSG)
+    assert.equal(writes(sb), 0)
+    assert.equal(sb.db.residents[0].name, '利用者01')
+    assert.equal(sb.db.residents[0].needs_review, true)
+  })
+
+  it('接続設定の無い端末は、役割を問い合わせる前に unconfigured（今までどおり）', async () => {
+    testRole = 'field'
+    const sb = base()
+    useClient(sb)
+    fakeGas()
+    assert.equal(await G.autoSyncMasters(), 'unconfigured')
+    assert.equal(await G.syncMasters(), 'unconfigured')
+    assert.deepEqual(sb.rpcCalls, [])
+  })
+
+  it('事務所（office）・管理者（admin）のログインは今までどおり同期する', async () => {
+    for (const role of ['office', 'admin']) {
+      lsStore.clear()
+      configure()
+      testRole = role
+      D.forgetMyRole()
+      const sb = base()
+      useClient(sb)
+      const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }, { id: 'R002', name: '利用者02' }], staff: ['職員01'] })
+      const out = await G.autoSyncMasters()
+      assert.equal(typeof out, 'object', role)
+      assert.ok(gas.requests.some((r) => r.body?.action === 'getRoster'), role)
+      assert.equal(sb.db.residents.length, 2, role)
+      assert.ok(sb.db.master_sync_log.length >= 1, role)
+    }
   })
 })
