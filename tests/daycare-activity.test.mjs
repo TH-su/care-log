@@ -66,6 +66,13 @@ function fakeClient(state) {
     const run = () => {
       state.calls.push({ table: q.table, action: q.action, payload: q.payload, filters: q.filters })
       if (q.table === 'app_settings') return { data: q.single ? null : [], error: null, status: 200 }
+      if (q.action === 'update') {
+        if (state.down) return { data: null, error: { message: 'Service Unavailable', code: '' }, status: 503 }
+        const hit = rows.find((r) => q.filters.every(([op, k, v]) => (op === 'eq' ? r[k] === v : op === 'is' ? (r[k] ?? null) === v : true)))
+        if (!hit) return { data: null, error: null, status: 200 }
+        Object.assign(hit, q.payload, { rev: hit.rev + 1 })
+        return { data: { ...hit }, error: null, status: 200 }
+      }
       if (q.action === 'insert') {
         if (state.down) return { data: null, error: { message: 'Service Unavailable', code: '' }, status: 503 }
         const p = q.payload
@@ -89,6 +96,11 @@ function fakeClient(state) {
       },
       insert(p) {
         q.action = 'insert'
+        q.payload = p
+        return b
+      },
+      update(p) {
+        q.action = 'update'
         q.payload = p
         return b
       },
@@ -278,6 +290,29 @@ if (A === null) {
       assert.equal(st.rows.filter((r) => r.resident_id === 3 && r.label === '園芸').length, 1, '園芸は1行のまま')
       await done()
     })
+    it('この端末の取り消しがまだ届いていない行には合流しない: 入れ直しは送信待ちにし、取り消しの後に新しい行として届く', async () => {
+      const x = { id: 60, resident_id: 4, day: '2026-10-21', label: '書道', participation: 'full', note: null, recorded_by: 1, rev: 1, client_key: 'x-60', deleted_at: null }
+      const st = await fresh([x])
+      st.down = true
+      const del = await DB.softDeleteDaycareActivity({ ...x }, { editedBy: 4 })
+      assert.equal(del, 'queued')
+      st.down = false
+      // 電波が戻った直後（取り消しはまだ送信待ち）に〔その他〕から同じ項目を入れ直す
+      const r = await DB.insertDaycareActivity({ resident_id: 4, day: '2026-10-21', label: '書道', recorded_by: 4 })
+      assert.equal(r.kind, 'queued', '先の行（取り消し待ち）に合流しない')
+      await DB.flushQueue(true)
+      const shodo = st.rows.filter((row) => row.resident_id === 4 && row.label === '書道')
+      assert.deepEqual(
+        shodo.map((row) => [row.id === 60 ? 'old' : 'new', row.deleted_at === null ? 'live' : 'deleted']),
+        [
+          ['old', 'deleted'],
+          ['new', 'live'],
+        ],
+        '取り消しが届いた後に、入れ直しが新しい行として残る',
+      )
+      assert.deepEqual(DB.pendingActivityOps(), [])
+      await done()
+    })
     it('未来の日・空の項目は送らない（DbError・通信しない）', async () => {
       const st = await fresh()
       await assert.rejects(DB.insertDaycareActivity({ resident_id: 1, day: '2999-01-01', label: '体操', recorded_by: 4 }), /未来の日/)
@@ -338,7 +373,7 @@ if (A === null) {
       assert.match(db, /daycare_activity: 'デイの活動の記録はまだ使い始めていません（開始日に解禁します）'/)
       assert.match(db, /return day === null \|\| label === null \|\| label === '' \? null : \{ resident_id: residentId, day, label \}/)
       // 送信待ちの経路: 同じ度合いの行が先にあれば届いたのと同じ（合流）。その判定は止める判定より前
-      const merge = db.indexOf("if (op.table === 'daycare_activity_log' && (await activitySameLanded(sb, op.payload))) return 'sent'")
+      const merge = db.indexOf("if (st === 'same') return 'sent'")
       const stop = db.indexOf("if (await naturalKeyTaken(sb, op.table, op.payload)) return 'conflict'")
       assert.ok(merge > 0 && stop > merge, '合流の判定は止める判定の直前')
       // 〔自分の内容で直す〕の中身は度合い・備考だけ（自然キー・冪等キー・記入者は送らない）
@@ -377,14 +412,21 @@ if (A === null) {
     })
     it('2b の反証の直し（重大1・中1・中2）', () => {
       const s = code('../src/components/DaycareActivitySection.tsx')
-      // 重大1: 部品は人・日ごとに作り直し、前回はこの方の行だけから選ぶ（前の方の前回を次の方へ記録しない）
-      assert.match(code('../src/pages/DaycarePersonPage.tsx'), /<DaycareActivitySection key=\{`\$\{residentId\}:\$\{data\.day\}`\}/)
-      assert.match(s, /previousActivities\(prev\.filter\(\(r\) => r\.resident_id === residentId\), day\)/)
+      // 重大1: 前回は「読んだ時の人・日」の印を持ち、いま開いている人・日と違えば使わない。この方の行だけから選ぶ
+      //   （部品を key で作り直す直しは、確認の反証で「圏外で人を切り替えると活動の欄が使えない」退行が出たのでやめた）
+      assert.doesNotMatch(code('../src/pages/DaycarePersonPage.tsx'), /<DaycareActivitySection key=/)
+      assert.match(s, /prev === null \|\| prev\.key !== personKey \? null : previousActivities\(prev\.rows\.filter\(\(r\) => r\.resident_id === residentId\), day\)/)
+      assert.match(s, /setPrev\(\(old\) => \(before !== null \? \{ key: k, rows: before \} : old !== null && old\.key === k \? old : null\)\)/)
       // 中1: 取り消しの送信待ちの行は外さず「取り消しの送信待ち」で残し、同じ項目のチップを押せなくする
       assert.doesNotMatch(s, /\.filter\(\(a\) => upd\.get\(a\.id\)\?\.deleted !== true\)/)
       assert.match(s, /deleting: p\?\.deleted === true,/)
       assert.match(s, /取り消しの送信待ち（電波が戻ると自動で送信します。届くまで同じ項目は入れられません）/)
       assert.match(s, /const labelsNow = new Set\(\[\.\.\.shown\.list\.map\(\(x\) => x\.a\.label\)/)
+      // 確認の反証 中2: 〔その他〕からも取り消しの送信待ちの項目は入れない。DB 側も、取り消し待ちの行には合流しない
+      assert.match(s, /if \(deletingLabels\.has\(label\)\) \{/)
+      const db = code('../src/lib/db.ts')
+      assert.match(db, /if \(st === 'deleting'\) return 'retry'/)
+      assert.match(db, /if \(row !== null && activityDeletePending\(row\.id\)\) return queued\(\)/)
       // 中2: 止まった度合いの変更・取り消しはその行の下で知らせる
       assert.match(s, /if \(p\.stopped\) stoppedUpd\.set\(p\.rowId, p\)/)
       assert.match(s, /stopped: stoppedUpd\.get\(a\.id\) \?\? null,/)
@@ -392,7 +434,7 @@ if (A === null) {
     })
     it('1人の記録の画面: 活動の欄は別の部品で、昼食・水分の書き込みの経路は変えない', () => {
       const p = code('../src/pages/DaycarePersonPage.tsx')
-      assert.match(p, /<DaycareActivitySection key=\{`\$\{residentId\}:\$\{data\.day\}`\} residentId=\{residentId\} residentName=\{name\} day=\{data\.day\} today=\{today\} actorId=\{actorId\} show=\{show\} refreshKey=\{reloadKey\} \/>/)
+      assert.match(p, /<DaycareActivitySection residentId=\{residentId\} residentName=\{name\} day=\{data\.day\} today=\{today\} actorId=\{actorId\} show=\{show\} refreshKey=\{reloadKey\} \/>/)
       assert.doesNotMatch(p, /DaycareActivity\(|insertDaycareActivity/)
     })
     it('まとめて記録の画面: 書き込みは insertDaycareActivity だけ・相手は activityTargets（在席・帰宅）・端末に業務データを残さない', () => {
