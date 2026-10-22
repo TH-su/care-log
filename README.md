@@ -42,3 +42,8 @@
 | `npm test` | ロジックの回帰テスト |
 | `npm run seed` | 合成テストデータ投入（実在氏名ゼロ・検証用） |
 | `CARELOG_PG_ADMIN_URL=postgres://postgres@127.0.0.1:<port>/postgres node tests/pg-run-all.mjs` | サーバーの契約の試験（使い捨ての Postgres に Supabase の真似と移行 0001〜最新を当て、`tests/*-pg.mjs` をすべて流す。本番には向けない＝127.0.0.1／localhost 以外は断る）。GitHub Actions の `pg-contract` が push のたびに同じものを流す |
+
+## 変更の出し方（2026-10-22〜）
+
+main はルールセットで守られている: 変更は PR だけ・「試験とビルド」と「pg-contract」の合格が必須・削除と強制の上書きは禁止。
+main への取り込みがそのまま公開になるため、ブランチを切って push し、PR を作って自動の取り込み（`gh pr merge --auto --merge`）を入れる。試験に合格した時点で取り込まれ、公開が走る。
