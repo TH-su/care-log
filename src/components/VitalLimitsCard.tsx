@@ -98,6 +98,14 @@ export function VitalLimitsCard({ residentId, role }: Props) {
       setMsg({ tone: 'warn', text: p.message })
       return
     }
+    // 同じ開始日の行がもうある（1人・1開始日に1件）: 送る前に知らせる
+    if (rows.some((r) => r.resident_id === rid && r.valid_from === p.value.valid_from)) {
+      setMsg({
+        tone: 'warn',
+        text: `この開始日（${md(p.value.valid_from)}）には、もう行があります。別の開始日にしてください（今日足した行なら、取り消してから足し直せます）。入力は消えていません。`,
+      })
+      return
+    }
     // 施設の基準と合わせて段階の順が崩れる項目は効かないので、足す前に止める（2d-1 の反証 中2。先の日の行は効く日まで気づけないため）
     const base = vitalThresholds()
     const fb = inputFallback(p.value, base)
@@ -149,13 +157,11 @@ export function VitalLimitsCard({ residentId, role }: Props) {
     }
   }
 
-  /** その開始日の直前に効く行（その日ちょうどの行は除く＝同じ日には足せない）の値を入れる */
-  const baseRowFor = (from: string): ResidentVitalLimit | null =>
-    limitFor(
-      rows.filter((r) => !(r.resident_id === residentId && r.valid_from === from)),
-      residentId,
-      from,
-    )
+  /**
+   * その開始日に効いている行（その日ちょうどの行も含む＝カードの「今日の基準」と同じ値）。初めの値はここから入れる
+   * （2d-1 の確認の反証 軽1: 今日から効く行がある日に、一つ前の行の値を入れていた）。その日ちょうどの行がある日には足せない（送る前に止める）
+   */
+  const baseRowFor = (from: string): ResidentVitalLimit | null => limitFor(rows, residentId, from)
   const fillFrom = (v: VitalLimitInput, from: string): VitalLimitInput => {
     const b = baseRowFor(from)
     const out = { ...v, valid_from: from }
@@ -304,12 +310,16 @@ export function VitalLimitsCard({ residentId, role }: Props) {
                   <div role="status" className="space-y-1 rounded border border-warn bg-warn-bg p-2 text-sm">
                     <p>
                       <span aria-hidden="true">▲ </span>
-                      {fromRow === null
-                        ? 'この開始日の前には個人の行がありません（いまの入力は、別の行の値から入れたものです）。'
-                        : `この開始日の直前に効くのは ${md(fromRow.valid_from)} からの行（${limitSummary(fromRow)}）です。いまの入力は別の行の値から入れたものです。`}
+                      {fromRow === null ? 'この開始日に効く個人の行はありません。' : `この開始日に効くのは ${md(fromRow.valid_from)} からの行（${limitSummary(fromRow)}）です。`}
+                      {(() => {
+                        const src = prefillFrom === null ? null : (rows.find((r) => r.id === prefillFrom) ?? null)
+                        return src === null
+                          ? 'いまの入力は、空欄（施設の基準）から入れたものです。'
+                          : `いまの入力は、${md(src.valid_from)} からの行の値から入れたものです。`
+                      })()}
                     </p>
                     <button type="button" onClick={() => { setInput(fillFrom(input, input.valid_from)); setDirty(false) }} className={btn}>
-                      {fromRow === null ? '空欄にする（施設の基準）' : `${md(fromRow.valid_from)} からの行の値を入れる`}
+                      {fromRow === null ? '空欄にする（施設の基準・いまの入力は消えます）' : `${md(fromRow.valid_from)} からの行の値で入れ直す（いまの入力は消えます）`}
                     </button>
                   </div>
                 ) : null}
