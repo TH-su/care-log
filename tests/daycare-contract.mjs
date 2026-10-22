@@ -622,6 +622,126 @@ export const DAYCARE_CASES = [
       ],
     },
   },
+  // ── 0042: 過去の日の到着・帰宅の時刻は事務所だけ（代表者の決定 2026-10-22） ──
+  {
+    id: '0042-1',
+    name: '現場: 過去の日に時刻つきの追加は 42501（daycare_past_times_office_only）・時刻なし（欠席）の追加と今日の到着は通る',
+    async run(h) {
+      const T = `(now() at time zone 'Asia/Tokyo')::date`
+      const ins = (vals) =>
+        h.as({ appRole: 'field' }, (q) => q(`insert into public.daycare_attendance (resident_id, day, arrived_at, left_at, absent, absent_reason, client_key) values (${vals}) returning id`))
+      const code = (r) => (Array.isArray(r) ? 'ok' : r.error)
+      const pastTimes = await ins(`1, ${T} - 1, '09:30', null, false, null, 'g1-a'`)
+      const msg = await h.as({ appRole: 'field' }, async (q) => {
+        try {
+          await q(`savepoint m`)
+          await q(`insert into public.daycare_attendance (resident_id, day, arrived_at, client_key) values (1, ${T} - 1, '09:30', 'g1-m')`)
+          return 'no-error'
+        } catch (e) {
+          await q(`rollback to savepoint m`)
+          return String(e.message).split(':')[0]
+        }
+      })
+      return {
+        pastTimes: code(pastTimes),
+        msg,
+        pastAbsent: code(await ins(`2, ${T} - 1, null, null, true, 'condition', 'g1-b'`)),
+        todayTimes: code(await ins(`3, ${T}, '09:30', null, false, null, 'g1-c'`)),
+      }
+    },
+    expect: { pastTimes: '42501', msg: 'daycare_past_times_office_only', pastAbsent: 'ok', todayTimes: 'ok' },
+  },
+  {
+    id: '0042-2',
+    name: '現場: 過去の日の時刻の修正・時刻の入った方の欠席・帰宅の取り消し・時刻の入った行の取り消し（soft delete）・日付の移し替えは 42501／備考・時刻の無い方の欠席・欠席の取り消しは通る',
+    async run(h) {
+      const T = `(now() at time zone 'Asia/Tokyo')::date`
+      // 所有者の接続（役割なし＝止めない）で過去の日の行を用意する
+      await h.pg(`insert into public.daycare_attendance (id, resident_id, day, arrived_at, left_at, client_key) overriding system value values
+        (701, 1, ${T} - 1, '09:30', '15:30', 'g2-1'),
+        (702, 2, ${T} - 1, null, null, 'g2-2'),
+        (703, 3, ${T} - 2, '09:00', null, 'g2-3'),
+        (705, 5, ${T}, '09:00', null, 'g2-5')`)
+      await h.pg(`insert into public.daycare_attendance (id, resident_id, day, absent, absent_reason, client_key) overriding system value values (704, 4, ${T} - 1, true, 'wish', 'g2-4')`)
+      const up = (sql) => h.as({ appRole: 'field' }, (q) => q(sql))
+      const code = (r) => (Array.isArray(r) ? 'ok' : r.error)
+      return {
+        changeLeft: code(await up(`update public.daycare_attendance set left_at = '16:00', edited_by = 1 where id = 701 returning id`)),
+        absentWithTimes: code(await up(`update public.daycare_attendance set absent = true, absent_reason = 'condition', arrived_at = null, left_at = null where id = 701 returning id`)),
+        cancelLeave: code(await up(`update public.daycare_attendance set left_at = null where id = 701 returning id`)),
+        softDelete: code(await up(`update public.daycare_attendance set deleted_at = now(), deleted_by = 1 where id = 703 returning id`)),
+        moveDay: code(await up(`update public.daycare_attendance set day = ${T} - 1 where id = 705 returning id`)),
+        noteOnly: code(await up(`update public.daycare_attendance set note = '見本の備考' where id = 701 returning id`)),
+        absentNoTimes: code(await up(`update public.daycare_attendance set absent = true, absent_reason = 'family' where id = 702 returning id`)),
+        cancelAbsent: code(await up(`update public.daycare_attendance set absent = false, absent_reason = null where id = 704 returning id`)),
+        todayLeave: code(await up(`update public.daycare_attendance set left_at = '15:00' where id = 705 returning id`)),
+        kept: (await h.pg(`select left_at::text l from public.daycare_attendance where id = 701`))[0].l,
+      }
+    },
+    expect: {
+      changeLeft: '42501',
+      absentWithTimes: '42501',
+      cancelLeave: '42501',
+      softDelete: '42501',
+      moveDay: '42501',
+      noteOnly: 'ok',
+      absentNoTimes: 'ok',
+      cancelAbsent: 'ok',
+      todayLeave: 'ok',
+      kept: '15:30:00',
+    },
+  },
+  {
+    id: '0042-3',
+    name: '事務所（office）と役割なしの接続は、過去の日の時刻を入力・修正・取り消しできる',
+    async run(h) {
+      const T = `(now() at time zone 'Asia/Tokyo')::date`
+      const code = (r) => (Array.isArray(r) ? 'ok' : r.error)
+      const off = (sql) => h.as({ appRole: 'office' }, (q) => q(sql))
+      const none = (sql) => h.as({}, (q) => q(sql))
+      return {
+        officeInsert: code(await off(`insert into public.daycare_attendance (id, resident_id, day, arrived_at, client_key) overriding system value values (801, 1, ${T} - 3, '09:10', 'g3-1') returning id`)),
+        officeLeave: code(await off(`update public.daycare_attendance set left_at = '15:20' where id = 801 returning id`)),
+        officeFix: code(await off(`update public.daycare_attendance set arrived_at = '09:05' where id = 801 returning id`)),
+        officeCancel: code(await off(`update public.daycare_attendance set left_at = null where id = 801 returning id`)),
+        noRoleInsert: code(await none(`insert into public.daycare_attendance (resident_id, day, arrived_at, client_key) values (2, ${T} - 3, '09:30', 'g3-2') returning id`)),
+        row: (await h.pg(`select arrived_at::text a, left_at::text l from public.daycare_attendance where id = 801`))[0],
+      }
+    },
+    expect: {
+      officeInsert: 'ok',
+      officeLeave: 'ok',
+      officeFix: 'ok',
+      officeCancel: 'ok',
+      noRoleInsert: 'ok',
+      row: { a: '09:05:00', l: null },
+    },
+  },
+  {
+    id: '0042-4',
+    name: 'トリガは insert と update の2つ・関数は誰にも実行の許可を出さない（トリガからだけ）・ポリシーは 0041 のまま',
+    async run(h) {
+      const trg = await h.pg(
+        `select event_manipulation ev, action_timing t from information_schema.triggers
+          where event_object_table = 'daycare_attendance' and trigger_name = 'trg_daycare_attendance_past_guard' order by 1`,
+      )
+      const fn = (await h.pg(
+        `select has_function_privilege('authenticated', 'public.daycare_attendance_past_guard()', 'execute') auth,
+                has_function_privilege('anon', 'public.daycare_attendance_past_guard()', 'execute') anon,
+                (select prosecdef from pg_proc where oid = 'public.daycare_attendance_past_guard()'::regprocedure) definer`,
+      ))[0]
+      const pol = (await h.pg(`select string_agg(policyname, ',' order by policyname) p from pg_policies where schemaname = 'public' and tablename = 'daycare_attendance'`))[0].p
+      return { trg, fn, pol }
+    },
+    expect: {
+      trg: [
+        { ev: 'INSERT', t: 'BEFORE' },
+        { ev: 'UPDATE', t: 'BEFORE' },
+      ],
+      fn: { auth: false, anon: false, definer: true },
+      pol: 'insert_auth,member_only,read_auth,update_auth',
+    },
+  },
 ]
 
 /** 観測と期待の突き合わせ（JSON 表記で比べる）。食い違いの一覧を返す（空なら一致）。expect の値が undefined のキーは見ない */

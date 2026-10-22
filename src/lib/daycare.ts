@@ -145,6 +145,13 @@ export function nowHm(d: Date = new Date()): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
+/** 予定の時刻（'9:30' のような1桁の時も）を 'HH:MM' に。読めなければ null（時刻を入れる小窓の初めの値に使う） */
+export function planHm(v: unknown): string | null {
+  if (typeof v !== 'string') return null
+  const m = /^\s*(\d{1,2}):(\d{2})/.exec(v)
+  return m === null ? null : hmOf(`${m[1].padStart(2, '0')}:${m[2]}`)
+}
+
 /** 'HH:MM' か 'HH:MM:SS' を 'HH:MM' に。読めなければ null */
 export function hmOf(v: unknown): string | null {
   if (typeof v !== 'string') return null
@@ -180,6 +187,23 @@ export function validateAttendance(v: AttendanceInput): { ok: true } | { ok: fal
     if (v.left_at < v.arrived_at) return { ok: false, message: '帰宅の時刻が到着より前になっています。時刻を確かめてください。' }
   }
   return { ok: true }
+}
+
+// ── 過去の日の到着・帰宅の時刻（代表者の決定 2026-10-22・移行 0042） ──────────
+
+/** 過去の日の到着・帰宅の時刻を入力・修正できる役割か（事務所・管理者）。分からない（null・undefined）は現場と同じ＝false */
+export function canEditPastDaycareTimes(role: string | null | undefined): boolean {
+  return role === 'office' || role === 'admin'
+}
+
+/**
+ * 到着・帰宅の時刻を変える操作をしてよいか（画面の出し分け。DB は 0042 のトリガで同じ規則を守る）。
+ * 今日は誰でも（いまの時刻で押す）。過去の日は事務所・管理者だけ（時刻を入れる・直す・取り消す・時刻の入った方を欠席にする）
+ */
+export function canChangeDaycareTimes(day: string, today: string, role: string | null | undefined): boolean {
+  if (day > today) return false
+  if (day === today) return true
+  return canEditPastDaycareTimes(role)
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -532,6 +556,30 @@ export function bathNeedsCheck(st: DaycareBathStatus): boolean {
 // ══════════════════════════════════════════════════════════════
 // 前回値・絞り込み
 // ══════════════════════════════════════════════════════════════
+
+// ── 日報の「発熱者」に載せるデイの測定（代表者の決定 2026-10-22） ──────────
+
+/** 発熱（注意の高値以上＝今の基準 37.5℃以上）か。タイムラインの「▲発熱」（TimelinePage の isFever）と同じ判定 */
+export function isFeverTemp(temp: number | null | undefined): boolean {
+  const lv = tempLevel(typeof temp === 'number' ? temp : null)
+  return lv === 'warn-high' || lv === 'danger-high'
+}
+
+/**
+ * 日報の発熱者（kind='observation'）に載せる行。デイの測定（冪等キー dc: の行＝daycareIds）は、その方のその日のデイの測定に
+ * 1回でも発熱があれば全部載せ（再測定の経過が見える）、無ければ載せない。デイ以外の行（日報で入れた発熱者）は今までどおり全部。
+ * daycareIds が分からない（undefined）時は今までどおり全部載せる（消すより載せる）
+ */
+export function dailyFeverObservations<T extends { id: number; resident_id: number; temp: number | null }>(
+  list: readonly T[],
+  daycareIds: readonly number[] | undefined,
+): T[] {
+  if (daycareIds === undefined) return [...list]
+  const dc = new Set(daycareIds)
+  const fever = new Set<number>()
+  for (const v of list) if (dc.has(v.id) && isFeverTemp(v.temp)) fever.add(v.resident_id)
+  return list.filter((v) => !dc.has(v.id) || fever.has(v.resident_id))
+}
 
 /**
  * 前回値: その方の直近の測定（種類を問わない・その日のデイの測定を除く）。並びは測定日 → 測定時刻 → id の新しい順。

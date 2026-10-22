@@ -27,11 +27,13 @@ import {
   FORBIDDEN_REASON,
   OUTDATED_REASON,
   fetchAllResidents,
+  cachedMyRole,
   fetchBathDay,
   fetchDaycareAttendance,
   fetchDaycareDay,
   fetchDaycarePlan,
   fetchDaycareVitals,
+  fetchMyRole,
   fetchResidentTargets,
   fetchResidents,
   getAppSetting,
@@ -50,20 +52,26 @@ import {
   subscribeBathChanges,
   subscribeChanges,
   subscribeDaycareChanges,
+  subscribeMyRole,
   updateBath,
   updateDaycareAttendance,
 } from '../lib/db'
-import type { AbsentBathResult } from '../lib/db'
+import type { AbsentBathResult, MyRole } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
 import { ConfirmDialog, ErrorBlock, LoadingBlock, ModalShell, ResidentPickerModal, useToast } from '../components/ui'
 import {
   attendanceState,
   bathNeedsCheck,
   buildDaycareBoard,
+  canChangeDaycareTimes,
+  canEditPastDaycareTimes,
   daycareBathLabel,
   daycareBathStatus,
   fmtPlanTimes,
+  hmOf,
   nowHm,
+  planHm,
+  validateAttendance,
   vitalNeedsRecheck,
 } from '../lib/daycare'
 import type { DaycareBoardRow, KeyedVital } from '../lib/daycare'
@@ -93,9 +101,12 @@ const MSG_NOT_PERSISTED =
 const MSG_NO_RECORDER = '記録者が選ばれていません。上の「記録者」で選んでから記録してください。'
 const MSG_ROW_PENDING = '未送信の記録があります（送信が終わると押せるようになります）'
 const MSG_FUTURE = '未来の日には記録できません。'
-/** 過去の日の到着・帰宅（いまの時刻が入ってしまうため止める。時刻を入れる操作は段階2で決める＝反証レビュー中7） */
+/** 過去の日の到着・帰宅の時刻は事務所のログインだけ（代表者の決定 2026-10-22・移行 0042 のトリガも同じ規則） */
 const MSG_PAST_TIME =
-  '過去の日の到着・帰宅は、この画面では記録できません（いまの時刻が入ってしまうため）。欠席・入浴は記録できます。到着・帰宅の時刻は事務所に伝えてください。'
+  '過去の日の到着・帰宅の時刻は、事務所のログインで入力・修正します（現場の端末は当日だけ）。欠席・入浴は記録できます。時刻は事務所に伝えてください。'
+/** 時刻の入った方の過去の日の欠席・帰宅の取り消し（時刻を消すため事務所だけ） */
+const MSG_PAST_TIME_CLEAR =
+  '過去の日に、到着・帰宅の時刻が入っている方を欠席にする・帰宅を取り消すのは、事務所のログインで行います（時刻を消すため）。'
 const MSG_GATE_UNKNOWN =
   'デイの記録を使える期間かどうかを確認できませんでした（通信エラー）。電波状態を確認して、再試行してください。記録の閲覧はこのままできます。'
 
@@ -239,11 +250,33 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   /** 入浴の区分・中止を選ぶ小窓の対象 */
   const [bathFor, setBathFor] = useState<DaycareBoardRow | null>(null)
   const [confirm, setConfirm] = useState<{ title: string; body: string; label: string; danger?: boolean; run: () => void } | null>(null)
+  /** ログインの役割（事務所・管理者だけ過去の日の到着・帰宅の時刻を入れられる。分からない間は現場と同じ扱い） */
+  const [role, setRole] = useState<MyRole | null | undefined>(cachedMyRole())
+  /** 時刻を入れる・直す小窓（事務所のログイン）。arrive＝到着を記録・leave＝帰宅を記録・fix＝時刻を直す */
+  const [timeFor, setTimeFor] = useState<{ row: DaycareBoardRow; mode: 'arrive' | 'leave' | 'fix' } | null>(null)
+  const [timeArr, setTimeArr] = useState('')
+  const [timeLeft, setTimeLeft] = useState('')
+  const [timeErr, setTimeErr] = useState<string | null>(null)
   const [, setQueueTick] = useState(0)
   const genRef = useRef(0)
   const dayRef = useRef(day)
   dayRef.current = day
   const opening = useRef<Promise<void> | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    const ask = () => {
+      void fetchMyRole().then((r) => {
+        if (alive) setRole(r)
+      })
+    }
+    ask()
+    const off = subscribeMyRole(ask)
+    return () => {
+      alive = false
+      off()
+    }
+  }, [])
 
   // ── 時計（60秒ごと・画面に戻った時に今日を取り直す） ──
   useEffect(() => {
@@ -477,7 +510,11 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     return true
   }
 
-  const errText = (e: unknown) => (e instanceof DbError ? e.message : '保存できませんでした。通信状態を確認して、もう一度押してください。')
+  const errText = (e: unknown) => {
+    // 過去の日に DB（0042 のトリガ）で止まった時は「このアカウントでは使えません」ではなく、時刻は事務所で、と出す
+    if (e instanceof DbError && e.kind === 'forbidden' && dayRef.current < todayIso()) return MSG_PAST_TIME
+    return e instanceof DbError ? e.message : '保存できませんでした。通信状態を確認して、もう一度押してください。'
+  }
 
   /** 到着の時刻・帰宅の時刻・欠席を書く（行が無ければ追加・あれば変えた列だけ）。戻り値は書いた後の行（送信待ち・競合は null） */
   const writeAttendance = async (
@@ -514,7 +551,9 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   const onArrive = async (row: DaycareBoardRow) => {
     if (!precheck(row)) return
     if (day !== todayIso()) {
-      setMsg(row.residentId, { tone: 'warn', text: MSG_PAST_TIME })
+      // 過去の日: 事務所のログインは時刻を入れる小窓（予定の開始を初めの値に）。現場は止める
+      if (canEditPastDaycareTimes(role)) openTime(row, 'arrive')
+      else setMsg(row.residentId, { tone: 'warn', text: MSG_PAST_TIME })
       return
     }
     setRowBusy(row.residentId, true)
@@ -529,7 +568,8 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   const onLeave = async (row: DaycareBoardRow) => {
     if (!precheck(row)) return
     if (day !== todayIso()) {
-      setMsg(row.residentId, { tone: 'warn', text: MSG_PAST_TIME })
+      if (canEditPastDaycareTimes(role)) openTime(row, 'leave')
+      else setMsg(row.residentId, { tone: 'warn', text: MSG_PAST_TIME })
       return
     }
     setRowBusy(row.residentId, true)
@@ -630,7 +670,53 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
 
   const askAbsent = (row: DaycareBoardRow) => {
     if (!precheck(row)) return
+    if (hasTimes(row) && !canChangeDaycareTimes(day, todayIso(), role)) {
+      setMsg(row.residentId, { tone: 'warn', text: MSG_PAST_TIME_CLEAR })
+      return
+    }
     setAbsentFor(row)
+  }
+
+  /** 到着・帰宅の時刻が入っているか（欠席にする・取り消すと時刻を消す） */
+  const hasTimes = (row: DaycareBoardRow) => row.attendance !== null && (row.attendance.arrived_at !== null || row.attendance.left_at !== null)
+
+  // ── 時刻を入れる・直す（事務所のログイン・過去の日も） ──
+  const openTime = (row: DaycareBoardRow, mode: 'arrive' | 'leave' | 'fix') => {
+    const a = row.attendance
+    const plan = row.plans[0] ?? null
+    setTimeArr(hmOf(a?.arrived_at) ?? (mode === 'arrive' ? (planHm(plan?.start) ?? '') : ''))
+    setTimeLeft(hmOf(a?.left_at) ?? (mode === 'leave' ? (planHm(row.plans[row.plans.length - 1]?.end) ?? '') : ''))
+    setTimeErr(null)
+    setTimeFor({ row, mode })
+  }
+  const saveTime = async () => {
+    const t = timeFor
+    if (t === null) return
+    const arrived_at = timeArr === '' ? null : timeArr
+    const left_at = timeLeft === '' ? null : timeLeft
+    if (arrived_at === null) {
+      setTimeErr('到着の時刻を入れてください。')
+      return
+    }
+    const v = validateAttendance({ absent: false, absent_reason: null, arrived_at, left_at })
+    if (!v.ok) {
+      setTimeErr(v.message)
+      return
+    }
+    if (!precheck(t.row)) {
+      setTimeFor(null)
+      return
+    }
+    setTimeFor(null)
+    setRowBusy(t.row.residentId, true)
+    const res = await writeAttendance(t.row, { arrived_at, left_at, absent: false, absent_reason: null })
+    setRowBusy(t.row.residentId, false)
+    if (res === 'failed') return
+    const prev = t.row.attendance
+    show(
+      `${nameOf(t.row.residentId)}さんの時刻を記録しました（到着 ${hmShort(arrived_at)}${left_at !== null ? `・帰宅 ${hmShort(left_at)}` : ''}）`,
+      res === null ? undefined : () => void undo(res, { arrived_at: prev?.arrived_at ?? null, left_at: prev?.left_at ?? null }),
+    )
   }
 
   const askCancelAbsent = (row: DaycareBoardRow) => {
@@ -655,6 +741,10 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
 
   const askCancelLeave = (row: DaycareBoardRow) => {
     if (!precheck(row) || row.attendance === null) return
+    if (!canChangeDaycareTimes(day, todayIso(), role)) {
+      setMsg(row.residentId, { tone: 'warn', text: MSG_PAST_TIME_CLEAR })
+      return
+    }
     const a = row.attendance
     setConfirm({
       title: '帰宅の記録を取り消しますか',
@@ -773,7 +863,9 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       </div>
       {day < today ? (
         <p role="status" className="rounded-lg border border-border bg-surface2 p-3 text-sm text-ink2">
-          過去の日を表示しています。到着・帰宅の記録はできません（いまの時刻が入るため）。欠席・入浴は記録できます。
+          {canEditPastDaycareTimes(role)
+            ? '過去の日を表示しています。到着・帰宅は時刻を入れて記録します（事務所のログイン）。〔時刻を直す〕で直せます。'
+            : '過去の日を表示しています。到着・帰宅の時刻は事務所のログインで入力・修正します。欠席・入浴は記録できます（時刻が入っている方の欠席・帰宅の取り消しは事務所）。'}
         </p>
       ) : null}
       {gate !== null && !(gate.observed && gate.value === true) ? (
@@ -866,8 +958,10 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
             const m = rowMsg.get(row.residentId)
             const name = nameOf(row.residentId)
             const disabled = !canWrite || isFuture || isBusy
-            /** 到着・帰宅はいまの時刻を入れるので今日だけ（過去の日は止める） */
-            const stampDisabled = disabled || day !== today
+            /** 到着・帰宅の時刻を変える操作: 今日は誰でも・過去の日は事務所のログインだけ（現場は止める＝0042 と同じ規則） */
+            const timesOk = canChangeDaycareTimes(day, today, role)
+            const stampDisabled = disabled || !timesOk
+            const rowHasTimes = hasTimes(row)
             const vDone = vitalsDone(row.residentId)
             const vAbn = vDone && vitalsAbnormal(row.residentId)
             return (
@@ -917,7 +1011,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                       <button
                         type="button"
                         onClick={() => askCancelLeave(row)}
-                        disabled={disabled}
+                        disabled={disabled || !timesOk}
                         className="min-h-tap rounded-full border border-border-strong px-4 text-base text-ink disabled:text-ink3"
                       >
                         帰宅を取り消す
@@ -936,11 +1030,24 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                       <button
                         type="button"
                         onClick={() => askAbsent(row)}
-                        disabled={disabled}
+                        disabled={disabled || (rowHasTimes && !timesOk)}
                         aria-label={`${name}さんを欠席にする`}
                         className="min-h-tap rounded-full border border-border-strong px-4 text-base text-ink disabled:text-ink3"
                       >
                         欠席
+                      </button>
+                    ) : null}
+                    {canEditPastDaycareTimes(role) && (row.state === 'present' || row.state === 'left') ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (precheck(row)) openTime(row, 'fix')
+                        }}
+                        disabled={disabled}
+                        aria-label={`${name}さんの到着・帰宅の時刻を直す`}
+                        className="min-h-tap rounded-full border border-border-strong px-4 text-base text-ink disabled:text-ink3"
+                      >
+                        時刻を直す
                       </button>
                     ) : null}
                   </div>
@@ -1075,6 +1182,63 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
             <div className="mt-4 flex justify-end">
               <button type="button" onClick={() => setAbsentFor(null)} className="min-h-tap rounded border border-border-strong px-4 text-base text-ink">
                 キャンセル
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </ModalShell>
+
+      <ModalShell open={timeFor !== null} label="到着・帰宅の時刻" onClose={() => setTimeFor(null)}>
+        {timeFor !== null ? (
+          <div className="p-4">
+            <h2 className="text-lg font-bold text-ink">
+              {timeFor.mode === 'arrive' ? '到着を記録' : timeFor.mode === 'leave' ? '帰宅を記録' : '時刻を直す'}（{nameOf(timeFor.row.residentId)}さん・{fmtDayLabel(day)}）
+            </h2>
+            <p className="mt-2 text-sm text-ink2">到着・帰宅の時刻を入れます（事務所のログイン）。帰宅は空のままにできます。</p>
+            <div className="mt-3 grid grid-cols-1 gap-gap sm:grid-cols-2">
+              <label className="block text-base text-ink">
+                到着の時刻
+                <input
+                  type="time"
+                  step={60}
+                  value={timeArr}
+                  onChange={(e) => {
+                    setTimeArr(e.target.value)
+                    setTimeErr(null)
+                  }}
+                  className="mt-1 block min-h-tap w-full rounded border border-border-strong bg-surface px-3 text-lg text-ink"
+                />
+              </label>
+              <label className="block text-base text-ink">
+                帰宅の時刻
+                <input
+                  type="time"
+                  step={60}
+                  value={timeLeft}
+                  onChange={(e) => {
+                    setTimeLeft(e.target.value)
+                    setTimeErr(null)
+                  }}
+                  className="mt-1 block min-h-tap w-full rounded border border-border-strong bg-surface px-3 text-lg text-ink"
+                />
+              </label>
+            </div>
+            {timeErr !== null ? (
+              <p role="alert" className="mt-3 rounded border border-danger bg-danger-bg p-2 text-base text-ink">
+                <span aria-hidden="true">▲ </span>
+                {timeErr}
+              </p>
+            ) : null}
+            <div className="mt-4 flex justify-end gap-gap">
+              <button type="button" onClick={() => setTimeFor(null)} className="min-h-tap rounded border border-border-strong px-4 text-base text-ink">
+                キャンセル
+              </button>
+              <button
+                type="button"
+                onClick={() => void saveTime()}
+                className="min-h-tap rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink"
+              >
+                記録する
               </button>
             </div>
           </div>

@@ -210,6 +210,7 @@ import { normalizeCategories, scheduleColorPatch } from '../lib/noteCategory'
 // 発熱者・他症状者のバイタル欄の印（A1 平熱との差・A9 SpO2 の個別の下限）。平熱と目標は画面を開いた時に1回読んで控える
 import { fetchResidentTargets, fetchUsualTemps, loadVitalThresholds } from '../lib/db'
 import { judgeTemp, spo2LevelFor } from '../lib/vitalAlerts'
+import { dailyFeverObservations } from '../lib/daycare'
 import type { ResidentTargets } from '../lib/vitalAlerts'
 import {
   CategoryChips,
@@ -3604,8 +3605,9 @@ function DaySheet({
     void (async () => {
       try {
         // 1日ぶんだけを取りに行く（10日表示でも全件ロードしない）。
-        // 取得済みの日は親のキャッシュから即返る＝区切りを行き来しても取り直さない
-        const report = await loadDay(day)
+        // 取得済みの日は親のキャッシュから即返る＝区切りを行き来しても取り直さない。
+        // 基準値も待つ（発熱者に載せるデイの測定を、いまの基準で選ぶため。読めない時は今の基準のまま・起動中は控えから即返る）
+        const [report] = await Promise.all([loadDay(day), loadVitalThresholds()])
         if (!alive || !aliveRef.current) return
 
         const safeNotes = Array.isArray(report?.notes) ? report.notes.filter((n) => n != null) : []
@@ -3639,8 +3641,9 @@ function DaySheet({
           for (const f of HELD_ADOPT_FIELDS) if (f in p.values) pick[f] = p.values[f]
           return Object.keys(pick).length > 0 ? ({ ...v, ...pick } as Vital) : v
         }
+        // デイの測定（dc: の行）は、その日に1回でも発熱（37.5℃以上）のあった方だけ全部載せる（2026-10-22 代表者の決定）
         const obs = Array.isArray(report?.observations)
-          ? report.observations.filter((v) => v != null).map(newer).map(withPending)
+          ? dailyFeverObservations(report.observations.filter((v) => v != null).map(newer).map(withPending), report.daycareVitalIds)
           : []
         const sym = Array.isArray(report?.symptoms)
           ? report.symptoms.filter((v) => v != null).map(newer).map(withPending)
