@@ -1169,7 +1169,11 @@ if (DC === null) {
       assert.match(v, /const quiet = quiet0 && dataRef\.current !== null && dataRef\.current\.day === target/)
       // F4: 拒まれて送信待ちに残った値は kept=false の項目として帯に出す（黙って移らない）
       assert.match(v, /clearSentDraft\(key, edits\)\s*const where = 'サーバーに受け付けられませんでした。[^']*'\s*return \{ key, kept: false,/)
-      const m = sql('../supabase/migrations/0042_daycare_past_times_office.sql')
+      // F6: 0042 は main に入ったので書き換えず、0043 で関数を差し替える（表・ポリシー・トリガには触れない）
+      const m = sql('../supabase/migrations/0043_daycare_past_guard_more.sql')
+      assert.doesNotMatch(m, /do \$\$/)
+      assert.doesNotMatch(m, /create policy|drop policy|alter table|create (or replace )?trigger/i)
+      assert.match(m, /create or replace function public\.daycare_attendance_past_guard\(\)/)
       assert.match(m, /and \(new\.resident_id = old\.resident_id or \(old\.arrived_at is null and old\.left_at is null\)\)/)
       assert.match(m, /and not \(new\.deleted_at is null and old\.deleted_at is not null\s+and \(new\.arrived_at is not null or new\.left_at is not null\)\)/)
     })

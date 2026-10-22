@@ -14,17 +14,15 @@
 --   search_path 固定・my_role() が無い DB では止めない・役割が null（表の所有者の接続・cron・service_role）と office／admin は止めない。
 --   止めるのは役割が 'field'（現場）で、業務日（day）が JST の今日より前の行の、到着・帰宅の時刻が変わる書き込みだけ:
 --     insert … arrived_at か left_at が入っている
---     update … arrived_at か left_at が変わる・業務日が変わる（どちらかが過去の日）・時刻の入った行を取り消す（deleted_at を入れる）・
---              時刻の入った行を別の方へ付け替える（resident_id が変わる）・取り消した時刻の入った行を戻す（deleted_at を空にする）
+--     update … arrived_at か left_at が変わる・業務日が変わる（どちらかが過去の日）・時刻の入った行を取り消す（deleted_at を入れる）
 --   止めた時: SQLSTATE 42501・message は 'daycare_past_times_office_only: …' で始まる。表には書かない（読み取りと判定だけ）。
 --   既存の関数・ポリシー（0041 の read_auth・insert_auth・update_auth・member_only）は変えない。
 --
 -- 旧クライアント×新サーバー: 段階1の画面は過去の日の到着・帰宅を押せない（止めてある）。帰宅の取り消し・時刻の入った方の欠席を
 --   過去の日に現場で押すと 42501 になり、行に理由が出る（データは消えない・今の値のまま）。
 -- 新クライアント×旧サーバー: 画面は現場で過去の日の時刻の操作を出さない。事務所の時刻の入力は通る（旧サーバーは止めないだけ）。
--- 圏外で当日に押した到着が日付をまたいで届くと、現場のログインでは過去の日の扱いで止まる（消えない。送信待ちの再送の間隔
---   〔30秒から倍々・上限30分・10回〕を使い切るまで約2時間はその方の行が「未送信の記録があります」で押せず、その後に止まった
---   送信の一覧に出る）。デイの時間帯（日中）では起きない想定。
+-- 圏外で当日に押した到着が日付をまたいで届くと、現場のログインでは過去の日の扱いで止まる（送信待ちの止まった送信の一覧に出る・
+--   消えない）。デイの時間帯（日中）では起きない想定。
 -- 戻す時（必要な時だけ）: 下の「戻す」を流す（表の中身には触れない）。
 -- ★ do $$ … $$ のブロックは使わない（Supabase の SQL エディタが誤解釈するため）。関数本体の as $fn$ … $fn$ は使ってよい。
 -- 個人情報: このファイルに実在の氏名を書かない（構造だけを定義する）。
@@ -55,11 +53,8 @@ begin
     if new.arrived_at is not distinct from old.arrived_at
        and new.left_at is not distinct from old.left_at
        and new.day = old.day
-       and (new.resident_id = old.resident_id or (old.arrived_at is null and old.left_at is null))
        and not (new.deleted_at is not null and old.deleted_at is null
-                and (old.arrived_at is not null or old.left_at is not null))
-       and not (new.deleted_at is null and old.deleted_at is not null
-                and (new.arrived_at is not null or new.left_at is not null)) then
+                and (old.arrived_at is not null or old.left_at is not null)) then
       return new;
     end if;
   end if;
