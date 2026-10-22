@@ -34,9 +34,9 @@ import {
 import type { CellSaveResult, DaycareNoteMarkRow, MyRole, NoteMeta, Queued } from '../lib/db'
 import {
   MARK_COMMENT_MAX,
+  fixProposal,
   isStale,
   markBody,
-  markTail,
   markCategories,
   markCommentError,
   markDayPrefix,
@@ -104,7 +104,7 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
   const [, setTick] = useState(0)
   const [now, setNow] = useState(Date.now())
   /**
-   * 小窓: add＝申し送りにする／fix＝申し送りを直す。rid・d＝小窓を開いた時の人・日（送り先。開いたまま「戻る」で人が
+   * 小窓: add＝申し送りにする（comment＝ひと言）／fix＝申し送りを直す（comment＝直した後の全文）。rid・d＝小窓を開いた時の人・日（送り先。開いたまま「戻る」で人が
    * 替わっても、開いた時の方へ送る＝2c の反証 重大1。人・日が替わったら小窓は閉じる）
    */
   const [dlg, setDlg] = useState<{
@@ -316,8 +316,8 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
     }
   }
 
-  /** 〔申し送りを直す〕: いまの記録の文で本文を直す（基準は見た本文）。rid・d は小窓を開いた時の人・日 */
-  const sendFix = async (rid: number, d: string, rec: MarkRecord, row: DaycareNoteMarkRow, text: string, comment: string) => {
+  /** 〔申し送りを直す〕: 小窓で確かめた全文で本文を直す（基準は見た本文）。rid・d は小窓を開いた時の人・日 */
+  const sendFix = async (rid: number, d: string, rec: MarkRecord, row: DaycareNoteMarkRow, full: string) => {
     const k = `${rid}:${d}:${markPrefix(d, rid, rec)}`
     const why = precheck()
     if (why !== null) {
@@ -328,7 +328,7 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
     try {
       const res: CellSaveResult<Note> | Queued = await saveNoteEdits(
         { id: row.note.id },
-        { body: { value: markBody(text, comment), base: row.note.body } },
+        { body: { value: full.trim(), base: row.note.body } },
         { meta: noteMetaOf(row.note), editedBy: actorId },
       )
       if (res === 'queued') {
@@ -401,7 +401,7 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
                 <button
                   type="button"
                   disabled={blocked !== null || isBusy || removing}
-                  onClick={() => setDlg({ mode: 'fix', rid: residentId, d: day, rec, text, comment: markTail(live.note.body, text), row: live })}
+                  onClick={() => setDlg({ mode: 'fix', rid: residentId, d: day, rec, text, comment: fixProposal(live.note.body, text), row: live })}
                   className={smallCls}
                 >
                   申し送りを直す
@@ -453,7 +453,9 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
     )
   }
 
-  const commentErr = dlg === null ? null : markCommentError(dlg.comment)
+  // add＝ひと言（100字まで）／fix＝直した後の申し送りの全文（空にはできない。小窓で職員が確かめてから送る）
+  const commentErr =
+    dlg === null ? null : dlg.mode === 'fix' ? (dlg.comment.trim() === '' ? '申し送りの文を入れてください。' : null) : markCommentError(dlg.comment)
   const dialogs = (
     <>
       <ModalShell open={dlg !== null} label={dlg?.mode === 'fix' ? '申し送りを直す' : '申し送りにする'} onClose={() => setDlg(null)} narrow>
@@ -462,21 +464,38 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
             <h2 className="text-lg font-bold text-ink">{dlg.mode === 'fix' ? '申し送りを直す' : '申し送りにする'}</h2>
             <p className="text-sm text-ink2">区分「デイ」の申し送りとして送ります。</p>
             {dlg.mode === 'fix' && dlg.row !== null ? (
-              <p className="text-sm text-ink2">いまの申し送り: {dlg.row.note.body}</p>
-            ) : null}
-            <p className="rounded border border-border bg-surface2 p-2 text-base text-ink">{dlg.text}</p>
-            <label className="block text-sm text-ink2">
-              ひと言（任意・{MARK_COMMENT_MAX}字まで）
-              <input
-                type="text"
-                value={dlg.comment}
-                maxLength={MARK_COMMENT_MAX * 2}
-                onChange={(e) => setDlg({ ...dlg, comment: e.target.value })}
-                aria-invalid={commentErr !== null}
-                aria-describedby={commentErr !== null ? 'mark-comment-err' : undefined}
-                className="mt-1 block min-h-tap w-full rounded border border-border-strong bg-surface px-2 text-lg text-ink"
-              />
-            </label>
+              <>
+                <p className="text-sm text-ink2">いまの申し送り: {dlg.row.note.body}</p>
+                <p className="text-sm text-ink2">いまの記録: {dlg.text}</p>
+                <label className="block text-sm text-ink2">
+                  直した後の申し送り（全文を確かめて、必要なら直してください）
+                  <textarea
+                    value={dlg.comment}
+                    rows={3}
+                    onChange={(e) => setDlg({ ...dlg, comment: e.target.value })}
+                    aria-invalid={commentErr !== null}
+                    aria-describedby={commentErr !== null ? 'mark-comment-err' : undefined}
+                    className="mt-1 block w-full rounded border border-border-strong bg-surface px-2 py-1 text-lg text-ink"
+                  />
+                </label>
+              </>
+            ) : (
+              <>
+                <p className="rounded border border-border bg-surface2 p-2 text-base text-ink">{dlg.text}</p>
+                <label className="block text-sm text-ink2">
+                  ひと言（任意・{MARK_COMMENT_MAX}字まで）
+                  <input
+                    type="text"
+                    value={dlg.comment}
+                    maxLength={MARK_COMMENT_MAX * 2}
+                    onChange={(e) => setDlg({ ...dlg, comment: e.target.value })}
+                    aria-invalid={commentErr !== null}
+                    aria-describedby={commentErr !== null ? 'mark-comment-err' : undefined}
+                    className="mt-1 block min-h-tap w-full rounded border border-border-strong bg-surface px-2 text-lg text-ink"
+                  />
+                </label>
+              </>
+            )}
             {commentErr !== null ? (
               <p id="mark-comment-err" className="text-sm text-danger">
                 {commentErr}
@@ -492,7 +511,7 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
                 onClick={() => {
                   const cur = dlg
                   setDlg(null)
-                  if (cur.mode === 'fix' && cur.row !== null) void sendFix(cur.rid, cur.d, cur.rec, cur.row, cur.text, cur.comment)
+                  if (cur.mode === 'fix' && cur.row !== null) void sendFix(cur.rid, cur.d, cur.rec, cur.row, cur.comment)
                   else void sendAdd(cur.rid, cur.d, cur.rec, cur.text, cur.comment)
                 }}
                 className="min-h-tap rounded border-2 border-primary bg-primary px-4 text-base font-bold text-primary-ink disabled:border-border-strong disabled:bg-surface disabled:text-ink3"
