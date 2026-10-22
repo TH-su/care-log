@@ -31,6 +31,10 @@
 // - 7つ目の項目。行き先は一覧（/incident）。封鎖は app_settings の input_enabled_incident（getKindInputGate('incident')）で決める
 //   （入浴・与薬と同じ作り）。取得できない時はこのボタンだけを押せなくする（一覧は「その他」からも開ける）
 //
+// デイ（せせらぎ）（2026-10-22 デイ段階1・代表承認）:
+// - 8つ目の項目。行き先は /record/daycare（今日の到着・欠席。バイタル一括は画面の中の切り替え）。封鎖は app_settings の
+//   input_enabled_daycare（getKindInputGate('daycare')）で決める（入浴・与薬と同じ作り）。取得できない時はこのボタンだけを押せなくする
+//
 // 寸法メモ（トークン外の値を直書きしないための読み替え）:
 // - min-height 72px … 4px グリッドの利用可能値が 64px / 80px のため、下回らない側の min-h-20（80px）を使う
 // - 17px 文字   … ops 系統のトークンは fs-base=16px / fs-lg=18px。下回らない側の text-lg（18px）を使う
@@ -58,7 +62,7 @@ const LOCKED_NEXT =
 const LOAD_ERROR =
   'アプリで入力できる期間かどうかを確認できませんでした。通信状態を確認して［再試行する］を押してください。押せない場合は、下のタブで日報などほかの画面に移ってから、下のタブ「その他」→「記録」をもう一度開いてください。'
 
-type HubKey = 'vitals' | 'meals' | 'note' | 'outing' | 'bath' | 'med' | 'incident'
+type HubKey = 'vitals' | 'meals' | 'note' | 'outing' | 'bath' | 'med' | 'incident' | 'daycare'
 
 /**
  * 種類ごとの入力解禁の旗（null＝取得中、observed=false＝取得できなかった、forbidden＝このアカウントは記録アプリを
@@ -83,6 +87,8 @@ const ITEMS: { key: HubKey; to: string; label: string }[] = [
   { key: 'med', to: '/record/med', label: '与薬チェック' },
   // 封鎖は input_enabled_incident で判定する（下の incidentLocked）
   { key: 'incident', to: '/incident', label: '事故・ヒヤリハット' },
+  // 封鎖は input_enabled_daycare で判定する（下の daycareLocked・2026-10-22 デイ段階1）
+  { key: 'daycare', to: '/record/daycare', label: 'デイ（せせらぎ）' },
 ]
 
 /** 入浴の旗を取得できなかった時の一言（入浴のボタンだけに付ける） */
@@ -96,6 +102,10 @@ const MED_GATE_UNKNOWN =
 /** 事故・ヒヤリハットの旗を取得できなかった時の一言（このボタンだけに付ける） */
 const INCIDENT_GATE_UNKNOWN =
   '事故・ヒヤリハットの記録を使える期間かどうかを確認できませんでした（通信エラー）。電波状態を確認して、この画面を開き直してください。'
+
+/** デイの旗を取得できなかった時の一言（このボタンだけに付ける） */
+const DAYCARE_GATE_UNKNOWN =
+  'デイの記録を使える期間かどうかを確認できませんでした（通信エラー）。電波状態を確認して、この画面を開き直してください。'
 
 /** アイコンは必ず文字ラベルと併記する（アイコン単独では意味を持たせない） */
 const ICON_PATHS: Record<HubKey, ReactNode> = {
@@ -146,6 +156,14 @@ const ICON_PATHS: Record<HubKey, ReactNode> = {
       <path d="M12 10v4.5M12 17.5v.01" />
     </>
   ),
+  // 家と人（デイ）
+  daycare: (
+    <>
+      <path d="M4 11l8-6 8 6v9H4z" />
+      <circle cx="12" cy="13" r="2" />
+      <path d="M8.5 20c0-2 1.6-3.5 3.5-3.5s3.5 1.5 3.5 3.5" />
+    </>
+  ),
 }
 
 function HubIcon({ name }: { name: HubKey }) {
@@ -178,6 +196,7 @@ export function RecordHubPage({ inputEnabled: inputEnabledProp }: RecordHubPageP
   const bathReasonId = `${uid}-bath-locked`
   const medReasonId = `${uid}-med-locked`
   const incidentReasonId = `${uid}-incident-locked`
+  const daycareReasonId = `${uid}-daycare-locked`
 
   const [fetchedEnabled, setFetchedEnabled] = useState<boolean | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -190,6 +209,8 @@ export function RecordHubPage({ inputEnabled: inputEnabledProp }: RecordHubPageP
   const [medGate, setMedGate] = useState<KindGate | null>(null)
   /** 事故・ヒヤリハットの旗（null＝取得中、observed=false＝取得できなかった） */
   const [incidentGate, setIncidentGate] = useState<KindGate | null>(null)
+  /** デイの旗（null＝取得中、observed=false＝取得できなかった） */
+  const [daycareGate, setDaycareGate] = useState<KindGate | null>(null)
 
   // 入力解禁フラグは「記録タブを表示するたびに毎回取り直す」（ui-design.md §0.5・前提情報は毎回取り直す規範）。
   // 取得できなければ入力へ進ませない（安全側フォールバック）。
@@ -272,6 +293,22 @@ export function RecordHubPage({ inputEnabled: inputEnabledProp }: RecordHubPageP
     }
   }, [reloadKey])
 
+  // デイの旗（input_enabled_daycare）も画面を開くたびに取り直す。取得できなくても他の項目には影響させない
+  useEffect(() => {
+    let alive = true
+    setDaycareGate(null)
+    getKindInputGate('daycare')
+      .then((g) => {
+        if (alive) setDaycareGate(g)
+      })
+      .catch(() => {
+        if (alive) setDaycareGate({ value: false, observed: false })
+      })
+    return () => {
+      alive = false
+    }
+  }, [reloadKey])
+
   // 親が「封鎖」と言っている場合と、取り直した値が false の場合の両方で封鎖する（安全側）
   const locked = fetchedEnabled !== true || inputEnabledProp === false
   /** 入浴は自分の旗だけで決める（取得中・取得できない間は押せない＝安全側） */
@@ -280,8 +317,10 @@ export function RecordHubPage({ inputEnabled: inputEnabledProp }: RecordHubPageP
   const medLocked = medGate === null || !medGate.observed || medGate.value !== true
   /** 事故・ヒヤリハットも自分の旗だけで決める（取得中・取得できない間は押せない＝安全側） */
   const incidentLocked = incidentGate === null || !incidentGate.observed || incidentGate.value !== true
+  /** デイも自分の旗だけで決める（取得中・取得できない間は押せない＝安全側） */
+  const daycareLocked = daycareGate === null || !daycareGate.observed || daycareGate.value !== true
   const lockedOf = (key: HubKey): boolean =>
-    key === 'incident' ? incidentLocked : key === 'bath' ? bathLocked : key === 'med' ? medLocked : locked
+    key === 'daycare' ? daycareLocked : key === 'incident' ? incidentLocked : key === 'bath' ? bathLocked : key === 'med' ? medLocked : locked
 
   const open = useCallback(
     (to: string, itemLocked: boolean) => {
@@ -344,7 +383,11 @@ export function RecordHubPage({ inputEnabled: inputEnabledProp }: RecordHubPageP
                     ? incidentGate === null
                       ? undefined
                       : incidentReasonId
-                    : reasonId
+                    : item.key === 'daycare'
+                      ? daycareGate === null
+                        ? undefined
+                        : daycareReasonId
+                      : reasonId
             return (
               <li key={item.key}>
                 <button
@@ -383,6 +426,13 @@ export function RecordHubPage({ inputEnabled: inputEnabledProp }: RecordHubPageP
             事故・ヒヤリハット:{' '}
             {incidentGate.observed ? kindBlockedMessage('incident') : gateUnknownText(incidentGate, INCIDENT_GATE_UNKNOWN)}
             （一覧の閲覧は「その他」→「事故・ヒヤリハット」からできます）
+          </p>
+        ) : null}
+        {/* デイの封鎖の理由（2026-10-22 デイ段階1） */}
+        {daycareGate !== null && daycareLocked ? (
+          <p id={daycareReasonId} role="status" className="mt-3 text-sm text-ink2">
+            <span aria-hidden="true">▲ </span>
+            デイ（せせらぎ）: {daycareGate.observed ? kindBlockedMessage('daycare') : gateUnknownText(daycareGate, DAYCARE_GATE_UNKNOWN)}
           </p>
         ) : null}
       </SectionCard>

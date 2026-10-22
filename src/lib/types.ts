@@ -255,6 +255,7 @@ export interface Outing {
 export type BathResult = 'full' | 'shower' | 'partial' | 'cancel' | 'visit'
 /** 中止の理由。condition=体調不良 / refusal=本人の拒否 / facility=事業所の都合 / other=その他（備考必須） */
 export type BathCancelReason = 'condition' | 'refusal' | 'facility' | 'other'
+  | 'absent' // 欠席（デイの到着・在席の画面が欠席を記録した時だけ付く・0041。2026-10-22 代表承認・入浴の画面の選択肢には出さない）
 
 /** 入浴記録（1人1日1件。bath_on は JST の業務日付） */
 export interface BathRecord {
@@ -297,7 +298,13 @@ export const BATH_CANCEL_REASON_LABEL: Record<BathCancelReason, string> = {
   refusal: '本人の拒否',
   facility: '事業所の都合',
   other: 'その他',
+  absent: '欠席',
 }
+/**
+ * 受信値と保存前の検証で照合する中止の理由（画面の選択肢 BATH_CANCEL_REASONS ＋ 欠席 absent）。2026-10-22 デイ段階1（0041）。
+ * 入浴の画面の理由の選択肢は BATH_CANCEL_REASONS のまま変えない（欠席はデイの到着・在席の画面からだけ付く）
+ */
+export const BATH_CANCEL_REASONS_KNOWN: readonly BathCancelReason[] = [...BATH_CANCEL_REASONS, 'absent']
 
 // ── 服薬介助の実施チェック（2026-09-26 追加・契約改訂は代表承認済み・0013_med_admin.sql） ──
 // 薬の名前は持たない（処方の正本は入居者マスタで自由記述）。頓服だけ、使った薬を自由記述で残す。
@@ -387,6 +394,7 @@ export const MED_STATUS_MARK: Record<MedStatus, string> = {
  * 既存の native_input_enabled（切替日D）とは別の旗で、種類ごとに開始日を決められる。
  */
 export type InputKind = 'bath' | 'med' | 'incident'
+  | 'daycare' // デイ（せせらぎ）の到着・在席・バイタル・欠席（app_settings.input_enabled_daycare・0041。2026-10-22 追加）
 export const INPUT_KINDS: readonly InputKind[] = ['bath', 'med', 'incident']
 
 // ── 事故・ヒヤリハット（2026-09-26 追加・契約改訂は代表承認済み・0014_incidents.sql） ──
@@ -802,6 +810,11 @@ export const LS = {
    * 他の一覧の階（cl_vitalsFloor・cl_sheetFloor）とは既定と選べる値が違うため、別のキーにする（既存の画面の値を書き換えない）
    */
   medFloor: 'cl_medFloor',
+  /**
+   * デイのバイタル一括の絞り込み（2026-10-22 デイ段階1・UI 状態のみ）。値は 'present'（在席の方）・'planned'（予定の方全員）・
+   * 'all'（予定＋記録のある方）。利用者・日付・入力値は保存しない
+   */
+  dcVitalsFilter: 'cl_dcVitalsFilter',
 } as const
 
 /**
@@ -844,3 +857,80 @@ export const OUTING_KIND_LABEL: Record<OutingKind, string> = { outing: '外出',
 
 // 職種タグの語彙（初期値。★運用開始時に本人確認）
 export const ROLE_TAGS = ['介護', '看護', 'デイ', '厨房', 'ケアマネ', '事務'] as const
+
+// ── デイ（せせらぎ）の記録 段階1（2026-10-22 追加・代表承認・0041_daycare_stage1.sql） ──
+// 到着・在席・帰宅・欠席（daycare_attendance）と、その日の予定の写し（daycare_days）・予定の読み口（RPC daycare_plan）。
+// デイのバイタルは新しい種類を足さず、既存の vitals の kind 'observation' のまま冪等キー client_key を
+// 'dc:<業務日>:<利用者id>:<回>' の形にして見分ける（DAYCARE_VITAL_KEY_PREFIX・組み立ては src/lib/daycare.ts）。
+
+/** 欠席の理由。condition=体調不良 / hospital=受診・入院 / wish=本人の希望 / family=ご家族の都合 / other=その他 */
+export type DaycareAbsentReason = 'condition' | 'hospital' | 'wish' | 'family' | 'other'
+/** 欠席の理由の並び（画面の選択肢・DB の check と同じ5つ） */
+export const DAYCARE_ABSENT_REASONS: readonly DaycareAbsentReason[] = ['condition', 'hospital', 'wish', 'family', 'other']
+export const DAYCARE_ABSENT_REASON_LABEL: Record<DaycareAbsentReason, string> = {
+  condition: '体調不良',
+  hospital: '受診・入院',
+  wish: '本人の希望',
+  family: 'ご家族の都合',
+  other: 'その他',
+}
+
+/** 到着・帰宅・欠席（1人1日1件。day は JST の業務日付）。状態は保存せず列から導く（daycare.ts の attendanceState） */
+export interface DaycareAttendance {
+  id: number
+  resident_id: number
+  day: string
+  /** 到着（＝在席）の時刻 'HH:MM'（秒は持たない） */
+  arrived_at: string | null
+  /** 帰宅の時刻 'HH:MM' */
+  left_at: string | null
+  absent: boolean
+  absent_reason: DaycareAbsentReason | null
+  note: string | null
+  recorded_by: number | null
+  rev: number
+}
+
+/** その日の予定の写しの状態。kv=予定あり / none=写しはあるがその日の予定なし / unknown=予定を読めなかった */
+export type DaycarePlanSource = 'kv' | 'none' | 'unknown'
+
+/**
+ * 予定と名簿の照合（RPC daycare_plan がサーバーで行う・氏名は端末へ送らない）。
+ * mid=利用者No と氏名が一致 / name=利用者No の無い記録を氏名で1人に絞れた / mismatch=利用者No は合うが氏名が違う /
+ * external=外部利用者（段階1〜3は対象外） / absent_roster=名簿の在籍者に居ない / ambiguous=氏名で絞れない
+ */
+export type DaycarePlanMatch = 'mid' | 'name' | 'mismatch' | 'external' | 'absent_roster' | 'ambiguous'
+
+/** RPC daycare_plan の1行（予定1件ごとに1行）。sched_id が null の1行だけ＝その日の予定なし */
+export interface DaycarePlanRow {
+  sched_id: string | null
+  event_id: string | null
+  /** 照合できた在籍者（mid・name の時だけ） */
+  resident_id: number | null
+  match: DaycarePlanMatch | null
+  /** 同じ人の記録が週間計画に2つ以上ある（後勝ちにせず「予定 要確認」に倒す） */
+  dup: boolean
+  external: boolean
+  hospitalized: boolean
+  start_time: string | null
+  end_time: string | null
+  bathing: boolean
+  plan_rev: number | null
+  updated_at: string | null
+}
+
+/** その日の予定の写し（開所の最初のタップで作る・氏名を持たない） */
+export interface DaycareDay {
+  id: number
+  day: string
+  plan_source: DaycarePlanSource
+  plan_rev: number | null
+  plan_updated_at: string | null
+  plan_rows: DaycarePlanRow[]
+  opened_by: number | null
+  created_at: string | null
+  rev: number
+}
+
+/** デイの測定の冪等キーの頭（'dc:<業務日>:<利用者id>:<回>'） */
+export const DAYCARE_VITAL_KEY_PREFIX = 'dc:'

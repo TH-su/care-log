@@ -110,6 +110,11 @@ const loadBathRecordPage = () => import('./pages/BathRecordPage')
 const BathRecordPage = lazy(() => loadBathRecordPage().then((m) => ({ default: m.BathRecordPage })))
 const loadBathMonthPage = () => import('./pages/BathMonthPage')
 const BathMonthPage = lazy(() => loadBathMonthPage().then((m) => ({ default: m.BathMonthPage })))
+// デイ（せせらぎ）の今日（到着・在席・帰宅・欠席）とバイタル一括（2026-10-22 デイ段階1）。記録ハブから入る
+const loadDaycarePage = () => import('./pages/DaycarePage')
+const DaycarePage = lazy(() => loadDaycarePage().then((m) => ({ default: m.DaycarePage })))
+const loadDaycareVitalsPage = () => import('./pages/DaycareVitalsPage')
+const DaycareVitalsPage = lazy(() => loadDaycareVitalsPage().then((m) => ({ default: m.DaycareVitalsPage })))
 // 与薬チェック（2026-09-26 追加）。記録は記録ハブから、服薬の時間帯・月次表は「その他」から入る
 const loadMedRecordPage = () => import('./pages/MedRecordPage')
 const MedRecordPage = lazy(() => loadMedRecordPage().then((m) => ({ default: m.MedRecordPage })))
@@ -1633,6 +1638,9 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
             />
             {/* 入浴（デイ）。入力解禁は native_input_enabled ではなく input_enabled_bath（画面が自前で取り直す） */}
             <Route path="/record/bath" element={<BathRecordPage actorId={actorId} staff={staff} />} />
+            {/* デイ（せせらぎ）段階1（2026-10-22）。入力解禁は input_enabled_daycare（画面の中で確かめる） */}
+            <Route path="/record/daycare" element={<DaycarePage actorId={actorId} staff={staff} />} />
+            <Route path="/record/daycare/vitals" element={<DaycareVitalsPage actorId={actorId} staff={staff} />} />
             <Route path="/bath/month" element={<BathMonthPage />} />
             {/* 与薬チェック。入力解禁は input_enabled_med（画面が自前で取り直す） */}
             <Route path="/record/med" element={<MedRecordPage actorId={actorId} staff={staff} />} />

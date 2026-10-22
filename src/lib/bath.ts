@@ -7,7 +7,7 @@
 // 月次表の「未」は「その日の曜日に予定があって、その日の記録が無い」日。
 // 個人情報: ここには氏名も記録本文も書かない（型と計算だけ）。
 
-import { BATH_CANCEL_REASONS, BATH_RESULTS } from './types.ts'
+import { BATH_CANCEL_REASONS_KNOWN, BATH_RESULTS } from './types.ts'
 import type { BathCancelReason, BathRecord, BathResult, Resident } from './types.ts'
 
 /**
@@ -181,7 +181,8 @@ export function validateBathInput(v: BathInput, today: string): BathInputCheck {
     return { ok: false, message: '「入浴した」か「入浴していない」を選んでください。' }
   }
   if (v.result === 'cancel') {
-    if (v.cancel_reason !== null && !(BATH_CANCEL_REASONS as readonly string[]).includes(v.cancel_reason)) {
+    // 欠席（absent・0041）はデイの到着・在席の画面が付ける理由。照合は画面の選択肢＋欠席（BATH_CANCEL_REASONS_KNOWN）
+    if (v.cancel_reason !== null && !(BATH_CANCEL_REASONS_KNOWN as readonly string[]).includes(v.cancel_reason)) {
       return { ok: false, message: '中止の理由を読み取れませんでした。もう一度「入浴していない」を押してください。' }
     }
     if (v.cancel_reason === 'other' && (v.note ?? '').trim() === '') {

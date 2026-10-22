@@ -31,6 +31,10 @@ L0承認済み。詳細設計の正本: `docs/PLAN.md`・`docs/design/db-design.
 追加（2026-09-26・代表承認）: `/incident`=事故・ヒヤリハット 一覧（「その他」と記録ハブの7つ目）・`/incident/new`・`/incident/:id`=入力・編集（事故報告書の印刷を含む）・
 `/incident/summary`=委員会用の月次集計（「その他」から）。`LS.view` の既知値 `incident`（入力・編集も一覧の配下）/ `incidentSummary`
 
+追加（2026-10-22・代表承認・デイ段階1）: `/record/daycare`=デイ（せせらぎ）の今日（到着・在席・帰宅・欠席・入浴のボタン。記録ハブの8つ目）・
+`/record/daycare/vitals`=デイのバイタル一括（同じ画面の上の切り替え）。`cl_view` は 'record' の配下。`cl_recordTab` の許可リスト（ui-design.md §9）は変えない
+（ベースURLから開いた時は記録ハブへ戻る・再読み込みは URL で戻る）
+
 リロード復元: HashRouter のURLが第一。ベースURL直開き時のみ `LS.view` の既知値照合で復元。
 
 ## src/lib/db.ts が export するAPI（他ビルダーはこれを import する）
@@ -231,7 +235,39 @@ hasPendingIncident(recordId: number): boolean                  // このタブ�
 pendingIncidentOps(): PendingIncident[]                        // 送信待ちにある追加（未送信・送信中・止まっている）。読むだけ。一覧に「未送信」として出す
 fetchOfficeProfile(): Promise<OfficeProfile>                    // app_settings の corp_name / office_name_* / office_no_* / office_address（無い・空は ''）
 subscribeIncidentChanges(cb): () => void                       // incidents の Realtime（既存・入浴・与薬とは別のチャンネル）
+
+// ── デイ（せせらぎ）の記録 段階1（2026-10-22 追加・代表承認の契約改訂。既存の定義は変えない・0041） ──
+fetchDaycarePlan(dayIso): Promise<DaycarePlanResult>          // RPC daycare_plan（予定1件ごとに1行・照合はサーバー・氏名は受け取らない）。
+                                                               // { source: 'kv'|'none'|'unknown', rows, rev, updatedAt, missing }（関数が無い＝unknown・missing=true）
+fetchDaycareDay(dayIso): Promise<DaycareDay | null>           // その日の予定の写し（daycare_days）。表が無いと DbError('server')
+openDaycareDay(dayIso, staffId): Promise<DaycareDay>          // RPC daycare_open_day。開所の最初のタップ（今日だけ）で写しを作る。既にあればそのまま
+fetchDaycareAttendance(dayIso): Promise<DaycareAttendance[]>  // 到着・帰宅・欠席（削除済みを除く）
+insertDaycareAttendance(a): Promise<DaycareAttendance | Conflict | Queued>   // client_key 付き。1人1日1件の 23505（自分のキーでない）は 'conflict'
+updateDaycareAttendance(current, patch, opts?): Promise<DaycareAttendance | Conflict | Queued>  // rev 照合・変えた列だけ（欠席の付け外しは理由・時刻もそろえる）
+hasPendingDaycareAttendance(residentId, day, recordId): boolean // このタブの送信待ちにその人・その日の追加・その記録の修正があるか（読むだけ）
+fetchDaycareVitals(dayIso): Promise<{ live: KeyedVital[]; keys: string[] }>  // その日のデイの測定（client_key が 'dc:' で始まる生きている行）と、
+                                                               // 取り消した行も含めた 'dc:' のキー（次の回を決める用・キーだけ）
+fetchRecentVitals(residentIds, fromIso, toIso): Promise<KeyedVital[]>   // 前回値の材料（種類を問わない・新しい順・上限まで）
+recordAbsentBath(p): Promise<AbsentBathResult>                // 欠席の日の入浴: 読む → あれば更新（自動の行は手入力へ）→ 無ければ追加 → 23505 なら読み直して更新。
+                                                               // 圏外は入浴の予定がある人だけ追加を送信待ちへ（再送で overrideAutoRow が自動の行へ合流）。例外を投げない
+subscribeDaycareChanges(cb): () => void                        // daycare_attendance の Realtime（既存・入浴・与薬とは別のチャンネル cl_daycare_*）
 ```
+
+- デイ（せせらぎ）段階1（2026-10-22・代表承認・正本は【AI取締役】の Phase3報告と承認事項_v1・検証計画 v2）:
+  - デイのバイタルは新しい種類を足さない。既存の vitals の kind 'observation' のまま、saveVitalEdits の target を
+    `{ routine: false, clientKey: 'dc:<業務日>:<利用者id>:<回>', residentId, day, kind: 'observation' }` にする（0011・KEYLESS_KINDS・
+    vitals の制約は変えない）。2台で同じ人の同じ回を測ると同じキー＝同じ行に合流し、0011 の欄ごとの判定で後着が競合になる。
+    取り消した回のキーは使い直さない（次の回＝取り消した回を含めて使った最大＋1・daycare.ts の nextDaycareSeq）。
+    既存の画面ではデイの測定は「経過観察（発熱者）」の1行として見える（日報の発熱者の欄にも並ぶ＝承認済みの帰結・検証計画 v2 の D17）
+  - 範囲外（VITAL_RANGE）と血圧の上下逆（上 ≦ 下）は保存しない。血圧の上は下と組で送る（下を入れるまで上だけを送らない）
+  - 入浴の中止の理由に 'absent'（欠席）を足した（types.ts の BathCancelReason に1行・表示名・照合用の BATH_CANCEL_REASONS_KNOWN。
+    画面の選択肢 BATH_CANCEL_REASONS は変えない）。normalizeBath・validateBathInput は BATH_CANCEL_REASONS_KNOWN で照合する
+  - 到着・帰宅・欠席（daycare_attendance）は入浴と同じ送り方（LegacyTable に足した・client_key・rev 照合・送信待ち cl_sendQueue・edited_by）。
+    入力解禁は input_enabled_daycare（InputKind に 'daycare'）。デイのバイタルは saveVitalEdits の入口の native_input_enabled にも、
+    欠席の入浴は input_enabled_bath にも従う（旗は重ねて効く）
+  - 週間計画（kv_entries の care_schedule_v2）は読むだけ（daycare_plan・daycare_open_day の中＝サーバー）。端末から kv_ の関数を呼ばない
+  - 外部利用者は段階1〜3の対象外（「名簿に無い方 n 名」と数だけ出す）。residents に何も書かない
+  - 純ロジック（キー・状態・一覧・テンキー・範囲・欠席の入浴の扱い・前回値）は `src/lib/daycare.ts`
 
 - 事故・ヒヤリハット（incidents）は入浴・与薬と同じ送り方（client_key・rev 照合・送信待ち cl_sendQueue・edited_by・soft delete）。入力解禁は input_enabled_incident。
   自然キーは持たない。送信待ちの中身は書き換えない・破棄しない（未送信の記録は画面が hasPendingIncident で編集できなくする）
@@ -497,6 +533,12 @@ MasterSyncStatus()                           // 設定画面の「最終同期: 
   休業日は 0件でなく予定者を visit・auto=true で入れる（private.care_auto_daycare_closed で判定）。値は空の時だけ '12-31,01-01,01-02,01-03' にする。
   **0016 を当ててからアプリを公開する**（visit は差し替え前の check では保存できない）。与薬チェックの「未」は4つの時間帯とも自動の時刻から15分（眠前は 21:15）。
   入浴の月次表は「訪」の記号と合計の「訪問」列（全＋シには数えない）
+- `0041_daycare_stage1.sql`（2026-10-22・代表承認・冪等）: app_settings に input_enabled_daycare（'false'）・bath_records.cancel_reason の check に
+  'absent'（同じ名前で差し替え）・daycare_days（1日1行・予定の写し plan_rows jsonb・plan_source kv/none/unknown・update は unknown の行だけ）・
+  daycare_attendance（1人1日1件の部分unique・client_key 全体unique・欠席の理由と時刻の check・rev／変更の記録トリガ（day））・
+  RPC daycare_plan(p_date)（予定1件ごとに1行・照合 match と重複 dup・氏名を返さない）・RPC daycare_open_day(p_day, p_staff)（今日だけ）・
+  RLS＋restrictive の member_only・delete ポリシーなし・Realtime（daycare_attendance。「載っていなければ足す」一時の関数で冪等）。
+  vitals・0011・cron・週間計画には触れない。**DB を先に当て、旗は false のまま公開する**（旗を true にする前に min_client_build を上げる）
 - **適用順は 0001 → 0002 → 0003 → 0004 → 0005**。0003〜0005 は互いに独立だが、
   0003 未適用のまま新UIを配ると「定時以外のバイタル保存」と「食事一覧の読み込み」が失敗する（意図的にフォールバックを作っていない）。
 - 2026-10-10 追記: 0017〜0020 の契約は concurrent-entry.md §9（0017）・db-design.md、**0021〜0030（多端末運用の監査の直し）の要旨と適用の順番は

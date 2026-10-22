@@ -37,6 +37,12 @@ import type {
   BathCancelReason,
   BathRecord,
   BathResult,
+  DaycareAbsentReason,
+  DaycareAttendance,
+  DaycareDay,
+  DaycarePlanMatch,
+  DaycarePlanRow,
+  DaycarePlanSource,
   FluidIntake,
   ImportDay,
   Importance,
@@ -73,8 +79,9 @@ import { validateNoteAlias } from './types'
 import { rememberCreatedAt } from './nextMorning'
 import { isNoteCategory, normalizeCategories } from './noteCategory'
 import {
-  BATH_CANCEL_REASONS,
+  BATH_CANCEL_REASONS_KNOWN,
   BATH_RESULTS,
+  DAYCARE_ABSENT_REASONS,
   INCIDENT_KINDS,
   INCIDENT_OFFICES,
   INCIDENT_PLACES,
@@ -89,6 +96,9 @@ import {
 import { matchBathPlan, monthDays, monthRange, validateBathInput } from './bath'
 import type { BathPlanEntry, BathPlanRow } from './bath'
 import { normalizeMedSlots, validateMedAdminInput } from './med'
+// デイ（せせらぎ）の記録 段階1（2026-10-22・0041）。純ロジックは daycare.ts
+import { absentBathAction, hmOf, isDaycareVitalKey, validateAttendance } from './daycare'
+import type { KeyedVital } from './daycare'
 import { normalizeChoices, normalizeIncidentDetail, validateIncidentInput } from './incident'
 import type { IncidentInput } from './incident'
 import {
@@ -194,6 +204,10 @@ const IMPORT_DAY_COLS = 'source,day,imported_at,src_rows,inserted,updated,skippe
  * auto（自動で入った記録の印）は 0015_auto_check.sql で追加（0015 を当ててからこの版を公開する）
  */
 const BATH_COLS = 'id,resident_id,bath_on,result,cancel_reason,note,recorded_by,rev,auto'
+/** デイの到着・帰宅・欠席（0041_daycare_stage1.sql）。監査列・client_key は端末へ持ち出さない */
+const DAYCARE_ATTENDANCE_COLS = 'id,resident_id,day,arrived_at,left_at,absent,absent_reason,note,recorded_by,rev'
+/** デイの1日の予定の写し（0041）。plan_rows に氏名は入らない（サーバーが照合した結果だけ） */
+const DAYCARE_DAY_COLS = 'id,day,plan_source,plan_rev,plan_updated_at,plan_rows,opened_by,created_at,rev'
 /** 服薬の時間帯（0013_med_admin.sql）。監査列・client_key は端末へ持ち出さない */
 const MED_SLOTS_COLS = 'id,resident_id,slots,note,rev'
 /**
@@ -891,7 +905,8 @@ function normalizeBath(row: unknown): BathRecord | null {
     bath_on,
     result,
     // 中止以外は理由を持たない（DB の check と同じ。受信値を信じない）
-    cancel_reason: result === 'cancel' ? oneOf<BathCancelReason>(r.cancel_reason, BATH_CANCEL_REASONS) : null,
+    // 欠席（absent・0041）も照合に含める（画面の選択肢 BATH_CANCEL_REASONS は変えない）
+    cancel_reason: result === 'cancel' ? oneOf<BathCancelReason>(r.cancel_reason, BATH_CANCEL_REASONS_KNOWN) : null,
     note: str(r.note),
     recorded_by: idNum(r.recorded_by),
     rev: num(r.rev) ?? 1,
@@ -1023,7 +1038,9 @@ function normalizeImportDay(row: unknown): ImportDay | null {
  * incidents（事故・ヒヤリハット・2026-09-26 追加）も同じ経路（自然キーは持たない）。
  * 入力解禁の判定だけは表ごとに違う（writeGate: 入浴は input_enabled_bath、服薬は input_enabled_med、事故は input_enabled_incident）
  */
-type LegacyTable = 'fluid_intake' | 'notes' | 'outings' | 'bath_records' | 'med_slots' | 'med_admin' | 'incidents'
+// daycare_attendance（デイの到着・帰宅・欠席・2026-10-22 デイ段階1・0041）も入浴と同じ経路（client_key・rev 照合・送信待ち・
+// edited_by）。入力解禁は input_enabled_daycare（writeGate）。1人1日1件の自然キーを持つ（入浴と同じ扱い）
+type LegacyTable = 'fluid_intake' | 'notes' | 'outings' | 'bath_records' | 'med_slots' | 'med_admin' | 'incidents' | 'daycare_attendance'
 
 /** 列の並び・rev 照合の作法が共通の業務表（読み取りの列は colsOf） */
 type QueueTable = 'vitals' | 'meals' | LegacyTable
@@ -1109,6 +1126,7 @@ const LEGACY_TABLES: readonly LegacyTable[] = [
   'med_slots',
   'med_admin',
   'incidents',
+  'daycare_attendance',
 ]
 
 /** 旧版が使っていた退避キー。値は cl_sendQueue の中へ移し、移せたことを観測してから取り除く */
@@ -3785,6 +3803,8 @@ function colsOf(table: QueueTable): string {
       return MED_ADMIN_COLS
     case 'incidents':
       return INCIDENT_COLS
+    case 'daycare_attendance':
+      return DAYCARE_ATTENDANCE_COLS
   }
 }
 
@@ -3958,6 +3978,11 @@ function naturalKeyOf(table: QueueTable, payload: Record<string, unknown>): Reco
     const slot = oneOf<MedAdminSlot>(payload.slot, MED_ADMIN_SLOTS)
     return day === null || slot === null || slot === 'prn' ? null : { resident_id: residentId, admin_on: day, slot }
   }
+  // デイの到着・帰宅・欠席（1人1日1件・0041）
+  if (table === 'daycare_attendance') {
+    const day = dateStr(payload.day)
+    return day === null ? null : { resident_id: residentId, day }
+  }
   return null
 }
 
@@ -3965,6 +3990,10 @@ function naturalKeyOf(table: QueueTable, payload: Record<string, unknown>): Reco
 async function naturalKeyTaken(sb: SupabaseClient, table: QueueTable, payload: Record<string, unknown>): Promise<boolean> {
   if (table === 'bath_records') return bathDayTaken(sb, payload)
   if (table === 'med_slots' || table === 'med_admin') return medKeyTaken(sb, table, payload)
+  if (table === 'daycare_attendance') {
+    const key = naturalKeyOf(table, payload)
+    return key !== null && (await findByKey(sb, 'daycare_attendance', key)) !== null
+  }
   return false
 }
 
@@ -4382,6 +4411,7 @@ const KIND_BLOCKED_MSG: Record<InputKind, string> = {
   bath: '入浴の記録はまだ使い始めていません（開始日に解禁します）',
   med: '服薬の記録はまだ使い始めていません（開始日に解禁します）',
   incident: '事故・ヒヤリハットの記録はまだ使い始めていません（開始日に解禁します）',
+  daycare: 'デイの記録はまだ使い始めていません（開始日に解禁します）',
 }
 
 interface KindGateState {
@@ -4396,6 +4426,7 @@ function newKindGates(): Record<InputKind, KindGateState> {
     bath: { value: null, fetchedAt: 0, inFlight: null },
     med: { value: null, fetchedAt: 0, inFlight: null },
     incident: { value: null, fetchedAt: 0, inFlight: null },
+    daycare: { value: null, fetchedAt: 0, inFlight: null },
   }
 }
 
@@ -4479,6 +4510,7 @@ async function writeGate(table: LegacyTable): Promise<void> {
   if (table === 'bath_records') return assertKindWritable('bath')
   if (table === 'med_admin') return assertKindWritable('med')
   if (table === 'incidents') return assertKindWritable('incident')
+  if (table === 'daycare_attendance') return assertKindWritable('daycare')
   if (table === 'med_slots') {
     if (!isSupabaseConfigured()) throw new DbError('unconfigured', MSG.unconfigured)
     assertBuildCurrent() // 旗の封鎖は受けないが、古い版の止め（F28③）は受ける
@@ -7121,6 +7153,12 @@ export async function resendQueuedOp(
  * 変更の記録の「変えた職員」は積んだ時の操作者（無ければ記録者）。自然キーを持たない表は null
  */
 function insertAsUpdatePatch(table: string, payload: Record<string, unknown>): Record<string, unknown> | null {
+  // デイの到着・帰宅・欠席（0041）: 自然キー（利用者・日）と冪等キーを外した中身。自動の記録の印（auto）は持たない表
+  if (table === 'daycare_attendance') {
+    const out = omitKeys(payload, ['client_key', 'resident_id', 'day', 'id', 'rev', 'deleted_at'])
+    out.edited_by = idNum(payload.edited_by) ?? idNum(payload.recorded_by) ?? null
+    return out
+  }
   if (table !== 'bath_records' && table !== 'med_admin' && table !== 'med_slots') return null
   const out = omitKeys(payload, ['client_key', 'resident_id', 'bath_on', 'admin_on', 'slot', 'id', 'rev', 'deleted_at'])
   if (table !== 'med_slots') out.auto = false
@@ -7737,6 +7775,473 @@ export async function fetchBathFirstDay(): Promise<string | null> {
     .maybeSingle()) as Res<unknown>
   if (res.error !== null) throw bathReadError(res)
   return dateStr(asRecord(res.data)?.bath_on)
+}
+
+// ── デイ（せせらぎ）の記録 段階1（2026-10-22 追加・代表承認・0041_daycare_stage1.sql） ─────────────
+//
+// 到着・帰宅・欠席（daycare_attendance）は入浴記録と同じ経路（client_key・rev 照合・送信待ち cl_sendQueue・edited_by・soft delete）。
+//   入力解禁は input_enabled_daycare（writeGate）。1人1日1件の自然キー（部分unique）を持つ: 23505 のうち自分の client_key が
+//   載っていないものは「他の端末が先に記録した」→ 'conflict'（画面は読み直して「先に記録があります」）。
+// 予定（RPC daycare_plan）は読むだけ。照合はサーバーで行い、氏名は受け取らない（週間計画の氏名を現場の端末へ降ろさない）。
+// その日の予定の写し（RPC daycare_open_day）は開所の最初のタップでだけ作る（読み取りの経路から書かない）。
+// デイのバイタルは既存の saveVitalEdits（0011）をそのまま使い、冪等キーを 'dc:<日>:<id>:<回>' にする（daycare.ts）。
+//   ここに足すのは client_key を含めて読む読み取りだけ（既存の VITAL_COLS・画面は変えない）。
+// 欠席の日の入浴（recordAbsentBath）は既存の insertBath・updateBath を使い、「その日の行を読む → あれば更新（自動の行は
+//   手入力へ）→ 無ければ追加 → 23505 なら読み直して更新」の順で決める（反証レビュー 重大2）。
+
+const DAYCARE_MSG = {
+  missing: 'デイの記録はまだ使えません（サーバー側の設定待ち）。管理者に連絡してください。',
+  future: '未来の日には記録できません。日付を今日以前にしてください。',
+  openToday: '予定の写しは今日の分だけ作れます。',
+} as const
+
+/** 1日のデイの到着・欠席の取得上限（1日の利用者数がこれを超える運用は無い） */
+const DAYCARE_DAY_ROWS = DAY_ROWS
+const DAYCARE_PLAN_MATCHES: readonly DaycarePlanMatch[] = ['mid', 'name', 'mismatch', 'external', 'absent_roster', 'ambiguous']
+const DAYCARE_PLAN_SOURCES: readonly DaycarePlanSource[] = ['kv', 'none', 'unknown']
+
+function normalizeDaycareAttendance(row: unknown): DaycareAttendance | null {
+  const r = asRecord(row)
+  if (!r) return null
+  const id = idNum(r.id)
+  const resident_id = idNum(r.resident_id)
+  const day = dateStr(r.day)
+  if (id === null || resident_id === null || day === null) return null
+  const absent = r.absent === true
+  return {
+    id,
+    resident_id,
+    day,
+    // 欠席の日は時刻を持たない（DB の check と同じ。受信値を信じない）
+    arrived_at: absent ? null : hmOf(r.arrived_at),
+    left_at: absent ? null : hmOf(r.left_at),
+    absent,
+    absent_reason: absent ? oneOf<DaycareAbsentReason>(r.absent_reason, DAYCARE_ABSENT_REASONS) : null,
+    note: str(r.note),
+    recorded_by: idNum(r.recorded_by),
+    rev: num(r.rev) ?? 1,
+  }
+}
+
+function normalizeDaycarePlanRow(row: unknown): DaycarePlanRow | null {
+  const r = asRecord(row)
+  if (!r) return null
+  const sched = str(r.sched_id)
+  return {
+    sched_id: sched,
+    event_id: str(r.event_id),
+    resident_id: idNum(r.resident_id),
+    match: sched === null ? null : oneOf<DaycarePlanMatch>(r.match, DAYCARE_PLAN_MATCHES),
+    dup: r.dup === true,
+    external: r.external === true,
+    hospitalized: r.hospitalized === true,
+    start_time: str(r.start_time),
+    end_time: str(r.end_time),
+    bathing: r.bathing === true,
+    plan_rev: num(r.plan_rev),
+    updated_at: str(r.updated_at),
+  }
+}
+
+function normalizeDaycareDay(row: unknown): DaycareDay | null {
+  const r = asRecord(row)
+  if (!r) return null
+  const id = idNum(r.id)
+  const day = dateStr(r.day)
+  const source = oneOf<DaycarePlanSource>(r.plan_source, DAYCARE_PLAN_SOURCES)
+  if (id === null || day === null || source === null) return null
+  const rows: DaycarePlanRow[] = []
+  if (Array.isArray(r.plan_rows)) {
+    for (const x of r.plan_rows.slice(0, MAX_ROWS)) {
+      const n = normalizeDaycarePlanRow(x)
+      if (n !== null && n.sched_id !== null) rows.push(n)
+    }
+  }
+  return {
+    id,
+    day,
+    plan_source: source,
+    plan_rev: num(r.plan_rev),
+    plan_updated_at: str(r.plan_updated_at),
+    plan_rows: rows,
+    opened_by: idNum(r.opened_by),
+    created_at: str(r.created_at),
+    rev: num(r.rev) ?? 1,
+  }
+}
+
+/** client_key を含むバイタルの行（デイの画面の読み取りだけ） */
+function normalizeKeyedVital(row: unknown): KeyedVital | null {
+  const v = normalizeVital(row)
+  if (v === null) return null
+  return { ...v, client_key: str(asRecord(row)?.client_key) }
+}
+
+/** 表・関数が無い（0041 未適用）時は「サーバー側の設定待ち」で止める（読めない理由を取り違えさせない） */
+function daycareReadError(res: Res<unknown>): DbError {
+  if (isMissingTable(res) || isMissingRpc(res)) return new DbError('server', DAYCARE_MSG.missing)
+  return readError(res)
+}
+
+/** その日の予定（RPC daycare_plan の結果）。source: kv＝予定あり／none＝予定なし／unknown＝読めない（関数が無いも含む） */
+export interface DaycarePlanResult {
+  source: DaycarePlanSource
+  /** 予定1件ごとの行（none・unknown では空） */
+  rows: DaycarePlanRow[]
+  /** 週間計画の写しの版・更新時刻（unknown では null） */
+  rev: number | null
+  updatedAt: string | null
+  /** 関数が無い DB（0041 未適用）＝サーバー側の設定待ち */
+  missing: boolean
+}
+
+/**
+ * その日のデイの予定（週間計画の写しから・読むだけ）。0行＝読めない（unknown）・sched_id が空の1行だけ＝予定なし（none）。
+ * 関数が無い（0041 未適用）は unknown・missing=true（例外にしない＝画面は「確かめられません」の帯を出す）。通信できない等は例外
+ */
+export async function fetchDaycarePlan(dayIso: string): Promise<DaycarePlanResult> {
+  assertDay(dayIso)
+  const sb = await getClient()
+  const res = (await sb.rpc('daycare_plan', { p_date: dayIso })) as Res<unknown>
+  if (res.error !== null) {
+    if (isMissingRpc(res)) return { source: 'unknown', rows: [], rev: null, updatedAt: null, missing: true }
+    throw readError(res)
+  }
+  const raw = Array.isArray(res.data) ? res.data.slice(0, MAX_ROWS) : []
+  const rows = raw.map(normalizeDaycarePlanRow).filter((r): r is DaycarePlanRow => r !== null)
+  if (rows.length === 0) return { source: 'unknown', rows: [], rev: null, updatedAt: null, missing: false }
+  const real = rows.filter((r) => r.sched_id !== null)
+  return {
+    source: real.length === 0 ? 'none' : 'kv',
+    rows: real,
+    rev: rows[0].plan_rev,
+    updatedAt: rows[0].updated_at,
+    missing: false,
+  }
+}
+
+/** その日の予定の写し（無ければ null）。表が無い（0041 未適用）時は例外（サーバー側の設定待ち） */
+export async function fetchDaycareDay(dayIso: string): Promise<DaycareDay | null> {
+  assertDay(dayIso)
+  const sb = await getClient()
+  const res = (await sb.from('daycare_days').select(DAYCARE_DAY_COLS).eq('day', dayIso).limit(1).maybeSingle()) as Res<unknown>
+  if (res.error !== null) throw daycareReadError(res)
+  return res.data === null ? null : normalizeDaycareDay(res.data)
+}
+
+/**
+ * 今日の予定の写しを作る（開所の最初のタップ・RPC daycare_open_day）。既にあればそのまま返す（写しは動かさない。
+ * 読めなかった写し＝unknown だけ、いま読めればサーバーが1回置き換える）。今日以外は作らない（例外）。
+ * 通信できない時は DbError('network')（写しは次のタップで作り直す。到着・欠席の記録そのものは止めない）
+ */
+export async function openDaycareDay(dayIso: string, staffId: number | null): Promise<DaycareDay> {
+  assertDay(dayIso)
+  if (dayIso !== localToday()) throw new DbError('server', DAYCARE_MSG.openToday)
+  await assertKindWritable('daycare')
+  const sb = await getClient()
+  let res: Res<unknown>
+  try {
+    res = (await sb.rpc('daycare_open_day', { p_day: dayIso, p_staff: idNum(staffId) })) as Res<unknown>
+  } catch {
+    throw new DbError('network', MSG.networkWrite)
+  }
+  if (res.error !== null) {
+    if (isMissingRpc(res)) throw new DbError('server', DAYCARE_MSG.missing)
+    if (isAuthFail(res)) {
+      fireAuthExpired()
+      throw new DbError('auth', MSG.authWrite)
+    }
+    if (isTransient(res)) throw new DbError('network', MSG.networkWrite)
+    throw rejectError('保存でき', errCode(res), res.status)
+  }
+  const row = normalizeDaycareDay(res.data)
+  if (row === null) throw new DbError('server', MSG.broken)
+  return row
+}
+
+/** その日の到着・帰宅・欠席（削除済みを除く） */
+export async function fetchDaycareAttendance(dayIso: string): Promise<DaycareAttendance[]> {
+  assertDay(dayIso)
+  const sb = await getClient()
+  const res = (await sb
+    .from('daycare_attendance')
+    .select(DAYCARE_ATTENDANCE_COLS)
+    .eq('day', dayIso)
+    .is('deleted_at', null)
+    .order('id', { ascending: true })
+    .limit(DAYCARE_DAY_ROWS)) as Res<unknown>
+  if (res.error !== null) throw daycareReadError(res)
+  const rows = list(res.data, normalizeDaycareAttendance, DAYCARE_DAY_ROWS)
+  await assertSessionIfEmpty(sb, rows.length) // anon で読んだ0件を「未記録」と出さない（F58）
+  return rows
+}
+
+/** 保存前の検証（画面と同じ関数）。未来の日は止める */
+function assertAttendanceInput(day: string, v: Parameters<typeof validateAttendance>[0]): void {
+  if (day > localToday()) throw new DbError('server', DAYCARE_MSG.future)
+  const check = validateAttendance(v)
+  if (!check.ok) throw new DbError('server', check.message)
+}
+
+/**
+ * 到着・欠席の追加。端末生成の冪等キー client_key を必ず付ける（再送しても1行に収まる）。
+ * 戻り値: 追加した行／'conflict'（同じ人・同じ日に他の端末が先に記録した）／'queued'（通信できない）
+ */
+export async function insertDaycareAttendance(
+  a: Omit<DaycareAttendance, 'id' | 'rev'>,
+): Promise<DaycareAttendance | Conflict | Queued> {
+  const absent = a.absent === true
+  const v = {
+    absent,
+    absent_reason: absent ? a.absent_reason : null,
+    arrived_at: absent ? null : a.arrived_at,
+    left_at: absent ? null : a.left_at,
+  }
+  assertAttendanceInput(a.day, v)
+  await writeGate('daycare_attendance')
+  const note = a.note === null || a.note.trim() === '' ? null : a.note
+  const payload = withClientKey({ resident_id: a.resident_id, day: a.day, ...v, note, recorded_by: idNum(a.recorded_by) })
+  const sb = await getClient()
+  const res = (await sb.from('daycare_attendance').insert(payload).select(DAYCARE_ATTENDANCE_COLS).maybeSingle()) as Res<unknown>
+  if (res.error !== null) {
+    if (isAuthFail(res)) {
+      fireAuthExpired()
+      return enqueue({ table: 'daycare_attendance', kind: 'insert', payload })
+    }
+    if (isTransient(res)) return enqueue({ table: 'daycare_attendance', kind: 'insert', payload })
+    if (isMissingTable(res)) throw new DbError('server', DAYCARE_MSG.missing)
+    if (isUniqueViolation(res)) {
+      const ck = clientKeyOf(payload)
+      // 自分の送信が既に載っている（再送の行き違い）→ 載っている行を返す
+      const landed = ck === null ? null : await findByKey(sb, 'daycare_attendance', ck, DAYCARE_ATTENDANCE_COLS, true)
+      const row = landed === null ? null : normalizeDaycareAttendance(landed.row)
+      if (row !== null) return row
+      // 他の端末が同じ人・同じ日を先に記録した（1人1日1件）→ 入力を消さず読み直しを促す
+      if (await naturalKeyTaken(sb, 'daycare_attendance', payload)) return CONFLICT
+      return enqueue({ table: 'daycare_attendance', kind: 'insert', payload })
+    }
+    throw rejectError('保存でき', errCode(res), res.status)
+  }
+  markSelfRow('daycare_attendance', res.data, num(asRecord(res.data)?.rev))
+  kickAfterDelivered()
+  const row = normalizeDaycareAttendance(res.data)
+  if (row === null) throw new DbError('server', MSG.broken)
+  return row
+}
+
+/**
+ * 到着・帰宅・欠席の修正（rev 照合の部分更新）。送るのは変えた列だけ（欠席を変えた時は理由・時刻もそろえて送る）。
+ * 送る前に、修正後の値（current と patch を重ねたもの）を検証する
+ */
+export async function updateDaycareAttendance(
+  current: DaycareAttendance,
+  patch: Partial<Pick<DaycareAttendance, 'arrived_at' | 'left_at' | 'absent' | 'absent_reason' | 'note'>>,
+  opts?: WriteOpts,
+): Promise<DaycareAttendance | Conflict | Queued> {
+  const absent = patch.absent !== undefined ? patch.absent : current.absent
+  const merged = {
+    absent,
+    absent_reason: absent ? (patch.absent_reason !== undefined ? patch.absent_reason : current.absent_reason) : null,
+    arrived_at: absent ? null : patch.arrived_at !== undefined ? patch.arrived_at : current.arrived_at,
+    left_at: absent ? null : patch.left_at !== undefined ? patch.left_at : current.left_at,
+  }
+  assertAttendanceInput(current.day, merged)
+  const sent: Record<string, unknown> = {}
+  if (patch.absent !== undefined && patch.absent !== current.absent) {
+    // 欠席の付け外しは理由・時刻を一緒に送る（DB の check をまたがない）
+    Object.assign(sent, merged)
+  } else {
+    if (patch.absent_reason !== undefined && merged.absent_reason !== current.absent_reason) sent.absent_reason = merged.absent_reason
+    if (patch.arrived_at !== undefined && merged.arrived_at !== current.arrived_at) sent.arrived_at = merged.arrived_at
+    if (patch.left_at !== undefined && merged.left_at !== current.left_at) sent.left_at = merged.left_at
+  }
+  if (patch.note !== undefined) {
+    const note = patch.note === null || patch.note.trim() === '' ? null : patch.note
+    if (note !== current.note) sent.note = note
+  }
+  if (Object.keys(sent).length === 0) return current
+  return updateRow('daycare_attendance', current.id, current.rev, sent, normalizeDaycareAttendance, opts)
+}
+
+/**
+ * この端末（このタブ）の送信待ちに、その人・その日の到着・欠席の追加、またはその記録（recordId）の修正が
+ * 残っているか（送信中を含む・止めた op は含めない）。読むだけ。画面はこれが true の行のボタンを押せなくする（入浴と同じ）
+ */
+export function hasPendingDaycareAttendance(residentId: number, day: string, recordId: number | null): boolean {
+  for (const q of queue) {
+    if (q.table !== 'daycare_attendance' || q.blocked !== undefined) continue
+    if (q.kind === 'insert') {
+      if (idNum(q.payload.resident_id) === residentId && dateStr(q.payload.day) === day) return true
+    } else if (q.kind === 'update' && recordId !== null && q.rowId === recordId) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * その日のデイの測定（client_key が 'dc:' で始まる生きている行・client_key つき）と、その日の 'dc:' のキーの全部
+ * （取り消した行も含む＝次の回を決めるため。キーだけを読む）
+ */
+export async function fetchDaycareVitals(dayIso: string): Promise<{ live: KeyedVital[]; keys: string[] }> {
+  assertDay(dayIso)
+  const sb = await getClient()
+  const [liveRes, keyRes] = await Promise.all([
+    sb
+      .from('vitals')
+      .select(`${VITAL_COLS},client_key`)
+      .eq('measured_on', dayIso)
+      .like('client_key', 'dc:%')
+      .is('deleted_at', null)
+      .order('id', { ascending: true })
+      .limit(DAYCARE_DAY_ROWS) as unknown as Promise<Res<unknown>>,
+    sb
+      .from('vitals')
+      .select('client_key')
+      .eq('measured_on', dayIso)
+      .like('client_key', 'dc:%')
+      .order('id', { ascending: true })
+      .limit(MAX_ROWS) as unknown as Promise<Res<unknown>>,
+  ])
+  if (liveRes.error !== null) throw readError(liveRes)
+  if (keyRes.error !== null) throw readError(keyRes)
+  const live = list(liveRes.data, normalizeKeyedVital, DAYCARE_DAY_ROWS).filter((v) => isDaycareVitalKey(v.client_key))
+  const keys: string[] = []
+  if (Array.isArray(keyRes.data)) {
+    for (const r of keyRes.data) {
+      const k = str(asRecord(r)?.client_key)
+      if (k !== null && isDaycareVitalKey(k)) keys.push(k)
+    }
+  }
+  return { live, keys }
+}
+
+/**
+ * 前回値の材料: 方々の、期間（from〜to）の測定（種類を問わない・削除済みを除く・client_key つき）。新しい順に上限まで
+ * （上限を超えた分は古い側が落ちる＝前回値の表示だけに使う）
+ */
+export async function fetchRecentVitals(residentIds: readonly number[], fromIso: string, toIso: string): Promise<KeyedVital[]> {
+  assertDay(fromIso)
+  assertDay(toIso)
+  const ids = [...new Set(residentIds.filter((x) => Number.isSafeInteger(x) && x > 0))]
+  if (ids.length === 0) return []
+  const sb = await getClient()
+  const res = (await sb
+    .from('vitals')
+    .select(`${VITAL_COLS},client_key`)
+    .in('resident_id', ids)
+    .gte('measured_on', fromIso)
+    .lte('measured_on', toIso)
+    .is('deleted_at', null)
+    .order('measured_on', { ascending: false })
+    .order('id', { ascending: false })
+    .limit(MAX_ROWS)) as Res<unknown>
+  if (res.error !== null) throw readError(res)
+  return list(res.data, normalizeKeyedVital, MAX_ROWS)
+}
+
+/** その人・その日の入浴記録（生きている行・無ければ null）。読めない時は例外 */
+async function findBathOf(residentId: number, dayIso: string): Promise<BathRecord | null> {
+  const sb = await getClient()
+  const res = (await sb
+    .from('bath_records')
+    .select(BATH_COLS)
+    .eq('resident_id', residentId)
+    .eq('bath_on', dayIso)
+    .is('deleted_at', null)
+    .order('id', { ascending: false })
+    .limit(1)
+    .maybeSingle()) as Res<unknown>
+  if (res.error !== null) throw bathReadError(res)
+  return res.data === null ? null : normalizeBath(res.data)
+}
+
+/** 欠席の日の入浴の結果 */
+export type AbsentBathResult =
+  /** 「中止・欠席」にした（追加した・直した） */
+  | { status: 'done'; record: BathRecord }
+  /** 送信待ちに残した（電波が戻れば送る。自動の行があれば再送の時に合流する） */
+  | { status: 'queued' }
+  /** 入浴の予定も行も無い */
+  | { status: 'none' }
+  /** 既に「中止・欠席」 */
+  | { status: 'already'; record: BathRecord }
+  /** 人が記録した「中止」（欠席以外の理由）をそのまま残した */
+  | { status: 'kept'; record: BathRecord }
+  /** 人が記録した「入浴した」がある。直すには確認が要る（confirmManual=true でもう一度呼ぶ） */
+  | { status: 'needsConfirm'; record: BathRecord }
+  /** 入浴の行が他の端末で直された（rev が合わない）。入浴の画面で確かめてもらう */
+  | { status: 'conflict' }
+  /** 入浴の記録は使えない（入浴の旗が封鎖・確かめられない・サーバー側の設定待ち）。欠席の記録は止めない */
+  | { status: 'blocked'; message: string }
+
+/**
+ * 欠席の日の入浴を「中止・欠席」にする（反証レビュー 重大2 の手順）:
+ *   その日の行を読む → あれば更新（自動の行は手入力に切り替え＝updateBath の autoOffPatch）→ 無ければ追加 →
+ *   追加が 23505（読んだ後に自動の行・他の端末の行ができた）なら読み直して更新（1回だけ）。
+ *   圏外で読めない時は、入浴の予定がある人だけ追加を送信待ちへ積む（再送の時に既存の overrideAutoRow が自動の行に合流）。
+ * 例外は投げない（欠席の記録そのものを止めない）。結果は画面が文で出す
+ */
+export async function recordAbsentBath(p: {
+  residentId: number
+  day: string
+  bathingPlanned: boolean
+  recordedBy: number | null
+  /** 人が記録した「入浴した」を直してよい（確認ダイアログで選んだ） */
+  confirmManual?: boolean
+}): Promise<AbsentBathResult> {
+  const blockedOf = (e: unknown): AbsentBathResult | null =>
+    e instanceof DbError && (e.kind === 'blocked' || e.kind === 'gate-unknown' || e.kind === 'forbidden' || e.kind === 'unconfigured')
+      ? { status: 'blocked', message: e.message }
+      : null
+  const insertAbsent = (): Promise<BathRecord | Conflict | Queued> =>
+    insertBath({ resident_id: p.residentId, bath_on: p.day, result: 'cancel', cancel_reason: 'absent', note: null, recorded_by: p.recordedBy })
+  const opts: WriteOpts = { editedBy: p.recordedBy }
+  try {
+    await writeGate('bath_records')
+  } catch (e) {
+    return blockedOf(e) ?? { status: 'blocked', message: e instanceof Error ? e.message : MSG.networkWrite }
+  }
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let existing: BathRecord | null
+    try {
+      existing = await findBathOf(p.residentId, p.day)
+    } catch (e) {
+      const b = blockedOf(e)
+      if (b !== null) return b
+      if (e instanceof DbError && e.kind === 'server') return { status: 'blocked', message: e.message }
+      // 読めない（圏外）: 入浴の予定がある人だけ追加を送信待ちへ（自動の行は再送の時に合流する）
+      if (!p.bathingPlanned) return { status: 'none' }
+      try {
+        const r = await insertAbsent()
+        if (r === QUEUED) return { status: 'queued' }
+        if (r === CONFLICT) continue
+        return { status: 'done', record: r }
+      } catch (e2) {
+        return blockedOf(e2) ?? { status: 'blocked', message: e2 instanceof Error ? e2.message : MSG.networkWrite }
+      }
+    }
+    const action = absentBathAction(existing, p.bathingPlanned)
+    try {
+      if (action.kind === 'none') return { status: 'none' }
+      if (action.kind === 'already') return { status: 'already', record: action.record }
+      if (action.kind === 'keep') return { status: 'kept', record: action.record }
+      if (action.kind === 'update') {
+        if (action.confirm && p.confirmManual !== true) return { status: 'needsConfirm', record: action.record }
+        const r = await updateBath(action.record, { result: 'cancel', cancel_reason: 'absent' }, opts)
+        if (r === QUEUED) return { status: 'queued' }
+        if (r === CONFLICT) return { status: 'conflict' }
+        return { status: 'done', record: r }
+      }
+      const r = await insertAbsent()
+      if (r === QUEUED) return { status: 'queued' }
+      if (r === CONFLICT) continue // 読んだ後に行ができた → 読み直して更新（1回だけ）
+      return { status: 'done', record: r }
+    } catch (e) {
+      return blockedOf(e) ?? { status: 'blocked', message: e instanceof Error ? e.message : MSG.networkWrite }
+    }
+  }
+  return { status: 'conflict' }
 }
 
 // ── 与薬チェック（服薬介助・2026-09-26 追加・0013_med_admin.sql） ─────────────────
@@ -8933,6 +9438,49 @@ export function subscribeBathChanges(cb: (table: string, info?: ChangeInfo) => v
       channel = ch
       // 状態の移り変わりを受け取り、つながり直した時に表ごとの RESYNC を流す（F14）
       unwatch = watchChannel(ch, REALTIME_BATH_TABLES, cb, () => !cancelled)
+    } catch {
+      // 接続先未設定・通信不可。購読なしで動く
+    }
+  })()
+
+  return () => {
+    cancelled = true
+    unwatch?.()
+    unwatch = null
+    if (client !== null && channel !== null) void client.removeChannel(channel)
+    channel = null
+  }
+}
+
+/**
+ * デイの到着・帰宅・欠席の Realtime を購読する表（2026-10-22 デイ段階1・0041）。入浴と同じく既存のチャンネルには混ぜない
+ * （0041 を当てる前の DB で既存7表・入浴・与薬の購読まで止まらないようにする）
+ */
+const REALTIME_DAYCARE_TABLES = ['daycare_attendance'] as const
+
+/**
+ * デイの到着・帰宅・欠席の変更通知（デイの画面だけが使う）。呼び方・渡す情報は subscribeChanges と同じ。
+ * 接続できない・配信対象に無い（0041 未適用）場合は通知が来ないだけで、画面は手動更新で成立する。
+ */
+export function subscribeDaycareChanges(cb: (table: string, info?: ChangeInfo) => void): () => void {
+  let cancelled = false
+  let client: SupabaseClient | null = null
+  let channel: ReturnType<SupabaseClient['channel']> | null = null
+  let unwatch: (() => void) | null = null
+
+  void (async () => {
+    try {
+      const sb = await getClient()
+      if (cancelled) return
+      client = sb
+      let ch = sb.channel(`cl_daycare_${Math.random().toString(36).slice(2, 10)}`)
+      for (const table of REALTIME_DAYCARE_TABLES) {
+        ch = ch.on('postgres_changes', { event: '*', schema: 'public', table }, (payload: unknown) => {
+          if (!cancelled) deliverChange(table, payload, cb, () => !cancelled)
+        })
+      }
+      channel = ch
+      unwatch = watchChannel(ch, REALTIME_DAYCARE_TABLES, cb, () => !cancelled)
     } catch {
       // 接続先未設定・通信不可。購読なしで動く
     }

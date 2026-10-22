@@ -8,6 +8,7 @@
 import {
   BATH_CANCEL_REASON_LABEL,
   BATH_RESULT_LABEL,
+  DAYCARE_ABSENT_REASON_LABEL,
   INCIDENT_KIND_LABEL,
   INCIDENT_PLACE_LABEL,
   INCIDENT_SEVERITY_LABEL,
@@ -39,6 +40,7 @@ export const STOPPED_TABLE_LABEL: Record<string, string> = {
   note_reads: '申し送りの既読',
   attendance: '日報の出勤者',
   residents: '申し送りでの表示名',
+  daycare_attendance: 'デイの到着・欠席',
 }
 
 /** 取り消し（deleted_at を付ける修正）か */
@@ -103,6 +105,13 @@ const FIELDS: Record<string, Record<string, FieldFmt>> = {
     end_on: { label: '帰着日', fmt: text },
     end_at: { label: '帰着時刻', fmt: hm },
     companion: { label: '同行', fmt: text },
+    note: { label: '備考', fmt: text },
+  },
+  daycare_attendance: {
+    arrived_at: { label: '到着', fmt: hm },
+    left_at: { label: '帰宅', fmt: hm },
+    absent: { label: '欠席', fmt: (v) => (v === true ? '欠席' : v === false ? '欠席でない' : null) },
+    absent_reason: { label: '欠席の理由', fmt: labelOf(DAYCARE_ABSENT_REASON_LABEL) },
     note: { label: '備考', fmt: text },
   },
   bath_records: {
@@ -248,5 +257,8 @@ export function stoppedOpLines(
 export function stoppedOpNeedsCompare(op: Pick<StoppedOpLike, 'table' | 'kind' | 'state'>): boolean {
   if (op.state !== 'conflict') return false
   if (op.kind === 'update' || op.kind === 'alias') return true
-  return op.kind === 'insert' && (op.table === 'bath_records' || op.table === 'med_admin' || op.table === 'med_slots')
+  return (
+    op.kind === 'insert' &&
+    (op.table === 'bath_records' || op.table === 'med_admin' || op.table === 'med_slots' || op.table === 'daycare_attendance')
+  )
 }
