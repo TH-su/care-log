@@ -568,17 +568,20 @@ export function isFeverTemp(temp: number | null | undefined): boolean {
 /**
  * 日報の発熱者（kind='observation'）に載せる行。デイの測定（冪等キー dc: の行＝daycareIds）は、その方のその日のデイの測定に
  * 1回でも発熱があれば全部載せ（再測定の経過が見える）、無ければ載せない。デイ以外の行（日報で入れた発熱者）は今までどおり全部。
- * daycareIds が分からない（undefined）時は今までどおり全部載せる（消すより載せる）
+ * daycareIds が分からない（undefined）時は今までどおり全部載せる（消すより載せる）。
+ * keepIds＝日報で直している最中の行（止まった控え・送信待ち）。その方のデイの測定は発熱が無くても載せ続ける（隠すと「他の端末で
+ * 取り消された」と誤って裁かれ、送信待ちの印も見えなくなるため＝反証レビュー4巡目 F1・F9）
  */
 export function dailyFeverObservations<T extends { id: number; resident_id: number; temp: number | null }>(
   list: readonly T[],
   daycareIds: readonly number[] | undefined,
+  keepIds?: ReadonlySet<number>,
 ): T[] {
   if (daycareIds === undefined) return [...list]
   const dc = new Set(daycareIds)
-  const fever = new Set<number>()
-  for (const v of list) if (dc.has(v.id) && isFeverTemp(v.temp)) fever.add(v.resident_id)
-  return list.filter((v) => !dc.has(v.id) || fever.has(v.resident_id))
+  const shown = new Set<number>()
+  for (const v of list) if (dc.has(v.id) && (isFeverTemp(v.temp) || (keepIds !== undefined && keepIds.has(v.id)))) shown.add(v.resident_id)
+  return list.filter((v) => !dc.has(v.id) || shown.has(v.resident_id))
 }
 
 /**

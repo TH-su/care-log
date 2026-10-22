@@ -223,8 +223,11 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     }
   }, [reloadKey])
 
-  const load = useCallback(async (target: string, quiet: boolean) => {
+  const load = useCallback(async (target: string, quiet0: boolean) => {
     const gen = ++genRef.current
+    // 表示中と違う日を読む時は、静かな読み直しでも失敗を出す（新しい日の読み込みを追い越して失敗すると「読み込んでいます」の
+    // まま止まるため＝反証レビュー4巡目 F3）
+    const quiet = quiet0 && dataRef.current !== null && dataRef.current.day === target
     if (!quiet) {
       setLoading(true)
       setError(null)
@@ -557,10 +560,12 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     }
     const err = await saveSlot(slot, edits)
     if (err !== null) {
-      // サーバーに拒まれた値は送信待ちの控えに「止まった送信」として残る（消えない・未送信の一覧から確かめられる）＝移ってよい。
-      // 控えに無い（記録者が未選択・入力の封鎖などで送る前に止まった）時だけ、入力を残して止める
+      // 控えに無い（記録者が未選択・入力の封鎖などで送る前に止まった）時は、入力を残して止める
       if (!editsHeldInQueue(edits, pendingRow('vitals', targetOf(slot))?.values)) return { key, kept: true, reason: err }
+      // サーバーに拒まれた値は送信待ちの控えに残る（消えない）。黙って移らず、どこで確かめるかを帯に出す（反証レビュー4巡目 F4）
       clearSentDraft(key, edits)
+      const where = 'サーバーに受け付けられませんでした。値はこの端末の送信待ちに残っています（この日のデイのバイタル一括のその方の行で確かめ、入れ直してください）。'
+      return { key, kept: false, reason: dropped === null ? where : `${dropped}${where}` }
     }
     return dropped === null ? null : { key, kept: false, reason: dropped }
   }
@@ -605,14 +610,17 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     const msg = pageMsg
     setDiscardAsk(false)
     if (msg === null) return
+    // 捨てるのは帯に出した「入力を残した」測定だけ。捨てた（上下逆）・拒まれた測定の今の入力（帯が出た後に打ち直した値）は捨てない。
+    // 残りの入力（帯が出た後に入れた値を含む）は、もう一度片づけてから移る（送れなければまた帯に出す＝反証レビュー4巡目 F2）
     const next = new Map(draftsRef.current)
     for (const i of msg.issues) {
+      if (!i.kept) continue
       next.delete(i.key)
       pairBlocked.current.delete(i.key)
     }
     writeDrafts(next)
     setPageMsg(null)
-    msg.go()
+    afterRelease(msg.go)
   }
   // 帯に出した測定の入力が、ほかの経路で送れて無くなったら、その項目を帯から外す（3巡目 軽4）
   useEffect(() => {
@@ -1103,7 +1111,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
       <ConfirmDialog
         open={discardAsk}
         title="保存せずに移りますか"
-        body="帯に出した方の、まだ保存していない値を捨てて移ります。捨てた値は戻せません。"
+        body="帯に出した方の、まだ保存していない値を捨てて移ります。捨てた値は戻せません（ほかの方の入れた値は保存してから移ります）。"
         confirmLabel="保存せずに移る"
         danger
         onConfirm={discardAndGo}

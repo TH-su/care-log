@@ -528,6 +528,9 @@ const MSG_REG_STOPPED =
 const MSG_PICK_LOST =
   '▲ 保存が完了したため選択を反映できませんでした。行の対象／記入者をもう一度選んでください'
 
+/** 日報の読み込みで基準値を待つ上限（ms。詰まっても表示を止めない・その時は今の基準で選ぶ） */
+const THRESHOLD_WAIT_MS = 1500
+
 /** 3セット並べる発熱者ブロックの1行あたりの枠数（現行スプシの実測） */
 const FEVER_SETS = 3
 
@@ -3606,8 +3609,12 @@ function DaySheet({
       try {
         // 1日ぶんだけを取りに行く（10日表示でも全件ロードしない）。
         // 取得済みの日は親のキャッシュから即返る＝区切りを行き来しても取り直さない。
-        // 基準値も待つ（発熱者に載せるデイの測定を、いまの基準で選ぶため。読めない時は今の基準のまま・起動中は控えから即返る）
-        const [report] = await Promise.all([loadDay(day), loadVitalThresholds()])
+        // 基準値も待つ（発熱者に載せるデイの測定を、いまの基準で選ぶため。読めない時は今の基準のまま・起動中は控えから即返る）。
+        // 待つのは上限まで（基準値の取得が詰まっても日報の表示を止めない＝反証レビュー4巡目 F5）
+        const [report] = await Promise.all([
+          loadDay(day),
+          Promise.race([loadVitalThresholds(), new Promise((r) => setTimeout(r, THRESHOLD_WAIT_MS))]),
+        ])
         if (!alive || !aliveRef.current) return
 
         const safeNotes = Array.isArray(report?.notes) ? report.notes.filter((n) => n != null) : []
@@ -3641,10 +3648,12 @@ function DaySheet({
           for (const f of HELD_ADOPT_FIELDS) if (f in p.values) pick[f] = p.values[f]
           return Object.keys(pick).length > 0 ? ({ ...v, ...pick } as Vital) : v
         }
-        // デイの測定（dc: の行）は、その日に1回でも発熱（37.5℃以上）のあった方だけ全部載せる（2026-10-22 代表者の決定）
-        const obs = Array.isArray(report?.observations)
-          ? dailyFeverObservations(report.observations.filter((v) => v != null).map(newer).map(withPending), report.daycareVitalIds)
-          : []
+        // デイの測定（dc: の行）は、その日に1回でも発熱（37.5℃以上）のあった方だけ全部載せる（2026-10-22 代表者の決定）。
+        // 日報で直している最中の行（止まった控え・送信待ち）は隠さない（反証レビュー4巡目 F1・F9）
+        const obsAll = Array.isArray(report?.observations) ? report.observations.filter((v) => v != null).map(newer).map(withPending) : []
+        const editing = new Set<number>()
+        for (const v of obsAll) if (vitalConflictsRef.current[v.id] !== undefined || pendingRow('vitals', vitalTargetOf(v.id)) !== null) editing.add(v.id)
+        const obs = dailyFeverObservations(obsAll, report?.daycareVitalIds, editing)
         const sym = Array.isArray(report?.symptoms)
           ? report.symptoms.filter((v) => v != null).map(newer).map(withPending)
           : []
