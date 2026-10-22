@@ -31,6 +31,7 @@ import {
   fetchBathDay,
   fetchDaycareAttendance,
   fetchDaycareDay,
+  fetchDaycareIntake,
   fetchDaycarePlan,
   fetchDaycareVitals,
   fetchMyRole,
@@ -56,7 +57,8 @@ import {
   updateBath,
   updateDaycareAttendance,
 } from '../lib/db'
-import type { AbsentBathResult, MyRole } from '../lib/db'
+import type { AbsentBathResult, DaycareMealRow, MyRole } from '../lib/db'
+import { fluidTotalOf, lunchLabel, personPath } from '../lib/daycarePerson'
 import { RecorderBar } from '../components/RecorderBar'
 import { ConfirmDialog, ErrorBlock, LoadingBlock, ModalShell, ResidentPickerModal, useToast } from '../components/ui'
 import {
@@ -81,6 +83,7 @@ import { BATH_CANCEL_REASON_LABEL, BATH_RESULT_LABEL, DAYCARE_ABSENT_REASONS, DA
 import type {
   BathCancelReason,
   BathRecord,
+  FluidIntake,
   BathResult,
   DaycareAbsentReason,
   DaycareAttendance,
@@ -123,6 +126,9 @@ interface DayData {
   attendance: DaycareAttendance[]
   baths: BathRecord[]
   vitals: KeyedVital[]
+  /** 昼食・おやつ（取り込みの印つき）と水分（段階2a・行の小さな印と1人の記録への入口に使う） */
+  meals: DaycareMealRow[]
+  fluids: FluidIntake[]
 }
 
 type RowMsg = { tone: 'warn' | 'danger' | 'info' | 'ok'; text: string }
@@ -345,11 +351,12 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       }
       // 写しが「読めなかった」（unknown）の日は、いまの週間計画も読む（読めれば表示に使い、次のタップで写し直す＝反証レビュー中2）
       const usable = snapshot !== null && snapshot.plan_source !== 'unknown'
-      const [plan, attendance, baths, dv] = await Promise.all([
+      const [plan, attendance, baths, dv, intake] = await Promise.all([
         usable ? Promise.resolve(null) : fetchDaycarePlan(target),
         missing ? Promise.resolve([] as DaycareAttendance[]) : fetchDaycareAttendance(target),
         fetchBathDay(target).catch(() => [] as BathRecord[]),
         fetchDaycareVitals(target).catch(() => ({ live: [] as KeyedVital[], keys: [] as string[] })),
+        fetchDaycareIntake(target).catch(() => ({ meals: [] as DaycareMealRow[], fluids: [] as FluidIntake[] })),
       ])
       if (gen !== genRef.current || target !== dayRef.current) return
       const next: DayData = {
@@ -361,6 +368,8 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         attendance,
         baths,
         vitals: dv.live,
+        meals: intake.meals,
+        fluids: intake.fluids,
       }
       setData(next)
       setError(null)
@@ -395,7 +404,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     const offA = subscribeDaycareChanges(onChange)
     const offB = subscribeBathChanges(onChange)
     const offC = subscribeChanges((table, info) => {
-      if (table === 'vitals') onChange(table, info)
+      if (table === 'vitals' || table === 'meals' || table === 'fluid_intake') onChange(table, info)
     })
     let last = queuePending()
     const offQ = queueSubscribe((n) => {
@@ -425,6 +434,9 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     [residents],
   )
   const bathOf = useCallback((id: number) => data?.baths.find((b) => b.resident_id === id) ?? null, [data])
+  /** 段階2a: 行の小さな印（昼食・水分） */
+  const lunchOf = (id: number) => data?.meals.find((m) => m.meal.resident_id === id && m.meal.meal_slot === 'lunch')?.meal ?? null
+  const fluidOf = (id: number) => (data === null ? 0 : fluidTotalOf(data.fluids, id, data.day))
   const vitalsOf = useCallback((id: number) => (data?.vitals ?? []).filter((v) => v.resident_id === id), [data])
 
   const canWrite = gate !== null && gate.observed && gate.value === true && !(data?.missing ?? false)
@@ -1077,6 +1089,23 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                       バイタル&nbsp;
                       <span className="font-bold">{vAbn ? '▲ 要確認' : vDone ? '✓ 済' : '— 未'}</span>
                     </Link>
+                    ) : null}
+                    {row.state === 'present' || row.state === 'left' ? (
+                      <>
+                        <span className="inline-flex min-h-tap items-center rounded-full border border-border bg-surface2 px-3 text-base text-ink">
+                          昼食&nbsp;<span className="font-bold">{lunchLabel(lunchOf(row.residentId))}</span>
+                        </span>
+                        <span className="inline-flex min-h-tap items-center rounded-full border border-border bg-surface2 px-3 text-base text-ink">
+                          水分&nbsp;<span className="font-bold font-num">{fluidOf(row.residentId)} ml</span>
+                        </span>
+                        <Link
+                          to={personPath(row.residentId, day, today)}
+                          aria-label={`${name}さんの1日の記録（昼食・おやつ・水分・排泄）を開く`}
+                          className="inline-flex min-h-tap items-center rounded-full border border-primary bg-surface px-4 text-base font-bold text-primary"
+                        >
+                          記録<span aria-hidden="true"> ›</span>
+                        </Link>
+                      </>
                     ) : null}
                     <span
                       className={`inline-flex min-h-tap items-center rounded-full px-3 text-base ${

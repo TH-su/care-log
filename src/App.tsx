@@ -115,6 +115,8 @@ const loadDaycarePage = () => import('./pages/DaycarePage')
 const DaycarePage = lazy(() => loadDaycarePage().then((m) => ({ default: m.DaycarePage })))
 const loadDaycareVitalsPage = () => import('./pages/DaycareVitalsPage')
 const DaycareVitalsPage = lazy(() => loadDaycareVitalsPage().then((m) => ({ default: m.DaycareVitalsPage })))
+const loadDaycarePersonPage = () => import('./pages/DaycarePersonPage')
+const DaycarePersonPage = lazy(() => loadDaycarePersonPage().then((m) => ({ default: m.DaycarePersonPage })))
 // 与薬チェック（2026-09-26 追加）。記録は記録ハブから、服薬の時間帯・月次表は「その他」から入る
 const loadMedRecordPage = () => import('./pages/MedRecordPage')
 const MedRecordPage = lazy(() => loadMedRecordPage().then((m) => ({ default: m.MedRecordPage })))
@@ -583,6 +585,7 @@ function screenTitle(pathname: string): string {
   if (pathname === '/record/bath') return '入浴（デイ）'
   if (pathname === '/record/daycare') return 'デイ（せせらぎ）'
   if (pathname === '/record/daycare/vitals') return 'デイ バイタル一括'
+  if (pathname.startsWith('/record/daycare/person/')) return 'デイ 1人の記録'
   if (pathname === '/bath/month') return '入浴 月次表'
   if (pathname === '/record/med') return '与薬チェック'
   if (pathname === '/med/slots') return '服薬の時間帯'
@@ -1643,6 +1646,8 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
             {/* デイ（せせらぎ）段階1（2026-10-22）。入力解禁は input_enabled_daycare（画面の中で確かめる） */}
             <Route path="/record/daycare" element={<DaycarePage actorId={actorId} staff={staff} />} />
             <Route path="/record/daycare/vitals" element={<DaycareVitalsPage actorId={actorId} staff={staff} />} />
+            {/* デイ 段階2a（2026-10-22）: 1人の1日記録（昼食・おやつ・水分・排泄の表示と入口）。業務日は ?day= */}
+            <Route path="/record/daycare/person/:residentId" element={<DaycarePersonPage actorId={actorId} staff={staff} />} />
             <Route path="/bath/month" element={<BathMonthPage />} />
             {/* 与薬チェック。入力解禁は input_enabled_med（画面が自前で取り直す） */}
             <Route path="/record/med" element={<MedRecordPage actorId={actorId} staff={staff} />} />
