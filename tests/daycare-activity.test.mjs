@@ -375,9 +375,24 @@ if (A === null) {
       // 送り先（人・日）は押した時に固定する
       assert.match(s, /const rid = residentId\s+const d = day\s+const key = `\$\{rid\}:\$\{d\}`/)
     })
+    it('2b の反証の直し（重大1・中1・中2）', () => {
+      const s = code('../src/components/DaycareActivitySection.tsx')
+      // 重大1: 部品は人・日ごとに作り直し、前回はこの方の行だけから選ぶ（前の方の前回を次の方へ記録しない）
+      assert.match(code('../src/pages/DaycarePersonPage.tsx'), /<DaycareActivitySection key=\{`\$\{residentId\}:\$\{data\.day\}`\}/)
+      assert.match(s, /previousActivities\(prev\.filter\(\(r\) => r\.resident_id === residentId\), day\)/)
+      // 中1: 取り消しの送信待ちの行は外さず「取り消しの送信待ち」で残し、同じ項目のチップを押せなくする
+      assert.doesNotMatch(s, /\.filter\(\(a\) => upd\.get\(a\.id\)\?\.deleted !== true\)/)
+      assert.match(s, /deleting: p\?\.deleted === true,/)
+      assert.match(s, /取り消しの送信待ち（電波が戻ると自動で送信します。届くまで同じ項目は入れられません）/)
+      assert.match(s, /const labelsNow = new Set\(\[\.\.\.shown\.list\.map\(\(x\) => x\.a\.label\)/)
+      // 中2: 止まった度合いの変更・取り消しはその行の下で知らせる
+      assert.match(s, /if \(p\.stopped\) stoppedUpd\.set\(p\.rowId, p\)/)
+      assert.match(s, /stopped: stoppedUpd\.get\(a\.id\) \?\? null,/)
+      assert.match(s, /は、他の端末の変更と食い違って止まっています（送っていません）。/)
+    })
     it('1人の記録の画面: 活動の欄は別の部品で、昼食・水分の書き込みの経路は変えない', () => {
       const p = code('../src/pages/DaycarePersonPage.tsx')
-      assert.match(p, /<DaycareActivitySection residentId=\{residentId\} residentName=\{name\} day=\{data\.day\} today=\{today\} actorId=\{actorId\} show=\{show\} refreshKey=\{reloadKey\} \/>/)
+      assert.match(p, /<DaycareActivitySection key=\{`\$\{residentId\}:\$\{data\.day\}`\} residentId=\{residentId\} residentName=\{name\} day=\{data\.day\} today=\{today\} actorId=\{actorId\} show=\{show\} refreshKey=\{reloadKey\} \/>/)
       assert.doesNotMatch(p, /DaycareActivity\(|insertDaycareActivity/)
     })
     it('まとめて記録の画面: 書き込みは insertDaycareActivity だけ・相手は activityTargets（在席・帰宅）・端末に業務データを残さない', () => {
