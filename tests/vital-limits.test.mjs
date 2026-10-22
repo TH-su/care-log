@@ -307,7 +307,10 @@ if (L === null) {
       assert.ok(stop > 0 && send > stop)
       assert.match(c, /fallbackNotice\(thresholdsFor\(r, vitalThresholds\(\)\)\.fallback\)/)
       // 中3: 開始日の直前に効く行（その日ちょうどの行は除く）から入れる。直していなければ日を変えた時に入れ直し、直していれば知らせる
-      assert.match(c, /rows\.filter\(\(r\) => !\(r\.resident_id === residentId && r\.valid_from === from\)\)/)
+      // 確認の反証 軽1: 初めの値はその開始日に効いている行（その日ちょうどの行も含む）。同じ開始日の行がある時は送る前に止める
+      assert.match(c, /const baseRowFor = \(from: string\): ResidentVitalLimit \| null => limitFor\(rows, residentId, from\)/)
+      assert.match(c, /if \(rows\.some\(\(r\) => r\.resident_id === rid && r\.valid_from === p\.value\.valid_from\)\) \{/)
+      assert.match(c, /いまの入力は、空欄（施設の基準）から入れたものです。/)
       assert.match(c, /setInput\(dirty \? \{ \.\.\.input, valid_from: from \} : fillFrom\(input, from\)\)/)
       assert.match(c, /setInput\(fillFrom\(emptyInput\(todayIso\(\)\), todayIso\(\)\)\)/)
       assert.match(c, /const fromChanged = open && \(fromRow\?\.id \?\? null\) !== prefillFrom/)
