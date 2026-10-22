@@ -381,6 +381,22 @@ if (DC === null) {
     })
   })
 
+  describe('止まった欄の「あなたの値」（反証レビュー2巡目 中1）', () => {
+    it('止まった後に打ち直した値（送信待ち）で置き換える・送信待ちに無い欄と送信待ちが無い時はそのまま', () => {
+      const cs = [
+        { field: 'sys_bp', server: 150, base: null, mine: 140, reason: 'changed' },
+        { field: 'dia_bp', server: 90, base: null, mine: 80, reason: 'changed' },
+      ]
+      const out = DC.overlayPendingMine(cs, { sys_bp: 128, pulse: 70 })
+      assert.equal(out[0].mine, 128, '打ち直した上の値')
+      assert.equal(out[0].server, 150, 'いまの値は変えない')
+      assert.equal(out[1].mine, 80, '送信待ちに無い欄はそのまま')
+      assert.equal(cs[0].mine, 140, '元の配列は変えない')
+      assert.deepEqual(DC.overlayPendingMine(cs, null), cs)
+      assert.equal(DC.overlayPendingMine(cs, { sys_bp: null })[0].mine, null, '空にした（null）も打ち直しとして扱う')
+    })
+  })
+
   describe('前回値・絞り込み', () => {
     it('前回値は欄ごとに直近（種類を問わない・その日のデイの測定を除く）', () => {
       const rows = [
@@ -957,6 +973,25 @@ if (DC === null) {
       assert.match(m, /create function public\.daycare_open_day\(p_day date, p_staff bigint default null\)\s+returns jsonb\s+language plpgsql\s+volatile\s+security definer/)
       assert.doesNotMatch(m, /create policy "insert_auth" on public\.daycare_days/)
       assert.doesNotMatch(m, /create policy "update_auth" on public\.daycare_days/)
+    })
+    it('反証レビュー2巡目の直し（静的）: あなたの値はいまの送信待ちから・送れなかった上は消さずに移らない・過去の日の unknown の写しにも帯', () => {
+      const v = code('../src/pages/DaycareVitalsPage.tsx')
+      // 中1: 〔あなたの値で直す〕と表示は、止まった後に打ち直した値（送信待ちの values）を使う
+      assert.match(v, /const withCurrentMine = \(slot: DaycareVitalSlot, cs: CellConflict\[\]\): CellConflict\[\] =>\s*overlayPendingMine\(cs, pendingRow\('vitals', targetOf\(slot\)\)\?\.values \?\? null\)/)
+      assert.match(v, /const resolveMine = async \(slot: DaycareVitalSlot, conflicts0: CellConflict\[\]\) => \{\s*const conflicts = withCurrentMine\(slot, conflicts0\)/)
+      assert.match(v, /conflicts: withCurrentMine\(slot, pend\.conflicts\)/)
+      assert.match(v, /conflicts: withCurrentMine\(slot, st\.conflicts\)/)
+      // 軽2: 送り先はキーから組み立てる（絞り込みで外れた方も）・送れなければ移らない
+      assert.match(v, /const k = parseDaycareVitalKey\(key\)/)
+      assert.doesNotMatch(v, /flatSlots\.find\(\(s\) => s\.key === key\)/)
+      assert.match(v, /const releaseAllHeld = async \(\): Promise<boolean> => \{[\s\S]*?if \(results\.some\(\(ok\) => !ok\)\) \{[\s\S]*?return false/)
+      assert.match(v, /if \(await releaseAllHeld\(\)\) go\(\)/)
+      for (const re of [/afterRelease\(\(\) => setDay\(\(d\) => addDays\(d, -1\)\)\)/, /afterRelease\(\(\) => setDay\(today\)\)/, /afterRelease\(\(\) => setReloadKey\(\(n\) => n \+ 1\)\)/]) assert.match(v, re)
+      assert.doesNotMatch(v, /releaseAllHeld\(\)\s*\n\s*set(Day|ReloadKey)\(/)
+      // 記録者が未選択・送れない時は false（入力は消さない）
+      assert.match(v, /if \(actorId === null\) \{\s*setState\(slot\.key, \{ kind: 'error', text: MSG_NO_RECORDER \}\)\s*return false/)
+      const t = code('../src/pages/DaycarePage.tsx')
+      assert.match(t, /data\.day < today && !data\.missing && \(data\.snapshot === null \|\| data\.snapshot\.plan_source === 'unknown'\)/)
     })
     it('画面は端末に業務データを書かない（localStorage は絞り込みの既知値だけ）', () => {
       for (const f of ['../src/pages/DaycarePage.tsx', '../src/pages/DaycareVitalsPage.tsx']) {

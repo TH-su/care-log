@@ -570,3 +570,12 @@ export function readDcVitalsFilter(raw: unknown): DcVitalsFilter {
 export function isDay(v: unknown): v is string {
   return typeof v === 'string' && DAY_RE.test(v)
 }
+
+/**
+ * 止まった（競合した）欄の「あなたの値」を、いまの送信待ちの値に置き換える。止まった後に打ち直すと送信待ちの値だけが
+ * 新しくなり、競合した時に控えた値は古いまま残るため（反証レビュー2巡目 中1）。送信待ちに無い欄はそのまま
+ */
+export function overlayPendingMine<T extends { field: string; mine: unknown }>(conflicts: T[], pendingValues: Record<string, unknown> | null): T[] {
+  if (pendingValues === null) return conflicts
+  return conflicts.map((c) => (Object.prototype.hasOwnProperty.call(pendingValues, c.field) ? { ...c, mine: pendingValues[c.field] } : c))
+}

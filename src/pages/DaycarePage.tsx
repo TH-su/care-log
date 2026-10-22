@@ -198,10 +198,12 @@ function PlanBanners({ data, notInRoster, unconfirmed, today }: { data: DayData;
       </p>,
     )
   }
-  if (data.snapshot === null && data.day < today && !data.missing) {
+  // 過去の日で写しが無い・写しが「確かめられない」だった時は、いまの週間計画で出している旨を出す（反証レビュー2巡目 軽3）
+  if (data.day < today && !data.missing && (data.snapshot === null || data.snapshot.plan_source === 'unknown')) {
     out.push(
       <p key="nosnap" role="status" className="rounded-lg border border-border bg-surface2 p-3 text-sm text-ink2">
-        この日の予定の写しがありません。いまの週間計画で予定を出しています（当日の予定と違うことがあります）。
+        {data.snapshot === null ? 'この日の予定の写しがありません。' : 'この日は予定の写しを取れませんでした（週間計画が読めませんでした）。'}
+        いまの週間計画で予定を出しています（当日の予定と違うことがあります）。
       </p>,
     )
   }
