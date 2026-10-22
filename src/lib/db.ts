@@ -669,6 +669,18 @@ function num(v: unknown): number | null {
   return null
 }
 
+/** 日報のバイタルの生の行（client_key つき）から、デイの測定（冪等キー dc:）の行 id を拾う（2026-10-22） */
+function daycareVitalIdsOf(raw: unknown): number[] {
+  if (!Array.isArray(raw)) return []
+  const out: number[] = []
+  for (const r of raw) {
+    const rec = asRecord(r)
+    const id = idNum(rec?.id)
+    if (id !== null && isDaycareVitalKey(rec?.client_key)) out.push(id)
+  }
+  return out
+}
+
 function idNum(v: unknown): number | null {
   const n = num(v)
   return n !== null && Number.isInteger(n) && n > 0 ? n : null
@@ -9869,6 +9881,11 @@ export interface DailyReport {
   outings: Outing[]
   /** 発熱者ブロック（kind='observation'） */
   observations: Vital[]
+  /**
+   * observations のうち、デイの測定（冪等キー dc: の行）の id（2026-10-22 代表者の決定）。日報の画面は、その日に発熱のあった方の
+   * デイの測定だけを発熱者に載せる（daycare.ts の dailyFeverObservations）。旧い控え（この欄が無い）は今までどおり全部載せる
+   */
+  daycareVitalIds?: number[]
   /** 他症状者ブロック（kind='symptom'） */
   symptoms: Vital[]
   /** 出勤者（sort < 0 ＝ 取り消し済みは除く） */
@@ -9946,9 +9963,10 @@ export async function fetchDailyReports(
       .order('start_on', { ascending: true })
       .order('id', { ascending: true })
       .limit(cap) as unknown as Promise<Res<unknown>>,
+    // client_key はデイの測定を見分けるためだけに読む（行には載せない＝daycareVitalIds・2026-10-22）
     sb
       .from('vitals')
-      .select(VITAL_COLS)
+      .select(`${VITAL_COLS},client_key`)
       .gte('measured_on', from)
       .lte('measured_on', to)
       .in('kind', ['observation', 'symptom'])
@@ -9982,6 +10000,7 @@ export async function fetchDailyReports(
   const notes = list(notesRes.data, normalizeNote, cap)
   const outings = list(outingsRes.data, normalizeOuting, cap)
   const vitals = list(vitalsRes.data, normalizeVital, cap)
+  const daycareIds = new Set(daycareVitalIdsOf(vitalsRes.data))
   const attendance = list(attendanceRes.data, normalizeAttendance, cap)
   const importDays = list(importRes.data, normalizeImportDay, cap)
   // anon で読んだ0件を「記録なし」の日報として出さない（F58）
@@ -9998,6 +10017,7 @@ export async function fetchDailyReports(
       // 開始が当日以前で、帰着が無いか当日以降＝その日の外出者（1日ずつ取る時と同じ条件）
       outings: outings.filter((o) => o.start_on <= day && (o.end_on === null || o.end_on >= day)),
       observations: dayVitals.filter((v) => v.kind === 'observation'),
+      daycareVitalIds: dayVitals.filter((v) => v.kind === 'observation' && daycareIds.has(v.id)).map((v) => v.id),
       symptoms: dayVitals.filter((v) => v.kind === 'symptom'),
       attendance: attendance.filter((a) => a.day === day),
       // その日の台帳は直近1件（imported_at 降順で引いているので先頭が最新）
@@ -10030,9 +10050,10 @@ export async function fetchDailyReport(dayIso: string, staffId: number | null): 
       .order('id', { ascending: true })
       .limit(DAY_ROWS) as unknown as Promise<Res<unknown>>,
     // 発熱者（observation）と他症状者（symptom）は1往復で取り、画面側の2ブロックへ振り分ける
+    // client_key はデイの測定を見分けるためだけに読む（行には載せない＝daycareVitalIds・2026-10-22）
     sb
       .from('vitals')
-      .select(VITAL_COLS)
+      .select(`${VITAL_COLS},client_key`)
       .eq('measured_on', dayIso)
       .in('kind', ['observation', 'symptom'])
       .is('deleted_at', null)
@@ -10072,6 +10093,10 @@ export async function fetchDailyReport(dayIso: string, staffId: number | null): 
     notes,
     outings: list(outingsRes.data, normalizeOuting, DAY_ROWS),
     observations: vitals.filter((v) => v.kind === 'observation'),
+    daycareVitalIds: (() => {
+      const dc = new Set(daycareVitalIdsOf(vitalsRes.data))
+      return vitals.filter((v) => v.kind === 'observation' && dc.has(v.id)).map((v) => v.id)
+    })(),
     symptoms: vitals.filter((v) => v.kind === 'symptom'),
     attendance: list(attendanceRes.data, normalizeAttendance, DAY_ROWS),
     importDay: importDays[0] ?? null,

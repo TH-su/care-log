@@ -397,6 +397,51 @@ if (DC === null) {
     })
   })
 
+  describe('日報の発熱者に載せるデイの測定（代表者の決定 2026-10-22）', () => {
+    it('発熱の判定はタイムラインの「▲発熱」と同じ（37.5℃以上＝注意の高値以上）', () => {
+      assert.equal(DC.isFeverTemp(37.4), false)
+      assert.equal(DC.isFeverTemp(37.5), true)
+      assert.equal(DC.isFeverTemp(38.2), true)
+      assert.equal(DC.isFeverTemp(35.0), false, '低い体温は発熱ではない')
+      assert.equal(DC.isFeverTemp(null), false)
+      assert.equal(DC.isFeverTemp(undefined), false)
+    })
+    it('1回でも発熱した方はその日のデイの測定を全部（再測定の経過）・発熱の無い方のデイの測定は載せない・日報で入れた発熱者はそのまま', () => {
+      const list = [
+        vital(1, 5, '2026-10-22', { temp: 37.8 }), // デイ・1回目 発熱
+        vital(2, 5, '2026-10-22', { temp: 37.0 }), // デイ・再測定（下がった）
+        vital(3, 6, '2026-10-22', { temp: 36.4 }), // デイ・発熱なし
+        vital(4, 7, '2026-10-22', { temp: 36.8 }), // 日報で入れた発熱者（デイではない）
+        vital(5, 6, '2026-10-22', { temp: null, pulse: 80 }), // デイ・体温なし
+      ]
+      assert.deepEqual(DC.dailyFeverObservations(list, [1, 2, 3, 5]).map((v) => v.id), [1, 2, 4])
+      assert.deepEqual(DC.dailyFeverObservations(list, undefined).map((v) => v.id), [1, 2, 3, 4, 5], '分からない時は今までどおり全部')
+      assert.deepEqual(DC.dailyFeverObservations(list, []).map((v) => v.id), [1, 2, 3, 4, 5], 'デイの測定が無い日はそのまま')
+    })
+  })
+
+  describe('過去の日の到着・帰宅の時刻（代表者の決定 2026-10-22・0042）', () => {
+    it('予定の時刻（1桁の時も）を小窓の初めの値に', () => {
+      assert.equal(DC.planHm('9:30'), '09:30')
+      assert.equal(DC.planHm('09:05'), '09:05')
+      assert.equal(DC.planHm('15:30:00'), '15:30')
+      assert.equal(DC.planHm('25:00'), null)
+      assert.equal(DC.planHm(''), null)
+      assert.equal(DC.planHm(null), null)
+    })
+    it('事務所・管理者だけ過去の日も・今日は誰でも・未来は誰も・役割が分からない時は現場と同じ', () => {
+      assert.equal(DC.canEditPastDaycareTimes('office'), true)
+      assert.equal(DC.canEditPastDaycareTimes('admin'), true)
+      assert.equal(DC.canEditPastDaycareTimes('field'), false)
+      assert.equal(DC.canEditPastDaycareTimes(null), false)
+      assert.equal(DC.canEditPastDaycareTimes(undefined), false)
+      assert.equal(DC.canChangeDaycareTimes('2026-10-22', '2026-10-22', 'field'), true)
+      assert.equal(DC.canChangeDaycareTimes('2026-10-21', '2026-10-22', 'field'), false)
+      assert.equal(DC.canChangeDaycareTimes('2026-10-21', '2026-10-22', 'office'), true)
+      assert.equal(DC.canChangeDaycareTimes('2026-10-23', '2026-10-22', 'office'), false)
+    })
+  })
+
   describe('前回値・絞り込み', () => {
     it('前回値は欄ごとに直近（種類を問わない・その日のデイの測定を除く）', () => {
       const rows = [
@@ -607,6 +652,38 @@ if (DC === null) {
   }
 
   const T = todayLocal()
+
+  describe('日報の取得: デイの測定の行 id を添える（行に client_key は載せない）', () => {
+    it('fetchDailyReport・fetchDailyReports は観察（observation）のうち dc: の行の id を daycareVitalIds に入れる', async () => {
+      const s = fakeServer()
+      s.db.vitals.push(
+        { ...vital(1, 5, T, { temp: 37.8, client_key: `dc:${T}:5:1` }), deleted_at: null },
+        { ...vital(2, 5, T, { temp: 36.9 }), deleted_at: null },
+        { ...vital(3, 6, T, { temp: 36.4, client_key: `dc:${T}:6:1` }), deleted_at: null },
+        { ...vital(4, 6, T, { kind: 'symptom', client_key: 'other-key' }), deleted_at: null },
+      )
+      const cols = []
+      const from0 = s.client.from
+      s.client.from = (table) => {
+        const b = from0(table)
+        const sel = b.select
+        b.select = (c) => {
+          if (table === 'vitals') cols.push(c)
+          return sel(c)
+        }
+        return b
+      }
+      DB.__testHooks.setClient(s.client)
+      const one = await DB.fetchDailyReport(T, null)
+      assert.deepEqual(one.observations.map((v) => v.id), [1, 2, 3])
+      assert.deepEqual(one.daycareVitalIds, [1, 3])
+      assert.equal(one.observations.some((v) => 'client_key' in v), false, '行には client_key を載せない（normalizeVital のまま）')
+      const many = await DB.fetchDailyReports([T], null)
+      assert.deepEqual(many.get(T).daycareVitalIds, [1, 3])
+      assert.ok(cols.length >= 2 && cols.every((c) => /,client_key$/.test(c)), `vitals の select: ${cols.join(' | ')}`)
+      await reset()
+    })
+  })
 
   describe('欠席の日の入浴 recordAbsentBath（反証レビュー 重大2・オンライン）', () => {
     it('先に欠席（行なし・入浴の予定あり）→「中止・欠席」を追加（12:30 の自動の行は作られなくなる）', async () => {
@@ -964,7 +1041,7 @@ if (DC === null) {
       assert.match(v, /fill: dayRef\.current === todayIso\(\) \? \{ measured_at: nowHm\(\), recorded_by: actorId \} : \{ recorded_by: actorId \}/)
       assert.match(v, /const usable = snapshot !== null && snapshot\.plan_source !== 'unknown'/)
       const t = code('../src/pages/DaycarePage.tsx')
-      assert.match(t, /const stampDisabled = disabled \|\| day !== today/)
+      assert.match(t, /const timesOk = canChangeDaycareTimes\(day, today, role\)\s*const stampDisabled = disabled \|\| !timesOk/)
       assert.match(t, /onClick=\{\(\) => void onArrive\(row\)\}\s*disabled=\{stampDisabled\}/)
       assert.match(t, /onClick=\{\(\) => void onLeave\(row\)\}\s*disabled=\{stampDisabled\}/)
       assert.match(t, /data\.snapshot !== null && data\.snapshot\.plan_source !== 'unknown'/)
@@ -992,6 +1069,31 @@ if (DC === null) {
       assert.match(v, /if \(actorId === null\) \{\s*setState\(slot\.key, \{ kind: 'error', text: MSG_NO_RECORDER \}\)\s*return false/)
       const t = code('../src/pages/DaycarePage.tsx')
       assert.match(t, /data\.day < today && !data\.missing && data\.planSource !== 'unknown' && \(data\.snapshot === null \|\| data\.snapshot\.plan_source === 'unknown'\)/)
+    })
+    it('日報の発熱者（静的）: 読み込みで基準値を待ち、デイの測定は発熱のあった方だけ・温度板とタイムラインは変えない', () => {
+      const d = code('../src/pages/DailySheetPage.tsx')
+      assert.match(d, /const \[report\] = await Promise\.all\(\[loadDay\(day\), loadVitalThresholds\(\)\]\)/)
+      assert.match(d, /dailyFeverObservations\(report\.observations\.filter\(\(v\) => v != null\)\.map\(newer\)\.map\(withPending\), report\.daycareVitalIds\)/)
+      const db = code('../src/lib/db.ts')
+      assert.match(db, /\.select\(`\$\{VITAL_COLS\},client_key`\)\s*\.gte\('measured_on', from\)\s*\.lte\('measured_on', to\)\s*\.in\('kind', \['observation', 'symptom'\]\)/)
+      assert.match(db, /\.select\(`\$\{VITAL_COLS\},client_key`\)\s*\.eq\('measured_on', dayIso\)\s*\.in\('kind', \['observation', 'symptom'\]\)/)
+      assert.doesNotMatch(code('../src/pages/TimelinePage.tsx'), /dailyFeverObservations|daycareVitalIds/)
+      assert.doesNotMatch(code('../src/components/print/tempSheetModel.ts'), /dailyFeverObservations|daycareVitalIds/)
+    })
+    it('過去の日の時刻（静的）: 0042 はトリガ1つと関数1つ・do $$ を使わない・ポリシーを変えない／画面は事務所だけ時刻の小窓・現場は取り消しと時刻の入った方の欠席を止める', () => {
+      const m = sql('../supabase/migrations/0042_daycare_past_times_office.sql')
+      assert.doesNotMatch(m, /do \$\$/)
+      assert.doesNotMatch(m, /create policy|drop policy|alter table/i)
+      assert.match(m, /create or replace trigger trg_daycare_attendance_past_guard\s+before insert or update on public\.daycare_attendance/)
+      assert.match(m, /if v_role is distinct from 'field' then\s+return new;/)
+      assert.match(m, /errcode = '42501'/)
+      const t = code('../src/pages/DaycarePage.tsx')
+      assert.match(t, /if \(canEditPastDaycareTimes\(role\)\) openTime\(row, 'arrive'\)/)
+      assert.match(t, /if \(canEditPastDaycareTimes\(role\)\) openTime\(row, 'leave'\)/)
+      assert.match(t, /onClick=\{\(\) => askCancelLeave\(row\)\}\s*disabled=\{disabled \|\| !timesOk\}/)
+      assert.match(t, /disabled=\{disabled \|\| \(rowHasTimes && !timesOk\)\}/)
+      assert.match(t, /if \(e instanceof DbError && e\.kind === 'forbidden' && dayRef\.current < todayIso\(\)\) return MSG_PAST_TIME/)
+      assert.match(t, /type="time"/)
     })
     it('画面は端末に業務データを書かない（localStorage は絞り込みの既知値だけ）', () => {
       for (const f of ['../src/pages/DaycarePage.tsx', '../src/pages/DaycareVitalsPage.tsx']) {

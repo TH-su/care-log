@@ -547,6 +547,16 @@ MasterSyncStatus()                           // 設定画面の「最終同期: 
   直接の insert・update のポリシーは無い＝写しはこの関数だけが書く）・
   RLS＋restrictive の member_only・delete ポリシーなし・Realtime（daycare_attendance。「載っていなければ足す」一時の関数で冪等）。
   vitals・0011・cron・週間計画には触れない。**DB を先に当て、旗は false のまま公開する**（旗を true にする前に min_client_build を上げる）
+- `0042_daycare_past_times_office.sql`（2026-10-22・代表者の決定・冪等）: daycare_attendance に BEFORE INSERT／UPDATE のトリガ
+  trg_daycare_attendance_past_guard（関数 public.daycare_attendance_past_guard・security definer・0040 の residents_master_guard と同じ作法）。
+  役割が field（現場）のログインの、業務日が JST の今日より前の行で、到着・帰宅の時刻が変わる書き込み（時刻つきの追加・時刻の修正・時刻を消す欠席・
+  帰宅の取り消し・時刻の入った行の soft delete・業務日の移し替え）を 42501・'daycare_past_times_office_only: …' で止める。office・admin・役割 null
+  （所有者・cron・service_role）と my_role() の無い DB は止めない。過去の日の欠席（時刻なし）・欠席の取り消し・備考・入浴は現場も書ける。
+  ポリシー・既存の関数は変えない。画面（DaycarePage）は同じ規則で出し分ける（事務所だけ時刻を入れる・直す小窓）
+- 日報の発熱者（2026-10-22・代表者の決定）: `fetchDailyReport`・`fetchDailyReports` は発熱者・他症状者の問い合わせだけ `client_key` も読み、
+  `DailyReport.daycareVitalIds`（観察のうちデイの測定 dc: の行 id）を添える（行には client_key を載せない）。日報の画面は読み込みで基準値を待ち、
+  `dailyFeverObservations`（daycare.ts）で、その日に1回でも発熱（37.5℃以上・タイムラインの「▲発熱」と同じ判定）のあった方のデイの測定だけを
+  全部載せる。日報で入れた発熱者はそのまま。温度板・カルテのグラフ・タイムラインは変えない（1日1点を選ぶ・温度で判定する作りで溢れない）
 - **適用順は 0001 → 0002 → 0003 → 0004 → 0005**。0003〜0005 は互いに独立だが、
   0003 未適用のまま新UIを配ると「定時以外のバイタル保存」と「食事一覧の読み込み」が失敗する（意図的にフォールバックを作っていない）。
 - 2026-10-10 追記: 0017〜0020 の契約は concurrent-entry.md §9（0017）・db-design.md、**0021〜0030（多端末運用の監査の直し）の要旨と適用の順番は
