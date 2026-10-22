@@ -968,8 +968,9 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
         </ul>
       </section>
 
-      {/* 活動・レク（段階2b・0044）。活動だけの旗に従う別の部品（昼食・水分の保存とは混ぜない） */}
-      <DaycareActivitySection residentId={residentId} residentName={name} day={data.day} today={today} actorId={actorId} show={show} refreshKey={reloadKey} />
+      {/* 活動・レク（段階2b・0044）。活動だけの旗に従う別の部品（昼食・水分の保存とは混ぜない）。
+          key で人・日ごとに作り直す（前の方の「前回」・読み込み中の状態を次の方へ持ち越さない＝2b の反証 重大1） */}
+      <DaycareActivitySection key={`${residentId}:${data.day}`} residentId={residentId} residentName={name} day={data.day} today={today} actorId={actorId} show={show} refreshKey={reloadKey} />
 
       <section aria-labelledby="h-ex" className={sectionCls}>
         <h3 id="h-ex" className="text-lg font-bold text-ink">

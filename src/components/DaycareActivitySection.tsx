@@ -188,13 +188,25 @@ export function DaycareActivitySection({ residentId, residentName, day, today, a
   // 送信待ちの重ね表示: 取り消しを送信待ちにした行は外し、度合いの修正は送信待ちの値で出す。追加はまだ載っていない項目だけ
   const shown = useMemo(() => {
     const upd = new Map<number, Extract<PendingActivityOp, { kind: 'update' }>>()
-    for (const p of pending) if (p.kind === 'update' && !p.stopped) upd.set(p.rowId, p)
-    const list = mine
-      .filter((a) => upd.get(a.id)?.deleted !== true)
-      .map((a) => {
-        const p = upd.get(a.id)
-        return { a, participation: p?.participation ?? a.participation, waiting: p !== undefined }
-      })
+    const stoppedUpd = new Map<number, Extract<PendingActivityOp, { kind: 'update' }>>()
+    for (const p of pending) {
+      if (p.kind !== 'update') continue
+      if (p.stopped) stoppedUpd.set(p.rowId, p)
+      else upd.set(p.rowId, p)
+    }
+    // 取り消しを送信待ちにした行は、届くまで「取り消しの送信待ち」として残し、同じ項目を入れられないようにする
+    // （入れ直すと先の行に合流し、後から届いた取り消しで入れ直しまで消えるため＝2b の反証 中1）。
+    // 止まった度合いの変更・取り消しは、その行の下で知らせる（サーバーの値に黙って戻さない＝2b の反証 中2）
+    const list = mine.map((a) => {
+      const p = upd.get(a.id)
+      return {
+        a,
+        participation: p?.participation ?? a.participation,
+        waiting: p !== undefined,
+        deleting: p?.deleted === true,
+        stopped: stoppedUpd.get(a.id) ?? null,
+      }
+    })
     const have = new Set(mine.map((a) => a.label))
     // 送信待ちの追加は、まだ載っていない項目だけ重ねる。止まった追加（他の端末の記録と度合いが食い違った）は、
     // 同じ項目の行がサーバーにあっても出す（押した人が食い違いに気づけるように）
@@ -336,7 +348,8 @@ export function DaycareActivitySection({ residentId, residentName, day, today, a
     }
   }
 
-  const prevPick = prev === null ? null : previousActivities(prev, day)
+  // 前回はこの方の行だけから選ぶ（人を取り違えない。部品は人・日ごとに作り直されるが、念のため絞る）
+  const prevPick = prev === null ? null : previousActivities(prev.filter((r) => r.resident_id === residentId), day)
   const toCopy = prevPick === null ? [] : copyItems(prevPick.items, [...labelsNow].map((label) => ({ label })))
   const copyPrev = async () => {
     // 1件ずつ足す（失敗したらそこで止め、理由は欄の下に出る）。〔元に戻す〕のトーストは出さない（件数が多いため）
@@ -410,7 +423,13 @@ export function DaycareActivitySection({ residentId, residentName, day, today, a
             <p className="text-base text-ink2">この日の活動の記録はまだありません。</p>
           ) : (
             <ul className="space-y-2" aria-label="この日の活動">
-              {shown.list.map(({ a, participation, waiting }) => (
+              {shown.list.map(({ a, participation, waiting, deleting, stopped }) =>
+                deleting ? (
+                  <li key={a.id} className="rounded border border-warn bg-warn-bg p-2 text-base text-ink">
+                    <span className="font-bold line-through">{activityText({ label: a.label, participation })}</span>
+                    {' — 取り消しの送信待ち（電波が戻ると自動で送信します。届くまで同じ項目は入れられません）'}
+                  </li>
+                ) : (
                 <li key={a.id} className="space-y-1 rounded border border-border p-2">
                   <div className="flex flex-wrap items-center justify-between gap-gap">
                     <span className="text-lg font-bold text-ink">
@@ -441,8 +460,18 @@ export function DaycareActivitySection({ residentId, residentName, day, today, a
                       </button>
                     ))}
                   </div>
+                  {stopped !== null ? (
+                    <p role="alert" className="rounded border border-warn bg-warn-bg p-2 text-sm text-ink">
+                      <span aria-hidden="true">▲ </span>
+                      {stopped.deleted
+                        ? 'この端末の取り消しは、他の端末の変更と食い違って止まっています（送っていません）。'
+                        : `この端末で押した〔${stopped.participation === null ? '変更' : ACTIVITY_PARTICIPATION_LABEL[stopped.participation]}〕は、他の端末の変更と食い違って止まっています（送っていません）。`}
+                      上の度合いはサーバーの値です。設定の「送れていない記録」で確かめてください。
+                    </p>
+                  ) : null}
                 </li>
-              ))}
+                ),
+              )}
               {shown.adds.map((p) => (
                 <li key={`q:${p.label}:${p.stopped ? 's' : 'p'}`} role={p.stopped ? 'alert' : undefined} className="rounded border border-warn bg-warn-bg p-2 text-base text-ink">
                   <span className="font-bold">{activityText(p)}</span>
