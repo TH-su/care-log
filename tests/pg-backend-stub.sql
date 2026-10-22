@@ -40,6 +40,17 @@ create table if not exists public.kv_entries (
   updated_at timestamptz not null default now(),
   primary key (tenant_id, key)
 );
+-- 版（本番の care-backend 0005_kv_store.sql の kv_entries.rev と同じ形）。0041 の daycare_plan が写しの版として返す
+alter table public.kv_entries add column if not exists rev int not null default 0;
+
+-- 入居者マスタの写しの最小の真似（本番は care-backend 0004_master_residents_shadow.sql）。0015・0016 の入浴・与薬の
+-- 自動の記録（private.care_auto_bath_on など）が入院中の判定に読む。試験で自動の記録を動かす時に要る（2026-10-22 デイ段階1）
+create table if not exists public.master_residents (
+  tenant_id uuid not null,
+  source_id text not null,
+  hospitalized boolean,
+  primary key (tenant_id, source_id)
+);
 
 create schema if not exists cron;
 create table if not exists cron.job (jobid bigserial primary key, jobname text unique, schedule text, command text);
