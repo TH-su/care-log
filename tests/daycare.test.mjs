@@ -101,6 +101,7 @@ const planRow = (over = {}) => ({
   start_time: '9:30',
   end_time: '15:30',
   bathing: false,
+  bath_resident_id: null,
   plan_rev: 3,
   updated_at: '2026-10-20T00:00:00Z',
   ...over,
@@ -249,6 +250,18 @@ if (DC === null) {
       assert.equal(b.counts.planned, 1)
       assert.equal(b.counts.present, 1)
       assert.equal(b.counts.waiting, 1)
+    })
+    it('反証レビュー重大1: 氏名が食い違う予定（cron は入浴の行を作る）の方を予定外で足すと、入浴の予定ありになる（欠席で入浴を中止・欠席にする）', () => {
+      const b = DC.buildDaycareBoard({
+        planRows: [planRow({ sched_id: 'm1', resident_id: null, match: 'mismatch', bathing: true, bath_resident_id: 3 })],
+        source: 'kv',
+        residents: roster,
+        attendance: [],
+        extraIds: [3],
+      })
+      assert.equal(b.unconfirmed, 1)
+      assert.deepEqual(b.rows.map((r) => [r.residentId, r.extra, r.bathingPlanned]), [[3, true, true]])
+      assert.deepEqual(DC.absentBathAction(null, b.rows[0].bathingPlanned), { kind: 'insert' })
     })
     it('unknown と none は行を作らない（画面は帯で出し分ける）', () => {
       assert.equal(DC.buildDaycareBoard({ planRows: [], source: 'unknown', residents: roster, attendance: [] }).rows.length, 0)
@@ -926,6 +939,24 @@ if (DC === null) {
       assert.match(d, /const REALTIME_DAYCARE_TABLES = \['daycare_attendance'\] as const/)
       assert.match(d, /sb\.channel\(`cl_daycare_/)
       assert.doesNotMatch(d.slice(d.indexOf('const REALTIME_TABLES = ['), d.indexOf('] as const', d.indexOf('const REALTIME_TABLES = ['))), /daycare/, '既存のチャンネルに混ぜない')
+    })
+    it('反証レビューの直し（静的）: 上下逆で止めた上は送らない・持っている上は離れる前に確かめる・過去の日の到着と帰宅は止める・写しが unknown の日は写し直す', () => {
+      const v = code('../src/pages/DaycareVitalsPage.tsx')
+      assert.match(v, /pairBlocked\.current\.add\(slot\.key\)/)
+      assert.match(v, /if \(pairBlocked\.current\.has\(key\)\) \{[\s\S]*?setDraft\(key, 'sys_bp', undefined\)/)
+      assert.match(v, /registerUnsaved\(\(\) => \[\.\.\.draftsRef\.current\.values\(\)\]\.some\(\(d\) => 'sys_bp' in d\)\)/)
+      assert.match(v, /fill: dayRef\.current === todayIso\(\) \? \{ measured_at: nowHm\(\), recorded_by: actorId \} : \{ recorded_by: actorId \}/)
+      assert.match(v, /const usable = snapshot !== null && snapshot\.plan_source !== 'unknown'/)
+      const t = code('../src/pages/DaycarePage.tsx')
+      assert.match(t, /const stampDisabled = disabled \|\| day !== today/)
+      assert.match(t, /onClick=\{\(\) => void onArrive\(row\)\}\s*disabled=\{stampDisabled\}/)
+      assert.match(t, /onClick=\{\(\) => void onLeave\(row\)\}\s*disabled=\{stampDisabled\}/)
+      assert.match(t, /data\.snapshot !== null && data\.snapshot\.plan_source !== 'unknown'/)
+      assert.match(t, /arrived_at: prev\?\.arrived_at \?\? null, left_at: prev\?\.left_at \?\? null/)
+      const m = sql('../supabase/migrations/0041_daycare_stage1.sql')
+      assert.match(m, /create function public\.daycare_open_day\(p_day date, p_staff bigint default null\)\s+returns jsonb\s+language plpgsql\s+volatile\s+security definer/)
+      assert.doesNotMatch(m, /create policy "insert_auth" on public\.daycare_days/)
+      assert.doesNotMatch(m, /create policy "update_auth" on public\.daycare_days/)
     })
     it('画面は端末に業務データを書かない（localStorage は絞り込みの既知値だけ）', () => {
       for (const f of ['../src/pages/DaycarePage.tsx', '../src/pages/DaycareVitalsPage.tsx']) {

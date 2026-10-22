@@ -7838,6 +7838,7 @@ function normalizeDaycarePlanRow(row: unknown): DaycarePlanRow | null {
     start_time: str(r.start_time),
     end_time: str(r.end_time),
     bathing: r.bathing === true,
+    bath_resident_id: idNum(r.bath_resident_id),
     plan_rev: num(r.plan_rev),
     updated_at: str(r.updated_at),
   }

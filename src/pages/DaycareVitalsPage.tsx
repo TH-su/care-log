@@ -44,6 +44,7 @@ import {
 import type { CellConflict, CellEditInput, VitalCellField, VitalTarget } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
 import { ErrorBlock, LoadingBlock } from '../components/ui'
+import { registerUnsaved } from '../lib/leaveGuard'
 import { DaycareNav } from './DaycarePage'
 import {
   DAYCARE_VITAL_FIELDS,
@@ -163,7 +164,12 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   const [active, setActive] = useState<Active | null>(null)
   const [buf, setBuf] = useState('')
   const [kpError, setKpError] = useState<string | null>(null)
-  const [, setQueueTick] = useState(0)
+  const [queueTick, setQueueTick] = useState(0)
+  /** 血圧の上下逆で止めた測定（その上は送らない＝打ち直してもらう・反証レビュー中4） */
+  const pairBlocked = useRef(new Set<string>())
+  /** 入れたが送っていない値の写し（離れる時の確認に使う） */
+  const draftsRef = useRef(drafts)
+  draftsRef.current = drafts
   const genRef = useRef(0)
   const dayRef = useRef(day)
   dayRef.current = day
@@ -215,12 +221,14 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
         if (e instanceof DbError && e.kind === 'server') missing = true
         else throw e
       }
+      // 写しが「読めなかった」（unknown）日は、いまの週間計画も読む（次の保存で写し直す＝反証レビュー中2）
+      const usable = snapshot !== null && snapshot.plan_source !== 'unknown'
       const [plan, attendance, dv] = await Promise.all([
-        snapshot !== null ? Promise.resolve(null) : fetchDaycarePlan(target),
+        usable ? Promise.resolve(null) : fetchDaycarePlan(target),
         missing ? Promise.resolve([] as DaycareAttendance[]) : fetchDaycareAttendance(target),
         fetchDaycareVitals(target),
       ])
-      const planRows = snapshot !== null ? snapshot.plan_rows : (plan?.rows ?? [])
+      const planRows = usable && snapshot !== null ? snapshot.plan_rows : (plan?.rows ?? [])
       const ids = new Set<number>()
       for (const r of planRows) if (r.resident_id !== null) ids.add(r.resident_id)
       for (const a of attendance) ids.add(a.resident_id)
@@ -229,8 +237,8 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
       setData({
         day: target,
         planRows,
-        planSource: snapshot !== null ? snapshot.plan_source : (plan?.source ?? 'unknown'),
-        opened: snapshot !== null,
+        planSource: usable && snapshot !== null ? snapshot.plan_source : (plan?.source ?? 'unknown'),
+        opened: usable,
         missing: missing || plan?.missing === true,
         attendance,
         live: dv.live,
@@ -305,11 +313,26 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
 
   const nameOf = useCallback((id: number) => residents.find((r) => r.id === id)?.name ?? `利用者ID ${id}`, [residents])
 
-  /** 1人の測定の並び（サーバーの行＋足した再測定） */
+  /**
+   * 1人の測定の並び（サーバーの行＋足した再測定＋送信待ちにだけある回）。送信待ちの回を出すのは、読み直しの後に圏外で入れた
+   * 再測定が画面から消え、次の〔＋再測定〕で同じ回を上書きしないため（反証レビュー軽9）
+   */
   const slotsOf = useCallback(
-    (residentId: number): DaycareVitalSlot[] =>
-      data === null ? [] : daycareVitalSlots(data.live, data.keys, residentId, data.day, extraSeqs.get(residentId) ?? []),
-    [data, extraSeqs],
+    (residentId: number): DaycareVitalSlot[] => {
+      if (data === null) return []
+      const extra = extraSeqs.get(residentId) ?? []
+      const top = nextDaycareSeq([...data.keys, ...extra.map((x) => daycareVitalKey(data.day, residentId, x))], data.day, residentId) + 3
+      const queued: number[] = []
+      for (let seq = 1; seq <= top; seq += 1) {
+        const key = daycareVitalKey(data.day, residentId, seq)
+        if (data.keys.includes(key)) continue
+        if (pendingRow('vitals', { routine: false, clientKey: key, residentId, day: data.day, kind: 'observation' }) !== null) queued.push(seq)
+      }
+      return daycareVitalSlots(data.live, data.keys, residentId, data.day, [...extra, ...queued])
+    },
+    // queueTick: 送信待ちが増減した時に並びを作り直す
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [data, extraSeqs, queueTick],
   )
   const flatSlots = useMemo(() => shownRows.flatMap((r) => slotsOf(r.residentId)), [shownRows, slotsOf])
 
@@ -359,8 +382,8 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     if (data === null || data.opened || data.day !== todayIso() || opening.current) return
     opening.current = true
     try {
-      await openDaycareDay(data.day, actorId)
-      setData((prev) => (prev === null ? prev : { ...prev, opened: true }))
+      const snap = await openDaycareDay(data.day, actorId)
+      setData((prev) => (prev === null ? prev : { ...prev, opened: snap.plan_source !== 'unknown' }))
     } catch {
       // 次の保存でもう一度
     } finally {
@@ -383,7 +406,8 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     void ensureOpened()
     try {
       const r = await saveVitalEdits(targetOf(slot), send as CellEditInput<VitalCellField>, {
-        fill: { measured_at: nowHm(), recorded_by: actorId },
+        // 測定時刻は今日だけいまの時刻で埋める（過去の日にいまの時刻を入れない＝反証レビュー中7）
+        fill: dayRef.current === todayIso() ? { measured_at: nowHm(), recorded_by: actorId } : { recorded_by: actorId },
         editedBy: actorId,
         rebase: rebase !== undefined,
       })
@@ -401,7 +425,11 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
           return { ...prev, live, keys }
         })
       }
-      if (r.held === true) setState(slot.key, { kind: 'held' })
+      if (r.held === true) {
+        // 止まっている行へまとめた: 食い違いが分かれば〔いまの値にする〕〔あなたの値で直す〕を出す（反証レビュー中6）
+        const pc = r.conflicts.length > 0 ? r.conflicts : (pendingRow('vitals', targetOf(slot))?.conflicts ?? [])
+        setState(slot.key, pc.length > 0 ? { kind: 'conflict', conflicts: pc } : { kind: 'held' })
+      }
       else if (r.conflicts.length > 0) setState(slot.key, { kind: 'conflict', conflicts: r.conflicts })
       else setState(slot.key, { kind: 'saved' })
     } catch (e) {
@@ -419,16 +447,37 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     setKpError(null)
   }
 
-  /** 血圧の上を持ったまま別の測定へ移る時: 上を単独で送る（逆転は下が無いので起きない） */
+  /**
+   * 血圧の上を持ったまま別の測定へ移る時: 上を単独で送る（下が無いので逆転は起きない）。
+   * ただし上下逆で止めた後の上は送らない（打ち間違いの上だけが載るのを防ぐ＝反証レビュー中4）。理由を出して捨てる
+   */
   const flushHeldSys = (cur: Active | null, nextKey: string | null) => {
     if (cur === null || cur.key === nextKey) return
-    const d = drafts.get(cur.key)
+    releaseHeldOf(cur.key)
+  }
+
+  /** その測定で持っている血圧の上を、送るか（上下逆で止めた後なら）捨てる */
+  const releaseHeldOf = (key: string) => {
+    const d = draftsRef.current.get(key)
     if (d === undefined || !('sys_bp' in d)) return
-    const slot = flatSlots.find((s) => s.key === cur.key)
+    if (pairBlocked.current.has(key)) {
+      pairBlocked.current.delete(key)
+      setDraft(key, 'sys_bp', undefined)
+      setState(key, { kind: 'error', text: '血圧は上下逆のため保存していません。測り直して、上から入れ直してください。' })
+      return
+    }
+    const slot = flatSlots.find((s) => s.key === key)
     if (slot === undefined) return
     const edits: Partial<Record<DaycareVitalField, number | null>> = { sys_bp: d.sys_bp ?? null }
-    if ('dia_bp' in d) edits.dia_bp = d.dia_bp ?? null
     void saveSlot(slot, edits)
+  }
+
+  /** 日付の切り替え・読み直しの前: 持っている血圧の上を全部片づける（黙って消さない＝反証レビュー中3） */
+  const releaseAllHeld = () => {
+    for (const key of [...draftsRef.current.keys()]) releaseHeldOf(key)
+    setActive(null)
+    setBuf('')
+    setKpError(null)
   }
 
   const closeKeypad = () => {
@@ -481,6 +530,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
         return
       }
       // 上は下と組で送る（下を入れるまで持つ）。下が既にある時は今すぐ組で送る
+      pairBlocked.current.delete(slot.key)
       if (dia !== null && valueOf(slot, 'dia_bp').local === false) void saveSlot(slot, { sys_bp: v, dia_bp: dia })
       else setDraft(slot.key, 'sys_bp', v)
       advance(cur)
@@ -490,9 +540,12 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
       const sys = valueOf(slot, 'sys_bp').v
       const pairErr = bpPairError(sys, v)
       if (pairErr !== null) {
+        // 下で止めた: 持っている上も送らない（打ち直すまで）
+        pairBlocked.current.add(slot.key)
         setKpError(pairErr)
         return
       }
+      pairBlocked.current.delete(slot.key)
       const edits: Partial<Record<DaycareVitalField, number | null>> = { dia_bp: v }
       if (sys !== null) edits.sys_bp = sys
       setDraft(slot.key, 'dia_bp', v)
@@ -520,6 +573,9 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     setKpError(null)
     if (nb !== buf && keypadComplete(active.field, nb)) commit(active, nb, false)
   }
+
+  // 持っている血圧の上（下を入れる前）がある間は、画面を離れる・再読み込みの前に確かめる（既存の leaveGuard・反証レビュー中3）
+  useEffect(() => registerUnsaved(() => [...draftsRef.current.values()].some((d) => 'sys_bp' in d)), [])
 
   // 物理キーボード（数字・小数点・Backspace・Enter・Esc）
   useEffect(() => {
@@ -550,7 +606,13 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   const addRecheck = (row: DaycareBoardRow, last: DaycareVitalSlot) => {
     if (!canWrite || data === null) return
     const local = (extraSeqs.get(row.residentId) ?? []).map((s) => daycareVitalKey(data.day, row.residentId, s))
-    const seq = nextDaycareSeq([...data.keys, ...local, ...slotsOf(row.residentId).map((s) => s.key)], data.day, row.residentId)
+    let seq = nextDaycareSeq([...data.keys, ...local, ...slotsOf(row.residentId).map((s) => s.key)], data.day, row.residentId)
+    // 送信待ちにだけある回は使わない（上書きしない）
+    for (let i = 0; i < 50; i += 1) {
+      const key = daycareVitalKey(data.day, row.residentId, seq)
+      if (pendingRow('vitals', { routine: false, clientKey: key, residentId: row.residentId, day: data.day, kind: 'observation' }) === null) break
+      seq += 1
+    }
     setExtraSeqs((prev) => {
       const next = new Map(prev)
       next.set(row.residentId, [...(next.get(row.residentId) ?? []), seq])
@@ -599,7 +661,10 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
       <div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">
         <button
           type="button"
-          onClick={() => setDay((d) => addDays(d, -1))}
+          onClick={() => {
+            releaseAllHeld()
+            setDay((d) => addDays(d, -1))
+          }}
           className="min-h-tap min-w-tap rounded border border-border-strong bg-surface px-3 text-lg text-ink"
           aria-label="前の日へ"
         >
@@ -611,7 +676,10 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
         </span>
         <button
           type="button"
-          onClick={() => setDay((d) => (addDays(d, 1) > today ? d : addDays(d, 1)))}
+          onClick={() => {
+            releaseAllHeld()
+            setDay((d) => (addDays(d, 1) > today ? d : addDays(d, 1)))
+          }}
           disabled={day >= today}
           className="min-h-tap min-w-tap rounded border border-border-strong bg-surface px-3 text-lg text-ink disabled:text-ink3"
           aria-label="次の日へ"
@@ -619,11 +687,25 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
           <span aria-hidden="true">›</span>
         </button>
         {day !== today ? (
-          <button type="button" onClick={() => setDay(today)} className="min-h-tap rounded border border-primary px-4 text-base font-bold text-primary">
+          <button
+            type="button"
+            onClick={() => {
+              releaseAllHeld()
+              setDay(today)
+            }}
+            className="min-h-tap rounded border border-primary px-4 text-base font-bold text-primary"
+          >
             今日を開く
           </button>
         ) : null}
-        <button type="button" onClick={() => setReloadKey((n) => n + 1)} className="min-h-tap rounded border border-border-strong bg-surface px-4 text-base text-ink">
+        <button
+          type="button"
+          onClick={() => {
+            releaseAllHeld()
+            setReloadKey((n) => n + 1)
+          }}
+          className="min-h-tap rounded border border-border-strong bg-surface px-4 text-base text-ink"
+        >
           最新に更新
         </button>
       </div>
@@ -828,7 +910,16 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                                 ＋再測定
                               </button>
                             ) : null}
-                            <SlotStatus st={st} pend={pend?.state ?? null} onTake={(c) => void resolveTake(slot, c)} onMine={(c) => void resolveMine(slot, c)} />
+                            <SlotStatus
+                              st={
+                                (st === undefined || st.kind === 'held') && pend !== null && pend.state === 'conflict' && pend.conflicts.length > 0
+                                  ? { kind: 'conflict', conflicts: pend.conflicts }
+                                  : st
+                              }
+                              pend={pend?.state ?? null}
+                              onTake={(c) => void resolveTake(slot, c)}
+                              onMine={(c) => void resolveMine(slot, c)}
+                            />
                           </div>
                         </div>
                       )

@@ -915,6 +915,11 @@ export interface DaycarePlanRow {
   start_time: string | null
   end_time: string | null
   bathing: boolean
+  /**
+   * 12:30 の自動の入浴（0016 の cron）がこの予定から行を作る相手（利用者No だけで在籍者と結ぶ＝cron と同じ規則・氏名は見ない）。
+   * 氏名が食い違う予定（mismatch）でも入る。欠席の時の入浴の扱い（入浴の予定があるか）に使う
+   */
+  bath_resident_id: number | null
   plan_rev: number | null
   updated_at: string | null
 }

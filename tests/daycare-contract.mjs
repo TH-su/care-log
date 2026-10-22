@@ -379,7 +379,7 @@ export const DAYCARE_CASES = [
       // none の日（別の日付を直接作って確かめる＝今日の行は上で kv になった）
       await h.pg(`delete from public.daycare_days where day = $1::date`, [d])
       const none = await h.as({}, (q) => q(`select public.daycare_open_day($1::date, 1) as r`, [d]))
-      // 職員が kv の写しを直接書き換えようとしても通らない（update は unknown の行だけ）
+      // 職員が写しを直接書き換えようとしても通らない（書けるのは daycare_open_day だけ。update のポリシーが無い＝0行）
       const tamper = await h.as({}, (q) => q(`update public.daycare_days set plan_rows = '[]'::jsonb where day = $1::date returning id`, [d]))
       return {
         unk: [unk[0].r.plan_source, unk[0].r.plan_rows.length],
@@ -399,6 +399,50 @@ export const DAYCARE_CASES = [
   },
   {
     id: 'A3',
+    name: '反証レビュー中5: 写しを職員が直接作る・unknown の写しを書き換える経路が無い（過去の日の偽の写し・日付の付け替え）・非会員は開所できない',
+    async run(h) {
+      const d = await today(h)
+      const ins = await h.as({}, (q) =>
+        q(`insert into public.daycare_days (day, plan_source, plan_rows) values ('2026-10-01', 'kv', '[{"sched_id":"x"}]'::jsonb) returning id`),
+      )
+      await h.pg(`insert into public.daycare_days (id, day, plan_source) overriding system value values (991, '2026-10-02', 'unknown')`)
+      const upd = await h.as({}, (q) =>
+        q(`update public.daycare_days set day = '2026-01-05', plan_source = 'kv', plan_rows = '[{"sched_id":"y"}]'::jsonb where id = 991 returning id`),
+      )
+      const row = (await h.pg(`select day::text d, plan_source s from public.daycare_days where id = 991`))[0]
+      const out = await h.as({ member: false }, (q) => q(`select public.daycare_open_day($1::date, 1) as r`, [d]))
+      const outRows = (await h.pg(`select count(*)::int n from public.daycare_days where day = $1::date`, [d]))[0].n
+      return { ins: Array.isArray(ins) ? 'ok' : ins.error, upd: Array.isArray(upd) ? upd.length : upd.error, row, out: out.error ?? 'ok', outRows }
+    },
+    expect: { ins: '42501', upd: 0, row: { d: '2026-10-02', s: 'unknown' }, out: '42501', outRows: 0 },
+  },
+  {
+    id: 'A2/重大1',
+    name: '反証レビュー重大1: bath_resident_id（予定から 12:30 の自動の入浴が行を作る相手）が、cron（care_auto_bath_on）が実際に作った相手と一致する（氏名の食い違い・氏名だけの照合・外部・入院・入浴なしを混ぜて）',
+    async run(h) {
+      const d = '2026-10-19'
+      const w = dowOf(d)
+      await h.pg(`insert into public.app_settings (key, value) values ('input_enabled_bath', 'true') on conflict (key) do update set value = 'true'`)
+      await putSchedule(h, [
+        schedRes('a', { masterId: 'M001', name: '見本 一郎' }, [{ dow: w, bathing: true }]),
+        schedRes('b', { masterId: 'M002', name: '見本 別名' }, [{ dow: w, bathing: true }]), // 氏名が食い違う（mismatch）でも cron は作る
+        schedRes('c', { name: '見本 次郎' }, [{ dow: w, bathing: true }]), // 利用者No なし（氏名だけで照合）＝cron は作らない
+        schedRes('e', { external: true, name: '見本 外部' }, [{ dow: w, bathing: true }]),
+        schedRes('f', { masterId: 'M004', name: '見本 和子', hospitalized: true }, [{ dow: w, bathing: true }]),
+        schedRes('g', { masterId: 'M005', name: '見本 三郎' }, [{ dow: w, bathing: false }]),
+        schedRes('i', { masterId: 'M006', name: '見本 退所' }, [{ dow: w, bathing: true }]), // 名簿で在籍でない
+      ])
+      const rows = await plan(h, d)
+      const planned = [...new Set(rows.map((r) => r.bath_resident_id).filter((x) => x !== null).map(String))].sort()
+      const mm = rows.find((r) => r.sched_id === 'b')
+      await h.pg(`select private.care_auto_bath_on($1::date)`, [d])
+      const made = (await h.pg(`select resident_id::text r from public.bath_records where bath_on = $1::date and auto order by 1`, [d])).map((x) => x.r)
+      return { planned, made, mismatch: [mm?.match, mm?.resident_id ?? null, String(mm?.bath_resident_id)] }
+    },
+    expect: { planned: ['1', '2'], made: ['1', '2'], mismatch: ['mismatch', null, '2'] },
+  },
+  {
+    id: 'A3',
     name: '開所の写しに氏名が入らない（plan_rows のキーに name が無い）',
     async run(h) {
       const d = await today(h)
@@ -408,7 +452,7 @@ export const DAYCARE_CASES = [
       return { keys, hasName: JSON.stringify(r[0].r).includes('見本') }
     },
     expect: {
-      keys: ['bathing', 'dup', 'end_time', 'event_id', 'external', 'hospitalized', 'match', 'plan_rev', 'resident_id', 'sched_id', 'start_time', 'updated_at'],
+      keys: ['bath_resident_id', 'bathing', 'dup', 'end_time', 'event_id', 'external', 'hospitalized', 'match', 'plan_rev', 'resident_id', 'sched_id', 'start_time', 'updated_at'],
       hasName: false,
     },
   },
@@ -558,7 +602,7 @@ export const DAYCARE_CASES = [
   // ── Realtime・関数の権限 ──
   {
     id: 'D14',
-    name: '到着・欠席の表は Realtime に載る・関数は authenticated だけが実行できる（anon・public は不可）',
+    name: '到着・欠席の表は Realtime に載る・関数は authenticated だけが実行できる（anon・public は不可）・開所は security definer（写しはこの関数だけが書く）',
     async run(h) {
       const pub = (await h.pg(`select count(*)::int n from pg_publication_tables where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'daycare_attendance'`))[0].n
       const days = (await h.pg(`select count(*)::int n from pg_publication_tables where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'daycare_days'`))[0].n
@@ -573,7 +617,7 @@ export const DAYCARE_CASES = [
       pub: 1,
       days: 0,
       perm: [
-        { proname: 'daycare_open_day', anon: false, auth: true, definer: false },
+        { proname: 'daycare_open_day', anon: false, auth: true, definer: true },
         { proname: 'daycare_plan', anon: false, auth: true, definer: false },
       ],
     },

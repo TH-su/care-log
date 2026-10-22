@@ -15,13 +15,17 @@
 --   3. daycare_days（1日1行）… その日の予定の写し。開所の最初のタップ（当日だけ）で、その日の予定の全行を
 --        jsonb で写す（daycare_open_day）。週間計画の履歴は30版で消えるため、過去の日の「予定があった人」の根拠を残す。
 --        plan_source = 'kv'（予定あり）／'none'（写しはあるがその日の予定なし）／'unknown'（予定を読めなかった）。
---        写しは動かさない（update は unknown の行を、読めた写しに1回だけ置き換える時だけ通す）。氏名は持たない。
+--        写しは動かさない（書けるのは daycare_open_day だけ＝security definer。職員の直接の insert・update のポリシーは作らない。
+--        読めなかった写し＝unknown だけ、読めた時に1回置き換える）。氏名は持たない。
 --   4. daycare_attendance（1人1日1件）… 到着・帰宅・欠席。状態は保存せず列から導く
 --        （欠席＝absent／到着の時刻あり・帰宅なし＝在席／帰宅あり＝帰宅／どれも無い＝予定）。到着の1タップで在席。
 --        client_key（端末生成の冪等キー）・rev・変更の記録・soft delete・RLS は 0012 の bath_records と同じ形。
 --   5. 関数 daycare_plan(p_date) … その日のデイの予定（週間計画の写し kv_entries の care_schedule_v2 から・読むだけ）。
 --        予定1件ごとに1行（同じ人の同じ曜日の2件は2行＝1枠に畳まない）。照合はサーバーの中で行い、氏名は返さない。
---   6. 関数 daycare_open_day(p_day, p_staff) … 今日の予定の写し（daycare_days）を作って返す。今日以外は断る
+--        bath_resident_id は「12:30 の自動の入浴（0016 の care_auto_bath_on）がこの予定から行を作る相手」（利用者No だけで
+--        在籍者と結ぶ＝cron と同じ規則）。氏名が食い違う予定でも、欠席の時にその方の入浴を「中止・欠席」にできるようにする
+--   6. 関数 daycare_open_day(p_day, p_staff) … 今日の予定の写し（daycare_days）を作って返す。今日以外は断る。
+--        security definer（写しを職員が直接作る・書き換える経路を作らない）。中で許可リストの職員か（private.is_member）を確かめる
 --   7. Realtime に daycare_attendance を足す（既に載っていれば何もしない＝冪等。端末は別のチャンネルで購読する）
 --
 -- 触らないもの: vitals（デイの測定は既存の kind 'observation' のまま・冪等キー client_key を 'dc:<日>:<利用者id>:<回>'
@@ -87,15 +91,14 @@ create or replace trigger trg_history_daycare_days
   after update on public.daycare_days
   for each row execute function public.record_history_capture('day');
 
--- RLS: 読む・作る＝許可リストの職員（現場を含む）。更新は「読めなかった写し（unknown）」の置き換えだけ。delete のポリシーは作らない
+-- RLS: 読む＝許可リストの職員（現場を含む）。書くのは daycare_open_day（security definer・表の所有者の権限）だけ＝
+-- 職員の直接の insert・update・delete のポリシーは作らない（写しを過去の日に作る・書き換える経路を作らない）
 alter table public.daycare_days enable row level security;
 drop policy if exists "read_auth"   on public.daycare_days;
 drop policy if exists "insert_auth" on public.daycare_days;
 drop policy if exists "update_auth" on public.daycare_days;
 drop policy if exists member_only   on public.daycare_days;
 create policy "read_auth"   on public.daycare_days for select to authenticated using (true);
-create policy "insert_auth" on public.daycare_days for insert to authenticated with check (true);
-create policy "update_auth" on public.daycare_days for update to authenticated using (plan_source = 'unknown') with check (true);
 create policy member_only on public.daycare_days as restrictive for all to authenticated
   using (private.is_member()) with check (private.is_member());
 
@@ -201,6 +204,7 @@ returns table (
   start_time   text,
   end_time     text,
   bathing      boolean,
+  bath_resident_id bigint,
   plan_rev     integer,
   updated_at   timestamptz
 )
@@ -296,6 +300,12 @@ as $fn$
            e.v ->> 'startTime' as start_time,
            e.v ->> 'endTime' as end_time,
            coalesce(e.v ->> 'bathing', '') = 'true' as bathing,
+           -- 12:30 の自動の入浴（0016）がこの予定から行を作る相手（cron と同じ規則: 利用者No があり・外部でも入院中でもなく・
+           -- 入浴の予定があり、利用者No で在籍者に結べる。氏名は見ない＝mismatch の予定でも入る）
+           case when f.mid is not null and not f.external and not f.hospitalized
+                     and coalesce(e.v ->> 'bathing', '') = 'true'
+                then (select ro.id from roster ro where ro.source_id = f.mid order by ro.id limit 1)
+           end as bath_resident_id,
            f.ord,
            e.ord as eord,
            -- 並べ替え用: 「9:30」を「09:30」にそろえる（時刻の形でなければ後ろへ）
@@ -314,15 +324,15 @@ as $fn$
            = (extract(isodow from p_date)::int - 1)
   )
   select q.sched_id, q.event_id, q.resident_id, q.match, q.dup, q.external, q.hospitalized,
-         q.start_time, q.end_time, q.bathing, q.plan_rev, q.updated_at
+         q.start_time, q.end_time, q.bathing, q.bath_resident_id, q.plan_rev, q.updated_at
     from (
       select p.sched_id, p.event_id, p.resident_id, p.match, p.dup, p.external, p.hospitalized,
-             p.start_time, p.end_time, p.bathing, s.rev as plan_rev, s.updated_at,
+             p.start_time, p.end_time, p.bathing, p.bath_resident_id, s.rev as plan_rev, s.updated_at,
              0 as grp, p.start_key, p.ord, p.eord
         from plan p cross join ok s
       union all
       -- 写しはあるが、その日の予定が無い（none）
-      select null, null, null, null, null, null, null, null, null, null, s.rev, s.updated_at,
+      select null, null, null, null, null, null, null, null, null, null, null, s.rev, s.updated_at,
              1, null, null, null
         from ok s
        where not exists (select 1 from plan)
@@ -339,14 +349,16 @@ grant execute on function public.daycare_plan(date) to authenticated;
 -- ---------- 6. 今日の予定の写しを作る（開所の最初のタップ） ----------
 -- 今日（日本時間）の分だけ。既に写しがあればそのまま返す（写しは動かさない）。写しが unknown（読めなかった）で、
 -- いま読めた時だけ1回置き換える。返り値は daycare_days の1行（jsonb）。
--- security invoker（daycare_days・kv_entries の RLS がそのまま効く）。
+-- security definer: daycare_days に職員の直接の書き込みのポリシーを置かず、写しはこの関数だけが作る（過去の日の写しを作る・
+-- 書き換える経路を作らない）。中で許可リストの職員か（private.is_member）を確かめ、違えば 42501。search_path は空・全部を修飾する。
+-- 予定は daycare_plan（呼んだ職員の JWT の my_tenant()）から読む。
 drop function if exists public.daycare_open_day(date, bigint);
 
 create function public.daycare_open_day(p_day date, p_staff bigint default null)
 returns jsonb
 language plpgsql
 volatile
-security invoker
+security definer
 set search_path = ''
 as $fn$
 declare
@@ -360,6 +372,9 @@ declare
   v_cur    text;
   v_row    public.daycare_days%rowtype;
 begin
+  if not coalesce(private.is_member(), false) then
+    raise exception 'このアカウントではデイの記録を使えません（許可リストを確かめてください）' using errcode = '42501';
+  end if;
   if p_day is null or p_day <> v_today then
     raise exception '予定の写しは今日の分だけ作れます。日付を今日にしてからもう一度お試しください'
       using errcode = '22023';

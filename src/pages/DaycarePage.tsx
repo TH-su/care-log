@@ -93,6 +93,9 @@ const MSG_NOT_PERSISTED =
 const MSG_NO_RECORDER = '記録者が選ばれていません。上の「記録者」で選んでから記録してください。'
 const MSG_ROW_PENDING = '未送信の記録があります（送信が終わると押せるようになります）'
 const MSG_FUTURE = '未来の日には記録できません。'
+/** 過去の日の到着・帰宅（いまの時刻が入ってしまうため止める。時刻を入れる操作は段階2で決める＝反証レビュー中7） */
+const MSG_PAST_TIME =
+  '過去の日の到着・帰宅は、この画面では記録できません（いまの時刻が入ってしまうため）。欠席・入浴は記録できます。到着・帰宅の時刻は事務所に伝えてください。'
 const MSG_GATE_UNKNOWN =
   'デイの記録を使える期間かどうかを確認できませんでした（通信エラー）。電波状態を確認して、再試行してください。記録の閲覧はこのままできます。'
 
@@ -304,8 +307,10 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         if (e instanceof DbError && e.kind === 'server') missing = true
         else throw e
       }
+      // 写しが「読めなかった」（unknown）の日は、いまの週間計画も読む（読めれば表示に使い、次のタップで写し直す＝反証レビュー中2）
+      const usable = snapshot !== null && snapshot.plan_source !== 'unknown'
       const [plan, attendance, baths, dv] = await Promise.all([
-        snapshot !== null ? Promise.resolve(null) : fetchDaycarePlan(target),
+        usable ? Promise.resolve(null) : fetchDaycarePlan(target),
         missing ? Promise.resolve([] as DaycareAttendance[]) : fetchDaycareAttendance(target),
         fetchBathDay(target).catch(() => [] as BathRecord[]),
         fetchDaycareVitals(target).catch(() => ({ live: [] as KeyedVital[], keys: [] as string[] })),
@@ -313,8 +318,8 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       if (gen !== genRef.current || target !== dayRef.current) return
       const next: DayData = {
         day: target,
-        planRows: snapshot !== null ? snapshot.plan_rows : (plan?.rows ?? []),
-        planSource: snapshot !== null ? snapshot.plan_source : (plan?.source ?? 'unknown'),
+        planRows: usable && snapshot !== null ? snapshot.plan_rows : (plan?.rows ?? []),
+        planSource: usable && snapshot !== null ? snapshot.plan_source : (plan?.source ?? 'unknown'),
         snapshot,
         missing: missing || plan?.missing === true,
         attendance,
@@ -406,12 +411,19 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
 
   /** 開所の最初のタップ（今日だけ）: その日の予定の写しを作る。通信できない時は次のタップでもう一度（記録は止めない） */
   const ensureOpened = useCallback(async () => {
-    if (data === null || data.snapshot !== null || day !== todayIso()) return
+    // 写しが無い日と、写しが「読めなかった」（unknown）日は作り直す（サーバーが unknown の写しだけを1回置き換える）
+    if (data === null || (data.snapshot !== null && data.snapshot.plan_source !== 'unknown') || day !== todayIso()) return
     if (opening.current !== null) return opening.current
     opening.current = (async () => {
       try {
         const snap = await openDaycareDay(day, actorId)
-        setData((prev) => (prev !== null && prev.day === snap.day ? { ...prev, snapshot: snap, planRows: snap.plan_rows, planSource: snap.plan_source } : prev))
+        setData((prev) =>
+          prev !== null && prev.day === snap.day
+            ? snap.plan_source === 'unknown'
+              ? { ...prev, snapshot: snap }
+              : { ...prev, snapshot: snap, planRows: snap.plan_rows, planSource: snap.plan_source }
+            : prev,
+        )
       } catch {
         // 写しは次のタップで作り直す（到着・欠席の記録そのものは止めない）
       } finally {
@@ -498,6 +510,10 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   // ── 到着（＝在席） ──
   const onArrive = async (row: DaycareBoardRow) => {
     if (!precheck(row)) return
+    if (day !== todayIso()) {
+      setMsg(row.residentId, { tone: 'warn', text: MSG_PAST_TIME })
+      return
+    }
     setRowBusy(row.residentId, true)
     const t = nowHm()
     const res = await writeAttendance(row, { arrived_at: t, left_at: null, absent: false, absent_reason: null })
@@ -509,6 +525,10 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   // ── 帰宅 ──
   const onLeave = async (row: DaycareBoardRow) => {
     if (!precheck(row)) return
+    if (day !== todayIso()) {
+      setMsg(row.residentId, { tone: 'warn', text: MSG_PAST_TIME })
+      return
+    }
     setRowBusy(row.residentId, true)
     const t = nowHm()
     const res = await writeAttendance(row, { left_at: t })
@@ -532,6 +552,8 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     setAbsentFor(null)
     if (!precheck(row)) return
     setRowBusy(row.residentId, true)
+    // 元に戻す時に到着・帰宅の時刻も戻す（欠席は時刻を消すため＝反証レビュー軽8）
+    const prev = row.attendance
     const res = await writeAttendance(row, { absent: true, absent_reason: reason, arrived_at: null, left_at: null })
     if (res === 'failed') {
       setRowBusy(row.residentId, false)
@@ -540,9 +562,10 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     const bath = await recordAbsentBath({ residentId: row.residentId, day, bathingPlanned: row.bathingPlanned, recordedBy: actorId })
     setRowBusy(row.residentId, false)
     afterAbsentBath(row, bath)
+    const bathTouched = bath.status === 'done' || bath.status === 'queued' || bath.status === 'already'
     show(
       `${nameOf(row.residentId)}さんを欠席にしました（${DAYCARE_ABSENT_REASON_LABEL[reason]}）`,
-      res === null ? undefined : () => void undoAbsent(res, row),
+      res === null ? undefined : () => void undoAbsent(res, prev, bathTouched),
     )
     scheduleReload()
   }
@@ -573,9 +596,15 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     else if (r.status === 'kept') setMsg(id, { tone: 'info', text: '欠席は記録しました。入浴は「入浴していない」の記録があるので、そのままにしました。' })
   }
 
-  const undoAbsent = async (row: DaycareAttendance, boardRow: DaycareBoardRow) => {
-    await undo(row, { absent: false, absent_reason: null })
-    noteBathAfterAbsentCancel(boardRow.residentId)
+  const undoAbsent = async (row: DaycareAttendance, prev: DaycareAttendance | null, bathTouched: boolean) => {
+    await undo(row, { absent: false, absent_reason: null, arrived_at: prev?.arrived_at ?? null, left_at: prev?.left_at ?? null })
+    if (bathTouched) {
+      setMsg(row.resident_id, {
+        tone: 'info',
+        text: '欠席を取り消しました。入浴の記録は「入浴していない（欠席）」のままです。入浴した場合は、下の〔区分・中止を選ぶ〕で記録し直してください。',
+      })
+    }
+    scheduleReload()
   }
 
   /** 欠席を取り消した後: 入浴の「中止・欠席」は消さずに案内する */
@@ -584,6 +613,16 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     if (b !== null && b.result === 'cancel' && b.cancel_reason === 'absent') {
       setMsg(id, { tone: 'info', text: '欠席を取り消しました。入浴の記録は「入浴していない（欠席）」のままです。入浴した場合は、下の〔区分・中止を選ぶ〕で記録し直してください。' })
     }
+  }
+
+  /** 欠席の方に入浴の記録（自動・人の入浴）が残っている時、入浴を「中止・欠席」に直す（人の入浴は確認つき） */
+  const onAbsentBathFix = async (row: DaycareBoardRow) => {
+    if (!precheck(row)) return
+    setRowBusy(row.residentId, true)
+    const r = await recordAbsentBath({ residentId: row.residentId, day, bathingPlanned: true, recordedBy: actorId })
+    setRowBusy(row.residentId, false)
+    afterAbsentBath(row, r)
+    scheduleReload()
   }
 
   const askAbsent = (row: DaycareBoardRow) => {
@@ -729,9 +768,9 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
           最新に更新
         </button>
       </div>
-      {day < today && data?.day === day && day === addDays(today, -1) ? (
-        <p role="status" className="text-sm text-ink2">
-          表示中は前の日です（日付が変わりました）。今日の記録は〔今日を開く〕から。
+      {day < today ? (
+        <p role="status" className="rounded-lg border border-border bg-surface2 p-3 text-sm text-ink2">
+          過去の日を表示しています。到着・帰宅の記録はできません（いまの時刻が入るため）。欠席・入浴は記録できます。
         </p>
       ) : null}
       {gate !== null && !(gate.observed && gate.value === true) ? (
@@ -770,9 +809,12 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   }
   const vitalsWaiting = board.rows.filter((r) => r.state === 'present' && !vitalsDone(r.residentId)).length
   // 入浴を確かめていない方（在席・帰宅で、予定ありの未記録か自動の記録のまま）
-  const bathUnchecked = board.rows.filter(
-    (r) => (r.state === 'present' || r.state === 'left') && bathNeedsCheck(daycareBathStatus(bathOf(r.residentId), r.bathingPlanned)),
-  ).length
+  const bathUnchecked = board.rows.filter((r) => {
+    const st = daycareBathStatus(bathOf(r.residentId), r.bathingPlanned)
+    if (r.state === 'present' || r.state === 'left') return bathNeedsCheck(st)
+    // 欠席の方に自動の記録が残っている（入浴の旗の封鎖・通信の失敗などで直せなかった）
+    return r.state === 'absent' && st.kind === 'auto'
+  }).length
 
   const tiles: { label: string; value: number; tone?: 'warn' }[] = [
     { label: '予定', value: c.planned },
@@ -821,6 +863,8 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
             const m = rowMsg.get(row.residentId)
             const name = nameOf(row.residentId)
             const disabled = !canWrite || isFuture || isBusy
+            /** 到着・帰宅はいまの時刻を入れるので今日だけ（過去の日は止める） */
+            const stampDisabled = disabled || day !== today
             const vDone = vitalsDone(row.residentId)
             const vAbn = vDone && vitalsAbnormal(row.residentId)
             return (
@@ -850,7 +894,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                       <button
                         type="button"
                         onClick={() => void onArrive(row)}
-                        disabled={disabled}
+                        disabled={stampDisabled}
                         aria-label={`${name}さんの到着を記録（在席にする）`}
                         className="min-h-14 rounded-full border border-primary bg-primary px-5 text-lg font-bold text-primary-ink disabled:border-border disabled:bg-surface2 disabled:text-ink3"
                       >
@@ -860,7 +904,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                       <button
                         type="button"
                         onClick={() => void onLeave(row)}
-                        disabled={disabled}
+                        disabled={stampDisabled}
                         aria-label={`${name}さんの帰宅を記録`}
                         className="min-h-14 rounded-full border border-primary bg-primary px-5 text-lg font-bold text-primary-ink disabled:border-border disabled:bg-surface2 disabled:text-ink3"
                       >
@@ -929,6 +973,17 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                     >
                       入浴&nbsp;<span className="font-bold">{daycareBathLabel(bst)}</span>
                     </span>
+                    {row.state === 'absent' && (bst.kind === 'auto' || bst.kind === 'done') ? (
+                      <button
+                        type="button"
+                        onClick={() => void onAbsentBathFix(row)}
+                        disabled={disabled}
+                        aria-label={`${name}さんの入浴を「入浴していない（欠席）」にする`}
+                        className="min-h-tap rounded-full border border-border-strong px-4 text-base text-ink disabled:text-ink3"
+                      >
+                        入浴を「欠席」にする
+                      </button>
+                    ) : null}
                     {row.state === 'present' || row.state === 'left' ? (
                       <span className="flex flex-wrap gap-gap" role="group" aria-label={`${name}さんの入浴`}>
                         {bathNeedsCheck(bst) ? (

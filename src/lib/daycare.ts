@@ -202,7 +202,7 @@ export interface DaycareBoardRow {
   dup: boolean
   /** 週間計画で入院中 */
   hospitalized: boolean
-  /** 入浴の予定がある */
+  /** 入浴の予定がある（12:30 の自動の入浴が行を作る相手を含む） */
   bathingPlanned: boolean
   attendance: DaycareAttendance | null
   state: AttendanceState
@@ -302,7 +302,12 @@ export function buildDaycareBoard(p: {
   }
   for (const a of att.values()) ensure(a.resident_id, true)
   for (const id of p.extraIds ?? []) ensure(id, true)
+  // 12:30 の自動の入浴が行を作る相手（cron と同じ規則・氏名を見ない）は、照合できない予定（氏名の食い違い）でも
+  // 入浴の予定ありとする＝その方を予定外で足して欠席にした時も、入浴を「中止・欠席」にする（反証レビュー重大1）
+  const autoBath = new Set<number>()
+  for (const r of p.planRows) if (r.sched_id !== null && typeof r.bath_resident_id === 'number') autoBath.add(r.bath_resident_id)
   const rows = [...byResident.values()]
+  for (const r of rows) if (autoBath.has(r.residentId)) r.bathingPlanned = true
   for (const r of rows) r.plans.sort((a, b) => timeKey(a.start).localeCompare(timeKey(b.start)))
   rows.sort((a, b) => {
     if (a.extra !== b.extra) return a.extra ? 1 : -1
