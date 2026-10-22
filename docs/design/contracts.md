@@ -335,9 +335,11 @@ planResidentSync(rows, entries): ResidentSyncPlan / planStaffSync(rows, names): 
 adoptRosterName(id: number, current: string, rosterName: string): Promise<'adopted' | 'stale'>
                                              // 〔名簿の氏名を採用する〕（F51）。id・見ていた氏名・needs_review=true が条件。先に直されていれば 'stale'
 hasMasterConnection(): boolean               // この端末に名簿の接続設定があるか（合言葉は返さない）
-autoSyncMasters(now?: number): Promise<'unconfigured' | 'fresh' | 'busy' | MasterSyncOutcome>
+autoSyncMasters(now?: number): Promise<'unconfigured' | 'officeOnly' | 'fresh' | 'busy' | MasterSyncOutcome>
                                              // 自動同期（F50）。接続設定のある端末だけ、前回（他の端末の master_sync_log も見る）から60分たっていれば同期。
                                              // 失敗後は10分あける（AUTO_SYNC_INTERVAL_MS・AUTO_SYNC_RETRY_MS）。同じ端末のタブは Web Lock cl_masterSync で1本に
+                                             // 0040（2026-10-22）: 事務・管理者のログインでない時（現場・役割が分からない時）は何も読まず書かずに 'officeOnly'。
+                                             // syncMasters・adoptRosterName も同じ時は書く前に MASTER_OFFICE_ONLY_MSG で止める（DB でも residents・staff・台帳は事務・管理者だけ）
 ```
 
 - 照合（F49）: 氏名照合の候補から退去済み（active=false）の行を外す（退去者と同じ氏名の新しい入居者は新しい行になる）。在籍中の同名は従来どおり保留

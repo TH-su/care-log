@@ -24,11 +24,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
+  canWriteMasters,
   discardQueuedOp,
   fetchAllResidents,
   fetchAllStaff,
   fetchQueuedOpTarget,
   fetchStaff,
+  fetchMyRole,
   fetchTimelineChunk,
   flushQueue,
   hasUnpersistedQueue,
@@ -40,8 +42,9 @@ import {
   resendQueuedOp,
   setResidentNoteAlias,
   subscribeMastersChanged,
+  subscribeMyRole,
 } from '../lib/db'
-import type { StoppedOp } from '../lib/db'
+import type { MyRole, StoppedOp } from '../lib/db'
 import { getActorId, setActorId as persistActorId, subscribeActor, touchActivity } from '../lib/actor'
 import { hasNoteAlias, LS, NOTE_ALIAS_MAX, noteDisplayName, validateNoteAlias } from '../lib/types'
 import type { ImportDay, Resident, Staff } from '../lib/types'
@@ -518,6 +521,12 @@ export function SettingsPage() {
   const [adoptAsk, setAdoptAsk] = useState<RosterReview | null>(null)
   const [adopting, setAdopting] = useState(false)
   const [reviewMsg, setReviewMsg] = useState<{ tone: 'ok' | 'danger'; text: string } | null>(null)
+  /**
+   * ログインの役割（db.ts の my_account の控え。undefined＝確かめ中）。名簿の同期と名簿の氏名の採用は事務・管理者だけ
+   * （移行 0040・代表者の決定 2026-10-22）。現場・役割の分からないログインにはボタンを出さない
+   */
+  const [role, setRole] = useState<MyRole | null | undefined>(undefined)
+  const canSync = canWriteMasters(role)
 
   // 要確認（needs_review）
   const [residents, setResidents] = useState<Resident[] | null>(null)
@@ -603,6 +612,22 @@ export function SettingsPage() {
 
   // 記録する職員が他の所（バイタル・食事の「記録者」・別のタブ）で切り替わったら、ここの表示も合わせる（F46）
   useEffect(() => subscribeActor((id) => setActorIdState(id)), [])
+
+  // ログインの役割（名簿の同期のボタンを出すか）。ログインし直したら取り直す
+  useEffect(() => {
+    let alive = true
+    const load = () => {
+      fetchMyRole().then((r) => {
+        if (alive) setRole(r)
+      })
+    }
+    load()
+    const off = subscribeMyRole(load)
+    return () => {
+      alive = false
+      off()
+    }
+  }, [])
 
   // 利用者スナップショット（要確認の抽出と、送れていない記録の対象名に使う。33名規模＝軽い読取なので画面表示時に取得する）。
   // 退去された方も含む全員を読む（F49: 退去済みの行に立った「要確認」も一覧に出す・過去の記録の対象名を引く）
@@ -1331,16 +1356,27 @@ export function SettingsPage() {
         <div className="mt-2">
           <MasterSyncStatus />
         </div>
-        <div className="mt-3 flex justify-end">
-          <button
-            type="button"
-            onClick={() => void handleSync()}
-            disabled={syncing}
-            className="min-h-tap rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink disabled:opacity-60"
-          >
-            {syncing ? '同期中です…' : 'マスタを同期する'}
-          </button>
-        </div>
+        {canSync ? (
+          <div className="mt-3 flex justify-end">
+            <button
+              type="button"
+              onClick={() => void handleSync()}
+              disabled={syncing}
+              className="min-h-tap rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink disabled:opacity-60"
+            >
+              {syncing ? '同期中です…' : 'マスタを同期する'}
+            </button>
+          </div>
+        ) : (
+          <p className="mt-3 text-sm text-ink2">
+            <span aria-hidden="true">ⓘ </span>
+            {role === undefined
+              ? 'ログインの役割を確かめています…'
+              : role === null
+                ? 'ログインの役割を確かめられませんでした（通信を確かめてから、画面を開き直してください）。名簿の同期は、事務・管理者のログインでだけ行います。'
+                : '名簿の同期は、事務・管理者のログインでだけ行います（現場のログインでは同期しません）。'}
+          </p>
+        )}
 
         {syncing ? <LoadingBlock label="名簿を読み取っています…" /> : null}
         {syncError ? (
@@ -1433,7 +1469,7 @@ export function SettingsPage() {
                             <span className="sr-only">要確認</span>
                           </span>
                         </div>
-                        {rv !== null ? (
+                        {rv !== null && canSync ? (
                           <div className="mt-1 flex flex-wrap items-center gap-gap">
                             <p className="min-w-0 flex-1 text-base text-ink">
                               名簿の氏名: <span className="font-bold">{rv.roster}</span>
@@ -1449,7 +1485,9 @@ export function SettingsPage() {
                           </div>
                         ) : (
                           <p className="mt-1 text-sm text-ink2">
-                            「マスタを同期する」を押すと、名簿の氏名がここに出ます（採用して保留を外せます）。
+                            {canSync
+                              ? '「マスタを同期する」を押すと、名簿の氏名がここに出ます（採用して保留を外せます）。'
+                              : '名簿の氏名の採用は、事務・管理者のログインで行います。'}
                           </p>
                         )}
                       </li>

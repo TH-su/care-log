@@ -632,6 +632,14 @@ export function canUnlockNotes(role: MyRole | null | undefined): boolean {
   return role === 'office' || role === 'admin'
 }
 
+/**
+ * 名簿の同期（利用者・職員の写しと同期の台帳を書く）をしてよい役割か（事務所・管理者。移行 0040・代表者の決定 2026-10-22）。
+ * null（分からない）は現場と同じ扱い＝false（DB も office・admin のログインにしか書かせない）
+ */
+export function canWriteMasters(role: MyRole | null | undefined): boolean {
+  return canUnlockNotes(role)
+}
+
 // ── 受信データの正規化（multi-device-sync 原則10: 受信データを信じない） ──────
 
 function asRecord(v: unknown): Record<string, unknown> | null {

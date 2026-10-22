@@ -16,7 +16,7 @@
 // 本ファイルは contracts.md の許可により supabase を直接呼ぶ（db.ts を経由しない唯一の例外）。
 
 import { supabase } from './supabase'
-import { fetchLastMasterSync, notifyMastersChanged } from './db'
+import { canWriteMasters, fetchLastMasterSync, fetchMyRole, notifyMastersChanged } from './db'
 import { LS } from './types'
 import type { Resident, Staff } from './types'
 
@@ -1052,6 +1052,18 @@ function rosterFailHint(reason: GasReadFail | 'empty' | null): string {
   }
 }
 
+/** 現場のログインで名簿の同期・名簿の氏名の採用を求められた時の文（画面にそのまま出す） */
+export const MASTER_OFFICE_ONLY_MSG =
+  '名簿の同期は、事務・管理者のログインでだけ行います（現場のログインでは同期しません）。事務所のパソコンで同期してください。利用者・職員の一覧は変更していません。'
+
+/**
+ * 名簿を書いてよい役割（事務所・管理者）でなければ MASTER_OFFICE_ONLY_MSG で throw する（0040・代表者の決定 2026-10-22）。
+ * 役割は db.ts の my_account の結果（端末のメモリの控え）。分からない時（通信できない・関数が無い）も書かない側に倒す
+ */
+async function assertMasterWriter(): Promise<void> {
+  if (!canWriteMasters(await fetchMyRole())) throw new Error(MASTER_OFFICE_ONLY_MSG)
+}
+
 /** syncMasters の結果（F51: 氏名の食い違いで保留にした方の名簿の氏名を、画面のメモリにだけ渡す） */
 export interface MasterSyncOutcome {
   residents: SyncResult
@@ -1079,6 +1091,7 @@ export interface SyncOptions {
  *       （contracts.md の戻り値型にエラー枠が無いため。呼び出し側＝設定画面は必ず try/catch し、
  *         e.message をそのまま画面に出せる。文面は「何が起きたか＋次にどうすればよいか」で統一）。
  *       名簿から一度に外れる人数が多すぎる時は、何も書かずに MasterDropError を throw する（F43）。
+ *       事務所・管理者のログインでない時は、何も読まず書かずに MASTER_OFFICE_ONLY_MSG で throw する（0040）。
  *
  * 安全設計:
  *  - 取得できなかった系列は 1 行も触らない（空上書き保護）。0件応答も「取得できず」に倒す。
@@ -1093,6 +1106,8 @@ export interface SyncOptions {
 export async function syncMasters(opts: SyncOptions = {}): Promise<MasterSyncOutcome | 'unconfigured'> {
   const cfg = readGasConfig()
   if (cfg === 'unconfigured') return 'unconfigured'
+  // 現場のログイン（と役割の分からないログイン）では同期しない（0040・代表者の決定 2026-10-22）。GAS にも DB にも触れない
+  await assertMasterWriter()
   if (cfg === 'invalid') {
     throw new Error(
       'GASの接続先URLの形式が正しくありません。設定画面で https://script.google.com/macros/s/.../exec の形式のURLを入力し直してください。',
@@ -1180,6 +1195,7 @@ export async function syncMasters(opts: SyncOptions = {}): Promise<MasterSyncOut
  */
 export async function adoptRosterName(id: number, current: string, rosterName: string): Promise<'adopted' | 'stale'> {
   const name = typeof rosterName === 'string' ? rosterName.trim() : ''
+  await assertMasterWriter()
   if (!Number.isInteger(id) || id <= 0 || name === '' || typeof current !== 'string') {
     throw new Error(
       '名簿の氏名を採用できませんでした（対象を読み取れません）。もう一度「マスタを同期する」を押してから、やり直してください。',
@@ -1237,11 +1253,12 @@ function stampFresh(t: number | null, now: number, ms: number): boolean {
   return t !== null && t <= now && now - t < ms
 }
 
-export type AutoSyncOutcome = 'unconfigured' | 'fresh' | 'busy' | MasterSyncOutcome
+export type AutoSyncOutcome = 'unconfigured' | 'officeOnly' | 'fresh' | 'busy' | MasterSyncOutcome
 
 /**
  * 名簿の自動同期（F50・2026-10-10 本人回答: 接続設定のある端末で起動時と60分ごと）。
  * - 接続設定の無い端末（現場の iPhone）は何もしない（'unconfigured'）。合言葉を配る運用にしない
+ * - 事務所・管理者のログインでない端末（現場・役割の分からないログイン）も何もしない（'officeOnly'。0040・代表者の決定 2026-10-22）
  * - 前回の同期から60分たっていなければ何もしない（'fresh'）。他の端末が同期した記録（master_sync_log）も見る
  *   ＝同期は実質1台に寄る。失敗した後は10分あける
  * - 同じ端末の複数のタブで重ならないよう、navigator.locks があれば1本にまとめる（他のタブが同期中なら 'busy'）
@@ -1250,6 +1267,7 @@ export type AutoSyncOutcome = 'unconfigured' | 'fresh' | 'busy' | MasterSyncOutc
  */
 export async function autoSyncMasters(now: number = Date.now()): Promise<AutoSyncOutcome> {
   if (!hasMasterConnection()) return 'unconfigured'
+  if (!canWriteMasters(await fetchMyRole())) return 'officeOnly'
   if (stampFresh(readStamp(AUTO_SYNC_OK_KEY), now, AUTO_SYNC_INTERVAL_MS)) return 'fresh'
   if (stampFresh(readStamp(AUTO_SYNC_TRY_KEY), now, AUTO_SYNC_RETRY_MS)) return 'fresh'
   // 他の端末が直前に同期していれば、その時刻を控えて待つ（読めなければこの端末の控えだけで決める）
