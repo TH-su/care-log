@@ -1,0 +1,40 @@
+name: 試験（PR）
+
+# PR の時に、公開（deploy.yml）と同じ試験とビルドを回す（2026-10-22・改善プロンプト第3弾の9）。
+# main はルールセットで「PR とこの試験の合格」が必須になる。公開は今までどおり main への取り込みで deploy.yml が行う。
+# 秘密は使わない（ビルドは接続先なしで型とまとめ方だけ確かめる。本番の Supabase には一切つながない）。
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-test-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: 試験とビルド
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Test
+        # deploy.yml と同じ: スキップが1件でもあれば止める（件数の行が読めない時も止める）
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee "$RUNNER_TEMP/npm-test.log"
+          if ! grep -Eq '^(ℹ|#) skipped 0$' "$RUNNER_TEMP/npm-test.log"; then
+            echo "::error::試験にスキップがあります（または件数の行が読めません）。スキップの理由を確かめてください。"
+            grep -E '^(ℹ|#) (tests|pass|fail|skipped) ' "$RUNNER_TEMP/npm-test.log" || true
+            exit 1
+          fi
+      - name: Build
+        run: npm run build
