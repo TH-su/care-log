@@ -105,15 +105,17 @@ export function isStale(body: string, current: string | null): boolean {
 }
 
 /**
- * いまの申し送りから、記録の文の後ろに足された部分（ひと言・日報で足した文）を取り出す（〔申し送りを直す〕で引き継ぐ
- * ＝2c の反証 中5）。記録の文には「。」が入らないので、最初の「。」の後ろ。無ければ、いまの文で始まる時はその後ろ。
- * どちらでもなければ空（小窓に「いまの申し送り」を出して、職員が入れ直せるようにする）
+ * 〔申し送りを直す〕の欄に初めに入れる「直した後の申し送り」の案。小窓は全文を見せて直させる（職員が確かめてから送る）。
+ * 前の記録の文はどこにも残っていないので、ひと言を推測で切り出さない（切り出すと、前の記録の値の切れ端が黙って載る
+ * ＝2c の直しの確認の反証 中1）。確かな時だけ「。」の後ろを引き継ぐ: いまの文に「。」が無く（自由入力の活動の項目には
+ * 「。」が入りうる）、申し送りに「。」がある時（記録の文には「。」が入らないので、最初の「。」の後ろはひと言か足した文）
  */
-export function markTail(body: string, current: string | null): string {
+export function fixProposal(body: string, current: string): string {
+  if (current.includes('。')) return current
   const i = body.indexOf('。')
-  if (i >= 0) return body.slice(i + 1).trim()
-  if (current !== null && body.startsWith(current)) return body.slice(current.length).trim()
-  return ''
+  if (i < 0) return current
+  const tail = body.slice(i + 1).trim()
+  return tail === '' ? current : `${current}。${tail}`
 }
 
 /** ひと言の検査（長すぎは理由の文） */

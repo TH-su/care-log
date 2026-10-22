@@ -104,10 +104,16 @@ if (M === null) {
       assert.equal(M.isStale('昼食 主食 7割・副食 5割 声かけで完食', '昼食 主食 7割・副食 5割'), false)
       assert.equal(M.isStale('水分 10:30 1500 ml', '水分 10:30 150 ml'), true)
       assert.equal(M.isStale('昼食 主食 10割・副食 5割', '昼食 主食 1割・副食 5割'), true)
-      // 〔申し送りを直す〕で引き継ぐ部分（ひと言・日報で足した文）
-      assert.equal(M.markTail('昼食 主食 7割・副食 5割。むせ込みあり', '昼食 主食 5割・副食 5割'), 'むせ込みあり')
-      assert.equal(M.markTail('昼食 主食 7割・副食 5割 声かけで完食', '昼食 主食 7割・副食 5割'), '声かけで完食')
-      assert.equal(M.markTail('昼食 主食 7割・副食 5割', '昼食 主食 5割・副食 5割'), '')
+      // 〔申し送りを直す〕の全文の案: 確かな時だけ「。」の後ろ（ひと言・足した文）を引き継ぐ。前の記録の切れ端は入れない
+      assert.equal(M.fixProposal('昼食 主食 7割・副食 5割。むせ込みあり', '昼食 主食 5割・副食 5割'), '昼食 主食 5割・副食 5割。むせ込みあり')
+      assert.equal(M.fixProposal('昼食 主食 7割・副食 5割', '昼食 主食 5割・副食 5割'), '昼食 主食 5割・副食 5割')
+      // 2c の直しの確認の反証 中1: 記録の文が短くなった時に、前の値の切れ端（（一部）・脈 70・下剤 1回）を入れない
+      assert.equal(M.fixProposal('活動 体操（一部）', '活動 体操'), '活動 体操')
+      assert.equal(M.fixProposal('バイタル 体温 36.5℃・血圧 120/80・脈 70', 'バイタル 体温 36.5℃・血圧 120/80'), 'バイタル 体温 36.5℃・血圧 120/80')
+      assert.equal(M.fixProposal('排泄 排尿 3回・排便 1回・下剤 1回', '排泄 排尿 3回・排便 1回'), '排泄 排尿 3回・排便 1回')
+      // 自由入力の活動の項目に「。」がある時は引き継がない（どこまでが項目か分からない。小窓に前の申し送りを出して直させる）
+      assert.equal(M.fixProposal('活動 散歩。公園まで。ふらつき', '活動 散歩。公園まで（一部）'), '活動 散歩。公園まで（一部）')
+      assert.equal(M.fixProposal('昼食 主食 7割・副食 5割。', '昼食 主食 5割・副食 5割'), '昼食 主食 5割・副食 5割')
       assert.equal(M.markCommentError('あ'.repeat(100)), null)
       assert.match(M.markCommentError('あ'.repeat(101)), /100 字まで/)
     })
@@ -228,7 +234,6 @@ if (M === null) {
       assert.match(comp, /markCategories\(rec\.kind\)\.length > 0 \? \{ categories: markCategories\(rec\.kind\) \} : \{\}/)
       // 〔外す〕は見た行（F09）・確認つき。〔申し送りを直す〕は見た本文を基準に
       assert.match(comp, /deleteNote\(\{ id: row\.note\.id \}, row\.note, \{ meta: noteMetaOf\(row\.note\), editedBy: actorId \}\)/)
-      assert.match(comp, /\{ body: \{ value: markBody\(text, comment\), base: row\.note\.body \} \}/)
       assert.match(comp, /<ConfirmDialog\s+open=\{delRow !== null\}/)
     })
     it('送る直前に読み直して世代を決める・生きている印があれば2件目を作らない・読めていなければ付けない', () => {
@@ -244,11 +249,15 @@ if (M === null) {
       assert.match(comp, /const sendAdd = async \(rid: number, d: string, rec: MarkRecord, text: string, comment: string\) => \{/)
       assert.doesNotMatch(comp.slice(comp.indexOf('const sendAdd'), comp.indexOf('const sendRemove')), /const rid = residentId/)
       assert.match(comp, /void sendAdd\(cur\.rid, cur\.d, cur\.rec, cur\.text, cur\.comment\)/)
-      assert.match(comp, /void sendFix\(cur\.rid, cur\.d, cur\.rec, cur\.row, cur\.text, cur\.comment\)/)
+      assert.match(comp, /void sendFix\(cur\.rid, cur\.d, cur\.rec, cur\.row, cur\.comment\)/)
       assert.match(comp, /void sendRemove\(delRow\.rid, delRow\.d, delRow\.rec, delRow\.row\)/)
       assert.match(comp, /useEffect\(\(\) => \{\s+setDlg\(null\)\s+setDelRow\(null\)\s+\}, \[day, residentId\]\)/)
-      // 中5: 〔申し送りを直す〕は足された部分を引き継ぐ
-      assert.match(comp, /comment: markTail\(live\.note\.body, text\)/)
+      // 中5（と確認の反証 中1）: 〔申し送りを直す〕は全文の案を見せて直させる（ひと言を推測で切り出さない）
+      assert.match(comp, /comment: fixProposal\(live\.note\.body, text\)/)
+      assert.match(comp, /\{ body: \{ value: full\.trim\(\), base: row\.note\.body \} \}/)
+      assert.match(comp, /直した後の申し送り（全文を確かめて、必要なら直してください）/)
+      assert.match(comp, /<textarea/)
+      assert.doesNotMatch(comp, /markTail/)
     })
     it('17時のロック: 現場のログインは記録日の 17:00 から付け外し・直しをしない（事務所はできる・サーバーが正）', () => {
       assert.match(comp, /const lockedForMe = lockState\(day, 'daycare', false, now\)\.locked && !canUnlockNotes\(role\)/)
