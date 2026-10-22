@@ -14,8 +14,10 @@ import {
   VITAL_LIMIT_FIELDS,
   VITAL_LIMIT_LABEL,
   VITAL_LIMIT_RANGES,
+  baseGroupText,
   cancelableToday,
   fallbackNotice,
+  inputFallback,
   limitFor,
   limitSummary,
   parseVitalLimitInput,
@@ -53,6 +55,12 @@ export function VitalLimitsCard({ residentId, role }: Props) {
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<Msg | null>(null)
   const [delRow, setDelRow] = useState<ResidentVitalLimit | null>(null)
+  /**
+   * 〔足す〕の初めの値を取った行（選んだ開始日の直前に効く行。無ければ null）と、そこから値を直したか（2d-1 の反証 中3）。
+   * 開始日を変えた時、直していなければその日の直前に効く行の値を入れ直し、直していれば知らせて〔その行の値を入れる〕を出す
+   */
+  const [prefillFrom, setPrefillFrom] = useState<number | null>(null)
+  const [dirty, setDirty] = useState(false)
   const ridRef = useRef(residentId)
   ridRef.current = residentId
 
@@ -79,7 +87,7 @@ export function VitalLimitsCard({ residentId, role }: Props) {
   const mine = rows.filter((r) => r.resident_id === residentId).sort((a, b) => b.valid_from.localeCompare(a.valid_from) || b.id - a.id)
   const now = limitFor(rows, residentId, today)
   const eff = thresholdsFor(now, vitalThresholds())
-  const upcoming = mine.filter((r) => r.valid_from > today)
+  const upcoming = mine.filter((r) => r.valid_from > today).sort((a, b) => a.valid_from.localeCompare(b.valid_from))
   const fb = fallbackNotice(eff.fallback)
   const tag = (g: VitalLimitGroup) => (eff.individual.has(g) ? '（個人の基準）' : '（施設の基準）')
 
@@ -88,6 +96,17 @@ export function VitalLimitsCard({ residentId, role }: Props) {
     const p = parseVitalLimitInput(input, todayIso())
     if (!p.ok) {
       setMsg({ tone: 'warn', text: p.message })
+      return
+    }
+    // 施設の基準と合わせて段階の順が崩れる項目は効かないので、足す前に止める（2d-1 の反証 中2。先の日の行は効く日まで気づけないため）
+    const base = vitalThresholds()
+    const fb = inputFallback(p.value, base)
+    if (fb.size > 0) {
+      const names = (['temp', 'sysBp', 'diaBp', 'pulse'] as const).filter((g) => fb.has(g))
+      setMsg({
+        tone: 'warn',
+        text: `入れた値は施設の基準と合わせると段階の順が崩れるため、効きません: ${names.map((g) => baseGroupText(g, base)).join('・')}。この項目は値をそろえて入れるか、空欄にしてください（入力は消えていません）。`,
+      })
       return
     }
     setBusy(true)
@@ -130,6 +149,22 @@ export function VitalLimitsCard({ residentId, role }: Props) {
     }
   }
 
+  /** その開始日の直前に効く行（その日ちょうどの行は除く＝同じ日には足せない）の値を入れる */
+  const baseRowFor = (from: string): ResidentVitalLimit | null =>
+    limitFor(
+      rows.filter((r) => !(r.resident_id === residentId && r.valid_from === from)),
+      residentId,
+      from,
+    )
+  const fillFrom = (v: VitalLimitInput, from: string): VitalLimitInput => {
+    const b = baseRowFor(from)
+    const out = { ...v, valid_from: from }
+    for (const f of VITAL_LIMIT_FIELDS) out[f] = b === null || b[f] === null || !Number.isFinite(b[f]) ? '' : String(b[f])
+    setPrefillFrom(b?.id ?? null)
+    return out
+  }
+  const fromRow = open ? baseRowFor(input.valid_from) : null
+  const fromChanged = open && (fromRow?.id ?? null) !== prefillFrom
   const t = eff.t
   const msgCls = msg === null ? '' : msg.tone === 'ok' ? 'border-ok bg-ok-bg' : msg.tone === 'warn' ? 'border-warn bg-warn-bg' : 'border-danger bg-danger-bg'
   const btn = 'min-h-tap rounded border border-border-strong bg-surface px-3 text-base text-ink disabled:text-ink3'
@@ -191,9 +226,20 @@ export function VitalLimitsCard({ residentId, role }: Props) {
             </p>
           ) : null}
           {upcoming.length > 0 ? (
-            <p className="mt-1 text-sm">
-              <span aria-hidden="true">ⓘ </span>これから効く行: {upcoming.map((r) => `${md(r.valid_from)} から`).join('・')}
-            </p>
+            <div className="mt-1 space-y-1 text-sm">
+              <p>
+                <span aria-hidden="true">ⓘ </span>これから効く行: {upcoming.map((r) => `${md(r.valid_from)} から`).join('・')}
+              </p>
+              {upcoming.map((r) => {
+                const n = fallbackNotice(thresholdsFor(r, vitalThresholds()).fallback)
+                return n === null ? null : (
+                  <p key={r.id} role="status" className="rounded border border-warn bg-warn-bg p-2">
+                    <span aria-hidden="true">▲ </span>
+                    {md(r.valid_from)} からの行: {n}
+                  </p>
+                )
+              })}
+            </div>
           ) : null}
           {mine.length > 0 ? (
             <details className="mt-2">
@@ -231,7 +277,10 @@ export function VitalLimitsCard({ residentId, role }: Props) {
                         type="text"
                         inputMode={VITAL_LIMIT_RANGES[f].decimal ? 'decimal' : 'numeric'}
                         value={input[f]}
-                        onChange={(e) => setInput({ ...input, [f]: e.target.value })}
+                        onChange={(e) => {
+                          setInput({ ...input, [f]: e.target.value })
+                          setDirty(true)
+                        }}
                         className="mt-1 block min-h-tap w-full rounded border border-border-strong bg-surface px-2 text-lg"
                       />
                     </label>
@@ -243,10 +292,27 @@ export function VitalLimitsCard({ residentId, role }: Props) {
                     type="date"
                     min={today}
                     value={input.valid_from}
-                    onChange={(e) => setInput({ ...input, valid_from: e.target.value })}
+                    onChange={(e) => {
+                      const from = e.target.value
+                      // 値を直していなければ、新しい開始日の直前に効く行の値を入れ直す（直していれば下で知らせる）
+                      setInput(dirty ? { ...input, valid_from: from } : fillFrom(input, from))
+                    }}
                     className="mt-1 block min-h-tap rounded border border-border-strong bg-surface px-2 text-lg"
                   />
                 </label>
+                {fromChanged ? (
+                  <div role="status" className="space-y-1 rounded border border-warn bg-warn-bg p-2 text-sm">
+                    <p>
+                      <span aria-hidden="true">▲ </span>
+                      {fromRow === null
+                        ? 'この開始日の前には個人の行がありません（いまの入力は、別の行の値から入れたものです）。'
+                        : `この開始日の直前に効くのは ${md(fromRow.valid_from)} からの行（${limitSummary(fromRow)}）です。いまの入力は別の行の値から入れたものです。`}
+                    </p>
+                    <button type="button" onClick={() => { setInput(fillFrom(input, input.valid_from)); setDirty(false) }} className={btn}>
+                      {fromRow === null ? '空欄にする（施設の基準）' : `${md(fromRow.valid_from)} からの行の値を入れる`}
+                    </button>
+                  </div>
+                ) : null}
                 <label className="block text-sm">
                   根拠（必須・200字まで。主治医の指示とその日付など）
                   <textarea
@@ -274,10 +340,9 @@ export function VitalLimitsCard({ residentId, role }: Props) {
               <button
                 type="button"
                 onClick={() => {
-                  // 行は「その日からの一式」（空欄＝施設の基準）。いま効いている個人の値を初めから入れておく（変えない項目を失わない）
-                  const v = emptyInput(todayIso())
-                  if (now !== null) for (const f of VITAL_LIMIT_FIELDS) v[f] = now[f] === null || !Number.isFinite(now[f]) ? '' : String(now[f])
-                  setInput(v)
+                  // 行は「その日からの一式」（空欄＝施設の基準）。開始日（初めは今日）の直前に効く個人の値を初めから入れておく
+                  setInput(fillFrom(emptyInput(todayIso()), todayIso()))
+                  setDirty(false)
                   setOpen(true)
                 }}
                 className={`${btn} mt-2`}

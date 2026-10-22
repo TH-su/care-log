@@ -147,6 +147,19 @@ if (L === null) {
       assert.equal(b.individual.size, 0)
       assert.equal(L.fallbackNotice(new Set()), null)
     })
+    it('2d-1 の反証 中2: 足す前に、施設の基準と合わせて段階の順が崩れる項目を見つける（先の日の行も効く日まで気づけないため）', () => {
+      const v = (over = {}) => {
+        const o = {}
+        for (const f of L.VITAL_LIMIT_FIELDS) o[f] = null
+        return { ...o, ...over }
+      }
+      assert.deepEqual([...L.inputFallback(v({ temp_warn_high: 38.5 }), BASE)], ['temp'], '施設の危険の高 38.1 を超える注意の高')
+      assert.deepEqual([...L.inputFallback(v({ temp_warn_high: 38.5, temp_danger_high: 39.0 }), BASE)], [], '危険の高もそろえて入れれば効く')
+      assert.deepEqual([...L.inputFallback(v({ sys_bp_warn_low: 140 }), { ...BASE, sysBp: { dangerHigh: 130, warnLow: 90 } })], ['sysBp'])
+      assert.deepEqual([...L.inputFallback(v(), BASE)], [])
+      assert.equal(L.baseGroupText('temp', BASE), '体温（注意 37.5・危険 38.1・危険の低 35.5）')
+      assert.equal(L.baseGroupText('pulse', BASE), '脈（危険の高 101・注意の低 40）')
+    })
     it('入力の検査: 空欄は施設の基準・範囲・小数・入れた値どうしの順・根拠は必須・開始日は今日以降', () => {
       const base = (over = {}) => {
         const v = { valid_from: '2026-10-22', basis: '主治医の指示 10/20' }
@@ -285,6 +298,24 @@ if (L === null) {
       assert.doesNotMatch(c, /supabase|\.from\(|\.rpc\(|localStorage/)
       assert.match(c, /<ConfirmDialog\s+open=\{delRow !== null\}/)
       assert.match(c, /canEdit && cancelableToday\(r, today\)/)
+    })
+    it('2d-1 の反証の直し（カード）: 足す前に施設の基準と合わない項目を止める・初めの値は開始日の直前に効く行から・先の日の行の知らせ', () => {
+      const c = code('../src/components/VitalLimitsCard.tsx')
+      // 中2: 足す前に止める（addResidentVitalLimit より前）・これから効く行にも知らせ
+      const stop = c.indexOf('const fb = inputFallback(p.value, base)')
+      const send = c.indexOf('await addResidentVitalLimit(rid, p.value)')
+      assert.ok(stop > 0 && send > stop)
+      assert.match(c, /fallbackNotice\(thresholdsFor\(r, vitalThresholds\(\)\)\.fallback\)/)
+      // 中3: 開始日の直前に効く行（その日ちょうどの行は除く）から入れる。直していなければ日を変えた時に入れ直し、直していれば知らせる
+      assert.match(c, /rows\.filter\(\(r\) => !\(r\.resident_id === residentId && r\.valid_from === from\)\)/)
+      assert.match(c, /setInput\(dirty \? \{ \.\.\.input, valid_from: from \} : fillFrom\(input, from\)\)/)
+      assert.match(c, /setInput\(fillFrom\(emptyInput\(todayIso\(\)\), todayIso\(\)\)\)/)
+      assert.match(c, /const fromChanged = open && \(fromRow\?\.id \?\? null\) !== prefillFrom/)
+    })
+    it('2d-1 の反証 中1・軽4（移行）: 足した時刻はサーバーの今・取り消した行と、取り消し以外の取り消しの列の書き換えは止める', () => {
+      assert.match(migCode, /new\.created_at := now\(\);\s+new\.deleted_at := null;\s+new\.deleted_by := null;/)
+      assert.match(migCode, /or \(old\.deleted_at is not null\s+and \(new\.deleted_at is distinct from old\.deleted_at/)
+      assert.match(migCode, /or \(old\.deleted_at is null and new\.deleted_at is null\s+and \(new\.deleted_by is distinct from old\.deleted_by or new\.edited_by is distinct from old\.edited_by\)\)/)
     })
   })
 }

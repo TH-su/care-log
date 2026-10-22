@@ -173,6 +173,22 @@ export function thresholdsFor(limit: ResidentVitalLimit | null, base: VitalThres
   return { t: { ...base, temp, sysBp, diaBp, pulse }, individual, fallback }
 }
 
+/**
+ * 入れた値を施設の基準と合わせた時に、段階の順が崩れて効かない項目（足す前の確かめ＝2d-1 の反証 中2）。
+ * 例: 施設の危険の高 38.1 の時に、体温の注意の高だけ 38.5 を入れた → 体温
+ */
+export function inputFallback(value: Record<VitalLimitField, number | null>, base: VitalThresholds): ReadonlySet<VitalLimitGroup> {
+  const row = { id: 0, resident_id: 0, valid_from: '', basis: '', set_by: null, rev: 1, created_at: null, ...value } as ResidentVitalLimit
+  return thresholdsFor(row, base).fallback
+}
+
+/** 施設の基準の一つの項目の言葉（足す前の確かめの文に使う） */
+export function baseGroupText(g: VitalLimitGroup, base: VitalThresholds): string {
+  if (g === 'temp') return `体温（注意 ${base.temp.warnHigh}・危険 ${base.temp.dangerHigh}・危険の低 ${base.temp.dangerLow}）`
+  const p = g === 'sysBp' ? base.sysBp : g === 'diaBp' ? base.diaBp : base.pulse
+  return `${VITAL_LIMIT_GROUP_LABEL[g]}（危険の高 ${p.dangerHigh}・注意の低 ${p.warnLow}）`
+}
+
 /** 施設の基準に戻した項目の知らせ（無ければ null） */
 export function fallbackNotice(fallback: ReadonlySet<VitalLimitGroup>): string | null {
   if (fallback.size === 0) return null
