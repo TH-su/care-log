@@ -35,6 +35,7 @@ import {
   peekResidentTargets,
   peekTimelineChunk,
 } from '../lib/cachedReads'
+import { useVitalLimits, VITAL_LIMITS_FAILED_TEXT } from '../hooks/useVitalLimits'
 import { buildMedDayRows, medMissingAllowed } from '../lib/med'
 import type { MedDayRow } from '../lib/med'
 import { buildDayAlerts, fluidTotalsOf } from '../lib/vitalAlerts'
@@ -127,6 +128,8 @@ export function AlertsPage() {
   const [state, setState] = useState<LoadState>({ status: 'loading' })
   const [tick, setTick] = useState(0)
   const [stool, setStool] = useState<StoolState>({ status: 'loading' })
+  // 個人の閾値（段階2d-2）。読めない時は施設の基準で判定し、その旨を出す
+  const limits = useVitalLimits(tick)
   const aliveRef = useRef(true)
   const day = clock.day
 
@@ -332,8 +335,9 @@ export function AlertsPage() {
       medRows,
       usualTemps: data.usual,
       targets: data.targets ?? new Map(),
+      thresholdsFor: (rid) => limits.lookup(rid, data.day),
     })
-  }, [data, clock, shown, medRows])
+  }, [data, clock, shown, medRows, limits.lookup])
 
   const alerts = useMemo(
     () => (stoolExtra === null ? baseAlerts : appendReasons(baseAlerts, shown.map((r) => r.id), stoolExtra.reasons)),
@@ -387,6 +391,7 @@ export function AlertsPage() {
         ) : (
           <>
             {data?.targets === null ? <PartialNote text={NOTE_TARGETS} /> : null}
+            {limits.failed ? <PartialNote text={VITAL_LIMITS_FAILED_TEXT} /> : null}
             {data?.med === null ? <PartialNote text={NOTE_MEDS} /> : null}
             <StoolNote state={stool} unlinked={stoolExtra?.unlinked ?? 0} />
             {day === clock.day && clock.nowMin < fromHour * 60 ? (

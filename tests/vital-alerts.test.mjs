@@ -939,7 +939,8 @@ describe('配線: 基準値は1か所（types.ts・KartePage・chart.ts）・移
 
   it('KartePage の帯・基準線・低摂取の線は基準値から作る（数の書き込みが無い）', () => {
     const s = read('../src/pages/KartePage.tsx')
-    assert.match(s, /import \{ vitalThresholds \} from '\.\.\/lib\/vitalThresholds'/)
+    // 段階2d-2: 点の判定（sysBpLevelBy など）も同じ vitalThresholds.ts から読む（固定し直し・意図は同じ＝基準値は1か所）
+    assert.match(s, /import \{[^}]*\bvitalThresholds\b[^}]*\} from '\.\.\/lib\/vitalThresholds'/)
     for (const lit of ["label: '38.1'", "label: '37.5'", "label: '35.5'", "label: '上151'", "label: '下91'", "label: '上90'", "label: '下50'", "label: '101'", "label: '40'", "label: '90'", "label: '93'"]) {
       assert.ok(!s.includes(lit), `KartePage に ${lit} が残っている`)
     }

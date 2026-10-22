@@ -75,6 +75,9 @@ import {
   vitalRangeError,
 } from '../lib/daycare'
 import type { DaycareBoardRow, DaycareReleaseIssue, DaycareVitalField, DaycareVitalSlot, DcVitalsFilter, KeyedVital } from '../lib/daycare'
+import { useVitalLimits } from '../hooks/useVitalLimits'
+import { vitalThresholds } from '../lib/vitalThresholds'
+import { VitalLimitsFailedNote } from '../components/VitalLimitsFailedNote'
 import { addDays, fmtDayLabel, todayIso, toHalfWidth } from '../lib/format'
 import { LEVEL_MARK, LS } from '../lib/types'
 import type { DaycareAttendance, DaycarePlanRow, DaycarePlanSource, Level, Resident, Staff } from '../lib/types'
@@ -161,6 +164,8 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   const [reloadKey, setReloadKey] = useState(0)
   const [residents, setResidents] = useState<Resident[]>([])
   const [targets, setTargets] = useState<Map<number, ResidentTargets>>(new Map())
+  // 段階2d-2: 個人のバイタルの閾値（印・〔＋再測定〕をその方のその日の基準で出す。読めない時は施設の基準・その旨を出す）
+  const limits = useVitalLimits(reloadKey)
   const [gate, setGate] = useState<{ value: boolean; observed: boolean; forbidden?: true; outdated?: true } | null>(null)
   const [filter, setFilterState] = useState<DcVitalsFilter>(readFilter)
   const [extraSeqs, setExtraSeqs] = useState<Map<number, number[]>>(new Map())
@@ -775,7 +780,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     const vals: Partial<Record<DaycareVitalField, number | null>> = {}
     for (const f of DAYCARE_VITAL_FIELDS) vals[f] = valueOf(last, f).v
     flushHeldSys(active, null)
-    setActive({ residentId: row.residentId, seq, key: daycareVitalKey(data.day, row.residentId, seq), field: firstAbnormalField(vals, targets.get(row.residentId)) })
+    setActive({ residentId: row.residentId, seq, key: daycareVitalKey(data.day, row.residentId, seq), field: firstAbnormalField(vals, targets.get(row.residentId), limits.lookup(row.residentId, data.day)) })
     setBuf('')
     setKpError(null)
   }
@@ -1013,6 +1018,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   return (
     <div className="mx-auto w-full max-w-6xl space-y-4 p-4">
       {header}
+      {limits.failed ? <VitalLimitsFailedNote className="" /> : null}
       <div className="lg:flex lg:items-start lg:gap-4">
         <div className={`min-w-0 flex-1 space-y-3 ${active !== null ? 'pb-96 lg:pb-0' : ''}`}>
           {shownRows.length === 0 ? (
@@ -1028,18 +1034,26 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                 const slots = slotsOf(row.residentId)
                 const prev = prevOf(row.residentId)
                 const target = targets.get(row.residentId)
+                const th = limits.lookup(row.residentId, data.day)
+                const own = th !== vitalThresholds()
                 return (
                   <li key={row.residentId} className="rounded-lg border border-border bg-surface p-3">
                     <div className="mb-2 flex flex-wrap items-baseline justify-between gap-gap">
                       <p className="text-lg font-bold text-ink">{nameOf(row.residentId)}</p>
-                      <p className="text-sm text-ink2">{target?.spo2_warn_below != null ? `個別: SpO2 ${target.spo2_warn_below}/${target.spo2_danger_below}` : '施設の基準'}</p>
+                      <p className="text-sm text-ink2">
+                        {target?.spo2_warn_below != null
+                          ? `個別: SpO2 ${target.spo2_warn_below}/${target.spo2_danger_below}${own ? '・個人の基準' : ''}`
+                          : own
+                            ? '個人の基準'
+                            : '施設の基準'}
+                      </p>
                     </div>
                     {slots.map((slot, si) => {
                       const st = slotState.get(slot.key)
                       const pend = pendingRow('vitals', targetOf(slot))
                       const vals: Partial<Record<DaycareVitalField, number | null>> = {}
                       for (const f of DAYCARE_VITAL_FIELDS) vals[f] = valueOf(slot, f).v
-                      const abnormal = vitalNeedsRecheck(vals, target)
+                      const abnormal = vitalNeedsRecheck(vals, target, th)
                       const isLast = si === slots.length - 1
                       return (
                         <div key={slot.key} className={si > 0 ? 'mt-3 border-t border-border pt-3' : ''}>
@@ -1050,7 +1064,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                           <div className="grid grid-cols-5 gap-gap">
                             {DAYCARE_VITAL_FIELDS.map((f) => {
                               const { v, local } = valueOf(slot, f)
-                              const lv = vitalLevel(f, v, target)
+                              const lv = vitalLevel(f, v, target, th)
                               const isActive = active?.key === slot.key && active.field === f
                               const pv = prev[f]
                               const word = lv === null ? '' : LEVEL_WORD[lv]

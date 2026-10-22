@@ -18,6 +18,7 @@ import { vitalThresholds } from '../../lib/vitalThresholds.ts'
 import type { VitalThresholds } from '../../lib/vitalThresholds.ts'
 import { fluidProgress, fluidTargetOf, judgeTemp, mealLowStreaks, mealShade, spo2LevelFor, spo2Limits } from '../../lib/vitalAlerts.ts'
 import type { ResidentTargets } from '../../lib/vitalAlerts.ts'
+import { lastChangeDay } from '../../lib/vitalLimits.ts'
 
 /** 温度板の日数 */
 export const TEMP_SHEET_DAYS = 14
@@ -55,6 +56,12 @@ export interface TempSheetInput {
   target: ResidentTargets | null | undefined
   /** 基準値（省くといまの基準値） */
   thresholds?: VitalThresholds
+  /**
+   * その日の基準（段階2d-2・個人の閾値。src/lib/vitalLimits.ts の thresholdsLookup）。省くと全部の日が thresholds。
+   * 体温・血圧・脈・SpO2 の印は日ごとにこの基準で判定し、線と凡例は期間の最後の日の基準で描く（計画の質問11）。
+   * 食事・水分は個人の閾値の対象外なので thresholds のまま
+   */
+  thresholdsFor?: (day: string) => VitalThresholds
 }
 
 export interface MealMark {
@@ -88,8 +95,10 @@ export interface TempSheetModel {
   /** 水分（日合計 'ml' の数字と目標比 '67%'。記録なしは両方 ''） */
   fluid: { total: string; ratio: string }[]
   fluidTarget: { ml: number; individual: boolean }
-  /** 基準値（線を引く値） */
+  /** 基準値（線を引く値＝期間の最後の日の基準） */
   thresholds: VitalThresholds
+  /** 期間の中で基準が変わった一番新しい日（凡例の下に「〇/〇から基準が変わりました」）。変わっていなければ null */
+  changedFrom: string | null
 }
 
 const KIND_ORDER: Record<VitalKind, number> = { routine: 0, recheck: 1, observation: 2, symptom: 3 }
@@ -144,6 +153,9 @@ export function buildTempSheet(p: TempSheetInput): TempSheetModel {
   const t = p.thresholds ?? vitalThresholds()
   const days = [...p.days]
   const last = days[days.length - 1] ?? ''
+  // その日の基準（体温・血圧・脈・SpO2 の印）。渡されなければ全部の日が t（今までと同じ）
+  const tOn = p.thresholdsFor ?? (() => t)
+  const lineT = days.length > 0 ? tOn(last) : t
   const mine = <T extends { resident_id: number }>(rows: readonly T[]): T[] => rows.filter((r) => r != null && r.resident_id === p.residentId)
 
   const sorted = mine(p.vitals).slice().sort(cmpVital)
@@ -154,7 +166,7 @@ export function buildTempSheet(p: TempSheetInput): TempSheetModel {
   const spo2 = daily(sorted, 'spo2', days)
   const usual = fin(p.usual) ? p.usual : null
 
-  const tempJudges = temp.map((v) => judgeTemp(v, usual, t))
+  const tempJudges = temp.map((v, i) => judgeTemp(v, usual, tOn(days[i])))
   const tempMarks = tempJudges.map((j) => j.mark)
   const tempLevels: Level[] = tempJudges.map((j) => j.level ?? (j.overUsual ? 'warn-high' : null))
 
@@ -200,17 +212,18 @@ export function buildTempSheet(p: TempSheetInput): TempSheetModel {
     spo2,
     tempMarks,
     tempLevels,
-    sysMarks: sys.map((v) => markOf(v == null ? null : levelHighLow(v, t.sysBp))),
-    diaMarks: dia.map((v) => markOf(v == null ? null : levelHighLow(v, t.diaBp))),
-    pulseMarks: pulse.map((v) => markOf(v == null ? null : levelHighLow(v, t.pulse))),
-    spo2Marks: spo2.map((v) => markOf(spo2LevelFor(v, p.target, t))),
+    sysMarks: sys.map((v, i) => markOf(v == null ? null : levelHighLow(v, tOn(days[i]).sysBp))),
+    diaMarks: dia.map((v, i) => markOf(v == null ? null : levelHighLow(v, tOn(days[i]).diaBp))),
+    pulseMarks: pulse.map((v, i) => markOf(v == null ? null : levelHighLow(v, tOn(days[i]).pulse))),
+    spo2Marks: spo2.map((v, i) => markOf(spo2LevelFor(v, p.target, tOn(days[i])))),
     usual,
-    spo2Limits: spo2Limits(p.target, t),
+    spo2Limits: spo2Limits(p.target, lineT),
     meals: { breakfast: mealRow('breakfast'), lunch: mealRow('lunch'), dinner: mealRow('dinner') },
     lowLabels,
     fluid,
     fluidTarget: fluidTargetOf(p.target, t),
-    thresholds: t,
+    thresholds: lineT,
+    changedFrom: p.thresholdsFor === undefined ? null : lastChangeDay(days, tOn),
   }
 }
 

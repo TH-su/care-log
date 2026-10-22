@@ -306,7 +306,8 @@ describe('カルテの配線（A1・A2・A3・A6・A7・A9・個別の目標）'
     assert.match(s, /dash: '1\.5 3'/)
     assert.match(s, /平熱 \$\{/)
     assert.match(s, /30日の定時の中央値/)
-    assert.match(s, /markOf\?\(v: number\): string \| null/)
+    // 段階2d-2: 点ごとの記号はその点の日の基準で（day を受け取る。固定し直し・意図は同じ）
+    assert.match(s, /markOf\?\(v: number, day\?: string\): string \| null/)
   })
 
   it('SpO2: 個別の下限（spo2LevelFor・spo2Limits）で判定し、個別の下限の線を引く', () => {

@@ -1164,9 +1164,12 @@ if (DC === null) {
     })
     it('日報の発熱者（静的）: 読み込みで基準値を待ち、デイの測定は発熱のあった方だけ・温度板とタイムラインは変えない', () => {
       const d = code('../src/pages/DailySheetPage.tsx')
-      assert.match(d, /const thresholds = loadVitalThresholds\(\)\.then\(/)
+      // 段階2d-2: 個人の閾値も同じ上限まで待つ（固定し直し・意図は同じ＝発熱の判定に使う基準を待ってから選ぶ）
+      assert.match(d, /const limitsP = fetchResidentVitalLimits\(\)\.then\(/)
+      assert.match(d, /const thresholds = Promise\.all\(\[loadVitalThresholds\(\), limitsP\]\)\.then\(/)
       assert.match(d, /const \[report\] = await Promise\.all\(\[\s*loadDay\(day\),\s*Promise\.race\(\[thresholds, new Promise<void>\(\(r\) => \(waitTimer = setTimeout\(r, THRESHOLD_WAIT_MS\)\)\)\]\),\s*\]\)/)
-      assert.match(d, /const obs = dailyFeverObservations\(obsAll, report\?\.daycareVitalIds, editing\)/)
+      assert.match(d, /const usedLookup = thresholdsLookup\(loadedLimits, vitalThresholds\(\)\)/)
+      assert.match(d, /const obs = dailyFeverObservations\(obsAll, report\?\.daycareVitalIds, editing, \(rid\) => usedLookup\(rid, day\)\)/)
       // 直している最中の行（止まった控え・送信待ち）は隠さない（4巡目 F1・F9）
       assert.match(d, /if \(vitalConflictsRef\.current\[v\.id\] !== undefined \|\| pendingRow\('vitals', vitalTargetOf\(v\.id\)\) !== null\) editing\.add\(v\.id\)/)
       const db = code('../src/lib/db.ts')
@@ -1216,7 +1219,9 @@ if (DC === null) {
       assert.match(d, /const prev = moveRowStatuses\(prev0, keyMoves, keyStay\)/)
       // 6巡目: 基準値が遅れて届いても自動では読み直さない（失敗の繰り返し・入力中の行のずれを防ぐ）。違う基準だった時だけ一言
       assert.doesNotMatch(d, /setThresholdsTick|thresholdsTick/)
-      assert.match(d, /if \(!thresholdsDone\) \{\s*void thresholds\.then\(\(\) => \{\s*if \(alive && aliveRef\.current && JSON\.stringify\(vitalThresholds\(\)\) !== usedThresholds\) setThresholdsLate\(true\)/)
+      // 段階2d-2: 比べるのは施設の基準と個人の閾値の両方（行が無い・読めないは同じ＝[]）。固定し直し・意図は同じ
+      assert.match(d, /const usedThresholds = JSON\.stringify\(\[vitalThresholds\(\), loadedLimits \?\? \[\]\]\)/)
+      assert.match(d, /if \(!thresholdsDone\) \{\s*void thresholds\.then\(\(\) => \{\s*if \(alive && aliveRef\.current && JSON\.stringify\(\[vitalThresholds\(\), loadedLimits \?\? \[\]\]\) !== usedThresholds\) setThresholdsLate\(true\)/)
       assert.match(d, /\}, \[day, reload, reloadToken, loadDay, applyAttendance, onLoaded, restoreDrafts, writeHeld\]\)/)
       assert.match(d, /thresholdsLate=\{thresholdsLate\}\s*onReselect=\{\(\) => setReload\(\(n\) => n \+ 1\)\}/)
       // 7巡目 中1: 一言が案内するボタンを一言の横に置く（他の帯が出ていない時でも押せる）

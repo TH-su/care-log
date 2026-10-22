@@ -43,12 +43,7 @@ import type { CellSaveResult, ChangeInfo, PendingCellRow, VitalTarget } from '..
 import { addDays, fmtDayLabel, normalizeVitalInput, todayIso } from '../lib/format'
 import { recordTimeFor } from '../lib/nextMorning'
 import {
-  diaBpLevel,
   LS,
-  pulseLevel,
-  spo2Level,
-  sysBpLevel,
-  tempLevel,
   VITAL_RANGE,
 } from '../lib/types'
 import type { Level, Resident, Vital, VitalKind } from '../lib/types'
@@ -98,6 +93,11 @@ import { RecorderBar } from '../components/RecorderBar'
 // 平熱との差（A1）・SpO2 の個別の下限（A9）。平熱と目標は画面を開いた時に1回読んで控える。基準値の上書き（A8）も1回読む
 import { fetchResidentTargets, fetchUsualTemps, loadVitalThresholds } from '../lib/db'
 import { judgeTemp, spo2Limits, spo2LevelFor } from '../lib/vitalAlerts'
+import { diaBpLevelBy, pulseLevelBy, spo2LevelBy, sysBpLevelBy, tempLevelBy, vitalThresholds } from '../lib/vitalThresholds'
+import type { VitalThresholds } from '../lib/vitalThresholds'
+import { INDIVIDUAL_LIMIT_NOTE, isIndividualField } from '../lib/vitalLimits'
+import { useVitalLimits } from '../hooks/useVitalLimits'
+import { VitalLimitsFailedNote } from '../components/VitalLimitsFailedNote'
 import type { ResidentTargets } from '../lib/vitalAlerts'
 
 // ── 定数 ─────────────────────────────────────────────────────
@@ -130,12 +130,13 @@ const FIELD_UNIT: Record<Field, string> = {
   spo2: '%',
 }
 const FIELD_DIGITS: Record<Field, number> = { temp: 1, sys_bp: 0, dia_bp: 0, pulse: 0, spo2: 0 }
-const LEVEL_FN: Record<Field, (v: number | null) => Level> = {
-  temp: tempLevel,
-  sys_bp: sysBpLevel,
-  dia_bp: diaBpLevel,
-  pulse: pulseLevel,
-  spo2: spo2Level,
+/** 判定（t＝その方のその日の基準。段階2d-2: 個人の閾値を合成した物・個人の値が無い方は施設の基準そのもの） */
+const LEVEL_BY: Record<Field, (v: number | null, t: VitalThresholds) => Level> = {
+  temp: tempLevelBy,
+  sys_bp: sysBpLevelBy,
+  dia_bp: diaBpLevelBy,
+  pulse: pulseLevelBy,
+  spo2: (v, t) => spo2LevelBy(v, t),
 }
 
 const KIND_LABEL: Record<VitalKind, string> = {
@@ -645,6 +646,8 @@ export function VitalsGridPage({
   const [usualTemps, setUsualTemps] = useState<Map<number, number | null>>(() => new Map())
   /** 個別の目標（A9 の SpO2 の下限。無い方・読めない時は施設の基準 93%・90%） */
   const [targets, setTargets] = useState<Map<number, ResidentTargets>>(() => new Map())
+  /** 段階2d-2: 個人の閾値（開いた時に1回読む。読めない時は施設の基準で判定し、その旨を出す） */
+  const limits = useVitalLimits()
   /** 基準値（app_settings の上書き）を読み終えた印（読み終えたら描き直して新しい基準で印を出す） */
   const [, setThresholdsVer] = useState(0)
   const [floor, setFloor] = useState<string>(() => readFloor() ?? '1')
@@ -1989,6 +1992,7 @@ export function VitalsGridPage({
             {error}
           </p>
         ) : null}
+        {limits.failed ? <VitalLimitsFailedNote /> : null}
 
         {floorOptions.length > 1 ? (
           // bar-compact: スマホの幅ではボタンを小さく・間隔を詰める（sheet.css）
@@ -2097,6 +2101,7 @@ export function VitalsGridPage({
                     day={day}
                     usualTemp={usualTemps.get(row.residentId)}
                     target={targets.get(row.residentId)}
+                    limitsT={limits.lookup(row.residentId, day)}
                     presence={presence}
                     onOpenCell={(field) => openCell(row.rowId, field, edit)}
                     onAddRecheck={() => addRecheck(row.residentId)}
@@ -2260,6 +2265,8 @@ interface FragmentRowProps {
   usualTemp?: number | null
   /** A9: この方の個別の目標（SpO2 の下限。無ければ施設の基準） */
   target?: ResidentTargets
+  /** 段階2d-2: この方のこの日の基準（個人の閾値。無い方は施設の基準そのもの） */
+  limitsT: VitalThresholds
   /** 他の端末が入力中の欄・行の表示（Presence） */
   presence: CellPresence
   onOpenCell: (field: Field) => void
@@ -2298,14 +2305,17 @@ function VitalValue({
   value,
   usualTemp,
   target,
+  t,
 }: {
   field: Field
   value: number
   usualTemp: number | null | undefined
   target: ResidentTargets | undefined
+  /** その方のその日の基準（段階2d-2） */
+  t: VitalThresholds
 }) {
   if (field === 'temp') {
-    const j = judgeTemp(value, usualTemp)
+    const j = judgeTemp(value, usualTemp, t)
     const usualText = j.level ? j.note : j.overUsual ? j.mark : null
     return (
       <>
@@ -2322,23 +2332,27 @@ function VitalValue({
     )
   }
   if (field === 'spo2') {
-    return <LevelCell value={value} level={spo2LevelFor(value, target)} digits={FIELD_DIGITS.spo2} />
+    return <LevelCell value={value} level={spo2LevelFor(value, target, t)} digits={FIELD_DIGITS.spo2} />
   }
-  return <LevelCell value={value} level={LEVEL_FN[field](value)} digits={FIELD_DIGITS[field]} />
+  return <LevelCell value={value} level={LEVEL_BY[field](value, t)} digits={FIELD_DIGITS[field]} />
 }
 
-/** 読み上げに足す A1・A9 の語（「（平熱+1.2・平熱より高い）」「（個別の下限 95% を下回る）」）。当たらなければ '' */
-function newMarkWord(field: Field, value: number, usualTemp: number | null | undefined, target: ResidentTargets | undefined): string {
+/**
+ * 読み上げに足す A1・A9 の語（「（平熱+1.2・平熱より高い）」「（個別の下限 95% を下回る）」）と、
+ * 段階2d-2 の個人の基準で印が付いた時の「（個人の基準）」。当たらなければ ''
+ */
+function newMarkWord(field: Field, value: number, usualTemp: number | null | undefined, target: ResidentTargets | undefined, th: VitalThresholds): string {
+  const own = isIndividualField(field, th, vitalThresholds()) && (field === 'temp' ? judgeTemp(value, usualTemp, th).level : LEVEL_BY[field](value, th)) ? INDIVIDUAL_LIMIT_NOTE : ''
   if (field === 'temp') {
-    const j = judgeTemp(value, usualTemp)
+    const j = judgeTemp(value, usualTemp, th)
     const t = j.level ? j.note : j.overUsual ? j.mark : null
-    return t ? `（${t.replace('↑', '')}・平熱より高い）` : ''
+    return `${t ? `（${t.replace('↑', '')}・平熱より高い）` : ''}${own}`
   }
   if (field === 'spo2') {
-    const lim = spo2Limits(target)
-    return lim.individual && spo2LevelFor(value, target) ? `（個別の下限 ${lim.warnBelow}% を下回る）` : ''
+    const lim = spo2Limits(target, th)
+    return lim.individual && spo2LevelFor(value, target, th) ? `（個別の下限 ${lim.warnBelow}% を下回る）` : ''
   }
-  return ''
+  return own
 }
 
 const STATE_MARK: Record<RowState, string> = {
@@ -2371,6 +2385,7 @@ function FragmentRow({
   day,
   usualTemp,
   target,
+  limitsT,
   presence,
   onOpenCell,
   onAddRecheck,
@@ -2421,7 +2436,7 @@ function FragmentRow({
                 onClick={() => onOpenCell(f)}
                 aria-label={`${room ?? '居室未設定'} ${residentName} ${KIND_LABEL[row.kind]} ${FIELD_LABEL[f]}${
                   raw === '' ? '　未入力' : `　${raw}`
-                }${parsed != null && !selected && !bad ? newMarkWord(f, parsed, usualTemp, target) : ''}`}
+                }${parsed != null && !selected && !bad ? newMarkWord(f, parsed, usualTemp, target, limitsT) : ''}`}
                 aria-describedby={busy ? busyId : undefined}
                 className={[
                   busy ? `relative ${BUSY_RING}` : '',
@@ -2449,7 +2464,7 @@ function FragmentRow({
                 ) : parsed == null || selected || bad ? (
                   <span className="tabular block font-bold">{raw}</span>
                 ) : (
-                  <VitalValue field={f} value={parsed} usualTemp={usualTemp} target={target} />
+                  <VitalValue field={f} value={parsed} usualTemp={usualTemp} target={target} t={limitsT} />
                 )}
                 {busy ? <BusyMark busy={busy} id={busyId} /> : null}
               </button>

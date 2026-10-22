@@ -12,12 +12,13 @@
 // 浮動小数の誤差で境目が外れないように）。
 // 拡張子付きで import する（tests から node で直接読めるようにするため）。個人情報は扱わない（型と計算だけ）。
 
-import { LEVEL_MARK, MED_SLOT_LABEL, MED_SLOTS, diaBpLevel, pulseLevel, sysBpLevel } from './types.ts'
+import { LEVEL_MARK, MED_SLOT_LABEL, MED_SLOTS } from './types.ts'
 import type { Level, Meal, MealSlot, MedSlot, Note, Vital } from './types.ts'
 import type { MedDayRow } from './med.ts'
 import { MEAL_CHART_SLOTS, mealIntake } from './chart.ts'
-import { FLUID_TARGET_RANGE, MEAL_FULL, SPO2_LIMIT_RANGE, spo2LevelBy, tempLevelBy, vitalThresholds } from './vitalThresholds.ts'
+import { FLUID_TARGET_RANGE, MEAL_FULL, SPO2_LIMIT_RANGE, diaBpLevelBy, pulseLevelBy, spo2LevelBy, sysBpLevelBy, tempLevelBy, vitalThresholds } from './vitalThresholds.ts'
 import type { VitalThresholds } from './vitalThresholds.ts'
+import { INDIVIDUAL_LIMIT_NOTE } from './vitalLimits.ts'
 
 // ══════════════════════════════════════════════════════════════
 // 個別の目標（resident_targets・0034）と平熱（vital_usual_temps・0034）の形
@@ -399,34 +400,44 @@ export interface DayAlertsInput {
   targets: ReadonlyMap<number, ResidentTargets>
   /** 基準値（省くといまの基準値） */
   thresholds?: VitalThresholds
+  /**
+   * 段階2d-2: その方の day のバイタルの基準（個人の閾値＝vitalLimits.ts の thresholdsLookup）。省く・個人の値が無い方は thresholds。
+   * 体温・血圧・脈の判定だけに使う（食事・水分・SpO2 は今までどおり。SpO2 の個別の下限は A9 の targets）
+   */
+  thresholdsFor?: (residentId: number) => VitalThresholds
 }
 
 const sevOf = (lv: Level): 'danger' | 'warn' => (lv === 'danger-high' || lv === 'danger-low' ? 'danger' : 'warn')
 const hm = (v: string | null): string | null => (typeof v === 'string' && /^\d{2}:\d{2}/.test(v) ? v.slice(0, 5) : null)
 
-/** 1件のバイタルの基準外の理由（体温＝A1 込み・血圧・脈・SpO2＝A9 込み） */
-function vitalReasons(v: Vital, usual: number | null | undefined, target: ResidentTargets | undefined, t: VitalThresholds): AlertReason[] {
+/**
+ * 1件のバイタルの基準外の理由（体温＝A1 込み・血圧・脈・SpO2＝A9 込み）。
+ * t はその方のその日の基準（個人の閾値を合成した後）、facility は施設の基準（個人の基準で判定した項目に注記を付けるため）
+ */
+function vitalReasons(v: Vital, usual: number | null | undefined, target: ResidentTargets | undefined, t: VitalThresholds, facility: VitalThresholds = t): AlertReason[] {
   const out: AlertReason[] = []
   const base = { kind: 'vital' as const, section: 'vitals' as const, time: hm(v.measured_at), recordId: v.id }
   if (v.temp != null) {
     const j = judgeTemp(v.temp, usual, t)
     if (j.level) {
       // 今の印（重い方）＋両方当たる時は平熱差の注記: 「体温 37.8↑（平熱+1.3）」
-      out.push({ ...base, severity: sevOf(j.level), label: `体温 ${v.temp.toFixed(1)}${j.mark}${j.note ? `（${j.note}）` : ''}` })
+      const own = t.temp !== facility.temp ? INDIVIDUAL_LIMIT_NOTE : ''
+      out.push({ ...base, severity: sevOf(j.level), label: `体温 ${v.temp.toFixed(1)}${j.mark}${j.note ? `（${j.note}）` : ''}${own}` })
     } else if (j.overUsual) {
       // 平熱との差だけ: 「体温 37.3（平熱+1.0↑）」
       out.push({ ...base, severity: 'warn', label: `体温 ${v.temp.toFixed(1)}（${j.mark}）` })
     }
   }
-  const sl = sysBpLevel(v.sys_bp)
-  const dl = diaBpLevel(v.dia_bp)
+  const sl = sysBpLevelBy(v.sys_bp, t)
+  const dl = diaBpLevelBy(v.dia_bp, t)
   if (sl || dl) {
     const part = (x: number | null, lv: Level) => `${x ?? '—'}${lv ? LEVEL_MARK[lv] : ''}`
     const severity = sl === 'danger-high' || dl === 'danger-high' ? 'danger' : 'warn'
-    out.push({ ...base, severity, label: `血圧 ${part(v.sys_bp, sl)}/${part(v.dia_bp, dl)}` })
+    const own = (sl && t.sysBp !== facility.sysBp) || (dl && t.diaBp !== facility.diaBp) ? INDIVIDUAL_LIMIT_NOTE : ''
+    out.push({ ...base, severity, label: `血圧 ${part(v.sys_bp, sl)}/${part(v.dia_bp, dl)}${own}` })
   }
-  const pl = pulseLevel(v.pulse)
-  if (pl) out.push({ ...base, severity: sevOf(pl), label: `脈拍 ${v.pulse}${LEVEL_MARK[pl]}` })
+  const pl = pulseLevelBy(v.pulse, t)
+  if (pl) out.push({ ...base, severity: sevOf(pl), label: `脈拍 ${v.pulse}${LEVEL_MARK[pl]}${t.pulse !== facility.pulse ? INDIVIDUAL_LIMIT_NOTE : ''}` })
   const ol = spo2LevelFor(v.spo2, target, t)
   if (ol) {
     const lim = spo2Limits(target, t)
@@ -461,13 +472,15 @@ export function buildDayAlerts(p: DayAlertsInput): ResidentAlerts[] {
     seen.add(rid)
     const reasons: AlertReason[] = []
     const target = p.targets.get(rid)
+    // その方の day の基準（個人の閾値が無い方は t のまま＝今までと同じ判定）
+    const tr = p.thresholdsFor?.(rid) ?? t
 
     // バイタル（測定の時刻順・時刻の無いものは後ろ）
     const vs = p.vitals
       .filter((v) => v.resident_id === rid && v.measured_on === p.day)
       .slice()
       .sort((a, b) => (hm(a.measured_at) ?? '99:99').localeCompare(hm(b.measured_at) ?? '99:99') || a.id - b.id)
-    for (const v of vs) reasons.push(...vitalReasons(v, p.usualTemps.get(rid), target, t))
+    for (const v of vs) reasons.push(...vitalReasons(v, p.usualTemps.get(rid), target, tr, t))
 
     // 摂取低下（A2）
     const ml = streaks.get(rid)?.get(p.day)

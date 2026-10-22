@@ -283,13 +283,29 @@ if (L === null) {
       const t = read('../src/lib/types.ts')
       assert.doesNotMatch(t, /vital_limits|VitalLimit/)
     })
-    it('2d-1 ではどの画面の判定も変えない: 個人の基準（thresholdsFor）を使うのはカルテのカードだけ', () => {
+    it('2d-2: 記録の画面はその方のその日の基準で判定する（読むのは useVitalLimits の lookup だけ・施設の基準だけの判定の入口を使わない・読めない時は1行の知らせ）', () => {
+      // 2d-1 の「どの画面の判定も変えない」を、2d-2 で差し替えた後の形に固定し直す（個人の値の引き方を1か所＝hook に集める）
+      const SCREENS = ['KartePage', 'VitalsGridPage', 'VitalsSheetPage', 'DailySheetPage', 'TimelinePage', 'AlertsPage', 'DaycarePage', 'DaycareVitalsPage', 'DaycarePersonPage']
+      for (const f of SCREENS) {
+        const s = code(`../src/pages/${f}.tsx`)
+        assert.match(s, /useVitalLimits\(/, f)
+        assert.match(s, /limits\.failed \?/, f)
+        assert.doesNotMatch(s, /\b(tempLevel|sysBpLevel|diaBpLevel|pulseLevel|spo2Level|vitalHasAlert)\(/, `${f} が施設の基準だけの判定を使っている`)
+        assert.doesNotMatch(s, /\bthresholdsFor\(|\blimitFor\(/, `${f} が行から直接合成している（lookup を通す）`)
+      }
       const pages = readdirSync(new URL('../src/pages/', import.meta.url)).filter((f) => f.endsWith('.tsx'))
-      for (const f of pages) assert.doesNotMatch(code(`../src/pages/${f}`), /thresholdsFor|limitFor\(|fetchResidentVitalLimits/, f)
-      const libs = ['vitalAlerts.ts', 'daycare.ts', 'chart.ts']
-      for (const f of libs) assert.doesNotMatch(code(`../src/lib/${f}`), /vitalLimits|thresholdsFor/, f)
+      for (const f of pages) if (!SCREENS.includes(f.replace('.tsx', ''))) assert.doesNotMatch(code(`../src/pages/${f}`), /useVitalLimits|thresholdsLookup/, f)
+      // 判定の部品は基準を引数で受ける（daycare.ts・chart.ts は個人の閾値の表を知らない。vitalAlerts.ts は注記の文だけ借りる）
+      assert.doesNotMatch(code('../src/lib/daycare.ts'), /vitalLimits|fetchResidentVitalLimits/)
+      assert.doesNotMatch(code('../src/lib/chart.ts'), /vitalLimits|thresholdsFor/)
+      assert.match(code('../src/lib/vitalAlerts.ts'), /import \{ INDIVIDUAL_LIMIT_NOTE \} from '\.\/vitalLimits\.ts'/)
+      const hook = code('../src/hooks/useVitalLimits.ts')
+      assert.match(hook, /const lookup = useMemo\(\(\) => thresholdsLookup\(rows, base\), \[rows, base\]\)/)
+      // カードで足した・取り消した後は、カルテの印を取り直す
       const karte = code('../src/pages/KartePage.tsx')
-      assert.match(karte, /<VitalLimitsCard residentId=\{residentId\} role=\{role\} \/>/)
+      assert.match(karte, /<VitalLimitsCard residentId=\{residentId\} role=\{role\} onChanged=\{\(\) => setLimitsTick\(\(n\) => n \+ 1\)\} \/>/)
+      assert.match(karte, /const limits = useVitalLimits\(`\$\{tick\}\|\$\{targetsTick\}\|\$\{limitsTick\}`\)/)
+      assert.doesNotMatch(code('../src/components/VitalLimitsCard.tsx'), /まだ効いていません/)
     })
     it('カード: 書き込みは addResidentVitalLimit・cancelResidentVitalLimit だけ・取り消しは確認つき・端末に業務データを残さない', () => {
       const c = code('../src/components/VitalLimitsCard.tsx')

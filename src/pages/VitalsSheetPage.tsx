@@ -66,13 +66,8 @@ import {
 import { addDays, fmtDayLabel, normalizeVitalInput, todayIso, toHalfWidth } from '../lib/format'
 import { recordTimeFor } from '../lib/nextMorning'
 import {
-  diaBpLevel,
   LS,
-  pulseLevel,
   SHEET_DAYS,
-  spo2Level,
-  sysBpLevel,
-  tempLevel,
   VITAL_RANGE,
 } from '../lib/types'
 import type { Level, Resident, SheetDays, Vital } from '../lib/types'
@@ -122,6 +117,11 @@ import { RecorderBar } from '../components/RecorderBar'
 // 平熱との差（A1）・SpO2 の個別の下限（A9）・直近7日の細い線（A4）。平熱と目標は1回読んで控える。基準値の上書き（A8）も1回読む
 import { fetchUsualTemps, loadVitalThresholds } from '../lib/db'
 import { judgeTemp, spo2Limits, spo2LevelFor } from '../lib/vitalAlerts'
+import { diaBpLevelBy, pulseLevelBy, spo2LevelBy, sysBpLevelBy, tempLevelBy, vitalThresholds } from '../lib/vitalThresholds'
+import type { VitalThresholds } from '../lib/vitalThresholds'
+import { INDIVIDUAL_LIMIT_NOTE, isIndividualField } from '../lib/vitalLimits'
+import { useVitalLimits } from '../hooks/useVitalLimits'
+import { VitalLimitsFailedNote } from '../components/VitalLimitsFailedNote'
 import type { ResidentTargets } from '../lib/vitalAlerts'
 import '../styles/sheet.css'
 
@@ -192,12 +192,13 @@ const ROW_ALT = 'sheet-alt'
 /** 縞なしの行の地色（従来どおり面の色）。alt 行と同じ要素に両方は当てない */
 const ROW_PLAIN = 'bg-surface'
 const FIELD_DIGITS: Record<Field, number> = { temp: 1, sys_bp: 0, dia_bp: 0, pulse: 0, spo2: 0 }
-const LEVEL_FN: Record<Field, (v: number | null) => Level> = {
-  temp: tempLevel,
-  sys_bp: sysBpLevel,
-  dia_bp: diaBpLevel,
-  pulse: pulseLevel,
-  spo2: spo2Level,
+/** 判定（t＝その方のその日の基準。段階2d-2: 個人の閾値を合成した物・個人の値が無い方は施設の基準そのもの） */
+const LEVEL_BY: Record<Field, (v: number | null, t: VitalThresholds) => Level> = {
+  temp: tempLevelBy,
+  sys_bp: sysBpLevelBy,
+  dia_bp: diaBpLevelBy,
+  pulse: pulseLevelBy,
+  spo2: (v, t) => spo2LevelBy(v, t),
 }
 
 /** この画面が扱う行の種別（発熱者=observation・他症状者=symptom は日報シートの担当） */
@@ -813,6 +814,8 @@ export function VitalsSheetPage({
   const [usualTemps, setUsualTemps] = useState<Map<number, number | null>>(() => new Map())
   /** 個別の目標（A9 の SpO2 の下限。無い方・読めない時は施設の基準 93%・90%） */
   const [targets, setTargets] = useState<Map<number, ResidentTargets>>(() => peekResidentTargets() ?? new Map())
+  /** 段階2d-2: 個人の閾値（開いた時に1回読む。読めない時は施設の基準で判定し、その旨を出す） */
+  const limits = useVitalLimits()
   /** 基準値（app_settings の上書き）を読み終えた印（読み終えたら描き直して新しい基準で印を出す） */
   const [, setThresholdsVer] = useState(0)
   /** A4 の線のために、表示の初日より前に読んだ定時の値（表示の日数が7日より短い時だけ。表には出さない） */
@@ -2183,6 +2186,7 @@ export function VitalsSheetPage({
             </button>
           </p>
         ) : null}
+        {limits.failed ? <VitalLimitsFailedNote /> : null}
       </div>
 
       {/* 他の端末が入力中の欄の要約（誰が・どこを）。無い時も1行の高さを取る＝出ても表を押し下げない */}
@@ -2326,6 +2330,7 @@ export function VitalsSheetPage({
                     spark={isRoutine ? (sparkByResident.get(row.residentId) ?? null) : null}
                     usualTemp={usualTemps.get(row.residentId)}
                     spo2Target={targets.get(row.residentId)}
+                    limitsOn={(d) => limits.lookup(row.residentId, d)}
                     recs={recs}
                     editable={editable}
                     removable={removable}
@@ -2417,19 +2422,21 @@ interface Spark {
 
 /**
  * 読み上げに足す A1・A9 の語（「（平熱+1.2・平熱より高い）」「（個別の下限 95% を下回る）」）。当たらなければ ''。
- * この表の欄（SheetCell）には今の4段階の印しか出せないので、平熱との差は読み上げにだけ足す（見た目の印は積み残し）
+ * この表の欄（SheetCell）には今の4段階の印しか出せないので、平熱との差は読み上げにだけ足す（見た目の印は積み残し）。
+ * 段階2d-2: 個人の基準で印が付いた時は「（個人の基準）」も読み上げに足す（見た目の欄は変えない）
  */
-function newMarkWord(field: Field, value: number, usualTemp: number | null | undefined, target: ResidentTargets | undefined): string {
+function newMarkWord(field: Field, value: number, usualTemp: number | null | undefined, target: ResidentTargets | undefined, th: VitalThresholds): string {
+  const own = isIndividualField(field, th, vitalThresholds()) && (field === 'temp' ? judgeTemp(value, usualTemp, th).level : LEVEL_BY[field](value, th)) ? INDIVIDUAL_LIMIT_NOTE : ''
   if (field === 'temp') {
-    const j = judgeTemp(value, usualTemp)
+    const j = judgeTemp(value, usualTemp, th)
     const t = j.level ? j.note : j.overUsual ? j.mark : null
-    return t ? `（${t.replace('↑', '')}・平熱より高い）` : ''
+    return `${t ? `（${t.replace('↑', '')}・平熱より高い）` : ''}${own}`
   }
   if (field === 'spo2') {
-    const lim = spo2Limits(target)
-    return lim.individual && spo2LevelFor(value, target) ? `（個別の下限 ${lim.warnBelow}% を下回る）` : ''
+    const lim = spo2Limits(target, th)
+    return lim.individual && spo2LevelFor(value, target, th) ? `（個別の下限 ${lim.warnBelow}% を下回る）` : ''
   }
-  return ''
+  return own
 }
 
 /** 値の並びを線の座標へ（値の無い日で線を切る）。y0〜y1 が縦の範囲（上が大きい値） */
@@ -2522,6 +2529,8 @@ interface FragmentRowProps {
   usualTemp?: number | null
   /** A9: この方の個別の目標（SpO2 の下限。無ければ施設の基準） */
   spo2Target?: ResidentTargets
+  /** 段階2d-2: この方のその日の基準（個人の閾値。無い方は施設の基準そのもの） */
+  limitsOn: (day: string) => VitalThresholds
   recs: Map<string, Rec>
   editable: boolean
   /** この再検行に「✕」を出すか（一番下の空の再検行だけ true） */
@@ -2554,6 +2563,7 @@ function FragmentRow({
   spark = null,
   usualTemp,
   spo2Target,
+  limitsOn,
   recs,
   editable,
   removable = false,
@@ -2663,10 +2673,11 @@ function FragmentRow({
               // 範囲外・未確定の入力にはしきい値の色を付けない（誤った意味づけを避ける）。
               // SpO2 は個別の下限がある方はその下限で（A9）。体温の印は今のまま（A1 の平熱との差は読み上げに足す）
               const ok = parsed != null && !bad
-              const level = !ok ? null : f === 'spo2' ? spo2LevelFor(parsed, spo2Target) : LEVEL_FN[f](parsed)
-              const newMark = ok ? newMarkWord(f, parsed, usualTemp, spo2Target) : ''
+              const th = limitsOn(day)
+              const level = !ok ? null : f === 'spo2' ? spo2LevelFor(parsed, spo2Target, th) : LEVEL_BY[f](parsed, th)
+              const newMark = ok ? newMarkWord(f, parsed, usualTemp, spo2Target, th) : ''
               // A1 の見た目の印（今の印が無くて平熱+1.0℃以上の時だけ「平」。両方当たる時は今の印のまま＝注記は読み上げ）
-              const usualMark = ok && f === 'temp' && level === null && judgeTemp(parsed, usualTemp).overUsual ? '平' : null
+              const usualMark = ok && f === 'temp' && level === null && judgeTemp(parsed, usualTemp, th).overUsual ? '平' : null
               // この欄（Presence の照合）。再検は行 id で指す（まだ行が無い枠は id なし）
               const target: CellTarget = {
                 table: 'vitals',
