@@ -579,3 +579,58 @@ export function overlayPendingMine<T extends { field: string; mine: unknown }>(c
   if (pendingValues === null) return conflicts
   return conflicts.map((c) => (Object.prototype.hasOwnProperty.call(pendingValues, c.field) ? { ...c, mine: pendingValues[c.field] } : c))
 }
+
+// ── 日付の切り替え・読み直しの前の片づけ（反証レビュー3巡目） ──────────
+
+/** 片づけで送れなかった・捨てた測定（kept＝入力を画面に残した／false＝上下逆で捨てた） */
+export interface DaycareReleaseIssue {
+  key: string
+  kept: boolean
+  reason: string
+}
+
+/**
+ * 片づけで送る欄。送っている最中の欄は除く（二重に送らない）。上だけ・下だけ・ほかの欄もそのまま送る
+ * （下を入れたが送れなかった時に、上だけ送って下を捨てない＝3巡目 軽3）
+ */
+export function releaseEditsOf(
+  draft: Partial<Record<DaycareVitalField, number | null>> | undefined,
+  inflight: ReadonlySet<string> | undefined,
+): Partial<Record<DaycareVitalField, number | null>> {
+  const out: Partial<Record<DaycareVitalField, number | null>> = {}
+  if (draft === undefined) return out
+  for (const f of DAYCARE_VITAL_FIELDS) {
+    if (!(f in draft)) continue
+    if (inflight !== undefined && inflight.has(f)) continue
+    out[f] = draft[f] ?? null
+  }
+  return out
+}
+
+/** 止めた理由の一覧から、入力が無くなった（ほかの経路で送れた）残しの項目を外す。捨てた項目は押して移るまで残す */
+export function pruneReleaseIssues(issues: readonly DaycareReleaseIssue[], hasDraft: (key: string) => boolean): DaycareReleaseIssue[] {
+  return issues.filter((i) => !i.kept || hasDraft(i.key))
+}
+
+/** 止めた理由の帯に出す「誰の何回目か」（絞り込みで行が見えない方でも分かるように） */
+export function releaseIssueLabel(key: string, nameOf: (residentId: number) => string): string {
+  const k = parseDaycareVitalKey(key)
+  if (k === null) return '（測定を特定できません）'
+  return `${nameOf(k.residentId)}（${k.seq > 1 ? `再測定 ${k.seq - 1}` : '1回目'}）`
+}
+
+/**
+ * 送った欄が全部、送信待ちの控えに同じ値で残っているか。サーバーに拒まれた値は「止まった送信」として控えに残り、
+ * 未送信の一覧から確かめられる（消えない）ため、片づけでは載ったとみなして移ってよい（3巡目 軽2）
+ */
+export function editsHeldInQueue(
+  edits: Partial<Record<DaycareVitalField, number | null>>,
+  pendingValues: Record<string, unknown> | null | undefined,
+): boolean {
+  if (pendingValues === null || pendingValues === undefined) return false
+  const fs = Object.keys(edits)
+  if (fs.length === 0) return false
+  return fs.every(
+    (f) => Object.prototype.hasOwnProperty.call(pendingValues, f) && (pendingValues[f] ?? null) === (edits[f as DaycareVitalField] ?? null),
+  )
+}
