@@ -395,6 +395,7 @@ export const MED_STATUS_MARK: Record<MedStatus, string> = {
  */
 export type InputKind = 'bath' | 'med' | 'incident'
   | 'daycare' // デイ（せせらぎ）の到着・在席・バイタル・欠席（app_settings.input_enabled_daycare・0041。2026-10-22 追加）
+  | 'daycare_activity' // デイの活動・レクだけ（app_settings.input_enabled_daycare_activity・0044。2026-10-22 段階2b 追加）
 export const INPUT_KINDS: readonly InputKind[] = ['bath', 'med', 'incident']
 
 // ── 事故・ヒヤリハット（2026-09-26 追加・契約改訂は代表承認済み・0014_incidents.sql） ──

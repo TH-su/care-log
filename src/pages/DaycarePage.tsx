@@ -28,6 +28,7 @@ import {
   OUTDATED_REASON,
   fetchAllResidents,
   cachedMyRole,
+  fetchDaycareActivities,
   fetchBathDay,
   fetchDaycareAttendance,
   fetchDaycareDay,
@@ -52,6 +53,7 @@ import {
   recordAbsentBath,
   subscribeBathChanges,
   subscribeChanges,
+  subscribeDaycareActivityChanges,
   subscribeDaycareChanges,
   subscribeMyRole,
   updateBath,
@@ -59,6 +61,8 @@ import {
 } from '../lib/db'
 import type { AbsentBathResult, DaycareMealRow, MyRole } from '../lib/db'
 import { fluidTotalOf, lunchLabel, personPath } from '../lib/daycarePerson'
+import { activitiesOf, activityChipText } from '../lib/daycareActivity'
+import type { DaycareActivity } from '../lib/daycareActivity'
 import { RecorderBar } from '../components/RecorderBar'
 import { ConfirmDialog, ErrorBlock, LoadingBlock, ModalShell, ResidentPickerModal, useToast } from '../components/ui'
 import {
@@ -129,6 +133,8 @@ interface DayData {
   /** 昼食・おやつ（取り込みの印つき）と水分（段階2a・行の小さな印と1人の記録への入口に使う） */
   meals: DaycareMealRow[]
   fluids: FluidIntake[]
+  /** 活動・レク（段階2b・行の小さな印）。null＝読めない（0044 未適用・通信エラー）＝印を出さない（「記録なし」に見せない） */
+  activities: DaycareActivity[] | null
 }
 
 type RowMsg = { tone: 'warn' | 'danger' | 'info' | 'ok'; text: string }
@@ -152,11 +158,13 @@ function hmShort(t: string | null): string {
   return m === null ? '' : `${Number(m[1])}:${m[2]}`
 }
 
-/** デイの画面の上の切り替え（今日／バイタル）。今いる画面は塗りと aria-current で示す */
-export function DaycareNav({ current }: { current: 'today' | 'vitals' }) {
-  const items: { key: 'today' | 'vitals'; to: string; label: string }[] = [
+/** デイの画面の上の切り替え（今日／バイタル／活動）。今いる画面は塗りと aria-current で示す */
+export function DaycareNav({ current }: { current: 'today' | 'vitals' | 'activity' }) {
+  const items: { key: 'today' | 'vitals' | 'activity'; to: string; label: string }[] = [
     { key: 'today', to: '/record/daycare', label: '今日（到着・欠席）' },
     { key: 'vitals', to: '/record/daycare/vitals', label: 'バイタル一括' },
+    // 段階2b（2026-10-22）: 活動・レクをまとめて記録
+    { key: 'activity', to: '/record/daycare/bulk', label: '活動をまとめて' },
   ]
   return (
     <nav aria-label="デイの画面" className="flex flex-wrap gap-gap print:hidden">
@@ -358,6 +366,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         fetchDaycareVitals(target).catch(() => ({ live: [] as KeyedVital[], keys: [] as string[] })),
         fetchDaycareIntake(target).catch(() => ({ meals: [] as DaycareMealRow[], fluids: [] as FluidIntake[] })),
       ])
+      const activities = await fetchDaycareActivities(target).catch(() => null)
       if (gen !== genRef.current || target !== dayRef.current) return
       const next: DayData = {
         day: target,
@@ -370,6 +379,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         vitals: dv.live,
         meals: intake.meals,
         fluids: intake.fluids,
+        activities,
       }
       setData(next)
       setError(null)
@@ -406,6 +416,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     const offC = subscribeChanges((table, info) => {
       if (table === 'vitals' || table === 'meals' || table === 'fluid_intake') onChange(table, info)
     })
+    const offD = subscribeDaycareActivityChanges(onChange)
     let last = queuePending()
     const offQ = queueSubscribe((n) => {
       setQueueTick((x) => x + 1)
@@ -416,6 +427,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       offA()
       offB()
       offC()
+      offD()
       offQ()
       if (reloadTimer.current !== null) window.clearTimeout(reloadTimer.current)
     }
@@ -437,6 +449,8 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   /** 段階2a: 行の小さな印（昼食・水分） */
   const lunchOf = (id: number) => data?.meals.find((m) => m.meal.resident_id === id && m.meal.meal_slot === 'lunch')?.meal ?? null
   const fluidOf = (id: number) => (data === null ? 0 : fluidTotalOf(data.fluids, id, data.day))
+  /** 段階2b: 行の小さな印（活動の件数）。読めない時は null（印を出さない） */
+  const activityCountOf = (id: number) => (data === null || data.activities === null ? null : activitiesOf(data.activities, id, data.day).length)
   const vitalsOf = useCallback((id: number) => (data?.vitals ?? []).filter((v) => v.resident_id === id), [data])
 
   const canWrite = gate !== null && gate.observed && gate.value === true && !(data?.missing ?? false)
@@ -1098,9 +1112,14 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                         <span className="inline-flex min-h-tap items-center rounded-full border border-border bg-surface2 px-3 text-base text-ink">
                           水分&nbsp;<span className="font-bold font-num">{fluidOf(row.residentId)} ml</span>
                         </span>
+                        {activityCountOf(row.residentId) !== null ? (
+                          <span className="inline-flex min-h-tap items-center rounded-full border border-border bg-surface2 px-3 text-base text-ink">
+                            活動&nbsp;<span className="font-bold">{activityChipText(activityCountOf(row.residentId) ?? 0)}</span>
+                          </span>
+                        ) : null}
                         <Link
                           to={personPath(row.residentId, day, today)}
-                          aria-label={`${name}さんの1日の記録（昼食・おやつ・水分・排泄）を開く`}
+                          aria-label={`${name}さんの1日の記録（昼食・おやつ・水分・活動・排泄）を開く`}
                           className="inline-flex min-h-tap items-center rounded-full border border-primary bg-surface px-4 text-base font-bold text-primary"
                         >
                           記録<span aria-hidden="true"> ›</span>

@@ -43,6 +43,7 @@ import {
 } from '../lib/db'
 import type { CellConflict, CellEditInput, DaycareMealRow, MealCellField, MealTarget } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
+import { DaycareActivitySection } from '../components/DaycareActivitySection'
 import { ConfirmDialog, ErrorBlock, LoadingBlock, useToast } from '../components/ui'
 import {
   DAYCARE_VITAL_FIELDS,
@@ -966,6 +967,9 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           ))}
         </ul>
       </section>
+
+      {/* 活動・レク（段階2b・0044）。活動だけの旗に従う別の部品（昼食・水分の保存とは混ぜない） */}
+      <DaycareActivitySection residentId={residentId} residentName={name} day={data.day} today={today} actorId={actorId} show={show} refreshKey={reloadKey} />
 
       <section aria-labelledby="h-ex" className={sectionCls}>
         <h3 id="h-ex" className="text-lg font-bold text-ink">

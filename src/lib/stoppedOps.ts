@@ -18,6 +18,7 @@ import {
   MED_STATUS_LABEL,
   OUTING_KIND_LABEL,
 } from './types'
+import { ACTIVITY_PARTICIPATION_LABEL } from './daycareActivity'
 
 /** listStoppedOps の1件のうち、言葉にするのに使う分（db.ts の StoppedOp と同じ形） */
 export interface StoppedOpLike {
@@ -41,6 +42,7 @@ export const STOPPED_TABLE_LABEL: Record<string, string> = {
   attendance: '日報の出勤者',
   residents: '申し送りでの表示名',
   daycare_attendance: 'デイの到着・欠席',
+  daycare_activity_log: 'デイの活動',
 }
 
 /** 取り消し（deleted_at を付ける修正）か */
@@ -112,6 +114,11 @@ const FIELDS: Record<string, Record<string, FieldFmt>> = {
     left_at: { label: '帰宅', fmt: hm },
     absent: { label: '欠席', fmt: (v) => (v === true ? '欠席' : v === false ? '欠席でない' : null) },
     absent_reason: { label: '欠席の理由', fmt: labelOf(DAYCARE_ABSENT_REASON_LABEL) },
+    note: { label: '備考', fmt: text },
+  },
+  daycare_activity_log: {
+    label: { label: '項目', fmt: text },
+    participation: { label: '参加', fmt: labelOf(ACTIVITY_PARTICIPATION_LABEL) },
     note: { label: '備考', fmt: text },
   },
   bath_records: {
@@ -259,6 +266,10 @@ export function stoppedOpNeedsCompare(op: Pick<StoppedOpLike, 'table' | 'kind' |
   if (op.kind === 'update' || op.kind === 'alias') return true
   return (
     op.kind === 'insert' &&
-    (op.table === 'bath_records' || op.table === 'med_admin' || op.table === 'med_slots' || op.table === 'daycare_attendance')
+    (op.table === 'bath_records' ||
+      op.table === 'med_admin' ||
+      op.table === 'med_slots' ||
+      op.table === 'daycare_attendance' ||
+      op.table === 'daycare_activity_log')
   )
 }

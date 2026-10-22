@@ -99,6 +99,8 @@ import { normalizeMedSlots, validateMedAdminInput } from './med'
 // デイ（せせらぎ）の記録 段階1（2026-10-22・0041）。純ロジックは daycare.ts
 import { absentBathAction, hmOf, isDaycareVitalKey, validateAttendance } from './daycare'
 import type { KeyedVital } from './daycare'
+import { activityLabelError, normalizeActivityLabel, participationOf } from './daycareActivity'
+import type { ActivityParticipation, DaycareActivity } from './daycareActivity'
 import { normalizeChoices, normalizeIncidentDetail, validateIncidentInput } from './incident'
 import type { IncidentInput } from './incident'
 import {
@@ -206,6 +208,8 @@ const IMPORT_DAY_COLS = 'source,day,imported_at,src_rows,inserted,updated,skippe
 const BATH_COLS = 'id,resident_id,bath_on,result,cancel_reason,note,recorded_by,rev,auto'
 /** デイの到着・帰宅・欠席（0041_daycare_stage1.sql）。監査列・client_key は端末へ持ち出さない */
 const DAYCARE_ATTENDANCE_COLS = 'id,resident_id,day,arrived_at,left_at,absent,absent_reason,note,recorded_by,rev'
+/** デイの活動・レク（0044・段階2b） */
+const DAYCARE_ACTIVITY_COLS = 'id,resident_id,day,label,participation,note,recorded_by,rev'
 /** デイの1日の予定の写し（0041）。plan_rows に氏名は入らない（サーバーが照合した結果だけ） */
 const DAYCARE_DAY_COLS = 'id,day,plan_source,plan_rev,plan_updated_at,plan_rows,opened_by,created_at,rev'
 /** 服薬の時間帯（0013_med_admin.sql）。監査列・client_key は端末へ持ち出さない */
@@ -1052,7 +1056,9 @@ function normalizeImportDay(row: unknown): ImportDay | null {
  */
 // daycare_attendance（デイの到着・帰宅・欠席・2026-10-22 デイ段階1・0041）も入浴と同じ経路（client_key・rev 照合・送信待ち・
 // edited_by）。入力解禁は input_enabled_daycare（writeGate）。1人1日1件の自然キーを持つ（入浴と同じ扱い）
-type LegacyTable = 'fluid_intake' | 'notes' | 'outings' | 'bath_records' | 'med_slots' | 'med_admin' | 'incidents' | 'daycare_attendance'
+// daycare_activity_log（デイの活動・レク・2026-10-22 デイ段階2b・0044）も同じ経路。入力解禁は input_enabled_daycare_activity。
+// 1人1日1項目1行の自然キーを持ち、同じ項目・同じ度合いの行が先にあれば合流する（insertDaycareActivity・送信待ちの経路）
+type LegacyTable = 'fluid_intake' | 'notes' | 'outings' | 'bath_records' | 'med_slots' | 'med_admin' | 'incidents' | 'daycare_attendance' | 'daycare_activity_log'
 
 /** 列の並び・rev 照合の作法が共通の業務表（読み取りの列は colsOf） */
 type QueueTable = 'vitals' | 'meals' | LegacyTable
@@ -1139,6 +1145,7 @@ const LEGACY_TABLES: readonly LegacyTable[] = [
   'med_admin',
   'incidents',
   'daycare_attendance',
+  'daycare_activity_log',
 ]
 
 /** 旧版が使っていた退避キー。値は cl_sendQueue の中へ移し、移せたことを観測してから取り除く */
@@ -3570,6 +3577,8 @@ async function sendQueuedOp(sb: SupabaseClient, op: QueueOp): Promise<SendResult
         // 入浴記録（1人1日1件）・服薬の時間帯（1人1件）・与薬の記録（1人1日1時間帯1件）は自然キー（部分unique）も持つ。
         // 自分の client_key が載っておらず、同じ自然キーの生きている行がある＝他の端末が先に記録した。
         // 再送しても通らないので止める（消さずに残し「未送信」として数え続ける＝rev 不一致の update と同じ扱い）
+        // デイの活動（0044）は、同じ項目・同じ参加の度合いの行が先にあれば合流する（届いたのと同じ＝止めない）
+        if (op.table === 'daycare_activity_log' && (await activitySameLanded(sb, op.payload))) return 'sent'
         if (await naturalKeyTaken(sb, op.table, op.payload)) return 'conflict'
         return 'retry'
       }
@@ -3817,6 +3826,8 @@ function colsOf(table: QueueTable): string {
       return INCIDENT_COLS
     case 'daycare_attendance':
       return DAYCARE_ATTENDANCE_COLS
+    case 'daycare_activity_log':
+      return DAYCARE_ACTIVITY_COLS
   }
 }
 
@@ -3995,6 +4006,12 @@ function naturalKeyOf(table: QueueTable, payload: Record<string, unknown>): Reco
     const day = dateStr(payload.day)
     return day === null ? null : { resident_id: residentId, day }
   }
+  // デイの活動・レク（1人1日1項目1件・0044）
+  if (table === 'daycare_activity_log') {
+    const day = dateStr(payload.day)
+    const label = str(payload.label)
+    return day === null || label === null || label === '' ? null : { resident_id: residentId, day, label }
+  }
   return null
 }
 
@@ -4002,11 +4019,23 @@ function naturalKeyOf(table: QueueTable, payload: Record<string, unknown>): Reco
 async function naturalKeyTaken(sb: SupabaseClient, table: QueueTable, payload: Record<string, unknown>): Promise<boolean> {
   if (table === 'bath_records') return bathDayTaken(sb, payload)
   if (table === 'med_slots' || table === 'med_admin') return medKeyTaken(sb, table, payload)
-  if (table === 'daycare_attendance') {
+  if (table === 'daycare_attendance' || table === 'daycare_activity_log') {
     const key = naturalKeyOf(table, payload)
-    return key !== null && (await findByKey(sb, 'daycare_attendance', key)) !== null
+    return key !== null && (await findByKey(sb, table, key)) !== null
   }
   return false
+}
+
+/**
+ * デイの活動（0044）の追加が自然キーで当たった時、同じ方・同じ日・同じ項目の生きている行が、同じ参加の度合いで先にあるか。
+ * あれば2台で同じチップを押した＝1行に合流（後の追加は届いたのと同じ）。度合いが違えば false（止めて確かめる）
+ */
+async function activitySameLanded(sb: SupabaseClient, payload: Record<string, unknown>): Promise<boolean> {
+  const key = naturalKeyOf('daycare_activity_log', payload)
+  if (key === null) return false
+  const found = await findByKey(sb, 'daycare_activity_log', key, 'id,rev,participation')
+  if (found === null) return false
+  return participationOf(asRecord(found.row)?.participation) === (participationOf(payload.participation) ?? 'full')
 }
 
 function omitKeys(src: Record<string, unknown>, keys: string[]): Record<string, unknown> {
@@ -4424,6 +4453,7 @@ const KIND_BLOCKED_MSG: Record<InputKind, string> = {
   med: '服薬の記録はまだ使い始めていません（開始日に解禁します）',
   incident: '事故・ヒヤリハットの記録はまだ使い始めていません（開始日に解禁します）',
   daycare: 'デイの記録はまだ使い始めていません（開始日に解禁します）',
+  daycare_activity: 'デイの活動の記録はまだ使い始めていません（開始日に解禁します）',
 }
 
 interface KindGateState {
@@ -4439,6 +4469,7 @@ function newKindGates(): Record<InputKind, KindGateState> {
     med: { value: null, fetchedAt: 0, inFlight: null },
     incident: { value: null, fetchedAt: 0, inFlight: null },
     daycare: { value: null, fetchedAt: 0, inFlight: null },
+    daycare_activity: { value: null, fetchedAt: 0, inFlight: null },
   }
 }
 
@@ -4523,6 +4554,7 @@ async function writeGate(table: LegacyTable): Promise<void> {
   if (table === 'med_admin') return assertKindWritable('med')
   if (table === 'incidents') return assertKindWritable('incident')
   if (table === 'daycare_attendance') return assertKindWritable('daycare')
+  if (table === 'daycare_activity_log') return assertKindWritable('daycare_activity')
   if (table === 'med_slots') {
     if (!isSupabaseConfigured()) throw new DbError('unconfigured', MSG.unconfigured)
     assertBuildCurrent() // 旗の封鎖は受けないが、古い版の止め（F28③）は受ける
@@ -7171,6 +7203,12 @@ function insertAsUpdatePatch(table: string, payload: Record<string, unknown>): R
     out.edited_by = idNum(payload.edited_by) ?? idNum(payload.recorded_by) ?? null
     return out
   }
+  // デイの活動（0044）: 自然キー（利用者・日・項目）と冪等キーを外した中身（参加の度合い・備考）。記入者は直さない
+  if (table === 'daycare_activity_log') {
+    const out = omitKeys(payload, ['client_key', 'resident_id', 'day', 'label', 'id', 'rev', 'deleted_at', 'recorded_by'])
+    out.edited_by = idNum(payload.edited_by) ?? idNum(payload.recorded_by) ?? null
+    return out
+  }
   if (table !== 'bath_records' && table !== 'med_admin' && table !== 'med_slots') return null
   const out = omitKeys(payload, ['client_key', 'resident_id', 'bath_on', 'admin_on', 'slot', 'id', 'rev', 'deleted_at'])
   if (table !== 'med_slots') out.auto = false
@@ -8090,6 +8128,197 @@ export function hasPendingDaycareAttendance(residentId: number, day: string, rec
     }
   }
   return false
+}
+
+// ── デイ（せせらぎ）の記録 段階2b: 活動・レク（2026-10-22 追加・代表承認・0044_daycare_activity.sql） ─────────────
+//
+// daycare_activity_log（1人1日1項目1行）は到着・欠席と同じ経路（client_key・rev 照合・送信待ち cl_sendQueue・edited_by・soft delete）。
+//   入力解禁は活動だけの旗 input_enabled_daycare_activity（writeGate）。過去の日は現場も記録できる（時刻を持たない）。
+//   2台で同じ方・同じ日・同じ項目を入れた時（23505）: 同じ参加の度合いなら先の行に合流して成功（'merged'）、
+//   違えば 'taken'（画面は読み直して「先に記録があります」）。送信待ちの経路も同じ規則（activitySameLanded）。
+
+const ACTIVITY_MSG = {
+  missing: 'デイの活動の記録はまだ使えません（サーバー側の設定待ち）。管理者に連絡してください。',
+} as const
+
+/** 1日のデイの活動の取得上限（1日の利用者数 × 項目数を十分に上回る） */
+const DAYCARE_ACTIVITY_ROWS = 2000
+/** 前回コピーのために読む、その方の前の日の行の上限（前回の1日分が収まる） */
+const DAYCARE_ACTIVITY_PREV_ROWS = 60
+
+function normalizeDaycareActivity(row: unknown): DaycareActivity | null {
+  const r = asRecord(row)
+  if (!r) return null
+  const id = idNum(r.id)
+  const resident_id = idNum(r.resident_id)
+  const day = dateStr(r.day)
+  const label = str(r.label)
+  const rev = num(r.rev)
+  if (id === null || resident_id === null || day === null || label === null || label === '' || rev === null) return null
+  return {
+    id,
+    resident_id,
+    day,
+    label,
+    // 4つ以外の度合いは「参加」として読む（受信値を信じない・行を落とさない）
+    participation: participationOf(r.participation) ?? 'full',
+    note: str(r.note),
+    recorded_by: idNum(r.recorded_by),
+    rev,
+  }
+}
+
+/** 活動の読み書きが「表が無い（0044 未適用）」で止まったか（画面は活動の欄だけ「設定待ち」にする） */
+export function isActivityMissingError(e: unknown): boolean {
+  return e instanceof DbError && e.message === ACTIVITY_MSG.missing
+}
+
+function activityReadError(res: Res<unknown>): DbError {
+  if (isMissingTable(res)) return new DbError('server', ACTIVITY_MSG.missing)
+  return readError(res)
+}
+
+/** その日のデイの活動（全員分・削除済みを除く） */
+export async function fetchDaycareActivities(dayIso: string): Promise<DaycareActivity[]> {
+  assertDay(dayIso)
+  const sb = await getClient()
+  const res = (await sb
+    .from('daycare_activity_log')
+    .select(DAYCARE_ACTIVITY_COLS)
+    .eq('day', dayIso)
+    .is('deleted_at', null)
+    .order('id', { ascending: true })
+    .limit(DAYCARE_ACTIVITY_ROWS)) as Res<unknown>
+  if (res.error !== null) throw activityReadError(res)
+  return list(res.data, normalizeDaycareActivity, DAYCARE_ACTIVITY_ROWS)
+}
+
+/** その方の、before より前の日の活動（新しい日から・前回コピーの元。いちばん新しい日を選ぶのは daycareActivity.ts） */
+export async function fetchPreviousActivities(residentId: number, beforeIso: string): Promise<DaycareActivity[]> {
+  assertDay(beforeIso)
+  const sb = await getClient()
+  const res = (await sb
+    .from('daycare_activity_log')
+    .select(DAYCARE_ACTIVITY_COLS)
+    .eq('resident_id', residentId)
+    .lt('day', beforeIso)
+    .is('deleted_at', null)
+    .order('day', { ascending: false })
+    .order('id', { ascending: true })
+    .limit(DAYCARE_ACTIVITY_PREV_ROWS)) as Res<unknown>
+  if (res.error !== null) throw activityReadError(res)
+  return list(res.data, normalizeDaycareActivity, DAYCARE_ACTIVITY_PREV_ROWS)
+}
+
+/**
+ * 活動の追加の結果。saved＝足した／merged＝同じ項目・同じ度合いの行が先にあった（1行に合流。〔元に戻す〕で消してはいけない）／
+ * taken＝違う度合いで先にあった（row＝その行・読めなければ null）／queued＝通信できず送信待ち
+ */
+export type DaycareActivityAdd =
+  | { kind: 'saved'; row: DaycareActivity }
+  | { kind: 'merged'; row: DaycareActivity }
+  | { kind: 'taken'; row: DaycareActivity | null }
+  | { kind: 'queued' }
+
+/**
+ * 活動の追加。項目は NFKC にそろえて前後の空白を落として送る。端末生成の冪等キー client_key を必ず付ける（再送しても1行）。
+ * 未来の日・空の項目・長すぎる項目は送らない
+ */
+export async function insertDaycareActivity(a: {
+  resident_id: number
+  day: string
+  label: string
+  participation?: ActivityParticipation
+  note?: string | null
+  recorded_by: number | null
+}): Promise<DaycareActivityAdd> {
+  const label = normalizeActivityLabel(a.label)
+  const why = activityLabelError(label)
+  if (why !== null) throw new DbError('server', why)
+  assertDay(a.day)
+  if (a.day > localToday()) throw new DbError('server', DAYCARE_MSG.future)
+  const participation = a.participation ?? 'full'
+  await writeGate('daycare_activity_log')
+  const note = a.note === undefined || a.note === null || a.note.trim() === '' ? null : a.note
+  const payload = withClientKey({ resident_id: a.resident_id, day: a.day, label, participation, note, recorded_by: idNum(a.recorded_by) })
+  const queued = async (): Promise<DaycareActivityAdd> => {
+    await enqueue({ table: 'daycare_activity_log', kind: 'insert', payload })
+    return { kind: 'queued' }
+  }
+  const sb = await getClient()
+  const res = (await sb.from('daycare_activity_log').insert(payload).select(DAYCARE_ACTIVITY_COLS).maybeSingle()) as Res<unknown>
+  if (res.error !== null) {
+    if (isAuthFail(res)) {
+      fireAuthExpired()
+      return queued()
+    }
+    if (isTransient(res)) return queued()
+    if (isMissingTable(res)) throw new DbError('server', ACTIVITY_MSG.missing)
+    if (isUniqueViolation(res)) {
+      const ck = clientKeyOf(payload)
+      // 自分の送信が既に載っている（再送の行き違い）→ 載っている行を返す
+      const landed = ck === null ? null : await findByKey(sb, 'daycare_activity_log', ck, DAYCARE_ACTIVITY_COLS, true)
+      const mine = landed === null ? null : normalizeDaycareActivity(landed.row)
+      if (mine !== null) return { kind: 'saved', row: mine }
+      // 他の端末が同じ方・同じ日・同じ項目を先に記録した: 度合いが同じなら合流、違えば知らせて読み直す
+      const key = naturalKeyOf('daycare_activity_log', payload)
+      const other = key === null ? null : await findByKey(sb, 'daycare_activity_log', key, DAYCARE_ACTIVITY_COLS)
+      const row = other === null ? null : normalizeDaycareActivity(other.row)
+      if (row !== null) return row.participation === participation ? { kind: 'merged', row } : { kind: 'taken', row }
+      return queued()
+    }
+    throw rejectError('保存でき', errCode(res), res.status)
+  }
+  markSelfRow('daycare_activity_log', res.data, num(asRecord(res.data)?.rev))
+  kickAfterDelivered()
+  const row = normalizeDaycareActivity(res.data)
+  if (row === null) throw new DbError('server', MSG.broken)
+  return { kind: 'saved', row }
+}
+
+/** 活動の参加の度合い・備考の修正（rev 照合の部分更新）。送るのは変えた列だけ */
+export async function updateDaycareActivity(
+  current: DaycareActivity,
+  patch: Partial<Pick<DaycareActivity, 'participation' | 'note'>>,
+  opts?: WriteOpts,
+): Promise<DaycareActivity | Conflict | Queued> {
+  const sent: Record<string, unknown> = {}
+  if (patch.participation !== undefined && patch.participation !== current.participation) sent.participation = patch.participation
+  if (patch.note !== undefined) {
+    const note = patch.note === null || patch.note.trim() === '' ? null : patch.note
+    if (note !== current.note) sent.note = note
+  }
+  if (Object.keys(sent).length === 0) return current
+  return updateRow('daycare_activity_log', current.id, current.rev, sent, normalizeDaycareActivity, opts)
+}
+
+/** 活動の取り消し（deleted_at を付ける。物理削除はしない） */
+export async function softDeleteDaycareActivity(current: DaycareActivity, opts?: WriteOpts): Promise<true | Conflict | Queued> {
+  return softDelete('daycare_activity_log', current.id, current.rev, opts)
+}
+
+/** この端末の送信待ちにある活動の操作（画面が重ねて出す・読むだけ）。stopped＝止まった（競合・拒否）op */
+export type PendingActivityOp =
+  | { kind: 'add'; residentId: number; day: string; label: string; participation: ActivityParticipation; stopped: boolean }
+  | { kind: 'update'; rowId: number; participation: ActivityParticipation | null; deleted: boolean; stopped: boolean }
+
+export function pendingActivityOps(): PendingActivityOp[] {
+  const out: PendingActivityOp[] = []
+  for (const q of queue) {
+    if (q.table !== 'daycare_activity_log') continue
+    const stopped = q.blocked !== undefined
+    if (q.kind === 'insert') {
+      const residentId = idNum(q.payload.resident_id)
+      const day = dateStr(q.payload.day)
+      const label = str(q.payload.label)
+      if (residentId === null || day === null || label === null) continue
+      out.push({ kind: 'add', residentId, day, label, participation: participationOf(q.payload.participation) ?? 'full', stopped })
+    } else if (q.kind === 'update' && q.rowId !== undefined) {
+      const deleted = Object.prototype.hasOwnProperty.call(q.payload, 'deleted_at') && q.payload.deleted_at !== null
+      out.push({ kind: 'update', rowId: q.rowId, participation: participationOf(q.payload.participation), deleted, stopped })
+    }
+  }
+  return out
 }
 
 /** デイの1日の昼食・おやつの行（取り込みの印つき）。段階2a・2026-10-22 */
@@ -9542,6 +9771,49 @@ export function subscribeDaycareChanges(cb: (table: string, info?: ChangeInfo) =
       }
       channel = ch
       unwatch = watchChannel(ch, REALTIME_DAYCARE_TABLES, cb, () => !cancelled)
+    } catch {
+      // 接続先未設定・通信不可。購読なしで動く
+    }
+  })()
+
+  return () => {
+    cancelled = true
+    unwatch?.()
+    unwatch = null
+    if (client !== null && channel !== null) void client.removeChannel(channel)
+    channel = null
+  }
+}
+
+/**
+ * デイの活動・レクの Realtime を購読する表（2026-10-22 デイ段階2b・0044）。段階1のデイのチャンネルにも混ぜない
+ * （0044 を当てる前の DB で、到着・欠席の購読まで止まらないようにする）
+ */
+const REALTIME_DAYCARE_ACTIVITY_TABLES = ['daycare_activity_log'] as const
+
+/**
+ * デイの活動の変更通知（デイの画面だけが使う）。呼び方・渡す情報は subscribeChanges と同じ。
+ * 接続できない・配信対象に無い（0044 未適用）場合は通知が来ないだけで、画面は手動更新で成立する。
+ */
+export function subscribeDaycareActivityChanges(cb: (table: string, info?: ChangeInfo) => void): () => void {
+  let cancelled = false
+  let client: SupabaseClient | null = null
+  let channel: ReturnType<SupabaseClient['channel']> | null = null
+  let unwatch: (() => void) | null = null
+
+  void (async () => {
+    try {
+      const sb = await getClient()
+      if (cancelled) return
+      client = sb
+      let ch = sb.channel(`cl_dcact_${Math.random().toString(36).slice(2, 10)}`)
+      for (const table of REALTIME_DAYCARE_ACTIVITY_TABLES) {
+        ch = ch.on('postgres_changes', { event: '*', schema: 'public', table }, (payload: unknown) => {
+          if (!cancelled) deliverChange(table, payload, cb, () => !cancelled)
+        })
+      }
+      channel = ch
+      unwatch = watchChannel(ch, REALTIME_DAYCARE_ACTIVITY_TABLES, cb, () => !cancelled)
     } catch {
       // 接続先未設定・通信不可。購読なしで動く
     }
