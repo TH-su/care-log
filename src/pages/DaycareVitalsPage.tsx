@@ -43,7 +43,7 @@ import {
 } from '../lib/db'
 import type { CellConflict, CellEditInput, VitalCellField, VitalTarget } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
-import { ErrorBlock, LoadingBlock } from '../components/ui'
+import { ConfirmDialog, ErrorBlock, LoadingBlock } from '../components/ui'
 import { registerUnsaved } from '../lib/leaveGuard'
 import { DaycareNav } from './DaycarePage'
 import {
@@ -56,6 +56,7 @@ import {
   buildDaycareBoard,
   daycareVitalKey,
   daycareVitalSlots,
+  editsHeldInQueue,
   firstAbnormalField,
   keypadAppend,
   keypadComplete,
@@ -65,12 +66,15 @@ import {
   overlayPendingMine,
   parseDaycareVitalKey,
   previousVitalOf,
+  pruneReleaseIssues,
   readDcVitalsFilter,
+  releaseEditsOf,
+  releaseIssueLabel,
   vitalLevel,
   vitalNeedsRecheck,
   vitalRangeError,
 } from '../lib/daycare'
-import type { DaycareBoardRow, DaycareVitalField, DaycareVitalSlot, DcVitalsFilter, KeyedVital } from '../lib/daycare'
+import type { DaycareBoardRow, DaycareReleaseIssue, DaycareVitalField, DaycareVitalSlot, DcVitalsFilter, KeyedVital } from '../lib/daycare'
 import { addDays, fmtDayLabel, todayIso, toHalfWidth } from '../lib/format'
 import { LEVEL_MARK, LS } from '../lib/types'
 import type { DaycareAttendance, DaycarePlanRow, DaycarePlanSource, Level, Resident, Staff } from '../lib/types'
@@ -166,17 +170,26 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   const [active, setActive] = useState<Active | null>(null)
   const [buf, setBuf] = useState('')
   const [kpError, setKpError] = useState<string | null>(null)
-  /** 画面の上に出す一言（日付の切り替え・読み直しを止めた理由） */
-  const [pageMsg, setPageMsg] = useState<string | null>(null)
+  /** 日付の切り替え・読み直しを止めた理由（送れなかった・捨てた測定と、押した操作） */
+  const [pageMsg, setPageMsg] = useState<{ issues: DaycareReleaseIssue[]; go: () => void } | null>(null)
+  /** 〔保存せずに移る〕の確認を開いているか */
+  const [discardAsk, setDiscardAsk] = useState(false)
+  /** 日付の切り替え・読み直しの前の片づけ中（欄と日付の操作を止める＝3巡目 軽1） */
+  const [releasing, setReleasing] = useState(false)
+  const releasingRef = useRef(false)
   const [queueTick, setQueueTick] = useState(0)
   /** 血圧の上下逆で止めた測定（その上は送らない＝打ち直してもらう・反証レビュー中4） */
   const pairBlocked = useRef(new Set<string>())
-  /** 入れたが送っていない値の写し（離れる時の確認に使う） */
+  /** 入れたが送っていない値の写し（離れる時の確認・片づけに使う）。書く時は writeDrafts で state と同時に更新する（await の後でも最新を読む） */
   const draftsRef = useRef(drafts)
-  draftsRef.current = drafts
+  /** 送っている最中の欄（測定のキー → 欄 → 本数）と、送っている最中の保存（片づけの前に待つ） */
+  const inflightRef = useRef(new Map<string, Map<string, number>>())
+  const inflightSaves = useRef(new Set<Promise<unknown>>())
+  const dataRef = useRef<VData | null>(null)
   const genRef = useRef(0)
   const dayRef = useRef(day)
   dayRef.current = day
+  dataRef.current = data
   const opening = useRef(false)
 
   useEffect(() => {
@@ -261,7 +274,8 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   useEffect(() => {
     setActive(null)
     setExtraSeqs(new Map())
-    setDrafts(new Map())
+    draftsRef.current = new Map()
+    setDrafts(draftsRef.current)
     setSlotState(new Map())
     void load(day, false)
   }, [day, reloadKey, load])
@@ -340,11 +354,12 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   )
   const flatSlots = useMemo(() => shownRows.flatMap((r) => slotsOf(r.residentId)), [shownRows, slotsOf])
 
+  // 送り先の日はキーの日付から取る（表示中の日ではない＝読み込みの間に前の日の行を押しても別の日へ送らない・3巡目 中1）
   const targetOf = (slot: DaycareVitalSlot): VitalTarget => ({
     routine: false,
     clientKey: slot.key,
     residentId: slot.residentId,
-    day: dayRef.current,
+    day: parseDaycareVitalKey(slot.key)?.day ?? dayRef.current,
     kind: 'observation',
   })
 
@@ -370,16 +385,37 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
       else next.set(key, st)
       return next
     })
-  const setDraft = (key: string, f: DaycareVitalField, v: number | null | undefined) =>
-    setDrafts((prev) => {
-      const next = new Map(prev)
-      const cur = { ...(next.get(key) ?? {}) }
-      if (v === undefined) delete cur[f]
-      else cur[f] = v
-      if (Object.keys(cur).length === 0) next.delete(key)
-      else next.set(key, cur)
-      return next
-    })
+  const writeDrafts = (next: Map<string, Partial<Record<DaycareVitalField, number | null>>>) => {
+    draftsRef.current = next
+    setDrafts(next)
+  }
+  const setDraft = (key: string, f: DaycareVitalField, v: number | null | undefined) => {
+    const next = new Map(draftsRef.current)
+    const cur = { ...(next.get(key) ?? {}) }
+    if (v === undefined) delete cur[f]
+    else cur[f] = v
+    if (Object.keys(cur).length === 0) next.delete(key)
+    else next.set(key, cur)
+    writeDrafts(next)
+  }
+  /** 送れた欄の入力を外す。送っている間に打ち直した欄（値が違う）は残す（3巡目 軽1 b） */
+  const clearSentDraft = (key: string, edits: Partial<Record<DaycareVitalField, number | null>>) => {
+    for (const [f, v] of Object.entries(edits)) {
+      const fld = f as DaycareVitalField
+      const d = draftsRef.current.get(key)
+      if (d !== undefined && fld in d && (d[fld] ?? null) === (v ?? null)) setDraft(key, fld, undefined)
+    }
+  }
+  const markInflight = (key: string, fields: string[], delta: 1 | -1) => {
+    const m = new Map(inflightRef.current.get(key) ?? [])
+    for (const f of fields) {
+      const n = (m.get(f) ?? 0) + delta
+      if (n > 0) m.set(f, n)
+      else m.delete(f)
+    }
+    if (m.size === 0) inflightRef.current.delete(key)
+    else inflightRef.current.set(key, m)
+  }
 
   /** 開所の最初の保存（今日だけ）: その日の予定の写しを作る（通信できない時は次の保存でもう一度） */
   const ensureOpened = async () => {
@@ -397,17 +433,32 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
 
   /**
    * 1回の測定の欄を保存する（既存の saveVitalEdits＝0011 そのまま。基準は読んだ時のサーバーの値）。
-   * 戻り値: true＝値はサーバーか送信待ちに載った（競合・止まった行を含む）／false＝載せられなかった（入力は画面に残す）
+   * 戻り値: null＝値はサーバーか送信待ちに載った（競合・止まった行を含む）／文字列＝載せられなかった理由（入力は画面に残す）
    */
-  const saveSlot = async (
+  const saveSlot = (
     slot: DaycareVitalSlot,
     edits: Partial<Record<DaycareVitalField, number | null>>,
     rebase?: Record<string, unknown>,
-  ): Promise<boolean> => {
+  ): Promise<string | null> => {
     if (actorId === null) {
       setState(slot.key, { kind: 'error', text: MSG_NO_RECORDER })
-      return false
+      return Promise.resolve(MSG_NO_RECORDER)
     }
+    const fields = Object.keys(edits)
+    markInflight(slot.key, fields, 1)
+    const run = sendSlot(slot, edits, actorId, rebase)
+    inflightSaves.current.add(run)
+    return run.finally(() => {
+      inflightSaves.current.delete(run)
+      markInflight(slot.key, fields, -1)
+    })
+  }
+  const sendSlot = async (
+    slot: DaycareVitalSlot,
+    edits: Partial<Record<DaycareVitalField, number | null>>,
+    actor: number,
+    rebase?: Record<string, unknown>,
+  ): Promise<string | null> => {
     const send: Record<string, { value: unknown; base?: unknown }> = {}
     for (const [f, v] of Object.entries(edits)) {
       const base = rebase !== undefined && f in rebase ? rebase[f] : (slot.vital?.[f as DaycareVitalField] ?? null)
@@ -416,16 +467,17 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     setState(slot.key, { kind: 'saving' })
     void ensureOpened()
     try {
+      const slotDay = parseDaycareVitalKey(slot.key)?.day ?? dayRef.current
       const r = await saveVitalEdits(targetOf(slot), send as CellEditInput<VitalCellField>, {
-        // 測定時刻は今日だけいまの時刻で埋める（過去の日にいまの時刻を入れない＝反証レビュー中7）
-        fill: dayRef.current === todayIso() ? { measured_at: nowHm(), recorded_by: actorId } : { recorded_by: actorId },
-        editedBy: actorId,
+        // 測定時刻は今日の測定だけいまの時刻で埋める（過去の日にいまの時刻を入れない＝反証レビュー中7）
+        fill: slotDay === todayIso() ? { measured_at: nowHm(), recorded_by: actor } : { recorded_by: actor },
+        editedBy: actor,
         rebase: rebase !== undefined,
       })
-      for (const f of Object.keys(edits)) setDraft(slot.key, f as DaycareVitalField, undefined)
+      clearSentDraft(slot.key, edits)
       if (r === 'queued') {
         setState(slot.key, { kind: 'queued', persisted: isQueuePersisted() })
-        return true
+        return null
       }
       if (r.row !== null) {
         const row: KeyedVital = { ...r.row, client_key: slot.key }
@@ -443,10 +495,11 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
       }
       else if (r.conflicts.length > 0) setState(slot.key, { kind: 'conflict', conflicts: r.conflicts })
       else setState(slot.key, { kind: 'saved' })
-      return true
+      return null
     } catch (e) {
-      setState(slot.key, { kind: 'error', text: e instanceof DbError ? e.message : '保存できませんでした。通信状態を確認して、もう一度入れてください。' })
-      return false
+      const text = e instanceof DbError ? e.message : '保存できませんでした。通信状態を確認して、もう一度入れてください。'
+      setState(slot.key, { kind: 'error', text })
+      return text
     }
   }
 
@@ -459,7 +512,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
 
   // ── テンキー ──
   const openCell = (slot: DaycareVitalSlot, field: DaycareVitalField) => {
-    if (!canWrite) return
+    if (!canWrite || releasingRef.current) return
     // 血圧の上だけを入れて人・回を移った時は、上を単独で送る（上下の組は下を入れた時に送る）
     flushHeldSys(active, slot.key)
     setActive({ residentId: slot.residentId, seq: slot.seq, key: slot.key, field })
@@ -477,53 +530,99 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   }
 
   /**
-   * その測定で持っている血圧の上を、送るか（上下逆で止めた後なら）捨てる。
-   * 戻り値: true＝片づいた（送れた・持っていなかった）／false＝送れなかった・上下逆で捨てた（理由を行に出した）。
-   * 送り先はキーから組み立てる（絞り込みで一覧から外れた方でも送る＝反証レビュー2巡目 軽2）
+   * その測定の入れたが送っていない値を送る（上だけ・下と組・ほかの欄も。送っている最中の欄は除く）。
+   * 上下逆で止めた後の上は送らずに捨てる。送り先はキーから組み立てる（絞り込みで外れた方・キーの日付で送る）。
+   * 戻り値: null＝片づいた／項目＝送れなかった（kept＝入力を残した）・捨てた（kept=false）
    */
-  const releaseHeldOf = async (key: string): Promise<boolean> => {
-    const d = draftsRef.current.get(key)
-    if (d === undefined || !('sys_bp' in d)) return true
-    if (pairBlocked.current.has(key)) {
+  const releaseHeldOf = async (key: string): Promise<DaycareReleaseIssue | null> => {
+    const edits = releaseEditsOf(draftsRef.current.get(key), new Set(inflightRef.current.get(key)?.keys() ?? []))
+    if (Object.keys(edits).length === 0) return null
+    let dropped: string | null = null
+    if (pairBlocked.current.has(key) && 'sys_bp' in edits) {
       pairBlocked.current.delete(key)
       setDraft(key, 'sys_bp', undefined)
-      setState(key, { kind: 'error', text: '血圧は上下逆のため保存していません。測り直して、上から入れ直してください。' })
-      return false
+      delete edits.sys_bp
+      dropped = '血圧は上下逆のため保存していません。測り直して、上から入れ直してください。'
+      setState(key, { kind: 'error', text: dropped })
     }
+    if (Object.keys(edits).length === 0) return dropped === null ? null : { key, kept: false, reason: dropped }
     const k = parseDaycareVitalKey(key)
-    if (k === null || data === null) return false
+    if (k === null) return { key, kept: true, reason: '測定を特定できませんでした。' }
+    const cur = dataRef.current
     const slot: DaycareVitalSlot = {
       residentId: k.residentId,
       seq: k.seq,
       key,
-      vital: data.live.find((v) => v.client_key === key) ?? null,
+      vital: cur !== null && cur.day === k.day ? (cur.live.find((v) => v.client_key === key) ?? null) : null,
     }
-    return saveSlot(slot, { sys_bp: d.sys_bp ?? null })
+    const err = await saveSlot(slot, edits)
+    if (err !== null) {
+      // サーバーに拒まれた値は送信待ちの控えに「止まった送信」として残る（消えない・未送信の一覧から確かめられる）＝移ってよい。
+      // 控えに無い（記録者が未選択・入力の封鎖などで送る前に止まった）時だけ、入力を残して止める
+      if (!editsHeldInQueue(edits, pendingRow('vitals', targetOf(slot))?.values)) return { key, kept: true, reason: err }
+      clearSentDraft(key, edits)
+    }
+    return dropped === null ? null : { key, kept: false, reason: dropped }
   }
 
   /**
-   * 日付の切り替え・読み直しの前: 持っている血圧の上を全部片づける（黙って消さない＝反証レビュー中3）。
-   * 1つでも送れなかった（記録者が未選択・入力の封鎖など）・上下逆で捨てた時は false＝移らずに理由を出す（入力は残す）
+   * 日付の切り替え・読み直しの前: 送っている最中の保存を待ってから、入れたが送っていない値を全部送る（黙って消さない＝反証レビュー中3）。
+   * 戻り値は送れなかった・捨てた測定の一覧（空なら移ってよい）
    */
-  const releaseAllHeld = async (): Promise<boolean> => {
+  const releaseAllHeld = async (): Promise<DaycareReleaseIssue[]> => {
+    await Promise.allSettled([...inflightSaves.current])
     const results = await Promise.all([...draftsRef.current.keys()].map((key) => releaseHeldOf(key)))
-    // テンキーは閉じる（スマホ幅でテンキーの下に帯が隠れないように）。送れなかった上は下書きに残る（送らずに閉じる）
+    return results.filter((x): x is DaycareReleaseIssue => x !== null)
+  }
+  /**
+   * 日付の切り替え・読み直し（入れた値を片づけてから）。片づけの間はテンキーを閉じ、欄と日付の操作を止める（待つ間に入れた値が
+   * 移った後に消えないように＝3巡目 軽1）。送れなかったら移らずに帯で理由と〔保存せずに移る〕を出す（3巡目 軽2・軽4）
+   */
+  const afterRelease = (go: () => void) => {
+    if (releasingRef.current) return
+    releasingRef.current = true
+    setReleasing(true)
     setActive(null)
     setBuf('')
     setKpError(null)
-    if (results.some((ok) => !ok)) {
-      setPageMsg('まだ保存していない血圧の上がありました（理由は該当の方の行に出しています）。確かめてから、もう一度押してください。')
-      return false
-    }
-    setPageMsg(null)
-    return true
-  }
-  /** 日付の切り替え・読み直し（持っている血圧の上を片づけてから） */
-  const afterRelease = (go: () => void) => {
     void (async () => {
-      if (await releaseAllHeld()) go()
+      try {
+        const issues = await releaseAllHeld()
+        if (issues.length > 0) {
+          setPageMsg({ issues, go })
+          return
+        }
+        setPageMsg(null)
+        go()
+      } finally {
+        releasingRef.current = false
+        setReleasing(false)
+      }
     })()
   }
+  /** 〔保存せずに移る〕: 帯に出した測定の入力を捨てて、止めた操作をする */
+  const discardAndGo = () => {
+    const msg = pageMsg
+    setDiscardAsk(false)
+    if (msg === null) return
+    const next = new Map(draftsRef.current)
+    for (const i of msg.issues) {
+      next.delete(i.key)
+      pairBlocked.current.delete(i.key)
+    }
+    writeDrafts(next)
+    setPageMsg(null)
+    msg.go()
+  }
+  // 帯に出した測定の入力が、ほかの経路で送れて無くなったら、その項目を帯から外す（3巡目 軽4）
+  useEffect(() => {
+    setPageMsg((m) => {
+      if (m === null) return m
+      const issues = pruneReleaseIssues(m.issues, (key) => drafts.has(key))
+      if (issues.length === m.issues.length) return m
+      return issues.length === 0 ? null : { ...m, issues }
+    })
+  }, [drafts])
 
   const closeKeypad = () => {
     flushHeldSys(active, null)
@@ -619,8 +718,8 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     if (nb !== buf && keypadComplete(active.field, nb)) commit(active, nb, false)
   }
 
-  // 持っている血圧の上（下を入れる前）がある間は、画面を離れる・再読み込みの前に確かめる（既存の leaveGuard・反証レビュー中3）
-  useEffect(() => registerUnsaved(() => [...draftsRef.current.values()].some((d) => 'sys_bp' in d)), [])
+  // 入れたが送っていない値（血圧の上・送れなかった値）がある間は、画面を離れる・再読み込みの前に確かめる（既存の leaveGuard・反証レビュー中3）
+  useEffect(() => registerUnsaved(() => [...draftsRef.current.values()].some((d) => Object.keys(d).length > 0)), [])
 
   // 物理キーボード（数字・小数点・Backspace・Enter・Esc）
   useEffect(() => {
@@ -649,7 +748,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
 
   /** 再測定の行を足す（次の回）＝基準を外れた欄から入れ始める */
   const addRecheck = (row: DaycareBoardRow, last: DaycareVitalSlot) => {
-    if (!canWrite || data === null) return
+    if (!canWrite || data === null || releasingRef.current) return
     const local = (extraSeqs.get(row.residentId) ?? []).map((s) => daycareVitalKey(data.day, row.residentId, s))
     let seq = nextDaycareSeq([...data.keys, ...local, ...slotsOf(row.residentId).map((s) => s.key)], data.day, row.residentId)
     // 送信待ちにだけある回は使わない（上書きしない）
@@ -708,6 +807,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
         <button
           type="button"
           onClick={() => afterRelease(() => setDay((d) => addDays(d, -1)))}
+          disabled={releasing}
           className="min-h-tap min-w-tap rounded border border-border-strong bg-surface px-3 text-lg text-ink"
           aria-label="前の日へ"
         >
@@ -720,7 +820,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
         <button
           type="button"
           onClick={() => afterRelease(() => setDay((d) => (addDays(d, 1) > today ? d : addDays(d, 1))))}
-          disabled={day >= today}
+          disabled={day >= today || releasing}
           className="min-h-tap min-w-tap rounded border border-border-strong bg-surface px-3 text-lg text-ink disabled:text-ink3"
           aria-label="次の日へ"
         >
@@ -730,6 +830,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
           <button
             type="button"
             onClick={() => afterRelease(() => setDay(today))}
+            disabled={releasing}
             className="min-h-tap rounded border border-primary px-4 text-base font-bold text-primary"
           >
             今日を開く
@@ -738,6 +839,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
         <button
           type="button"
           onClick={() => afterRelease(() => setReloadKey((n) => n + 1))}
+          disabled={releasing}
           className="min-h-tap rounded border border-border-strong bg-surface px-4 text-base text-ink"
         >
           最新に更新
@@ -761,11 +863,34 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
           </button>
         ))}
       </div>
-      {pageMsg !== null ? (
-        <p role="alert" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">
-          <span aria-hidden="true">▲ </span>
-          {pageMsg}
+      {releasing ? (
+        <p role="status" className="text-base text-ink2">
+          入れた値を保存しています…
         </p>
+      ) : null}
+      {pageMsg !== null ? (
+        <div role="alert" className="space-y-2 rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">
+          <p>
+            <span aria-hidden="true">▲ </span>
+            {pageMsg.issues.some((i) => i.kept)
+              ? 'まだ保存していない値があるため、移っていません。確かめてから、もう一度押してください。'
+              : '保存しなかった値がありました。確かめてから移ってください。'}
+          </p>
+          <ul className="list-disc space-y-1 pl-6">
+            {pageMsg.issues.map((i) => (
+              <li key={i.key}>
+                {releaseIssueLabel(i.key, nameOf)}: {i.reason}
+              </li>
+            ))}
+          </ul>
+          <button
+            type="button"
+            onClick={() => (pageMsg.issues.some((i) => i.kept) ? setDiscardAsk(true) : discardAndGo())}
+            className="min-h-tap rounded border border-border-strong bg-surface px-4 text-base text-ink"
+          >
+            {pageMsg.issues.some((i) => i.kept) ? '保存せずに移る' : '移る'}
+          </button>
+        </div>
       ) : null}
       <p className="text-sm text-ink2">
         記号: ↑↑ 危険（高い）・↑ 注意（高い）・↓ 注意（低い）・↓↓ 危険（低い）・— 未測定。範囲外と血圧の上下逆は保存しません。
@@ -788,7 +913,8 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     </div>
   )
 
-  if (loading && data === null) {
+  // 前の日の行を出したまま新しい日を読む間は、行を出さない（押せる古い行を残さない＝3巡目 中1）
+  if ((loading && data === null) || (data !== null && data.day !== day && error === null)) {
     return (
       <div className="mx-auto w-full max-w-6xl space-y-4 p-4">
         {header}
@@ -974,6 +1100,15 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
         </div>
         {keypad}
       </div>
+      <ConfirmDialog
+        open={discardAsk}
+        title="保存せずに移りますか"
+        body="帯に出した方の、まだ保存していない値を捨てて移ります。捨てた値は戻せません。"
+        confirmLabel="保存せずに移る"
+        danger
+        onConfirm={discardAndGo}
+        onCancel={() => setDiscardAsk(false)}
+      />
     </div>
   )
 }
