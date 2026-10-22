@@ -68,6 +68,7 @@ import {
   personNav,
   personPath,
   readPersonDay,
+  settleQueuedFluid,
   snackLabel,
 } from '../lib/daycarePerson'
 import { excretionFailMessage, excretionViewFor, fetchExcretion, MSG_EXCRETION_UNCONFIGURED } from '../lib/excretionClient'
@@ -99,13 +100,21 @@ interface PersonData {
 
 type MealSlot2 = 'lunch' | 'snack'
 type MealField = 'main_amount' | 'side_amount' | 'status'
+/**
+ * 昼食・おやつの保存の状態。人・日・枠ごとに持つ（保存の途中で人や日を切り替えても、前の方の結果を次の方の欄に出さない＝
+ * 2a の反証 中3）。食い違い・止まり・拒否は、その送り先（target）を持ち、解く操作はその送り先へ送る
+ */
 type SaveState =
   | { kind: 'saving' }
   | { kind: 'saved' }
   | { kind: 'queued'; persisted: boolean }
-  | { kind: 'conflict'; conflicts: CellConflict[] }
-  | { kind: 'held' }
+  | { kind: 'conflict'; conflicts: CellConflict[]; target: MealTarget }
+  | { kind: 'held'; target: MealTarget }
+  | { kind: 'rejected'; target: MealTarget; reason?: string }
   | { kind: 'error'; text: string }
+
+const mealKeyOf = (t: MealTarget) => `${t.residentId}:${t.day}:${t.slot}`
+const personKeyOf = (residentId: number, day: string) => `${residentId}:${day}`
 
 type ExState =
   | { status: 'loading' }
@@ -151,8 +160,17 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   const [residents, setResidents] = useState<Resident[]>([])
   const [targets, setTargets] = useState<Map<number, ResidentTargets>>(new Map())
   const [gate, setGate] = useState<{ value: boolean; observed: boolean; forbidden?: true; outdated?: true } | null>(null)
-  const [mealState, setMealState] = useState<Partial<Record<MealSlot2, SaveState>>>({})
-  const [fluidMsg, setFluidMsg] = useState<{ tone: 'warn' | 'danger' | 'info'; text: string } | null>(null)
+  const [mealState, setMealState] = useState<Record<string, SaveState>>({})
+  /** 水分の一言（人・日ごと。いま開いている人・日の分だけ出す） */
+  // queued: 送信待ちにした旨の一言（add＝足した分が載ったら・delId＝取り消した行がサーバーから消えたら外す）
+  const [fluidMsg, setFluidMsg] = useState<{ key: string; tone: 'warn' | 'danger' | 'info'; text: string; queued?: { add: true } | { delId: number } } | null>(null)
+  /**
+   * 送信待ちの水分（人・日ごと）。base＝退避した時のサーバーの合計、ml＝まだ載っていない量、lost＝端末に控えを残せなかった。
+   * 合計と一覧に重ねて出し、取り直した合計で載った分だけ減らす（既存の食事・水分の一括入力と同じ消し込み＝2a の反証 中4）
+   */
+  const [queuedFluids, setQueuedFluids] = useState<Record<string, { base: number; ml: number; lost: boolean }>>({})
+  /** 取り消しを送信待ちにした水分の行（サーバーから消えるまで画面から外す・同じ行の取り消しを二重に積まない） */
+  const [hiddenFluidIds, setHiddenFluidIds] = useState<Set<number>>(new Set())
   const [fluidOther, setFluidOther] = useState('')
   const [fluidBusy, setFluidBusy] = useState(false)
   const [delFluid, setDelFluid] = useState<FluidIntake | null>(null)
@@ -163,6 +181,8 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   const genRef = useRef(0)
   const dayRef = useRef(day)
   dayRef.current = day
+  const residentRef = useRef(residentId)
+  residentRef.current = residentId
 
   useEffect(() => {
     const t = window.setInterval(() => setToday(todayIso()), 60_000)
@@ -239,8 +259,6 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   }, [])
 
   useEffect(() => {
-    setMealState({})
-    setFluidMsg(null)
     setFluidOther('')
     void load(day, false)
   }, [day, residentId, reloadKey, load])
@@ -309,23 +327,31 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   const canWrite = gate !== null && gate.observed && gate.value === true && !(data?.missing ?? false) && day <= today
 
   // ── 昼食・おやつ ──
-  const mealRowOf = (slot: MealSlot2): DaycareMealRow | null =>
-    data?.meals.find((m) => m.meal.resident_id === residentId && m.meal.meal_slot === slot) ?? null
   const targetOf = (slot: MealSlot2): MealTarget => ({ residentId, day, slot })
-  /** 画面に出す値（送信待ちの値 → サーバーの値） */
-  const mealShown = (slot: MealSlot2): Pick<Meal, 'main_amount' | 'side_amount' | 'status'> | null => {
-    const cur = mealRowOf(slot)?.meal ?? null
-    const p = pendingRow('meals', targetOf(slot))
-    if (p === null) return cur
+  const mealRowFor = (t: MealTarget): DaycareMealRow | null =>
+    data === null || data.day !== t.day
+      ? null
+      : (data.meals.find((m) => m.meal.resident_id === t.residentId && m.meal.meal_slot === t.slot) ?? null)
+  const mealRowOf = (slot: MealSlot2): DaycareMealRow | null => mealRowFor(targetOf(slot))
+  /**
+   * 画面に出す値: 送信待ち（まだ送っていない・送っている途中）の値だけ重ねる。止まった値（食い違い）・拒まれた値は重ねず、
+   * サーバーの値を出して欄の下で知らせる（既存の食事・水分の一括入力と同じ＝2a の反証 重大1）
+   */
+  const mealShownFor = (t: MealTarget): Pick<Meal, 'main_amount' | 'side_amount' | 'status'> | null => {
+    const cur = mealRowFor(t)?.meal ?? null
+    const p = pendingRow('meals', t)
+    if (p === null || p.state !== 'pending') return cur
     const pick = <K extends MealField>(f: K): Meal[K] | null =>
       (f in p.values ? (p.values[f] as Meal[K] | null) : (cur?.[f] ?? null)) as Meal[K] | null
     return { main_amount: pick('main_amount'), side_amount: pick('side_amount'), status: pick('status') }
   }
-  const setMeal = (slot: MealSlot2, st: SaveState | null) =>
+  const mealShown = (slot: MealSlot2) => mealShownFor(targetOf(slot))
+  const setMealFor = (t: MealTarget, st: SaveState | null) =>
     setMealState((prev) => {
       const next = { ...prev }
-      if (st === null) delete next[slot]
-      else next[slot] = st
+      const k = mealKeyOf(t)
+      if (st === null) delete next[k]
+      else next[k] = st
       return next
     })
 
@@ -337,82 +363,93 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
     return null
   }
 
-  /** 昼食・おやつの欄を保存する（既存の saveMealEdits。基準は読んだ時のサーバーの値。rebase は〔あなたの値で直す〕） */
+  /**
+   * 昼食・おやつの欄を保存する（既存の saveMealEdits。基準は読んだ時のサーバーの値。rebase は〔あなたの値で直す〕・〔元に戻す〕）。
+   * 送り先（t）は押した時の人・日・枠で固定する（応答の前に人や日を切り替えても、次の方へ書かない＝2a の反証 中3）
+   */
   const saveMeal = async (
-    slot: MealSlot2,
+    t: MealTarget,
     patch: Partial<Record<MealField, number | string | null>>,
     opts: { rebase?: Record<string, unknown>; undoable?: boolean } = {},
   ) => {
     const why = precheck()
     if (why !== null) {
-      setMeal(slot, { kind: 'error', text: why })
+      setMealFor(t, { kind: 'error', text: why })
       return
     }
-    const before = mealShown(slot)
-    const cur = mealRowOf(slot)?.meal ?? null
+    const before = mealShownFor(t)
+    const cur = mealRowFor(t)?.meal ?? null
     const send: Record<string, { value: unknown; base: unknown }> = {}
     for (const [f, v] of Object.entries(patch)) {
       const base = opts.rebase !== undefined && f in opts.rebase ? opts.rebase[f] : (cur?.[f as MealField] ?? null)
       send[f] = { value: v, base }
     }
-    setMeal(slot, { kind: 'saving' })
+    setMealFor(t, { kind: 'saving' })
+    const here = () => residentRef.current === t.residentId && dayRef.current === t.day
     try {
-      const r = await saveMealEdits(targetOf(slot), send as CellEditInput<MealCellField>, {
+      const r = await saveMealEdits(t, send as CellEditInput<MealCellField>, {
         // 記入者は新しい行の時だけ（更新では編集した欄だけ＝部分更新）。edited_by は既定の操作者＝取り込みの上書きを止める印
         ...(cur === null ? { fill: { recorded_by: actorId } } : {}),
         editedBy: actorId,
         rebase: opts.rebase !== undefined,
       })
       if (r === 'queued') {
-        setMeal(slot, { kind: 'queued', persisted: isQueuePersisted() })
-      } else {
-        if (r.row !== null) {
-          const saved = r.row
-          setData((prev) => {
-            if (prev === null || prev.day !== saved.meal_on) return prev
-            const old = prev.meals.find((m) => m.meal.id === saved.id)
-            const meals = [
-              ...prev.meals.filter((m) => m.meal.id !== saved.id),
-              { meal: saved, imported: old?.imported ?? false, editedInApp: true },
-            ]
-            return { ...prev, meals }
-          })
-        }
-        if (r.held === true) {
-          const p = pendingRow('meals', targetOf(slot))
-          setMeal(slot, p !== null && p.conflicts.length > 0 ? { kind: 'conflict', conflicts: p.conflicts } : { kind: 'held' })
-          return
-        }
-        if (r.conflicts.length > 0) {
-          setMeal(slot, { kind: 'conflict', conflicts: r.conflicts })
-          return
-        }
-        setMeal(slot, { kind: 'saved' })
+        // 送信待ちにした: 〔元に戻す〕は出さない（送る前の値を基準にした取り消しが、送った時に偽の食い違いになるため＝中2）
+        setMealFor(t, { kind: 'queued', persisted: isQueuePersisted() })
+        return
       }
-      if (opts.undoable !== false) {
-        const word = slot === 'lunch' ? '昼食' : 'おやつ'
+      if (r.row !== null) {
+        const saved = r.row
+        const wrote = r.applied.length > 0
+        setData((prev) => {
+          if (prev === null || prev.day !== saved.meal_on) return prev
+          const old = prev.meals.find((m) => m.meal.id === saved.id)
+          const meals = [
+            ...prev.meals.filter((m) => m.meal.id !== saved.id),
+            // 画面の入力の印は、実際に書けた時だけ（同じ値＝何も書かなかった時は edited_by が付かない）
+            { meal: saved, imported: old?.imported ?? false, editedInApp: (old?.editedInApp ?? false) || wrote },
+          ]
+          return { ...prev, meals }
+        })
+      }
+      if (r.held === true) {
+        const p = pendingRow('meals', t)
+        setMealFor(t, p !== null && p.conflicts.length > 0 ? { kind: 'conflict', conflicts: p.conflicts, target: t } : { kind: 'held', target: t })
+        return
+      }
+      if (r.conflicts.length > 0) {
+        setMealFor(t, { kind: 'conflict', conflicts: r.conflicts, target: t })
+        return
+      }
+      setMealFor(t, { kind: 'saved' })
+      // 〔元に戻す〕はオンラインで実際に書けた時だけ（既存の食事・水分の一括入力と同じ）。人・日を移った後は出さない
+      if (opts.undoable !== false && r.applied.length > 0 && here()) {
+        const word = t.slot === 'lunch' ? '昼食' : 'おやつ'
         const undoPatch: Partial<Record<MealField, number | string | null>> = {}
         for (const f of Object.keys(patch) as MealField[]) undoPatch[f] = before?.[f] ?? null
-        show(`${nameOf(residentId)}さんの${word}を記録しました`, () => {
-          // 元に戻す: 送った値を基準に、前の値へ戻す
+        show(`${nameOf(t.residentId)}さんの${word}を記録しました`, () => {
           const base: Record<string, unknown> = {}
           for (const f of Object.keys(patch)) base[f] = patch[f as MealField] ?? null
-          void saveMeal(slot, undoPatch, { rebase: base, undoable: false })
+          void saveMeal(t, undoPatch, { rebase: base, undoable: false })
         })
       }
     } catch (e) {
-      setMeal(slot, { kind: 'error', text: e instanceof DbError ? e.message : '保存できませんでした。通信状態を確認して、もう一度押してください。' })
+      const text = e instanceof DbError ? e.message : '保存できませんでした。通信状態を確認して、もう一度押してください。'
+      // 拒まれた値が送信待ちに残った時は、押した直後から〔取り下げる〕を出す（読み直すまで外す手段が無いままにしない）
+      const p = pendingRow('meals', t)
+      setMealFor(t, p !== null && p.state === 'rejected' ? { kind: 'rejected', target: t, reason: text } : { kind: 'error', text })
     }
   }
 
-  const resolveTake = async (slot: MealSlot2, conflicts: CellConflict[]) => {
-    const p = pendingRow('meals', targetOf(slot))
-    await discardPendingRow('meals', targetOf(slot), conflicts.map((c) => c.field), p?.vers)
-    setMeal(slot, null)
+  /** 食い違い・止まり・拒否を解く（送り先は状態が持つ target） */
+  const resolveTake = async (t: MealTarget, fields?: readonly string[]) => {
+    const p = pendingRow('meals', t)
+    await discardPendingRow('meals', t, fields ?? (p === null ? [] : Object.keys(p.values)), p?.vers)
+    setMealFor(t, null)
     scheduleReload()
   }
-  const resolveMine = async (slot: MealSlot2, conflicts: CellConflict[]) => {
-    const p = pendingRow('meals', targetOf(slot))
+  const resolveMine = async (t: MealTarget, conflicts: CellConflict[]) => {
+    const p = pendingRow('meals', t)
     const patch: Partial<Record<MealField, number | string | null>> = {}
     const base: Record<string, unknown> = {}
     for (const c of conflicts) {
@@ -420,65 +457,142 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
       patch[c.field as MealField] = (mine ?? null) as number | string | null
       base[c.field] = c.server
     }
-    await saveMeal(slot, patch, { rebase: base, undoable: false })
+    await saveMeal(t, patch, { rebase: base, undoable: false })
   }
 
+  // 読み込みの後: 送信待ちで止まっている（食い違い）・拒まれた昼食・おやつを、欄の下の知らせとして出し直す
+  // （読み直し・人や日の切り替え・開き直しの後も、止まっている値を保存済みのように見せない＝重大1）
+  useEffect(() => {
+    if (data === null) return
+    for (const slot of ['lunch', 'snack'] as const) {
+      const t: MealTarget = { residentId, day: data.day, slot }
+      const p = pendingRow('meals', t)
+      if (p === null || p.state === 'pending') continue
+      setMealState((prev) => {
+        const k = mealKeyOf(t)
+        const cur = prev[k]
+        if (cur !== undefined && (cur.kind === 'conflict' || cur.kind === 'held' || cur.kind === 'rejected' || cur.kind === 'saving')) return prev
+        const st: SaveState =
+          p.state === 'rejected' ? { kind: 'rejected', target: t } : p.conflicts.length > 0 ? { kind: 'conflict', conflicts: p.conflicts, target: t } : { kind: 'held', target: t }
+        return { ...prev, [k]: st }
+      })
+    }
+  }, [data, residentId])
+
+  /** 割合・おやつのボタン: 状態が「食べた」以外（拒食・外出・入院）なら「食べた」に戻して送る（2a の反証 中5） */
+  const withEaten = (status: string | null | undefined, patch: Partial<Record<MealField, number | string | null>>) =>
+    status === null || status === undefined || status === 'eaten' ? patch : { ...patch, status: 'eaten' }
+
   // ── 水分 ──
+  const personKey = personKeyOf(residentId, day)
   const fluidsOf = useMemo(
-    () => (data === null ? [] : data.fluids.filter((f) => f.resident_id === residentId && f.taken_on === data.day)),
-    [data, residentId],
+    () =>
+      data === null
+        ? []
+        : data.fluids.filter((f) => f.resident_id === residentId && f.taken_on === data.day && !hiddenFluidIds.has(f.id)),
+    [data, residentId, hiddenFluidIds],
   )
+  // 読み込みの後: 送信待ちの水分は、取り直した合計で載った分だけ減らす（観測ベース）。取り消しを送った行はサーバーから消えたら外す
+  useEffect(() => {
+    if (data === null) return
+    setQueuedFluids((prev) => {
+      let changed = false
+      const next = { ...prev }
+      for (const [k, held] of Object.entries(prev)) {
+        const [ridText, d] = k.split(':')
+        if (d !== data.day) continue
+        const now = fluidTotalOf(data.fluids, Number(ridText), d)
+        const r = settleQueuedFluid(held, now)
+        if (r === null) delete next[k]
+        else next[k] = { ...held, ...r }
+        changed = true
+      }
+      return changed ? next : prev
+    })
+    setHiddenFluidIds((prev) => {
+      if (prev.size === 0) return prev
+      const still = new Set([...prev].filter((id) => data.fluids.some((f) => f.id === id)))
+      return still.size === prev.size ? prev : still
+    })
+  }, [data])
+  // 送信待ちにした旨の一言は、届いたと観測できたら外す（「電波が戻ると自動で送信します」を送った後に残さない）
+  useEffect(() => {
+    setFluidMsg((m) => {
+      if (m === null || m.queued === undefined) return m
+      if ('add' in m.queued) return queuedFluids[m.key] === undefined ? null : m
+      if (data === null || !m.key.endsWith(`:${data.day}`)) return m
+      const delId = m.queued.delId
+      return data.fluids.some((f) => f.id === delId) ? m : null
+    })
+  }, [queuedFluids, data])
+
   const addFluid = async (ml: number) => {
+    const rid = residentId
+    const d = day
+    const key = personKeyOf(rid, d)
     const why = precheck()
     if (why !== null) {
-      setFluidMsg({ tone: 'warn', text: why })
+      setFluidMsg({ key, tone: 'warn', text: why })
       return
     }
     setFluidBusy(true)
-    setFluidMsg(null)
     try {
       const r = await insertFluid({
-        resident_id: residentId,
-        taken_on: day,
+        resident_id: rid,
+        taken_on: d,
         // 今日だけいまの時刻（過去の日にいまの時刻を入れない＝段階1の反証レビュー中7と同じ考え）
-        taken_at: day === todayIso() ? nowHm() : null,
+        taken_at: d === todayIso() ? nowHm() : null,
         amount_ml: ml,
         kind: null,
         recorded_by: actorId,
       })
       if (r === 'queued') {
-        setFluidMsg({ tone: 'info', text: `＋${fmtMl(ml)}：${isQueuePersisted() ? MSG_QUEUED : MSG_NOT_PERSISTED}` })
+        const persisted = isQueuePersisted()
+        setQueuedFluids((prev) => {
+          const held = prev[key]
+          // base は最初に退避した時点のサーバーの合計を保つ（重ねて退避しても基準をずらさない）
+          const base = held !== undefined ? held.base : data === null || data.day !== d ? 0 : fluidTotalOf(data.fluids, rid, d)
+          return { ...prev, [key]: { base, ml: (held?.ml ?? 0) + ml, lost: (held?.lost ?? false) || !persisted } }
+        })
+        setFluidMsg({ key, tone: persisted ? 'info' : 'danger', text: `＋${fmtMl(ml)}：${persisted ? MSG_QUEUED : MSG_NOT_PERSISTED}`, queued: { add: true } })
         return
       }
       const saved = r
       setData((prev) => (prev === null || prev.day !== saved.taken_on ? prev : { ...prev, fluids: [...prev.fluids, saved] }))
-      show(`${nameOf(residentId)}さんの水分 ＋${fmtMl(ml)} を記録しました`, () => void removeFluid(saved, true))
+      setFluidMsg((m) => (m !== null && m.key === key ? null : m))
+      if (residentRef.current === rid && dayRef.current === d) {
+        show(`${nameOf(rid)}さんの水分 ＋${fmtMl(ml)} を記録しました`, () => void removeFluid(saved, true))
+      }
     } catch (e) {
-      setFluidMsg({ tone: 'danger', text: e instanceof DbError ? e.message : '保存できませんでした。通信状態を確認して、もう一度押してください。' })
+      setFluidMsg({ key, tone: 'danger', text: e instanceof DbError ? e.message : '保存できませんでした。通信状態を確認して、もう一度押してください。' })
     } finally {
       setFluidBusy(false)
     }
   }
   const removeFluid = async (f: FluidIntake, fromUndo = false) => {
     setDelFluid(null)
+    const key = personKeyOf(f.resident_id, f.taken_on)
     const why = precheck()
     if (why !== null) {
-      setFluidMsg({ tone: 'warn', text: why })
+      setFluidMsg({ key, tone: 'warn', text: why })
       return
     }
     try {
       const r = await softDeleteFluid(f.id, f.rev, { editedBy: actorId })
       if (r === 'queued') {
-        setFluidMsg({ tone: 'info', text: `${fmtMl(f.amount_ml)} の取り消し：${MSG_QUEUED}` })
+        // 取り消しを送信待ちにした: 画面からは先に外す（同じ行の取り消しを二重に積まない）。控えを残せたかで文言を分ける
+        setHiddenFluidIds((prev) => new Set([...prev, f.id]))
+        const persisted = isQueuePersisted()
+        setFluidMsg({ key, tone: persisted ? 'info' : 'danger', text: `${fmtMl(f.amount_ml)} の取り消し：${persisted ? MSG_QUEUED : MSG_NOT_PERSISTED}`, queued: { delId: f.id } })
       } else if (r === true) {
         setData((prev) => (prev === null ? prev : { ...prev, fluids: prev.fluids.filter((x) => x.id !== f.id) }))
         if (!fromUndo) show(`水分 ${fmtMl(f.amount_ml)} を取り消しました`)
       } else {
-        setFluidMsg({ tone: 'warn', text: '他の端末が先にこの記録を直していました。最新の内容に読み直しました。確かめてから、もう一度押してください。' })
+        setFluidMsg({ key, tone: 'warn', text: '他の端末が先にこの記録を直していました。最新の内容に読み直しました。確かめてから、もう一度押してください。' })
         scheduleReload()
       }
     } catch (e) {
-      setFluidMsg({ tone: 'danger', text: e instanceof DbError ? e.message : '取り消せませんでした。通信状態を確認して、もう一度押してください。' })
+      setFluidMsg({ key, tone: 'danger', text: e instanceof DbError ? e.message : '取り消せませんでした。通信状態を確認して、もう一度押してください。' })
     }
   }
   const otherErr = fluidOther === '' ? null : fluidAmountError(fluidOther)
@@ -582,7 +696,8 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   const lunchRow = mealRowOf('lunch')
   const lunch = mealShown('lunch')
   const snack = mealShown('snack')
-  const fluidTotal = fluidTotalOf(fluidsOf, residentId, data.day)
+  const queuedNow = queuedFluids[personKey] ?? null
+  const fluidTotal = fluidTotalOf(fluidsOf, residentId, data.day) + (queuedNow?.ml ?? 0)
   const sectionCls = 'rounded-lg border border-border bg-surface p-3 space-y-2'
   const chipCls = (on: boolean) =>
     on
@@ -676,11 +791,11 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
                 <button
                   key={n}
                   type="button"
-                  aria-pressed={lunch?.[f] === n && lunch?.status !== 'refused'}
+                  aria-pressed={lunch?.[f] === n && (lunch?.status ?? 'eaten') === 'eaten'}
                   aria-label={`${f === 'main_amount' ? '主食' : '副食'} ${n}割`}
                   disabled={!canWrite}
-                  onClick={() => void saveMeal('lunch', lunch?.status === 'refused' ? { [f]: n, status: 'eaten' } : { [f]: n })}
-                  className={chipCls(lunch?.[f] === n && lunch?.status !== 'refused')}
+                  onClick={() => void saveMeal(targetOf('lunch'), withEaten(lunch?.status, { [f]: n }))}
+                  className={chipCls(lunch?.[f] === n && (lunch?.status ?? 'eaten') === 'eaten')}
                 >
                   {n}
                 </button>
@@ -693,13 +808,17 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
             type="button"
             aria-pressed={lunch?.status === 'refused'}
             disabled={!canWrite}
-            onClick={() => void saveMeal('lunch', { status: lunch?.status === 'refused' ? 'eaten' : 'refused' })}
+            onClick={() => void saveMeal(targetOf('lunch'), { status: lunch?.status === 'refused' ? 'eaten' : 'refused' })}
             className={chipCls(lunch?.status === 'refused')}
           >
-            {lunch?.status === 'refused' ? '拒食を取り消す' : '拒食'}
+            拒食
           </button>
         </div>
-        <MealStatusLine st={mealState.lunch} onTake={(cs) => void resolveTake('lunch', cs)} onMine={(cs) => void resolveMine('lunch', cs)} />
+        <MealStatusLine
+          st={mealState[mealKeyOf(targetOf('lunch'))]}
+          onTake={(t, fields) => void resolveTake(t, fields)}
+          onMine={(t, cs) => void resolveMine(t, cs)}
+        />
       </section>
 
       <section aria-labelledby="h-snack" className={sectionCls}>
@@ -714,16 +833,20 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
             <button
               key={c.value}
               type="button"
-              aria-pressed={snack?.main_amount === c.value && snack?.status !== 'refused'}
+              aria-pressed={snack?.main_amount === c.value && (snack?.status ?? 'eaten') === 'eaten'}
               disabled={!canWrite}
-              onClick={() => void saveMeal('snack', { main_amount: c.value })}
-              className={chipCls(snack?.main_amount === c.value && snack?.status !== 'refused')}
+              onClick={() => void saveMeal(targetOf('snack'), withEaten(snack?.status, { main_amount: c.value }))}
+              className={chipCls(snack?.main_amount === c.value && (snack?.status ?? 'eaten') === 'eaten')}
             >
               {c.label}
             </button>
           ))}
         </div>
-        <MealStatusLine st={mealState.snack} onTake={(cs) => void resolveTake('snack', cs)} onMine={(cs) => void resolveMine('snack', cs)} />
+        <MealStatusLine
+          st={mealState[mealKeyOf(targetOf('snack'))]}
+          onTake={(t, fields) => void resolveTake(t, fields)}
+          onMine={(t, cs) => void resolveMine(t, cs)}
+        />
       </section>
 
       <section aria-labelledby="h-fluid" className={sectionCls}>
@@ -774,14 +897,20 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
             {otherErr}
           </p>
         ) : null}
-        {fluidMsg !== null ? (
+        {fluidMsg !== null && fluidMsg.key === personKey ? (
           <p role={fluidMsg.tone === 'danger' ? 'alert' : 'status'} className={`text-sm ${fluidMsg.tone === 'danger' ? 'text-danger' : fluidMsg.tone === 'warn' ? 'text-warn' : 'text-ink2'}`}>
             <span aria-hidden="true">{fluidMsg.tone === 'info' ? '⚠ ' : '▲ '}</span>
             {fluidMsg.text}
           </p>
         ) : null}
         <ul aria-label="この日の水分の記録" className="space-y-1">
-          {fluidsOf.length === 0 ? <li className="text-base text-ink2">まだ記録はありません</li> : null}
+          {fluidsOf.length === 0 && queuedNow === null ? <li className="text-base text-ink2">まだ記録はありません</li> : null}
+          {queuedNow !== null ? (
+            <li className={`text-base ${queuedNow.lost ? 'text-danger' : 'text-ink2'}`}>
+              <span aria-hidden="true">⚠ </span>
+              {queuedNow.lost ? '送れていない（この端末にも控えなし）' : '送信待ち'} ＋{fmtMl(queuedNow.ml)}（合計に含めています）
+            </li>
+          ) : null}
           {fluidsOf.map((f) => (
             <li key={f.id} className="flex flex-wrap items-center justify-between gap-gap text-base text-ink">
               <span>
@@ -860,7 +989,15 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
 }
 
 /** 昼食・おやつの保存の状態（送信中・送信待ち・食い違い・失敗） */
-function MealStatusLine({ st, onTake, onMine }: { st: SaveState | undefined; onTake: (cs: CellConflict[]) => void; onMine: (cs: CellConflict[]) => void }) {
+function MealStatusLine({
+  st,
+  onTake,
+  onMine,
+}: {
+  st: SaveState | undefined
+  onTake: (t: MealTarget, fields?: readonly string[]) => void
+  onMine: (t: MealTarget, cs: CellConflict[]) => void
+}) {
   if (st === undefined) return null
   if (st.kind === 'saving') return <p className="text-sm text-ink2" role="status">↻ 送信中…</p>
   if (st.kind === 'saved') return <p className="text-sm text-ok" role="status">✓ 保存しました</p>
@@ -878,26 +1015,50 @@ function MealStatusLine({ st, onTake, onMine }: { st: SaveState | undefined; onT
         {st.text}
       </p>
     )
-  if (st.kind === 'held')
+  if (st.kind === 'held' || st.kind === 'rejected')
     return (
-      <p className="text-sm text-ink" role="status">
-        <span aria-hidden="true">▲ </span>他の端末の記録と食い違って止まっています。〔最新に更新〕で読み直してください。
-      </p>
+      <div role="alert" className="space-y-2 rounded border border-warn bg-warn-bg p-2 text-sm text-ink">
+        <p>
+          <span aria-hidden="true">▲ </span>
+          {st.kind === 'held'
+            ? '他の端末の記録と食い違って止まっている値があります（送っていません）。上の「いま」はサーバーの値です。'
+            : `${st.reason === undefined ? '' : `${st.reason} `}サーバーに受け付けられなかった値があります（送っていません）。上の「いま」はサーバーの値です。`}
+          〔取り下げる〕で送信待ちから外し、必要なら押し直してください。
+        </p>
+        <button type="button" onClick={() => onTake(st.target)} className="min-h-tap rounded border border-border-strong bg-surface px-3 text-base text-ink">
+          取り下げる
+        </button>
+      </div>
     )
   const words: Record<string, string> = { main_amount: '主食', side_amount: '副食', status: '状態' }
-  const val = (v: unknown) => (v === null || v === undefined ? '—' : v === 'refused' ? '拒食' : v === 'eaten' ? '食べた' : String(v))
+  const val = (v: unknown) =>
+    v === null || v === undefined
+      ? '—'
+      : v === 'refused'
+        ? '拒食'
+        : v === 'eaten'
+          ? '食べた'
+          : v === 'out'
+            ? '外出'
+            : v === 'hospital'
+              ? '入院'
+              : String(v)
   return (
     <div role="alert" className="space-y-2 rounded border border-warn bg-warn-bg p-2 text-sm text-ink">
       <p>
         <span aria-hidden="true">▲ </span>
-        他の端末が先に記録しました。
+        他の端末が先に記録しました（上の「いま」はサーバーの値です）。
         {st.conflicts.map((c) => `${words[c.field] ?? c.field}: いまの値 ${val(c.server)}（あなた ${val(c.mine)}）`).join('・')}
       </p>
       <div className="flex flex-wrap gap-gap">
-        <button type="button" onClick={() => onTake(st.conflicts)} className="min-h-tap rounded border border-border-strong bg-surface px-3 text-base text-ink">
+        <button
+          type="button"
+          onClick={() => onTake(st.target, st.conflicts.map((c) => c.field))}
+          className="min-h-tap rounded border border-border-strong bg-surface px-3 text-base text-ink"
+        >
           いまの値にする
         </button>
-        <button type="button" onClick={() => onMine(st.conflicts)} className="min-h-tap rounded border border-primary bg-surface px-3 text-base text-primary">
+        <button type="button" onClick={() => onMine(st.target, st.conflicts)} className="min-h-tap rounded border border-primary bg-surface px-3 text-base text-primary">
           あなたの値で直す
         </button>
       </div>

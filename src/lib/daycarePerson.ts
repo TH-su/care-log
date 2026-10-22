@@ -101,3 +101,12 @@ export function readPersonDay(raw: string | null, today: string): string {
   if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== raw) return today
   return raw > today ? today : raw
 }
+
+/**
+ * 送信待ちの水分の消し込み（既存の食事・水分の一括入力と同じ）。held.base＝退避した時のサーバーの合計、held.ml＝まだ載っていない量、
+ * now＝取り直したサーバーの合計。載ったと観測できた分だけ減らし、残りが無ければ null
+ */
+export function settleQueuedFluid(held: { base: number; ml: number }, now: number): { base: number; ml: number } | null {
+  const remain = held.ml - (now - held.base)
+  return remain > 0 ? { base: now, ml: remain } : null
+}

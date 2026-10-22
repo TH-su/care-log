@@ -113,6 +113,15 @@ if (DP === null) {
     })
   })
 
+  describe('送信待ちの水分の消し込み（2a の反証 中4）', () => {
+    it('載ったと観測できた分だけ減らし、残りが無ければ消す（既存の食事・水分の一括入力と同じ）', () => {
+      assert.deepEqual(DP.settleQueuedFluid({ base: 150, ml: 200 }, 150), { base: 150, ml: 200 }, 'まだ載っていない')
+      assert.deepEqual(DP.settleQueuedFluid({ base: 150, ml: 350 }, 350), { base: 350, ml: 150 }, '一部（200）だけ載った')
+      assert.equal(DP.settleQueuedFluid({ base: 150, ml: 200 }, 350), null, '全部載った')
+      assert.equal(DP.settleQueuedFluid({ base: 150, ml: 200 }, 500), null, '別の端末の分も増えた')
+    })
+  })
+
   describe('排泄ケアアプリの入口・前の方／次の方・業務日', () => {
     it('入口は care-tools の排泄ケアアプリ（相対パス）＋?masterId=source_id。受け付けない形は最初の画面', () => {
       assert.equal(DP.haibenAppHref('M001'), '../care-tools/haiben-record.html?masterId=M001')
@@ -244,8 +253,34 @@ if (DP === null) {
       assert.match(page, /editedBy: actorId,/)
       assert.match(page, /mealSourceLabel\(lunchRow\)/)
     })
+    it('2a の反証の直し（重大1・中2〜5）', () => {
+      // 重大1: 重ねて出すのは送信待ち（pending）だけ。止まった・拒まれた値は欄の下で知らせ、読み込みの後に出し直す
+      assert.match(page, /if \(p === null \|\| p\.state !== 'pending'\) return cur/)
+      assert.match(page, /p\.state === 'rejected' \? \{ kind: 'rejected', target: t \} : p\.conflicts\.length > 0 \? \{ kind: 'conflict', conflicts: p\.conflicts, target: t \} : \{ kind: 'held', target: t \}/)
+      assert.doesNotMatch(page, /〔最新に更新〕で読み直してください/)
+      // 中2: 〔元に戻す〕はオンラインで実際に書けた時だけ・送信待ちでは出さない
+      assert.match(page, /if \(r === 'queued'\) \{[\s\S]{0,300}?setMealFor\(t, \{ kind: 'queued', persisted: isQueuePersisted\(\) \}\)\s*return\s*\}/)
+      assert.match(page, /if \(opts\.undoable !== false && r\.applied\.length > 0 && here\(\)\) \{/)
+      // 中3: 状態は人・日・枠ごと。送り先は押した時の target、解く操作は状態が持つ target
+      assert.match(page, /const mealKeyOf = \(t: MealTarget\) => `\$\{t\.residentId\}:\$\{t\.day\}:\$\{t\.slot\}`/)
+      assert.match(page, /onTake=\{\(t, fields\) => void resolveTake\(t, fields\)\}/)
+      assert.match(page, /onMine=\{\(t, cs\) => void resolveMine\(t, cs\)\}/)
+      assert.match(page, /fluidMsg !== null && fluidMsg\.key === personKey/)
+      // 中4: 送信待ちの水分を合計と一覧に重ね、取り直しで消し込む。取り消しの送信待ちは行を先に外す
+      assert.match(page, /const fluidTotal = fluidTotalOf\(fluidsOf, residentId, data\.day\) \+ \(queuedNow\?\.ml \?\? 0\)/)
+      assert.match(page, /const r = settleQueuedFluid\(held, now\)/)
+      assert.match(page, /setHiddenFluidIds\(\(prev\) => new Set\(\[\.\.\.prev, f\.id\]\)\)/)
+      // 中5: 拒食・外出・入院の行は、割合・おやつのボタンで「食べた」に戻して送る
+      assert.match(page, /status === null \|\| status === undefined \|\| status === 'eaten' \? patch : \{ \.\.\.patch, status: 'eaten' \}/)
+      assert.match(page, /onClick=\{\(\) => void saveMeal\(targetOf\('lunch'\), withEaten\(lunch\?\.status, \{ \[f\]: n \}\)\)\}/)
+      assert.match(page, /onClick=\{\(\) => void saveMeal\(targetOf\('snack'\), withEaten\(snack\?\.status, \{ main_amount: c\.value \}\)\)\}/)
+      // 画面での確認で見つけた2点: 送信待ちの一言は届いたら外す・拒まれた直後から〔取り下げる〕を出す
+      assert.match(page, /if \('add' in m\.queued\) return queuedFluids\[m\.key\] === undefined \? null : m/)
+      assert.match(page, /\}, \[queuedFluids, data\]\)/)
+      assert.match(page, /p !== null && p\.state === 'rejected' \? \{ kind: 'rejected', target: t, reason: text \} : \{ kind: 'error', text \}/)
+    })
     it('過去の日の水分にいまの時刻を入れない', () => {
-      assert.match(page, /taken_at: day === todayIso\(\) \? nowHm\(\) : null/)
+      assert.match(page, /taken_at: d === todayIso\(\) \? nowHm\(\) : null/)
     })
     it('既存の食事の読み込み（MEAL_COLS）は変えず、取り込みの印は新しい関数でだけ読む', () => {
       const db = code('../src/lib/db.ts')
