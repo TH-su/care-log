@@ -3577,8 +3577,14 @@ async function sendQueuedOp(sb: SupabaseClient, op: QueueOp): Promise<SendResult
         // 入浴記録（1人1日1件）・服薬の時間帯（1人1件）・与薬の記録（1人1日1時間帯1件）は自然キー（部分unique）も持つ。
         // 自分の client_key が載っておらず、同じ自然キーの生きている行がある＝他の端末が先に記録した。
         // 再送しても通らないので止める（消さずに残し「未送信」として数え続ける＝rev 不一致の update と同じ扱い）
-        // デイの活動（0044）は、同じ項目・同じ参加の度合いの行が先にあれば合流する（届いたのと同じ＝止めない）
-        if (op.table === 'daycare_activity_log' && (await activitySameLanded(sb, op.payload))) return 'sent'
+        // デイの活動（0044）は、同じ項目・同じ参加の度合いの行が先にあれば合流する（届いたのと同じ＝止めない）。
+        // ただし、この端末の取り消しがまだ届いていない行には合流しない（後から届く取り消しで入れ直しまで消えるため）。
+        // 取り消しが届くのを待って送り直す（2b の直しの確認の反証 中2）
+        if (op.table === 'daycare_activity_log') {
+          const st = await activityLandedState(sb, op.payload)
+          if (st === 'deleting') return 'retry'
+          if (st === 'same') return 'sent'
+        }
         if (await naturalKeyTaken(sb, op.table, op.payload)) return 'conflict'
         return 'retry'
       }
@@ -4026,16 +4032,31 @@ async function naturalKeyTaken(sb: SupabaseClient, table: QueueTable, payload: R
   return false
 }
 
+/** この端末の送信待ちに、その活動の行（rowId）の取り消し（止まっていない）が残っているか。読むだけ */
+function activityDeletePending(rowId: number): boolean {
+  return queue.some(
+    (q) =>
+      q.table === 'daycare_activity_log' &&
+      q.kind === 'update' &&
+      q.rowId === rowId &&
+      q.blocked === undefined &&
+      Object.prototype.hasOwnProperty.call(q.payload, 'deleted_at') &&
+      q.payload.deleted_at !== null,
+  )
+}
+
 /**
- * デイの活動（0044）の追加が自然キーで当たった時、同じ方・同じ日・同じ項目の生きている行が、同じ参加の度合いで先にあるか。
- * あれば2台で同じチップを押した＝1行に合流（後の追加は届いたのと同じ）。度合いが違えば false（止めて確かめる）
+ * デイの活動（0044）の追加が自然キーで当たった時の、先にある生きている行（同じ方・同じ日・同じ項目）の様子。
+ * same＝同じ参加の度合い（2台で同じチップを押した＝1行に合流・後の追加は届いたのと同じ）／
+ * deleting＝この端末の取り消しがまだ届いていない行（合流させず、取り消しが届くのを待つ）／other＝度合いが違う・読めない（止めて確かめる）
  */
-async function activitySameLanded(sb: SupabaseClient, payload: Record<string, unknown>): Promise<boolean> {
+async function activityLandedState(sb: SupabaseClient, payload: Record<string, unknown>): Promise<'same' | 'deleting' | 'other'> {
   const key = naturalKeyOf('daycare_activity_log', payload)
-  if (key === null) return false
+  if (key === null) return 'other'
   const found = await findByKey(sb, 'daycare_activity_log', key, 'id,rev,participation')
-  if (found === null) return false
-  return participationOf(asRecord(found.row)?.participation) === (participationOf(payload.participation) ?? 'full')
+  if (found === null) return 'other'
+  if (activityDeletePending(found.id)) return 'deleting'
+  return participationOf(asRecord(found.row)?.participation) === (participationOf(payload.participation) ?? 'full') ? 'same' : 'other'
 }
 
 function omitKeys(src: Record<string, unknown>, keys: string[]): Record<string, unknown> {
@@ -8135,7 +8156,8 @@ export function hasPendingDaycareAttendance(residentId: number, day: string, rec
 // daycare_activity_log（1人1日1項目1行）は到着・欠席と同じ経路（client_key・rev 照合・送信待ち cl_sendQueue・edited_by・soft delete）。
 //   入力解禁は活動だけの旗 input_enabled_daycare_activity（writeGate）。過去の日は現場も記録できる（時刻を持たない）。
 //   2台で同じ方・同じ日・同じ項目を入れた時（23505）: 同じ参加の度合いなら先の行に合流して成功（'merged'）、
-//   違えば 'taken'（画面は読み直して「先に記録があります」）。送信待ちの経路も同じ規則（activitySameLanded）。
+//   違えば 'taken'（画面は読み直して「先に記録があります」）。送信待ちの経路も同じ規則（activityLandedState）。
+//   この端末の取り消しがまだ届いていない行には合流しない（取り消しが届いてから送る）。
 
 const ACTIVITY_MSG = {
   missing: 'デイの活動の記録はまだ使えません（サーバー側の設定待ち）。管理者に連絡してください。',
@@ -8264,6 +8286,9 @@ export async function insertDaycareActivity(a: {
       const key = naturalKeyOf('daycare_activity_log', payload)
       const other = key === null ? null : await findByKey(sb, 'daycare_activity_log', key, DAYCARE_ACTIVITY_COLS)
       const row = other === null ? null : normalizeDaycareActivity(other.row)
+      // この端末の取り消しがまだ届いていない行には合流しない（後から届く取り消しで入れ直しまで消えるため）。
+      // 送信待ちに積み、取り消しの後に送る（送信待ちは積んだ順に送り、先に当たれば取り消しが届くまで待つ）
+      if (row !== null && activityDeletePending(row.id)) return queued()
       if (row !== null) return row.participation === participation ? { kind: 'merged', row } : { kind: 'taken', row }
       return queued()
     }

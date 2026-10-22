@@ -83,7 +83,8 @@ export function DaycareActivitySection({ residentId, residentName, day, today, a
   const [rowsDay, setRowsDay] = useState<string | null>(null)
   const [missing, setMissing] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [prev, setPrev] = useState<DaycareActivity[] | null>(null)
+  /** 前回コピーの元（key＝読んだ時の人・日。いま開いている人・日と違えば使わない＝前の方の前回を次の方へ記録しない＝2b の反証 重大1） */
+  const [prev, setPrev] = useState<{ key: string; rows: DaycareActivity[] } | null>(null)
   const [reloadKey, setReloadKey] = useState(0)
   const [msg, setMsg] = useState<Msg | null>(null)
   const [busy, setBusy] = useState<Set<string>>(new Set())
@@ -115,7 +116,9 @@ export function DaycareActivitySection({ residentId, residentName, day, today, a
       if (gen !== genRef.current) return
       setRows(list)
       setRowsDay(target)
-      setPrev(before)
+      const k = `${rid}:${target}`
+      // 前回を読めなかった時は、同じ人・日の前の値だけ残す（別の方の前回は残さない）
+      setPrev((old) => (before !== null ? { key: k, rows: before } : old !== null && old.key === k ? old : null))
       setMissing(false)
       setLoadError(null)
     } catch (e) {
@@ -217,6 +220,7 @@ export function DaycareActivitySection({ residentId, residentName, day, today, a
     return { list, adds }
   }, [mine, pending, residentId, day])
   const labelsNow = new Set([...shown.list.map((x) => x.a.label), ...shown.adds.map((p) => p.label)])
+  const deletingLabels = new Set(shown.list.filter((x) => x.deleting).map((x) => x.a.label))
 
   // 送信待ちにした旨の一言は、その方・その日の送信待ち（止まっていない分）が無くなったら外す
   useEffect(() => {
@@ -258,6 +262,11 @@ export function DaycareActivitySection({ residentId, residentName, day, today, a
     const bad = activityLabelError(label)
     if (bad !== null) {
       say(key, 'warn', bad)
+      return false
+    }
+    // 取り消しの送信待ちの項目は、届くまで入れない（〔その他〕からも。DB 側も合流させない＝2b の直しの確認の反証 中2）
+    if (deletingLabels.has(label)) {
+      say(key, 'warn', `「${label}」は取り消しの送信待ちです。取り消しが届いてから入れ直してください。`)
       return false
     }
     setBusyLabel(label, true)
@@ -348,8 +357,9 @@ export function DaycareActivitySection({ residentId, residentName, day, today, a
     }
   }
 
-  // 前回はこの方の行だけから選ぶ（人を取り違えない。部品は人・日ごとに作り直されるが、念のため絞る）
-  const prevPick = prev === null ? null : previousActivities(prev.filter((r) => r.resident_id === residentId), day)
+  // 前回は、いま開いている人・日のために読んだ分の、この方の行だけから選ぶ（人を取り違えない）
+  const prevPick =
+    prev === null || prev.key !== personKey ? null : previousActivities(prev.rows.filter((r) => r.resident_id === residentId), day)
   const toCopy = prevPick === null ? [] : copyItems(prevPick.items, [...labelsNow].map((label) => ({ label })))
   const copyPrev = async () => {
     // 1件ずつ足す（失敗したらそこで止め、理由は欄の下に出る）。〔元に戻す〕のトーストは出さない（件数が多いため）
