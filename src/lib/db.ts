@@ -8092,6 +8092,54 @@ export function hasPendingDaycareAttendance(residentId: number, day: string, rec
   return false
 }
 
+/** デイの1日の昼食・おやつの行（取り込みの印つき）。段階2a・2026-10-22 */
+export interface DaycareMealRow {
+  meal: Meal
+  /** 申し送りのスプレッドシートから取り込まれた行（import_key あり） */
+  imported: boolean
+  /** 画面で入れた・直した行（edited_by あり。取り込みはこの行を上書きしない＝tools/import.mjs の app_protected） */
+  editedInApp: boolean
+}
+
+/**
+ * デイの1日の昼食・おやつ（取り込みの印つき）と水分を読む（段階2a・読むだけ）。既存の食事の読み込み（MEAL_COLS）は変えず、
+ * 取り込みの印（import_key・edited_by）だけ足して読む。表示のためだけで、書き込みは既存の saveMealEdits・insertFluid を使う
+ */
+export async function fetchDaycareIntake(dayIso: string): Promise<{ meals: DaycareMealRow[]; fluids: FluidIntake[] }> {
+  assertDay(dayIso)
+  const sb = await getClient()
+  const [mealsRes, fluidsRes] = await Promise.all([
+    sb
+      .from('meals')
+      .select(`${MEAL_COLS},import_key,edited_by`)
+      .eq('meal_on', dayIso)
+      .in('meal_slot', ['lunch', 'snack'])
+      .is('deleted_at', null)
+      .order('id', { ascending: true })
+      .limit(MAX_ROWS) as unknown as Promise<Res<unknown>>,
+    sb
+      .from('fluid_intake')
+      .select(FLUID_COLS)
+      .eq('taken_on', dayIso)
+      .is('deleted_at', null)
+      .order('id', { ascending: true })
+      .limit(MAX_ROWS) as unknown as Promise<Res<unknown>>,
+  ])
+  for (const res of [mealsRes, fluidsRes]) if (res.error !== null) throw readError(res)
+  const meals: DaycareMealRow[] = []
+  for (const raw of Array.isArray(mealsRes.data) ? mealsRes.data : []) {
+    const meal = normalizeMeal(raw)
+    if (meal === null) continue
+    const rec = asRecord(raw)
+    meals.push({
+      meal,
+      imported: typeof rec?.import_key === 'string' && rec.import_key !== '',
+      editedInApp: idNum(rec?.edited_by) !== null,
+    })
+  }
+  return { meals, fluids: list(fluidsRes.data, normalizeFluid, MAX_ROWS) }
+}
+
 /**
  * その日のデイの測定（client_key が 'dc:' で始まる生きている行・client_key つき）と、その日の 'dc:' のキーの全部
  * （取り消した行も含む＝次の回を決めるため。キーだけを読む）

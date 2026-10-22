@@ -636,7 +636,9 @@ describe('静的な見張り（読むだけ・個人情報を残さない）', (
     walk(root)
     const users = files.filter((p) => /from '\.\.?\/(lib\/)?excretionClient'/.test(readFileSync(p, 'utf8'))).map((p) => p.slice(root.length))
     // lib/cachedReads.ts は裏での先読み（2026-10-17）が fetchExcretion（読むだけ）を呼ぶ
-    assert.deepEqual(users.sort(), ['lib/cachedReads.ts', 'pages/AlertsPage.tsx', 'pages/KartePage.tsx'])
+    // pages/DaycarePersonPage.tsx はデイの1人の記録（段階2a・2026-10-22）が fetchExcretion（読むだけ）を呼ぶ（書き込みの経路を持たないことは
+    // tests/daycare-person.test.mjs が別に確かめる）
+    assert.deepEqual(users.sort(), ['lib/cachedReads.ts', 'pages/AlertsPage.tsx', 'pages/DaycarePersonPage.tsx', 'pages/KartePage.tsx'])
   })
 
   it('カルテ: 排泄の欄（karte-excretion）を食事・水分の次に置き、移動ボタンと ?sec= の許可リストにも入る', () => {
