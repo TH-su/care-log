@@ -593,10 +593,9 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   const header = (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-gap">
-        <h1 className="text-xl font-bold text-ink">デイ（せせらぎ）</h1>
+        <DaycareNav current="vitals" />
         <RecorderBar actorId={actorId} staff={staff ?? null} />
       </div>
-      <DaycareNav current="vitals" />
       <div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">
         <button
           type="button"
@@ -692,7 +691,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     active !== null && activeSlot !== null ? (
       <section
         aria-label="テンキー"
-        className="fixed inset-x-0 bottom-0 z-40 border-t border-border-strong bg-surface p-3 lg:sticky lg:top-4 lg:z-auto lg:w-80 lg:shrink-0 lg:rounded-lg lg:border"
+        className="fixed inset-x-0 bottom-0 z-40 border-t border-border-strong bg-surface p-3 lg:sticky lg:top-20 lg:z-auto lg:w-80 lg:shrink-0 lg:rounded-lg lg:border"
       >
         <div className="mb-2" aria-live="polite">
           <p className="text-base text-ink">

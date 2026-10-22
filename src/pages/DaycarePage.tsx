@@ -667,10 +667,9 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   const header = (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-gap">
-        <h1 className="text-xl font-bold text-ink">デイ（せせらぎ）</h1>
+        <DaycareNav current="today" />
         <RecorderBar actorId={actorId} staff={staff ?? null} />
       </div>
-      <DaycareNav current="today" />
       <div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">
         <button
           type="button"
@@ -872,6 +871,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
 
                 {row.state === 'present' || row.state === 'left' || bath !== null || vDone ? (
                   <div className="mt-3 flex flex-wrap items-center gap-gap">
+                    {row.state === 'present' || row.state === 'left' || vDone ? (
                     <Link
                       to="/record/daycare/vitals"
                       className={`inline-flex min-h-tap items-center rounded-full px-3 text-base ${
@@ -885,6 +885,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                       バイタル&nbsp;
                       <span className="font-bold">{vAbn ? '▲ 要確認' : vDone ? '✓ 済' : '— 未'}</span>
                     </Link>
+                    ) : null}
                     <span className="inline-flex min-h-tap items-center text-base text-ink2">
                       入浴&nbsp;
                       <span className="font-bold text-ink">
