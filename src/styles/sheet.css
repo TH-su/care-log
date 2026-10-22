@@ -967,6 +967,10 @@
   }
   .dsheet-day > [data-day-bar] {
     border-top: var(--sheet-rule-bold) solid var(--c-ink2);
+    /* 下の罫線（2026-10-22 指示）。スクロールで日付の行が上に残ると、下の線（すぐ下の段が持つ border-b）が
+       流れて消え、日付の行の下に表の中身が線なしで潜り込んで見えていた。行の高さを変えないよう、線は影で外側に描く
+       （スクロールしていない時は、すぐ下の段の線とちょうど重なる＝二重にならない） */
+    box-shadow: 0 var(--sheet-rule) 0 var(--c-border-strong);
   }
   .dsheet-frame-row,
   .dsheet-body > :not(.dsheet-island) {
