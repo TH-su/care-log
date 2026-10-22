@@ -397,6 +397,39 @@ if (DC === null) {
     })
   })
 
+  describe('日付の切り替え・読み直しの前の片づけ（反証レビュー3巡目）', () => {
+    it('送る欄: 上・下・ほかの欄を全部送る・送っている最中の欄は除く・入力が無ければ空', () => {
+      assert.deepEqual(DC.releaseEditsOf({ sys_bp: 140, dia_bp: 80, temp: 36.8 }, undefined), { temp: 36.8, sys_bp: 140, dia_bp: 80 })
+      assert.deepEqual(DC.releaseEditsOf({ sys_bp: 140, temp: 36.8 }, new Set(['temp'])), { sys_bp: 140 })
+      assert.deepEqual(DC.releaseEditsOf({ pulse: null }, new Set()), { pulse: null }, '空にした（null）も送る')
+      assert.deepEqual(DC.releaseEditsOf(undefined, undefined), {})
+      assert.deepEqual(DC.releaseEditsOf({ sys_bp: 140, note: 'x' }, undefined), { sys_bp: 140 }, '知らない欄は送らない')
+    })
+    it('拒まれて送信待ちに残った値は載ったとみなす（値が同じ欄が全部ある時だけ）', () => {
+      assert.equal(DC.editsHeldInQueue({ sys_bp: 140, dia_bp: 80 }, { sys_bp: 140, dia_bp: 80, temp: 36.5 }), true)
+      assert.equal(DC.editsHeldInQueue({ sys_bp: 140, dia_bp: 80 }, { sys_bp: 140 }), false, '下が控えに無い')
+      assert.equal(DC.editsHeldInQueue({ sys_bp: 150 }, { sys_bp: 140 }), false, '控えの値が違う（打ち直した）')
+      assert.equal(DC.editsHeldInQueue({ pulse: null }, { pulse: null }), true)
+      assert.equal(DC.editsHeldInQueue({ sys_bp: 140 }, null), false, '控えが無い（送る前に止まった）')
+      assert.equal(DC.editsHeldInQueue({}, { sys_bp: 140 }), false)
+    })
+    it('帯の項目: 入力が残る項目は入力が無くなったら外す・捨てた項目は残す', () => {
+      const issues = [
+        { key: 'dc:2026-10-22:3:1', kept: true, reason: 'a' },
+        { key: 'dc:2026-10-22:5:2', kept: true, reason: 'b' },
+        { key: 'dc:2026-10-22:6:1', kept: false, reason: 'c' },
+      ]
+      const out = DC.pruneReleaseIssues(issues, (k) => k === 'dc:2026-10-22:5:2')
+      assert.deepEqual(out.map((i) => i.key), ['dc:2026-10-22:5:2', 'dc:2026-10-22:6:1'])
+    })
+    it('帯の見出し: 誰の何回目か（絞り込みで見えない方でも分かる）', () => {
+      const nameOf = (id) => `見本 ${id}`
+      assert.equal(DC.releaseIssueLabel('dc:2026-10-22:3:1', nameOf), '見本 3（1回目）')
+      assert.equal(DC.releaseIssueLabel('dc:2026-10-22:3:3', nameOf), '見本 3（再測定 2）')
+      assert.equal(DC.releaseIssueLabel('bad', nameOf), '（測定を特定できません）')
+    })
+  })
+
   describe('日報の発熱者に載せるデイの測定（代表者の決定 2026-10-22）', () => {
     it('発熱の判定はタイムラインの「▲発熱」と同じ（37.5℃以上＝注意の高値以上）', () => {
       assert.equal(DC.isFeverTemp(37.4), false)
@@ -1036,9 +1069,9 @@ if (DC === null) {
     it('反証レビューの直し（静的）: 上下逆で止めた上は送らない・持っている上は離れる前に確かめる・過去の日の到着と帰宅は止める・写しが unknown の日は写し直す', () => {
       const v = code('../src/pages/DaycareVitalsPage.tsx')
       assert.match(v, /pairBlocked\.current\.add\(slot\.key\)/)
-      assert.match(v, /if \(pairBlocked\.current\.has\(key\)\) \{[\s\S]*?setDraft\(key, 'sys_bp', undefined\)/)
-      assert.match(v, /registerUnsaved\(\(\) => \[\.\.\.draftsRef\.current\.values\(\)\]\.some\(\(d\) => 'sys_bp' in d\)\)/)
-      assert.match(v, /fill: dayRef\.current === todayIso\(\) \? \{ measured_at: nowHm\(\), recorded_by: actorId \} : \{ recorded_by: actorId \}/)
+      assert.match(v, /if \(pairBlocked\.current\.has\(key\) && 'sys_bp' in edits\) \{[\s\S]*?setDraft\(key, 'sys_bp', undefined\)/)
+      assert.match(v, /registerUnsaved\(\(\) => \[\.\.\.draftsRef\.current\.values\(\)\]\.some\(\(d\) => Object\.keys\(d\)\.length > 0\)\)/)
+      assert.match(v, /fill: slotDay === todayIso\(\) \? \{ measured_at: nowHm\(\), recorded_by: actor \} : \{ recorded_by: actor \}/)
       assert.match(v, /const usable = snapshot !== null && snapshot\.plan_source !== 'unknown'/)
       const t = code('../src/pages/DaycarePage.tsx')
       assert.match(t, /const timesOk = canChangeDaycareTimes\(day, today, role\)\s*const stampDisabled = disabled \|\| !timesOk/)
@@ -1061,14 +1094,39 @@ if (DC === null) {
       // 軽2: 送り先はキーから組み立てる（絞り込みで外れた方も）・送れなければ移らない
       assert.match(v, /const k = parseDaycareVitalKey\(key\)/)
       assert.doesNotMatch(v, /flatSlots\.find\(\(s\) => s\.key === key\)/)
-      assert.match(v, /const releaseAllHeld = async \(\): Promise<boolean> => \{[\s\S]*?if \(results\.some\(\(ok\) => !ok\)\) \{[\s\S]*?return false/)
-      assert.match(v, /if \(await releaseAllHeld\(\)\) go\(\)/)
+      assert.match(v, /const releaseAllHeld = async \(\): Promise<DaycareReleaseIssue\[\]> => \{/)
+      assert.match(v, /const issues = await releaseAllHeld\(\)\s*if \(issues\.length > 0\) \{\s*setPageMsg\(\{ issues, go \}\)\s*return\s*\}/)
       for (const re of [/afterRelease\(\(\) => setDay\(\(d\) => addDays\(d, -1\)\)\)/, /afterRelease\(\(\) => setDay\(today\)\)/, /afterRelease\(\(\) => setReloadKey\(\(n\) => n \+ 1\)\)/]) assert.match(v, re)
       assert.doesNotMatch(v, /releaseAllHeld\(\)\s*\n\s*set(Day|ReloadKey)\(/)
       // 記録者が未選択・送れない時は false（入力は消さない）
-      assert.match(v, /if \(actorId === null\) \{\s*setState\(slot\.key, \{ kind: 'error', text: MSG_NO_RECORDER \}\)\s*return false/)
+      assert.match(v, /if \(actorId === null\) \{\s*setState\(slot\.key, \{ kind: 'error', text: MSG_NO_RECORDER \}\)\s*return Promise\.resolve\(MSG_NO_RECORDER\)/)
       const t = code('../src/pages/DaycarePage.tsx')
       assert.match(t, /data\.day < today && !data\.missing && data\.planSource !== 'unknown' && \(data\.snapshot === null \|\| data\.snapshot\.plan_source === 'unknown'\)/)
+    })
+    it('反証レビュー3巡目の直し（静的）: 送り先の日はキーから・読み込み中は古い行を出さない・片づけ中は止める・打ち直した値は消さない・下も送る・帯に誰か出す', () => {
+      const v = code('../src/pages/DaycareVitalsPage.tsx')
+      // 中1: 送り先の日・測定時刻はキーの日付から。新しい日を読む間は前の日の行を出さない
+      assert.match(v, /day: parseDaycareVitalKey\(slot\.key\)\?\.day \?\? dayRef\.current,/)
+      assert.match(v, /const slotDay = parseDaycareVitalKey\(slot\.key\)\?\.day \?\? dayRef\.current/)
+      assert.match(v, /if \(\(loading && data === null\) \|\| \(data !== null && data\.day !== day && error === null\)\) \{/)
+      assert.match(v, /vital: cur !== null && cur\.day === k\.day \?/)
+      // 軽1: 片づけの前にテンキーを閉じ、欄・再測定・日付を止める。送っている最中の保存を待つ。送った値と違う入力は残す
+      assert.match(v, /releasingRef\.current = true\s*setReleasing\(true\)\s*setActive\(null\)/)
+      assert.match(v, /if \(!canWrite \|\| releasingRef\.current\) return/)
+      assert.match(v, /if \(!canWrite \|\| data === null \|\| releasingRef\.current\) return/)
+      assert.match(v, /await Promise\.allSettled\(\[\.\.\.inflightSaves\.current\]\)/)
+      assert.match(v, /if \(d !== undefined && fld in d && \(d\[fld\] \?\? null\) === \(v \?\? null\)\) setDraft\(key, fld, undefined\)/)
+      assert.doesNotMatch(v, /for \(const f of Object\.keys\(edits\)\) setDraft\(slot\.key, f as DaycareVitalField, undefined\)/)
+      for (const re of [/disabled=\{releasing\}/g]) assert.ok((v.match(re) ?? []).length >= 3, '前の日・今日を開く・最新に更新を片づけ中は押せない')
+      assert.match(v, /disabled=\{day >= today \|\| releasing\}/)
+      // 軽2: 送れない時の逃げ道（確認つきで捨てて移る）
+      assert.match(v, /confirmLabel="保存せずに移る"\s*danger\s*onConfirm=\{discardAndGo\}/)
+      // 軽3: 片づけは入力の全部の欄（下・ほかの欄も）を送る
+      assert.match(v, /const edits = releaseEditsOf\(draftsRef\.current\.get\(key\), new Set\(inflightRef\.current\.get\(key\)\?\.keys\(\) \?\? \[\]\)\)/)
+      // 軽4: 帯に誰の何回目かを出す・ほかの経路で送れたら外す
+      assert.match(v, /releaseIssueLabel\(i\.key, nameOf\)/)
+      assert.match(v, /pruneReleaseIssues\(m\.issues, \(key\) => drafts\.has\(key\)\)/)
+      assert.match(v, /if \(!editsHeldInQueue\(edits, pendingRow\('vitals', targetOf\(slot\)\)\?\.values\)\) return \{ key, kept: true, reason: err \}/)
     })
     it('日報の発熱者（静的）: 読み込みで基準値を待ち、デイの測定は発熱のあった方だけ・温度板とタイムラインは変えない', () => {
       const d = code('../src/pages/DailySheetPage.tsx')
