@@ -507,14 +507,15 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
    */
   const releaseAllHeld = async (): Promise<boolean> => {
     const results = await Promise.all([...draftsRef.current.keys()].map((key) => releaseHeldOf(key)))
+    // テンキーは閉じる（スマホ幅でテンキーの下に帯が隠れないように）。送れなかった上は下書きに残る（送らずに閉じる）
+    setActive(null)
+    setBuf('')
+    setKpError(null)
     if (results.some((ok) => !ok)) {
       setPageMsg('まだ保存していない血圧の上がありました（理由は該当の方の行に出しています）。確かめてから、もう一度押してください。')
       return false
     }
     setPageMsg(null)
-    setActive(null)
-    setBuf('')
-    setKpError(null)
     return true
   }
   /** 日付の切り替え・読み直し（持っている血圧の上を片づけてから） */

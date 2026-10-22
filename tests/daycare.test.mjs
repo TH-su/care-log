@@ -991,7 +991,7 @@ if (DC === null) {
       // 記録者が未選択・送れない時は false（入力は消さない）
       assert.match(v, /if \(actorId === null\) \{\s*setState\(slot\.key, \{ kind: 'error', text: MSG_NO_RECORDER \}\)\s*return false/)
       const t = code('../src/pages/DaycarePage.tsx')
-      assert.match(t, /data\.day < today && !data\.missing && \(data\.snapshot === null \|\| data\.snapshot\.plan_source === 'unknown'\)/)
+      assert.match(t, /data\.day < today && !data\.missing && data\.planSource !== 'unknown' && \(data\.snapshot === null \|\| data\.snapshot\.plan_source === 'unknown'\)/)
     })
     it('画面は端末に業務データを書かない（localStorage は絞り込みの既知値だけ）', () => {
       for (const f of ['../src/pages/DaycarePage.tsx', '../src/pages/DaycareVitalsPage.tsx']) {
