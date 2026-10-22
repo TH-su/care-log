@@ -593,18 +593,48 @@ export function dailyFeverObservations<T extends { id: number; resident_id: numb
 export function rekeyHeld<T extends { rowKey: string }>(
   held: Readonly<Record<number, T>>,
   keyOf: (id: number) => string | null,
-): { next: Record<number, T> | null; moves: [string, string][] } {
+): { next: Record<number, T> | null; moves: [string, string][]; stay: string[] } {
   let next: Record<number, T> | null = null
   const moves: [string, string][] = []
+  const stay: string[] = []
   for (const [idText, c] of Object.entries(held)) {
     const id = Number(idText)
     const k = keyOf(id)
-    if (k === null || k === c.rowKey) continue
+    if (k === null || k === c.rowKey) {
+      stay.push(c.rowKey)
+      continue
+    }
     next = next ?? { ...held }
     next[id] = { ...c, rowKey: k }
     moves.push([c.rowKey, k])
   }
-  return { next, moves }
+  return { next, moves, stay }
+}
+
+/**
+ * 行の一言を、控えの行キーの付け直しに合わせて移す（反証レビュー6巡目 軽1）。一言は「行」に1つなので、1件ずつ順に移すと
+ * 連鎖（f-0→f-1・f-1→f-2）で一言が消えたり別の控えの一言が付いたりする。先に移す一言を全部集め、移し元を全部消してから、
+ * 空いている移し先に入れる。動かない控えが残る行（stay）の一言は、その控えのものなので動かさない
+ */
+export function moveRowStatuses<S>(
+  prev: Readonly<Record<string, S>>,
+  moves: readonly (readonly [string, string])[],
+  stay: readonly string[],
+): Record<string, S> {
+  const stays = new Set(stay)
+  const carry: [string, S][] = []
+  const from = new Set<string>()
+  for (const [f, t] of moves) {
+    if (stays.has(f) || from.has(f)) continue
+    const st = prev[f]
+    if (st === undefined) continue
+    from.add(f)
+    carry.push([t, st])
+  }
+  const next: Record<string, S> = { ...prev }
+  for (const f of from) delete next[f]
+  for (const [t, st] of carry) if (next[t] === undefined) next[t] = st
+  return next
 }
 
 /**
