@@ -140,6 +140,49 @@ export const LIMIT_CASES = [
     expect: { field: '42501', cancelRev: 2, revive: 'P0001|vital_limits_immutable', late: 'P0001|vital_limits_cancel_late' },
   },
   {
+    id: 'L4b',
+    name: '2d-1 の反証 中1: 足す時に送った created_at（先の日付・過去の日付）と deleted_at は使わない（サーバーの今・取り消していない）',
+    async run(h) {
+      const r = await h.as({ appRole: 'office' }, (q) =>
+        q(
+          `insert into public.resident_vital_limits (resident_id, valid_from, temp_warn_high, basis, client_key, created_at, deleted_at)
+           values (1, ${TODAY}, 37.2, '試験', 'l4b-1', '2027-01-15T10:00:00+09:00', now()) returning
+             ((created_at at time zone 'Asia/Tokyo')::date = ${TODAY}) as today, deleted_at is null as live`,
+        ),
+      )
+      const r2 = await h.as({ appRole: 'office' }, (q) =>
+        q(
+          `insert into public.resident_vital_limits (resident_id, valid_from, temp_warn_high, basis, client_key, created_at)
+           values (2, ${TODAY}, 37.2, '試験', 'l4b-2', now() - interval '3 days') returning ((created_at at time zone 'Asia/Tokyo')::date = ${TODAY}) as today`,
+        ),
+      )
+      return { future: Array.isArray(r) ? r[0] : out(r), past: Array.isArray(r2) ? r2[0].today : out(r2) }
+    },
+    expect: { future: { today: true, live: true }, past: true },
+  },
+  {
+    id: 'L4c',
+    name: '2d-1 の反証 軽4: 生きている行の取り消しの列・変えた職員だけの書き換え、取り消した行の書き換え（時刻・職員）は止まる',
+    async run(h) {
+      await add(h, { temp_warn_high: 37.2, ck: 'l4c-1' })
+      await add(h, { resident: 2, temp_warn_high: 37.2, ck: 'l4c-2' })
+      const upd = (ck, sql) => h.as({ appRole: 'office' }, (q) => q(`update public.resident_vital_limits set ${sql} where client_key = '${ck}' returning id`))
+      const liveEdited = out(await upd('l4c-1', 'edited_by = 2'))
+      const liveDeletedBy = out(await upd('l4c-1', 'deleted_by = 2'))
+      const cancel = out(await upd('l4c-2', 'deleted_at = now(), deleted_by = 1, edited_by = 1'))
+      const moveTime = out(await upd('l4c-2', `deleted_at = now() + interval '1 day'`))
+      const changeBy = out(await upd('l4c-2', 'deleted_by = 2, edited_by = 2'))
+      return { liveEdited, liveDeletedBy, cancel, moveTime, changeBy }
+    },
+    expect: {
+      liveEdited: 'P0001|vital_limits_immutable',
+      liveDeletedBy: 'P0001|vital_limits_immutable',
+      cancel: 'ok',
+      moveTime: 'P0001|vital_limits_immutable',
+      changeBy: 'P0001|vital_limits_immutable',
+    },
+  },
+  {
     id: 'L5',
     name: '壊れた組・範囲外・根拠なしは 23514（check）。全部 null の行（施設の基準に戻す）は根拠があれば入る',
     async run(h) {

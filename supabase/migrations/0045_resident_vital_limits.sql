@@ -19,6 +19,7 @@
 --        更新 … 値の列・valid_from・resident_id・basis・set_by・client_key は変えられない。変えられるのは取り消し
 --               （deleted_at・deleted_by・edited_by）だけで、足した日（日本時間）の当日だけ（取り違えの直し）。
 --               取り消した行を戻す（deleted_at を null に戻す）こともできない。それより後は新しい行を足す
+--        足した時刻（created_at）はトリガがサーバーの今にする（送られた値を使わない）。取り消した状態で足すこともさせない。
 --        止めた時: SQLSTATE P0001・message は 'vital_limits_backdated:'／'vital_limits_immutable:'／'vital_limits_cancel_late:'
 --        で始まる（0033 の 'note_locked:' と同じ作法）。表には書かない（判定だけ）。
 --        役割の分からない接続（private.my_role() が null＝表の所有者・service_role・SQL エディタ）は止めない（保守のため）。
@@ -138,10 +139,15 @@ begin
       raise exception 'vital_limits_backdated: 個人の閾値は、足した日（今日）より前の日から効かせることはできません（主治医の指示の日は根拠に書いてください）'
         using errcode = 'P0001';
     end if;
+    -- 足した時刻はサーバーの今にする（送られた created_at を使わない＝先の日付を送って「後日の取り消し」を当日に見せない）。
+    -- 取り消した状態で足すこともさせない
+    new.created_at := now();
+    new.deleted_at := null;
+    new.deleted_by := null;
     return new;
   end if;
 
-  -- 更新: 取り消し（deleted_at・deleted_by・edited_by）のほかは変えられない
+  -- 更新: 取り消し（deleted_at を null から入れる・deleted_by・edited_by をそれと一緒に）のほかは変えられない
   if new.resident_id is distinct from old.resident_id
      or new.valid_from is distinct from old.valid_from
      or new.temp_warn_high is distinct from old.temp_warn_high
@@ -157,7 +163,14 @@ begin
      or new.set_by is distinct from old.set_by
      or new.client_key is distinct from old.client_key
      or new.created_at is distinct from old.created_at
-     or (old.deleted_at is not null and new.deleted_at is null) then
+     -- 取り消した行は一切変えられない（復活・取り消しの時刻や取り消した職員の書き換え）
+     or (old.deleted_at is not null
+         and (new.deleted_at is distinct from old.deleted_at
+              or new.deleted_by is distinct from old.deleted_by
+              or new.edited_by is distinct from old.edited_by))
+     -- 生きている行の、取り消しでない更新で、取り消しの列・変えた職員だけを書き換える
+     or (old.deleted_at is null and new.deleted_at is null
+         and (new.deleted_by is distinct from old.deleted_by or new.edited_by is distinct from old.edited_by)) then
     raise exception 'vital_limits_immutable: 個人の閾値の行は書き換えられません（変える時は新しい行を足してください）'
       using errcode = 'P0001';
   end if;
