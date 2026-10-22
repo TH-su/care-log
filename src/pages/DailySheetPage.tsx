@@ -5944,6 +5944,7 @@ function DaySheet({
         empty={phase === 'ready' && savedRows === 0}
         importDay={phase === 'ready' ? importDay : undefined}
         thresholdsLate={thresholdsLate}
+        onReselect={() => setReload((n) => n + 1)}
         othersHere={othersHere}
         onPickDay={onPickDay}
         onAddAttendance={(role) => {
@@ -6666,6 +6667,7 @@ function DayHeader({
   empty,
   importDay,
   thresholdsLate = false,
+  onReselect,
   othersHere,
   onPickDay,
   onAddAttendance,
@@ -6686,8 +6688,10 @@ function DayHeader({
    * （2026-09-05 追加。監査で「空欄が『記録なし』と読める」と指摘された）。
    */
   importDay?: ImportDay | null
-  /** 基準値が遅れて届き、発熱者の欄を前の基準で選んだまま（〔最新に更新〕で選び直す） */
+  /** 基準値が遅れて届き、発熱者の欄を前の基準で選んだまま（〔選び直す〕で選び直す） */
   thresholdsLate?: boolean
+  /** この日の枠だけ読み直して、いまの基準で発熱者を選び直す（取り置きから読む・下書きは消さない） */
+  onReselect?: () => void
   /** いまこの日の申し送りを書いている他の職員（Presence） */
   othersHere: PresenceHere[]
   onPickDay: (iso: string) => void
@@ -6808,10 +6812,22 @@ function DayHeader({
           <p className="px-1 py-1 text-ink2">最終取込 {fmtStamp(importDay.imported_at)}</p>
         )}
         {thresholdsLate && (
-          <p className="px-1 py-1 text-warn">
-            <span aria-hidden="true">▲ </span>
-            施設の基準値の読み込みが遅れたため、発熱者の欄（デイの測定）は前の基準で選んでいます。〔最新に更新〕を押すと選び直します。
-          </p>
+          <div className="flex flex-wrap items-center gap-gap px-1 py-1">
+            <p className="flex-1 text-warn">
+              <span aria-hidden="true">▲ </span>
+              施設の基準値の読み込みが遅れたため、発熱者の欄（デイの測定）は前の基準で選んでいます。〔選び直す〕を押すと、いまの基準で選び直します。
+            </p>
+            {/* 文言が案内するボタンをこの一言の横に置く（他の端末の更新の帯が出ていない時でも押せる＝反証レビュー7巡目 中1） */}
+            {onReselect !== undefined && (
+              <button
+                type="button"
+                onClick={onReselect}
+                className="min-h-tap rounded-md border border-primary bg-surface px-4 text-base font-bold text-primary print:hidden"
+              >
+                選び直す
+              </button>
+            )}
+          </div>
         )}
       </div>
     </>

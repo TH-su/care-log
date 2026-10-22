@@ -1218,7 +1218,9 @@ if (DC === null) {
       assert.doesNotMatch(d, /setThresholdsTick|thresholdsTick/)
       assert.match(d, /if \(!thresholdsDone\) \{\s*void thresholds\.then\(\(\) => \{\s*if \(alive && aliveRef\.current && JSON\.stringify\(vitalThresholds\(\)\) !== usedThresholds\) setThresholdsLate\(true\)/)
       assert.match(d, /\}, \[day, reload, reloadToken, loadDay, applyAttendance, onLoaded, restoreDrafts, writeHeld\]\)/)
-      assert.match(d, /thresholdsLate=\{thresholdsLate\}/)
+      assert.match(d, /thresholdsLate=\{thresholdsLate\}\s*onReselect=\{\(\) => setReload\(\(n\) => n \+ 1\)\}/)
+      // 7巡目 中1: 一言が案内するボタンを一言の横に置く（他の帯が出ていない時でも押せる）
+      assert.match(d, /onClick=\{onReselect\}[\s\S]{0,200}選び直す/)
       // 6巡目 軽3: 保存の応答の後・消す確認の後は、いまの行キーを引き直して一言を出す
       assert.match(d, /const key = currentRowKey\(id, c\.rowKey\)/)
       assert.match(d, /const key = currentRowKey\(v\.id, rowKey\)/)
