@@ -8346,6 +8346,83 @@ export function pendingActivityOps(): PendingActivityOp[] {
   return out
 }
 
+// ── デイ（せせらぎ）の記録 段階2c: 申し送りの印（2026-10-22 追加・代表承認・DB 変更なし） ─────────────
+//
+// 印＝記録から文を組み立てた申し送り（区分「デイ」）。書き込みは既存の insertNote（冪等キー dcn:…）・deleteNote・saveNoteEdits
+// だけを使い、ここには読み取りだけを足す。鍵の作りと世代は daycareNoteMark.ts。
+
+/** 1人1日の印として読む申し送りの上限（記録の数 × 付け直しの回数を十分に上回る） */
+const DAYCARE_NOTE_MARK_ROWS = 500
+
+/** 印の申し送り（冪等キーつき）。deleted＝取り消した申し送り（世代を数えるためだけに読む） */
+export interface DaycareNoteMarkRow {
+  note: Note
+  clientKey: string
+  deleted: boolean
+}
+
+/**
+ * その日・その方の、申し送りの印（冪等キー dcn:<日>:<利用者id>: で始まる区分「デイ」の申し送り）を読む。
+ * ★取り消した申し送りも読む（全読取は生きている行だけ、の例外）: 印の世代は取り消した分も数えないと、外した後に付け直した
+ * 時に取り消し済みの鍵へ当たり、insertNote が取り消した行を「届いた」として返してしまう（付け直しができない）。
+ * 取り消した行は画面に出さず、鍵（世代）だけに使う。前例は findNoteByClientKey・fetchQueuedOpTarget（取り消した行も読む）
+ */
+export async function fetchDaycareNoteMarks(dayIso: string, residentId: number): Promise<DaycareNoteMarkRow[]> {
+  assertDay(dayIso)
+  const sb = await getClient()
+  const res = (await bounded(
+    sb
+      .from('notes')
+      .select(`${NOTE_COLS},client_key,deleted_at`)
+      .eq('note_on', dayIso)
+      .eq('resident_id', residentId)
+      .eq('shift', 'daycare')
+      .like('client_key', `dcn:${dayIso}:${residentId}:%`)
+      .order('id', { ascending: true })
+      .limit(DAYCARE_NOTE_MARK_ROWS),
+  )) as Res<unknown>
+  if (res.error !== null) throw readError(res)
+  const out: DaycareNoteMarkRow[] = []
+  for (const raw of Array.isArray(res.data) ? res.data.slice(0, DAYCARE_NOTE_MARK_ROWS) : []) {
+    const r = asRecord(raw)
+    const note = normalizeNote(raw)
+    const clientKey = str(r?.client_key)
+    if (note === null || clientKey === null) continue
+    out.push({ note, clientKey, deleted: r?.deleted_at !== null && r?.deleted_at !== undefined })
+  }
+  await assertSessionIfEmpty(sb, out.length) // anon で読んだ0件を「印なし」と出さない（F58）
+  return out
+}
+
+/** この端末の送信待ちにある、印の申し送りの登録（冪等キーが prefix で始まるもの）。読むだけ */
+export interface PendingNoteMark {
+  clientKey: string
+  /** pending＝送信待ち／conflict・rejected＝止まった（設定の「送れていない申し送り」で確かめる） */
+  state: 'pending' | 'conflict' | 'rejected'
+  /** 17時のロック（0033）で止まった */
+  locked: boolean
+  body: string
+}
+
+export function pendingDaycareNoteMarks(prefix: string): PendingNoteMark[] {
+  const out: PendingNoteMark[] = []
+  const seen = new Set<string>()
+  const opDone = opDoneIndex(readStoresQuiet().s2?.done)
+  for (const op of [...queue.filter((o) => !isOpDone(o, opDone)), ...storedOps()]) {
+    if (op.table !== 'notes' || op.kind !== 'insert' || sentQids.has(op.qid)) continue
+    const ck = str(op.payload.client_key)
+    if (ck === null || !ck.startsWith(prefix) || seen.has(ck)) continue
+    seen.add(ck)
+    out.push({
+      clientKey: ck,
+      state: op.blocked ?? 'pending',
+      locked: op.errCode === NOTE_LOCKED_CODE,
+      body: str(op.payload.body) ?? '',
+    })
+  }
+  return out
+}
+
 /** デイの1日の昼食・おやつの行（取り込みの印つき）。段階2a・2026-10-22 */
 export interface DaycareMealRow {
   meal: Meal

@@ -44,6 +44,9 @@ import {
 import type { CellConflict, CellEditInput, DaycareMealRow, MealCellField, MealTarget } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
 import { DaycareActivitySection } from '../components/DaycareActivitySection'
+import { useDaycareNoteMarks } from '../components/DaycareNoteMark'
+import { activityText } from '../lib/daycareActivity'
+import { activityMarkText, excretionMarkText, fluidMarkText, mealMarkText, vitalMarkText } from '../lib/daycareNoteMark'
 import { ConfirmDialog, ErrorBlock, LoadingBlock, useToast } from '../components/ui'
 import {
   DAYCARE_VITAL_FIELDS,
@@ -371,6 +374,25 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
     if (actorId === null) return MSG_NO_RECORDER
     return null
   }
+
+  // 申し送りの印（段階2c）。申し送りへの書き込みはこの部品の中だけ（この画面の書き込みの経路は増やさない）
+  const marks = useDaycareNoteMarks({
+    residentId,
+    day,
+    actorId,
+    canWrite,
+    blockedReason: canWrite
+      ? null
+      : gate?.forbidden
+        ? FORBIDDEN_REASON
+        : gate?.outdated
+          ? OUTDATED_REASON
+          : gate?.observed
+            ? kindBlockedMessage('daycare')
+            : MSG_GATE_UNKNOWN,
+    refreshKey: reloadKey,
+    show,
+  })
 
   /**
    * 昼食・おやつの欄を保存する（既存の saveMealEdits。基準は読んだ時のサーバーの値。rebase は〔あなたの値で直す〕・〔元に戻す〕）。
@@ -799,6 +821,10 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
         <Link to="/record/daycare/vitals" className="inline-flex min-h-tap items-center rounded border border-border-strong px-4 text-base text-link">
           バイタル一括で入力する<span aria-hidden="true"> ›</span>
         </Link>
+        {marks.button(
+          { kind: 'vital' },
+          vitalMarkText({ temp: latestOf('temp'), sys_bp: latestOf('sys_bp'), dia_bp: latestOf('dia_bp'), pulse: latestOf('pulse'), spo2: latestOf('spo2') }),
+        )}
       </section>
 
       <section aria-labelledby="h-bath" className={sectionCls}>
@@ -857,6 +883,8 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           onTake={(t, fields) => void resolveTake(t, fields)}
           onMine={(t, cs) => void resolveMine(t, cs)}
         />
+        {/* 申し送りの文はサーバーの値から（送信待ちの値は送れてから） */}
+        {marks.button({ kind: 'lunch' }, mealMarkText('lunch', lunchLabel(lunchRow?.meal ?? null)))}
       </section>
 
       <section aria-labelledby="h-snack" className={sectionCls}>
@@ -885,6 +913,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           onTake={(t, fields) => void resolveTake(t, fields)}
           onMine={(t, cs) => void resolveMine(t, cs)}
         />
+        {marks.button({ kind: 'snack' }, mealMarkText('snack', snackLabel(mealRowOf('snack')?.meal ?? null)))}
       </section>
 
       <section aria-labelledby="h-fluid" className={sectionCls}>
@@ -950,26 +979,38 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
             </li>
           ) : null}
           {fluidsOf.map((f) => (
-            <li key={f.id} className="flex flex-wrap items-center justify-between gap-gap text-base text-ink">
-              <span>
-                {f.taken_at === null ? '時刻なし' : f.taken_at.slice(0, 5)}　{fmtMl(f.amount_ml)}
-              </span>
-              <button
-                type="button"
-                disabled={!canWrite}
-                onClick={() => setDelFluid(f)}
-                aria-label={`${f.taken_at === null ? '時刻なし' : f.taken_at.slice(0, 5)} の ${fmtMl(f.amount_ml)} を取り消す`}
-                className="min-h-tap rounded border border-danger px-3 text-base text-danger disabled:border-border disabled:text-ink3"
-              >
-                取り消す
-              </button>
+            <li key={f.id} className="space-y-1 text-base text-ink">
+              <div className="flex flex-wrap items-center justify-between gap-gap">
+                <span>
+                  {f.taken_at === null ? '時刻なし' : f.taken_at.slice(0, 5)}　{fmtMl(f.amount_ml)}
+                </span>
+                <button
+                  type="button"
+                  disabled={!canWrite}
+                  onClick={() => setDelFluid(f)}
+                  aria-label={`${f.taken_at === null ? '時刻なし' : f.taken_at.slice(0, 5)} の ${fmtMl(f.amount_ml)} を取り消す`}
+                  className="min-h-tap rounded border border-danger px-3 text-base text-danger disabled:border-border disabled:text-ink3"
+                >
+                  取り消す
+                </button>
+              </div>
+              {marks.button({ kind: 'fluid', id: f.id }, fluidMarkText(f))}
             </li>
           ))}
         </ul>
       </section>
 
       {/* 活動・レク（段階2b・0044）。活動だけの旗に従う別の部品（昼食・水分の保存とは混ぜない） */}
-      <DaycareActivitySection residentId={residentId} residentName={name} day={data.day} today={today} actorId={actorId} show={show} refreshKey={reloadKey} />
+      <DaycareActivitySection
+        residentId={residentId}
+        residentName={name}
+        day={data.day}
+        today={today}
+        actorId={actorId}
+        show={show}
+        refreshKey={reloadKey}
+        markSlot={(a) => marks.button({ kind: 'activity', id: a.id }, activityMarkText(activityText(a)))}
+      />
 
       <section aria-labelledby="h-ex" className={sectionCls}>
         <h3 id="h-ex" className="text-lg font-bold text-ink">
@@ -1013,8 +1054,10 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
         >
           排泄ケアアプリで記録する<span aria-hidden="true"> ›</span>
         </a>
+        {marks.button({ kind: 'ex' }, excretionMarkText(exDay), ex.status === 'ok' && ex.view.linked && exDay !== null)}
       </section>
 
+      {marks.dialogs}
       <ConfirmDialog
         open={delFluid !== null}
         title="水分の記録を取り消しますか"

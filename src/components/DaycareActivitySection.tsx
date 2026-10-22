@@ -10,6 +10,7 @@
 // ・端末に業務データを残さない（localStorage を使わない）。送り先（人・日）は押した時に固定する（2a の反証 中3 と同じ）
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import {
   DbError,
   FORBIDDEN_REASON,
@@ -69,6 +70,8 @@ interface Props {
   show: (msg: string, undo?: () => void) => void
   /** 画面の〔最新に更新〕の回数（変わったら活動も読み直す） */
   refreshKey?: number
+  /** 各行の下に置く物（段階2c の〔申し送りにする〕。この部品は申し送りへ書かない） */
+  markSlot?: (a: DaycareActivity) => ReactNode
 }
 
 const toneCls: Record<Msg['tone'], string> = {
@@ -77,7 +80,7 @@ const toneCls: Record<Msg['tone'], string> = {
   danger: 'border-danger bg-danger-bg',
 }
 
-export function DaycareActivitySection({ residentId, residentName, day, today, actorId, show, refreshKey = 0 }: Props) {
+export function DaycareActivitySection({ residentId, residentName, day, today, actorId, show, refreshKey = 0, markSlot }: Props) {
   const [gate, setGate] = useState<Gate | null>(null)
   const [rows, setRows] = useState<DaycareActivity[] | null>(null)
   const [rowsDay, setRowsDay] = useState<string | null>(null)
@@ -479,6 +482,7 @@ export function DaycareActivitySection({ residentId, residentName, day, today, a
                       上の度合いはサーバーの値です。設定の「送れていない記録」で確かめてください。
                     </p>
                   ) : null}
+                  {markSlot?.(a)}
                 </li>
                 ),
               )}

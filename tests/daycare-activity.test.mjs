@@ -434,7 +434,7 @@ if (A === null) {
     })
     it('1人の記録の画面: 活動の欄は別の部品で、昼食・水分の書き込みの経路は変えない', () => {
       const p = code('../src/pages/DaycarePersonPage.tsx')
-      assert.match(p, /<DaycareActivitySection residentId=\{residentId\} residentName=\{name\} day=\{data\.day\} today=\{today\} actorId=\{actorId\} show=\{show\} refreshKey=\{reloadKey\} \/>/)
+      assert.match(p, /<DaycareActivitySection\s+residentId=\{residentId\}\s+residentName=\{name\}\s+day=\{data\.day\}\s+today=\{today\}\s+actorId=\{actorId\}\s+show=\{show\}\s+refreshKey=\{reloadKey\}\s+markSlot=\{\(a\) => marks\.button\(\{ kind: 'activity', id: a\.id \}, activityMarkText\(activityText\(a\)\)\)\}\s+\/>/)
       assert.doesNotMatch(p, /DaycareActivity\(|insertDaycareActivity/)
     })
     it('まとめて記録の画面: 書き込みは insertDaycareActivity だけ・相手は activityTargets（在席・帰宅）・端末に業務データを残さない', () => {
