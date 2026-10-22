@@ -210,7 +210,8 @@ import { normalizeCategories, scheduleColorPatch } from '../lib/noteCategory'
 // 発熱者・他症状者のバイタル欄の印（A1 平熱との差・A9 SpO2 の個別の下限）。平熱と目標は画面を開いた時に1回読んで控える
 import { fetchResidentTargets, fetchUsualTemps, loadVitalThresholds } from '../lib/db'
 import { judgeTemp, spo2LevelFor } from '../lib/vitalAlerts'
-import { dailyFeverObservations, rekeyHeld } from '../lib/daycare'
+import { dailyFeverObservations, moveRowStatuses, rekeyHeld } from '../lib/daycare'
+import { vitalThresholds } from '../lib/vitalThresholds'
 import type { ResidentTargets } from '../lib/vitalAlerts'
 import {
   CategoryChips,
@@ -3433,8 +3434,11 @@ function DaySheet({
   const [outingDrafts, setOutingDrafts] = useState<OutingDraft[]>([])
 
   const [status, setStatus] = useState<Record<string, RowStatus>>({})
-  /** 読み込みで基準値の待ちを打ち切った後に、基準値が届いた印（その日を読み直して発熱者を選び直す） */
-  const [thresholdsTick, setThresholdsTick] = useState(0)
+  /**
+   * 読み込みで基準値の待ちを打ち切った後に、違う基準値が届いた（発熱者は前の基準で選んだまま）。自動では読み直さず、
+   * 日の見出しに〔最新に更新〕で選び直す旨を出す（自動の読み直しは失敗の繰り返し・入力中の行のずれを起こすため＝反証レビュー6巡目 中1・軽2）
+   */
+  const [thresholdsLate, setThresholdsLate] = useState(false)
   /**
    * 競合したバイタル（行の id → 行のキー・競合した時に見ていた行・あなたの入力）。
    * この画面のセルはサーバーの値を描くので、入力はここに控え、くらべて選ぶ画面で見せる
@@ -3623,13 +3627,8 @@ function DaySheet({
           Promise.race([thresholds, new Promise<void>((r) => (waitTimer = setTimeout(r, THRESHOLD_WAIT_MS)))]),
         ])
         if (waitTimer !== null) clearTimeout(waitTimer)
-        // 上限が先に来た時は、基準値が届いた後でもう一度読む（発熱者をいまの基準で選び直す＝反証レビュー5巡目 軽1）
-        if (!thresholdsDone) {
-          void thresholds.then(() => {
-            if (alive && aliveRef.current) setThresholdsTick((n) => n + 1)
-          })
-        }
         if (!alive || !aliveRef.current) return
+        setThresholdsLate(false)
 
         const safeNotes = Array.isArray(report?.notes) ? report.notes.filter((n) => n != null) : []
         setNotes(
@@ -3667,7 +3666,14 @@ function DaySheet({
         const obsAll = Array.isArray(report?.observations) ? report.observations.filter((v) => v != null).map(newer).map(withPending) : []
         const editing = new Set<number>()
         for (const v of obsAll) if (vitalConflictsRef.current[v.id] !== undefined || pendingRow('vitals', vitalTargetOf(v.id)) !== null) editing.add(v.id)
+        const usedThresholds = JSON.stringify(vitalThresholds())
         const obs = dailyFeverObservations(obsAll, report?.daycareVitalIds, editing)
+        // 上限が先に来た時は、基準値が届いた後で、選ぶのに使った基準と違えば一言だけ出す（読み直さない・失敗では何もしない）
+        if (!thresholdsDone) {
+          void thresholds.then(() => {
+            if (alive && aliveRef.current && JSON.stringify(vitalThresholds()) !== usedThresholds) setThresholdsLate(true)
+          })
+        }
         const sym = Array.isArray(report?.symptoms)
           ? report.symptoms.filter((v) => v != null).map(newer).map(withPending)
           : []
@@ -3675,7 +3681,7 @@ function DaySheet({
         setSymptoms(sym)
         // 控え（止まっている行）の行キーを今の並びで付け直す。デイの測定の出し入れで、同じ方の日報の行の位置が変わり、
         // 古いキーのままだと〔くらべて選ぶ〕と一言が出なくなるため（反証レビュー5巡目 中1）。一言も新しいキーへ移す
-        const { next: heldNext, moves: keyMoves } = rekeyHeld(vitalConflictsRef.current, (id) => {
+        const { next: heldNext, moves: keyMoves, stay: keyStay } = rekeyHeld(vitalConflictsRef.current, (id) => {
           const v = obs.find((x) => x.id === id) ?? sym.find((x) => x.id === id)
           return v === undefined ? null : vitalRowKey(v, obs)
         })
@@ -3684,14 +3690,9 @@ function DaySheet({
         // 競合・失敗など、ほかの一言が出ている行はそちらを優先する
         const queuedKeys = new Set<string>()
         for (const v of [...obs, ...sym]) if (queuedIds.has(v.id)) queuedKeys.add(vitalRowKey(v, obs))
-        setStatus((prev) => {
+        setStatus((prev0) => {
+          const prev = moveRowStatuses(prev0, keyMoves, keyStay)
           const next = { ...prev }
-          for (const [from, to] of keyMoves) {
-            const st = prev[from]
-            if (st === undefined) continue
-            delete next[from]
-            if (next[to] === undefined) next[to] = st
-          }
           for (const [k, st] of Object.entries(prev)) if (st?.text === MSG_QUEUED && !queuedKeys.has(k)) delete next[k]
           // 「最新に更新を押して」の一言は、読み直した（押した）ので外す（押した後も残って同じ案内を出し続けない・F15/F65）
           for (const [k, st] of Object.entries(prev)) if (st?.text === `▲ ${ERR_CONFLICT}`) delete next[k]
@@ -3723,7 +3724,7 @@ function DaySheet({
     return () => {
       alive = false
     }
-  }, [day, reload, reloadToken, thresholdsTick, loadDay, applyAttendance, onLoaded, restoreDrafts, writeHeld])
+  }, [day, reload, reloadToken, loadDay, applyAttendance, onLoaded, restoreDrafts, writeHeld])
 
   // 名前を引く表は在籍を問わない一覧から作る（F48。退職者が書いた過去の申し送り・退居された方の過去日の記録が
   // 「職員ID n」「利用者ID n」になっていた）。選ぶ候補（ピッカー）と行の並び（residentOrder）は在籍者のまま
@@ -4806,6 +4807,17 @@ function DaySheet({
    * ・書かなかった欄（他の端末が先に変えていた）は控えに残して競合に、行が取り消されていたら「行が無い控え」にする
    * ・控えを消すのは保存成功・送信待ちへ渡した時だけ。競合・例外では残す（R-D）
    */
+  /**
+   * いまの行キー（控えがあればその行キー、無ければいまの並びで作る）。保存の応答を待つ間や、消す確認の小窓を開いている間に
+   * 読み込みが行キーを付け直すことがあるため、一言を出す直前・控えを書く直前に引き直す（反証レビュー6巡目 軽3）
+   */
+  const currentRowKey = useCallback((id: number, fallback: string): string => {
+    const held = vitalConflictsRef.current[id]
+    if (held !== undefined) return held.rowKey
+    const v = observationsRef.current.find((x) => x.id === id) ?? symptomsRef.current.find((x) => x.id === id)
+    return v === undefined ? fallback : vitalRowKey(v, observationsRef.current)
+  }, [])
+
   const saveVitalJob = useCallback(
     async (id: number) => {
       const c = vitalConflictsRef.current[id]
@@ -4828,6 +4840,7 @@ function DaySheet({
       try {
         markSelfWrite() // この日の取り置きを捨てる（自分の書込の通知は db.ts の isSelfWrite が行と版で見分ける・F11）
         const res = await saveVitalEdits(target, edits as CellEditInput<VitalCellField>, { rebase })
+        const key = currentRowKey(id, c.rowKey)
         const cur = vitalConflictsRef.current[id]
         if (res === 'queued') {
           // 送信待ちへ渡し終えた。送信が済むまで、その値を行に重ねて出す（送信待ちの後に確定する値は送った内容が基準）
@@ -4838,7 +4851,7 @@ function DaySheet({
           if (cur && hasEdits(remain)) rest[id] = { ...cur, base: after, edits: remain }
           else delete rest[id]
           writeHeld(rest)
-          setRowStatus(c.rowKey, { tone: 'warn', text: queuedMsg() })
+          setRowStatus(key, { tone: 'warn', text: queuedMsg() })
           return
         }
         if (res.held === true) {
@@ -4851,7 +4864,7 @@ function DaySheet({
               [id]: { ...cur, mode: 'conflict', edits: p ? adoptPendingVital(cur.edits, p) : cur.edits },
             })
           }
-          setRowStatus(c.rowKey, { tone: 'danger', text: `▲ ${ERR_BLOCKED_WRITE}` })
+          setRowStatus(key, { tone: 'danger', text: `▲ ${ERR_BLOCKED_WRITE}` })
           await refreshVitalAfterConflict(id)
           return
         }
@@ -4872,7 +4885,7 @@ function DaySheet({
           // 行が他の端末で取り消されていた: 「行が無い控え」として欄の下に値とボタンを出す（最新に更新した後と同じ）
           rest[id] = { ...held, mode: 'orphan', edits: remain }
           writeHeld(rest)
-          setRowStatus(c.rowKey, null)
+          setRowStatus(key, null)
           return
         }
         if (res.conflicts.length > 0) {
@@ -4885,21 +4898,21 @@ function DaySheet({
           }))
           rest[id] = { ...held, mode: 'conflict', base: row ?? held.base, edits: remain }
           writeHeld(rest)
-          setRowStatus(c.rowKey, { tone: 'danger', text: `▲ ${ERR_CONFLICT_STILL}（${describeHeldCols(columns)}）` })
+          setRowStatus(key, { tone: 'danger', text: `▲ ${ERR_CONFLICT_STILL}（${describeHeldCols(columns)}）` })
           return
         }
         if (cur && hasEdits(remain)) rest[id] = { ...cur, base: row ?? cur.base, edits: remain }
         else delete rest[id]
         writeHeld(rest)
-        saveOk(c.rowKey)
+        saveOk(key)
       } catch (err) {
         // 例外: 控えは残す（R-D）。〔保存し直す〕でもう一度送れる
         const cur = vitalConflictsRef.current[id]
         if (cur) writeHeld({ ...vitalConflictsRef.current, [id]: { ...cur, mode: 'unsaved' } })
-        setRowStatus(c.rowKey, { tone: 'danger', text: `▲ ${errText(err)}` })
+        setRowStatus(currentRowKey(id, c.rowKey), { tone: 'danger', text: `▲ ${errText(err)}` })
       }
     },
-    [latestVital, markSelfWrite, refreshVitalAfterConflict, replaceVital, saveOk, setRowStatus, writeHeld],
+    [currentRowKey, latestVital, markSelfWrite, refreshVitalAfterConflict, replaceVital, saveOk, setRowStatus, writeHeld],
   )
 
   /** 1行の保存を順番待ちに積む（積んだ時点の値は持ち越さず、動き出した時に最新から計算し直す） */
@@ -4955,6 +4968,8 @@ function DaySheet({
       const newlyCleared = newlyClearedFields(prev, edits, shown)
       const apply = () => {
         const cur = vitalConflictsRef.current[v.id]
+        // 確認の小窓を開いている間に行キーが付け直されていれば、いまのキーを使う（反証レビュー6巡目 軽3）
+        const key = currentRowKey(v.id, rowKey)
         const mode = cur?.mode === 'conflict' ? 'conflict' : cur?.mode === 'unsaved' ? 'unsaved' : 'pending'
         // 確定の後に他の編集が重なっていても、今回の欄だけを重ねる（控えの基準は recordFieldEdit が保つ）
         let merged = cur?.edits ?? {}
@@ -4964,11 +4979,11 @@ function DaySheet({
         }
         writeHeld({
           ...vitalConflictsRef.current,
-          [v.id]: { rowKey, mode, base: cur?.base ?? v, edits: merged },
+          [v.id]: { rowKey: key, mode, base: cur?.base ?? v, edits: merged },
         })
         if (mode === 'conflict') {
           // 競合中は、くらべて選ぶで選ぶまで保存しない（5画面共通の規約）
-          setRowStatus(rowKey, { tone: 'danger', text: `▲ ${ERR_CONFLICT_HOLD}` })
+          setRowStatus(key, { tone: 'danger', text: `▲ ${ERR_CONFLICT_HOLD}` })
           return
         }
         if (mode === 'unsaved') {
@@ -5928,6 +5943,7 @@ function DaySheet({
         workers={workers}
         empty={phase === 'ready' && savedRows === 0}
         importDay={phase === 'ready' ? importDay : undefined}
+        thresholdsLate={thresholdsLate}
         othersHere={othersHere}
         onPickDay={onPickDay}
         onAddAttendance={(role) => {
@@ -6649,6 +6665,7 @@ function DayHeader({
   workers,
   empty,
   importDay,
+  thresholdsLate = false,
   othersHere,
   onPickDay,
   onAddAttendance,
@@ -6669,6 +6686,8 @@ function DayHeader({
    * （2026-09-05 追加。監査で「空欄が『記録なし』と読める」と指摘された）。
    */
   importDay?: ImportDay | null
+  /** 基準値が遅れて届き、発熱者の欄を前の基準で選んだまま（〔最新に更新〕で選び直す） */
+  thresholdsLate?: boolean
   /** いまこの日の申し送りを書いている他の職員（Presence） */
   othersHere: PresenceHere[]
   onPickDay: (iso: string) => void
@@ -6787,6 +6806,12 @@ function DayHeader({
         )}
         {!empty && importDay != null && (
           <p className="px-1 py-1 text-ink2">最終取込 {fmtStamp(importDay.imported_at)}</p>
+        )}
+        {thresholdsLate && (
+          <p className="px-1 py-1 text-warn">
+            <span aria-hidden="true">▲ </span>
+            施設の基準値の読み込みが遅れたため、発熱者の欄（デイの測定）は前の基準で選んでいます。〔最新に更新〕を押すと選び直します。
+          </p>
         )}
       </div>
     </>

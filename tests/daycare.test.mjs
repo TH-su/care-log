@@ -466,10 +466,24 @@ if (DC === null) {
       assert.equal(r.next[12], held[12])
       assert.equal(r.next[13], held[13], '一覧に無い控え（行が無い控え）はそのまま')
       assert.deepEqual(r.moves, [['f9-1', 'f9-0']])
+      assert.deepEqual(r.stay.sort(), ['f7-0', 's12'], '動かない控えの行キー（一言を動かさない）')
       assert.equal(held[11].rowKey, 'f9-1', '元の控えは変えない')
       const same = DC.rekeyHeld(held, (id) => held[id].rowKey)
       assert.equal(same.next, null)
       assert.deepEqual(same.moves, [])
+    })
+    it('一言の移し方（反証レビュー6巡目 軽1）: 連鎖（f9-0→f9-1・f9-1→f9-2）でも両方の一言が正しい行へ移る', () => {
+      const out = DC.moveRowStatuses({ 'f9-0': 'A', 'f9-1': 'B' }, [['f9-0', 'f9-1'], ['f9-1', 'f9-2']], [])
+      assert.deepEqual(out, { 'f9-1': 'A', 'f9-2': 'B' })
+    })
+    it('一言の移し方: 動かない控えが残る行の一言は、その控えのものなので動かさない', () => {
+      // 同じ行 f9-0 に控え 101 と 102。102 だけ f9-1 へ動く → f9-0 の一言（101 のもの）は残す
+      const out = DC.moveRowStatuses({ 'f9-0': 'M101' }, [['f9-0', 'f9-1']], ['f9-0'])
+      assert.deepEqual(out, { 'f9-0': 'M101' })
+    })
+    it('一言の移し方: 移し先に既に一言がある時は上書きしない・移し元に一言が無い時は何もしない', () => {
+      assert.deepEqual(DC.moveRowStatuses({ 'f9-0': 'A', 'f9-1': 'Q' }, [['f9-0', 'f9-1']], []), { 'f9-1': 'Q' })
+      assert.deepEqual(DC.moveRowStatuses({ s5: 'S' }, [['f9-0', 'f9-1']], []), { s5: 'S' })
     })
   })
 
@@ -1199,9 +1213,16 @@ if (DC === null) {
       const d = code('../src/pages/DailySheetPage.tsx')
       assert.match(d, /rekeyHeld\(vitalConflictsRef\.current, \(id\) => \{[\s\S]*?return v === undefined \? null : vitalRowKey\(v, obs\)/)
       assert.match(d, /if \(heldNext !== null\) writeHeld\(heldNext\)/)
-      assert.match(d, /for \(const \[from, to\] of keyMoves\) \{/)
-      assert.match(d, /if \(!thresholdsDone\) \{\s*void thresholds\.then\(\(\) => \{\s*if \(alive && aliveRef\.current\) setThresholdsTick\(\(n\) => n \+ 1\)/)
-      assert.match(d, /\}, \[day, reload, reloadToken, thresholdsTick, loadDay, applyAttendance, onLoaded, restoreDrafts, writeHeld\]\)/)
+      assert.match(d, /const prev = moveRowStatuses\(prev0, keyMoves, keyStay\)/)
+      // 6巡目: 基準値が遅れて届いても自動では読み直さない（失敗の繰り返し・入力中の行のずれを防ぐ）。違う基準だった時だけ一言
+      assert.doesNotMatch(d, /setThresholdsTick|thresholdsTick/)
+      assert.match(d, /if \(!thresholdsDone\) \{\s*void thresholds\.then\(\(\) => \{\s*if \(alive && aliveRef\.current && JSON\.stringify\(vitalThresholds\(\)\) !== usedThresholds\) setThresholdsLate\(true\)/)
+      assert.match(d, /\}, \[day, reload, reloadToken, loadDay, applyAttendance, onLoaded, restoreDrafts, writeHeld\]\)/)
+      assert.match(d, /thresholdsLate=\{thresholdsLate\}/)
+      // 6巡目 軽3: 保存の応答の後・消す確認の後は、いまの行キーを引き直して一言を出す
+      assert.match(d, /const key = currentRowKey\(id, c\.rowKey\)/)
+      assert.match(d, /const key = currentRowKey\(v\.id, rowKey\)/)
+      assert.match(d, /\[v\.id\]: \{ rowKey: key, mode, base: cur\?\.base \?\? v, edits: merged \}/)
       assert.match(d, /if \(waitTimer !== null\) clearTimeout\(waitTimer\)/)
       const v = code('../src/pages/DaycareVitalsPage.tsx')
       assert.match(v, /if \(msg === null \|\| releasingRef\.current\) return/)
