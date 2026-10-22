@@ -120,6 +120,9 @@ import { applyVitalThresholds, parseVitalThresholds, VITAL_THRESHOLDS_SETTING_KE
 import type { VitalThresholds } from './vitalThresholds'
 import { validateResidentTargets } from './vitalAlerts'
 import type { ResidentTargets, ResidentTargetsInput } from './vitalAlerts'
+// 個人のバイタルの閾値（段階2d・0045）
+import { VITAL_LIMIT_FIELDS } from './vitalLimits'
+import type { ResidentVitalLimit } from './vitalLimits'
 
 // ── 契約で定義された戻り値 ───────────────────────────────────────────────────
 export type Conflict = 'conflict'
@@ -11469,6 +11472,162 @@ export async function saveResidentTargets(
   if (row === null) throw new DbError('server', MSG.broken)
   notifyLocalWrite('resident_targets', row) // 読み込みの控えを古いにする（2026-10-17）
   return row
+}
+
+// ── 個人のバイタルの閾値（段階2d・2026-10-22 代表承認・0045_resident_vital_limits.sql） ─────────────
+//
+// 有効開始日つき・追記のみ（遡れない・書き換えられない・取り消しは足した日の当日だけ＝DB のトリガが守る）。
+// 書けるのは office・admin のログインだけ（0034 と同じ RLS）。送信待ちには載せない（圏外・ログイン切れは DbError で止め、
+// 入力は画面に残す＝saveResidentTargets と同じ）。判定の合成は vitalLimits.ts（thresholdsFor）。
+
+const LIMITS_MSG = {
+  missing: '個人の閾値はまだ使えません（サーバー側の設定待ち）。管理者に連絡してください。入力は消えていません。',
+  backdated: '開始日は今日以降にしてください（前の日から効かせることはできません。主治医の指示の日は根拠に書いてください）。入力は消えていません。',
+  immutable: '個人の閾値の行は書き換えられません。変える時は新しい行を足してください。',
+  cancelLate: 'この行を取り消せるのは、足した日の当日だけです。変える時は新しい行を足してください。',
+  badValue: '個人の閾値の値がサーバーの範囲・順に合いませんでした。値を確かめてから、もう一度お試しください。入力は消えていません。',
+  duplicate: '同じ開始日の行が先にあります。画面を読み直してから確かめてください。入力は消えていません。',
+} as const
+
+/** 個人の閾値を変えられないログインで保存しようとした時の案内 */
+export const LIMITS_FORBIDDEN_MESSAGE =
+  '個人の閾値を保存できませんでした。変えられるのは事務・管理者のログインだけです（現場のログインでは見るだけです）。'
+
+const RESIDENT_VITAL_LIMIT_COLS =
+  'id,resident_id,valid_from,temp_warn_high,temp_danger_high,temp_danger_low,sys_bp_danger_high,sys_bp_warn_low,dia_bp_danger_high,dia_bp_warn_low,pulse_danger_high,pulse_warn_low,basis,set_by,rev,created_at'
+
+function normalizeResidentVitalLimit(row: unknown): ResidentVitalLimit | null {
+  const r = asRecord(row)
+  if (!r) return null
+  const id = idNum(r.id)
+  const residentId = idNum(r.resident_id)
+  const validFrom = dateStr(r.valid_from)
+  const rev = num(r.rev)
+  const basis = str(r.basis)
+  if (id === null || residentId === null || validFrom === null || rev === null || basis === null) return null
+  // 値は範囲の外・数でないものも、そのまま数として持つ（壊れた値は thresholdsFor が施設の基準へ戻して知らせる）
+  const n = (v: unknown): number | null => (v === null || v === undefined || v === '' ? null : Number.isFinite(Number(v)) ? Number(v) : NaN)
+  return {
+    id,
+    resident_id: residentId,
+    valid_from: validFrom,
+    temp_warn_high: n(r.temp_warn_high),
+    temp_danger_high: n(r.temp_danger_high),
+    temp_danger_low: n(r.temp_danger_low),
+    sys_bp_danger_high: n(r.sys_bp_danger_high),
+    sys_bp_warn_low: n(r.sys_bp_warn_low),
+    dia_bp_danger_high: n(r.dia_bp_danger_high),
+    dia_bp_warn_low: n(r.dia_bp_warn_low),
+    pulse_danger_high: n(r.pulse_danger_high),
+    pulse_warn_low: n(r.pulse_warn_low),
+    basis,
+    set_by: idNum(r.set_by),
+    rev,
+    created_at: str(r.created_at),
+  }
+}
+
+/**
+ * 個人の閾値（全員分・取り消した行は除く・開始日の古い順）。表が無い DB（0045 未適用）では missing=true・行は空
+ * （＝全員が施設の基準）。読めない時は例外（DbError）
+ */
+export async function fetchResidentVitalLimits(): Promise<{ rows: ResidentVitalLimit[]; missing: boolean }> {
+  const sb = await getClient()
+  const res = (await sb
+    .from('resident_vital_limits')
+    .select(RESIDENT_VITAL_LIMIT_COLS)
+    .is('deleted_at', null)
+    .order('resident_id', { ascending: true })
+    .order('valid_from', { ascending: true })
+    .limit(MAX_ROWS)) as Res<unknown>
+  if (res.error !== null) {
+    if (isMissingTable(res)) return { rows: [], missing: true }
+    throw readError(res)
+  }
+  return { rows: list(res.data, normalizeResidentVitalLimit), missing: false }
+}
+
+/** 個人の閾値の保存の失敗を案内へ写す（トリガの文の頭を先に見る＝check の 23514 と取り違えない） */
+function limitsWriteError(res: Res<unknown>): DbError {
+  if (isAuthFail(res)) {
+    fireAuthExpired()
+    return new DbError('auth', MSG.authWrite)
+  }
+  if (isTransient(res)) return new DbError('network', MSG.networkWrite)
+  if (isMissingTable(res)) return new DbError('server', LIMITS_MSG.missing)
+  const message = typeof res.error?.message === 'string' ? res.error.message : ''
+  if (message.startsWith('vital_limits_backdated:')) return new DbError('server', LIMITS_MSG.backdated)
+  if (message.startsWith('vital_limits_immutable:')) return new DbError('server', LIMITS_MSG.immutable)
+  if (message.startsWith('vital_limits_cancel_late:')) return new DbError('server', LIMITS_MSG.cancelLate)
+  const code = errCode(res)
+  if (code === '23514') return new DbError('server', LIMITS_MSG.badValue)
+  if (code === '42501' || res.status === 403) {
+    const role = cachedMyRole()
+    return new DbError('forbidden', canEditTargets(role) ? MSG.forbidden : LIMITS_FORBIDDEN_MESSAGE)
+  }
+  return rejectError('保存でき', code, res.status)
+}
+
+/** 書く前の確かめ（接続先・古い版・現場と分かっているログイン） */
+async function assertLimitsWritable(): Promise<void> {
+  if (!isSupabaseConfigured()) throw new DbError('unconfigured', MSG.unconfigured)
+  assertBuildCurrent() // 古い版の止め（F28③）は受ける。入力解禁の旗の封鎖は受けない（設定の操作のため・個別の目標と同じ）
+  if ((await fetchMyRole()) === 'field') throw new DbError('forbidden', LIMITS_FORBIDDEN_MESSAGE)
+}
+
+/**
+ * 個人の閾値の行を足す（upsert は使わない・送信待ちに載せない）。値の null＝その項目は施設の基準（全部 null＝施設の基準に戻す）。
+ * 戻り値: 足した行／'conflict'（同じ方・同じ開始日の生きている行が先にある）
+ */
+export async function addResidentVitalLimit(
+  residentId: number,
+  input: { valid_from: string; basis: string } & Partial<Record<(typeof VITAL_LIMIT_FIELDS)[number], number | null>>,
+  opts?: WriteOpts,
+): Promise<ResidentVitalLimit | Conflict> {
+  if (idNum(residentId) === null) throw new DbError('server', MSG.broken)
+  assertDay(input.valid_from)
+  if (input.valid_from < localToday()) throw new DbError('server', LIMITS_MSG.backdated)
+  await assertLimitsWritable()
+  const values: Record<string, unknown> = { resident_id: residentId, valid_from: input.valid_from, basis: input.basis.trim() }
+  for (const f of VITAL_LIMIT_FIELDS) values[f] = input[f] ?? null
+  const payload = withEditor(withClientKey(values), opts?.editedBy)
+  // 決めた職員＝この書き込みの操作者（edited_by と同じ。分からない時は null）
+  payload.set_by = idNum(payload.edited_by)
+  const sb = await getClient()
+  const res = (await bounded(sb.from('resident_vital_limits').insert(payload).select(RESIDENT_VITAL_LIMIT_COLS).maybeSingle())) as Res<unknown>
+  if (res.error !== null) {
+    if (isUniqueViolation(res)) return CONFLICT
+    throw limitsWriteError(res)
+  }
+  const row = normalizeResidentVitalLimit(res.data)
+  if (row === null) throw new DbError('server', MSG.broken)
+  notifyLocalWrite('resident_vital_limits', row) // 読み込みの控えを古いにする
+  return row
+}
+
+/** 個人の閾値の行を取り消す（足した日の当日だけ・rev 照合）。戻り値: true／'conflict'（他の端末が先に変えた・取り消した） */
+export async function cancelResidentVitalLimit(row: ResidentVitalLimit, opts?: WriteOpts): Promise<true | Conflict> {
+  await assertLimitsWritable()
+  const patch = withEditor({ deleted_at: new Date().toISOString() }, opts?.editedBy)
+  patch.deleted_by = idNum(patch.edited_by)
+  const sb = await getClient()
+  const res = (await bounded(
+    sb
+      .from('resident_vital_limits')
+      .update(patch)
+      .eq('id', row.id)
+      .eq('rev', row.rev)
+      .is('deleted_at', null)
+      .select('id')
+      .maybeSingle(),
+  )) as Res<unknown>
+  if (res.error !== null) throw limitsWriteError(res)
+  if (res.data === null) {
+    if (await sessionMissing(sb)) throw new DbError('network', MSG.networkWrite)
+    return CONFLICT
+  }
+  notifyLocalWrite('resident_vital_limits', row)
+  return true
 }
 
 // ── テスト専用の差し込み口（裁定11: 1つにまとめる） ─────────────────────────────

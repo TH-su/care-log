@@ -95,6 +95,7 @@ import {
 import type { ResidentTargets, ResidentTargetsInput } from '../lib/vitalAlerts'
 import { karteSecOf } from './alertsModel'
 // 温度板（A7）。ボタンを押した時だけ置く（TempSheet.tsx の冒頭）
+import { VitalLimitsCard } from '../components/VitalLimitsCard'
 import { TempSheetPrint } from '../components/print/TempSheet'
 import { buildTempSheet, sheetDays } from '../components/print/tempSheetModel'
 import {
@@ -3414,6 +3415,9 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
           usualSamples={usualSamples}
           role={role}
         />
+
+        {/* 個人の閾値（段階2d・0045）。事務・管理者だけ足せる。判定への反映は段階2d の後半 */}
+        <VitalLimitsCard residentId={residentId} role={role} />
 
         {loading ? (
           <div className="mt-3">
