@@ -456,6 +456,23 @@ if (DC === null) {
     })
   })
 
+  describe('日報の控えの行キーの付け直し（反証レビュー5巡目 中1）', () => {
+    it('並びが変わった控えだけ新しいキーにし、一言を移す組を返す・一覧に無い控えと変わらない控えはそのまま', () => {
+      const held = { 11: { rowKey: 'f9-1', mode: 'conflict' }, 12: { rowKey: 's12', mode: 'unsaved' }, 13: { rowKey: 'f7-0', mode: 'orphan' } }
+      const keys = { 11: 'f9-0', 12: 's12' }
+      const r = DC.rekeyHeld(held, (id) => keys[id] ?? null)
+      assert.equal(r.next[11].rowKey, 'f9-0')
+      assert.equal(r.next[11].mode, 'conflict', 'ほかの中身は変えない')
+      assert.equal(r.next[12], held[12])
+      assert.equal(r.next[13], held[13], '一覧に無い控え（行が無い控え）はそのまま')
+      assert.deepEqual(r.moves, [['f9-1', 'f9-0']])
+      assert.equal(held[11].rowKey, 'f9-1', '元の控えは変えない')
+      const same = DC.rekeyHeld(held, (id) => held[id].rowKey)
+      assert.equal(same.next, null)
+      assert.deepEqual(same.moves, [])
+    })
+  })
+
   describe('過去の日の到着・帰宅の時刻（代表者の決定 2026-10-22・0042）', () => {
     it('予定の時刻（1桁の時も）を小窓の初めの値に', () => {
       assert.equal(DC.planHm('9:30'), '09:30')
@@ -1133,7 +1150,8 @@ if (DC === null) {
     })
     it('日報の発熱者（静的）: 読み込みで基準値を待ち、デイの測定は発熱のあった方だけ・温度板とタイムラインは変えない', () => {
       const d = code('../src/pages/DailySheetPage.tsx')
-      assert.match(d, /const \[report\] = await Promise\.all\(\[\s*loadDay\(day\),\s*Promise\.race\(\[loadVitalThresholds\(\), new Promise\(\(r\) => setTimeout\(r, THRESHOLD_WAIT_MS\)\)\]\),\s*\]\)/)
+      assert.match(d, /const thresholds = loadVitalThresholds\(\)\.then\(/)
+      assert.match(d, /const \[report\] = await Promise\.all\(\[\s*loadDay\(day\),\s*Promise\.race\(\[thresholds, new Promise<void>\(\(r\) => \(waitTimer = setTimeout\(r, THRESHOLD_WAIT_MS\)\)\)\]\),\s*\]\)/)
       assert.match(d, /const obs = dailyFeverObservations\(obsAll, report\?\.daycareVitalIds, editing\)/)
       // 直している最中の行（止まった控え・送信待ち）は隠さない（4巡目 F1・F9）
       assert.match(d, /if \(vitalConflictsRef\.current\[v\.id\] !== undefined \|\| pendingRow\('vitals', vitalTargetOf\(v\.id\)\) !== null\) editing\.add\(v\.id\)/)
@@ -1176,6 +1194,18 @@ if (DC === null) {
       assert.match(m, /create or replace function public\.daycare_attendance_past_guard\(\)/)
       assert.match(m, /and \(new\.resident_id = old\.resident_id or \(old\.arrived_at is null and old\.left_at is null\)\)/)
       assert.match(m, /and not \(new\.deleted_at is null and old\.deleted_at is not null\s+and \(new\.arrived_at is not null or new\.left_at is not null\)\)/)
+    })
+    it('反証レビュー5巡目の直し（静的）: 控えの行キーを読み込みごとに付け直す・基準値が遅れて届いたら読み直す・片づけの最中は帯のボタンを止める', () => {
+      const d = code('../src/pages/DailySheetPage.tsx')
+      assert.match(d, /rekeyHeld\(vitalConflictsRef\.current, \(id\) => \{[\s\S]*?return v === undefined \? null : vitalRowKey\(v, obs\)/)
+      assert.match(d, /if \(heldNext !== null\) writeHeld\(heldNext\)/)
+      assert.match(d, /for \(const \[from, to\] of keyMoves\) \{/)
+      assert.match(d, /if \(!thresholdsDone\) \{\s*void thresholds\.then\(\(\) => \{\s*if \(alive && aliveRef\.current\) setThresholdsTick\(\(n\) => n \+ 1\)/)
+      assert.match(d, /\}, \[day, reload, reloadToken, thresholdsTick, loadDay, applyAttendance, onLoaded, restoreDrafts, writeHeld\]\)/)
+      assert.match(d, /if \(waitTimer !== null\) clearTimeout\(waitTimer\)/)
+      const v = code('../src/pages/DaycareVitalsPage.tsx')
+      assert.match(v, /if \(msg === null \|\| releasingRef\.current\) return/)
+      assert.ok((v.match(/disabled=\{releasing\}/g) ?? []).length >= 4, '日付の3つと帯のボタン')
     })
     it('画面は端末に業務データを書かない（localStorage は絞り込みの既知値だけ）', () => {
       for (const f of ['../src/pages/DaycarePage.tsx', '../src/pages/DaycareVitalsPage.tsx']) {

@@ -609,7 +609,9 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   const discardAndGo = () => {
     const msg = pageMsg
     setDiscardAsk(false)
-    if (msg === null) return
+    // 片づけの最中は何もしない（帯を消してから片づけを呼ぶと、片づけ中で何もせずに戻り、止めていた操作が黙って消えるため
+    // ＝反証レビュー5巡目 軽2）。帯のボタンも片づけの間は押せない
+    if (msg === null || releasingRef.current) return
     // 捨てるのは帯に出した「入力を残した」測定だけ。捨てた（上下逆）・拒まれた測定の今の入力（帯が出た後に打ち直した値）は捨てない。
     // 残りの入力（帯が出た後に入れた値を含む）は、もう一度片づけてから移る（送れなければまた帯に出す＝反証レビュー4巡目 F2）
     const next = new Map(draftsRef.current)
@@ -894,7 +896,8 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
           <button
             type="button"
             onClick={() => (pageMsg.issues.some((i) => i.kept) ? setDiscardAsk(true) : discardAndGo())}
-            className="min-h-tap rounded border border-border-strong bg-surface px-4 text-base text-ink"
+            disabled={releasing}
+            className="min-h-tap rounded border border-border-strong bg-surface px-4 text-base text-ink disabled:text-ink3"
           >
             {pageMsg.issues.some((i) => i.kept) ? '保存せずに移る' : '移る'}
           </button>

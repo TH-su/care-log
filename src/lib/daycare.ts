@@ -585,6 +585,29 @@ export function dailyFeverObservations<T extends { id: number; resident_id: numb
 }
 
 /**
+ * 控え（止まっている行）の行キーを、いまの並びで付け直す。日報の発熱者の行キーは「その方の中で何番目か」で決まるため、
+ * デイの測定の出し入れで同じ方の日報の行の位置が変わると、古いキーの控えは〔くらべて選ぶ〕と一言を出す行を失う
+ * （反証レビュー5巡目 中1）。keyOf が null（いまの一覧に無い行）の控えはそのまま。
+ * 戻り値: next＝付け直した控え（変わらなければ null）・moves＝[古いキー, 新しいキー]（一言を移すため）
+ */
+export function rekeyHeld<T extends { rowKey: string }>(
+  held: Readonly<Record<number, T>>,
+  keyOf: (id: number) => string | null,
+): { next: Record<number, T> | null; moves: [string, string][] } {
+  let next: Record<number, T> | null = null
+  const moves: [string, string][] = []
+  for (const [idText, c] of Object.entries(held)) {
+    const id = Number(idText)
+    const k = keyOf(id)
+    if (k === null || k === c.rowKey) continue
+    next = next ?? { ...held }
+    next[id] = { ...c, rowKey: k }
+    moves.push([c.rowKey, k])
+  }
+  return { next, moves }
+}
+
+/**
  * 前回値: その方の直近の測定（種類を問わない・その日のデイの測定を除く）。並びは測定日 → 測定時刻 → id の新しい順。
  * 欄ごとに「値のある直近」を選ぶ（血圧だけ測った日の後でも体温の前回が出る）
  */

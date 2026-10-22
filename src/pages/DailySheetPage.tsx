@@ -210,7 +210,7 @@ import { normalizeCategories, scheduleColorPatch } from '../lib/noteCategory'
 // 発熱者・他症状者のバイタル欄の印（A1 平熱との差・A9 SpO2 の個別の下限）。平熱と目標は画面を開いた時に1回読んで控える
 import { fetchResidentTargets, fetchUsualTemps, loadVitalThresholds } from '../lib/db'
 import { judgeTemp, spo2LevelFor } from '../lib/vitalAlerts'
-import { dailyFeverObservations } from '../lib/daycare'
+import { dailyFeverObservations, rekeyHeld } from '../lib/daycare'
 import type { ResidentTargets } from '../lib/vitalAlerts'
 import {
   CategoryChips,
@@ -3433,6 +3433,8 @@ function DaySheet({
   const [outingDrafts, setOutingDrafts] = useState<OutingDraft[]>([])
 
   const [status, setStatus] = useState<Record<string, RowStatus>>({})
+  /** 読み込みで基準値の待ちを打ち切った後に、基準値が届いた印（その日を読み直して発熱者を選び直す） */
+  const [thresholdsTick, setThresholdsTick] = useState(0)
   /**
    * 競合したバイタル（行の id → 行のキー・競合した時に見ていた行・あなたの入力）。
    * この画面のセルはサーバーの値を描くので、入力はここに控え、くらべて選ぶ画面で見せる
@@ -3611,10 +3613,22 @@ function DaySheet({
         // 取得済みの日は親のキャッシュから即返る＝区切りを行き来しても取り直さない。
         // 基準値も待つ（発熱者に載せるデイの測定を、いまの基準で選ぶため。読めない時は今の基準のまま・起動中は控えから即返る）。
         // 待つのは上限まで（基準値の取得が詰まっても日報の表示を止めない＝反証レビュー4巡目 F5）
+        let thresholdsDone = false
+        const thresholds = loadVitalThresholds().then(() => {
+          thresholdsDone = true
+        })
+        let waitTimer: ReturnType<typeof setTimeout> | null = null
         const [report] = await Promise.all([
           loadDay(day),
-          Promise.race([loadVitalThresholds(), new Promise((r) => setTimeout(r, THRESHOLD_WAIT_MS))]),
+          Promise.race([thresholds, new Promise<void>((r) => (waitTimer = setTimeout(r, THRESHOLD_WAIT_MS)))]),
         ])
+        if (waitTimer !== null) clearTimeout(waitTimer)
+        // 上限が先に来た時は、基準値が届いた後でもう一度読む（発熱者をいまの基準で選び直す＝反証レビュー5巡目 軽1）
+        if (!thresholdsDone) {
+          void thresholds.then(() => {
+            if (alive && aliveRef.current) setThresholdsTick((n) => n + 1)
+          })
+        }
         if (!alive || !aliveRef.current) return
 
         const safeNotes = Array.isArray(report?.notes) ? report.notes.filter((n) => n != null) : []
@@ -3659,12 +3673,25 @@ function DaySheet({
           : []
         setObservations(obs)
         setSymptoms(sym)
+        // 控え（止まっている行）の行キーを今の並びで付け直す。デイの測定の出し入れで、同じ方の日報の行の位置が変わり、
+        // 古いキーのままだと〔くらべて選ぶ〕と一言が出なくなるため（反証レビュー5巡目 中1）。一言も新しいキーへ移す
+        const { next: heldNext, moves: keyMoves } = rekeyHeld(vitalConflictsRef.current, (id) => {
+          const v = obs.find((x) => x.id === id) ?? sym.find((x) => x.id === id)
+          return v === undefined ? null : vitalRowKey(v, obs)
+        })
+        if (heldNext !== null) writeHeld(heldNext)
         // 送信待ちの行に「送信待ち」の印（一言）を付け、送信が済んだ行からは外す。
         // 競合・失敗など、ほかの一言が出ている行はそちらを優先する
         const queuedKeys = new Set<string>()
         for (const v of [...obs, ...sym]) if (queuedIds.has(v.id)) queuedKeys.add(vitalRowKey(v, obs))
         setStatus((prev) => {
           const next = { ...prev }
+          for (const [from, to] of keyMoves) {
+            const st = prev[from]
+            if (st === undefined) continue
+            delete next[from]
+            if (next[to] === undefined) next[to] = st
+          }
           for (const [k, st] of Object.entries(prev)) if (st?.text === MSG_QUEUED && !queuedKeys.has(k)) delete next[k]
           // 「最新に更新を押して」の一言は、読み直した（押した）ので外す（押した後も残って同じ案内を出し続けない・F15/F65）
           for (const [k, st] of Object.entries(prev)) if (st?.text === `▲ ${ERR_CONFLICT}`) delete next[k]
@@ -3696,7 +3723,7 @@ function DaySheet({
     return () => {
       alive = false
     }
-  }, [day, reload, reloadToken, loadDay, applyAttendance, onLoaded, restoreDrafts])
+  }, [day, reload, reloadToken, thresholdsTick, loadDay, applyAttendance, onLoaded, restoreDrafts, writeHeld])
 
   // 名前を引く表は在籍を問わない一覧から作る（F48。退職者が書いた過去の申し送り・退居された方の過去日の記録が
   // 「職員ID n」「利用者ID n」になっていた）。選ぶ候補（ピッカー）と行の並び（residentOrder）は在籍者のまま
