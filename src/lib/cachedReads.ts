@@ -64,6 +64,8 @@ export const cacheKeys = {
   staff: 'staff',
   allStaff: 'allStaff',
   targets: 'targets',
+  /** 個人のバイタルの閾値（段階2d・0045） */
+  vitalLimits: 'vitalLimits',
   timeline: (from: string, to: string, staffId: number | null) => `timeline|${from}|${to}|${staffId ?? '-'}`,
   daily: (actorId: number | null, day: string) => `daily|${actorId ?? '-'}|${day}`,
   vitalsSheet: (from: string, to: string) => `vitalsSheet|${from}|${to}`,
@@ -101,6 +103,12 @@ export const peekResidentTargets = () =>
 /** 個別の目標（表が無い DB・ログインの控えが無い時の空は控えない） */
 export const fetchResidentTargets = () =>
   dataCache.fetch(cacheKeys.targets, db.fetchResidentTargets, { meta: { tables: ['resident_targets'] } })
+
+export const peekResidentVitalLimits = () =>
+  dataCache.peek<Awaited<ReturnType<typeof db.fetchResidentVitalLimits>>>(cacheKeys.vitalLimits)
+/** 個人のバイタルの閾値（段階2d・0045。表が無い DB は missing＝全員が施設の基準。書いた後は notifyLocalWrite で古いにする） */
+export const fetchResidentVitalLimits = () =>
+  dataCache.fetch(cacheKeys.vitalLimits, db.fetchResidentVitalLimits, { meta: { tables: ['resident_vital_limits'] } })
 
 // ── 記録 ─────────────────────────────────────────────────────────────────
 

@@ -269,7 +269,9 @@ if (M === null) {
     })
     it('DB 変更なし（移行を足さない・types.ts と notes の表に触れない）', () => {
       const migs = readdirSync(new URL('../supabase/migrations/', import.meta.url)).filter((f) => f.endsWith('.sql')).sort()
-      assert.equal(migs.at(-1), '0044_daycare_activity.sql', '段階2c は移行を足さない')
+      // 0044（段階2b）の後に入るのは、段階2d の個人の閾値 0045 だけ（2c の分は無い）
+      const after = migs.filter((f) => f > '0044_daycare_activity.sql')
+      assert.deepEqual(after.filter((f) => f !== '0045_resident_vital_limits.sql'), [], '段階2c は移行を足さない')
       assert.doesNotMatch(read('../src/lib/types.ts'), /dcn:|NoteMark/)
       // 取り消した申し送りも読む読み取りは、印の鍵の頭で絞った1か所だけ
       const db = code('../src/lib/db.ts')
