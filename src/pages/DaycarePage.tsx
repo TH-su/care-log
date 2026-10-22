@@ -962,7 +962,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   return (
     <div className="mx-auto w-full max-w-5xl space-y-4 p-4">
       {header}
-      {limits.failed ? <VitalLimitsFailedNote className="" /> : null}
+      {limits.failed ? <VitalLimitsFailedNote className="" onRetry={() => void limits.refresh()} /> : null}
       <PlanBanners data={data} notInRoster={board.notInRoster} unconfirmed={board.unconfirmed} today={today} />
 
       <ul className="grid grid-cols-3 gap-gap sm:grid-cols-4 lg:grid-cols-7" aria-label="件数">

@@ -35,7 +35,8 @@ import {
   peekResidentTargets,
   peekTimelineChunk,
 } from '../lib/cachedReads'
-import { useVitalLimits, VITAL_LIMITS_FAILED_TEXT } from '../hooks/useVitalLimits'
+import { useVitalLimits } from '../hooks/useVitalLimits'
+import { VitalLimitsFailedNote } from '../components/VitalLimitsFailedNote'
 import { buildMedDayRows, medMissingAllowed } from '../lib/med'
 import type { MedDayRow } from '../lib/med'
 import { buildDayAlerts, fluidTotalsOf } from '../lib/vitalAlerts'
@@ -391,7 +392,7 @@ export function AlertsPage() {
         ) : (
           <>
             {data?.targets === null ? <PartialNote text={NOTE_TARGETS} /> : null}
-            {limits.failed ? <PartialNote text={VITAL_LIMITS_FAILED_TEXT} /> : null}
+            {limits.failed ? <VitalLimitsFailedNote className="mb-2" onRetry={() => void limits.refresh()} /> : null}
             {data?.med === null ? <PartialNote text={NOTE_MEDS} /> : null}
             <StoolNote state={stool} unlinked={stoolExtra?.unlinked ?? 0} />
             {day === clock.day && clock.nowMin < fromHour * 60 ? (

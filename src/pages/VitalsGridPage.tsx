@@ -95,7 +95,7 @@ import { fetchResidentTargets, fetchUsualTemps, loadVitalThresholds } from '../l
 import { judgeTemp, spo2Limits, spo2LevelFor } from '../lib/vitalAlerts'
 import { diaBpLevelBy, pulseLevelBy, spo2LevelBy, sysBpLevelBy, tempLevelBy, vitalThresholds } from '../lib/vitalThresholds'
 import type { VitalThresholds } from '../lib/vitalThresholds'
-import { INDIVIDUAL_LIMIT_NOTE, isIndividualField } from '../lib/vitalLimits'
+import { INDIVIDUAL_LIMIT_NOTE, ownLevel } from '../lib/vitalLimits'
 import { useVitalLimits } from '../hooks/useVitalLimits'
 import { VitalLimitsFailedNote } from '../components/VitalLimitsFailedNote'
 import type { ResidentTargets } from '../lib/vitalAlerts'
@@ -1992,7 +1992,7 @@ export function VitalsGridPage({
             {error}
           </p>
         ) : null}
-        {limits.failed ? <VitalLimitsFailedNote /> : null}
+        {limits.failed ? <VitalLimitsFailedNote onRetry={() => void limits.refresh()} /> : null}
 
         {floorOptions.length > 1 ? (
           // bar-compact: スマホの幅ではボタンを小さく・間隔を詰める（sheet.css）
@@ -2342,7 +2342,8 @@ function VitalValue({
  * 段階2d-2 の個人の基準で印が付いた時の「（個人の基準）」。当たらなければ ''
  */
 function newMarkWord(field: Field, value: number, usualTemp: number | null | undefined, target: ResidentTargets | undefined, th: VitalThresholds): string {
-  const own = isIndividualField(field, th, vitalThresholds()) && (field === 'temp' ? judgeTemp(value, usualTemp, th).level : LEVEL_BY[field](value, th)) ? INDIVIDUAL_LIMIT_NOTE : ''
+  // 個人の基準で印が決まった時だけ（施設の基準でも同じ印・印なしには付けない＝反証 軽3）
+  const own = ownLevel(field, value, th, vitalThresholds()) ? INDIVIDUAL_LIMIT_NOTE : ''
   if (field === 'temp') {
     const j = judgeTemp(value, usualTemp, th)
     const t = j.level ? j.note : j.overUsual ? j.mark : null

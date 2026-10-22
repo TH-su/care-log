@@ -2,12 +2,14 @@
 //
 //   const limits = useVitalLimits(tick)
 //   limits.lookup(residentId, day)  … その方・その日の基準（個人の値が無い方・読めない時は施設の基準＝vitalThresholds() そのもの）
-//   limits.failed                   … 読めなかった（施設の基準で判定している）。画面に1行の知らせを出す
+//   limits.failed                   … 読めなかった（施設の基準で判定している）。画面に1行の知らせ（〔読み直す〕つき）を出す
+//   limits.refresh()                … 取り直す（〔読み直す〕・日報の読み込み）。戻り値は判定に使う行
 //
 // 行は読み込みの控え（cachedReads）を通す。reloadKey が変わるたびに取り直す（〔最新を読み込む〕・カードで足した後）。
 // 取り直しに失敗しても、前に読めた行があればそれで判定を続ける（施設の基準へ戻すより正しい）。
-// 施設の基準（vitalThresholds()）は app_settings を読んだ後に差し替わるので、描くたびにいまの基準で引き直す。
-import { useEffect, useMemo, useRef, useState } from 'react'
+// 施設の基準（vitalThresholds()）は app_settings を読んだ後に差し替わるので、lookup は引くたびにいまの基準を見て、
+// 変わっていれば組み直す（反証 軽8: 描いた時の古い基準で判定し続けない＝2d-2 の前と同じく、いまの基準で判定する）。
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { fetchResidentVitalLimits, peekResidentVitalLimits } from '../lib/cachedReads'
 import { thresholdsLookup } from '../lib/vitalLimits'
 import type { ResidentVitalLimit } from '../lib/vitalLimits'
@@ -24,6 +26,8 @@ export interface VitalLimitsState {
   failed: boolean
   /** その方・その日の基準 */
   lookup: (residentId: number, day: string) => VitalThresholds
+  /** 取り直す。読めない時は前に読めた行（無ければ null）を返す。例外は投げない */
+  refresh: () => Promise<readonly ResidentVitalLimit[] | null>
 }
 
 export function useVitalLimits(reloadKey: unknown = 0): VitalLimitsState {
@@ -31,24 +35,46 @@ export function useVitalLimits(reloadKey: unknown = 0): VitalLimitsState {
   const [failed, setFailed] = useState(false)
   const rowsRef = useRef(rows)
   rowsRef.current = rows
+  const aliveRef = useRef(true)
+  const seqRef = useRef(0)
   useEffect(() => {
-    let cancelled = false
-    fetchResidentVitalLimits()
-      .then((r) => {
-        if (cancelled) return
+    aliveRef.current = true
+    return () => {
+      aliveRef.current = false
+    }
+  }, [])
+  const refresh = useCallback(async (): Promise<readonly ResidentVitalLimit[] | null> => {
+    const my = ++seqRef.current
+    try {
+      const r = await fetchResidentVitalLimits()
+      // 後から頼んだ取り直しが先に返っていれば、古い応答で上書きしない
+      if (aliveRef.current && my === seqRef.current) {
+        rowsRef.current = r.rows
         setRows(r.rows)
         setFailed(false)
-      })
-      .catch(() => {
-        if (cancelled) return
-        // 前に読めた行があればそれで続ける（知らせは出さない）
-        setFailed(rowsRef.current === null)
-      })
-    return () => {
-      cancelled = true
+      }
+      return r.rows
+    } catch {
+      // 前に読めた行があればそれで続ける（知らせは出さない）
+      const cur = rowsRef.current
+      if (aliveRef.current && my === seqRef.current) setFailed(cur === null)
+      return cur
     }
-  }, [reloadKey])
-  const base = vitalThresholds()
-  const lookup = useMemo(() => thresholdsLookup(rows, base), [rows, base])
-  return { rows, failed, lookup }
+  }, [])
+  useEffect(() => {
+    void refresh()
+  }, [reloadKey, refresh])
+  const lookup = useMemo(() => {
+    let builtFor: VitalThresholds | null = null
+    let inner: (residentId: number, day: string) => VitalThresholds = () => vitalThresholds()
+    return (residentId: number, day: string): VitalThresholds => {
+      const base = vitalThresholds()
+      if (base !== builtFor) {
+        inner = thresholdsLookup(rows, base)
+        builtFor = base
+      }
+      return inner(residentId, day)
+    }
+  }, [rows])
+  return { rows, failed, lookup, refresh }
 }

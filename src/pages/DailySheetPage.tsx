@@ -214,7 +214,6 @@ import { dailyFeverObservations, moveRowStatuses, rekeyHeld } from '../lib/dayca
 import { diaBpLevelBy, pulseLevelBy, sysBpLevelBy, vitalThresholds } from '../lib/vitalThresholds'
 import type { VitalThresholds } from '../lib/vitalThresholds'
 // 段階2d-2: 個人のバイタルの閾値（発熱者・他症状者の欄の印と、発熱者に載せるデイの測定の選び方）
-import { fetchResidentVitalLimits } from '../lib/cachedReads'
 import { thresholdsLookup } from '../lib/vitalLimits'
 import type { ResidentVitalLimit } from '../lib/vitalLimits'
 import { useVitalLimits } from '../hooks/useVitalLimits'
@@ -2146,6 +2145,11 @@ interface DaySheetProps {
   notesMissing: boolean
   /** 「最新に更新」で増える。増えるとこの日を取り直す（下書きは消さない） */
   reloadToken: number
+  /**
+   * 段階2d-2: 個人のバイタルの閾値を取り直す（親の useVitalLimits の refresh＝欄の印と同じ行を使う・反証 中1）。
+   * 読めない時は前に読めた行（無ければ null）を返す。例外は投げない
+   */
+  refreshLimits: () => Promise<readonly ResidentVitalLimit[] | null>
   /** 1日ぶんの日報を取る（取得済みならキャッシュから返る） */
   loadDay: (day: string) => Promise<DailyReport>
   /** 自分がこの日へ書き込んだ（変更通知の抑制＋取り置きの破棄） */
@@ -3170,7 +3174,7 @@ export function DailySheetPage({
           スクロールしても検索できる */}
       {headerSlot !== null ? createPortal(searchBar, headerSlot) : null}
 
-      {limits.failed ? <VitalLimitsFailedNote className="" /> : null}
+      {limits.failed ? <VitalLimitsFailedNote className="" onRetry={() => void limits.refresh()} /> : null}
 
       {phase === 'error' && everReady && (
         <div className="flex flex-wrap items-center gap-gap rounded-md border border-danger bg-danger-bg p-3">
@@ -3318,6 +3322,7 @@ export function DailySheetPage({
                   cellsMissing={cellsMissing}
                   notesMissing={notesMissing}
                   reloadToken={reload}
+                  refreshLimits={limits.refresh}
                   loadDay={loadDay}
                   onWrite={handleWrite}
                   onDirty={handleDirty}
@@ -3384,6 +3389,7 @@ function DaySheet({
   blockedReason,
   cellsMissing,
   reloadToken,
+  refreshLimits,
   loadDay,
   onWrite,
   onDirty,
@@ -3627,14 +3633,12 @@ function DaySheet({
         // 基準値も待つ（発熱者に載せるデイの測定を、いまの基準で選ぶため。読めない時は今の基準のまま・起動中は控えから即返る）。
         // 待つのは上限まで（基準値の取得が詰まっても日報の表示を止めない＝反証レビュー4巡目 F5）
         let thresholdsDone = false
-        // 段階2d-2: 個人の閾値も同じ上限まで待つ（発熱の判定がその方の基準になるため。読めない時は施設の基準＝null）
+        // 段階2d-2: 個人の閾値も同じ上限まで待つ（発熱の判定がその方の基準になるため）。親の部品で取り直す＝欄の印と同じ行を使い、
+        // 読めない時は前に読めた行で選ぶ（どちらも無い時は施設の基準で選び、親が「読めませんでした」を出す＝反証 中1）
         let loadedLimits: readonly ResidentVitalLimit[] | null = null
-        const limitsP = fetchResidentVitalLimits().then(
-          (r) => {
-            loadedLimits = r.rows
-          },
-          () => undefined,
-        )
+        const limitsP = refreshLimits().then((rows) => {
+          loadedLimits = rows
+        })
         const thresholds = Promise.all([loadVitalThresholds(), limitsP]).then(() => {
           thresholdsDone = true
         })
@@ -3683,13 +3687,18 @@ function DaySheet({
         const obsAll = Array.isArray(report?.observations) ? report.observations.filter((v) => v != null).map(newer).map(withPending) : []
         const editing = new Set<number>()
         for (const v of obsAll) if (vitalConflictsRef.current[v.id] !== undefined || pendingRow('vitals', vitalTargetOf(v.id)) !== null) editing.add(v.id)
-        const usedThresholds = JSON.stringify([vitalThresholds(), loadedLimits ?? []])
-        const usedLookup = thresholdsLookup(loadedLimits, vitalThresholds())
-        const obs = dailyFeverObservations(obsAll, report?.daycareVitalIds, editing, (rid) => usedLookup(rid, day))
-        // 上限が先に来た時は、基準値（個人の閾値を含む）が届いた後で、選ぶのに使った基準と違えば一言だけ出す（読み直さない・失敗では何もしない）
+        const usedThresholds = JSON.stringify(vitalThresholds())
+        const pickFever = (rows: readonly ResidentVitalLimit[] | null) => {
+          const look = thresholdsLookup(rows, vitalThresholds())
+          return dailyFeverObservations(obsAll, report?.daycareVitalIds, editing, (rid) => look(rid, day))
+        }
+        const obs = pickFever(loadedLimits)
+        // 上限が先に来た時は、届いた後で、施設の基準値が選ぶのに使った基準と違うか、個人の閾値で選び方が変わる時だけ一言を出す
+        // （読み直さない・失敗では何もしない。個人の閾値は選んだ行が変わらなければ黙る＝反証 軽7）
+        const pickedIds = obs.map((v) => v.id).join(',')
         if (!thresholdsDone) {
           void thresholds.then(() => {
-            if (alive && aliveRef.current && JSON.stringify([vitalThresholds(), loadedLimits ?? []]) !== usedThresholds) setThresholdsLate(true)
+            if (alive && aliveRef.current && (JSON.stringify(vitalThresholds()) !== usedThresholds || pickFever(loadedLimits).map((v) => v.id).join(',') !== pickedIds)) setThresholdsLate(true)
           })
         }
         const sym = Array.isArray(report?.symptoms)
@@ -3742,7 +3751,7 @@ function DaySheet({
     return () => {
       alive = false
     }
-  }, [day, reload, reloadToken, loadDay, applyAttendance, onLoaded, restoreDrafts, writeHeld])
+  }, [day, reload, reloadToken, loadDay, applyAttendance, onLoaded, restoreDrafts, writeHeld, refreshLimits])
 
   // 名前を引く表は在籍を問わない一覧から作る（F48。退職者が書いた過去の申し送り・退居された方の過去日の記録が
   // 「職員ID n」「利用者ID n」になっていた）。選ぶ候補（ピッカー）と行の並び（residentOrder）は在籍者のまま
