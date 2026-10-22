@@ -10,7 +10,24 @@
 
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { stripTypeScriptTypes } from 'node:module'
 import { registerLoadFailure } from './ts-load.mjs'
+
+/** 画面のファイルから宣言を抜き出して型を剥がし、名前の付いたもの（function・const）を返す（vitals-display と同じ形） */
+function evalDecls(src, heads, deps = {}) {
+  const part = (head) => {
+    const at = src.indexOf(`\n${head}`)
+    assert.ok(at >= 0, `${head} が見つからない`)
+    const re = /\n(?=(?:async function |function |const |let |interface |type |export |\/\*\*|\/\/))/g
+    re.lastIndex = at + 1
+    const m = re.exec(src)
+    return src.slice(at + 1, m ? m.index : undefined)
+  }
+  const js = stripTypeScriptTypes(heads.map(part).join('\n'))
+  const names = heads.map((h) => /^(?:function|const|let)\s+([A-Za-z0-9_]+)/.exec(h)?.[1]).filter((n) => n !== undefined)
+  return new Function(...Object.keys(deps), `${js}\nreturn { ${names.join(', ')} }`)(...Object.values(deps))
+}
 
 let L = null
 let T = null
@@ -206,6 +223,41 @@ if (L === null) {
       const look = L.thresholdsLookup([lim({ sys_bp_warn_low: 118 })], T.vitalThresholds())
       const out = VA.buildDayAlerts({ ...base, thresholdsFor: (rid) => look(rid, day) })
       assert.deepEqual(out[0].reasons.map((r) => r.label), ['血圧 116↓/70（個人の基準）'])
+    })
+  })
+
+  describe('タイムライン（TimelinePage の判定）', () => {
+    const src = readFileSync(new URL('../src/pages/TimelinePage.tsx', import.meta.url), 'utf8')
+    const { isFever, vitalAlertBy } = evalDecls(src, ['function isFever(', 'function vitalAlertBy('], { ...T, spo2LevelFor: VA.spo2LevelFor })
+    const day = '2026-10-16'
+    const noJudge = { tFor: () => T.vitalThresholds(), targetOf: () => undefined }
+    it('個人の値も SpO2 の個別の下限も無い方は、施設の基準だけの判定（types.ts の vitalHasAlert）と同じ', () => {
+      for (const v of [
+        vital(8, day, { temp: 37.4, sys_bp: 150, dia_bp: 90, pulse: 100, spo2: 93 }),
+        vital(8, day, { temp: 37.5 }),
+        vital(8, day, { spo2: 92 }),
+        vital(8, day, { pulse: 39 }),
+      ]) {
+        const facility = !!(T.tempLevelBy(v.temp, BASE) || T.sysBpLevelBy(v.sys_bp, BASE) || T.diaBpLevelBy(v.dia_bp, BASE) || T.pulseLevelBy(v.pulse, BASE) || T.spo2LevelBy(v.spo2, BASE))
+        assert.equal(vitalAlertBy(v, noJudge), facility)
+      }
+      assert.equal(isFever(vital(8, day, { temp: 37.5 }), BASE), true)
+      assert.equal(isFever(vital(8, day, { temp: 37.4 }), BASE), false)
+    })
+    it('A5（承認済みの変化）: SpO2 は個別の下限で判定する。下限 92/88 の方の 92 は施設の基準では ↓ だが、印なし', () => {
+      const tg = { id: 1, resident_id: 8, fluid_target_ml: null, spo2_warn_below: 92, spo2_danger_below: 88, rev: 1 }
+      const v = vital(8, day, { spo2: 92 })
+      assert.equal(T.spo2LevelBy(92, BASE), 'warn-low')
+      assert.equal(vitalAlertBy(v, { ...noJudge, targetOf: () => tg }), false)
+      assert.equal(vitalAlertBy(vital(8, day, { spo2: 91 }), { ...noJudge, targetOf: () => tg }), true)
+    })
+    it('個人の閾値はその方のその日の基準で見る（発熱の件数・基準外の一覧）', () => {
+      const look = L.thresholdsLookup([lim({ temp_warn_high: 37.2 })], T.vitalThresholds())
+      const judge = { tFor: look, targetOf: () => undefined }
+      assert.equal(vitalAlertBy(vital(7, day, { temp: 37.3 }), judge), true)
+      assert.equal(vitalAlertBy(vital(7, '2026-10-09', { temp: 37.3 }), judge), false, '開始日より前は施設の基準')
+      assert.equal(vitalAlertBy(vital(8, day, { temp: 37.3 }), judge), false, '他の方は施設の基準')
+      assert.equal(isFever(vital(7, day, { temp: 37.3 }), look(7, day)), true)
     })
   })
 
