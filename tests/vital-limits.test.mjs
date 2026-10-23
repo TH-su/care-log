@@ -309,7 +309,16 @@ if (L === null) {
       const note = code('../src/components/VitalLimitsFailedNote.tsx')
       assert.match(note, /print:hidden/)
       assert.match(note, /onClick=\{onRetry\}/)
-      for (const f of SCREENS) assert.match(code(`../src/pages/${f}.tsx`), /<VitalLimitsFailedNote[^>]*onRetry=\{\(\) => void limits\.refresh\(\)\}/, f)
+      for (const f of SCREENS.filter((x) => x !== 'DailySheetPage')) assert.match(code(`../src/pages/${f}.tsx`), /<VitalLimitsFailedNote[^>]*onRetry=\{\(\) => void limits\.refresh\(\)\}/, f)
+      // 日報は、読み直しで行が変わったら各日の枠の発熱者の選び方もやり直す（直しの確認 中1: 欄の印だけが替わらない）
+      const daily = code('../src/pages/DailySheetPage.tsx')
+      assert.match(daily, /<VitalLimitsFailedNote[^>]*onRetry=\{retryLimits\}/)
+      assert.match(daily, /const before = limits\.rows\s*void limits\.refresh\(\)\.then\(\(rows\) => \{\s*if \(rows !== before\) setReload\(\(n\) => n \+ 1\)/)
+      // カルテの注記はグラフごと・紙に出さない（反証 中2 の画面側の配線）。取り直しの口は変わらない（日報の枠の読み込みを増やさない）
+      const karteSrc = code('../src/pages/KartePage.tsx')
+      for (const g of ['temp', 'bp', 'pulse']) assert.match(karteSrc, new RegExp(`note: limitNote\\('${g}'\\)`))
+      assert.match(karteSrc, /\{panel\.note \? <span className="[^"]*print:hidden[^"]*">\{panel\.note\}<\/span> : null\}/)
+      assert.match(hook, /const refresh = useCallback\(async \(\)[^]*?\}, \[\]\)/)
       // カードで足した・取り消した後は、カルテの印を取り直す
       const karte = code('../src/pages/KartePage.tsx')
       assert.match(karte, /<VitalLimitsCard residentId=\{residentId\} role=\{role\} onChanged=\{\(\) => setLimitsTick\(\(n\) => n \+ 1\)\} \/>/)

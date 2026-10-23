@@ -2267,6 +2267,14 @@ export function DailySheetPage({
   const [vitalMarks0, setVitalMarks] = useState<VitalMarks>(NO_VITAL_MARKS)
   // 段階2d-2: 個人の閾値（開いた時に1回読む。読めない時は施設の基準で印を出し、その旨を出す）
   const limits = useVitalLimits()
+  // 〔個人の基準を読み直す〕: 読めた行が変わったら、各日の枠で発熱者に載せるデイの測定も選び直す（下書きは消さない）。
+  // 欄の印だけが新しい行に替わり、選び方が古い行のまま残らないように（2d-2 の直しの確認 中1）
+  const retryLimits = useCallback(() => {
+    const before = limits.rows
+    void limits.refresh().then((rows) => {
+      if (rows !== before) setReload((n) => n + 1)
+    })
+  }, [limits.rows, limits.refresh])
   const vitalMarks = useMemo<VitalMarks>(() => ({ ...vitalMarks0, limitsFor: limits.lookup }), [vitalMarks0, limits.lookup])
   useEffect(() => {
     let alive = true
@@ -3174,7 +3182,7 @@ export function DailySheetPage({
           スクロールしても検索できる */}
       {headerSlot !== null ? createPortal(searchBar, headerSlot) : null}
 
-      {limits.failed ? <VitalLimitsFailedNote className="" onRetry={() => void limits.refresh()} /> : null}
+      {limits.failed ? <VitalLimitsFailedNote className="" onRetry={retryLimits} /> : null}
 
       {phase === 'error' && everReady && (
         <div className="flex flex-wrap items-center gap-gap rounded-md border border-danger bg-danger-bg p-3">
