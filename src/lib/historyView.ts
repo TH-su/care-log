@@ -60,6 +60,9 @@ export const HISTORY_TABLE_LABEL: Record<string, string> = {
   daycare_days: 'デイの予定の写し',
   daycare_activity_log: 'デイの活動',
   resident_vital_limits: '個人の閾値',
+  daycare_training_sessions: 'デイの機能訓練',
+  daycare_home_visits: 'デイの居宅訪問',
+  daycare_staffing: 'デイの配置',
 }
 
 const VITAL_KIND_NAME: Record<string, string> = {

@@ -101,6 +101,17 @@ import { absentBathAction, hmOf, isDaycareVitalKey, validateAttendance } from '.
 import type { KeyedVital } from './daycare'
 import { activityLabelError, normalizeActivityLabel, participationOf } from './daycareActivity'
 import type { ActivityParticipation, DaycareActivity } from './daycareActivity'
+import {
+  TRAINING_MAX_MIN,
+  TRAINING_MIN_MIN,
+  TRAINING_PROGRAM_MAX,
+  cancelReasonOf,
+  hhmm,
+  staffingRoleOf,
+  trainingResultOf,
+} from './daycareTraining'
+import type { DaycareStaffing, DaycareTrainingSession, StaffingRole, trainingPayload } from './daycareTraining'
+import { addDays as addDaysIso } from './format'
 import { normalizeChoices, normalizeIncidentDetail, validateIncidentInput } from './incident'
 import type { IncidentInput } from './incident'
 import {
@@ -213,6 +224,10 @@ const BATH_COLS = 'id,resident_id,bath_on,result,cancel_reason,note,recorded_by,
 const DAYCARE_ATTENDANCE_COLS = 'id,resident_id,day,arrived_at,left_at,absent,absent_reason,note,recorded_by,rev'
 /** デイの活動・レク（0044・段階2b） */
 const DAYCARE_ACTIVITY_COLS = 'id,resident_id,day,label,participation,note,recorded_by,rev'
+/** デイの個別機能訓練の実施記録とその日の配置（0046・段階3） */
+const DAYCARE_TRAINING_COLS =
+  'id,resident_id,day,started_at,duration_min,program,result,cancel_reason,cancel_note,instructor_id,assisted_by,note,recorded_by,rev'
+const DAYCARE_STAFFING_COLS = 'id,day,staff_id,role,from_time,to_time,note,rev'
 /** デイの1日の予定の写し（0041）。plan_rows に氏名は入らない（サーバーが照合した結果だけ） */
 const DAYCARE_DAY_COLS = 'id,day,plan_source,plan_rev,plan_updated_at,plan_rows,opened_by,created_at,rev'
 /** 服薬の時間帯（0013_med_admin.sql）。監査列・client_key は端末へ持ち出さない */
@@ -1061,7 +1076,9 @@ function normalizeImportDay(row: unknown): ImportDay | null {
 // edited_by）。入力解禁は input_enabled_daycare（writeGate）。1人1日1件の自然キーを持つ（入浴と同じ扱い）
 // daycare_activity_log（デイの活動・レク・2026-10-22 デイ段階2b・0044）も同じ経路。入力解禁は input_enabled_daycare_activity。
 // 1人1日1項目1行の自然キーを持ち、同じ項目・同じ度合いの行が先にあれば合流する（insertDaycareActivity・送信待ちの経路）
-type LegacyTable = 'fluid_intake' | 'notes' | 'outings' | 'bath_records' | 'med_slots' | 'med_admin' | 'incidents' | 'daycare_attendance' | 'daycare_activity_log'
+// daycare_training_sessions（個別機能訓練の実施記録・1人1日1件）と daycare_staffing（その日の配置）も同じ経路（2026-10-23 デイ段階3・0046）。
+// 入力解禁は input_enabled_daycare_training。自然キーで当たったら止める（入浴と同じ扱い。結果の違う記録に合流しない）
+type LegacyTable = 'fluid_intake' | 'notes' | 'outings' | 'bath_records' | 'med_slots' | 'med_admin' | 'incidents' | 'daycare_attendance' | 'daycare_activity_log' | 'daycare_training_sessions' | 'daycare_staffing'
 
 /** 列の並び・rev 照合の作法が共通の業務表（読み取りの列は colsOf） */
 type QueueTable = 'vitals' | 'meals' | LegacyTable
@@ -1149,6 +1166,8 @@ const LEGACY_TABLES: readonly LegacyTable[] = [
   'incidents',
   'daycare_attendance',
   'daycare_activity_log',
+  'daycare_training_sessions',
+  'daycare_staffing',
 ]
 
 /** 旧版が使っていた退避キー。値は cl_sendQueue の中へ移し、移せたことを観測してから取り除く */
@@ -3837,6 +3856,10 @@ function colsOf(table: QueueTable): string {
       return DAYCARE_ATTENDANCE_COLS
     case 'daycare_activity_log':
       return DAYCARE_ACTIVITY_COLS
+    case 'daycare_training_sessions':
+      return DAYCARE_TRAINING_COLS
+    case 'daycare_staffing':
+      return DAYCARE_STAFFING_COLS
   }
 }
 
@@ -3896,6 +3919,19 @@ async function findByKey(
  * 入浴記録の自然キー（同じ人・同じ日）に生きている行があるか。
  * 読めなかった時は false（＝他の端末の行とは断定しない。呼び側は再試行へ回す）
  */
+/** その日の配置（0046）の自然キー（日・職員・役割・開始の時刻。時刻なしは時刻なし同士）に生きている行があるか。読めなかった時は false */
+async function staffingKeyTaken(sb: SupabaseClient, payload: Record<string, unknown>): Promise<boolean> {
+  const day = dateStr(payload.day)
+  const staffId = idNum(payload.staff_id)
+  const role = str(payload.role)
+  if (day === null || staffId === null || role === null) return false
+  let q = sb.from('daycare_staffing').select('id').is('deleted_at', null).eq('day', day).eq('staff_id', staffId).eq('role', role).limit(1)
+  const from = str(payload.from_time)
+  q = from === null ? q.is('from_time', null) : q.eq('from_time', from)
+  const res = await bounded(q.maybeSingle())
+  return res.error === null && res.data !== null
+}
+
 async function bathDayTaken(sb: SupabaseClient, payload: Record<string, unknown>): Promise<boolean> {
   const residentId = idNum(payload.resident_id)
   const day = dateStr(payload.bath_on)
@@ -4021,6 +4057,11 @@ function naturalKeyOf(table: QueueTable, payload: Record<string, unknown>): Reco
     const label = str(payload.label)
     return day === null || label === null || label === '' ? null : { resident_id: residentId, day, label }
   }
+  // デイの個別機能訓練の実施記録（1人1日1件・0046）
+  if (table === 'daycare_training_sessions') {
+    const day = dateStr(payload.day)
+    return day === null ? null : { resident_id: residentId, day }
+  }
   return null
 }
 
@@ -4028,10 +4069,12 @@ function naturalKeyOf(table: QueueTable, payload: Record<string, unknown>): Reco
 async function naturalKeyTaken(sb: SupabaseClient, table: QueueTable, payload: Record<string, unknown>): Promise<boolean> {
   if (table === 'bath_records') return bathDayTaken(sb, payload)
   if (table === 'med_slots' || table === 'med_admin') return medKeyTaken(sb, table, payload)
-  if (table === 'daycare_attendance' || table === 'daycare_activity_log') {
+  if (table === 'daycare_attendance' || table === 'daycare_activity_log' || table === 'daycare_training_sessions') {
     const key = naturalKeyOf(table, payload)
     return key !== null && (await findByKey(sb, table, key)) !== null
   }
+  // その日の配置（0046）: 同じ日・同じ職員・同じ役割・同じ開始の時刻の生きている行（部分 unique）
+  if (table === 'daycare_staffing') return staffingKeyTaken(sb, payload)
   return false
 }
 
@@ -4478,6 +4521,7 @@ const KIND_BLOCKED_MSG: Record<InputKind, string> = {
   incident: '事故・ヒヤリハットの記録はまだ使い始めていません（開始日に解禁します）',
   daycare: 'デイの記録はまだ使い始めていません（開始日に解禁します）',
   daycare_activity: 'デイの活動の記録はまだ使い始めていません（開始日に解禁します）',
+  daycare_training: 'デイの機能訓練の記録はまだ使い始めていません（開始日に解禁します）',
 }
 
 interface KindGateState {
@@ -4494,6 +4538,7 @@ function newKindGates(): Record<InputKind, KindGateState> {
     incident: { value: null, fetchedAt: 0, inFlight: null },
     daycare: { value: null, fetchedAt: 0, inFlight: null },
     daycare_activity: { value: null, fetchedAt: 0, inFlight: null },
+    daycare_training: { value: null, fetchedAt: 0, inFlight: null },
   }
 }
 
@@ -4579,6 +4624,7 @@ async function writeGate(table: LegacyTable): Promise<void> {
   if (table === 'incidents') return assertKindWritable('incident')
   if (table === 'daycare_attendance') return assertKindWritable('daycare')
   if (table === 'daycare_activity_log') return assertKindWritable('daycare_activity')
+  if (table === 'daycare_training_sessions' || table === 'daycare_staffing') return assertKindWritable('daycare_training')
   if (table === 'med_slots') {
     if (!isSupabaseConfigured()) throw new DbError('unconfigured', MSG.unconfigured)
     assertBuildCurrent() // 旗の封鎖は受けないが、古い版の止め（F28③）は受ける
@@ -8349,6 +8395,317 @@ export function pendingActivityOps(): PendingActivityOp[] {
   return out
 }
 
+// ── デイ（せせらぎ）の記録 段階3a: 個別機能訓練の実施記録とその日の配置（2026-10-23 追加・代表承認・0046_daycare_training.sql） ──
+//
+// daycare_training_sessions（1人1日1件）と daycare_staffing は到着・欠席と同じ経路（client_key・rev 照合・送信待ち cl_sendQueue・
+//   edited_by・soft delete）。入力解禁は機能訓練だけの旗 input_enabled_daycare_training（writeGate）。
+//   過去の日は現場のログインでは書けない（0046 のトリガが 42501・daycare_training_past_office_only: で止める）。未来の日の実施記録は送らない。
+//   2台で同じ方・同じ日に記録した時（23505）: 合流しない。'taken'（画面は先の記録を開いて「先に記録があります」）。
+//   結果の違う記録を機械では選べないため（段階3の計画 3.1）。送信待ちの経路も同じ（自然キーで当たったら止める）。
+
+const TRAINING_MSG = {
+  missing: 'デイの機能訓練の記録はまだ使えません（サーバー側の設定待ち）。管理者に連絡してください。',
+  bad: '機能訓練の記録の内容が足りません。開始時刻・内容・時間・指導員・結果（中止なら理由）を確かめてください。',
+} as const
+
+/** 1日の実施記録・配置の取得上限 */
+const DAYCARE_TRAINING_ROWS = 1000
+/** 前回の内容を選ぶために読む日数と行の上限（その日より前の、中止でない記録） */
+const DAYCARE_TRAINING_PREV_DAYS = 120
+const DAYCARE_TRAINING_PREV_ROWS = 3000
+
+function normalizeTrainingSession(row: unknown): DaycareTrainingSession | null {
+  const r = asRecord(row)
+  if (!r) return null
+  const id = idNum(r.id)
+  const resident_id = idNum(r.resident_id)
+  const day = dateStr(r.day)
+  const started = hhmm(r.started_at)
+  const program = str(r.program)
+  const result = trainingResultOf(r.result)
+  const instructor = idNum(r.instructor_id)
+  const rev = num(r.rev)
+  if (id === null || resident_id === null || day === null || started === null || program === null || result === null || instructor === null || rev === null) {
+    return null
+  }
+  const dur = num(r.duration_min)
+  return {
+    id,
+    resident_id,
+    day,
+    started_at: started,
+    duration_min: result === 'cancelled' ? null : dur,
+    program,
+    result,
+    cancel_reason: cancelReasonOf(r.cancel_reason),
+    cancel_note: str(r.cancel_note),
+    instructor_id: instructor,
+    assisted_by: idNum(r.assisted_by),
+    note: str(r.note),
+    recorded_by: idNum(r.recorded_by),
+    rev,
+  }
+}
+
+function normalizeStaffing(row: unknown): DaycareStaffing | null {
+  const r = asRecord(row)
+  if (!r) return null
+  const id = idNum(r.id)
+  const day = dateStr(r.day)
+  const staff_id = idNum(r.staff_id)
+  const role = staffingRoleOf(r.role)
+  const rev = num(r.rev)
+  if (id === null || day === null || staff_id === null || role === null || rev === null) return null
+  return { id, day, staff_id, role, from_time: hhmm(r.from_time), to_time: hhmm(r.to_time), note: str(r.note), rev }
+}
+
+/** 機能訓練の読み書きが「表が無い（0046 未適用）」で止まったか（画面は機能訓練の欄だけ「設定待ち」にする） */
+export function isTrainingMissingError(e: unknown): boolean {
+  return e instanceof DbError && e.message === TRAINING_MSG.missing
+}
+
+function trainingReadError(res: Res<unknown>): DbError {
+  if (isMissingTable(res)) return new DbError('server', TRAINING_MSG.missing)
+  return readError(res)
+}
+
+/** その日の個別機能訓練の実施記録（全員分・削除済みを除く） */
+export async function fetchTrainingSessions(dayIso: string): Promise<DaycareTrainingSession[]> {
+  assertDay(dayIso)
+  const sb = await getClient()
+  const res = (await sb
+    .from('daycare_training_sessions')
+    .select(DAYCARE_TRAINING_COLS)
+    .eq('day', dayIso)
+    .is('deleted_at', null)
+    .order('id', { ascending: true })
+    .limit(DAYCARE_TRAINING_ROWS)) as Res<unknown>
+  if (res.error !== null) throw trainingReadError(res)
+  return list(res.data, normalizeTrainingSession, DAYCARE_TRAINING_ROWS)
+}
+
+/** before より前の日（120日まで）の、中止でない実施記録（前回の内容を選ぶ元。選ぶのは daycareTraining.ts の previousProgram） */
+export async function fetchRecentTrainingSessions(beforeIso: string): Promise<DaycareTrainingSession[]> {
+  assertDay(beforeIso)
+  const sb = await getClient()
+  const res = (await sb
+    .from('daycare_training_sessions')
+    .select(DAYCARE_TRAINING_COLS)
+    .lt('day', beforeIso)
+    .gte('day', addDaysIso(beforeIso, -DAYCARE_TRAINING_PREV_DAYS))
+    .neq('result', 'cancelled')
+    .is('deleted_at', null)
+    .order('day', { ascending: false })
+    .order('id', { ascending: false })
+    .limit(DAYCARE_TRAINING_PREV_ROWS)) as Res<unknown>
+  if (res.error !== null) throw trainingReadError(res)
+  return list(res.data, normalizeTrainingSession, DAYCARE_TRAINING_PREV_ROWS)
+}
+
+/** その日の配置（削除済みを除く） */
+export async function fetchStaffing(dayIso: string): Promise<DaycareStaffing[]> {
+  assertDay(dayIso)
+  const sb = await getClient()
+  const res = (await sb
+    .from('daycare_staffing')
+    .select(DAYCARE_STAFFING_COLS)
+    .eq('day', dayIso)
+    .is('deleted_at', null)
+    .order('id', { ascending: true })
+    .limit(DAYCARE_TRAINING_ROWS)) as Res<unknown>
+  if (res.error !== null) throw trainingReadError(res)
+  return list(res.data, normalizeStaffing, DAYCARE_TRAINING_ROWS)
+}
+
+/**
+ * 実施記録の追加の結果。saved＝足した／taken＝同じ方・同じ日の記録が先にあった（row＝その行・読めなければ null。合流しない）／
+ * queued＝通信できず送信待ち
+ */
+export type TrainingSessionAdd =
+  | { kind: 'saved'; row: DaycareTrainingSession }
+  | { kind: 'taken'; row: DaycareTrainingSession | null }
+  | { kind: 'queued' }
+
+type TrainingFields = ReturnType<typeof trainingPayload>
+
+/** 送る前の確かめ（DB の check と同じ決まり。崩れた形は送らない） */
+function assertTrainingFields(f: TrainingFields): void {
+  const ok =
+    hhmm(f.started_at) !== null &&
+    f.program !== '' &&
+    [...f.program].length <= TRAINING_PROGRAM_MAX &&
+    f.instructor_id > 0 &&
+    (f.result === 'cancelled'
+      ? f.duration_min === null && f.cancel_reason !== null && (f.cancel_reason !== 'other' || (f.cancel_note ?? '').trim() !== '')
+      : f.duration_min !== null && f.duration_min >= TRAINING_MIN_MIN && f.duration_min <= TRAINING_MAX_MIN && f.cancel_reason === null)
+  if (!ok) throw new DbError('server', TRAINING_MSG.bad)
+}
+
+/**
+ * 個別機能訓練の実施記録の追加（1人1日1件）。端末生成の冪等キー client_key を必ず付ける（再送しても1行）。
+ * 未来の日・崩れた形は送らない
+ */
+export async function insertTrainingSession(a: { resident_id: number; day: string; recorded_by: number | null } & TrainingFields): Promise<TrainingSessionAdd> {
+  assertDay(a.day)
+  if (a.day > localToday()) throw new DbError('server', DAYCARE_MSG.future)
+  const f: TrainingFields = {
+    result: a.result,
+    started_at: a.started_at,
+    duration_min: a.duration_min,
+    program: a.program,
+    instructor_id: a.instructor_id,
+    assisted_by: a.assisted_by,
+    cancel_reason: a.cancel_reason,
+    cancel_note: a.cancel_note,
+    note: a.note,
+  }
+  assertTrainingFields(f)
+  await writeGate('daycare_training_sessions')
+  const payload = withClientKey({ resident_id: a.resident_id, day: a.day, ...f, recorded_by: idNum(a.recorded_by) })
+  const queued = async (): Promise<TrainingSessionAdd> => {
+    await enqueue({ table: 'daycare_training_sessions', kind: 'insert', payload })
+    return { kind: 'queued' }
+  }
+  const sb = await getClient()
+  const res = (await sb.from('daycare_training_sessions').insert(payload).select(DAYCARE_TRAINING_COLS).maybeSingle()) as Res<unknown>
+  if (res.error !== null) {
+    if (isAuthFail(res)) {
+      fireAuthExpired()
+      return queued()
+    }
+    if (isTransient(res)) return queued()
+    if (isMissingTable(res)) throw new DbError('server', TRAINING_MSG.missing)
+    if (isUniqueViolation(res)) {
+      const ck = clientKeyOf(payload)
+      // 自分の送信が既に載っている（再送の行き違い）→ 載っている行を返す
+      const landed = ck === null ? null : await findByKey(sb, 'daycare_training_sessions', ck, DAYCARE_TRAINING_COLS, true)
+      const mine = landed === null ? null : normalizeTrainingSession(landed.row)
+      if (mine !== null) return { kind: 'saved', row: mine }
+      // 他の端末が同じ方・同じ日を先に記録した: 合流せず、先の記録を返す（画面はそれを開いて知らせる）
+      const key = naturalKeyOf('daycare_training_sessions', payload)
+      const other = key === null ? null : await findByKey(sb, 'daycare_training_sessions', key, DAYCARE_TRAINING_COLS)
+      return { kind: 'taken', row: other === null ? null : normalizeTrainingSession(other.row) }
+    }
+    throw rejectError('保存でき', errCode(res), res.status)
+  }
+  markSelfRow('daycare_training_sessions', res.data, num(asRecord(res.data)?.rev))
+  kickAfterDelivered()
+  const row = normalizeTrainingSession(res.data)
+  if (row === null) throw new DbError('server', MSG.broken)
+  return { kind: 'saved', row }
+}
+
+/** 実施記録の修正（rev 照合の部分更新）。送るのは変えた列だけ。結果を変える時は、時間・理由も DB の決まりに合わせて送る */
+export async function updateTrainingSession(
+  current: DaycareTrainingSession,
+  next: TrainingFields,
+  opts?: WriteOpts,
+): Promise<DaycareTrainingSession | Conflict | Queued> {
+  assertTrainingFields(next)
+  const sent: Record<string, unknown> = {}
+  const cur: Record<string, unknown> = { ...current }
+  for (const [k, v] of Object.entries(next)) if (cur[k] !== v) sent[k] = v
+  // 中止 ↔ 実施を切り替える時は、時間と理由を必ず一緒に送る（片方だけ送ると両向きの check に当たる）
+  if ('result' in sent) {
+    sent.duration_min = next.duration_min
+    sent.cancel_reason = next.cancel_reason
+    sent.cancel_note = next.cancel_note
+  }
+  if (Object.keys(sent).length === 0) return current
+  return updateRow('daycare_training_sessions', current.id, current.rev, sent, normalizeTrainingSession, opts)
+}
+
+/** 実施記録の取り消し（deleted_at を付ける。物理削除はしない） */
+export async function softDeleteTrainingSession(current: DaycareTrainingSession, opts?: WriteOpts): Promise<true | Conflict | Queued> {
+  return softDelete('daycare_training_sessions', current.id, current.rev, opts)
+}
+
+/** 配置の追加の結果。taken＝同じ日・同じ職員・同じ役割・同じ開始の時刻が先にあった */
+export type StaffingAdd = { kind: 'saved'; row: DaycareStaffing } | { kind: 'taken' } | { kind: 'queued' }
+
+/** その日の配置の追加（機能訓練指導員・看護職員。時間帯は任意）。未来の日も入れられる（前の日に翌日の配置を入れる時のため） */
+export async function insertStaffing(a: {
+  day: string
+  staff_id: number
+  role: StaffingRole
+  from_time: string | null
+  to_time: string | null
+  recorded_by: number | null
+}): Promise<StaffingAdd> {
+  assertDay(a.day)
+  const from = a.from_time === null ? null : hhmm(a.from_time)
+  const to = a.to_time === null ? null : hhmm(a.to_time)
+  if ((a.from_time !== null && from === null) || (a.to_time !== null && to === null) || (from !== null && to !== null && from >= to)) {
+    throw new DbError('server', '時間帯を確かめてください（終わりは始まりより後にしてください）。')
+  }
+  await writeGate('daycare_staffing')
+  const payload = withClientKey({ day: a.day, staff_id: a.staff_id, role: a.role, from_time: from, to_time: to, recorded_by: idNum(a.recorded_by) })
+  const queued = async (): Promise<StaffingAdd> => {
+    await enqueue({ table: 'daycare_staffing', kind: 'insert', payload })
+    return { kind: 'queued' }
+  }
+  const sb = await getClient()
+  const res = (await sb.from('daycare_staffing').insert(payload).select(DAYCARE_STAFFING_COLS).maybeSingle()) as Res<unknown>
+  if (res.error !== null) {
+    if (isAuthFail(res)) {
+      fireAuthExpired()
+      return queued()
+    }
+    if (isTransient(res)) return queued()
+    if (isMissingTable(res)) throw new DbError('server', TRAINING_MSG.missing)
+    if (isUniqueViolation(res)) {
+      const ck = clientKeyOf(payload)
+      const landed = ck === null ? null : await findByKey(sb, 'daycare_staffing', ck, DAYCARE_STAFFING_COLS, true)
+      const mine = landed === null ? null : normalizeStaffing(landed.row)
+      if (mine !== null) return { kind: 'saved', row: mine }
+      return { kind: 'taken' }
+    }
+    throw rejectError('保存でき', errCode(res), res.status)
+  }
+  markSelfRow('daycare_staffing', res.data, num(asRecord(res.data)?.rev))
+  kickAfterDelivered()
+  const row = normalizeStaffing(res.data)
+  if (row === null) throw new DbError('server', MSG.broken)
+  return { kind: 'saved', row }
+}
+
+/** 配置の取り消し（deleted_at を付ける。物理削除はしない） */
+export async function softDeleteStaffing(current: DaycareStaffing, opts?: WriteOpts): Promise<true | Conflict | Queued> {
+  return softDelete('daycare_staffing', current.id, current.rev, opts)
+}
+
+/** この端末の送信待ちにある機能訓練・配置の操作（画面が重ねて出す・読むだけ）。stopped＝止まった（競合・拒否）op */
+export type PendingTrainingOp =
+  | { kind: 'add'; table: 'daycare_training_sessions'; residentId: number; day: string; stopped: boolean }
+  | { kind: 'add'; table: 'daycare_staffing'; day: string; staffId: number; role: StaffingRole; stopped: boolean }
+  | { kind: 'update'; table: 'daycare_training_sessions' | 'daycare_staffing'; rowId: number; deleted: boolean; stopped: boolean }
+
+export function pendingTrainingOps(): PendingTrainingOp[] {
+  const out: PendingTrainingOp[] = []
+  for (const q of queue) {
+    if (q.table !== 'daycare_training_sessions' && q.table !== 'daycare_staffing') continue
+    const stopped = q.blocked !== undefined
+    if (q.kind === 'insert') {
+      const day = dateStr(q.payload.day)
+      if (day === null) continue
+      if (q.table === 'daycare_training_sessions') {
+        const residentId = idNum(q.payload.resident_id)
+        if (residentId === null) continue
+        out.push({ kind: 'add', table: q.table, residentId, day, stopped })
+      } else {
+        const staffId = idNum(q.payload.staff_id)
+        const role = staffingRoleOf(q.payload.role)
+        if (staffId === null || role === null) continue
+        out.push({ kind: 'add', table: q.table, day, staffId, role, stopped })
+      }
+    } else if (q.kind === 'update' && q.rowId !== undefined) {
+      const deleted = Object.prototype.hasOwnProperty.call(q.payload, 'deleted_at') && q.payload.deleted_at !== null
+      out.push({ kind: 'update', table: q.table, rowId: q.rowId, deleted, stopped })
+    }
+  }
+  return out
+}
+
 // ── デイ（せせらぎ）の記録 段階2c: 申し送りの印（2026-10-22 追加・代表承認・DB 変更なし） ─────────────
 //
 // 印＝記録から文を組み立てた申し送り（区分「デイ」）。書き込みは既存の insertNote（冪等キー dcn:…）・deleteNote・saveNoteEdits
@@ -9919,6 +10276,49 @@ export function subscribeDaycareActivityChanges(cb: (table: string, info?: Chang
       }
       channel = ch
       unwatch = watchChannel(ch, REALTIME_DAYCARE_ACTIVITY_TABLES, cb, () => !cancelled)
+    } catch {
+      // 接続先未設定・通信不可。購読なしで動く
+    }
+  })()
+
+  return () => {
+    cancelled = true
+    unwatch?.()
+    unwatch = null
+    if (client !== null && channel !== null) void client.removeChannel(channel)
+    channel = null
+  }
+}
+
+/**
+ * デイの個別機能訓練の実施記録・その日の配置の Realtime を購読する表（2026-10-23 デイ段階3・0046）。段階1・2のチャンネルにも混ぜない
+ * （0046 を当てる前の DB で、到着・欠席・活動の購読まで止まらないようにする）
+ */
+const REALTIME_DAYCARE_TRAINING_TABLES = ['daycare_training_sessions', 'daycare_staffing'] as const
+
+/**
+ * デイの機能訓練の変更通知（機能訓練の画面だけが使う）。呼び方・渡す情報は subscribeChanges と同じ。
+ * 接続できない・配信対象に無い（0046 未適用）場合は通知が来ないだけで、画面は手動更新で成立する。
+ */
+export function subscribeDaycareTrainingChanges(cb: (table: string, info?: ChangeInfo) => void): () => void {
+  let cancelled = false
+  let client: SupabaseClient | null = null
+  let channel: ReturnType<SupabaseClient['channel']> | null = null
+  let unwatch: (() => void) | null = null
+
+  void (async () => {
+    try {
+      const sb = await getClient()
+      if (cancelled) return
+      client = sb
+      let ch = sb.channel(`cl_dctrn_${Math.random().toString(36).slice(2, 10)}`)
+      for (const table of REALTIME_DAYCARE_TRAINING_TABLES) {
+        ch = ch.on('postgres_changes', { event: '*', schema: 'public', table }, (payload: unknown) => {
+          if (!cancelled) deliverChange(table, payload, cb, () => !cancelled)
+        })
+      }
+      channel = ch
+      unwatch = watchChannel(ch, REALTIME_DAYCARE_TRAINING_TABLES, cb, () => !cancelled)
     } catch {
       // 接続先未設定・通信不可。購読なしで動く
     }

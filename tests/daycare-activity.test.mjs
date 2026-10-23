@@ -362,13 +362,15 @@ if (A === null) {
     })
     it('types.ts は InputKind に1行足すだけ（INPUT_KINDS・ほかの型は元のまま）', () => {
       const t = read('../src/lib/types.ts')
-      assert.match(t, /export type InputKind = 'bath' \| 'med' \| 'incident'\n {2}\| 'daycare' \/\/[^\n]*\n {2}\| 'daycare_activity' \/\/[^\n]*\nexport const INPUT_KINDS: readonly InputKind\[\] = \['bath', 'med', 'incident'\]/)
+      // 段階3a（2026-10-23）で機能訓練の1行が続けて足された（固定し直し・意図は同じ＝1行ずつ足す・INPUT_KINDS は元のまま）
+      assert.match(t, /export type InputKind = 'bath' \| 'med' \| 'incident'\n {2}\| 'daycare' \/\/[^\n]*\n {2}\| 'daycare_activity' \/\/[^\n]*\n {2}\| 'daycare_training' \/\/[^\n]*\nexport const INPUT_KINDS: readonly InputKind\[\] = \['bath', 'med', 'incident'\]/)
       assert.doesNotMatch(t, /DaycareActivity/)
     })
     it('db.ts の配線: 送信待ちの表・活動だけの旗・自然キー（利用者・日・項目）・合流・相手の行を直す中身・別のチャンネル', () => {
       const db = code('../src/lib/db.ts')
       assert.match(db, /type LegacyTable = [^\n]*'daycare_activity_log'/)
-      assert.match(db, /'daycare_attendance',\n {2}'daycare_activity_log',\n\]/)
+      // 段階3a（2026-10-23）の機能訓練の2表が後ろに続く（固定し直し・意図は同じ＝活動は送信待ちの表に入っている）
+      assert.match(db, /'daycare_attendance',\n {2}'daycare_activity_log',\n {2}'daycare_training_sessions',\n {2}'daycare_staffing',\n\]/)
       assert.match(db, /if \(table === 'daycare_activity_log'\) return assertKindWritable\('daycare_activity'\)/)
       assert.match(db, /daycare_activity: 'デイの活動の記録はまだ使い始めていません（開始日に解禁します）'/)
       assert.match(db, /return day === null \|\| label === null \|\| label === '' \? null : \{ resident_id: residentId, day, label \}/)
