@@ -97,7 +97,7 @@ import { matchBathPlan, monthDays, monthRange, validateBathInput } from './bath'
 import type { BathPlanEntry, BathPlanRow } from './bath'
 import { normalizeMedSlots, validateMedAdminInput } from './med'
 // デイ（せせらぎ）の記録 段階1（2026-10-22・0041）。純ロジックは daycare.ts
-import { absentBathAction, hmOf, isDaycareVitalKey, validateAttendance } from './daycare'
+import { absentBathAction, hmOf, isAutoOnlyAttendance, isDaycareVitalKey, validateAttendance } from './daycare'
 import type { KeyedVital } from './daycare'
 import { activityLabelError, normalizeActivityLabel, participationOf } from './daycareActivity'
 import type { ActivityParticipation, DaycareActivity } from './daycareActivity'
@@ -3694,8 +3694,46 @@ async function verifyLandedUpdate(sb: SupabaseClient, op: RowQueueOp, cols: stri
   const row = asRecord(res.data)
   const rev = num(row?.rev)
   if (row === null || rev === null || rev <= (op.rev as number)) return 'conflict'
-  if (!payloadLanded(op.payload, row)) return 'conflict'
+  if (!payloadLanded(op.payload, row)) {
+    // デイの到着・帰宅: 退避した後に、定時の処理の自動の帰宅（0047 の UPDATE）だけで版が1つ進んだ時は、いまの版に乗せ替えて送る
+    // （圏外で押した〔帰宅〕・時刻の直し・〔休み〕が計画の時刻に負けて止まらないように＝反証 中2）
+    if (op.table === 'daycare_attendance' && rev === (op.rev as number) + 1 && row.deleted_at === null) return rebaseOverAutoLeave(sb, op, cols, rev)
+    return 'conflict'
+  }
   lastLandedRev = rev
+  return 'sent'
+}
+
+/**
+ * 退避したデイの到着・帰宅の update を、自動の帰宅で1つ進んだ版に乗せ替えて送る（0047・反証 中2）。
+ * いまの行の帰宅が自動の印付きの時だけ（印の列が無い DB・印が無い＝人が変えた時は、従来どおり止める）。送る中身は op のまま
+ */
+async function rebaseOverAutoLeave(sb: SupabaseClient, op: RowQueueOp, cols: string, rev: number): Promise<SendResult> {
+  const cur = await bounded(sb.from('daycare_attendance').select('id,rev,left_auto').eq('id', op.rowId as number).is('deleted_at', null).limit(1).maybeSingle())
+  if (cur.error !== null) return isTransient(cur) ? 'retry' : 'conflict'
+  const c = asRecord(cur.data)
+  if (c === null || num(c.rev) !== rev || c.left_auto !== true) return 'conflict'
+  const res = await sendWithEditor(withEditorNull(op.payload), (p) =>
+    bounded(
+      sb
+        .from('daycare_attendance')
+        .update(p)
+        .eq('id', op.rowId as number)
+        .eq('rev', rev)
+        .is('deleted_at', null)
+        .select(cols)
+        .maybeSingle(),
+    ),
+  )
+  if (res.error !== null) {
+    if (isAuthFail(res)) {
+      fireAuthExpired()
+      return 'retry'
+    }
+    return isTransient(res) ? 'retry' : rejectedBy(res)
+  }
+  if (res.data === null) return 'retry'
+  lastLandedRev = num(asRecord(res.data)?.rev) ?? rev + 1
   return 'sent'
 }
 
@@ -3996,7 +4034,8 @@ async function medKeyTaken(
 }
 
 /**
- * 送信待ちの手動の追加（入浴・与薬の時間帯の記録）が自然キーで衝突した時、衝突した生きている行が自動の記録（auto=true）なら、
+ * 送信待ちの手動の追加（入浴・与薬の時間帯の記録・デイの到着・帰宅・休み）が自然キーで衝突した時、衝突した生きている行が
+ * 自動の記録（auto=true。デイの到着・帰宅は 0047 の定時の処理が入れた人の手の入っていない行＝isAutoOnlyAttendance）なら、
  * その行を読んだ rev で、送信待ちの中身（区分・理由・備考 / 状態・備考・記入者）と auto=false に update する。
  * 戻り値: 上書きできた 'sent'／通信・ログインの失敗や読んだ後に行が変わった 'retry'（次の送信で判定し直す）／
  *         受け付けられなかった 'rejected'／自動の記録ではない・行が無い・対象外の表 null（呼び側は従来どおり判定する）。
@@ -4022,16 +4061,34 @@ async function overrideAutoRow(
     if (day === null || slot === null || slot === 'prn') return null
     key = { resident_id: residentId, admin_on: day, slot }
     patch = { status: payload.status, note: payload.note ?? null }
+  } else if (table === 'daycare_attendance') {
+    // 圏外で押した〔休み〕・〔到着〕の間に、定時の処理の自動の到着が先に載った（0047・反証 重1）。人の記録を優先して上書きする。
+    // 自動の印は外して送る（同じ時刻を押した時はトリガが外さないため）
+    const day = dateStr(payload.day)
+    if (day === null) return null
+    key = { resident_id: residentId, day }
+    patch = {
+      arrived_at: payload.arrived_at ?? null,
+      left_at: payload.left_at ?? null,
+      absent: payload.absent === true,
+      absent_reason: payload.absent_reason ?? null,
+      note: payload.note ?? null,
+      arrived_auto: false,
+      left_auto: false,
+    }
   } else {
     return null
   }
-  const found = await findByKey(sb, table, key, 'id,rev,auto')
-  if (found === null || asRecord(found.row)?.auto !== true) return null
+  // デイの到着・帰宅は印の列まで読む（0047 の無い DB では列が無く読めない＝上書きせず従来どおり止める）
+  const found = await findByKey(sb, table, key, table === 'daycare_attendance' ? DAYCARE_ATTENDANCE_AUTO_COLS : 'id,rev,auto')
+  if (found === null) return null
+  const isAutoRow = table === 'daycare_attendance' ? isAutoOnlyAttendance(normalizeDaycareAttendance(found.row)) : asRecord(found.row)?.auto === true
+  if (!isAutoRow) return null
   const recorder = idNum(payload.recorded_by)
   const sent = {
     ...patch,
     recorded_by: recorder,
-    auto: false,
+    ...(table === 'daycare_attendance' ? {} : { auto: false }),
     // 変更の記録の「変えた職員」は送信待ちに残っている操作者（無ければ記録者）
     edited_by: idNum(payload.edited_by) ?? recorder,
   }

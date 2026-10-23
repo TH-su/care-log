@@ -80,5 +80,5 @@ for (const c of AUTO_CASES) {
   }
 }
 await client.end()
-console.log(`\n${ran - failed}/${ran} 件が移行 0047（デイ 自動の到着・帰宅）の契約と一致`)
+console.log(`\n${ran - failed}/${ran} 件が移行 0047・0048（デイ 自動の到着・帰宅）の契約と一致`)
 process.exit(failed === 0 ? 0 : 1)
