@@ -208,13 +208,21 @@ if (D === null) {
       assert.equal(days90[0].due, '2027-05-01', '規則は写しの設定から')
       assert.deepEqual(D.reviewDueList({ copy: rows, settings: null, people: [{ id: 6, active: false }], today }).map((r) => r.residentId).includes(6), false, '在籍でない方は出さない')
     })
-    it('見直しの一覧の絞り込み（積み残し 51・代表者の決定）: 計画がある方と、その日にデイの予定がある方だけ。予定を読めない時は絞らない', () => {
+    it('見直しの一覧の絞り込み（積み残し 51・代表者の決定）: 計画がある方と、週のどこかの曜日にデイの予定がある方だけ。週間計画を読めない時は絞らない', () => {
       const list = D.reviewDueList({ copy: rows, settings: null, people: [], today })
       // 3＝計画なし。5・6・1・2＝計画あり
       assert.deepEqual(D.filterReviewScope(list, new Set()).map((r) => r.residentId), [2, 1, 6, 5], '予定の無い計画なしの方は出さない')
-      assert.deepEqual(D.filterReviewScope(list, new Set([3])).map((r) => r.residentId), [2, 1, 3, 6, 5], 'その日に予定がある計画なしの方は出す')
-      assert.deepEqual(D.filterReviewScope(list, null).map((r) => r.residentId), list.map((r) => r.residentId), '予定を読めない時は全員（多めに出す）')
+      assert.deepEqual(D.filterReviewScope(list, new Set([3])).map((r) => r.residentId), [2, 1, 3, 6, 5], '予定がある計画なしの方は出す')
+      assert.deepEqual(D.filterReviewScope(list, null).map((r) => r.residentId), list.map((r) => r.residentId), '読めない時は全員（多めに出す）')
       assert.deepEqual(D.reviewDueCounts(D.filterReviewScope(list, new Set())), { overdue: 1, warn: 1, none: 0 }, '件数も絞った後で数える')
+    })
+    it('週のどこかの曜日に予定がある方（親の訂正）: 7日分の予定の和。1日でも読めない・7日に足りない時は null（絞らない）。照合できない予定（外部利用者など）は入らない', () => {
+      const day = (ids, source = 'kv') => ({ source, rows: ids.map((id) => ({ resident_id: id })) })
+      const week = [day([1, 2]), day([3]), day([], 'none'), day([2, null]), day([5]), day([], 'none'), day([], 'none')]
+      assert.deepEqual([...D.weekScopeIds(week)].sort(), [1, 2, 3, 5], '今日来ない方（別の曜日の方）も入る')
+      assert.equal(D.weekScopeIds([...week.slice(0, 6), null]), null)
+      assert.equal(D.weekScopeIds([...week.slice(0, 6), day([], 'unknown')]), null)
+      assert.equal(D.weekScopeIds(week.slice(0, 6)), null)
     })
     it('対象者の並び: 写しを読めない・0件の時は元の並びと知らせ。行がある時は計画がある方を上に（中は元の並び）、下の方には理由', () => {
       const targets = [7, 3, 1, 4, 2]

@@ -8107,6 +8107,15 @@ export async function fetchDaycarePlan(dayIso: string): Promise<DaycarePlanResul
   }
 }
 
+/**
+ * 続いた7日分のデイの予定（週間計画は曜日ごとなので、7日で全部の曜日になる）。読めない日は null。
+ * 見直しの期限の一覧を「週のどこかの曜日にデイの予定がある方」に絞るために使う（積み残し 51・読むだけ・移行なし）
+ */
+export async function fetchDaycarePlanWeek(baseIso: string): Promise<(DaycarePlanResult | null)[]> {
+  assertDay(baseIso)
+  return Promise.all(Array.from({ length: 7 }, (_, i) => fetchDaycarePlan(addDaysIso(baseIso, i)).catch(() => null)))
+}
+
 /** その日の予定の写し（無ければ null）。表が無い（0041 未適用）時は例外（サーバー側の設定待ち） */
 export async function fetchDaycareDay(dayIso: string): Promise<DaycareDay | null> {
   assertDay(dayIso)

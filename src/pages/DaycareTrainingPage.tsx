@@ -20,6 +20,7 @@ import {
   fetchDaycareAttendance,
   fetchDaycareDay,
   fetchDaycarePlan,
+  fetchDaycarePlanWeek,
   fetchMyRole,
   fetchRecentTrainingSessions,
   fetchStaffing,
@@ -45,7 +46,7 @@ import type { MyRole } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
 import { DaycareHomeVisitSection } from '../components/DaycareHomeVisitSection'
 import { DaycareReviewDueSection } from '../components/DaycareReviewDueSection'
-import { TARGET_NO_PLAN_LABEL, orderTargetsByPlan } from '../lib/trainingDue'
+import { TARGET_NO_PLAN_LABEL, orderTargetsByPlan, weekScopeIds } from '../lib/trainingDue'
 import type { DueCopyLoad } from '../lib/trainingDue'
 import { ConfirmDialog, ErrorBlock, LoadingBlock, ModalShell, useToast } from '../components/ui'
 import { buildDaycareBoard, canEditPastDaycareTimes } from '../lib/daycare'
@@ -155,6 +156,11 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
   const [, setQueueTick] = useState(0)
   /** 読み直しの回数（居宅訪問の区画も合わせて読み直す・段階3b） */
   const [dataTick, setDataTick] = useState(0)
+  /**
+   * 週間計画で、週のどこかの曜日にデイの予定がある方（見直しの期限の一覧を絞る・積み残し 51）。
+   * undefined＝読み込み中／null＝読めない（絞らない＝多めに出す）
+   */
+  const [weekIds, setWeekIds] = useState<Set<number> | null | undefined>(undefined)
   const { toast, show } = useToast()
   const genRef = useRef(0)
   const dayRef = useRef(day)
@@ -177,6 +183,9 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
     fetchMyRole()
       .then((r) => alive && setRole(r))
       .catch(() => {})
+    fetchDaycarePlanWeek(todayIso())
+      .then((plans) => alive && setWeekIds(weekScopeIds(plans)))
+      .catch(() => alive && setWeekIds(null))
     return () => {
       alive = false
     }
@@ -275,10 +284,6 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
     [data, residents],
   )
   const targets = board === null ? [] : trainingTargets(board.rows)
-  // 見直しの一覧を絞る、その日にデイの予定がある方（盤の予定がある方＝daycare_plan と同じ見方・外部利用者は入らない）。
-  // 予定を読めない日は null（絞らない＝多めに出す。代表者の決定 2026-10-23・積み残し 51）
-  const reviewScopeIds =
-    board === null || data === null || data.planSource === 'unknown' ? null : new Set(board.rows.filter((r) => r.planned).map((r) => r.residentId))
   // 計画書の写しで「計画がある・終了でない方」を上に（計画 6章）。写しが無い・読めない時は到着の並びのまま
   const planOrder =
     data === null || data.copy === 'missing'
@@ -767,8 +772,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
         actorId={actorId}
         blockedReason={homeVisitBlocked()}
         onSynced={scheduleReload}
-        scopeIds={reviewScopeIds}
-        scopeDay={day}
+        scopeIds={weekIds}
       />
 
       <DaycareHomeVisitSection

@@ -259,13 +259,17 @@ describe('静的検査（段階3c の規律）', () => {
     const review = card.slice(card.indexOf('const reviewLine'), card.indexOf('const rline'))
     assert.doesNotMatch(review, /visits/, '見直しの行は居宅訪問の読み込みに左右されない')
   })
-  it('見直しの一覧の絞り込みの配線（積み残し 51）: 画面は盤の予定がある方を渡し、予定を読めない日は null。区画は一覧と件数の両方を絞った後で出す', () => {
+  it('見直しの一覧の絞り込みの配線（積み残し 51・親の訂正）: 画面は今日から7日分の予定で「週のどこかの曜日に予定がある方」を作って渡す。区画は読み込み中は数を出さず、一覧と件数の両方を絞った後で出す', () => {
     const p = code('../src/pages/DaycareTrainingPage.tsx')
-    assert.match(p, /board === null \|\| data === null \|\| data\.planSource === 'unknown' \? null : new Set\(board\.rows\.filter\(\(r\) => r\.planned\)\.map\(\(r\) => r\.residentId\)\)/)
-    assert.match(p, /scopeIds=\{reviewScopeIds\}/)
+    assert.match(p, /fetchDaycarePlanWeek\(todayIso\(\)\)\s*\.then\(\(plans\) => alive && setWeekIds\(weekScopeIds\(plans\)\)\)\s*\.catch\(\(\) => alive && setWeekIds\(null\)\)/)
+    assert.match(p, /scopeIds=\{weekIds\}/)
+    assert.doesNotMatch(p, /r\.planned\)\.map/, 'その日の盤では絞らない')
     const c = code('../src/components/DaycareReviewDueSection.tsx')
-    assert.match(c, /filterReviewScope\(\s*reviewDueList\(/)
+    assert.match(c, /filterReviewScope\(\s*reviewDueList\([\s\S]*?\),\s*scopeIds \?\? null,\s*\)/)
     assert.match(c, /const counts = reviewDueCounts\(rows\)/)
+    assert.match(c, /\) : scopeIds === undefined \? \(/)
+    const db = code('../src/lib/db.ts')
+    assert.match(db, /Array\.from\(\{ length: 7 \}, \(_, i\) => fetchDaycarePlan\(addDaysIso\(baseIso, i\)\)\.catch\(\(\) => null\)\)/)
   })
   it('types.ts は LS に1行足すだけ（UI 状態のキー）', () => {
     assert.match(read('../src/lib/types.ts'), /dcTrainingReviewOpen: 'cl_dcTrainingReviewOpen',\n\} as const/)

@@ -59,15 +59,13 @@ export interface DaycareReviewDueSectionProps {
   /** 写した後（画面を読み直す） */
   onSynced: () => void
   /**
-   * 一覧に出す方を絞る、その日にデイの予定がある方（盤の予定がある方・外部利用者は入らない）。null＝その日の予定を読めない（絞らない）。
-   * 計画書に計画がある方は、予定が無くても出す（代表者の決定 2026-10-23・積み残し 51）
+   * 一覧に出す方を絞る、週間計画で週のどこかの曜日にデイの予定がある方（外部利用者は入らない）。undefined＝読み込み中／
+   * null＝週間計画を読めない（絞らない）。計画書に計画がある方は、予定が無くても出す（代表者の決定 2026-10-23・積み残し 51）
    */
-  scopeIds: ReadonlySet<number> | null
-  /** 絞りに使った予定の日（画面の日） */
-  scopeDay: string
+  scopeIds: ReadonlySet<number> | null | undefined
 }
 
-export function DaycareReviewDueSection({ today, residents, copy, role, actorId, blockedReason, onSynced, scopeIds, scopeDay }: DaycareReviewDueSectionProps) {
+export function DaycareReviewDueSection({ today, residents, copy, role, actorId, blockedReason, onSynced, scopeIds }: DaycareReviewDueSectionProps) {
   const [open, setOpen] = useState<boolean>(readOpen)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<Msg | null>(null)
@@ -87,7 +85,7 @@ export function DaycareReviewDueSection({ today, residents, copy, role, actorId,
       ? []
       : filterReviewScope(
           reviewDueList({ copy: loaded.rows, settings: loaded.settings, people: residents.map((r) => ({ id: r.id, active: r.active })), today }),
-          scopeIds,
+          scopeIds ?? null,
         )
   const counts = reviewDueCounts(rows)
   const cstate = loaded === null ? null : reviewCopyState(loaded)
@@ -162,6 +160,9 @@ export function DaycareReviewDueSection({ today, residents, copy, role, actorId,
           tone: 'warn',
           text: `計画書の写しに1人も載っていません${syncedDay === null ? '' : `（${fmtDayLabel(syncedDay)} に写したもの）`}。計画の見直しの期限は確かめられません。利用者番号が結べていない可能性があります。管理者に連絡してください。`,
         })
+      ) : scopeIds === undefined ? (
+        // 週間計画（一覧を絞る元）の読み込み中は、数と一覧を出さない（読み込みの前後で数が変わって見えないように）
+        <p className="text-base text-ink2">週間計画を読み込んでいます…</p>
       ) : (
         <>
           <p className={`text-base ${syncedDay !== today ? 'text-ink' : 'text-ink2'}`}>
@@ -180,8 +181,8 @@ export function DaycareReviewDueSection({ today, residents, copy, role, actorId,
           <p className="text-sm text-ink2">
             期限は計画書アプリが計算した値をそのまま使い、期限の{warn}日前から「間近」と出します（計画書の設定: {RULE_TEXT[rule]}）。
             {scopeIds === null
-              ? `${fmtDayLabel(scopeDay)}の予定を読めないため、計画のない方も含めて写しの全員を出しています。`
-              : `計画書に計画がある方と、${fmtDayLabel(scopeDay)}にデイの予定がある方を出しています。`}
+              ? '週間計画を読めないため、計画のない方も含めて写しの全員を出しています。'
+              : '計画書に計画がある方と、週間計画でデイの予定がある方（曜日を問わず）を出しています。'}
           </p>
           <button type="button" aria-expanded={open} aria-controls="review-due-list" onClick={toggle} className={btn}>
             {open ? '一覧を閉じる' : `一覧を開く（${rows.length}人）`}

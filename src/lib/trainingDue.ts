@@ -326,14 +326,29 @@ export function reviewDueList(args: { copy: readonly DueCopyRow[]; settings: Due
 }
 
 /**
- * 見直しの一覧を出す方を絞る（代表者の決定 2026-10-23・積み残し 51）。次のどちらかに当たる方だけを残す:
- * 1. その日の週間計画にデイの予定がある方（daycareIds＝盤の予定がある方。daycare_plan と同じ見方で、外部利用者は入らない）
+ * 見直しの一覧を出す方を絞る（代表者の決定 2026-10-23・積み残し 51・親の訂正 同日）。次のどちらかに当たる方だけを残す:
+ * 1. 週間計画（care_schedule_v2）で、週のどこかの曜日にデイの予定がある方（daycareIds。今日来ない方も外さない。
+ *    daycare_plan と同じ見方で、外部利用者は入らない）
  * 2. 写しに計画の行がある方（最新の計画の作成日がある方）
- * daycareIds が null（その日の予定を読めない）の時は絞らない（多めに出す側に倒す。画面はその旨を書き添える）
+ * daycareIds が null（週間計画を読めない）の時は絞らない（多めに出す側に倒す。画面はその旨を書き添える）
  */
 export function filterReviewScope(rows: readonly ReviewDueRow[], daycareIds: ReadonlySet<number> | null): ReviewDueRow[] {
   if (daycareIds === null) return [...rows]
   return rows.filter((r) => r.planDate !== null || daycareIds.has(r.residentId))
+}
+
+/**
+ * 続いた7日分の予定（daycare_plan の結果。週間計画は曜日ごとなので、7日で全部の曜日になる）から、
+ * どこかの曜日にデイの予定がある方（名簿と照合できた方）を集める。1日でも読めない（null・unknown）時は null（絞らない）
+ */
+export function weekScopeIds(plans: ReadonlyArray<{ source: string; rows: ReadonlyArray<{ resident_id: number | null }> } | null>): Set<number> | null {
+  if (plans.length < 7) return null
+  const ids = new Set<number>()
+  for (const p of plans) {
+    if (p === null || p.source === 'unknown') return null
+    for (const r of p.rows) if (r.resident_id !== null) ids.add(r.resident_id)
+  }
+  return ids
 }
 
 /** 見直しの一覧の数（期限切れ・間近・計画なし） */
