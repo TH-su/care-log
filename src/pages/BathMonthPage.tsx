@@ -276,11 +276,15 @@ export function BathMonthPage() {
         <p className="mt-2 text-sm text-ink2">
           {LEGEND}（未は今日まで）
         </p>
-        <p className="mt-1 text-sm">
-          {/* 2026-10-24 行き先を入浴の画面（/record/bath）からデイ せせらぎの今日の画面へ（デイの入浴はそこで記録する・代表者の回答）。
-              入浴の画面のルートは残す（ブックマークで開ける） */}
+        <p className="mt-1 flex flex-wrap items-center gap-x-gap text-sm">
+          {/* 2026-10-24 主の行き先を入浴の画面（/record/bath）からデイ せせらぎの今日の画面へ（デイの入浴はそこで記録する・代表者の回答）。
+              入浴の画面へは〔入浴の記録を直す〕を並べて残す（違う人・違う日に入れた入浴の取り消しなど、まれな直しの入口。
+              アプリの中で入浴の画面へ入れるのはここだけ。記録ハブの一覧からは外したまま・代表者の回答「推奨どおり」） */}
           <Link to="/record/daycare" className="inline-flex min-h-tap items-center text-link">
             デイ せせらぎの今日を開く<span aria-hidden="true"> ›</span>
+          </Link>
+          <Link to="/record/bath" className="inline-flex min-h-tap items-center text-link">
+            入浴の記録を直す<span aria-hidden="true"> ›</span>
           </Link>
         </p>
       </SectionCard>
