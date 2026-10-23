@@ -869,8 +869,8 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
             aria-pressed={filter === f}
             className={
               filter === f
-                ? 'min-h-tap rounded-full border border-primary bg-primary px-4 text-base font-bold text-primary-ink'
-                : 'min-h-tap rounded-full border border-border-strong bg-surface px-4 text-base text-ink'
+                ? 'min-h-tap rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink'
+                : 'min-h-tap rounded border border-border-strong bg-surface px-4 text-base text-ink'
             }
           >
             {filter === f ? <span aria-hidden="true">✓ </span> : null}
@@ -1096,7 +1096,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                                 type="button"
                                 onClick={() => addRecheck(row, slot)}
                                 disabled={!canWrite}
-                                className="min-h-tap rounded-full border-2 border-warn bg-warn-bg px-4 text-base font-bold text-ink disabled:opacity-60"
+                                className="min-h-tap rounded border-2 border-warn bg-warn-bg px-4 text-base font-bold text-ink disabled:opacity-60"
                               >
                                 ＋再測定
                               </button>

@@ -669,7 +669,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
       <div className="flex flex-wrap items-center justify-between gap-gap">
         <Link
           to={day === today ? '/record/daycare' : `/record/daycare`}
-          className="inline-flex min-h-tap items-center rounded-full border border-border-strong bg-surface px-4 text-base text-ink"
+          className="inline-flex min-h-tap items-center rounded border border-border-strong bg-surface px-4 text-base text-ink"
         >
           <span aria-hidden="true">‹ </span>デイの一覧へ
         </Link>

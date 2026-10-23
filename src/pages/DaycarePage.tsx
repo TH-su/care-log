@@ -28,6 +28,7 @@ import {
   OUTDATED_REASON,
   fetchAllResidents,
   cachedMyRole,
+  daycareAutoColumnsSeen,
   fetchDaycareActivities,
   fetchBathDay,
   fetchDaycareAttendance,
@@ -51,6 +52,8 @@ import {
   queuePending,
   queueSubscribe,
   recordAbsentBath,
+  softDeleteBath,
+  softDeleteDaycareAttendance,
   subscribeBathChanges,
   subscribeChanges,
   subscribeDaycareActivityChanges,
@@ -67,14 +70,16 @@ import { RecorderBar } from '../components/RecorderBar'
 import { ConfirmDialog, ErrorBlock, LoadingBlock, ModalShell, ResidentPickerModal, useToast } from '../components/ui'
 import {
   attendanceState,
-  bathNeedsCheck,
+  bathCountsUnchecked,
   buildDaycareBoard,
   canChangeDaycareTimes,
   canEditPastDaycareTimes,
   daycareBathLabel,
   daycareBathStatus,
   fmtPlanTimes,
+  hasManualTimes,
   hmOf,
+  isAutoOnlyAttendance,
   nowHm,
   planHm,
   validateAttendance,
@@ -717,6 +722,148 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     setAbsentFor(row)
   }
 
+  // ── 休みの1タップ（代表者の決定 2026-10-23: 〔休み〕を押すだけで理由「後で」の休み。理由は行から後で選ぶ） ──
+  // ・自動の到着・帰宅（0047）の後でも、時刻を消して休みにする（確かめは挟まない）。人が入れた時刻がある方だけ確かめを挟む
+  // ・入浴は既存の recordAbsentBath で「中止（欠席）」に直す。直後の〔元に戻す〕は全部を元どおりにする（決定 4）
+  // ・0047 を当てる前の DB（自動の印の列を読めない）は「後で」を受け付けないので、理由を選ぶ小窓にする（能力の観測）
+  const onRest = (row: DaycareBoardRow) => {
+    if (!precheck(row)) return
+    if (hasTimes(row) && !canChangeDaycareTimes(day, todayIso(), role)) {
+      setMsg(row.residentId, { tone: 'warn', text: MSG_PAST_TIME_CLEAR })
+      return
+    }
+    if (daycareAutoColumnsSeen() !== true) {
+      setAbsentFor(row)
+      return
+    }
+    const a = row.attendance
+    if (a !== null && hasManualTimes(a)) {
+      setConfirm({
+        title: '休みにしますか',
+        body: `${nameOf(row.residentId)}さんの到着${a.left_at !== null ? '・帰宅' : ''}の記録（${hmShort(a.arrived_at)}${a.left_at !== null ? `〜${hmShort(a.left_at)}` : ''}）を取り消して休みにします。`,
+        label: '休みにする',
+        danger: true,
+        run: () => {
+          setConfirm(null)
+          void restNow(row)
+        },
+      })
+      return
+    }
+    void restNow(row)
+  }
+
+  const restNow = async (row: DaycareBoardRow) => {
+    const id = row.residentId
+    const patch = { absent: true, absent_reason: 'later' as const, arrived_at: null, left_at: null }
+    const prevBath = bathOf(id)
+    setRowBusy(id, true)
+    let before: DaycareAttendance | null = row.attendance
+    let saved: DaycareAttendance | null
+    try {
+      await ensureOpened()
+      let r =
+        before === null
+          ? await insertDaycareAttendance({ resident_id: id, day, ...patch, note: null, recorded_by: actorId })
+          : await updateDaycareAttendance(before, patch, { editedBy: actorId })
+      if (r === 'conflict' && before === null) {
+        // 押した瞬間に定時の処理の自動の到着が先に入った: 読み直し、人が手を入れていない自動の行ならそのまま休みに直す
+        const now = (await fetchDaycareAttendance(day)).find((x) => x.resident_id === id) ?? null
+        if (now !== null && isAutoOnlyAttendance(now)) {
+          before = now
+          r = await updateDaycareAttendance(now, patch, { editedBy: actorId })
+        }
+      }
+      if (!afterWrite(id, r)) {
+        setRowBusy(id, false)
+        return
+      }
+      saved = r === 'queued' ? null : (r as DaycareAttendance)
+    } catch (e) {
+      setMsg(id, { tone: 'danger', text: errText(e, touchesTimes(patch, before)) })
+      setRowBusy(id, false)
+      return
+    }
+    const bath = await recordAbsentBath({ residentId: id, day, bathingPlanned: row.bathingPlanned, recordedBy: actorId })
+    setRowBusy(id, false)
+    afterAbsentBath(row, bath)
+    show(
+      `${nameOf(id)}さんを休みにしました（理由は行の〔理由〕から選べます）`,
+      saved === null ? undefined : () => void undoRest(row, saved, before, prevBath, bath),
+    )
+    scheduleReload()
+  }
+
+  /**
+   * 休みの直後の〔元に戻す〕（決定 4: 全部を元どおり）。到着・帰宅の時刻と自動の印を戻す。押す前に行が無かった方は行を取り消して
+   * 「行が無い」形に戻す（定時の処理がその後も到着を入れる）。入浴は、自動の行を休みに直していた時は全身浴に戻し、新しく作った
+   * 行は取り消す（12:30 の自動は取り消した行がある日は作らないので、その旨を案内する）
+   */
+  const undoRest = async (row: DaycareBoardRow, saved: DaycareAttendance, before: DaycareAttendance | null, prevBath: BathRecord | null, bath: AbsentBathResult) => {
+    const id = row.residentId
+    try {
+      const r =
+        before === null
+          ? await softDeleteDaycareAttendance(saved, { editedBy: actorId })
+          : await updateDaycareAttendance(
+              saved,
+              {
+                absent: before.absent,
+                absent_reason: before.absent ? before.absent_reason : null,
+                arrived_at: before.arrived_at,
+                left_at: before.left_at,
+                arrived_auto: before.arrived_auto === true,
+                left_auto: before.left_auto === true,
+              },
+              { editedBy: actorId },
+            )
+      if (r === 'conflict') {
+        setMsg(id, { tone: 'warn', text: MSG_CONFLICT })
+        scheduleReload()
+        return
+      }
+      if (r !== true) afterWrite(id, r)
+      else
+        setData((prev) => (prev === null || prev.day !== saved.day ? prev : { ...prev, attendance: prev.attendance.filter((a) => a.id !== saved.id) }))
+    } catch (e) {
+      setMsg(id, { tone: 'danger', text: errText(e, true) })
+      return
+    }
+    if (bath.status === 'done') {
+      try {
+        if (prevBath === null) {
+          await softDeleteBath(bath.record.id, bath.record.rev, { editedBy: actorId })
+          if (row.bathingPlanned) {
+            setMsg(id, { tone: 'info', text: '休みを取り消しました。入浴は 12:30 の自動では入りません。入浴したら入浴の欄から記録してください。' })
+          }
+        } else if (prevBath.auto && prevBath.result !== 'cancel') {
+          await updateBath(bath.record, { result: prevBath.result, cancel_reason: null }, { editedBy: actorId })
+        }
+      } catch {
+        setMsg(id, { tone: 'warn', text: '休みは取り消しました。入浴の記録は「入浴していない（欠席）」のままです。入浴の欄から直してください。' })
+      }
+    }
+    scheduleReload()
+  }
+
+  /** 休みの理由を後から選ぶ（「後で」の休みの行から）。休みのまま理由だけを変える */
+  const onReasonPick = async (row: DaycareBoardRow, reason: DaycareAbsentReason) => {
+    setAbsentFor(null)
+    const a = row.attendance
+    if (!precheck(row) || a === null || !a.absent) return
+    setRowBusy(row.residentId, true)
+    try {
+      const r = await updateDaycareAttendance(a, { absent_reason: reason }, { editedBy: actorId })
+      if (afterWrite(row.residentId, r) && r !== 'queued') {
+        show(`${nameOf(row.residentId)}さんの休みの理由を記録しました（${DAYCARE_ABSENT_REASON_LABEL[reason]}）`)
+      }
+    } catch (e) {
+      setMsg(row.residentId, { tone: 'danger', text: errText(e) })
+    } finally {
+      setRowBusy(row.residentId, false)
+    }
+  }
+
   /** 到着・帰宅の時刻が入っているか（欠席にする・取り消すと時刻を消す） */
   const hasTimes = (row: DaycareBoardRow) => row.attendance !== null && (row.attendance.arrived_at !== null || row.attendance.left_at !== null)
 
@@ -943,13 +1090,10 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     return latest !== null && vitalNeedsRecheck(latest, targets.get(id), limits.lookup(id, data.day))
   }
   const vitalsWaiting = board.rows.filter((r) => r.state === 'present' && !vitalsDone(r.residentId)).length
-  // 入浴を確かめていない方（在席・帰宅で、予定ありの未記録か自動の記録のまま）
-  const bathUnchecked = board.rows.filter((r) => {
-    const st = daycareBathStatus(bathOf(r.residentId), r.bathingPlanned)
-    if (r.state === 'present' || r.state === 'left') return bathNeedsCheck(st)
-    // 欠席の方に自動の記録が残っている（入浴の旗の封鎖・通信の失敗などで直せなかった）
-    return r.state === 'absent' && st.kind === 'auto'
-  }).length
+  // 入浴を確かめていない方（代表者の決定 2026-10-23 の 3: 自動の行は「済」で数えない。12:30 を過ぎても行が無い方と、
+  // 休みの方に自動の行が残っている方だけ＝daycare.ts の bathCountsUnchecked）
+  const bathClock = { pastDay: data.day < today, nowHm: nowHm() }
+  const bathUnchecked = board.rows.filter((r) => bathCountsUnchecked(daycareBathStatus(bathOf(r.residentId), r.bathingPlanned), r.state, bathClock)).length
 
   const tiles: { label: string; value: number; tone?: 'warn' }[] = [
     { label: '予定', value: c.planned },
@@ -1070,12 +1214,23 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                     {(row.state === 'planned' && !row.hospitalized) || row.state === 'present' ? (
                       <button
                         type="button"
-                        onClick={() => askAbsent(row)}
+                        onClick={() => onRest(row)}
                         disabled={disabled || (rowHasTimes && !timesOk)}
-                        aria-label={`${name}さんを欠席にする`}
+                        aria-label={`${name}さんを休みにする`}
                         className="min-h-tap rounded-full border border-border-strong px-4 text-base text-ink disabled:text-ink3"
                       >
-                        欠席
+                        休み
+                      </button>
+                    ) : null}
+                    {row.state === 'absent' ? (
+                      <button
+                        type="button"
+                        onClick={() => askAbsent(row)}
+                        disabled={disabled}
+                        aria-label={`${name}さんの休みの理由を選ぶ`}
+                        className="min-h-tap rounded-full border border-border-strong px-4 text-base text-ink disabled:text-ink3"
+                      >
+                        {row.attendance?.absent_reason === 'later' ? '理由を選ぶ' : '理由を直す'}
                       </button>
                     ) : null}
                     {canEditPastDaycareTimes(role) && (row.state === 'present' || row.state === 'left') ? (
@@ -1135,13 +1290,11 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                     ) : null}
                     <span
                       className={`inline-flex min-h-tap items-center rounded-full px-3 text-base ${
-                        bst.kind === 'auto'
-                          ? 'border-2 border-warn bg-warn-bg text-ink'
-                          : bst.kind === 'todo'
-                            ? 'border border-dashed border-border-strong text-ink'
-                            : bst.kind === 'done'
-                              ? 'border border-ok bg-ok-bg text-ink'
-                              : 'border border-border bg-surface2 text-ink'
+                        bst.kind === 'todo'
+                          ? 'border border-dashed border-border-strong text-ink'
+                          : bst.kind === 'done' || bst.kind === 'auto'
+                            ? 'border border-ok bg-ok-bg text-ink'
+                            : 'border border-border bg-surface2 text-ink'
                       }`}
                     >
                       入浴&nbsp;<span className="font-bold">{daycareBathLabel(bst)}</span>
@@ -1159,7 +1312,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                     ) : null}
                     {row.state === 'present' || row.state === 'left' ? (
                       <span className="flex flex-wrap gap-gap" role="group" aria-label={`${name}さんの入浴`}>
-                        {bathNeedsCheck(bst) ? (
+                        {bst.kind === 'todo' ? (
                           <button
                             type="button"
                             onClick={() => onBathAsPlanned(row)}
@@ -1234,7 +1387,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                 <li key={r}>
                   <button
                     type="button"
-                    onClick={() => void onAbsentPick(absentFor, r)}
+                    onClick={() => void (absentFor.attendance?.absent === true ? onReasonPick(absentFor, r) : onAbsentPick(absentFor, r))}
                     className="min-h-14 w-full rounded border border-border-strong bg-surface px-4 text-lg text-ink"
                   >
                     {DAYCARE_ABSENT_REASON_LABEL[r]}

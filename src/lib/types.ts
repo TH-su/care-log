@@ -872,16 +872,22 @@ export const ROLE_TAGS = ['介護', '看護', 'デイ', '厨房', 'ケアマネ'
 // デイのバイタルは新しい種類を足さず、既存の vitals の kind 'observation' のまま冪等キー client_key を
 // 'dc:<業務日>:<利用者id>:<回>' の形にして見分ける（DAYCARE_VITAL_KEY_PREFIX・組み立ては src/lib/daycare.ts）。
 
-/** 欠席の理由。condition=体調不良 / hospital=受診・入院 / wish=本人の希望 / family=ご家族の都合 / other=その他 */
-export type DaycareAbsentReason = 'condition' | 'hospital' | 'wish' | 'family' | 'other'
-/** 欠席の理由の並び（画面の選択肢・DB の check と同じ5つ） */
+/**
+ * 欠席の理由。condition=体調不良 / hospital=受診・入院 / wish=本人の希望 / family=ご家族の都合 / other=その他 /
+ * later=理由は後で（0047・今日の画面の〔休み〕の1タップ。選択肢には出さず、行から後で選び直す）
+ */
+export type DaycareAbsentReason = 'condition' | 'hospital' | 'wish' | 'family' | 'other' | 'later'
+/** 欠席の理由の並び（画面の選択肢の5つ。「後で」は選択肢に出さない） */
 export const DAYCARE_ABSENT_REASONS: readonly DaycareAbsentReason[] = ['condition', 'hospital', 'wish', 'family', 'other']
+/** 読み書きで受け付ける理由（DB の check と同じ6つ・0047） */
+export const DAYCARE_ABSENT_REASON_VALUES: readonly DaycareAbsentReason[] = [...DAYCARE_ABSENT_REASONS, 'later']
 export const DAYCARE_ABSENT_REASON_LABEL: Record<DaycareAbsentReason, string> = {
   condition: '体調不良',
   hospital: '受診・入院',
   wish: '本人の希望',
   family: 'ご家族の都合',
   other: 'その他',
+  later: '理由は後で',
 }
 
 /** 到着・帰宅・欠席（1人1日1件。day は JST の業務日付）。状態は保存せず列から導く（daycare.ts の attendanceState） */
@@ -898,6 +904,10 @@ export interface DaycareAttendance {
   note: string | null
   recorded_by: number | null
   rev: number
+  /** 定時の処理が入れた到着（0047。列が無い DB・読まない経路では無い＝false 扱い） */
+  arrived_auto?: boolean
+  /** 定時の処理が入れた帰宅（0047） */
+  left_auto?: boolean
 }
 
 /** その日の予定の写しの状態。kv=予定あり / none=写しはあるがその日の予定なし / unknown=予定を読めなかった */

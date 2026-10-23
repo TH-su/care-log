@@ -465,7 +465,7 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                   <Link
                     to={personPath(rid, day, today)}
                     aria-label={`${nameOf(rid)}さんの1日の記録を開く（活動の度合い・前回と同じ）`}
-                    className="inline-flex min-h-tap items-center rounded-full border border-primary bg-surface px-4 text-base font-bold text-primary"
+                    className="inline-flex min-h-tap items-center rounded border border-primary bg-surface px-4 text-base font-bold text-primary"
                   >
                     記録<span aria-hidden="true"> ›</span>
                   </Link>

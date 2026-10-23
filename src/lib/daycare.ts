@@ -30,7 +30,7 @@ import type {
   Resident,
   Vital,
 } from './types.ts'
-import { DAYCARE_ABSENT_REASONS } from './types.ts'
+import { DAYCARE_ABSENT_REASON_VALUES } from './types.ts'
 import { spo2LevelFor } from './vitalAlerts.ts'
 import type { ResidentTargets } from './vitalAlerts.ts'
 import { diaBpLevelBy, pulseLevelBy, sysBpLevelBy, tempLevelBy, vitalThresholds } from './vitalThresholds.ts'
@@ -169,7 +169,8 @@ export interface AttendanceInput {
 /** 保存前の検証（DB の check 0041 と同じ規則）。通らなければ理由の文 */
 export function validateAttendance(v: AttendanceInput): { ok: true } | { ok: false; message: string } {
   if (v.absent) {
-    if (v.absent_reason === null || !DAYCARE_ABSENT_REASONS.includes(v.absent_reason)) {
+    // 「後で」（0047 の〔休み〕の1タップ）も受け付ける（選択肢に出すのは5つ＝types.ts の DAYCARE_ABSENT_REASONS）
+    if (v.absent_reason === null || !DAYCARE_ABSENT_REASON_VALUES.includes(v.absent_reason)) {
       return { ok: false, message: '欠席の理由を選んでください。' }
     }
     if (v.arrived_at !== null || v.left_at !== null) {
@@ -185,6 +186,22 @@ export function validateAttendance(v: AttendanceInput): { ok: true } | { ok: fal
     if (v.left_at < v.arrived_at) return { ok: false, message: '帰宅の時刻が到着より前になっています。時刻を確かめてください。' }
   }
   return { ok: true }
+}
+
+/**
+ * 人が手を入れていない自動の到着・帰宅だけの行か（0047）。〔休み〕の1タップで、押した瞬間に定時の処理の到着が先に入った時、
+ * この形なら読み直してそのまま休みに直す（人の記録が先にあった時は「先に記録があります」で止める）
+ */
+export function isAutoOnlyAttendance(a: DaycareAttendance | null | undefined): boolean {
+  if (a === null || a === undefined || a.absent || a.recorded_by !== null) return false
+  if (a.arrived_at === null || a.arrived_auto !== true) return false
+  return a.left_at === null || a.left_auto === true
+}
+
+/** 人が入れた到着・帰宅の時刻があるか（自動の時刻だけなら false）。〔休み〕で人の記録を消す時だけ確かめを挟む */
+export function hasManualTimes(a: DaycareAttendance | null | undefined): boolean {
+  if (a === null || a === undefined) return false
+  return (a.arrived_at !== null && a.arrived_auto !== true) || (a.left_at !== null && a.left_auto !== true)
 }
 
 // ── 過去の日の到着・帰宅の時刻（代表者の決定 2026-10-22・移行 0042） ──────────
@@ -518,7 +535,12 @@ export function absentBathAction(existing: BathRecord | null, bathingPlanned: bo
 // デイの画面の入浴の状態（2026-10-22 親セッション経由の本番の実測: 12:30 の自動の「全身浴」は誰も確かめないまま残っていた）
 // 自動の記録（auto=true）は「確かめていない予定値」として見分け、〔予定どおり実施〕の1タップで人の記録にする。
 // ※入浴の画面（既存 BathRecordPage）は 2026-10-01 代表指示どおり自動の印を出さないまま（この区別はデイの画面だけ）
+// 2026-10-23 代表者の決定（今日の画面の改善 3）: 自動の全身浴は「済」とだけ出す（「自動」の文字は出さない）・「入浴 未確認」の
+// 数から外す（前の決定「▲ 未確認」を改める）。予定があって 12:30 より前の方は「予定」と出す
 // ══════════════════════════════════════════════════════════════
+
+/** 12:30 の自動の入浴（0015・0016 の care_auto_bath）の時刻（日本時間 'HH:MM'） */
+export const DAYCARE_AUTO_BATH_AT = '12:30'
 
 export type DaycareBathStatus =
   /** 入浴の予定も記録も無い */
@@ -542,8 +564,9 @@ export function daycareBathStatus(record: BathRecord | null, bathingPlanned: boo
 /** 画面の一言（記号＋文字。色だけに頼らない） */
 export function daycareBathLabel(st: DaycareBathStatus): string {
   if (st.kind === 'noPlan') return '予定なし'
-  if (st.kind === 'todo') return '— 未'
-  if (st.kind === 'auto') return `▲ 未確認（自動の記録: ${BATH_RESULT_LABEL[st.record.result]}）`
+  if (st.kind === 'todo') return '予定'
+  // 自動の記録は入ったことを前提にする（代表者の決定 3・「自動」の文字は出さない）
+  if (st.kind === 'auto') return '済'
   if (st.kind === 'done') return `✓ ${BATH_RESULT_LABEL[st.record.result]}`
   const r = st.record.cancel_reason
   return `入浴していない（${r === null ? '理由なし' : BATH_CANCEL_REASON_LABEL[r]}）`
@@ -552,6 +575,23 @@ export function daycareBathLabel(st: DaycareBathStatus): string {
 /** まだ人が確かめていない（予定あり・未記録か、自動の記録のまま） */
 export function bathNeedsCheck(st: DaycareBathStatus): boolean {
   return st.kind === 'todo' || st.kind === 'auto'
+}
+
+/**
+ * 件数の帯の「入浴 未確認」に数えるか（代表者の決定 2026-10-23 の 3）。自動の行（済）は数えない。
+ * ・在席・帰宅の方: 予定があって行が無いまま 12:30 を過ぎた時（自動が入らなかった＝旗・照合の都合）だけ。12:30 より前は「予定」で数えない。
+ *   過去の日は、予定があって行が無ければ数える
+ * ・休みの方: 自動の行が残っている時（入浴の旗の封鎖・通信の失敗などで「中止（休み）」に直せなかった）
+ * ・それ以外（予定・入院中など）は数えない
+ */
+export function bathCountsUnchecked(
+  st: DaycareBathStatus,
+  state: AttendanceState,
+  opts: { pastDay: boolean; nowHm: string },
+): boolean {
+  if (state === 'present' || state === 'left') return st.kind === 'todo' && (opts.pastDay || opts.nowHm >= DAYCARE_AUTO_BATH_AT)
+  if (state === 'absent') return st.kind === 'auto'
+  return false
 }
 
 // ══════════════════════════════════════════════════════════════

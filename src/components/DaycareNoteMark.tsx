@@ -374,7 +374,7 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
       body = (
         <div className="space-y-1">
           <div className="flex flex-wrap items-center gap-gap">
-            <span className="inline-flex min-h-tap items-center rounded-full border border-ok bg-ok-bg px-3 text-sm text-ink">
+            <span className="inline-flex min-h-tap items-center rounded border border-ok bg-ok-bg px-3 text-sm text-ink">
               <span aria-hidden="true">✉ </span>申し送り済み{lives.length > 1 ? `（${lives.length}件）` : ''}
               {removing ? '（外す操作は送信待ち）' : ''}
             </span>

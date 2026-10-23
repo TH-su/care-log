@@ -81,7 +81,7 @@ import { isNoteCategory, normalizeCategories } from './noteCategory'
 import {
   BATH_CANCEL_REASONS_KNOWN,
   BATH_RESULTS,
-  DAYCARE_ABSENT_REASONS,
+  DAYCARE_ABSENT_REASON_VALUES,
   INCIDENT_KINDS,
   INCIDENT_OFFICES,
   INCIDENT_PLACES,
@@ -226,6 +226,11 @@ const IMPORT_DAY_COLS = 'source,day,imported_at,src_rows,inserted,updated,skippe
 const BATH_COLS = 'id,resident_id,bath_on,result,cancel_reason,note,recorded_by,rev,auto'
 /** デイの到着・帰宅・欠席（0041_daycare_stage1.sql）。監査列・client_key は端末へ持ち出さない */
 const DAYCARE_ATTENDANCE_COLS = 'id,resident_id,day,arrived_at,left_at,absent,absent_reason,note,recorded_by,rev'
+/**
+ * 今日の画面の読み取り（fetchDaycareAttendance）だけが足して読む、自動の印の列（0047）。送信待ち・書き換え・くらべる経路は
+ * 上の列のまま（0047 を当てる前の DB でも書き込みを止めない）。列が無い DB では上の列で読み直し、印は「無い」とする
+ */
+const DAYCARE_ATTENDANCE_AUTO_COLS = `${DAYCARE_ATTENDANCE_COLS},arrived_auto,left_auto`
 /** デイの活動・レク（0044・段階2b） */
 const DAYCARE_ACTIVITY_COLS = 'id,resident_id,day,label,participation,note,recorded_by,rev'
 /** デイの個別機能訓練の実施記録とその日の配置（0046・段階3） */
@@ -7994,18 +7999,23 @@ function normalizeDaycareAttendance(row: unknown): DaycareAttendance | null {
   const day = dateStr(r.day)
   if (id === null || resident_id === null || day === null) return null
   const absent = r.absent === true
+  const arrived_at = absent ? null : hmOf(r.arrived_at)
+  const left_at = absent ? null : hmOf(r.left_at)
   return {
     id,
     resident_id,
     day,
     // 欠席の日は時刻を持たない（DB の check と同じ。受信値を信じない）
-    arrived_at: absent ? null : hmOf(r.arrived_at),
-    left_at: absent ? null : hmOf(r.left_at),
+    arrived_at,
+    left_at,
     absent,
-    absent_reason: absent ? oneOf<DaycareAbsentReason>(r.absent_reason, DAYCARE_ABSENT_REASONS) : null,
+    absent_reason: absent ? oneOf<DaycareAbsentReason>(r.absent_reason, DAYCARE_ABSENT_REASON_VALUES) : null,
     note: str(r.note),
     recorded_by: idNum(r.recorded_by),
     rev: num(r.rev) ?? 1,
+    // 自動の印（0047）。時刻の無い側の印は持たない（DB のトリガと同じ）。列を読まない経路・列が無い DB では false
+    arrived_auto: arrived_at !== null && r.arrived_auto === true,
+    left_auto: left_at !== null && r.left_auto === true,
   }
 }
 
@@ -8155,17 +8165,34 @@ export async function openDaycareDay(dayIso: string, staffId: number | null): Pr
   return row
 }
 
-/** その日の到着・帰宅・欠席（削除済みを除く） */
+/**
+ * 自動の印の列（0047）を最後の読み取りで読めたか。null＝まだ読んでいない・false＝列が無い DB（0047 未適用）。
+ * 画面は true の時だけ〔休み〕の1タップ（理由「後で」＝0047 の check）を使い、それ以外は理由を選ぶ小窓にする（能力の観測）
+ */
+let daycareAutoColsSeen: boolean | null = null
+export function daycareAutoColumnsSeen(): boolean | null {
+  return daycareAutoColsSeen
+}
+
+/** その日の到着・帰宅・欠席（削除済みを除く）。自動の印の列（0047）も読む。列が無い DB では印なしで読み直す */
 export async function fetchDaycareAttendance(dayIso: string): Promise<DaycareAttendance[]> {
   assertDay(dayIso)
   const sb = await getClient()
-  const res = (await sb
-    .from('daycare_attendance')
-    .select(DAYCARE_ATTENDANCE_COLS)
-    .eq('day', dayIso)
-    .is('deleted_at', null)
-    .order('id', { ascending: true })
-    .limit(DAYCARE_DAY_ROWS)) as Res<unknown>
+  const read = (cols: string) =>
+    sb
+      .from('daycare_attendance')
+      .select(cols)
+      .eq('day', dayIso)
+      .is('deleted_at', null)
+      .order('id', { ascending: true })
+      .limit(DAYCARE_DAY_ROWS) as unknown as Promise<Res<unknown>>
+  let res = await read(DAYCARE_ATTENDANCE_AUTO_COLS)
+  if (res.error !== null && isMissingColumn(res)) {
+    daycareAutoColsSeen = false
+    res = await read(DAYCARE_ATTENDANCE_COLS)
+  } else if (res.error === null) {
+    daycareAutoColsSeen = true
+  }
   if (res.error !== null) throw daycareReadError(res)
   const rows = list(res.data, normalizeDaycareAttendance, DAYCARE_DAY_ROWS)
   await assertSessionIfEmpty(sb, rows.length) // anon で読んだ0件を「未記録」と出さない（F58）
@@ -8231,7 +8258,7 @@ export async function insertDaycareAttendance(
  */
 export async function updateDaycareAttendance(
   current: DaycareAttendance,
-  patch: Partial<Pick<DaycareAttendance, 'arrived_at' | 'left_at' | 'absent' | 'absent_reason' | 'note'>>,
+  patch: Partial<Pick<DaycareAttendance, 'arrived_at' | 'left_at' | 'absent' | 'absent_reason' | 'note' | 'arrived_auto' | 'left_auto'>>,
   opts?: WriteOpts,
 ): Promise<DaycareAttendance | Conflict | Queued> {
   const absent = patch.absent !== undefined ? patch.absent : current.absent
@@ -8255,8 +8282,22 @@ export async function updateDaycareAttendance(
     const note = patch.note === null || patch.note.trim() === '' ? null : patch.note
     if (note !== current.note) sent.note = note
   }
+  // 自動の印（0047）を戻すのは、休みの直後の〔元に戻す〕だけ（時刻と一緒に戻す）。時刻の無い側には付けない。
+  // 外す方は送らない（人が時刻を直すと DB のトリガが外す）
+  if (patch.arrived_auto === true && merged.arrived_at !== null && current.arrived_auto !== true) sent.arrived_auto = true
+  if (patch.left_auto === true && merged.left_at !== null && current.left_auto !== true) sent.left_auto = true
   if (Object.keys(sent).length === 0) return current
   return updateRow('daycare_attendance', current.id, current.rev, sent, normalizeDaycareAttendance, opts)
+}
+
+/**
+ * 到着・欠席の行の取り消し（0047・休みの直後の〔元に戻す〕だけが使う）。押す前に行が無かった方の休みの行を消し、押す前と同じ
+ * 「行が無い」形に戻す（定時の処理は取り消し済みの行を数えないので、その後も自動で到着を入れる＝代表者の決定 4）。
+ * 時刻のある行は消さない（到着・帰宅の取り消しは時刻を消す修正で行う＝0042・0043 の守りと同じ考え）
+ */
+export async function softDeleteDaycareAttendance(current: DaycareAttendance, opts?: WriteOpts): Promise<true | Conflict | Queued> {
+  if (current.arrived_at !== null || current.left_at !== null) throw new DbError('server', '時刻のある記録は取り消せません。時刻を直してください。')
+  return softDelete('daycare_attendance', current.id, current.rev, opts)
 }
 
 /**
