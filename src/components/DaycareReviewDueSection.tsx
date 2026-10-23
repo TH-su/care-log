@@ -11,8 +11,8 @@
 import { useState } from 'react'
 import { DbError, canWriteMasters } from '../lib/db'
 import type { MyRole } from '../lib/db'
-import { REVIEW_STATE_LABEL, normalizeDueRule, normalizeWarnDays, reviewCopyState, reviewDueCounts, reviewDueList } from '../lib/trainingDue'
-import type { DueCopyLoad, ReviewDueRow } from '../lib/trainingDue'
+import { REVIEW_STATE_LABEL, filterReviewScope, normalizeDueRule, normalizeWarnDays, reviewCopyState, reviewDueCounts, reviewDueList } from '../lib/trainingDue'
+import type { DueCopyLoad, ReviewDueRow, WeekScope } from '../lib/trainingDue'
 import { readTrainingPlanConfig, trainingDueSyncText } from '../lib/trainingPlanClient'
 import { syncTrainingPlanDue } from '../lib/trainingDueSync'
 import { fmtDayLabel, isoDate } from '../lib/format'
@@ -58,9 +58,15 @@ export interface DaycareReviewDueSectionProps {
   blockedReason: string | null
   /** 写した後（画面を読み直す） */
   onSynced: () => void
+  /**
+   * 一覧に出す方を絞る、週間計画で週のどこかの曜日にデイの予定がある方（外部利用者は入らない）。undefined＝読み込み中。
+   * ids が null の時は絞らない（読めない・照合できない予定がある）。計画書に計画がある方は、予定が無くても出す
+   * （代表者の決定 2026-10-23・積み残し 51）
+   */
+  scope: WeekScope | undefined
 }
 
-export function DaycareReviewDueSection({ today, residents, copy, role, actorId, blockedReason, onSynced }: DaycareReviewDueSectionProps) {
+export function DaycareReviewDueSection({ today, residents, copy, role, actorId, blockedReason, onSynced, scope }: DaycareReviewDueSectionProps) {
   const [open, setOpen] = useState<boolean>(readOpen)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<Msg | null>(null)
@@ -76,7 +82,12 @@ export function DaycareReviewDueSection({ today, residents, copy, role, actorId,
 
   const loaded = copy !== null && copy !== 'missing' && copy !== 'error' ? copy : null
   const rows: ReviewDueRow[] =
-    loaded === null ? [] : reviewDueList({ copy: loaded.rows, settings: loaded.settings, people: residents.map((r) => ({ id: r.id, active: r.active })), today })
+    loaded === null
+      ? []
+      : filterReviewScope(
+          reviewDueList({ copy: loaded.rows, settings: loaded.settings, people: residents.map((r) => ({ id: r.id, active: r.active })), today }),
+          scope?.ids ?? null,
+        )
   const counts = reviewDueCounts(rows)
   const cstate = loaded === null ? null : reviewCopyState(loaded)
   const syncedAt = loaded?.settings?.synced_at ?? null
@@ -150,6 +161,9 @@ export function DaycareReviewDueSection({ today, residents, copy, role, actorId,
           tone: 'warn',
           text: `計画書の写しに1人も載っていません${syncedDay === null ? '' : `（${fmtDayLabel(syncedDay)} に写したもの）`}。計画の見直しの期限は確かめられません。利用者番号が結べていない可能性があります。管理者に連絡してください。`,
         })
+      ) : scope === undefined ? (
+        // 週間計画（一覧を絞る元）の読み込み中は、数と一覧を出さない（読み込みの前後で数が変わって見えないように）
+        <p className="text-base text-ink2">週間計画を読み込んでいます…</p>
       ) : (
         <>
           <p className={`text-base ${syncedDay !== today ? 'text-ink' : 'text-ink2'}`}>
@@ -167,6 +181,11 @@ export function DaycareReviewDueSection({ today, residents, copy, role, actorId,
           </ul>
           <p className="text-sm text-ink2">
             期限は計画書アプリが計算した値をそのまま使い、期限の{warn}日前から「間近」と出します（計画書の設定: {RULE_TEXT[rule]}）。
+            {scope?.reason === 'unread'
+              ? '週間計画を読めないため、計画のない方も含めて写しの全員を出しています。'
+              : scope?.reason === 'unmatched'
+                ? `週間計画に名簿と照合できない予定が ${scope.unmatched}件あるため、計画のない方も含めて写しの全員を出しています（照合できない予定は、その曜日のデイの今日の画面に出ます）。`
+                : '計画書に計画がある方と、週間計画でデイの予定がある方（曜日を問わず）を出しています。'}
           </p>
           <button type="button" aria-expanded={open} aria-controls="review-due-list" onClick={toggle} className={btn}>
             {open ? '一覧を閉じる' : `一覧を開く（${rows.length}人）`}

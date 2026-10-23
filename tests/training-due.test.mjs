@@ -208,6 +208,31 @@ if (D === null) {
       assert.equal(days90[0].due, '2027-05-01', '規則は写しの設定から')
       assert.deepEqual(D.reviewDueList({ copy: rows, settings: null, people: [{ id: 6, active: false }], today }).map((r) => r.residentId).includes(6), false, '在籍でない方は出さない')
     })
+    it('見直しの一覧の絞り込み（積み残し 51・代表者の決定）: 計画がある方と、週のどこかの曜日にデイの予定がある方だけ。週間計画を読めない時は絞らない', () => {
+      const list = D.reviewDueList({ copy: rows, settings: null, people: [], today })
+      // 3＝計画なし。5・6・1・2＝計画あり
+      assert.deepEqual(D.filterReviewScope(list, new Set()).map((r) => r.residentId), [2, 1, 6, 5], '予定の無い計画なしの方は出さない')
+      assert.deepEqual(D.filterReviewScope(list, new Set([3])).map((r) => r.residentId), [2, 1, 3, 6, 5], '予定がある計画なしの方は出す')
+      assert.deepEqual(D.filterReviewScope(list, null).map((r) => r.residentId), list.map((r) => r.residentId), '読めない時は全員（多めに出す）')
+      assert.deepEqual(D.reviewDueCounts(D.filterReviewScope(list, new Set())), { overdue: 1, warn: 1, none: 0 }, '件数も絞った後で数える')
+    })
+    it('週のどこかの曜日に予定がある方（親の訂正）: 7日分の予定の和。1日でも読めない・7日に足りない時は絞らない。外部利用者・在籍に居ない予定は入らない', () => {
+      const row = (id, match = 'mid', external = false) => ({ resident_id: id, match, external })
+      const day = (rs, source = 'kv') => ({ source, rows: rs })
+      const week = [day([row(1), row(2)]), day([row(3)]), day([], 'none'), day([row(2), row(null, 'external', true), row(null, 'absent_roster')]), day([row(5, 'name')]), day([], 'none'), day([], 'none')]
+      const w = D.weekScope(week)
+      assert.deepEqual([[...w.ids].sort(), w.reason, w.unmatched], [[1, 2, 3, 5], null, 0], '今日来ない方（別の曜日の方）も入る')
+      assert.deepEqual(D.weekScope([...week.slice(0, 6), null]), { ids: null, reason: 'unread', unmatched: 0 })
+      assert.deepEqual(D.weekScope([...week.slice(0, 6), day([], 'unknown')]), { ids: null, reason: 'unread', unmatched: 0 })
+      assert.deepEqual(D.weekScope(week.slice(0, 6)), { ids: null, reason: 'unread', unmatched: 0 })
+    })
+    it('名簿と照合できない予定（mismatch・ambiguous）が1件でもあれば絞らない（予定のある方を知らせなしに外さない・反証 中1）', () => {
+      const row = (id, match = 'mid', external = false) => ({ resident_id: id, match, external })
+      const day = (rs, source = 'kv') => ({ source, rows: rs })
+      const base = [day([row(1)]), day([]), day([]), day([]), day([]), day([]), day([])]
+      assert.deepEqual(D.weekScope([...base.slice(0, 6), day([row(null, 'mismatch'), row(null, 'ambiguous')])]), { ids: null, reason: 'unmatched', unmatched: 2 })
+      assert.equal(D.weekScope([...base.slice(0, 6), day([row(null, 'absent_roster'), row(null, 'external', true)])]).reason, null, '在籍に居ない予定・外部利用者は数えない')
+    })
     it('対象者の並び: 写しを読めない・0件の時は元の並びと知らせ。行がある時は計画がある方を上に（中は元の並び）、下の方には理由', () => {
       const targets = [7, 3, 1, 4, 2]
       assert.deepEqual(D.orderTargetsByPlan({ targets, copy: 'error', people: [], today }), { order: targets, noPlan: new Map(), notice: 'error' })

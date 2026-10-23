@@ -325,6 +325,49 @@ export function reviewDueList(args: { copy: readonly DueCopyRow[]; settings: Due
   return out.sort((a, b) => rank[a.state] - rank[b.state] || (a.due < b.due ? -1 : a.due > b.due ? 1 : 0) || a.residentId - b.residentId)
 }
 
+/**
+ * 見直しの一覧を出す方を絞る（代表者の決定 2026-10-23・積み残し 51・親の訂正 同日）。次のどちらかに当たる方だけを残す:
+ * 1. 週間計画（care_schedule_v2）で、週のどこかの曜日にデイの予定がある方（daycareIds。今日来ない方も外さない。
+ *    daycare_plan と同じ見方で、外部利用者は入らない）
+ * 2. 写しに計画の行がある方（最新の計画の作成日がある方）
+ * daycareIds が null（週間計画を読めない）の時は絞らない（多めに出す側に倒す。画面はその旨を書き添える）
+ */
+export function filterReviewScope(rows: readonly ReviewDueRow[], daycareIds: ReadonlySet<number> | null): ReviewDueRow[] {
+  if (daycareIds === null) return [...rows]
+  return rows.filter((r) => r.planDate !== null || daycareIds.has(r.residentId))
+}
+
+/** 週間計画から作った「予定がある方」（ids が null＝絞らない。reason＝絞らない理由・unmatched＝照合できない予定の件数） */
+export interface WeekScope {
+  ids: Set<number> | null
+  reason: 'unread' | 'unmatched' | null
+  unmatched: number
+}
+
+/**
+ * 続いた7日分の予定（daycare_plan の結果。週間計画は曜日ごとなので、7日で全部の曜日になる）から、
+ * どこかの曜日にデイの予定がある方（名簿と照合できた方）を集める。
+ * ・1日でも読めない（null・unknown）・7日に足りない時は ids＝null（reason 'unread'・絞らない）
+ * ・名簿と照合できない予定（mismatch・ambiguous＝在籍の方の予定かもしれない）が1件でもある時も ids＝null
+ *   （reason 'unmatched'・絞らない。予定のある方を知らせなしに一覧から外さない＝積み残し 51 の反証 中1）。
+ *   外部利用者（external）と名簿の在籍者に居ない予定（absent_roster）は数えない（care-log の在籍の方ではない）
+ */
+export function weekScope(
+  plans: ReadonlyArray<{ source: string; rows: ReadonlyArray<{ resident_id: number | null; match: string | null; external: boolean }> } | null>,
+): WeekScope {
+  if (plans.length < 7) return { ids: null, reason: 'unread', unmatched: 0 }
+  const ids = new Set<number>()
+  let unmatched = 0
+  for (const p of plans) {
+    if (p === null || p.source === 'unknown') return { ids: null, reason: 'unread', unmatched: 0 }
+    for (const r of p.rows) {
+      if (r.resident_id !== null) ids.add(r.resident_id)
+      else if (!r.external && (r.match === 'mismatch' || r.match === 'ambiguous')) unmatched += 1
+    }
+  }
+  return unmatched > 0 ? { ids: null, reason: 'unmatched', unmatched } : { ids, reason: null, unmatched: 0 }
+}
+
 /** 見直しの一覧の数（期限切れ・間近・計画なし） */
 export function reviewDueCounts(rows: readonly ReviewDueRow[]): { overdue: number; warn: number; none: number } {
   return {

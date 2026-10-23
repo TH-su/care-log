@@ -20,6 +20,7 @@ import {
   fetchDaycareAttendance,
   fetchDaycareDay,
   fetchDaycarePlan,
+  fetchDaycarePlanWeek,
   fetchMyRole,
   fetchRecentTrainingSessions,
   fetchStaffing,
@@ -45,8 +46,8 @@ import type { MyRole } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
 import { DaycareHomeVisitSection } from '../components/DaycareHomeVisitSection'
 import { DaycareReviewDueSection } from '../components/DaycareReviewDueSection'
-import { TARGET_NO_PLAN_LABEL, orderTargetsByPlan } from '../lib/trainingDue'
-import type { DueCopyLoad } from '../lib/trainingDue'
+import { TARGET_NO_PLAN_LABEL, orderTargetsByPlan, weekScope } from '../lib/trainingDue'
+import type { DueCopyLoad, WeekScope } from '../lib/trainingDue'
 import { ConfirmDialog, ErrorBlock, LoadingBlock, ModalShell, useToast } from '../components/ui'
 import { buildDaycareBoard, canEditPastDaycareTimes } from '../lib/daycare'
 import {
@@ -155,6 +156,11 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
   const [, setQueueTick] = useState(0)
   /** 読み直しの回数（居宅訪問の区画も合わせて読み直す・段階3b） */
   const [dataTick, setDataTick] = useState(0)
+  /**
+   * 週間計画で、週のどこかの曜日にデイの予定がある方（見直しの期限の一覧を絞る・積み残し 51）。
+   * undefined＝読み込み中。ids が null なら絞らない（読めない・照合できない予定がある＝多めに出す）
+   */
+  const [week, setWeek] = useState<WeekScope | undefined>(undefined)
   const { toast, show } = useToast()
   const genRef = useRef(0)
   const dayRef = useRef(day)
@@ -177,6 +183,9 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
     fetchMyRole()
       .then((r) => alive && setRole(r))
       .catch(() => {})
+    fetchDaycarePlanWeek(todayIso())
+      .then((plans) => alive && setWeek(weekScope(plans)))
+      .catch(() => alive && setWeek({ ids: null, reason: 'unread', unmatched: 0 }))
     return () => {
       alive = false
     }
@@ -763,6 +772,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
         actorId={actorId}
         blockedReason={homeVisitBlocked()}
         onSynced={scheduleReload}
+        scope={week}
       />
 
       <DaycareHomeVisitSection
