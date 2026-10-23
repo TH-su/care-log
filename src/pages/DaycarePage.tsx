@@ -700,7 +700,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       return
     }
     if (r.status === 'blocked') setMsg(id, { tone: 'warn', text: `休みは記録しました。入浴の記録は直していません（${r.message}）` })
-    else if (r.status === 'conflict') setMsg(id, { tone: 'warn', text: '休みは記録しました。入浴の記録が他の端末で直されていたため、入浴の記録は直していません。入浴の画面で確かめてください。' })
+    else if (r.status === 'conflict') setMsg(id, { tone: 'warn', text: '休みは記録しました。入浴の記録が他の端末で直されていたため、入浴の記録は直していません。この行の入浴か、入浴の画面（「その他」→「入浴 月次表」→〔入浴の記録を直す ›〕）で確かめてください。' })
     else if (r.status === 'queued') setMsg(id, { tone: 'info', text: `休みは記録しました。入浴の「入浴していない（欠席）」は${MSG_QUEUED}` })
     else if (r.status === 'kept') setMsg(id, { tone: 'info', text: '休みは記録しました。入浴は「入浴していない」の記録があるので、そのままにしました。' })
   }

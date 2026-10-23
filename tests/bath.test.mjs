@@ -436,6 +436,22 @@ if (B === null) {
       assert.match(app, /if \(pathname === '\/record\/bath'\) return '入浴（デイ）'/)
       assert.match(read('../src/pages/BathRecordPage.tsx'), /getKindInputGate\('bath'\)/)
     })
+    it('入浴 月次表のリンクは〔デイ せせらぎの今日を開く〕が先・〔入浴の記録を直す〕を並べて残す（2026-10-24 代表者の回答）', () => {
+      const month = read('../src/pages/BathMonthPage.tsx')
+      const links = [...month.matchAll(/<Link to="([^"]+)" className="inline-flex min-h-tap items-center text-link">\n\s*([^<\n]+)<span aria-hidden="true"> ›<\/span>/g)].map((m) => [m[1], m[2].trim()])
+      assert.deepEqual(links, [
+        ['/record/daycare', 'デイ せせらぎの今日を開く'],
+        ['/record/bath', '入浴の記録を直す'],
+      ])
+      // 並べた2つのリンクの間は 8px 以上あける（押し間違いを防ぐ）
+      assert.match(month, /<p className="mt-1 flex flex-wrap items-center gap-x-gap text-sm">/)
+      assert.equal(month.replace(/\/\/.*$/gm, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '').includes('入浴の記録を開く'), false)
+    })
+    it('デイの画面の休みで入浴の行が他の端末で直されていた時の案内は、入口のある所を指す（2026-10-24）', () => {
+      const p = read('../src/pages/DaycarePage.tsx')
+      assert.match(p, /入浴の記録は直していません。この行の入浴か、入浴の画面（「その他」→「入浴 月次表」→〔入浴の記録を直す ›〕）で確かめてください。/)
+      assert.equal(p.replace(/\/\/.*$/gm, '').includes('入浴の画面で確かめてください'), false)
+    })
     it('★入浴は「入浴した／入浴していない」の2つだけ（2026-10-01）: 記録画面・月次表・カルテ', () => {
       const page = read('../src/pages/BathRecordPage.tsx')
       assert.match(page, /\{BATH_SHOWN\.map\(\(r\) =>/)
