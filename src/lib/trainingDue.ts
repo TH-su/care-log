@@ -169,6 +169,34 @@ export function isEnded(person: DuePerson | undefined, copy: DueCopyRow | undefi
   return copy !== undefined && copy.stop_reason !== null && STOP_REASONS.includes(copy.stop_reason) && isYmd(copy.stop_from) && copy.stop_from <= today
 }
 
+/**
+ * 期限の一覧（見直し・居宅訪問）を出す範囲（積み残し 51・代表者の決定 2026-10-23）。計画書に計画がある方に加えて:
+ * week＝週間計画で、週のどこかの曜日にデイの予定がある方（null＝読めない・照合できない予定がある・予定が1件も無い＝週の分は絞らない）
+ * arrived＝その日に来た方（予定外で来た方を含む。計画書が無いまま来ている方を「計画なし」として目に入れるため）
+ */
+export interface DueScope {
+  week: ReadonlySet<number> | null
+  arrived: readonly number[]
+  /**
+   * 週の分で絞れない時（week＝null）も、名簿と照合できた予定の方。絞らないだけでなく「計画なし」「記録なし」に足す
+   * （照合できない予定が別に1件ある・1日だけ読めない時に、週の予定がある方が消えない＝積み残し 51 の続きの反証 中1）
+   */
+  known?: ReadonlySet<number>
+}
+
+/** 範囲に入るか（週の分が null の時は絞らない＝誰でも入る） */
+const inDueScope = (scope: DueScope, rid: number): boolean => scope.week === null || scope.week.has(rid) || scope.arrived.includes(rid)
+/** 範囲の方（週の分が null の時は、照合できた予定の方とその日に来た方＝週の分は全部は数え上げられない） */
+const dueScopePeople = (scope: DueScope): Set<number> => new Set<number>([...(scope.week ?? scope.known ?? []), ...scope.arrived])
+
+/**
+ * 居宅訪問の一覧で、訪問の記録だけがある方を外すか。範囲を渡し、週の分が読めていて、写しに行がある時だけ外す
+ * （写しに行が無い時は、計画がある方を見分けられない＝外すと少なめに出す側になる）
+ */
+export function homeVisitNarrows(scope: DueScope | undefined, copy: readonly unknown[]): boolean {
+  return scope !== undefined && scope.week !== null && copy.length > 0
+}
+
 /** 居宅訪問の期限の1行 */
 export interface HomeVisitDueRow {
   residentId: number
@@ -195,15 +223,24 @@ export function homeVisitDueList(args: {
   settings: DueCopySettings | null
   people: readonly DuePerson[]
   today: string
+  /**
+   * 出す範囲（案A・代表者の決定 2026-10-23）。渡した時は、計画がある方・週間計画に予定がある方・その日に来た方だけを出し、
+   * 訪問の記録だけがある方は出さない（週の分が null の時と、写しに行が1件も無い＝読めない・まだ写していない時は、
+   * 計画がある方を見分けられないので、訪問の記録がある方も出す＝多めに出す側）。渡さない時は 3b の決まりのまま
+   */
+  scope?: DueScope
 }): HomeVisitDueRow[] {
-  const { visits, copy, settings, people, today } = args
+  const { visits, copy, settings, people, today, scope } = args
   const rule = normalizeDueRule(settings?.due_rule)
   const warn = normalizeWarnDays(settings?.warn_days)
   const personOf = new Map(people.map((p) => [p.id, p]))
   const copyOf = new Map(copy.map((c) => [c.resident_id, c]))
   const ids = new Set<number>()
-  for (const v of visits) ids.add(v.resident_id)
-  for (const c of copy) if (isYmd(c.latest_plan_date)) ids.add(c.resident_id)
+  if (!homeVisitNarrows(scope, copy)) for (const v of visits) ids.add(v.resident_id)
+  // 週の分で絞れない時は、見直しの一覧（写しの全員）と同じく、写しに行がある方を全員出す（計画なしの方も「記録なし」で＝反証 軽1）
+  const allCopy = scope !== undefined && scope.week === null
+  for (const c of copy) if (allCopy || isYmd(c.latest_plan_date)) ids.add(c.resident_id)
+  if (scope !== undefined) for (const rid of dueScopePeople(scope)) ids.add(rid)
   const out: HomeVisitDueRow[] = []
   for (const rid of ids) {
     if (isEnded(personOf.get(rid), copyOf.get(rid), today)) continue
@@ -298,6 +335,8 @@ export interface ReviewDueRow {
   /** 最新の計画の作成日（無ければ null＝計画なし） */
   planDate: string | null
   state: Exclude<DueState, 'ended'>
+  /** 範囲に入るのに、計画書の写しに行が無い方（「計画なし」に数える＝多めに出す側・積み残し 51） */
+  noCopy?: true
 }
 
 /**
@@ -342,6 +381,38 @@ export interface WeekScope {
   ids: Set<number> | null
   reason: 'unread' | 'unmatched' | 'noplan' | null
   unmatched: number
+  /** 理由を問わず、読めた日の予定で名簿と照合できた方（ids が null の時も一覧に足す＝反証 中1。ids がある時は ids と同じ） */
+  known: Set<number>
+}
+
+/**
+ * 範囲で絞った見直しの一覧（積み残し 51・代表者の決定 2026-10-23・案A と同じ範囲）。
+ * ・写しの行は、計画がある方か、範囲に入る方だけを残す（週の分が null の時は絞らない）
+ * ・範囲に入るのに写しに行が無い方は、「計画なし」（noCopy）として足す（多めに出す側。在籍でない方は足さない・名簿に無い方は在籍として扱う）
+ */
+export function scopedReviewDueList(args: {
+  copy: readonly DueCopyRow[]
+  settings: DueCopySettings | null
+  people: readonly DuePerson[]
+  today: string
+  scope: DueScope
+}): ReviewDueRow[] {
+  const { copy, settings, people, today, scope } = args
+  const kept = reviewDueList({ copy, settings, people, today }).filter((r) => r.planDate !== null || inDueScope(scope, r.residentId))
+  const copyIds = new Set(copy.map((c) => c.resident_id))
+  const personOf = new Map(people.map((p) => [p.id, p]))
+  const extra: ReviewDueRow[] = []
+  for (const rid of dueScopePeople(scope)) {
+    if (copyIds.has(rid)) continue
+    // 名簿に無い方は在籍として扱う（名簿を読めない・届く前に、来た方を黙って消さない＝isEnded・居宅訪問の一覧と同じ向き・反証 中2）
+    const p = personOf.get(rid)
+    if (p !== undefined && !p.active) continue
+    extra.push({ residentId: rid, due: '', planDate: null, state: 'none', noCopy: true })
+  }
+  const rank: Record<ReviewDueRow['state'], number> = { overdue: 0, warn: 1, none: 2, ok: 3 }
+  return [...kept, ...extra].sort(
+    (a, b) => rank[a.state] - rank[b.state] || (a.due < b.due ? -1 : a.due > b.due ? 1 : 0) || a.residentId - b.residentId,
+  )
 }
 
 /**
@@ -356,21 +427,26 @@ export interface WeekScope {
 export function weekScope(
   plans: ReadonlyArray<{ source: string; rows: ReadonlyArray<{ resident_id: number | null; match: string | null; external: boolean }> } | null>,
 ): WeekScope {
-  if (plans.length < 7) return { ids: null, reason: 'unread', unmatched: 0 }
-  const ids = new Set<number>()
+  // 読めない日があっても、読めた日の照合できた方は known に集める（絞らない時も一覧に足す＝反証 中1）
+  const known = new Set<number>()
+  let unread = plans.length < 7
   let unmatched = 0
   for (const p of plans) {
-    if (p === null || p.source === 'unknown') return { ids: null, reason: 'unread', unmatched: 0 }
+    if (p === null || p.source === 'unknown') {
+      unread = true
+      continue
+    }
     for (const r of p.rows) {
-      if (r.resident_id !== null) ids.add(r.resident_id)
+      if (r.resident_id !== null) known.add(r.resident_id)
       else if (!r.external && (r.match === 'mismatch' || r.match === 'ambiguous')) unmatched += 1
     }
   }
-  if (unmatched > 0) return { ids: null, reason: 'unmatched', unmatched }
+  if (unread) return { ids: null, reason: 'unread', unmatched: 0, known }
+  if (unmatched > 0) return { ids: null, reason: 'unmatched', unmatched, known }
   // 週に1件も予定が無い（在籍の方に結べた予定が無い）時も絞らない。週間計画がデイに使われていない・拾えていない状態と
   // 見分けがつかないので、「計画なし 0人」に倒さず多めに出す（積み残し 51 の直しの確認 軽1）
-  if (ids.size === 0) return { ids: null, reason: 'noplan', unmatched: 0 }
-  return { ids, reason: null, unmatched: 0 }
+  if (known.size === 0) return { ids: null, reason: 'noplan', unmatched: 0, known }
+  return { ids: new Set(known), reason: null, unmatched: 0, known }
 }
 
 /** 見直しの一覧の数（期限切れ・間近・計画なし） */

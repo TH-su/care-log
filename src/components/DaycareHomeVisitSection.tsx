@@ -40,11 +40,13 @@ import {
   homeVisitCopyNotice,
   homeVisitDueCounts,
   homeVisitDueList,
+  homeVisitNarrows,
+  isYmd,
   latestVisit,
   normalizeDueRule,
   normalizeWarnDays,
 } from '../lib/trainingDue'
-import type { DueCopyRow, DueCopySettings, HomeVisitDueRow } from '../lib/trainingDue'
+import type { DueCopyRow, DueCopySettings, HomeVisitDueRow, WeekScope } from '../lib/trainingDue'
 import { fmtDayLabel, isoDate } from '../lib/format'
 import { LS } from '../lib/types'
 import type { Resident, Staff } from '../lib/types'
@@ -109,9 +111,14 @@ export interface DaycareHomeVisitSectionProps {
   blockedReason: string | null
   /** 画面の読み直しの回数（Realtime・〔最新に更新〕で変わる） */
   refreshKey: number
+  /**
+   * 一覧に出す範囲（案A・積み残し 51・代表者の決定 2026-10-23）。計画書に計画がある方・週間計画でデイの予定がある方・
+   * その日に来た方（targets）。undefined＝週間計画の読み込み中。ids が null なら週の分は絞らない（訪問の記録がある方も出す）
+   */
+  scope: WeekScope | undefined
 }
 
-export function DaycareHomeVisitSection({ today, residents, targets, staff, actorId, blockedReason, refreshKey }: DaycareHomeVisitSectionProps) {
+export function DaycareHomeVisitSection({ today, residents, targets, staff, actorId, blockedReason, refreshKey, scope }: DaycareHomeVisitSectionProps) {
   const [loaded, setLoaded] = useState<Loaded>({ status: 'loading' })
   const [open, setOpen] = useState<boolean>(readOpen)
   const [editor, setEditor] = useState<Editor | null>(null)
@@ -160,6 +167,7 @@ export function DaycareHomeVisitSection({ today, residents, targets, staff, acto
 
   const ready = loaded.status === 'ready' ? loaded : null
   const copy = ready !== null && ready.copy !== 'error' ? ready.copy : null
+  const dueScope = scope === undefined ? undefined : { week: scope.ids, known: scope.known, arrived: targets }
   const rows: HomeVisitDueRow[] =
     ready === null
       ? []
@@ -169,8 +177,20 @@ export function DaycareHomeVisitSection({ today, residents, targets, staff, acto
           settings: copy?.settings ?? null,
           people: residents.map((r) => ({ id: r.id, active: r.active })),
           today,
+          scope: dueScope,
         })
+  /** 訪問の記録だけがある方を外しているか（写しが読めない・まだ写していない時は外さない＝多めに出す側） */
+  const narrows = homeVisitNarrows(dueScope, copy?.rows ?? [])
+  /** 週間計画で絞れない時に出している方（実際に足している方だけを書く。写しが読めない時に「計画がある方」と書かない＝反証 軽2） */
+  const unnarrowedWho = (() => {
+    const parts = ['居宅訪問の記録がある方']
+    if (copy !== null) parts.push('計画書の写しに載っている方')
+    if (scope !== undefined && scope.known.size > 0) parts.push('週間計画で名簿と照合できた予定がある方')
+    return `${parts.join('・')}と、その日に来た方`
+  })()
   const counts = homeVisitDueCounts(rows)
+  /** その方が計画書の写しで計画を持つか（記録なしの行の添え書き。一覧に足す時と同じ isYmd で見る） */
+  const hasPlan = (rid: number) => (copy?.rows ?? []).some((c) => c.resident_id === rid && isYmd(c.latest_plan_date))
   const copyNotice = ready === null ? null : homeVisitCopyNotice(ready.copy)
   const ruleSource = ready === null ? 'default' : dueRuleSource(ready.copy)
   // 写した日時は日本時間の日付で出す（UTC の日付を切り出すと、0〜9時に写した分が前の日になる＝反証 軽6）
@@ -340,6 +360,9 @@ export function DaycareHomeVisitSection({ today, residents, targets, staff, acto
         <p role="alert" className="rounded border border-danger bg-danger-bg p-2 text-base text-ink">
           <span aria-hidden="true">▲ </span>居宅訪問の記録を読み込めませんでした。期限は確かめられません。通信状態を確認して、〔最新に更新〕を押してください。
         </p>
+      ) : scope === undefined ? (
+        // 週間計画（一覧の範囲）の読み込み中は、数と一覧を出さない（読み込みの前後で数が変わって見えないように）
+        <p className="text-base text-ink2">週間計画を読み込んでいます…</p>
       ) : (
         <>
           <ul className="flex flex-wrap gap-gap" aria-label={`今日（${fmtDayLabel(today)}）の時点の数`}>
@@ -363,10 +386,20 @@ export function DaycareHomeVisitSection({ today, residents, targets, staff, acto
                 : '計画書の設定がまだ写されていないので既定の数え方'}
             ）。
           </p>
+          <p className="text-sm text-ink2">
+            {scope.ids === null
+              ? `${scope.reason === 'unmatched' ? `週間計画に名簿と照合できない予定が ${scope.unmatched}件ある` : scope.reason === 'noplan' ? '週間計画にデイの予定が1件も見つからない' : '週間計画を読めない'}ため、${unnarrowedWho}を出しています。`
+              : !narrows
+                ? `計画書の写しが${copy === null ? '読めない' : '無い'}ため、居宅訪問の記録がある方、週間計画でデイの予定がある方（曜日を問わず）、その日に来た方を出しています（訪問の記録が無い方は「記録なし」）。`
+                : '計画書に計画がある方、週間計画でデイの予定がある方（曜日を問わず）、その日に来た方を出しています（訪問の記録が無い方は「記録なし」）。'}
+          </p>
           {copyNotice === 'error' ? (
-            msgBox({ tone: 'warn', text: '計画書の期限の写しを読み込めませんでした。訪問の記録が無い方と、終了した方を確かめられません。' })
-          ) : copyNotice === 'empty' ? (
-            msgBox({ tone: 'info', text: '計画書の写しが無いため、訪問の記録が無い方は出ていません（居宅訪問の記録がある方だけを出しています）。' })
+            msgBox({ tone: 'warn', text: '計画書の期限の写しを読み込めませんでした。計画がある方と、終了した方を確かめられません。' })
+          ) : copyNotice === 'empty' && scope.ids === null ? (
+            msgBox({
+              tone: 'info',
+              text: `計画書の写しが無く、週間計画でも絞れないため、訪問の記録が無い方は、${scope.known.size > 0 ? '週間計画で名簿と照合できた予定がある方と、' : ''}その日に来た方だけを出しています。`,
+            })
           ) : null}
           <button type="button" aria-expanded={open} aria-controls="home-visit-list" onClick={toggle} className={btn}>
             {open ? '一覧を閉じる' : `一覧を開く（${rows.length}人）`}
@@ -384,7 +417,7 @@ export function DaycareHomeVisitSection({ today, residents, targets, staff, acto
                       <p className="text-lg font-bold text-ink">{nameOf(r.residentId)}</p>
                       <p className="text-base text-ink">
                         <span className={stateCls(r)}>{stateText(r)}</span>
-                        {r.visit !== null ? `　次の期限 ${fmtDayLabel(r.due)}・前回 ${md(r.visit.visited_on)}` : '　計画書の写しに計画があります'}
+                        {r.visit !== null ? `　次の期限 ${fmtDayLabel(r.due)}・前回 ${md(r.visit.visited_on)}` : hasPlan(r.residentId) ? '　計画書の写しに計画があります' : ''}
                       </p>
                       {pendingAddsOf(r.residentId).length > 0 ? (
                         <p className="text-sm text-ink">

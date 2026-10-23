@@ -33,6 +33,7 @@ const NEXT_DUE = [
 ]
 
 const visit = (over = {}) => ({ id: 1, resident_id: 1, visited_on: '2026-10-01', explained_to: 'family', explained_on: '2026-10-01', ...over })
+const visitAt = (rid, on) => ({ id: rid * 10, resident_id: rid, visited_on: on, explained_to: 'family', explained_on: on })
 const copyRow = (over = {}) => ({ resident_id: 1, latest_plan_date: '2026-09-01', next_due: '2026-12-01', stop_reason: null, stop_from: null, ...over })
 
 if (D === null) {
@@ -221,23 +222,80 @@ if (D === null) {
       const day = (rs, source = 'kv') => ({ source, rows: rs })
       const week = [day([row(1), row(2)]), day([row(3)]), day([], 'none'), day([row(2), row(null, 'external', true), row(null, 'absent_roster')]), day([row(5, 'name')]), day([], 'none'), day([], 'none')]
       const w = D.weekScope(week)
-      assert.deepEqual([[...w.ids].sort(), w.reason, w.unmatched], [[1, 2, 3, 5], null, 0], '今日来ない方（別の曜日の方）も入る')
-      assert.deepEqual(D.weekScope([...week.slice(0, 6), null]), { ids: null, reason: 'unread', unmatched: 0 })
-      assert.deepEqual(D.weekScope([...week.slice(0, 6), day([], 'unknown')]), { ids: null, reason: 'unread', unmatched: 0 })
-      assert.deepEqual(D.weekScope(week.slice(0, 6)), { ids: null, reason: 'unread', unmatched: 0 })
+      assert.deepEqual([[...w.ids].sort(), w.reason, w.unmatched, [...w.known].sort()], [[1, 2, 3, 5], null, 0, [1, 2, 3, 5]], '今日来ない方（別の曜日の方）も入る')
+      // 読めない日があっても、読めた日の照合できた方は known に残す（絞らない時も一覧に足す＝積み残し 51 の続きの反証 中1）
+      const known = new Set([1, 2, 3, 5])
+      assert.deepEqual(D.weekScope([...week.slice(0, 6), null]), { ids: null, reason: 'unread', unmatched: 0, known })
+      assert.deepEqual(D.weekScope([...week.slice(0, 6), day([], 'unknown')]), { ids: null, reason: 'unread', unmatched: 0, known })
+      assert.deepEqual(D.weekScope(week.slice(0, 6)), { ids: null, reason: 'unread', unmatched: 0, known })
+      assert.deepEqual(D.weekScope([null, ...week.slice(1)]), { ids: null, reason: 'unread', unmatched: 0, known: new Set([2, 3, 5]) }, '読めない日が先頭でも、後の日を読む')
     })
     it('名簿と照合できない予定（mismatch・ambiguous）が1件でもあれば絞らない（予定のある方を知らせなしに外さない・反証 中1）', () => {
       const row = (id, match = 'mid', external = false) => ({ resident_id: id, match, external })
       const day = (rs, source = 'kv') => ({ source, rows: rs })
       const base = [day([row(1)]), day([]), day([]), day([]), day([]), day([]), day([])]
-      assert.deepEqual(D.weekScope([...base.slice(0, 6), day([row(null, 'mismatch'), row(null, 'ambiguous')])]), { ids: null, reason: 'unmatched', unmatched: 2 })
+      assert.deepEqual(D.weekScope([...base.slice(0, 6), day([row(null, 'mismatch'), row(null, 'ambiguous')])]), { ids: null, reason: 'unmatched', unmatched: 2, known: new Set([1]) })
       assert.equal(D.weekScope([...base.slice(0, 6), day([row(null, 'absent_roster'), row(null, 'external', true)])]).reason, null, '在籍に居ない予定・外部利用者は数えない')
     })
     it('週に1件も予定が無い時は絞らない（「計画なし 0人」に倒さない・直しの確認 軽1）', () => {
       const none = { source: 'none', rows: [] }
-      assert.deepEqual(D.weekScope(Array(7).fill(none)), { ids: null, reason: 'noplan', unmatched: 0 })
+      assert.deepEqual(D.weekScope(Array(7).fill(none)), { ids: null, reason: 'noplan', unmatched: 0, known: new Set() })
       const onlyExternal = { source: 'kv', rows: [{ resident_id: null, match: 'external', external: true }] }
-      assert.deepEqual(D.weekScope([onlyExternal, ...Array(6).fill(none)]), { ids: null, reason: 'noplan', unmatched: 0 }, '外部利用者だけの週も同じ')
+      assert.deepEqual(D.weekScope([onlyExternal, ...Array(6).fill(none)]), { ids: null, reason: 'noplan', unmatched: 0, known: new Set() }, '外部利用者だけの週も同じ')
+    })
+    it('案A（代表者の決定）: 見直しの一覧は、計画がある方・週間計画に予定がある方・その日に来た方。範囲に入るのに写しに無い方は「計画なし（写しなし）」として足す', () => {
+      const people = [1, 2, 3, 5, 6, 7, 8, 9].map((id) => ({ id, active: id !== 9 }))
+      // 写し: 1・2・5・6＝計画あり／3＝計画なし／4＝終了。7・8＝写しに無い。9＝在籍でない
+      const r = D.scopedReviewDueList({ copy: rows, settings: null, people, today, scope: { week: new Set([7]), arrived: [8, 9] } })
+      assert.deepEqual(
+        r.map((x) => [x.residentId, x.state, x.noCopy === true]),
+        [[2, 'overdue', false], [1, 'warn', false], [7, 'none', true], [8, 'none', true], [6, 'ok', false], [5, 'ok', false]],
+        '3（計画なし・範囲の外）は出ない・7（週の予定）と8（その日に来た）は写しなしとして出る・9（在籍でない）は出ない',
+      )
+      const r2 = D.scopedReviewDueList({ copy: rows, settings: null, people, today, scope: { week: new Set([3]), arrived: [] } })
+      assert.deepEqual(r2.find((x) => x.residentId === 3)?.noCopy, undefined, '写しにある計画なしの方は写しなしにしない')
+      const r3 = D.scopedReviewDueList({ copy: rows, settings: null, people: [...people, { id: 4, active: true }], today, scope: { week: new Set([4]), arrived: [4] } })
+      assert.equal(r3.some((x) => x.residentId === 4), false, '終了した方（写しで止めている）は、来ても週の予定があっても足し直さない')
+      const all = D.scopedReviewDueList({ copy: rows, settings: null, people, today, scope: { week: null, arrived: [8] } })
+      assert.deepEqual(all.map((x) => x.residentId).sort(), [1, 2, 3, 5, 6, 8], '週の分が読めない時は写しの全員＋その日に来た方')
+      // 反証 中1: 週の分で絞れない時も、照合できた予定の方（known）は「計画なし（写しなし）」に足す
+      const k = D.scopedReviewDueList({ copy: rows, settings: null, people, today, scope: { week: null, known: new Set([7]), arrived: [] } })
+      assert.deepEqual(k.find((x) => x.residentId === 7)?.noCopy, true, '照合できない予定が別にある・1日読めない時も、週の予定がある方は消えない')
+      // 反証 中2: 名簿に無い方（名簿を読めない・届く前）は在籍として扱い、黙って消さない（在籍でない方＝9 は今までどおり足さない）
+      const noRoster = D.scopedReviewDueList({ copy: rows, settings: null, people: [], today, scope: { week: new Set([7]), arrived: [8] } })
+      assert.deepEqual(noRoster.filter((x) => x.noCopy).map((x) => x.residentId), [7, 8], '名簿が空でも来た方・週の予定がある方は出る')
+    })
+    it('案A（代表者の決定）: 居宅訪問の一覧も同じ範囲。訪問の記録だけがある方は出さない（週の分が読めない時は出す）。範囲に入る方で訪問の無い方は「記録なし」', () => {
+      const visits = [visitAt(1, '2026-08-01'), visitAt(11, '2026-01-01'), visitAt(7, '2026-07-01')]
+      const copyRows = [copyRow({ resident_id: 5 })]
+      const w = D.homeVisitDueList({ visits, copy: copyRows, settings: null, people: [], today, scope: { week: new Set([1, 12]), arrived: [13] } })
+      assert.deepEqual(
+        w.map((x) => [x.residentId, x.state]),
+        [[1, 'warn'], [5, 'none'], [12, 'none'], [13, 'none']],
+        '11・7（訪問の記録だけ・範囲の外）は出ない。12（週の予定）・13（その日に来た）は記録なし',
+      )
+      const n = D.homeVisitDueList({ visits, copy: copyRows, settings: null, people: [], today, scope: { week: null, arrived: [13] } })
+      assert.deepEqual(n.map((x) => x.residentId).sort((a, b) => a - b), [1, 5, 7, 11, 13], '週の分が読めない時は訪問の記録がある方も出す')
+      // 反証 中1・軽1: 週の分で絞れない時も、照合できた予定の方は「記録なし」に足し、写しに行がある方は計画なしでも出す（見直しの一覧の「写しの全員」とそろえる）
+      const nk = D.homeVisitDueList({ visits, copy: [...copyRows, copyRow({ resident_id: 3, latest_plan_date: null, next_due: null })], settings: null, people: [], today, scope: { week: null, known: new Set([12]), arrived: [] } })
+      assert.deepEqual(nk.map((x) => x.residentId).sort((a, b) => a - b), [1, 3, 5, 7, 11, 12], '3（写しに行・計画なし）と 12（照合できた予定）も出る')
+      const wk = D.homeVisitDueList({ visits, copy: [...copyRows, copyRow({ resident_id: 3, latest_plan_date: null, next_due: null })], settings: null, people: [], today, scope: { week: new Set([1]), known: new Set([1]), arrived: [] } })
+      assert.equal(wk.some((x) => x.residentId === 3), false, '週の分で絞れる時は、写しに行があっても計画なしで範囲の外の方は出さない（見直しの一覧と同じ）')
+      const e = D.homeVisitDueList({ visits, copy: [], settings: null, people: [], today, scope: { week: new Set([1, 12]), arrived: [13] } })
+      assert.deepEqual(
+        e.map((x) => x.residentId).sort((a, b) => a - b),
+        [1, 7, 11, 12, 13],
+        '写しに行が無い（読めない・まだ写していない）時は、計画がある方を見分けられないので、訪問の記録がある方も出す（週の予定・その日に来た方も出す）',
+      )
+      assert.equal(D.homeVisitNarrows({ week: new Set([1]), arrived: [] }, [copyRow()]), true)
+      assert.equal(D.homeVisitNarrows({ week: new Set([1]), arrived: [] }, []), false)
+      assert.equal(D.homeVisitNarrows({ week: null, arrived: [1] }, [copyRow()]), false)
+      assert.equal(D.homeVisitNarrows(undefined, [copyRow()]), false)
+      assert.deepEqual(
+        D.homeVisitDueList({ visits, copy: copyRows, settings: null, people: [], today }).map((x) => x.residentId).sort((a, b) => a - b),
+        [1, 5, 7, 11],
+        '範囲を渡さない時は 3b の決まりのまま',
+      )
     })
     it('対象者の並び: 写しを読めない・0件の時は元の並びと知らせ。行がある時は計画がある方を上に（中は元の並び）、下の方には理由', () => {
       const targets = [7, 3, 1, 4, 2]

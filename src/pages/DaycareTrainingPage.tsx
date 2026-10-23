@@ -185,7 +185,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
       .catch(() => {})
     fetchDaycarePlanWeek(todayIso())
       .then((plans) => alive && setWeek(weekScope(plans)))
-      .catch(() => alive && setWeek({ ids: null, reason: 'unread', unmatched: 0 }))
+      .catch(() => alive && setWeek({ ids: null, reason: 'unread', unmatched: 0, known: new Set() }))
     return () => {
       alive = false
     }
@@ -773,6 +773,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
         blockedReason={homeVisitBlocked()}
         onSynced={scheduleReload}
         scope={week}
+        arrived={targets}
       />
 
       <DaycareHomeVisitSection
@@ -783,6 +784,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
         actorId={actorId}
         blockedReason={homeVisitBlocked()}
         refreshKey={dataTick}
+        scope={week}
       />
 
       <section aria-labelledby="h-targets" className="space-y-2 rounded-lg border border-border bg-surface p-3">

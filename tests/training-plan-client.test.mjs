@@ -261,11 +261,24 @@ describe('静的検査（段階3c の規律）', () => {
   })
   it('見直しの一覧の絞り込みの配線（積み残し 51・親の訂正）: 画面は今日から7日分の予定で「週のどこかの曜日に予定がある方」を作って渡す。区画は読み込み中は数を出さず、一覧と件数の両方を絞った後で出す', () => {
     const p = code('../src/pages/DaycareTrainingPage.tsx')
-    assert.match(p, /fetchDaycarePlanWeek\(todayIso\(\)\)\s*\.then\(\(plans\) => alive && setWeek\(weekScope\(plans\)\)\)\s*\.catch\(\(\) => alive && setWeek\(\{ ids: null, reason: 'unread', unmatched: 0 \}\)\)/)
+    assert.match(p, /fetchDaycarePlanWeek\(todayIso\(\)\)\s*\.then\(\(plans\) => alive && setWeek\(weekScope\(plans\)\)\)\s*\.catch\(\(\) => alive && setWeek\(\{ ids: null, reason: 'unread', unmatched: 0, known: new Set\(\) \}\)\)/)
     assert.match(p, /scope=\{week\}/)
     assert.doesNotMatch(p, /r\.planned\)\.map/, 'その日の盤では絞らない')
     const c = code('../src/components/DaycareReviewDueSection.tsx')
-    assert.match(c, /filterReviewScope\(\s*reviewDueList\([\s\S]*?\),\s*scope\?\.ids \?\? null,\s*\)/)
+    // 案A（代表者の決定）で、範囲にその日に来た方を足し、写しに無い方も「計画なし」に数える関数に替えた（固定し直し・意図は同じ）
+    assert.match(c, /scopedReviewDueList\(\{[\s\S]*?scope: \{ week: scope\?\.ids \?\? null, known: scope\?\.known, arrived \},\s*\}\)/)
+    assert.match(p, /scope=\{week\}\s*arrived=\{targets\}/)
+    const hv = code('../src/components/DaycareHomeVisitSection.tsx')
+    assert.match(hv, /const dueScope = scope === undefined \? undefined : \{ week: scope\.ids, known: scope\.known, arrived: targets \}/)
+    // 写しが読めない時に「計画がある方」と書かない（反証 軽2）
+    assert.match(hv, /if \(copy !== null\) parts\.push\('計画書の写しに載っている方'\)/)
+    assert.match(hv, /homeVisitDueList\(\{[\s\S]*?scope: dueScope,\s*\}\)/)
+    // 写しが読めない・まだ写していない時は、訪問の記録だけの方も外さない（多めに出す側）。その時の文
+    assert.match(hv, /const narrows = homeVisitNarrows\(dueScope, copy\?\.rows \?\? \[\]\)/)
+    // 記録なしの行の添え書きは、一覧に足す時と同じ isYmd で見る（崩れた日付の写しに「計画があります」と出さない）
+    assert.match(hv, /c\.resident_id === rid && isYmd\(c\.latest_plan_date\)/)
+    assert.match(hv, /計画書の写しが\$\{copy === null \? '読めない' : '無い'\}ため、居宅訪問の記録がある方、週間計画でデイの予定がある方/)
+    assert.match(hv, /\) : scope === undefined \? \(/)
     assert.match(c, /const counts = reviewDueCounts\(rows\)/)
     assert.match(c, /\) : scope === undefined \? \(/)
     assert.match(c, /scope\?\.reason === 'unmatched'/)
