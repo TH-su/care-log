@@ -283,8 +283,26 @@ if (DB === null) {
       assert.equal(r, 'sent')
       const row = st.daycare_training_sessions.find((x) => x.id === 7)
       assert.deepEqual([row.result, row.duration_min, row.cancel_reason, row.rev], ['cancelled', null, 'condition', 2])
+      // 指導員はこの端末の値に替わり、記入者は相手のまま（直した職員は edited_by に残る）。自然キー・冪等キーは送らない
+      assert.deepEqual([row.instructor_id, row.recorded_by, row.edited_by, row.client_key], [3, 2, 4, 'other'])
+      const up = st.calls.filter((c) => c.action === 'update').at(-1)
+      for (const k of ['resident_id', 'day', 'client_key', 'recorded_by']) assert.equal(k in up.payload, false, `${k} は送らない`)
       assert.deepEqual(DB.pendingTrainingOps(), [])
       await done()
+    })
+    it('〔いまの記録とくらべる〕に指導員・補助・中止の一言を出す（直しの確認の反証 中2: 違いが見えないまま相手の指導員を書き換えない）', () => {
+      const op = { table: 'daycare_training_sessions', kind: 'insert', payload: { resident_id: 1, day: DAY, recorded_by: 4, client_key: 'k', ...fields({ instructor_id: 3 }) } }
+      const theirs = sessionRow({ instructor_id: 2, assisted_by: 5, result: 'done', duration_min: 20, program: '立ち上がり', started_at: '10:00:00' })
+      const name = (id) => `見本 職員${id}`
+      const mine = SO.stoppedOpLines(op, (id) => `利用者${id}`, undefined, name)
+      const now = SO.stoppedOpLines(op, (id) => `利用者${id}`, theirs, name)
+      const pick = (lines, label) => lines.find((l) => l.label === label)?.value
+      assert.deepEqual([pick(mine, '指導員'), pick(now, '指導員')], ['見本 職員3', '見本 職員2'])
+      assert.deepEqual([pick(mine, '補助'), pick(now, '補助')], ['なし', '見本 職員5'])
+      assert.equal(pick(mine, '中止の一言'), '未入力')
+      assert.equal(pick(mine, 'ほか'), undefined, '数だけの欄は残らない')
+      // 氏名を引けない時は番号で出す（同じに見えない）
+      assert.equal(pick(SO.stoppedOpLines(op, (id) => `利用者${id}`), '指導員'), '職員ID 3')
     })
     it('配置: 圏外の間に同じ日・同じ職員・同じ役割・同じ開始の時刻が入っていたら、届いたのと同じ（送信待ちから外れ・1行のまま）', async () => {
       const st = await fresh()
@@ -296,6 +314,35 @@ if (DB === null) {
       await DB.flushQueue(true)
       assert.deepEqual(DB.pendingTrainingOps(), [])
       assert.equal(st.daycare_staffing.filter((x) => x.deleted_at === null).length, 1)
+      await done()
+    })
+    it('配置: 送信待ちの追加は時間帯を持つ（落とすと終日の指導員に見えて〔完了〕の指導員を取り違える＝直しの確認の反証 中1）', async () => {
+      const st = await fresh()
+      st.down = true
+      await DB.insertStaffing({ day: DAY, staff_id: 11, role: 'trainer', from_time: '09:00', to_time: '12:00', recorded_by: 4 })
+      assert.deepEqual(
+        DB.pendingTrainingOps().map((p) => [p.kind, p.table, p.staffId, p.fromTime, p.toTime, p.stopped]),
+        [['add', 'daycare_staffing', 11, '09:00', '12:00', false]],
+      )
+      await done()
+    })
+    it('配置: 開始が同じでも終わりの時刻が違えば「届いた」にせず止める。〔自分の内容で直す〕で相手の行の終わりの時刻を直す（直しの確認の反証 軽3）', async () => {
+      const st = await fresh()
+      st.down = true
+      await DB.insertStaffing({ day: DAY, staff_id: 3, role: 'trainer', from_time: '09:00', to_time: '16:00', recorded_by: 4 })
+      st.daycare_staffing.push({ id: 9, day: DAY, staff_id: 3, role: 'trainer', from_time: '09:00', to_time: '12:00', note: null, recorded_by: 2, rev: 1, client_key: 'o-9', deleted_at: null })
+      st.down = false
+      await DB.flushQueue(true)
+      assert.deepEqual(DB.pendingTrainingOps().map((p) => [p.kind, p.table, p.stopped]), [['add', 'daycare_staffing', true]], '16:00 を黙って捨てない')
+      const stopped = DB.listStoppedOps().find((o) => o.table === 'daycare_staffing')
+      assert.equal(SO.stoppedOpNeedsCompare(stopped), true)
+      const target = await DB.fetchQueuedOpTarget(stopped.qid)
+      assert.deepEqual([target?.id, target?.rev, target?.to_time], [9, 1, '12:00'], '並べて見せる相手の行')
+      assert.equal(await DB.resendQueuedOp(stopped.qid, { id: 9, rev: 1 }), 'sent')
+      const live = st.daycare_staffing.filter((x) => x.deleted_at === null)
+      assert.equal(live.length, 1)
+      assert.deepEqual([live[0].id, live[0].to_time, live[0].from_time, live[0].recorded_by, live[0].rev], [9, '16:00', '09:00', 2, 2])
+      assert.deepEqual(DB.pendingTrainingOps(), [])
       await done()
     })
   })

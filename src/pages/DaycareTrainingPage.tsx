@@ -271,13 +271,20 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
   const canWrite = gateOk && !missing && data !== null && data.sessions !== null && data.staffing !== null && day <= today && !pastLocked
   const sessions = data?.sessions ?? []
   const pending = pendingTrainingOps()
-  // 送信待ちの配置の追加（止まっていない分）も、配置として数える（圏外で入れた指導員で〔完了〕できるように・反証 軽4）。id は負の数
+  // 送信待ちの配置の追加（止まっていない分）も、時間帯ごと配置として数える（圏外で入れた指導員で〔完了〕できるように・反証 軽4。
+  // 時間帯を落とすと終日の指導員に見えて取り違える＝直しの確認の反証 中1）。id は負の数
   const pendingStaffing: DaycareStaffing[] = pending.flatMap((p, i) =>
     p.kind === 'add' && p.table === 'daycare_staffing' && p.day === day && !p.stopped
-      ? [{ id: -(i + 1), day, staff_id: p.staffId, role: p.role, from_time: null, to_time: null, note: null, rev: 0 }]
+      ? [{ id: -(i + 1), day, staff_id: p.staffId, role: p.role, from_time: p.fromTime, to_time: p.toTime, note: null, rev: 0 }]
       : [],
   )
-  const staffing = [...(data?.staffing ?? []), ...pendingStaffing]
+  // 一覧には送信待ちの印つきで出す（staffingShown）。指導員として数えるのは、圏外で〔外す〕を押した配置（送信待ちの取り消し）を
+  // 除いた分（staffing。追加と扱いをそろえる＝直しの確認の反証 軽5）
+  const staffingShown = [...(data?.staffing ?? []), ...pendingStaffing]
+  const removedStaffing = new Set(
+    pending.flatMap((p) => (p.kind === 'update' && p.table === 'daycare_staffing' && p.deleted && !p.stopped ? [p.rowId] : [])),
+  )
+  const staffing = staffingShown.filter((s) => !removedStaffing.has(s.id))
   const trainers = trainersOf(staffing, day)
   const dual = dualRoleWithoutTime(staffing, day)
   // 対象者でない方の記録（到着を取り消した・欠席にした方。直す入口を残す＝反証 中4）
@@ -652,9 +659,9 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
             {dual.map((id) => `${staffName(id)}さん`).join('・')}は、機能訓練指導員と看護職員の両方に入っています。兼務の時は時間帯を分けて書いてください。
           </p>
         ) : null}
-        {staffing.length > 0 ? (
+        {staffingShown.length > 0 ? (
           <ul className="divide-y divide-border">
-            {STAFFING_ROLES.flatMap((r) => staffing.filter((s) => s.role === r)).map((s) => {
+            {STAFFING_ROLES.flatMap((r) => staffingShown.filter((s) => s.role === r)).map((s) => {
               const p = s.id > 0 ? pendingRow('daycare_staffing', s.id) : undefined
               return (
                 <li key={s.id} className="flex flex-wrap items-center justify-between gap-gap py-2">
@@ -662,7 +669,9 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                     <span className="font-bold">{STAFFING_ROLE_LABEL[s.role]}</span> {staffName(s.staff_id)}
                     {staffingTimeText(s) !== '' ? <span className="ml-2 text-ink2">{staffingTimeText(s)}</span> : null}
                     {s.id < 0 ? <span className="ml-2 text-sm text-warn">（送信待ち）</span> : null}
-                    {p !== undefined ? <span className="ml-2 text-sm text-warn">（{p.stopped ? '止まっています' : '送信待ち'}）</span> : null}
+                    {p !== undefined ? (
+                      <span className="ml-2 text-sm text-warn">（{p.stopped ? '止まっています' : p.kind === 'update' && p.deleted ? '外す・送信待ち' : '送信待ち'}）</span>
+                    ) : null}
                   </p>
                   {s.id > 0 ? (
                     <button type="button" disabled={!canWrite || busy} onClick={() => setDelStaff(s)} className={btn} aria-label={`${STAFFING_ROLE_LABEL[s.role]} ${staffName(s.staff_id)}さんを配置から外す`}>

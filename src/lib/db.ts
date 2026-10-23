@@ -3607,9 +3607,10 @@ async function sendQueuedOp(sb: SupabaseClient, op: QueueOp): Promise<SendResult
           if (st === 'deleting') return 'retry'
           if (st === 'same') return 'sent'
         }
-        // その日の配置（0046）は、同じ日・同じ職員・同じ役割・同じ開始の時刻の行が先にあれば、届いたのと同じ（止めない）。
+        // その日の配置（0046）は、同じ日・同じ職員・同じ役割・同じ開始と終わりの時刻の行が先にあれば、届いたのと同じ（止めない）。
+        // 終わりの時刻が違えば、下で止める（設定でくらべて選ぶ）。
         // 機能訓練の実施記録は止める（結果の違う記録に合流しない。設定の〔いまの記録とくらべる〕で選ぶ）
-        if (op.table === 'daycare_staffing' && (await naturalKeyTaken(sb, op.table, op.payload))) return 'sent'
+        if (op.table === 'daycare_staffing' && (await staffingKeyTaken(sb, op.payload, true))) return 'sent'
         if (await naturalKeyTaken(sb, op.table, op.payload)) return 'conflict'
         return 'retry'
       }
@@ -3922,17 +3923,32 @@ async function findByKey(
  * 入浴記録の自然キー（同じ人・同じ日）に生きている行があるか。
  * 読めなかった時は false（＝他の端末の行とは断定しない。呼び側は再試行へ回す）
  */
-/** その日の配置（0046）の自然キー（日・職員・役割・開始の時刻。時刻なしは時刻なし同士）に生きている行があるか。読めなかった時は false */
-async function staffingKeyTaken(sb: SupabaseClient, payload: Record<string, unknown>): Promise<boolean> {
+/**
+ * その日の配置（0046）の自然キー（日・職員・役割・開始の時刻。時刻なしは時刻なし同士）の生きている行。
+ * 無い時は null、読めなかった時は undefined
+ */
+async function staffingKeyRow(sb: SupabaseClient, payload: Record<string, unknown>): Promise<Record<string, unknown> | null | undefined> {
   const day = dateStr(payload.day)
   const staffId = idNum(payload.staff_id)
   const role = str(payload.role)
-  if (day === null || staffId === null || role === null) return false
-  let q = sb.from('daycare_staffing').select('id').is('deleted_at', null).eq('day', day).eq('staff_id', staffId).eq('role', role).limit(1)
+  if (day === null || staffId === null || role === null) return null
+  let q = sb.from('daycare_staffing').select(DAYCARE_STAFFING_COLS).is('deleted_at', null).eq('day', day).eq('staff_id', staffId).eq('role', role).limit(1)
   const from = str(payload.from_time)
   q = from === null ? q.is('from_time', null) : q.eq('from_time', from)
   const res = await bounded(q.maybeSingle())
-  return res.error === null && res.data !== null
+  if (res.error !== null) return undefined
+  return asRecord(res.data)
+}
+
+/**
+ * その日の配置の自然キーに生きている行があるか。読めなかった時は false。
+ * sameEnd＝true の時は、終わりの時刻も同じ行がある時だけ true（送信待ちを「届いたのと同じ」として外してよいか。終わりの時刻が
+ * 違う行を同じとみなすと、この端末で入れた終わりの時刻が知らせも無く失われる＝段階3a の直しの確認の反証 軽3）
+ */
+async function staffingKeyTaken(sb: SupabaseClient, payload: Record<string, unknown>, sameEnd = false): Promise<boolean> {
+  const row = await staffingKeyRow(sb, payload)
+  if (row === null || row === undefined) return false
+  return !sameEnd || hhmm(row.to_time) === hhmm(payload.to_time)
 }
 
 async function bathDayTaken(sb: SupabaseClient, payload: Record<string, unknown>): Promise<boolean> {
@@ -7181,6 +7197,13 @@ export async function fetchQueuedOpTarget(qid: string): Promise<Record<string, u
   if (op === undefined) return null
   try {
     const sb = await getClient()
+    if (op.kind === 'insert' && op.table === 'daycare_staffing') {
+      // その日の配置の追加が、終わりの時刻の違う同じ鍵の行で止まった（段階3a の直しの確認の反証 軽3）: 先に入っていた相手の行
+      const row = await staffingKeyRow(sb, op.payload)
+      if (row === undefined) return undefined
+      if (row === null && (await sessionMissing(sb))) return undefined
+      return row
+    }
     if (op.kind === 'insert') {
       // 入浴・与薬の時間帯の記録・服薬の時間帯の追加が自然キーで止まった（F37）: 先に記録された相手の行（生きている行）。
       // 〔自分の内容で直す〕は、この行の id と版を resendQueuedOp の seen に渡す。相手の行が無い（取り消された）なら null
@@ -7280,6 +7303,13 @@ function insertAsUpdatePatch(table: string, payload: Record<string, unknown>): R
   // 全部を送るので、結果を替えても時間・理由の両向きの check に当たらない。記入者は直さない
   if (table === 'daycare_training_sessions') {
     const out = omitKeys(payload, ['client_key', 'resident_id', 'day', 'id', 'rev', 'deleted_at', 'recorded_by'])
+    out.edited_by = idNum(payload.edited_by) ?? idNum(payload.recorded_by) ?? null
+    return out
+  }
+  // デイのその日の配置（0046）: 自然キー（日・職員・役割・開始の時刻）と冪等キーを外した中身（終わりの時刻・備考）。
+  // 終わりの時刻だけが違って止まった追加を、相手の行の終わりの時刻で直す（直しの確認の反証 軽3）。記入者は直さない
+  if (table === 'daycare_staffing') {
+    const out = omitKeys(payload, ['client_key', 'day', 'staff_id', 'role', 'from_time', 'id', 'rev', 'deleted_at', 'recorded_by'])
     out.edited_by = idNum(payload.edited_by) ?? idNum(payload.recorded_by) ?? null
     return out
   }
@@ -8687,7 +8717,7 @@ export async function softDeleteStaffing(current: DaycareStaffing, opts?: WriteO
 /** この端末の送信待ちにある機能訓練・配置の操作（画面が重ねて出す・読むだけ）。stopped＝止まった（競合・拒否）op */
 export type PendingTrainingOp =
   | { kind: 'add'; table: 'daycare_training_sessions'; residentId: number; day: string; stopped: boolean }
-  | { kind: 'add'; table: 'daycare_staffing'; day: string; staffId: number; role: StaffingRole; stopped: boolean }
+  | { kind: 'add'; table: 'daycare_staffing'; day: string; staffId: number; role: StaffingRole; fromTime: string | null; toTime: string | null; stopped: boolean }
   | { kind: 'update'; table: 'daycare_training_sessions' | 'daycare_staffing'; rowId: number; deleted: boolean; stopped: boolean }
 
 export function pendingTrainingOps(): PendingTrainingOp[] {
@@ -8706,7 +8736,8 @@ export function pendingTrainingOps(): PendingTrainingOp[] {
         const staffId = idNum(q.payload.staff_id)
         const role = staffingRoleOf(q.payload.role)
         if (staffId === null || role === null) continue
-        out.push({ kind: 'add', table: q.table, day, staffId, role, stopped })
+        // 時間帯も渡す（落とすと終日の指導員に見え、〔完了〕の指導員を取り違える＝段階3a の直しの確認の反証 中1）
+        out.push({ kind: 'add', table: q.table, day, staffId, role, fromTime: hhmm(q.payload.from_time), toTime: hhmm(q.payload.to_time), stopped })
       }
     } else if (q.kind === 'update' && q.rowId !== undefined) {
       const deleted = Object.prototype.hasOwnProperty.call(q.payload, 'deleted_at') && q.payload.deleted_at !== null
