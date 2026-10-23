@@ -1068,8 +1068,8 @@ if (DC === null) {
       const cur = (await DB.fetchDaycareAttendance(T))[0]
       off = true
       assert.equal(await DB.updateDaycareAttendance(cur, { left_at: '12:50' }, { editedBy: 2 }), 'queued')
-      // 13:30 の定時の処理の自動の帰宅（版が1つ進む）
-      Object.assign(s.db.daycare_attendance[0], { left_at: '13:30:00', left_auto: true, rev: 4 })
+      // 13:30 の定時の処理の自動の帰宅（版が1つ進む・0049 で edited_by を空にする）
+      Object.assign(s.db.daycare_attendance[0], { left_at: '13:30:00', left_auto: true, rev: 4, edited_by: null })
       off = false
       await DB.flushQueue(true)
       assert.deepEqual([s.db.daycare_attendance[0].left_at, s.db.daycare_attendance[0].rev], ['12:50', 5])
@@ -1088,6 +1088,53 @@ if (DC === null) {
       await DB.flushQueue(true)
       assert.equal(s2.db.daycare_attendance[0].left_at, '13:05:00')
       assert.equal(DB.listStoppedOps().filter((o) => o.table === 'daycare_attendance').length, 1)
+      await reset()
+      // 確認の反証 軽1: 帰宅は自動の印のままでも、進んだ1歩が別の端末の人の直し（edited_by あり）なら乗せ替えずに止まる
+      let off3 = false
+      const s3 = fakeServer({ offline: () => off3 })
+      DB.__testHooks.setClient(s3.client)
+      s3.db.daycare_attendance.push({ id: 82, resident_id: 1, day: T, arrived_at: '09:30:00', left_at: '13:30:00', absent: false, absent_reason: null, note: null, recorded_by: null, rev: 5, arrived_auto: true, left_auto: true, deleted_at: null, edited_by: null, client_key: 'auto:dcatt:x:1' })
+      const cur3 = (await DB.fetchDaycareAttendance(T))[0]
+      off3 = true
+      await DB.updateDaycareAttendance(cur3, { absent: true, absent_reason: 'later' }, { editedBy: 2 })
+      // 別の端末（電波あり）が到着の時刻を直した: 帰宅の印は付いたまま・edited_by あり
+      Object.assign(s3.db.daycare_attendance[0], { arrived_at: '09:50:00', arrived_auto: false, rev: 6, edited_by: 3 })
+      off3 = false
+      await DB.flushQueue(true)
+      assert.deepEqual([s3.db.daycare_attendance[0].absent, s3.db.daycare_attendance[0].arrived_at], [false, '09:50:00'], '別の端末の人の直しを黙って上書きしない')
+      assert.equal(DB.listStoppedOps().filter((o) => o.table === 'daycare_attendance').length, 1)
+      await reset()
+    })
+    it('確認の反証 軽2: 送信待ちの手の〔到着〕が、自動の到着と自動の帰宅まで入った行に届いたら、自動の帰宅は残す（帰宅が到着より前なら外す）', async () => {
+      let off = true
+      const s = fakeServer({ offline: () => off })
+      DB.__testHooks.setClient(s.client)
+      await DB.insertDaycareAttendance({ resident_id: 1, day: T, arrived_at: '10:15', left_at: null, absent: false, absent_reason: null, note: null, recorded_by: 2 })
+      s.db.daycare_attendance.push({ id: 90, resident_id: 1, day: T, arrived_at: '09:30:00', left_at: '15:30:00', absent: false, absent_reason: null, note: null, recorded_by: null, rev: 2, arrived_auto: true, left_auto: true, deleted_at: null, client_key: 'auto:dcatt:x:1' })
+      off = false
+      await DB.flushQueue(true)
+      const a = s.db.daycare_attendance[0]
+      assert.deepEqual([a.arrived_at, a.arrived_auto, a.left_at, a.left_auto, a.recorded_by], ['10:15', false, '15:30:00', true, 2])
+      await reset()
+      // 手の到着が自動の帰宅より後（15:40 と 15:30）→ 帰宅を外す（帰宅は到着の後の check に当てない）
+      let off2 = true
+      const s2 = fakeServer({ offline: () => off2 })
+      DB.__testHooks.setClient(s2.client)
+      await DB.insertDaycareAttendance({ resident_id: 1, day: T, arrived_at: '15:40', left_at: null, absent: false, absent_reason: null, note: null, recorded_by: 2 })
+      s2.db.daycare_attendance.push({ id: 91, resident_id: 1, day: T, arrived_at: '09:30:00', left_at: '15:30:00', absent: false, absent_reason: null, note: null, recorded_by: null, rev: 2, arrived_auto: true, left_auto: true, deleted_at: null, client_key: 'auto:dcatt:x:1' })
+      off2 = false
+      await DB.flushQueue(true)
+      assert.deepEqual([s2.db.daycare_attendance[0].arrived_at, s2.db.daycare_attendance[0].left_at], ['15:40', null])
+      await reset()
+    })
+    it('確認の反証 軽3: 欠席の日の入浴は、実際にした事を返す（自動の行を直した＝元の区分・行を新しく作った）', async () => {
+      const s = fakeServer()
+      DB.__testHooks.setClient(s.client)
+      s.db.bath_records.push({ id: 95, resident_id: 1, bath_on: T, result: 'full', cancel_reason: null, note: null, recorded_by: null, rev: 1, auto: true, deleted_at: null })
+      const fromAuto = await DB.recordAbsentBath({ residentId: 1, day: T, bathingPlanned: true, recordedBy: 2 })
+      assert.deepEqual([fromAuto.status, fromAuto.autoResult, fromAuto.inserted], ['done', 'full', undefined])
+      const created = await DB.recordAbsentBath({ residentId: 2, day: T, bathingPlanned: true, recordedBy: 2 })
+      assert.deepEqual([created.status, created.autoResult, created.inserted], ['done', undefined, true])
       await reset()
     })
     it('反証 中4: 一覧の行は 12:30 の自動の入浴の相手かを持つ（〔元に戻す〕で入浴を戻してよいかの判定）', () => {
@@ -1287,8 +1334,12 @@ if (DC === null) {
       assert.match(undo, /await updateBath\(bath\.record, \{ result: back, cancel_reason: null \}, \{ editedBy: actorId \}\)/)
       assert.doesNotMatch(undo, /auto: true/)
       // 反証 中4: 休みで作った行を自動と同じ区分にするのは、12:30 の自動の相手で今日の 12:30 より前の時だけ。それ以外は行を取り消す
-      assert.match(undo, /const beforeAutoBath = row\.autoBath === true && day === todayIso\(\) && nowHm\(\) < DAYCARE_AUTO_BATH_AT/)
-      assert.match(undo, /prevBath === null && !beforeAutoBath\s*\? await softDeleteBath\(bath\.record\.id, bath\.record\.rev, \{ editedBy: actorId \}\)/)
+      // 確認の反証 軽3: 押した時（restNow）に 12:30 の自動の相手で 12:30 より前だったかを控え、戻し方は recordAbsentBath の結果で決める
+      const now = t.slice(t.indexOf('const restNow = '), t.indexOf('const undoRest = '))
+      assert.match(now, /const beforeAutoBath = row\.autoBath === true && day === todayIso\(\) && nowHm\(\) < DAYCARE_AUTO_BATH_AT/)
+      assert.match(undo, /bath\.inserted === true && !beforeAutoBath\s*\? await softDeleteBath\(bath\.record\.id, bath\.record\.rev, \{ editedBy: actorId \}\)/)
+      assert.match(undo, /bath\.autoResult === 'full' \|\| bath\.autoResult === 'visit' \? bath\.autoResult/)
+      assert.doesNotMatch(undo, /prevBath/)
     })
     it('予定が2件の方は「予定 要確認」と出す（代表者の回答 A2・定時の処理も入れない）', () => {
       assert.match(list, /: row\.plans\.length > 1\s*\?[^']*'予定 要確認（週間計画にこの方の予定が同じ日に2件あります）'/)
