@@ -1,4 +1,5 @@
-// 移行 0047（デイ 今日の画面の改善 1回目: 自動の到着・帰宅・休みの理由「後で」）の契約。素の Postgres で tests/daycare-auto-pg.mjs が流す。
+// 移行 0047（デイ 今日の画面の改善 1回目: 自動の到着・帰宅・休みの理由「後で」）と 0048（その反証1回の直し: 取り戻しは60分まで・
+// 自動にしない方の判定を到着・帰宅で同じに・入院は今の週間計画でも見る）の契約。素の Postgres で tests/daycare-auto-pg.mjs が流す。
 // 決定文書（【AI取締役】の 20261023_今日の画面の改善_決定_v1.md）の 3「1回目」と 4「守ること」を、DB の層で確かめる。
 //
 // ・定時の処理は時刻を引数で受ける本体（private.daycare_auto_attendance_at）を、時刻をずらして呼ぶ（cron は動かさない）。
@@ -222,6 +223,7 @@ export const AUTO_CASES = [
       r.deleted = code(await ins(`insert into public.daycare_attendance (resident_id, day, arrived_at, recorded_by, client_key) values (3, $1::date, '09:10', 1, 'c-au3-3') returning id`, [D]))
       await h.pg(`update public.daycare_attendance set deleted_at = now(), deleted_by = 1 where client_key = 'c-au3-3'`)
       r.t0931 = await tick(h, '09:31')
+      r.t1005 = await tick(h, '10:05')
       r.t1201 = await tick(h, '12:01')
       r.rows = await att(h)
       r.del3 = (await h.pg(`select count(*)::int as n from public.daycare_attendance where day = $1::date and resident_id = 3`, [D]))[0].n
@@ -232,7 +234,8 @@ export const AUTO_CASES = [
       manual: 'ok',
       deleted: 'ok',
       t0931: { day: D, arrived: 0, left: 0, snapshot: true, skipped: null },
-      t1201: { day: D, arrived: 1, left: 1, snapshot: false, skipped: null },
+      t1005: { day: D, arrived: 1, left: 0, snapshot: false, skipped: null },
+      t1201: { day: D, arrived: 0, left: 1, snapshot: false, skipped: null },
       rows: [
         [1, null, null, false, false, true, 'later'],
         [2, '08:50', '12:00', false, true, false, null],
@@ -265,19 +268,22 @@ export const AUTO_CASES = [
   },
   {
     id: 'AU5',
-    name: '止まっていた後の取り戻し: 終了の後に初めて流れた時は、到着と帰宅を一緒に入れる（両方とも自動の印）',
+    name: '取り戻すのは60分まで（反証 中3）: 旗を日中に開けた・止まっていた後でも、開始・終了から60分を過ぎた分は入れない（写しも作らない）。60分以内なら遅れて入れる',
     async run(h) {
       await prepare(h)
-      const r = await tick(h, '16:30')
-      return { r, rows: await att(h) }
+      const late = await tick(h, '16:30')
+      const rowsLate = (await att(h)).length
+      const snapLate = (await h.pg(`select count(*)::int as n from public.daycare_days where day = $1::date`, [D]))[0].n
+      // 10:20 に初めて流れた: 9:30（50分前）と 10:00 の方は入れる。9:00（80分前）の方は入れない
+      const r = await tick(h, '10:20')
+      return { late: late.skipped, rowsLate, snapLate, r, rows: (await att(h)).map((x) => x[0]) }
     },
     expect: {
-      r: { day: D, arrived: 3, left: 0, snapshot: true, skipped: null },
-      rows: [
-        [1, '09:30', '15:30', true, true, false, null],
-        [2, '09:00', '12:00', true, true, false, null],
-        [3, '10:00', '16:00', true, true, false, null],
-      ],
+      late: 'early',
+      rowsLate: 0,
+      snapLate: 0,
+      r: { day: D, arrived: 2, left: 0, snapshot: true, skipped: null },
+      rows: [1, 3],
     },
   },
   {
@@ -294,14 +300,15 @@ export const AUTO_CASES = [
       const D2 = '2030-03-13'
       await h.pg(`insert into public.daycare_days (day, plan_source, plan_rows, opened_by) values ($1::date, 'none', '[]'::jsonb, 1)`, [D2])
       const none = await tick(h, '10:05', D2)
-      // 読めなかった写し（別の日）→ いまの週間計画で置き換えて記録する（外泊は D の前後だけなので、8 の方も入る。予定が2件の 4 は入れない）
+      // 読めなかった写し（別の日）→ いまの週間計画で置き換えて記録する（外泊は D の前後だけなので、8 の方も入る。予定が2件の 4 と、
+      // 60分より前に始まった 2（9:00）は入れない）
       const D3 = '2030-03-20'
       await h.pg(`insert into public.daycare_days (day, plan_source, plan_rows, opened_by) values ($1::date, 'unknown', '[]'::jsonb, 1)`, [D3])
       const unk = await tick(h, '10:05', D3)
       const unkSnap = (await h.pg(`select plan_source, opened_by from public.daycare_days where day = $1::date`, [D3]))[0]
       return { kv: kv.arrived, kvRows, none: none.skipped, unk: unk.arrived, unkSnap }
     },
-    expect: { kv: 1, kvRows: [1], none: 'noplan', unk: 4, unkSnap: { plan_source: 'kv', opened_by: '1' } },
+    expect: { kv: 1, kvRows: [1], none: 'noplan', unk: 3, unkSnap: { plan_source: 'kv', opened_by: '1' } },
   },
   {
     id: 'AU7',
@@ -329,7 +336,7 @@ export const AUTO_CASES = [
       await prepare(h)
       // この件だけ 4 の方の予定を1件にする（取り消しで印を外さないことを、自動の行で確かめるため）
       await putSchedule(h, scheduleFor(D).map((r) => (r.id === 's4' ? schedRes('s4', { masterId: 'M004', name: '見本 和子' }, [{ dow: dowOf(D), start: '9:30', end: '15:30' }]) : r)))
-      await tick(h, '16:30')
+      for (const t of ['09:01', '09:31', '10:01', '12:01', '15:31', '16:01']) await tick(h, t)
       const up = (sql) => h.as({}, (q) => q(sql, [D]))
       const r = {}
       r.fixArrive = code(await up(`update public.daycare_attendance set arrived_at = '09:45', edited_by = 1 where day = $1::date and resident_id = 1 returning id`))
@@ -392,7 +399,7 @@ export const AUTO_CASES = [
       const fix = code(await h.as({}, (q) => q(`update public.daycare_attendance set absent = true, absent_reason = 'later', arrived_at = null, left_at = null, edited_by = 1 where day = $1::date and resident_id = 1 returning id`, [D])))
       // 3 の方は 10:00 の開始の前に休み
       const first = code(await h.as({}, (q) => q(`insert into public.daycare_attendance (resident_id, day, absent, absent_reason, recorded_by, client_key) values (3, $1::date, true, 'later', 1, 'c-au10-3') returning id`, [D])))
-      const t = await tick(h, '16:30')
+      const t = await tick(h, '12:01')
       return { dup, fix, first, t, rows: (await att(h)).filter((x) => x[0] === 1 || x[0] === 3) }
     },
     expect: {
@@ -415,21 +422,46 @@ export const AUTO_CASES = [
       const field = code(await h.as({ appRole: 'field' }, (q) => q(`update public.daycare_attendance set arrived_at = '09:40', edited_by = 1 where day = $1::date and resident_id = 1 returning id`, [PAST])))
       const fieldAbsent = code(
         await h.as({ appRole: 'field' }, (q) =>
-          q(`update public.daycare_attendance set absent = true, absent_reason = 'later', arrived_at = null, left_at = null, edited_by = 1 where day = $1::date and resident_id = 2 returning id`, [PAST]),
+          q(`update public.daycare_attendance set absent = true, absent_reason = 'later', arrived_at = null, left_at = null, edited_by = 1 where day = $1::date and resident_id = 3 returning id`, [PAST]),
         ),
       )
       const office = code(await h.as({ appRole: 'office' }, (q) => q(`update public.daycare_attendance set arrived_at = '09:40', edited_by = 1 where day = $1::date and resident_id = 1 returning id`, [PAST])))
-      const rows = (await att(h, PAST)).filter((x) => x[0] === 1 || x[0] === 2)
+      const rows = (await att(h, PAST)).filter((x) => x[0] === 1 || x[0] === 3)
       return { arrived: t.arrived, field, fieldAbsent, office, rows }
     },
     expect: {
-      arrived: 3,
+      arrived: 2,
       field: '42501',
       fieldAbsent: '42501',
       office: 'ok',
       rows: [
         [1, '09:40', null, false, false, false, null],
-        [2, '09:00', null, true, false, false, null],
+        [3, '10:00', null, true, false, false, null],
+      ],
+    },
+  },
+  {
+    id: 'AU14',
+    name: '自動にしない方は到着・帰宅とも同じ判定（反証 軽5・軽6）: 到着の後に外出した方には帰宅を入れない。写しの後に今の週間計画で入院にした方には到着を入れない',
+    async run(h) {
+      await prepare(h)
+      // 9:00 の回で写しができる（この時は誰も入院ではない）
+      await tick(h, '09:01')
+      // その後に今の週間計画で 1 の方を入院にする（入居者マスタの写しはまだ）
+      await putSchedule(h, scheduleFor(D).map((r) => (r.id === 's1' ? { ...r, hospitalized: true } : r)))
+      const t0931 = await tick(h, '09:31')
+      // 3 の方は到着の後、13:00 に受診で外出（帰着未定）
+      await tick(h, '10:01')
+      await h.pg(`insert into public.outings (resident_id, kind, start_on, start_at) values (3, 'outing', $1::date, '13:00')`, [D])
+      const t1601 = await tick(h, '16:01')
+      return { t0931: t0931.arrived, t1601: t1601.left, rows: (await att(h)).map((x) => [x[0], x[1], x[2]]) }
+    },
+    expect: {
+      t0931: 0,
+      t1601: 0,
+      rows: [
+        [2, '09:00', null],
+        [3, '10:00', null],
       ],
     },
   },

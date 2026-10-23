@@ -52,6 +52,7 @@ import {
   queuePending,
   queueSubscribe,
   recordAbsentBath,
+  softDeleteBath,
   softDeleteDaycareAttendance,
   subscribeBathChanges,
   subscribeChanges,
@@ -75,6 +76,7 @@ import {
   daycareBathLabel,
   daycareBathShortLabel,
   daycareBathStatus,
+  DAYCARE_AUTO_BATH_AT,
   fmtPlanTimes,
   hasManualTimes,
   hmOf,
@@ -810,8 +812,10 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
    * 休みの直後の〔元に戻す〕（決定 4: 全部を元どおり）。到着・帰宅の時刻と自動の印を戻す（もともと定時の処理が入れた行を元の形に
    * 戻すだけ）。押す前に行が無かった方は行を取り消して「行が無い」形に戻す（定時の処理がその後も到着を入れる）。
    * 入浴は（代表者の回答 A5）、休みで「中止（欠席）」にした行を 12:30 の自動と同じ区分に戻す: 自動の行を直していた時は元の区分、
-   * 休みで新しく作った行は休業日なら訪問介護で入浴・それ以外は全身浴。ただし自動の印は付けない（0015 からの決まり「端末は
-   * 自動の記録を作らない」＝tests/med.test.mjs を守る）ので、画面は人の記録と同じ「✓ 全身浴」と出る。
+   * 休みで新しく作った行は、12:30 の自動の相手（row.autoBath）で今日の 12:30 より前の時だけ、休業日なら訪問介護で入浴・それ以外は
+   * 全身浴にする。自動の相手でない方・12:30 を過ぎた（自動が行を作らなかった）方は、休みで作った行を取り消して「行が無い」形に
+   * 戻す（入浴したことにしない＝反証 中4）。自動の印は付けない（0015 からの決まり「端末は自動の記録を作らない」＝
+   * tests/med.test.mjs を守る）ので、戻した区分は人の記録と同じ「✓ 全身浴」と出る。
    * 人が入れた入浴の行は休みで直していない（確認を挟む）ので触らない
    */
   const undoRest = async (row: DaycareBoardRow, saved: DaycareAttendance, before: DaycareAttendance | null, prevBath: BathRecord | null, bath: AbsentBathResult) => {
@@ -844,14 +848,16 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       setMsg(id, { tone: 'danger', text: errText(e, true) })
       return
     }
-    if (bath.status === 'done' && (prevBath === null || (prevBath.auto && prevBath.result !== 'cancel'))) {
+    if (bath.status === 'done' && bath.record.result === 'cancel' && bath.record.cancel_reason === 'absent' && (prevBath === null || (prevBath.auto && prevBath.result !== 'cancel'))) {
+      // 休みで作った行を自動と同じ区分にしてよいか: 12:30 の自動の相手で、今日の 12:30 より前（この後に自動が来るはずだった）
+      const beforeAutoBath = row.autoBath === true && day === todayIso() && nowHm() < DAYCARE_AUTO_BATH_AT
       const back: 'full' | 'visit' =
         prevBath !== null && (prevBath.result === 'full' || prevBath.result === 'visit') ? prevBath.result : resultForBathed(day, closedDates) === 'visit' ? 'visit' : 'full'
       try {
         const b =
-          bath.record.result === 'cancel' && bath.record.cancel_reason === 'absent'
-            ? await updateBath(bath.record, { result: back, cancel_reason: null }, { editedBy: actorId })
-            : null
+          prevBath === null && !beforeAutoBath
+            ? await softDeleteBath(bath.record.id, bath.record.rev, { editedBy: actorId })
+            : await updateBath(bath.record, { result: back, cancel_reason: null }, { editedBy: actorId })
         if (b === 'conflict') setMsg(id, { tone: 'warn', text: '休みは取り消しました。入浴の記録が他の端末で直されていたため、入浴は戻していません。入浴の欄で確かめてください。' })
       } catch (e) {
         setMsg(id, { tone: 'warn', text: `休みは取り消しました。入浴の記録は「入浴していない（欠席）」のままです（${errText(e)}）。入浴の欄から直してください。` })
@@ -1220,9 +1226,12 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                       <span className="text-sm text-ink2">
                         {row.dup
                           ? '予定 要確認（週間計画にこの方の記録が2件あります）'
-                          : row.planned
-                            ? fmtPlanTimes(row.plans)
-                            : '予定外の来所'}
+                          : row.plans.length > 1
+                            ? // 同じ方に同じ日の予定が2件＝データの誤り（代表者の回答 A2「そのような日はない」）。定時の処理も到着・帰宅を入れない
+                              '予定 要確認（週間計画にこの方の予定が同じ日に2件あります）'
+                            : row.planned
+                              ? fmtPlanTimes(row.plans)
+                              : '予定外の来所'}
                         {row.bathingPlanned ? '・入浴の予定あり' : ''}
                       </span>
                     </Link>

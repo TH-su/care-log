@@ -247,6 +247,11 @@ export interface DaycareBoardRow {
   state: AttendanceState
   /** 予定に無い（記録がある・画面で足した） */
   extra: boolean
+  /**
+   * 12:30 の自動の入浴（0016 の care_auto_bath）が行を作る相手（予定の bath_resident_id）。休みの直後の〔元に戻す〕で、
+   * 休みで作った入浴の行を自動と同じ区分に戻すのは、この相手で 12:30 より前の時だけ（それ以外は行を取り消す＝反証 中4）
+   */
+  autoBath?: boolean
 }
 
 export interface DaycareBoardCounts {
@@ -346,7 +351,10 @@ export function buildDaycareBoard(p: {
   const autoBath = new Set<number>()
   for (const r of p.planRows) if (r.sched_id !== null && typeof r.bath_resident_id === 'number') autoBath.add(r.bath_resident_id)
   const rows = [...byResident.values()]
-  for (const r of rows) if (autoBath.has(r.residentId)) r.bathingPlanned = true
+  for (const r of rows) {
+    r.autoBath = autoBath.has(r.residentId)
+    if (r.autoBath) r.bathingPlanned = true
+  }
   for (const r of rows) r.plans.sort((a, b) => timeKey(a.start).localeCompare(timeKey(b.start)))
   rows.sort((a, b) => {
     if (a.extra !== b.extra) return a.extra ? 1 : -1

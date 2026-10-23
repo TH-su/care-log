@@ -1033,6 +1033,68 @@ if (DC === null) {
       assert.equal('arrived_auto' in sent[1], false, 'false は送らない（DB のトリガが外す）')
       await reset()
     })
+    it('反証 重1: 圏外で押した〔休み〕の追加が、後から載った自動の到着とぶつかったら、人の記録で上書きする（人の行には負けて止まる）', async () => {
+      let off = true
+      const s = fakeServer({ offline: () => off })
+      DB.__testHooks.setClient(s.client)
+      const q = await DB.insertDaycareAttendance({ resident_id: 1, day: T, arrived_at: null, left_at: null, absent: true, absent_reason: 'later', note: null, recorded_by: 2 })
+      assert.equal(q, 'queued')
+      // 9:30 の定時の処理の自動の到着（記入者なし・印つき）
+      s.db.daycare_attendance.push({ id: 70, resident_id: 1, day: T, arrived_at: '09:30:00', left_at: null, absent: false, absent_reason: null, note: null, recorded_by: null, rev: 1, arrived_auto: true, left_auto: false, deleted_at: null, client_key: 'auto:dcatt:x:1' })
+      off = false
+      await DB.flushQueue(true)
+      assert.equal(s.db.daycare_attendance.length, 1, '重複0')
+      const a = s.db.daycare_attendance[0]
+      assert.deepEqual([a.absent, a.absent_reason, a.arrived_at, a.left_at, a.arrived_auto, a.left_auto, a.recorded_by], [true, 'later', null, null, false, false, 2])
+      assert.equal(DB.queuePending(), 0)
+      await reset()
+      // 相手が人の記録なら止まる（黙って上書きしない）
+      let off2 = true
+      const s2 = fakeServer({ offline: () => off2 })
+      DB.__testHooks.setClient(s2.client)
+      await DB.insertDaycareAttendance({ resident_id: 1, day: T, arrived_at: null, left_at: null, absent: true, absent_reason: 'later', note: null, recorded_by: 2 })
+      s2.db.daycare_attendance.push({ id: 71, resident_id: 1, day: T, arrived_at: '09:35:00', left_at: null, absent: false, absent_reason: null, note: null, recorded_by: 3, rev: 1, arrived_auto: false, left_auto: false, deleted_at: null, client_key: 'c-x' })
+      off2 = false
+      await DB.flushQueue(true)
+      assert.equal(s2.db.daycare_attendance[0].arrived_at, '09:35:00')
+      assert.equal(DB.listStoppedOps().filter((o) => o.table === 'daycare_attendance').length, 1)
+      await reset()
+    })
+    it('反証 中2: 圏外で押した〔帰宅〕の書き換えが、自動の帰宅で版が1つ進んだ行に届かない時は、いまの版に乗せ替えて送る（人が変えていれば止まる）', async () => {
+      let off = false
+      const s = fakeServer({ offline: () => off })
+      DB.__testHooks.setClient(s.client)
+      s.db.daycare_attendance.push({ id: 80, resident_id: 1, day: T, arrived_at: '09:30:00', left_at: null, absent: false, absent_reason: null, note: null, recorded_by: 2, rev: 3, arrived_auto: false, left_auto: false, deleted_at: null, client_key: 'c-80' })
+      const cur = (await DB.fetchDaycareAttendance(T))[0]
+      off = true
+      assert.equal(await DB.updateDaycareAttendance(cur, { left_at: '12:50' }, { editedBy: 2 }), 'queued')
+      // 13:30 の定時の処理の自動の帰宅（版が1つ進む）
+      Object.assign(s.db.daycare_attendance[0], { left_at: '13:30:00', left_auto: true, rev: 4 })
+      off = false
+      await DB.flushQueue(true)
+      assert.deepEqual([s.db.daycare_attendance[0].left_at, s.db.daycare_attendance[0].rev], ['12:50', 5])
+      assert.equal(DB.queuePending(), 0)
+      await reset()
+      // 人が先に帰宅を入れていた（印なし）→ 止まる
+      let off2 = false
+      const s2 = fakeServer({ offline: () => off2 })
+      DB.__testHooks.setClient(s2.client)
+      s2.db.daycare_attendance.push({ id: 81, resident_id: 1, day: T, arrived_at: '09:30:00', left_at: null, absent: false, absent_reason: null, note: null, recorded_by: 2, rev: 3, arrived_auto: false, left_auto: false, deleted_at: null, client_key: 'c-81' })
+      const cur2 = (await DB.fetchDaycareAttendance(T))[0]
+      off2 = true
+      await DB.updateDaycareAttendance(cur2, { left_at: '12:50' }, { editedBy: 2 })
+      Object.assign(s2.db.daycare_attendance[0], { left_at: '13:05:00', left_auto: false, rev: 4 })
+      off2 = false
+      await DB.flushQueue(true)
+      assert.equal(s2.db.daycare_attendance[0].left_at, '13:05:00')
+      assert.equal(DB.listStoppedOps().filter((o) => o.table === 'daycare_attendance').length, 1)
+      await reset()
+    })
+    it('反証 中4: 一覧の行は 12:30 の自動の入浴の相手かを持つ（〔元に戻す〕で入浴を戻してよいかの判定）', () => {
+      const plan = (rid, bath) => ({ sched_id: `s${rid}`, event_id: 'e', resident_id: rid, match: 'mid', dup: false, external: false, hospitalized: false, start_time: '9:30', end_time: '15:30', bathing: true, bath_resident_id: bath, plan_rev: 1, updated_at: null })
+      const b = DC.buildDaycareBoard({ planRows: [plan(1, 1), plan(2, null)], source: 'kv', residents: [{ id: 1, name: 'a', active: true }, { id: 2, name: 'b', active: true }], attendance: [] })
+      assert.deepEqual(b.rows.map((r) => [r.residentId, r.autoBath, r.bathingPlanned]), [[1, true, true], [2, false, true]])
+    })
     it('〔元に戻す〕の取り消し: 時刻の無い休みの行だけ消せる（時刻のある行は消さない）', async () => {
       const s = fakeServer()
       DB.__testHooks.setClient(s.client)
@@ -1224,6 +1286,12 @@ if (DC === null) {
       assert.match(undo, /resultForBathed\(day, closedDates\)/)
       assert.match(undo, /await updateBath\(bath\.record, \{ result: back, cancel_reason: null \}, \{ editedBy: actorId \}\)/)
       assert.doesNotMatch(undo, /auto: true/)
+      // 反証 中4: 休みで作った行を自動と同じ区分にするのは、12:30 の自動の相手で今日の 12:30 より前の時だけ。それ以外は行を取り消す
+      assert.match(undo, /const beforeAutoBath = row\.autoBath === true && day === todayIso\(\) && nowHm\(\) < DAYCARE_AUTO_BATH_AT/)
+      assert.match(undo, /prevBath === null && !beforeAutoBath\s*\? await softDeleteBath\(bath\.record\.id, bath\.record\.rev, \{ editedBy: actorId \}\)/)
+    })
+    it('予定が2件の方は「予定 要確認」と出す（代表者の回答 A2・定時の処理も入れない）', () => {
+      assert.match(list, /: row\.plans\.length > 1\s*\?[^']*'予定 要確認（週間計画にこの方の予定が同じ日に2件あります）'/)
     })
     it('休みの文言（ボタン・状態・件数の帯）。入浴の理由の「欠席」は変えない（B6）', () => {
       assert.match(t, /text: `休み（\$\{reason\}）`/)
