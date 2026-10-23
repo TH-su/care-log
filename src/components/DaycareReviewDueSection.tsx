@@ -11,7 +11,7 @@
 import { useState } from 'react'
 import { DbError, canWriteMasters } from '../lib/db'
 import type { MyRole } from '../lib/db'
-import { REVIEW_STATE_LABEL, filterReviewScope, normalizeDueRule, normalizeWarnDays, reviewCopyState, reviewDueCounts, reviewDueList } from '../lib/trainingDue'
+import { REVIEW_STATE_LABEL, normalizeDueRule, normalizeWarnDays, reviewCopyState, reviewDueCounts, scopedReviewDueList } from '../lib/trainingDue'
 import type { DueCopyLoad, ReviewDueRow, WeekScope } from '../lib/trainingDue'
 import { readTrainingPlanConfig, trainingDueSyncText } from '../lib/trainingPlanClient'
 import { syncTrainingPlanDue } from '../lib/trainingDueSync'
@@ -64,9 +64,11 @@ export interface DaycareReviewDueSectionProps {
    * （代表者の決定 2026-10-23・積み残し 51）
    */
   scope: WeekScope | undefined
+  /** その日に来た方（予定外で来た方を含む。範囲に足す＝計画書が無いまま来ている方を「計画なし」として目に入れる） */
+  arrived: readonly number[]
 }
 
-export function DaycareReviewDueSection({ today, residents, copy, role, actorId, blockedReason, onSynced, scope }: DaycareReviewDueSectionProps) {
+export function DaycareReviewDueSection({ today, residents, copy, role, actorId, blockedReason, onSynced, scope, arrived }: DaycareReviewDueSectionProps) {
   const [open, setOpen] = useState<boolean>(readOpen)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<Msg | null>(null)
@@ -84,10 +86,13 @@ export function DaycareReviewDueSection({ today, residents, copy, role, actorId,
   const rows: ReviewDueRow[] =
     loaded === null
       ? []
-      : filterReviewScope(
-          reviewDueList({ copy: loaded.rows, settings: loaded.settings, people: residents.map((r) => ({ id: r.id, active: r.active })), today }),
-          scope?.ids ?? null,
-        )
+      : scopedReviewDueList({
+          copy: loaded.rows,
+          settings: loaded.settings,
+          people: residents.map((r) => ({ id: r.id, active: r.active })),
+          today,
+          scope: { week: scope?.ids ?? null, arrived },
+        })
   const counts = reviewDueCounts(rows)
   const cstate = loaded === null ? null : reviewCopyState(loaded)
   const syncedAt = loaded?.settings?.synced_at ?? null
@@ -182,12 +187,13 @@ export function DaycareReviewDueSection({ today, residents, copy, role, actorId,
           <p className="text-sm text-ink2">
             期限は計画書アプリが計算した値をそのまま使い、期限の{warn}日前から「間近」と出します（計画書の設定: {RULE_TEXT[rule]}）。
             {scope?.reason === 'unread'
-              ? '週間計画を読めないため、計画のない方も含めて写しの全員を出しています。'
+              ? '週間計画を読めないため、計画のない方も含めて写しの全員と、その日に来た方を出しています。'
               : scope?.reason === 'unmatched'
-                ? `週間計画に名簿と照合できない予定が ${scope.unmatched}件あるため、計画のない方も含めて写しの全員を出しています（照合できない予定は、その曜日のデイの今日の画面に出ます）。`
+                ? `週間計画に名簿と照合できない予定が ${scope.unmatched}件あるため、計画のない方も含めて写しの全員と、その日に来た方を出しています（照合できない予定は、その曜日のデイの今日の画面に出ます）。`
                 : scope?.reason === 'noplan'
-                  ? '週間計画にデイの予定が1件も見つからないため、計画のない方も含めて写しの全員を出しています。'
-                  : '計画書に計画がある方と、週間計画でデイの予定がある方（曜日を問わず）を出しています。'}
+                  ? '週間計画にデイの予定が1件も見つからないため、計画のない方も含めて写しの全員と、その日に来た方を出しています。'
+                  : '計画書に計画がある方、週間計画でデイの予定がある方（曜日を問わず）、その日に来た方を出しています。'}
+            計画書の写しに載っていない方も「計画なし」に数えます。
           </p>
           <button type="button" aria-expanded={open} aria-controls="review-due-list" onClick={toggle} className={btn}>
             {open ? '一覧を閉じる' : `一覧を開く（${rows.length}人）`}
@@ -204,7 +210,11 @@ export function DaycareReviewDueSection({ today, residents, copy, role, actorId,
                     <p className="text-lg font-bold text-ink">{nameOf(r.residentId)}</p>
                     <p className="text-base text-ink">
                       <span className={stateCls(r)}>{REVIEW_STATE_LABEL[r.state]}</span>
-                      {r.planDate !== null ? `　次の期限 ${fmtDayLabel(r.due)}・作成 ${md(r.planDate)}` : '　計画書アプリに計画がありません'}
+                      {r.planDate !== null
+                        ? `　次の期限 ${fmtDayLabel(r.due)}・作成 ${md(r.planDate)}`
+                        : r.noCopy
+                          ? '　計画書の写しに載っていません（計画書アプリに計画が無い可能性があります）'
+                          : '　計画書アプリに計画がありません'}
                     </p>
                   </li>
                 ))}

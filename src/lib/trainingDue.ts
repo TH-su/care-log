@@ -169,6 +169,29 @@ export function isEnded(person: DuePerson | undefined, copy: DueCopyRow | undefi
   return copy !== undefined && copy.stop_reason !== null && STOP_REASONS.includes(copy.stop_reason) && isYmd(copy.stop_from) && copy.stop_from <= today
 }
 
+/**
+ * 期限の一覧（見直し・居宅訪問）を出す範囲（積み残し 51・代表者の決定 2026-10-23）。計画書に計画がある方に加えて:
+ * week＝週間計画で、週のどこかの曜日にデイの予定がある方（null＝読めない・照合できない予定がある・予定が1件も無い＝週の分は絞らない）
+ * arrived＝その日に来た方（予定外で来た方を含む。計画書が無いまま来ている方を「計画なし」として目に入れるため）
+ */
+export interface DueScope {
+  week: ReadonlySet<number> | null
+  arrived: readonly number[]
+}
+
+/** 範囲に入るか（週の分が null の時は絞らない＝誰でも入る） */
+const inDueScope = (scope: DueScope, rid: number): boolean => scope.week === null || scope.week.has(rid) || scope.arrived.includes(rid)
+/** 範囲の方（週の分が null の時は、その日に来た方だけ＝週の分は数え上げられない） */
+const dueScopePeople = (scope: DueScope): Set<number> => new Set<number>([...(scope.week ?? []), ...scope.arrived])
+
+/**
+ * 居宅訪問の一覧で、訪問の記録だけがある方を外すか。範囲を渡し、週の分が読めていて、写しに行がある時だけ外す
+ * （写しに行が無い時は、計画がある方を見分けられない＝外すと少なめに出す側になる）
+ */
+export function homeVisitNarrows(scope: DueScope | undefined, copy: readonly unknown[]): boolean {
+  return scope !== undefined && scope.week !== null && copy.length > 0
+}
+
 /** 居宅訪問の期限の1行 */
 export interface HomeVisitDueRow {
   residentId: number
@@ -195,15 +218,22 @@ export function homeVisitDueList(args: {
   settings: DueCopySettings | null
   people: readonly DuePerson[]
   today: string
+  /**
+   * 出す範囲（案A・代表者の決定 2026-10-23）。渡した時は、計画がある方・週間計画に予定がある方・その日に来た方だけを出し、
+   * 訪問の記録だけがある方は出さない（週の分が null の時と、写しに行が1件も無い＝読めない・まだ写していない時は、
+   * 計画がある方を見分けられないので、訪問の記録がある方も出す＝多めに出す側）。渡さない時は 3b の決まりのまま
+   */
+  scope?: DueScope
 }): HomeVisitDueRow[] {
-  const { visits, copy, settings, people, today } = args
+  const { visits, copy, settings, people, today, scope } = args
   const rule = normalizeDueRule(settings?.due_rule)
   const warn = normalizeWarnDays(settings?.warn_days)
   const personOf = new Map(people.map((p) => [p.id, p]))
   const copyOf = new Map(copy.map((c) => [c.resident_id, c]))
   const ids = new Set<number>()
-  for (const v of visits) ids.add(v.resident_id)
+  if (!homeVisitNarrows(scope, copy)) for (const v of visits) ids.add(v.resident_id)
   for (const c of copy) if (isYmd(c.latest_plan_date)) ids.add(c.resident_id)
+  if (scope !== undefined) for (const rid of dueScopePeople(scope)) ids.add(rid)
   const out: HomeVisitDueRow[] = []
   for (const rid of ids) {
     if (isEnded(personOf.get(rid), copyOf.get(rid), today)) continue
@@ -298,6 +328,8 @@ export interface ReviewDueRow {
   /** 最新の計画の作成日（無ければ null＝計画なし） */
   planDate: string | null
   state: Exclude<DueState, 'ended'>
+  /** 範囲に入るのに、計画書の写しに行が無い方（「計画なし」に数える＝多めに出す側・積み残し 51） */
+  noCopy?: true
 }
 
 /**
@@ -342,6 +374,35 @@ export interface WeekScope {
   ids: Set<number> | null
   reason: 'unread' | 'unmatched' | 'noplan' | null
   unmatched: number
+}
+
+/**
+ * 範囲で絞った見直しの一覧（積み残し 51・代表者の決定 2026-10-23・案A と同じ範囲）。
+ * ・写しの行は、計画がある方か、範囲に入る方だけを残す（週の分が null の時は絞らない）
+ * ・範囲に入るのに写しに行が無い方は、「計画なし」（noCopy）として足す（多めに出す側。名簿の在籍の方だけ）
+ */
+export function scopedReviewDueList(args: {
+  copy: readonly DueCopyRow[]
+  settings: DueCopySettings | null
+  people: readonly DuePerson[]
+  today: string
+  scope: DueScope
+}): ReviewDueRow[] {
+  const { copy, settings, people, today, scope } = args
+  const kept = reviewDueList({ copy, settings, people, today }).filter((r) => r.planDate !== null || inDueScope(scope, r.residentId))
+  const copyIds = new Set(copy.map((c) => c.resident_id))
+  const personOf = new Map(people.map((p) => [p.id, p]))
+  const extra: ReviewDueRow[] = []
+  for (const rid of dueScopePeople(scope)) {
+    if (copyIds.has(rid)) continue
+    const p = personOf.get(rid)
+    if (p === undefined || !p.active) continue
+    extra.push({ residentId: rid, due: '', planDate: null, state: 'none', noCopy: true })
+  }
+  const rank: Record<ReviewDueRow['state'], number> = { overdue: 0, warn: 1, none: 2, ok: 3 }
+  return [...kept, ...extra].sort(
+    (a, b) => rank[a.state] - rank[b.state] || (a.due < b.due ? -1 : a.due > b.due ? 1 : 0) || a.residentId - b.residentId,
+  )
 }
 
 /**

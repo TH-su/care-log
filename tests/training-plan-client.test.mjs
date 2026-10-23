@@ -265,7 +265,16 @@ describe('静的検査（段階3c の規律）', () => {
     assert.match(p, /scope=\{week\}/)
     assert.doesNotMatch(p, /r\.planned\)\.map/, 'その日の盤では絞らない')
     const c = code('../src/components/DaycareReviewDueSection.tsx')
-    assert.match(c, /filterReviewScope\(\s*reviewDueList\([\s\S]*?\),\s*scope\?\.ids \?\? null,\s*\)/)
+    // 案A（代表者の決定）で、範囲にその日に来た方を足し、写しに無い方も「計画なし」に数える関数に替えた（固定し直し・意図は同じ）
+    assert.match(c, /scopedReviewDueList\(\{[\s\S]*?scope: \{ week: scope\?\.ids \?\? null, arrived \},\s*\}\)/)
+    assert.match(p, /scope=\{week\}\s*arrived=\{targets\}/)
+    const hv = code('../src/components/DaycareHomeVisitSection.tsx')
+    assert.match(hv, /const dueScope = scope === undefined \? undefined : \{ week: scope\.ids, arrived: targets \}/)
+    assert.match(hv, /homeVisitDueList\(\{[\s\S]*?scope: dueScope,\s*\}\)/)
+    // 写しが読めない・まだ写していない時は、訪問の記録だけの方も外さない（多めに出す側）。その時の文
+    assert.match(hv, /const narrows = homeVisitNarrows\(dueScope, copy\?\.rows \?\? \[\]\)/)
+    assert.match(hv, /計画書の写しが\$\{copy === null \? '読めない' : '無い'\}ため、居宅訪問の記録がある方、週間計画でデイの予定がある方/)
+    assert.match(hv, /\) : scope === undefined \? \(/)
     assert.match(c, /const counts = reviewDueCounts\(rows\)/)
     assert.match(c, /\) : scope === undefined \? \(/)
     assert.match(c, /scope\?\.reason === 'unmatched'/)
