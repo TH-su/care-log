@@ -321,7 +321,12 @@ if (DP === null) {
       // 段階2a は移行を足さない（0043 の次は段階2b の活動 0044 だけ＝2a の分は無い）
       const after = migs.filter((f) => f > '0043_daycare_past_guard_more.sql')
       // 0043 の後に入るのは、段階2b の活動 0044 と段階2d の個人の閾値 0045 だけ（2a の分は無い）
-      assert.deepEqual(after.filter((f) => !['0044_daycare_activity.sql', '0045_resident_vital_limits.sql'].includes(f)), [], '段階2a は移行を足さない')
+      // 段階3の 0046 も 2a の分ではない（固定し直し・意図は同じ）
+      assert.deepEqual(
+        after.filter((f) => !['0044_daycare_activity.sql', '0045_resident_vital_limits.sql', '0046_daycare_training.sql'].includes(f)),
+        [],
+        '段階2a は移行を足さない',
+      )
     })
   })
 }

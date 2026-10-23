@@ -161,12 +161,14 @@ function hmShort(t: string | null): string {
 }
 
 /** デイの画面の上の切り替え（今日／バイタル／活動）。今いる画面は塗りと aria-current で示す */
-export function DaycareNav({ current }: { current: 'today' | 'vitals' | 'activity' }) {
-  const items: { key: 'today' | 'vitals' | 'activity'; to: string; label: string }[] = [
+export function DaycareNav({ current }: { current: 'today' | 'vitals' | 'activity' | 'training' }) {
+  const items: { key: 'today' | 'vitals' | 'activity' | 'training'; to: string; label: string }[] = [
     { key: 'today', to: '/record/daycare', label: '今日（到着・欠席）' },
     { key: 'vitals', to: '/record/daycare/vitals', label: 'バイタル一括' },
     // 段階2b（2026-10-22）: 活動・レクをまとめて記録
     { key: 'activity', to: '/record/daycare/bulk', label: '活動をまとめて' },
+    // 段階3a（2026-10-23）: 個別機能訓練（配置と実施記録）
+    { key: 'training', to: '/record/daycare/training', label: '機能訓練' },
   ]
   return (
     <nav aria-label="デイの画面" className="flex flex-wrap gap-gap print:hidden">

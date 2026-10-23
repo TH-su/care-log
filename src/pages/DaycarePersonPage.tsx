@@ -44,6 +44,7 @@ import {
 import type { CellConflict, CellEditInput, DaycareMealRow, MealCellField, MealTarget } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
 import { DaycareActivitySection } from '../components/DaycareActivitySection'
+import { DaycareTrainingCard } from '../components/DaycareTrainingCard'
 import { useDaycareNoteMarks } from '../components/DaycareNoteMark'
 import { activityText } from '../lib/daycareActivity'
 import { activityMarkText, excretionMarkText, fluidMarkText, mealMarkText, vitalMarkText } from '../lib/daycareNoteMark'
@@ -1015,6 +1016,15 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
         show={show}
         refreshKey={reloadKey}
         markSlot={(a) => marks.button({ kind: 'activity', id: a.id }, activityMarkText(activityText(a)))}
+      />
+
+      {/* 個別機能訓練（段階3a・0046）。読むだけ（記録は機能訓練の画面）。機能訓練だけの旗に従う */}
+      <DaycareTrainingCard
+        residentId={residentId}
+        day={data.day}
+        today={today}
+        refreshKey={reloadKey}
+        staffName={(id) => (staff ?? []).find((s) => s.id === id)?.name ?? `職員ID ${id}`}
       />
 
       <section aria-labelledby="h-ex" className={sectionCls}>

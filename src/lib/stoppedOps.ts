@@ -19,6 +19,7 @@ import {
   OUTING_KIND_LABEL,
 } from './types'
 import { ACTIVITY_PARTICIPATION_LABEL } from './daycareActivity'
+import { STAFFING_ROLE_LABEL, TRAINING_CANCEL_REASON_LABEL, TRAINING_RESULT_LABEL } from './daycareTraining'
 
 /** listStoppedOps の1件のうち、言葉にするのに使う分（db.ts の StoppedOp と同じ形） */
 export interface StoppedOpLike {
@@ -43,6 +44,8 @@ export const STOPPED_TABLE_LABEL: Record<string, string> = {
   residents: '申し送りでの表示名',
   daycare_attendance: 'デイの到着・欠席',
   daycare_activity_log: 'デイの活動',
+  daycare_training_sessions: 'デイの機能訓練',
+  daycare_staffing: 'デイの配置',
 }
 
 /** 取り消し（deleted_at を付ける修正）か */
@@ -120,6 +123,19 @@ const FIELDS: Record<string, Record<string, FieldFmt>> = {
     label: { label: '項目', fmt: text },
     participation: { label: '参加', fmt: labelOf(ACTIVITY_PARTICIPATION_LABEL) },
     note: { label: '備考', fmt: text },
+  },
+  daycare_training_sessions: {
+    result: { label: '結果', fmt: labelOf(TRAINING_RESULT_LABEL) },
+    started_at: { label: '開始', fmt: hm },
+    duration_min: { label: '時間', fmt: (v) => (typeof v === 'number' ? `${v}分` : null) },
+    program: { label: '内容', fmt: text },
+    cancel_reason: { label: '中止の理由', fmt: labelOf(TRAINING_CANCEL_REASON_LABEL) },
+    note: { label: '備考', fmt: text },
+  },
+  daycare_staffing: {
+    role: { label: '役割', fmt: labelOf(STAFFING_ROLE_LABEL) },
+    from_time: { label: 'から', fmt: hm },
+    to_time: { label: 'まで', fmt: hm },
   },
   bath_records: {
     result: { label: '入浴', fmt: labelOf(BATH_RESULT_LABEL) },
