@@ -396,6 +396,10 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
                   ? cur
                   : { kind: 'conflict', conflicts: p.conflicts, target: t }
             else st = cur !== undefined && cur.kind === 'held' ? cur : { kind: 'held', target: t }
+          } else if (p !== null && p.state === 'pending' && (cur === undefined || cur.kind === 'saved')) {
+            // まだ届いていない値（開き直した時・別のタブや1人の画面で入れた分・送り直しの待ち）: 値だけ押された状態に見せず、
+            // 帯の端と下に「未送信」を出す（care-log の食事一括と同じ＝#45 の反証 中2）
+            st = { kind: 'queued', persisted: isQueuePersisted() }
           } else if (cur !== undefined && (cur.kind === 'conflict' || cur.kind === 'held' || cur.kind === 'rejected' || (cur.kind === 'queued' && p === null))) {
             // 届いた（送信待ちから消えた）・別のタブで解かれた: 送信待ち・食い違い・拒否の知らせを外す
             st = undefined

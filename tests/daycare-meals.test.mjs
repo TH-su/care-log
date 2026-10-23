@@ -124,6 +124,23 @@ if (DP === null) {
       const css = read('../src/index.css')
       assert.match(css, /@media \(min-width: 60em\) \{\s*\.dc-meal-row \{\s*grid-template-columns: 11rem minmax\(0, 1fr\);/)
     })
+    it('日を移った後の応答は前の日の表に入れない・画面の入力の印は実際に書けた時だけ（#45 の反証 軽5）', () => {
+      assert.match(page, /if \(prev === null \|\| prev\.day !== saved\.meal_on\) return prev/)
+      assert.match(page, /editedInApp: \(old\?\.editedInApp \?\? false\) \|\| wrote/)
+    })
+    it('知らせの出し直し: 止まった・拒まれた値・まだ届いていない値（開き直した時も「未送信」）・届いたら外す（#45 の反証 中2・軽5）', () => {
+      assert.match(page, /\}, \[data, cameKey, queueTick\]\)/)
+      assert.match(page, /if \(p\.state === 'rejected'\) st = cur !== undefined && cur\.kind === 'rejected' \? cur : \{ kind: 'rejected', target: t \}/)
+      assert.match(page, /\} else if \(p !== null && p\.state === 'pending' && \(cur === undefined \|\| cur\.kind === 'saved'\)\) \{\s*(\/\/[^\n]*\s*)*st = \{ kind: 'queued', persisted: isQueuePersisted\(\) \}/)
+      assert.match(page, /\(cur\.kind === 'queued' && p === null\)\)\) \{\s*(\/\/[^\n]*\s*)*st = undefined/)
+    })
+    it('解き方: 〔いまの値にする〕〔取り下げる〕は送信待ちから外す・〔あなたの値で直す〕は基準をサーバーの値にして送り直す（#45 の反証 軽5）', () => {
+      assert.match(page, /await discardPendingRow\('meals', t, fields \?\? \(p === null \? \[\] : Object\.keys\(p\.values\)\), p\?\.vers\)/)
+      assert.match(page, /base\[c\.field\] = c\.server/)
+      assert.match(page, /await saveMeal\(t, patch, \{ rebase: base, undoable: false \}\)/)
+      assert.match(page, /onClick=\{\(\) => onTake\(st\.target, st\.conflicts\.map\(\(c\) => c\.field\)\)\}/)
+      assert.match(page, /onClick=\{\(\) => onMine\(st\.target, st\.conflicts\)\}/)
+    })
     it('3状態: 読み込み中・読めない時の再試行・来た方がいない時の案内', () => {
       assert.match(page, /<LoadingBlock label="その日の昼食・おやつを読み込んでいます…" \/>/)
       assert.match(page, /<ErrorBlock message=\{error\} onRetry=\{\(\) => setReloadKey\(\(n\) => n \+ 1\)\} \/>/)

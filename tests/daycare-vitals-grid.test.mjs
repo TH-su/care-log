@@ -71,7 +71,7 @@ if (DC === null) {
       const head = page.slice(page.indexOf('<thead>'), page.indexOf('</thead>'))
       assert.ok(head.indexOf('氏名') < head.indexOf('DAYCARE_VITAL_FIELDS') && head.indexOf('DAYCARE_VITAL_FIELDS') < head.indexOf('再測定') && head.indexOf('再測定') < head.indexOf('状態'))
       // 表が枠より広い時だけ手がかりを出す（定時バイタルと同じ）
-      assert.match(page, /const check = \(\) => setTableScrolls\(el\.scrollWidth > el\.clientWidth \+ 1\)/)
+      assert.match(page, /const check = \(\) => \{\s*setTableScrolls\(el\.scrollWidth > el\.clientWidth \+ 1\)\s*setTableBoxWidth\(el\.clientWidth\)/)
       assert.match(page, /表は横にスクロールできます（氏名の列は左に残ります）/)
       // カードの一覧（1人1枚・5欄の格子）は無い
       assert.doesNotMatch(page, /grid grid-cols-5|aria-label="バイタルの一覧"/)
@@ -89,6 +89,16 @@ if (DC === null) {
       assert.match(page, /\{lv !== null \? <span className="text-sm font-bold leading-tight text-ink">\{word\.split\('・'\)\[0\]\}<\/span> : null\}/)
       // 読み上げは前と同じ（前回の値・未送信も読む）
       assert.match(page, /\$\{pv \? `、前回 \$\{fmtVal\(f, pv\.value\)\}` : ''\}\$\{local \? '、未送信' : ''\}/)
+    })
+    it('行の下の詳しい文は表の幅を広げない（幅0＋最小100% の箱・枠の幅で折り返して左に残す＝定時バイタルの F01 と同じ・#45 の反証 重1）', () => {
+      assert.match(
+        page,
+        /<td colSpan=\{DAYCARE_VITAL_FIELDS\.length \+ 3\} className="p-0">\s*<div className="w-0 min-w-full">\s*<div className="sticky left-0 px-2 pb-2" style=\{\{ maxWidth: tableBoxWidth > 0 \? tableBoxWidth : undefined \}\}>\s*<SlotStatus /,
+      )
+    })
+    it('送信中・保存済みも読み上げる（role="status"）・保存済みでも送信待ちが動けば詳しい文を出す（#45 の反証 軽3・軽4）', () => {
+      assert.match(page, /<span role="status" className=\{`text-sm font-bold \$\{mark\.tone/)
+      assert.match(page, /const detail = shown\?\.kind === 'saving' \? false : \(shown !== undefined && shown\.kind !== 'saved'\) \|\| pend !== null/)
     })
     it('状態の列は短い印（dcVitalSlotMark）・詳しい文と解き方は行の下（SlotStatus のまま）', () => {
       assert.match(page, /const mark = dcVitalSlotMark\(shown\?\.kind, pend\?\.state \?\? null\)/)

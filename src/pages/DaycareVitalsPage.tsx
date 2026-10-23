@@ -827,10 +827,15 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   // ── 表の横スクロールの枠（今日の画面の改善 2回目・定時バイタルと同じ）。表が枠より広い（横にスクロールできる）時だけ手がかりを出す ──
   const [tableBox, setTableBox] = useState<HTMLDivElement | null>(null)
   const [tableScrolls, setTableScrolls] = useState(false)
+  /** 表の枠の幅（行の下の詳しい文を、この幅で折り返して左に残すため） */
+  const [tableBoxWidth, setTableBoxWidth] = useState(0)
   useEffect(() => {
     const el = tableBox
     if (!el) return
-    const check = () => setTableScrolls(el.scrollWidth > el.clientWidth + 1)
+    const check = () => {
+      setTableScrolls(el.scrollWidth > el.clientWidth + 1)
+      setTableBoxWidth(el.clientWidth)
+    }
     check()
     if (typeof ResizeObserver === 'undefined') {
       window.addEventListener('resize', check)
@@ -1161,8 +1166,9 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                             ? { kind: 'conflict', conflicts: withCurrentMine(slot, st.conflicts) }
                             : st
                       const mark = dcVitalSlotMark(shown?.kind, pend?.state ?? null)
-                      // 詳しい文と解き方のボタンは、行の下の1行に出す（送信中・保存済みは状態の列の印だけ）
-                      const detail = shown !== undefined ? shown.kind !== 'saving' && shown.kind !== 'saved' : pend !== null
+                      // 詳しい文と解き方のボタンは、行の下の1行に出す（送信中は状態の列の印だけ）。保存済みでも送信待ちが動いていれば
+                      // （同じ端末の別のタブなど）その文を出す（前の SlotStatus と同じ出し方＝#45 の反証 軽4）
+                      const detail = shown?.kind === 'saving' ? false : (shown !== undefined && shown.kind !== 'saved') || pend !== null
                       const time = slot.vital?.measured_at ? slot.vital.measured_at.slice(0, 5) : null
                       return (
                         <Fragment key={slot.key}>
@@ -1236,7 +1242,8 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                             </td>
                             <td className="px-2 py-1">
                               {mark !== null ? (
-                                <span className={`text-sm font-bold ${mark.tone === 'ok' ? 'text-ok' : mark.tone === 'warn' ? 'text-warn' : 'text-ink2'}`}>
+                                // 送信中・保存済みも読み上げで知らせる（前の SlotStatus の role="status" と同じ＝#45 の反証 軽3）
+                                <span role="status" className={`text-sm font-bold ${mark.tone === 'ok' ? 'text-ok' : mark.tone === 'warn' ? 'text-warn' : 'text-ink2'}`}>
                                   <span aria-hidden="true">{mark.mark} </span>
                                   {mark.text}
                                 </span>
@@ -1245,8 +1252,16 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                           </tr>
                           {detail ? (
                             <tr className={isLast ? 'border-b border-border' : ''}>
-                              <td colSpan={DAYCARE_VITAL_FIELDS.length + 3} className="px-2 pb-2">
-                                <SlotStatus st={shown} pend={pend?.state ?? null} onTake={(c) => void resolveTake(slot, c)} onMine={(c) => void resolveMine(slot, c)} />
+                              {/* 詳しい文の行は表の幅を広げない（定時バイタルの F01 手直し 2026-10-10 と同じ形・#45 の反証 重1）。
+                                  表は自動の幅（min-w-max）なので、長い文の1行ぶんの幅が氏名の列に配られて表が広がり、
+                                  欄が sticky の氏名の列の下に隠れて押せなくなる。幅0＋最小100% の箱で表の幅の計算から外し、
+                                  文は表の枠の幅で折り返して、横スクロールしても左に残す（sticky） */}
+                              <td colSpan={DAYCARE_VITAL_FIELDS.length + 3} className="p-0">
+                                <div className="w-0 min-w-full">
+                                  <div className="sticky left-0 px-2 pb-2" style={{ maxWidth: tableBoxWidth > 0 ? tableBoxWidth : undefined }}>
+                                    <SlotStatus st={shown} pend={pend?.state ?? null} onTake={(c) => void resolveTake(slot, c)} onMine={(c) => void resolveMine(slot, c)} />
+                                  </div>
+                                </div>
                               </td>
                             </tr>
                           ) : null}
