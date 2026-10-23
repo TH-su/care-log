@@ -273,6 +273,8 @@ describe('静的検査（段階3c の規律）', () => {
     assert.match(hv, /homeVisitDueList\(\{[\s\S]*?scope: dueScope,\s*\}\)/)
     // 写しが読めない・まだ写していない時は、訪問の記録だけの方も外さない（多めに出す側）。その時の文
     assert.match(hv, /const narrows = homeVisitNarrows\(dueScope, copy\?\.rows \?\? \[\]\)/)
+    // 記録なしの行の添え書きは、一覧に足す時と同じ isYmd で見る（崩れた日付の写しに「計画があります」と出さない）
+    assert.match(hv, /c\.resident_id === rid && isYmd\(c\.latest_plan_date\)/)
     assert.match(hv, /計画書の写しが\$\{copy === null \? '読めない' : '無い'\}ため、居宅訪問の記録がある方、週間計画でデイの予定がある方/)
     assert.match(hv, /\) : scope === undefined \? \(/)
     assert.match(c, /const counts = reviewDueCounts\(rows\)/)

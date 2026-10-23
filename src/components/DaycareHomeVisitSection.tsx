@@ -41,6 +41,7 @@ import {
   homeVisitDueCounts,
   homeVisitDueList,
   homeVisitNarrows,
+  isYmd,
   latestVisit,
   normalizeDueRule,
   normalizeWarnDays,
@@ -181,8 +182,8 @@ export function DaycareHomeVisitSection({ today, residents, targets, staff, acto
   /** 訪問の記録だけがある方を外しているか（写しが読めない・まだ写していない時は外さない＝多めに出す側） */
   const narrows = homeVisitNarrows(dueScope, copy?.rows ?? [])
   const counts = homeVisitDueCounts(rows)
-  /** その方が計画書の写しで計画を持つか（記録なしの行の添え書き） */
-  const hasPlan = (rid: number) => (copy?.rows ?? []).some((c) => c.resident_id === rid && c.latest_plan_date !== null)
+  /** その方が計画書の写しで計画を持つか（記録なしの行の添え書き。一覧に足す時と同じ isYmd で見る） */
+  const hasPlan = (rid: number) => (copy?.rows ?? []).some((c) => c.resident_id === rid && isYmd(c.latest_plan_date))
   const copyNotice = ready === null ? null : homeVisitCopyNotice(ready.copy)
   const ruleSource = ready === null ? 'default' : dueRuleSource(ready.copy)
   // 写した日時は日本時間の日付で出す（UTC の日付を切り出すと、0〜9時に写した分が前の日になる＝反証 軽6）

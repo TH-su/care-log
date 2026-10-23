@@ -251,6 +251,8 @@ if (D === null) {
       )
       const r2 = D.scopedReviewDueList({ copy: rows, settings: null, people, today, scope: { week: new Set([3]), arrived: [] } })
       assert.deepEqual(r2.find((x) => x.residentId === 3)?.noCopy, undefined, '写しにある計画なしの方は写しなしにしない')
+      const r3 = D.scopedReviewDueList({ copy: rows, settings: null, people: [...people, { id: 4, active: true }], today, scope: { week: new Set([4]), arrived: [4] } })
+      assert.equal(r3.some((x) => x.residentId === 4), false, '終了した方（写しで止めている）は、来ても週の予定があっても足し直さない')
       const all = D.scopedReviewDueList({ copy: rows, settings: null, people, today, scope: { week: null, arrived: [8] } })
       assert.deepEqual(all.map((x) => x.residentId).sort(), [1, 2, 3, 5, 6, 8], '週の分が読めない時は写しの全員＋その日に来た方')
     })
