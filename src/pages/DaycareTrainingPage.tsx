@@ -275,6 +275,10 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
     [data, residents],
   )
   const targets = board === null ? [] : trainingTargets(board.rows)
+  // 見直しの一覧を絞る、その日にデイの予定がある方（盤の予定がある方＝daycare_plan と同じ見方・外部利用者は入らない）。
+  // 予定を読めない日は null（絞らない＝多めに出す。代表者の決定 2026-10-23・積み残し 51）
+  const reviewScopeIds =
+    board === null || data === null || data.planSource === 'unknown' ? null : new Set(board.rows.filter((r) => r.planned).map((r) => r.residentId))
   // 計画書の写しで「計画がある・終了でない方」を上に（計画 6章）。写しが無い・読めない時は到着の並びのまま
   const planOrder =
     data === null || data.copy === 'missing'
@@ -763,6 +767,8 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
         actorId={actorId}
         blockedReason={homeVisitBlocked()}
         onSynced={scheduleReload}
+        scopeIds={reviewScopeIds}
+        scopeDay={day}
       />
 
       <DaycareHomeVisitSection

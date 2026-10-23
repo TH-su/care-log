@@ -208,6 +208,14 @@ if (D === null) {
       assert.equal(days90[0].due, '2027-05-01', '規則は写しの設定から')
       assert.deepEqual(D.reviewDueList({ copy: rows, settings: null, people: [{ id: 6, active: false }], today }).map((r) => r.residentId).includes(6), false, '在籍でない方は出さない')
     })
+    it('見直しの一覧の絞り込み（積み残し 51・代表者の決定）: 計画がある方と、その日にデイの予定がある方だけ。予定を読めない時は絞らない', () => {
+      const list = D.reviewDueList({ copy: rows, settings: null, people: [], today })
+      // 3＝計画なし。5・6・1・2＝計画あり
+      assert.deepEqual(D.filterReviewScope(list, new Set()).map((r) => r.residentId), [2, 1, 6, 5], '予定の無い計画なしの方は出さない')
+      assert.deepEqual(D.filterReviewScope(list, new Set([3])).map((r) => r.residentId), [2, 1, 3, 6, 5], 'その日に予定がある計画なしの方は出す')
+      assert.deepEqual(D.filterReviewScope(list, null).map((r) => r.residentId), list.map((r) => r.residentId), '予定を読めない時は全員（多めに出す）')
+      assert.deepEqual(D.reviewDueCounts(D.filterReviewScope(list, new Set())), { overdue: 1, warn: 1, none: 0 }, '件数も絞った後で数える')
+    })
     it('対象者の並び: 写しを読めない・0件の時は元の並びと知らせ。行がある時は計画がある方を上に（中は元の並び）、下の方には理由', () => {
       const targets = [7, 3, 1, 4, 2]
       assert.deepEqual(D.orderTargetsByPlan({ targets, copy: 'error', people: [], today }), { order: targets, noPlan: new Map(), notice: 'error' })

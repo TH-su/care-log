@@ -325,6 +325,17 @@ export function reviewDueList(args: { copy: readonly DueCopyRow[]; settings: Due
   return out.sort((a, b) => rank[a.state] - rank[b.state] || (a.due < b.due ? -1 : a.due > b.due ? 1 : 0) || a.residentId - b.residentId)
 }
 
+/**
+ * 見直しの一覧を出す方を絞る（代表者の決定 2026-10-23・積み残し 51）。次のどちらかに当たる方だけを残す:
+ * 1. その日の週間計画にデイの予定がある方（daycareIds＝盤の予定がある方。daycare_plan と同じ見方で、外部利用者は入らない）
+ * 2. 写しに計画の行がある方（最新の計画の作成日がある方）
+ * daycareIds が null（その日の予定を読めない）の時は絞らない（多めに出す側に倒す。画面はその旨を書き添える）
+ */
+export function filterReviewScope(rows: readonly ReviewDueRow[], daycareIds: ReadonlySet<number> | null): ReviewDueRow[] {
+  if (daycareIds === null) return [...rows]
+  return rows.filter((r) => r.planDate !== null || daycareIds.has(r.residentId))
+}
+
 /** 見直しの一覧の数（期限切れ・間近・計画なし） */
 export function reviewDueCounts(rows: readonly ReviewDueRow[]): { overdue: number; warn: number; none: number } {
   return {
