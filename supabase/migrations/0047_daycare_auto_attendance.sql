@@ -28,7 +28,7 @@
 --     読み、開始の時刻を過ぎた方が初めて出た回に、写しを作ってから記録する（開所の職員は空。daycare_open_day と同じ形の行）。
 --     写しがある日は、その写しだけを見る（今日の画面の一覧と、自動で入れる相手を食い違わせない）
 --   ・入れる予定: 名簿と照合できた予定（match が mid・name）で、dup でない・外部でない・入院中でない・時刻を読める予定だけ。
---     同じ方に予定が2件ある日は、到着＝早い方の開始・帰宅＝遅い方の終了（どちらかの時刻を読めない予定があれば、その側は入れない）
+--     同じ方に予定が2件以上ある日は、データの誤りとして自動にしない（代表者「そのような日はない」2026-10-23）。時刻を読めない側は入れない
 --   ・到着: 開始の時刻を過ぎた方に、開始の時刻で入れる（arrived_auto=true・記入者なし）。その日の生きている行がもうある方
 --     （休み・手で押した到着・到着を取り消した＝時刻を消した行）には入れない＝人が記録・取り消した後に作り直さない。
 --     取り消し済み（deleted_at）の行は数えない: 行を消すのは、押す前に行が無かった方の休みの直後の〔元に戻す〕だけで
@@ -390,12 +390,11 @@ begin
        and coalesce(e.v ->> 'hospitalized', '') <> 'true'
   ),
   per as (
-    -- 同じ方の予定が2件の日は、早い方の開始と遅い方の終了。時刻を読めない予定が1件でもあれば、その側は入れない
-    select ev.rid,
-           case when pg_catalog.bool_or(ev.st is null) then null else pg_catalog.min(ev.st) end as st,
-           case when pg_catalog.bool_or(ev.et is null) then null else pg_catalog.max(ev.et) end as et
+    -- 1人1件の予定の方だけ（同じ方に予定が2件以上ある日は、データの誤りとして自動にしない＝代表者の回答 A2）
+    select ev.rid, pg_catalog.min(ev.st) as st, pg_catalog.min(ev.et) as et
       from ev
      group by ev.rid
+    having pg_catalog.count(*) = 1
   )
   insert into public.daycare_attendance (resident_id, day, arrived_at, left_at, arrived_auto, left_auto, recorded_by, client_key)
   select p.rid, v_day, p.st,
@@ -456,10 +455,11 @@ begin
        and coalesce(e.v ->> 'hospitalized', '') <> 'true'
   ),
   per as (
-    select ev.rid,
-           case when pg_catalog.bool_or(ev.et is null) then null else pg_catalog.max(ev.et) end as et
+    -- 到着と同じく、1人1件の予定の方だけ
+    select ev.rid, pg_catalog.min(ev.et) as et
       from ev
      group by ev.rid
+    having pg_catalog.count(*) = 1
   )
   update public.daycare_attendance a
      set left_at = p.et,

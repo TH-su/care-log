@@ -94,7 +94,7 @@ const MSG_GATE_UNKNOWN =
 const FILTER_LABEL: Record<DcVitalsFilter, string> = {
   present: '到着した方',
   planned: '予定の方全員',
-  all: '全員（欠席・入院を含む）',
+  all: '全員（休み・入院を含む）',
 }
 
 function readFilter(): DcVitalsFilter {
@@ -1026,7 +1026,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
               <p className="text-base text-ink">
                 {filter === 'present' ? '到着した方がまだいません。' : 'この日の対象の方がいません。'}
               </p>
-              <p className="mt-2 text-base text-ink2">「今日（到着・欠席）」で到着を記録すると、ここに並びます。</p>
+              <p className="mt-2 text-base text-ink2">「今日（到着・休み）」で到着を記録すると、ここに並びます。</p>
             </div>
           ) : (
             <ul className="space-y-3" aria-label="バイタルの一覧">

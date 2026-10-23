@@ -572,6 +572,19 @@ export function daycareBathLabel(st: DaycareBathStatus): string {
   return `入浴していない（${r === null ? '理由なし' : BATH_CANCEL_REASON_LABEL[r]}）`
 }
 
+/**
+ * 一覧の1行に出す短い一言（記号＋文字。色だけに頼らない・代表者の決定 2026-10-23 の 1人1行）。自動の行も「済」
+ * （「自動」の文字は出さない）。入浴していない時は「中止（理由）」
+ */
+export function daycareBathShortLabel(st: DaycareBathStatus): string {
+  if (st.kind === 'noPlan') return '予定なし'
+  if (st.kind === 'todo') return '予定'
+  if (st.kind === 'auto') return '済'
+  if (st.kind === 'done') return `✓ ${BATH_RESULT_LABEL[st.record.result]}`
+  const r = st.record.cancel_reason
+  return `中止（${r === null ? '理由なし' : BATH_CANCEL_REASON_LABEL[r]}）`
+}
+
 /** まだ人が確かめていない（予定あり・未記録か、自動の記録のまま） */
 export function bathNeedsCheck(st: DaycareBathStatus): boolean {
   return st.kind === 'todo' || st.kind === 'auto'

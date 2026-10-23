@@ -45,3 +45,35 @@
     overflow: hidden;
   }
 }
+
+/* デイの今日の一覧（1人1行・2026-10-23 代表者の決定・src/pages/DaycarePage.tsx）。
+   表に切り替える幅は em で決める（em のメディアクエリは利用者の文字の大きさの設定に比例する＝文字を大きくした端末では
+   折り返す形に戻り、氏名の列がつぶれない）。列: 氏名・予定｜到着｜帰宅｜入浴｜昼食｜バイタル｜休み。
+   Tailwind の層の外に置く（同じ強さの flex より後に効かせる） */
+.dc-row-head {
+  display: none;
+}
+@media (min-width: 60em) {
+  .dc-row,
+  .dc-row-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 4.5rem 4.5rem 8rem 8rem 6.5rem 6.5rem;
+    align-items: center;
+    column-gap: var(--tap-gap);
+    row-gap: 0;
+  }
+  .dc-cell-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
+  }
+  .dc-span2 {
+    grid-column: span 2 / span 2;
+  }
+}

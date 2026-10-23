@@ -44,7 +44,7 @@ function scheduleFor(day) {
     schedRes('s2', { masterId: 'M002', name: '見本 花子' }, [{ dow: w, start: '9:00', end: '12:00' }]),
     // 利用者No の無い記録を氏名で1人に絞れる（match=name）
     schedRes('s3', { masterId: null, name: '見本　次郎' }, [{ dow: w, start: '10:00', end: '16:00' }]),
-    // 同じ方に予定が2件（午前・午後）
+    // 同じ方に予定が2件（午前・午後）＝データの誤りとして自動にしない（代表者の回答 A2）
     schedRes('s4', { masterId: 'M004', name: '見本 和子' }, [
       { dow: w, start: '9:30', end: '12:00' },
       { dow: w, start: '13:30', end: '15:30' },
@@ -170,7 +170,7 @@ export const AUTO_CASES = [
   },
   {
     id: 'AU2',
-    name: '時刻をずらして流す: 開始の時刻で到着・終了の時刻で帰宅。2件の日は早い開始と遅い終了。照合できない予定・入院・外泊・在籍でない方は入れない。もう一度流しても増えない',
+    name: '時刻をずらして流す: 開始の時刻で到着・終了の時刻で帰宅。予定が2件の方・照合できない予定・入院・外泊・在籍でない方は入れない。もう一度流しても増えない',
     async run(h) {
       await prepare(h)
       const out = {}
@@ -187,26 +187,27 @@ export const AUTO_CASES = [
       const snap = (await h.pg(`select plan_source, opened_by, jsonb_array_length(plan_rows) as n from public.daycare_days where day = $1::date`, [D]))[0]
       out.snap = snap
       out.auto = (await h.pg(`select count(*)::int as n from public.daycare_attendance where day = $1::date and recorded_by is null and client_key like 'auto:dcatt:%'`, [D]))[0].n
+      out.twoEvents = (await h.pg(`select count(*)::int as n from public.daycare_attendance where day = $1::date and resident_id = 4`, [D]))[0].n
       return out
     },
     expect: {
       early: { day: D, arrived: 0, left: 0, snapshot: false, skipped: 'early' },
       snapEarly: 0,
       t0900: { day: D, arrived: 1, left: 0, snapshot: true, skipped: null },
-      t0931: { day: D, arrived: 2, left: 0, snapshot: false, skipped: null },
+      t0931: { day: D, arrived: 1, left: 0, snapshot: false, skipped: null },
       t1005: { day: D, arrived: 1, left: 0, snapshot: false, skipped: null },
       t1201: { day: D, arrived: 0, left: 1, snapshot: false, skipped: null },
-      t1531: { day: D, arrived: 0, left: 2, snapshot: false, skipped: null },
+      t1531: { day: D, arrived: 0, left: 1, snapshot: false, skipped: null },
       t1601: { day: D, arrived: 0, left: 1, snapshot: false, skipped: null },
       again: { day: D, arrived: 0, left: 0, snapshot: false, skipped: null },
       rows: [
         [1, '09:30', '15:30', true, true, false, null],
         [2, '09:00', '12:00', true, true, false, null],
         [3, '10:00', '16:00', true, true, false, null],
-        [4, '09:30', '15:30', true, true, false, null],
       ],
       snap: { plan_source: 'kv', opened_by: null, n: 14 },
-      auto: 4,
+      auto: 3,
+      twoEvents: 0,
     },
   },
   {
@@ -218,27 +219,26 @@ export const AUTO_CASES = [
       const r = {}
       r.absent = code(await ins(`insert into public.daycare_attendance (resident_id, day, absent, absent_reason, recorded_by, client_key) values (1, $1::date, true, 'later', 1, 'c-au3-1') returning id`, [D]))
       r.manual = code(await ins(`insert into public.daycare_attendance (resident_id, day, arrived_at, recorded_by, client_key) values (2, $1::date, '08:50', 1, 'c-au3-2') returning id`, [D]))
-      r.deleted = code(await ins(`insert into public.daycare_attendance (resident_id, day, arrived_at, recorded_by, client_key) values (4, $1::date, '09:10', 1, 'c-au3-4') returning id`, [D]))
-      await h.pg(`update public.daycare_attendance set deleted_at = now(), deleted_by = 1 where client_key = 'c-au3-4'`)
+      r.deleted = code(await ins(`insert into public.daycare_attendance (resident_id, day, arrived_at, recorded_by, client_key) values (3, $1::date, '09:10', 1, 'c-au3-3') returning id`, [D]))
+      await h.pg(`update public.daycare_attendance set deleted_at = now(), deleted_by = 1 where client_key = 'c-au3-3'`)
       r.t0931 = await tick(h, '09:31')
       r.t1201 = await tick(h, '12:01')
       r.rows = await att(h)
-      r.del4 = (await h.pg(`select count(*)::int as n from public.daycare_attendance where day = $1::date and resident_id = 4`, [D]))[0].n
+      r.del3 = (await h.pg(`select count(*)::int as n from public.daycare_attendance where day = $1::date and resident_id = 3`, [D]))[0].n
       return r
     },
     expect: {
       absent: 'ok',
       manual: 'ok',
       deleted: 'ok',
-      t0931: { day: D, arrived: 1, left: 0, snapshot: true, skipped: null },
+      t0931: { day: D, arrived: 0, left: 0, snapshot: true, skipped: null },
       t1201: { day: D, arrived: 1, left: 1, snapshot: false, skipped: null },
       rows: [
         [1, null, null, false, false, true, 'later'],
         [2, '08:50', '12:00', false, true, false, null],
         [3, '10:00', null, true, false, false, null],
-        [4, '09:30', null, true, false, false, null],
       ],
-      del4: 2,
+      del3: 2,
     },
   },
   {
@@ -272,12 +272,11 @@ export const AUTO_CASES = [
       return { r, rows: await att(h) }
     },
     expect: {
-      r: { day: D, arrived: 4, left: 0, snapshot: true, skipped: null },
+      r: { day: D, arrived: 3, left: 0, snapshot: true, skipped: null },
       rows: [
         [1, '09:30', '15:30', true, true, false, null],
         [2, '09:00', '12:00', true, true, false, null],
         [3, '10:00', '16:00', true, true, false, null],
-        [4, '09:30', '15:30', true, true, false, null],
       ],
     },
   },
@@ -295,14 +294,14 @@ export const AUTO_CASES = [
       const D2 = '2030-03-13'
       await h.pg(`insert into public.daycare_days (day, plan_source, plan_rows, opened_by) values ($1::date, 'none', '[]'::jsonb, 1)`, [D2])
       const none = await tick(h, '10:05', D2)
-      // 読めなかった写し（別の日）→ いまの週間計画で置き換えて記録する（外泊は D の前後だけなので、8 の方も入る）
+      // 読めなかった写し（別の日）→ いまの週間計画で置き換えて記録する（外泊は D の前後だけなので、8 の方も入る。予定が2件の 4 は入れない）
       const D3 = '2030-03-20'
       await h.pg(`insert into public.daycare_days (day, plan_source, plan_rows, opened_by) values ($1::date, 'unknown', '[]'::jsonb, 1)`, [D3])
       const unk = await tick(h, '10:05', D3)
       const unkSnap = (await h.pg(`select plan_source, opened_by from public.daycare_days where day = $1::date`, [D3]))[0]
       return { kv: kv.arrived, kvRows, none: none.skipped, unk: unk.arrived, unkSnap }
     },
-    expect: { kv: 1, kvRows: [1], none: 'noplan', unk: 5, unkSnap: { plan_source: 'kv', opened_by: '1' } },
+    expect: { kv: 1, kvRows: [1], none: 'noplan', unk: 4, unkSnap: { plan_source: 'kv', opened_by: '1' } },
   },
   {
     id: 'AU7',
@@ -328,6 +327,8 @@ export const AUTO_CASES = [
     name: '印を外すトリガ: 時刻を直す・休みにすると外れる。取り消しだけでは外さない。帰宅だけ直すと帰宅の印だけ外れる。〔元に戻す〕は時刻と一緒に印を戻せる',
     async run(h) {
       await prepare(h)
+      // この件だけ 4 の方の予定を1件にする（取り消しで印を外さないことを、自動の行で確かめるため）
+      await putSchedule(h, scheduleFor(D).map((r) => (r.id === 's4' ? schedRes('s4', { masterId: 'M004', name: '見本 和子' }, [{ dow: dowOf(D), start: '9:30', end: '15:30' }]) : r)))
       await tick(h, '16:30')
       const up = (sql) => h.as({}, (q) => q(sql, [D]))
       const r = {}
@@ -398,7 +399,7 @@ export const AUTO_CASES = [
       dup: '23505',
       fix: 'ok',
       first: 'ok',
-      t: { day: D, arrived: 0, left: 2, snapshot: false, skipped: null },
+      t: { day: D, arrived: 0, left: 1, snapshot: false, skipped: null },
       rows: [
         [1, null, null, false, false, true, 'later'],
         [3, null, null, false, false, true, 'later'],
@@ -422,7 +423,7 @@ export const AUTO_CASES = [
       return { arrived: t.arrived, field, fieldAbsent, office, rows }
     },
     expect: {
-      arrived: 4,
+      arrived: 3,
       field: '42501',
       fieldAbsent: '42501',
       office: 'ok',

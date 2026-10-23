@@ -452,7 +452,12 @@ if (A === null) {
     it('デイの一覧: 活動を読めない時は印を出さない（「記録なし」に見せない）・切り替えに〔活動をまとめて〕・ルート', () => {
       const d = code('../src/pages/DaycarePage.tsx')
       assert.match(d, /const activities = await fetchDaycareActivities\(target\)\.catch\(\(\) => null\)/)
-      assert.match(d, /\{activityCountOf\(row\.residentId\) !== null \? \(/)
+      // 今日の画面の改善 1回目（代表者の回答 A3・2026-10-23）で、活動・水分の札は一覧から外し、1人の記録の画面で見る（固定し直し）。
+      // 一覧に活動の件数を出さない＝読めない時に「記録なし」に見せる筋も無い
+      assert.doesNotMatch(d, /activityCountOf|activityChipText|fluidOf\(/)
+      const person = code('../src/pages/DaycarePersonPage.tsx')
+      assert.match(person, /import \{ activityText \} from '\.\.\/lib\/daycareActivity'/)
+      assert.match(person, /fluidTotalOf\(/)
       assert.match(d, /\{ key: 'activity', to: '\/record\/daycare\/bulk', label: '活動をまとめて' \}/)
       const app = code('../src/App.tsx')
       assert.match(app, /<Route path="\/record\/daycare\/bulk" element=\{<DaycareActivityBulkPage actorId=\{actorId\} staff=\{staff\} \/>\} \/>/)

@@ -1182,6 +1182,59 @@ if (DC === null) {
     })
   })
 
+  describe('今日の画面の改善 1回目（静的・代表者の決定 2026-10-23 と親の回答 A1〜A5・B1〜B9）', () => {
+    const t = code('../src/pages/DaycarePage.tsx')
+    const list = t.slice(t.indexOf('<div className="rounded-lg border border-border bg-surface">'), t.indexOf('setPickerOpen(true)'))
+    it('画面には「自動」の文字を出さない（到着・帰宅・入浴とも時刻・状態だけ＝代表者の指示）', () => {
+      assert.ok(list.length > 1000)
+      assert.doesNotMatch(list.replace(/電波が戻ると自動で送信します/g, ''), /自動/)
+      assert.doesNotMatch(list, /arrived_auto|left_auto/, '一覧は印を見て見た目を変えない')
+    })
+    it('1人1行: 氏名・予定（押すと1人の記録へ）｜到着｜帰宅｜入浴｜昼食｜バイタル｜休み（右端）。水分・活動の札は外した（代表者の回答 A3）', () => {
+      assert.match(list, /className="dc-row-head [^"]*"[^>]*>\s*<span>氏名・予定<\/span>\s*<span>到着<\/span>\s*<span>帰宅<\/span>\s*<span>入浴<\/span>\s*<span>昼食<\/span>\s*<span>バイタル<\/span>\s*<span className="text-right">休み<\/span>/)
+      assert.match(list, /<Link\s+to=\{personPath\(row\.residentId, day, today\)\}/)
+      assert.match(list, /className=\{REST_BTN\}/)
+      assert.doesNotMatch(list, /水分|活動/)
+      assert.match(t, /const REST_BTN =\s*'inline-flex min-h-tap min-w-\[5rem\]/)
+      // 押せる範囲 44px・角は 6px（rounded-full を使わない）
+      assert.doesNotMatch(t, /rounded-full/)
+      for (const k of ['CELL_BTN', 'DANGER_CELL_BTN', 'PRIMARY_CELL_BTN', 'REST_BTN']) assert.match(t, new RegExp(`const ${k} =\\s*'inline-flex min-h-tap`))
+      const css = read('../src/index.css')
+      assert.match(css, /\.dc-row-head \{\s*display: none;\s*\}/)
+      assert.match(css, /@media \(min-width: 60em\) \{\s*\.dc-row,\s*\.dc-row-head \{\s*display: grid;\s*grid-template-columns: minmax\(0, 1fr\) 4\.5rem 4\.5rem 8rem 8rem 6\.5rem 6\.5rem;/)
+    })
+    it('時刻の欄を押すと直す小窓（今日は現場も・過去の日は事務所＝A4）。〔帰宅を取り消す〕は小窓の中', () => {
+      assert.match(list, /const timesOk = canChangeDaycareTimes\(day, today, role\)/)
+      assert.match(list, /timesOk && !disabled \? \(\s*<button\s+type="button"\s+onClick=\{\(\) => \{\s*if \(precheck\(row\)\) openTime\(row, 'fix'\)/)
+      assert.match(t, /\{timeFor\.mode === 'fix' && timeFor\.row\.attendance\?\.left_at \? \(/)
+    })
+    it('〔休み〕の1タップ: 0047 が無い DB では理由の小窓・人の時刻がある方だけ確かめ・押した瞬間の自動の到着は読み直して休みに直す', () => {
+      const rest = t.slice(t.indexOf('const onRest = '), t.indexOf('const restNow = '))
+      assert.match(rest, /if \(daycareAutoColumnsSeen\(\) !== true\) \{\s*setAbsentFor\(row\)\s*return\s*\}/)
+      assert.match(rest, /if \(a !== null && hasManualTimes\(a\)\) \{\s*setConfirm\(/)
+      const now = t.slice(t.indexOf('const restNow = '), t.indexOf('const undoRest = '))
+      assert.match(now, /absent_reason: 'later' as const, arrived_at: null, left_at: null/)
+      assert.match(now, /if \(r === 'conflict' && before === null\) \{[\s\S]*?isAutoOnlyAttendance\(now\)/)
+      assert.match(now, /await recordAbsentBath\(\{ residentId: id, day, bathingPlanned: row\.bathingPlanned, recordedBy: actorId \}\)/)
+    })
+    it('直後の〔元に戻す〕: 時刻と印を戻す・押す前に行が無ければ行を取り消す・入浴は自動と同じ区分に戻す（印は付けない＝端末は自動の記録を作らない）', () => {
+      const undo = t.slice(t.indexOf('const undoRest = '), t.indexOf('const onReasonPick = '))
+      assert.match(undo, /before === null\s*\? await softDeleteDaycareAttendance\(saved, \{ editedBy: actorId \}\)/)
+      assert.match(undo, /arrived_auto: before\.arrived_auto === true,\s*left_auto: before\.left_auto === true,/)
+      assert.match(undo, /resultForBathed\(day, closedDates\)/)
+      assert.match(undo, /await updateBath\(bath\.record, \{ result: back, cancel_reason: null \}, \{ editedBy: actorId \}\)/)
+      assert.doesNotMatch(undo, /auto: true/)
+    })
+    it('休みの文言（ボタン・状態・件数の帯）。入浴の理由の「欠席」は変えない（B6）', () => {
+      assert.match(t, /text: `休み（\$\{reason\}）`/)
+      assert.match(t, /\{ label: '休み', value: c\.absent \}/)
+      assert.match(t, /label: '今日（到着・休み）'/)
+      assert.match(code('../src/pages/DaycarePersonPage.tsx'), /return `休み（\$\{a\?\.absent_reason/)
+      const T2 = read('../src/lib/types.ts')
+      assert.match(T2, /absent: '欠席'/, '入浴の理由の表示は変えない')
+    })
+  })
+
   describe('配線（ルート・記録ハブ・旗）', () => {
     it('App.tsx に /record/daycare と /record/daycare/vitals・記録ハブの許可リスト cl_recordTab は元のまま', () => {
       const a = read('../src/App.tsx')
@@ -1291,7 +1344,12 @@ if (DC === null) {
       const t = code('../src/pages/DaycarePage.tsx')
       assert.match(t, /if \(canEditPastDaycareTimes\(role\)\) openTime\(row, 'arrive'\)/)
       assert.match(t, /if \(canEditPastDaycareTimes\(role\)\) openTime\(row, 'leave'\)/)
-      assert.match(t, /onClick=\{\(\) => askCancelLeave\(row\)\}\s*disabled=\{disabled \|\| !timesOk\}/)
+      // 今日の画面の改善 1回目（代表者の回答 A4）: 時刻の欄を押すと直す小窓（今日は現場も・過去の日は事務所だけ＝canChangeDaycareTimes）。
+      // 〔帰宅を取り消す〕は時刻を直す小窓の中へ移した（固定し直し・現場の過去の日は時刻の欄が押せない＝止める意図は同じ）
+      assert.match(t, /const timesOk = canChangeDaycareTimes\(day, today, role\)/)
+      assert.match(t, /timesOk && !disabled \? \(\s*<button/)
+      assert.match(t, /setTimeFor\(null\)\s*askCancelLeave\(r\)/)
+      assert.match(t, /if \(!canChangeDaycareTimes\(day, todayIso\(\), role\)\) \{\s*setMsg\(row\.residentId, \{ tone: 'warn', text: MSG_PAST_TIME_CLEAR \}\)/)
       assert.match(t, /disabled=\{disabled \|\| \(rowHasTimes && !timesOk\)\}/)
       assert.match(t, /if \(timesTouched && e instanceof DbError && e\.kind === 'forbidden' && dayRef\.current < todayIso\(\)\) return MSG_PAST_TIME/)
       assert.match(t, /text: errText\(e, touchesTimes\(patch, row\.attendance\)\)/)

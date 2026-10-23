@@ -52,7 +52,6 @@ import {
   queuePending,
   queueSubscribe,
   recordAbsentBath,
-  softDeleteBath,
   softDeleteDaycareAttendance,
   subscribeBathChanges,
   subscribeChanges,
@@ -63,8 +62,7 @@ import {
   updateDaycareAttendance,
 } from '../lib/db'
 import type { AbsentBathResult, DaycareMealRow, MyRole } from '../lib/db'
-import { fluidTotalOf, lunchLabel, personPath } from '../lib/daycarePerson'
-import { activitiesOf, activityChipText } from '../lib/daycareActivity'
+import { lunchLabel, personPath } from '../lib/daycarePerson'
 import type { DaycareActivity } from '../lib/daycareActivity'
 import { RecorderBar } from '../components/RecorderBar'
 import { ConfirmDialog, ErrorBlock, LoadingBlock, ModalShell, ResidentPickerModal, useToast } from '../components/ui'
@@ -75,6 +73,7 @@ import {
   canChangeDaycareTimes,
   canEditPastDaycareTimes,
   daycareBathLabel,
+  daycareBathShortLabel,
   daycareBathStatus,
   fmtPlanTimes,
   hasManualTimes,
@@ -117,10 +116,10 @@ const MSG_ROW_PENDING = '未送信の記録があります（送信が終わる�
 const MSG_FUTURE = '未来の日には記録できません。'
 /** 過去の日の到着・帰宅の時刻は事務所のログインだけ（代表者の決定 2026-10-22・移行 0042 のトリガも同じ規則） */
 const MSG_PAST_TIME =
-  '過去の日の到着・帰宅の時刻は、事務所のログインで入力・修正します（現場の端末は当日だけ）。欠席・入浴は記録できます。時刻は事務所に伝えてください。'
-/** 時刻の入った方の過去の日の欠席・帰宅の取り消し（時刻を消すため事務所だけ） */
+  '過去の日の到着・帰宅の時刻は、事務所のログインで入力・修正します（現場の端末は当日だけ）。休み・入浴は記録できます。時刻は事務所に伝えてください。'
+/** 時刻の入った方の過去の日の休み・帰宅の取り消し（時刻を消すため事務所だけ） */
 const MSG_PAST_TIME_CLEAR =
-  '過去の日に、到着・帰宅の時刻が入っている方を欠席にする・帰宅を取り消すのは、事務所のログインで行います（時刻を消すため）。'
+  '過去の日に、到着・帰宅の時刻が入っている方を休みにする・帰宅を取り消すのは、事務所のログインで行います（時刻を消すため）。'
 const MSG_GATE_UNKNOWN =
   'デイの記録を使える期間かどうかを確認できませんでした（通信エラー）。電波状態を確認して、再試行してください。記録の閲覧はこのままできます。'
 
@@ -147,11 +146,27 @@ interface DayData {
 type RowMsg = { tone: 'warn' | 'danger' | 'info' | 'ok'; text: string }
 
 /** 状態の表示（記号＋文字＋時刻。色だけに頼らない） */
+/**
+ * 一覧の1行（代表者の決定 2026-10-23・1人1行）: 広い画面は 氏名・予定｜到着｜帰宅｜入浴｜昼食｜バイタル｜休み の表、
+ * 狭い画面は氏名の下に残りを折り返す（横に動かす表にはしない）。切り替えの幅と列は src/index.css の .dc-row（em で決める＝
+ * 利用者が文字を大きくした端末では折り返す形に戻り、氏名の列がつぶれない）
+ */
+/** 一覧の欄のボタン（押せる範囲 44px・角は 6px） */
+const CELL_BTN =
+  'inline-flex min-h-tap min-w-tap items-center justify-center rounded border border-border-strong bg-surface px-2 text-base text-ink disabled:text-ink3'
+const DANGER_CELL_BTN =
+  'inline-flex min-h-tap min-w-tap items-center justify-center rounded border border-danger bg-surface px-2 text-base text-danger disabled:border-border disabled:text-ink3'
+const PRIMARY_CELL_BTN =
+  'inline-flex min-h-tap min-w-tap items-center justify-center rounded border border-primary bg-primary px-3 text-base font-bold text-primary-ink disabled:border-border disabled:bg-surface2 disabled:text-ink3'
+/** 〔休み〕は押しやすく（右端にそろえ、幅をそろえる＝代表者の要望） */
+const REST_BTN =
+  'inline-flex min-h-tap min-w-[5rem] items-center justify-center rounded border-2 border-border-strong bg-surface px-3 text-base font-bold text-ink disabled:border-border disabled:text-ink3'
+
 function stateLabel(row: DaycareBoardRow): { mark: string; text: string; tone: 'plain' | 'ok' | 'info' | 'muted' } {
   const a = row.attendance
   if (row.state === 'absent') {
     const reason = a?.absent_reason ? DAYCARE_ABSENT_REASON_LABEL[a.absent_reason] : '理由なし'
-    return { mark: '✕', text: `欠席（${reason}）`, tone: 'muted' }
+    return { mark: '✕', text: `休み（${reason}）`, tone: 'muted' }
   }
   if (row.state === 'left') return { mark: '✓', text: `帰宅 ${hmShort(a?.left_at ?? null)}`, tone: 'muted' }
   if (row.state === 'present') return { mark: '●', text: `在席 ${hmShort(a?.arrived_at ?? null)}`, tone: 'ok' }
@@ -168,7 +183,7 @@ function hmShort(t: string | null): string {
 /** デイの画面の上の切り替え（今日／バイタル／活動）。今いる画面は塗りと aria-current で示す */
 export function DaycareNav({ current }: { current: 'today' | 'vitals' | 'activity' | 'training' }) {
   const items: { key: 'today' | 'vitals' | 'activity' | 'training'; to: string; label: string }[] = [
-    { key: 'today', to: '/record/daycare', label: '今日（到着・欠席）' },
+    { key: 'today', to: '/record/daycare', label: '今日（到着・休み）' },
     { key: 'vitals', to: '/record/daycare/vitals', label: 'バイタル一括' },
     // 段階2b（2026-10-22）: 活動・レクをまとめて記録
     { key: 'activity', to: '/record/daycare/bulk', label: '活動をまとめて' },
@@ -184,8 +199,8 @@ export function DaycareNav({ current }: { current: 'today' | 'vitals' | 'activit
           aria-current={current === it.key ? 'page' : undefined}
           className={
             current === it.key
-              ? 'flex min-h-tap items-center rounded-full border border-primary bg-primary px-4 text-base font-bold text-primary-ink'
-              : 'flex min-h-tap items-center rounded-full border border-border-strong bg-surface px-4 text-base text-ink'
+              ? 'flex min-h-tap items-center rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink'
+              : 'flex min-h-tap items-center rounded border border-border-strong bg-surface px-4 text-base text-ink'
           }
         >
           {current === it.key ? <span aria-hidden="true">✓ </span> : null}
@@ -457,11 +472,8 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     [residents],
   )
   const bathOf = useCallback((id: number) => data?.baths.find((b) => b.resident_id === id) ?? null, [data])
-  /** 段階2a: 行の小さな印（昼食・水分） */
+  /** 段階2a: 行の昼食の欄。水分・活動の札は 1人1行にした時に一覧から外し、1人の記録の画面で見る（代表者の回答 A3・2026-10-23） */
   const lunchOf = (id: number) => data?.meals.find((m) => m.meal.resident_id === id && m.meal.meal_slot === 'lunch')?.meal ?? null
-  const fluidOf = (id: number) => (data === null ? 0 : fluidTotalOf(data.fluids, id, data.day))
-  /** 段階2b: 行の小さな印（活動の件数）。読めない時は null（印を出さない） */
-  const activityCountOf = (id: number) => (data === null || data.activities === null ? null : activitiesOf(data.activities, id, data.day).length)
   const vitalsOf = useCallback((id: number) => (data?.vitals ?? []).filter((v) => v.resident_id === id), [data])
 
   const canWrite = gate !== null && gate.observed && gate.value === true && !(data?.missing ?? false)
@@ -652,7 +664,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     afterAbsentBath(row, bath)
     const bathTouched = bath.status === 'done' || bath.status === 'queued' || bath.status === 'already'
     show(
-      `${nameOf(row.residentId)}さんを欠席にしました（${DAYCARE_ABSENT_REASON_LABEL[reason]}）`,
+      `${nameOf(row.residentId)}さんを休みにしました（${DAYCARE_ABSENT_REASON_LABEL[reason]}）`,
       res === null ? undefined : () => void undoAbsent(res, prev, bathTouched),
     )
     scheduleReload()
@@ -663,7 +675,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     if (r.status === 'needsConfirm') {
       setConfirm({
         title: '入浴の記録を直しますか',
-        body: `${nameOf(id)}さんには「入浴した」の記録があります。欠席にすると、入浴の記録を「入浴していない（欠席）」に直します。`,
+        body: `${nameOf(id)}さんには「入浴した」の記録があります。休みにすると、入浴の記録を「入浴していない（欠席）」に直します。`,
         label: '入浴の記録を直す',
         run: () => {
           setConfirm(null)
@@ -678,10 +690,10 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       })
       return
     }
-    if (r.status === 'blocked') setMsg(id, { tone: 'warn', text: `欠席は記録しました。入浴の記録は直していません（${r.message}）` })
-    else if (r.status === 'conflict') setMsg(id, { tone: 'warn', text: '欠席は記録しました。入浴の記録が他の端末で直されていたため、入浴の記録は直していません。入浴の画面で確かめてください。' })
-    else if (r.status === 'queued') setMsg(id, { tone: 'info', text: `欠席は記録しました。入浴の「入浴していない（欠席）」は${MSG_QUEUED}` })
-    else if (r.status === 'kept') setMsg(id, { tone: 'info', text: '欠席は記録しました。入浴は「入浴していない」の記録があるので、そのままにしました。' })
+    if (r.status === 'blocked') setMsg(id, { tone: 'warn', text: `休みは記録しました。入浴の記録は直していません（${r.message}）` })
+    else if (r.status === 'conflict') setMsg(id, { tone: 'warn', text: '休みは記録しました。入浴の記録が他の端末で直されていたため、入浴の記録は直していません。入浴の画面で確かめてください。' })
+    else if (r.status === 'queued') setMsg(id, { tone: 'info', text: `休みは記録しました。入浴の「入浴していない（欠席）」は${MSG_QUEUED}` })
+    else if (r.status === 'kept') setMsg(id, { tone: 'info', text: '休みは記録しました。入浴は「入浴していない」の記録があるので、そのままにしました。' })
   }
 
   const undoAbsent = async (row: DaycareAttendance, prev: DaycareAttendance | null, bathTouched: boolean) => {
@@ -689,7 +701,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     if (bathTouched) {
       setMsg(row.resident_id, {
         tone: 'info',
-        text: '欠席を取り消しました。入浴の記録は「入浴していない（欠席）」のままです。入浴した場合は、下の〔区分・中止を選ぶ〕で記録し直してください。',
+        text: '休みを取り消しました。入浴の記録は「入浴していない（欠席）」のままです。入浴した場合は、行の入浴の欄から記録し直してください。',
       })
     }
     scheduleReload()
@@ -699,7 +711,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   const noteBathAfterAbsentCancel = (id: number) => {
     const b = bathOf(id)
     if (b !== null && b.result === 'cancel' && b.cancel_reason === 'absent') {
-      setMsg(id, { tone: 'info', text: '欠席を取り消しました。入浴の記録は「入浴していない（欠席）」のままです。入浴した場合は、下の〔区分・中止を選ぶ〕で記録し直してください。' })
+      setMsg(id, { tone: 'info', text: '休みを取り消しました。入浴の記録は「入浴していない（欠席）」のままです。入浴した場合は、行の入浴の欄から記録し直してください。' })
     }
   }
 
@@ -795,9 +807,12 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   }
 
   /**
-   * 休みの直後の〔元に戻す〕（決定 4: 全部を元どおり）。到着・帰宅の時刻と自動の印を戻す。押す前に行が無かった方は行を取り消して
-   * 「行が無い」形に戻す（定時の処理がその後も到着を入れる）。入浴は、自動の行を休みに直していた時は全身浴に戻し、新しく作った
-   * 行は取り消す（12:30 の自動は取り消した行がある日は作らないので、その旨を案内する）
+   * 休みの直後の〔元に戻す〕（決定 4: 全部を元どおり）。到着・帰宅の時刻と自動の印を戻す（もともと定時の処理が入れた行を元の形に
+   * 戻すだけ）。押す前に行が無かった方は行を取り消して「行が無い」形に戻す（定時の処理がその後も到着を入れる）。
+   * 入浴は（代表者の回答 A5）、休みで「中止（欠席）」にした行を 12:30 の自動と同じ区分に戻す: 自動の行を直していた時は元の区分、
+   * 休みで新しく作った行は休業日なら訪問介護で入浴・それ以外は全身浴。ただし自動の印は付けない（0015 からの決まり「端末は
+   * 自動の記録を作らない」＝tests/med.test.mjs を守る）ので、画面は人の記録と同じ「✓ 全身浴」と出る。
+   * 人が入れた入浴の行は休みで直していない（確認を挟む）ので触らない
    */
   const undoRest = async (row: DaycareBoardRow, saved: DaycareAttendance, before: DaycareAttendance | null, prevBath: BathRecord | null, bath: AbsentBathResult) => {
     const id = row.residentId
@@ -829,18 +844,17 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       setMsg(id, { tone: 'danger', text: errText(e, true) })
       return
     }
-    if (bath.status === 'done') {
+    if (bath.status === 'done' && (prevBath === null || (prevBath.auto && prevBath.result !== 'cancel'))) {
+      const back: 'full' | 'visit' =
+        prevBath !== null && (prevBath.result === 'full' || prevBath.result === 'visit') ? prevBath.result : resultForBathed(day, closedDates) === 'visit' ? 'visit' : 'full'
       try {
-        if (prevBath === null) {
-          await softDeleteBath(bath.record.id, bath.record.rev, { editedBy: actorId })
-          if (row.bathingPlanned) {
-            setMsg(id, { tone: 'info', text: '休みを取り消しました。入浴は 12:30 の自動では入りません。入浴したら入浴の欄から記録してください。' })
-          }
-        } else if (prevBath.auto && prevBath.result !== 'cancel') {
-          await updateBath(bath.record, { result: prevBath.result, cancel_reason: null }, { editedBy: actorId })
-        }
-      } catch {
-        setMsg(id, { tone: 'warn', text: '休みは取り消しました。入浴の記録は「入浴していない（欠席）」のままです。入浴の欄から直してください。' })
+        const b =
+          bath.record.result === 'cancel' && bath.record.cancel_reason === 'absent'
+            ? await updateBath(bath.record, { result: back, cancel_reason: null }, { editedBy: actorId })
+            : null
+        if (b === 'conflict') setMsg(id, { tone: 'warn', text: '休みは取り消しました。入浴の記録が他の端末で直されていたため、入浴は戻していません。入浴の欄で確かめてください。' })
+      } catch (e) {
+        setMsg(id, { tone: 'warn', text: `休みは取り消しました。入浴の記録は「入浴していない（欠席）」のままです（${errText(e)}）。入浴の欄から直してください。` })
       }
     }
     scheduleReload()
@@ -910,9 +924,9 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     if (!precheck(row) || row.attendance === null) return
     const a = row.attendance
     setConfirm({
-      title: '欠席を取り消しますか',
-      body: `${nameOf(row.residentId)}さんの欠席の記録を取り消して「予定」に戻します。入浴の記録は消しません。`,
-      label: '欠席を取り消す',
+      title: '休みを取り消しますか',
+      body: `${nameOf(row.residentId)}さんの休みの記録を取り消して「予定」に戻します。到着は自動では戻りません（〔到着〕を押してください）。入浴の記録は消しません。`,
+      label: '休みを取り消す',
       danger: true,
       run: () => {
         setConfirm(null)
@@ -978,7 +992,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       } else {
         setData((prev) => (prev === null || prev.day !== r.bath_on ? prev : { ...prev, baths: [...prev.baths.filter((b) => b.resident_id !== id), r] }))
         setMsg(id, null)
-        show(`${nameOf(id)}さんの入浴を「${word}」で記録しました（直す時は〔区分・中止を選ぶ〕）`)
+        show(`${nameOf(id)}さんの入浴を「${word}」で記録しました（直す時は行の入浴の欄を押してください）`)
       }
     } catch (e) {
       setMsg(id, { tone: 'danger', text: errText(e) })
@@ -1051,8 +1065,8 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       {day < today ? (
         <p role="status" className="rounded-lg border border-border bg-surface2 p-3 text-sm text-ink2">
           {canEditPastDaycareTimes(role)
-            ? '過去の日を表示しています。到着・帰宅は時刻を入れて記録します（事務所のログイン）。〔時刻を直す〕で直せます。'
-            : '過去の日を表示しています。到着・帰宅の時刻は事務所のログインで入力・修正します。欠席・入浴は記録できます（時刻が入っている方の欠席・帰宅の取り消しは事務所）。'}
+            ? '過去の日を表示しています。到着・帰宅は時刻を入れて記録します（事務所のログイン）。行の時刻を押すと直せます。'
+            : '過去の日を表示しています。到着・帰宅の時刻は事務所のログインで入力・修正します。休み・入浴は記録できます（時刻が入っている方の休み・帰宅の取り消しは事務所）。'}
         </p>
       ) : null}
       {gate !== null && !(gate.observed && gate.value === true) ? (
@@ -1099,7 +1113,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     { label: '予定', value: c.planned },
     { label: '在席', value: c.present },
     { label: '帰宅', value: c.left },
-    { label: '欠席', value: c.absent },
+    { label: '休み', value: c.absent },
     { label: '未到着', value: c.waiting },
     { label: 'バイタル未', value: vitalsWaiting, tone: vitalsWaiting > 0 ? 'warn' : undefined },
     { label: '入浴 未確認', value: bathUnchecked, tone: bathUnchecked > 0 ? 'warn' : undefined },
@@ -1111,14 +1125,16 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       {limits.failed ? <VitalLimitsFailedNote className="" onRetry={() => void limits.refresh()} /> : null}
       <PlanBanners data={data} notInRoster={board.notInRoster} unconfirmed={board.unconfirmed} today={today} />
 
-      <ul className="grid grid-cols-3 gap-gap sm:grid-cols-4 lg:grid-cols-7" aria-label="件数">
+      {/* 件数の帯（1行に詰める＝代表者の要望 2026-10-23。注意の数は ▲ と太字と枠で示す＝色だけに頼らない） */}
+      <ul className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border bg-surface px-3 py-2" aria-label="件数">
         {tiles.map((t) => (
-          <li key={t.label} className={`rounded-lg border bg-surface p-3 ${t.tone === 'warn' ? 'border-warn' : 'border-border'}`}>
-            <span className="block font-num text-2xl font-bold text-ink">{t.value}</span>
-            <span className="block text-sm text-ink2">
-              {t.tone === 'warn' ? <span aria-hidden="true">▲ </span> : null}
-              {t.label}
-            </span>
+          <li
+            key={t.label}
+            className={`inline-flex items-baseline gap-1 text-sm ${t.tone === 'warn' ? 'rounded border border-warn bg-warn-bg px-1 font-bold text-ink' : 'text-ink2'}`}
+          >
+            {t.tone === 'warn' ? <span aria-hidden="true">▲</span> : null}
+            <span>{t.label}</span>
+            <span className="font-num text-lg font-bold text-ink">{t.value}</span>
           </li>
         ))}
       </ul>
@@ -1133,232 +1149,239 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
           <p className="mt-2 text-base text-ink2">来所した方は〔予定にない方を追加〕から到着を記録できます。</p>
         </div>
       ) : (
-        <ul className="space-y-3" aria-label="利用者の一覧">
-          {board.rows.map((row) => {
-            const st = stateLabel(row)
-            const pending = hasPendingDaycareAttendance(row.residentId, day, row.attendance?.id ?? null)
-            const isBusy = busy.has(row.residentId) || pending
-            const bath = bathOf(row.residentId)
-            const bst = daycareBathStatus(bath, row.bathingPlanned)
-            const m = rowMsg.get(row.residentId)
-            const name = nameOf(row.residentId)
-            const disabled = !canWrite || isFuture || isBusy
-            /** 到着・帰宅の時刻を変える操作: 今日は誰でも・過去の日は事務所のログインだけ（現場は止める＝0042 と同じ規則） */
-            const timesOk = canChangeDaycareTimes(day, today, role)
-            const stampDisabled = disabled || !timesOk
-            const rowHasTimes = hasTimes(row)
-            const vDone = vitalsDone(row.residentId)
-            const vAbn = vDone && vitalsAbnormal(row.residentId)
-            return (
-              <li key={row.residentId} className="rounded-lg border border-border bg-surface p-3">
-                <div className="flex flex-wrap items-start justify-between gap-gap">
-                  <div className="min-w-0">
-                    <p className="text-lg font-bold text-ink">{name}</p>
-                    <p className="text-sm text-ink2">
-                      {row.dup
-                        ? '予定 要確認（週間計画にこの方の記録が2件あります）'
-                        : row.planned
-                          ? fmtPlanTimes(row.plans)
-                          : '予定外の来所'}
-                      {row.bathingPlanned ? '・入浴の予定あり' : ''}
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-gap">
-                    <span
-                      className={`inline-flex min-h-tap items-center rounded-full border px-3 text-base ${
-                        st.tone === 'ok' ? 'border-ok bg-ok-bg text-ink' : st.tone === 'muted' ? 'border-border bg-surface2 text-ink2' : 'border-border-strong text-ink'
-                      }`}
-                    >
-                      <span aria-hidden="true">{st.mark}&nbsp;</span>
-                      {st.text}
-                    </span>
-                    {row.hospitalized && row.state === 'planned' ? null : row.state === 'planned' ? (
-                      <button
-                        type="button"
-                        onClick={() => void onArrive(row)}
-                        disabled={stampDisabled}
-                        aria-label={`${name}さんの到着を記録（在席にする）`}
-                        className="min-h-14 rounded-full border border-primary bg-primary px-5 text-lg font-bold text-primary-ink disabled:border-border disabled:bg-surface2 disabled:text-ink3"
-                      >
-                        到着を記録
-                      </button>
-                    ) : row.state === 'present' ? (
-                      <button
-                        type="button"
-                        onClick={() => void onLeave(row)}
-                        disabled={stampDisabled}
-                        aria-label={`${name}さんの帰宅を記録`}
-                        className="min-h-14 rounded-full border border-primary bg-primary px-5 text-lg font-bold text-primary-ink disabled:border-border disabled:bg-surface2 disabled:text-ink3"
-                      >
-                        帰宅を記録
-                      </button>
-                    ) : row.state === 'left' ? (
-                      <button
-                        type="button"
-                        onClick={() => askCancelLeave(row)}
-                        disabled={disabled || !timesOk}
-                        className="min-h-tap rounded-full border border-border-strong px-4 text-base text-ink disabled:text-ink3"
-                      >
-                        帰宅を取り消す
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => askCancelAbsent(row)}
-                        disabled={disabled}
-                        className="min-h-tap rounded-full border border-danger px-4 text-base text-danger disabled:border-border disabled:text-ink3"
-                      >
-                        欠席を取り消す
-                      </button>
-                    )}
-                    {(row.state === 'planned' && !row.hospitalized) || row.state === 'present' ? (
-                      <button
-                        type="button"
-                        onClick={() => onRest(row)}
-                        disabled={disabled || (rowHasTimes && !timesOk)}
-                        aria-label={`${name}さんを休みにする`}
-                        className="min-h-tap rounded-full border border-border-strong px-4 text-base text-ink disabled:text-ink3"
-                      >
-                        休み
-                      </button>
-                    ) : null}
-                    {row.state === 'absent' ? (
-                      <button
-                        type="button"
-                        onClick={() => askAbsent(row)}
-                        disabled={disabled}
-                        aria-label={`${name}さんの休みの理由を選ぶ`}
-                        className="min-h-tap rounded-full border border-border-strong px-4 text-base text-ink disabled:text-ink3"
-                      >
-                        {row.attendance?.absent_reason === 'later' ? '理由を選ぶ' : '理由を直す'}
-                      </button>
-                    ) : null}
-                    {canEditPastDaycareTimes(role) && (row.state === 'present' || row.state === 'left') ? (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (precheck(row)) openTime(row, 'fix')
-                        }}
-                        disabled={disabled}
-                        aria-label={`${name}さんの到着・帰宅の時刻を直す`}
-                        className="min-h-tap rounded-full border border-border-strong px-4 text-base text-ink disabled:text-ink3"
-                      >
-                        時刻を直す
-                      </button>
-                    ) : null}
-                  </div>
-                </div>
-
-                {row.state === 'present' || row.state === 'left' || bath !== null || vDone ? (
-                  <div className="mt-3 flex flex-wrap items-center gap-gap">
-                    {row.state === 'present' || row.state === 'left' || vDone ? (
+        <div className="rounded-lg border border-border bg-surface">
+          {/* 列の見出し（広い画面だけ。狭い画面は各欄に小さな見出しを出す） */}
+          <div aria-hidden="true" className="dc-row-head border-b border-border px-3 py-2 text-sm font-bold text-ink2">
+            <span>氏名・予定</span>
+            <span>到着</span>
+            <span>帰宅</span>
+            <span>入浴</span>
+            <span>昼食</span>
+            <span>バイタル</span>
+            <span className="text-right">休み</span>
+          </div>
+          <ul className="divide-y divide-border" aria-label="利用者の一覧">
+            {board.rows.map((row) => {
+              const pending = hasPendingDaycareAttendance(row.residentId, day, row.attendance?.id ?? null)
+              const isBusy = busy.has(row.residentId) || pending
+              const bath = bathOf(row.residentId)
+              const bst = daycareBathStatus(bath, row.bathingPlanned)
+              const m = rowMsg.get(row.residentId)
+              const name = nameOf(row.residentId)
+              const disabled = !canWrite || isFuture || isBusy
+              /** 到着・帰宅の時刻を変える操作: 今日は誰でも・過去の日は事務所のログインだけ（現場は止める＝0042 と同じ規則） */
+              const timesOk = canChangeDaycareTimes(day, today, role)
+              const stampDisabled = disabled || !timesOk
+              const rowHasTimes = hasTimes(row)
+              const vDone = vitalsDone(row.residentId)
+              const vAbn = vDone && vitalsAbnormal(row.residentId)
+              const attended = row.state === 'present' || row.state === 'left'
+              const a = row.attendance
+              /** 時刻の欄（押すと直す小窓。押せない時は時刻だけ）。画面には「自動」の文字は出さない（代表者の指示 2026-10-23） */
+              const timeCell = (t: string | null, which: '到着' | '帰宅') =>
+                timesOk && !disabled ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (precheck(row)) openTime(row, 'fix')
+                    }}
+                    aria-label={`${name}さんの${which}の時刻（${hmShort(t)}）を直す`}
+                    className={CELL_BTN}
+                  >
+                    <span className="font-num">{hmShort(t)}</span>
+                  </button>
+                ) : (
+                  <span className="font-num text-base text-ink">{hmShort(t)}</span>
+                )
+              /** 休みの方に入浴の記録（自動・人の入浴）が残っている＝直す要る（▲ と注意の枠で示す。緑の「済」に見せない） */
+              const absentBathLeft = row.state === 'absent' && (bst.kind === 'auto' || bst.kind === 'done')
+              const bathCls = absentBathLeft
+                ? 'border-2 border-warn bg-warn-bg font-bold text-ink'
+                : bst.kind === 'todo'
+                  ? 'border border-dashed border-border-strong text-ink'
+                  : bst.kind === 'done' || bst.kind === 'auto'
+                    ? 'border border-ok bg-ok-bg text-ink'
+                    : 'border border-border bg-surface2 text-ink'
+              const bathText = absentBathLeft ? `▲ ${daycareBathShortLabel(bst)}` : daycareBathShortLabel(bst)
+              /** 入浴の欄を押せるか（在席・帰宅の方は区分・中止の小窓。休みの方は入浴の行が残っている時だけ「欠席」に直す小窓） */
+              const bathTappable = attended || absentBathLeft
+              return (
+                <li key={row.residentId} className="px-3 py-2">
+                  <div className="dc-row flex flex-wrap items-center gap-x-gap gap-y-2">
+                    {/* 氏名・予定（押すと1人の記録へ） */}
                     <Link
-                      to="/record/daycare/vitals"
-                      className={`inline-flex min-h-tap items-center rounded-full px-3 text-base ${
-                        vAbn
-                          ? 'border-2 border-warn bg-warn-bg text-ink'
-                          : vDone
-                            ? 'border border-ok bg-ok-bg text-ink'
-                            : 'border border-dashed border-border-strong text-ink'
-                      }`}
+                      to={personPath(row.residentId, day, today)}
+                      className="flex min-h-tap min-w-0 basis-full flex-col justify-center rounded px-1 hover:bg-surface2"
                     >
-                      バイタル&nbsp;
-                      <span className="font-bold">{vAbn ? '▲ 要確認' : vDone ? '✓ 済' : '— 未'}</span>
+                      <span className="truncate text-lg font-bold text-ink">
+                        {name}
+                        <span className="sr-only">さんの1日の記録を開く</span>
+                      </span>
+                      <span className="text-sm text-ink2">
+                        {row.dup
+                          ? '予定 要確認（週間計画にこの方の記録が2件あります）'
+                          : row.planned
+                            ? fmtPlanTimes(row.plans)
+                            : '予定外の来所'}
+                        {row.bathingPlanned ? '・入浴の予定あり' : ''}
+                      </span>
                     </Link>
-                    ) : null}
-                    {row.state === 'present' || row.state === 'left' ? (
+
+                    {row.state === 'absent' ? (
+                      // 休みの方は到着・帰宅の2欄をまとめて状態を出す
+                      <span className="inline-flex min-h-tap items-center text-base text-ink dc-span2">
+                        <span aria-hidden="true">✕&nbsp;</span>
+                        {stateLabel(row).text}
+                      </span>
+                    ) : (
                       <>
-                        <span className="inline-flex min-h-tap items-center rounded-full border border-border bg-surface2 px-3 text-base text-ink">
-                          昼食&nbsp;<span className="font-bold">{lunchLabel(lunchOf(row.residentId))}</span>
+                        <span className="inline-flex items-center gap-1">
+                          <span className="dc-cell-label text-sm text-ink2">到着</span>
+                          {row.hospitalized && row.state === 'planned' ? (
+                            <span className="text-base text-ink2">入院中</span>
+                          ) : a?.arrived_at ? (
+                            timeCell(a.arrived_at, '到着')
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => void onArrive(row)}
+                              disabled={stampDisabled}
+                              aria-label={`${name}さんの到着を記録（在席にする）`}
+                              className={PRIMARY_CELL_BTN}
+                            >
+                              到着
+                            </button>
+                          )}
                         </span>
-                        <span className="inline-flex min-h-tap items-center rounded-full border border-border bg-surface2 px-3 text-base text-ink">
-                          水分&nbsp;<span className="font-bold font-num">{fluidOf(row.residentId)} ml</span>
+                        <span className="inline-flex items-center gap-1">
+                          <span className="dc-cell-label text-sm text-ink2">帰宅</span>
+                          {row.state === 'present' ? (
+                            <button
+                              type="button"
+                              onClick={() => void onLeave(row)}
+                              disabled={stampDisabled}
+                              aria-label={`${name}さんの帰宅を記録`}
+                              className={PRIMARY_CELL_BTN}
+                            >
+                              帰宅
+                            </button>
+                          ) : row.state === 'left' ? (
+                            timeCell(a?.left_at ?? null, '帰宅')
+                          ) : (
+                            <span className="text-base text-ink3" aria-label="帰宅はまだありません">—</span>
+                          )}
                         </span>
-                        {activityCountOf(row.residentId) !== null ? (
-                          <span className="inline-flex min-h-tap items-center rounded-full border border-border bg-surface2 px-3 text-base text-ink">
-                            活動&nbsp;<span className="font-bold">{activityChipText(activityCountOf(row.residentId) ?? 0)}</span>
-                          </span>
-                        ) : null}
-                        <Link
-                          to={personPath(row.residentId, day, today)}
-                          aria-label={`${name}さんの1日の記録（昼食・おやつ・水分・活動・排泄）を開く`}
-                          className="inline-flex min-h-tap items-center rounded-full border border-primary bg-surface px-4 text-base font-bold text-primary"
-                        >
-                          記録<span aria-hidden="true"> ›</span>
-                        </Link>
                       </>
-                    ) : null}
-                    <span
-                      className={`inline-flex min-h-tap items-center rounded-full px-3 text-base ${
-                        bst.kind === 'todo'
-                          ? 'border border-dashed border-border-strong text-ink'
-                          : bst.kind === 'done' || bst.kind === 'auto'
-                            ? 'border border-ok bg-ok-bg text-ink'
-                            : 'border border-border bg-surface2 text-ink'
-                      }`}
-                    >
-                      入浴&nbsp;<span className="font-bold">{daycareBathLabel(bst)}</span>
-                    </span>
-                    {row.state === 'absent' && (bst.kind === 'auto' || bst.kind === 'done') ? (
-                      <button
-                        type="button"
-                        onClick={() => void onAbsentBathFix(row)}
-                        disabled={disabled}
-                        aria-label={`${name}さんの入浴を「入浴していない（欠席）」にする`}
-                        className="min-h-tap rounded-full border border-border-strong px-4 text-base text-ink disabled:text-ink3"
-                      >
-                        入浴を「欠席」にする
-                      </button>
-                    ) : null}
-                    {row.state === 'present' || row.state === 'left' ? (
-                      <span className="flex flex-wrap gap-gap" role="group" aria-label={`${name}さんの入浴`}>
-                        {bst.kind === 'todo' ? (
-                          <button
-                            type="button"
-                            onClick={() => onBathAsPlanned(row)}
-                            disabled={disabled}
-                            aria-label={`${name}さんの入浴を予定どおり実施として記録`}
-                            className="min-h-tap rounded-full border border-primary bg-primary px-4 text-base font-bold text-primary-ink disabled:border-border disabled:bg-surface2 disabled:text-ink3"
-                          >
-                            予定どおり実施
-                          </button>
-                        ) : null}
+                    )}
+
+                    {/* 入浴（押すと区分・中止の小窓） */}
+                    <span className="inline-flex items-center gap-1">
+                      <span className="dc-cell-label text-sm text-ink2">入浴</span>
+                      {bst.kind === 'noPlan' && !attended ? (
+                        <span className="text-base text-ink3">—</span>
+                      ) : bathTappable ? (
                         <button
                           type="button"
                           onClick={() => {
                             if (precheck(row)) setBathFor(row)
                           }}
                           disabled={disabled}
-                          aria-label={`${name}さんの入浴の区分・中止を選ぶ`}
-                          className="min-h-tap rounded-full border border-border-strong px-4 text-base text-ink disabled:text-ink3"
+                          aria-label={
+                            absentBathLeft
+                              ? `${name}さんは休みですが入浴の記録（${daycareBathLabel(bst)}）が残っています。直す`
+                              : `${name}さんの入浴（${daycareBathLabel(bst)}）の区分・中止を選ぶ`
+                          }
+                          className={`inline-flex min-h-tap items-center rounded px-2 text-base disabled:text-ink3 ${bathCls}`}
                         >
-                          {bst.kind === 'done' || bst.kind === 'notBathed' ? '直す（区分・中止）' : '区分・中止を選ぶ'}
+                          {bathText}
                         </button>
-                      </span>
-                    ) : null}
-                  </div>
-                ) : null}
+                      ) : (
+                        <span className={`inline-flex min-h-tap items-center rounded px-2 text-base ${bathCls}`}>{bathText}</span>
+                      )}
+                    </span>
 
-                {pending ? (
-                  <p className="mt-2 text-sm text-ink2" role="status">
-                    <span aria-hidden="true">↻ </span>未送信の記録があります（電波が戻ると自動で送信します）
-                  </p>
-                ) : null}
-                {m !== undefined ? (
-                  <p
-                    role={m.tone === 'danger' ? 'alert' : 'status'}
-                    className={`mt-2 rounded border p-2 text-sm text-ink ${
-                      m.tone === 'danger' ? 'border-danger bg-danger-bg' : m.tone === 'warn' ? 'border-warn bg-warn-bg' : 'border-border bg-surface2'
-                    }`}
-                  >
-                    {m.tone === 'danger' || m.tone === 'warn' ? <span aria-hidden="true">▲ </span> : null}
-                    {m.text}
-                  </p>
-                ) : null}
-              </li>
-            )
-          })}
-        </ul>
+                    {/* 昼食（表示だけ。入力は1人の記録） */}
+                    <span className="inline-flex items-center gap-1">
+                      <span className="dc-cell-label text-sm text-ink2">昼食</span>
+                      <span className="text-sm text-ink">{attended ? lunchLabel(lunchOf(row.residentId)) : '—'}</span>
+                    </span>
+
+                    {/* バイタル（押すとバイタル一括へ） */}
+                    <span className="inline-flex items-center gap-1">
+                      <span className="dc-cell-label text-sm text-ink2">バイタル</span>
+                      {attended || vDone ? (
+                        <Link
+                          to="/record/daycare/vitals"
+                          aria-label={`${name}さんのバイタル（${vAbn ? '要確認' : vDone ? '済' : '未'}）を一括の画面で入れる`}
+                          className={`inline-flex min-h-tap items-center rounded px-2 text-base ${
+                            vAbn ? 'border-2 border-warn bg-warn-bg text-ink' : vDone ? 'border border-ok bg-ok-bg text-ink' : 'border border-dashed border-border-strong text-ink'
+                          }`}
+                        >
+                          <span className="font-bold">{vAbn ? '▲ 要確認' : vDone ? '✓ 済' : '— 未'}</span>
+                        </Link>
+                      ) : (
+                        <span className="text-base text-ink3">—</span>
+                      )}
+                    </span>
+
+                    {/* 休み（右端にそろえる） */}
+                    <span className="ml-auto inline-flex flex-wrap items-center justify-end gap-1">
+                      {row.state === 'absent' ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => askAbsent(row)}
+                            disabled={disabled}
+                            aria-label={`${name}さんの休みの理由を選ぶ`}
+                            className={CELL_BTN}
+                          >
+                            理由
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => askCancelAbsent(row)}
+                            disabled={disabled}
+                            aria-label={`${name}さんの休みを取り消す`}
+                            className={DANGER_CELL_BTN}
+                          >
+                            取消
+                          </button>
+                        </>
+                      ) : row.hospitalized && row.state === 'planned' ? null : (
+                        <button
+                          type="button"
+                          onClick={() => onRest(row)}
+                          disabled={disabled || (rowHasTimes && !timesOk)}
+                          aria-label={`${name}さんを休みにする`}
+                          className={REST_BTN}
+                        >
+                          休み
+                        </button>
+                      )}
+                    </span>
+                  </div>
+
+                  {pending ? (
+                    <p className="mt-2 text-sm text-ink2" role="status">
+                      <span aria-hidden="true">↻ </span>未送信の記録があります（電波が戻ると自動で送信します）
+                    </p>
+                  ) : null}
+                  {m !== undefined ? (
+                    <p
+                      role={m.tone === 'danger' ? 'alert' : 'status'}
+                      className={`mt-2 rounded border p-2 text-sm text-ink ${
+                        m.tone === 'danger' ? 'border-danger bg-danger-bg' : m.tone === 'warn' ? 'border-warn bg-warn-bg' : 'border-border bg-surface2'
+                      }`}
+                    >
+                      {m.tone === 'danger' || m.tone === 'warn' ? <span aria-hidden="true">▲ </span> : null}
+                      {m.text}
+                    </p>
+                  ) : null}
+                </li>
+              )
+            })}
+          </ul>
+        </div>
       )}
 
       <div className="flex flex-wrap gap-gap">
@@ -1374,14 +1397,18 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
 
       <ResidentPickerModal open={pickerOpen} residents={active} onPick={addExtra} onClose={() => setPickerOpen(false)} />
 
-      <ModalShell open={absentFor !== null} label="欠席の理由" onClose={() => setAbsentFor(null)}>
+      <ModalShell open={absentFor !== null} label="休みの理由" onClose={() => setAbsentFor(null)}>
         {absentFor !== null ? (
           <div className="p-4">
-            <h2 className="text-lg font-bold text-ink">欠席の理由（{nameOf(absentFor.residentId)}さん）</h2>
+            <h2 className="text-lg font-bold text-ink">休みの理由（{nameOf(absentFor.residentId)}さん）</h2>
             {attendanceState(absentFor.attendance) === 'present' ? (
-              <p className="mt-2 text-base text-ink2">到着の記録（{hmShort(absentFor.attendance?.arrived_at ?? null)}）を取り消して欠席にします。</p>
+              <p className="mt-2 text-base text-ink2">到着の記録（{hmShort(absentFor.attendance?.arrived_at ?? null)}）を取り消して休みにします。</p>
             ) : null}
-            <p className="mt-2 text-sm text-ink2">理由を押すと欠席を記録します（入浴の予定は「入浴していない（欠席）」になります）。</p>
+            <p className="mt-2 text-sm text-ink2">
+              {absentFor.attendance?.absent === true
+                ? '理由を押すと、休みの理由を記録します。'
+                : '理由を押すと休みを記録します（入浴の予定は「入浴していない（欠席）」になります）。'}
+            </p>
             <ul className="mt-3 grid grid-cols-1 gap-gap sm:grid-cols-2">
               {DAYCARE_ABSENT_REASONS.map((r) => (
                 <li key={r}>
@@ -1410,7 +1437,11 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
             <h2 className="text-lg font-bold text-ink">
               {timeFor.mode === 'arrive' ? '到着を記録' : timeFor.mode === 'leave' ? '帰宅を記録' : '時刻を直す'}（{nameOf(timeFor.row.residentId)}さん・{fmtDayLabel(day)}）
             </h2>
-            <p className="mt-2 text-sm text-ink2">到着・帰宅の時刻を入れます（事務所のログイン）。帰宅は空のままにできます。</p>
+            <p className="mt-2 text-sm text-ink2">
+              {day === today
+                ? '到着・帰宅の時刻を入れます（遅れて来た日・早く帰った日は実際の時刻に直してください）。帰宅は空のままにできます。'
+                : '到着・帰宅の時刻を入れます（事務所のログイン）。帰宅は空のままにできます。'}
+            </p>
             <div className="mt-3 grid grid-cols-1 gap-gap sm:grid-cols-2">
               <label className="block text-base text-ink">
                 到着の時刻
@@ -1445,7 +1476,20 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                 {timeErr}
               </p>
             ) : null}
-            <div className="mt-4 flex justify-end gap-gap">
+            <div className="mt-4 flex flex-wrap justify-end gap-gap">
+              {timeFor.mode === 'fix' && timeFor.row.attendance?.left_at ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const r = timeFor.row
+                    setTimeFor(null)
+                    askCancelLeave(r)
+                  }}
+                  className="mr-auto min-h-tap rounded border border-danger px-4 text-base text-danger"
+                >
+                  帰宅を取り消す
+                </button>
+              ) : null}
               <button type="button" onClick={() => setTimeFor(null)} className="min-h-tap rounded border border-border-strong px-4 text-base text-ink">
                 キャンセル
               </button>
@@ -1465,7 +1509,41 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         {bathFor !== null ? (
           <div className="p-4">
             <h2 className="text-lg font-bold text-ink">入浴の記録（{nameOf(bathFor.residentId)}さん）</h2>
+            {attendanceState(bathFor.attendance) === 'absent' ? (
+              <>
+                <p className="mt-2 text-base text-ink">休みの方に入浴の記録が残っています。「入浴していない（欠席）」に直します。</p>
+                <div className="mt-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const r = bathFor
+                      setBathFor(null)
+                      void onAbsentBathFix(r)
+                    }}
+                    className="min-h-14 w-full rounded border border-primary bg-primary px-3 text-lg font-bold text-primary-ink"
+                  >
+                    入浴を「入浴していない（欠席）」にする
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
             <p className="mt-2 text-sm text-ink2">押した区分で記録します（押し直すと直せます）。</p>
+            {daycareBathStatus(bathOf(bathFor.residentId), bathFor.bathingPlanned).kind === 'todo' ? (
+              <div className="mt-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const r = bathFor
+                    setBathFor(null)
+                    onBathAsPlanned(r)
+                  }}
+                  className="min-h-14 w-full rounded border border-primary bg-primary px-3 text-lg font-bold text-primary-ink"
+                >
+                  予定どおり実施
+                </button>
+              </div>
+            ) : null}
             <h3 className="mt-3 text-base font-bold text-ink">入浴した</h3>
             <ul className="mt-2 grid grid-cols-1 gap-gap sm:grid-cols-3">
               {(['full', 'shower', 'partial'] as const).map((res) => (
@@ -1494,7 +1572,9 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                 </li>
               ))}
             </ul>
-            <p className="mt-3 text-sm text-ink2">欠席の時は、この小窓ではなく行の〔欠席〕から記録してください（入浴も「欠席」になります）。</p>
+            <p className="mt-3 text-sm text-ink2">休みの時は、この小窓ではなく行の〔休み〕から記録してください（入浴も「入浴していない（欠席）」になります）。</p>
+              </>
+            )}
             <div className="mt-4 flex justify-end">
               <button type="button" onClick={() => setBathFor(null)} className="min-h-tap rounded border border-border-strong px-4 text-base text-ink">
                 キャンセル
