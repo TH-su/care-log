@@ -164,6 +164,37 @@ if (T === null) {
         '中止（その他・受診）9:30',
       )
     })
+    it('〔完了〕の指導員の既定（反証 中1）: 開始時刻の時間帯の指導員が1人に決まる時だけ。午前・午後で違う日は時刻で選ぶ', () => {
+      const D = '2026-10-23'
+      const am = staffing({ id: 1, staff_id: 3, from_time: '09:00', to_time: '12:00' })
+      const pm = staffing({ id: 2, staff_id: 5, from_time: '13:00', to_time: '16:00' })
+      assert.equal(T.instructorFor([am, pm], D, '10:00'), 3)
+      assert.equal(T.instructorFor([am, pm], D, '14:30'), 5)
+      assert.equal(T.instructorFor([am, pm], D, '12:00'), null, '終わりの時刻は含まない・誰も入っていない時間は決めない')
+      assert.equal(T.instructorFor([am, pm], D, ''), null, '開始時刻が空（過去の日）で2人いる時は決めない')
+      assert.equal(T.instructorFor([am], D, ''), 3, '1人だけならその方')
+      const allDay = staffing({ id: 3, staff_id: 6 })
+      assert.equal(T.instructorFor([am, allDay], D, '10:00'), null, '時間帯の無い行は終日＝2人になる')
+      assert.equal(T.instructorFor([allDay, staffing({ id: 4, staff_id: 6, from_time: '09:00', to_time: '10:00' })], D, '09:30'), 6, '同じ方の2行は1人')
+      assert.equal(T.instructorFor([staffing({ id: 5, staff_id: 4, role: 'nurse' })], D, '10:00'), null, '看護職員は数えない')
+      assert.equal(T.instructorFor([staffing({ id: 6, staff_id: 9, day: '2026-10-22' })], D, '10:00'), null, '他の日は数えない')
+    })
+    it('対象者でない方の記録（反証 中4）: その日の記録のうち、今日の対象者に入っていない方だけ', () => {
+      const list = [
+        session({ id: 1, resident_id: 1, day: '2026-10-20' }),
+        session({ id: 2, resident_id: 2, day: '2026-10-20' }),
+        session({ id: 3, resident_id: 3, day: '2026-10-19' }),
+      ]
+      assert.deepEqual(T.sessionsOutsideTargets(list, [1], '2026-10-20').map((s) => s.id), [2])
+      assert.deepEqual(T.sessionsOutsideTargets(list, [1, 2], '2026-10-20'), [])
+    })
+    it('中止の一言は「その他」の時だけ送る（反証 軽6: 理由を替えた後に見えない一言を残さない）', () => {
+      const base = { result: 'cancelled', cancel_note: '受診のため', minutes: '20' }
+      assert.equal(T.trainingPayload(input({ ...base, cancel_reason: 'other' })).cancel_note, '受診のため')
+      assert.equal(T.trainingPayload(input({ ...base, cancel_reason: 'condition' })).cancel_note, null)
+      assert.equal(T.trainingPayload(input({ ...base, cancel_reason: 'condition' })).duration_min, null)
+      assert.equal(T.trainingPayload(input({ result: 'done', cancel_reason: null, cancel_note: '残り' })).cancel_note, null)
+    })
   })
 }
 
@@ -261,6 +292,16 @@ describe('静的検査（段階3a の規律）', () => {
     assert.match(p, /const setInput = \(patch: Partial<TrainingInput>\) => setEditor\(\(cur\) => \(cur === null \? cur : \{ \.\.\.cur, input: \{ \.\.\.cur\.input, \.\.\.patch \} \}\)\)/)
     // 足りない項目は押した時に出す（開いた直後から赤い文字を出さない）
     assert.match(p, /setEditor\(\{ \.\.\.ed, showErr: true \}\)/)
+    // 1タップで保存するのは、今日で・前回の内容があり・指導員が1人に決まる時だけ（反証 中1・中2）
+    assert.match(p, /if \(d < todayIso\(\) \|\| input\.program === '' \|\| input\.instructor_id === null\) \{\s*openNewWith\(rid, d, input\)\s*return/)
+    // 過去の日は押した時刻を使わない・指導員は開始時刻の時間帯で選ぶ
+    assert.match(p, /const start = d === todayIso\(\) \? defaultStartTime\(nowMinutes\(\), result === 'cancelled' \? 0 : minutes\) : ''/)
+    assert.match(p, /instructor_id: instructorFor\(staffing, d, start\)/)
+    // 送信待ちの配置も指導員として数える（反証 軽4）・対象者でない方の記録にも直す入口を残す（反証 中4）
+    assert.match(p, /const staffing = \[\.\.\.\(data\?\.staffing \?\? \[\]\), \.\.\.pendingStaffing\]/)
+    assert.match(p, /const outside = sessionsOutsideTargets\(sessions, targets, day\)/)
+    // 新しい記録の小窓は保存できるまで閉じない（反証 軽7）
+    assert.match(p, /if \(await saveNew\(ed\.rid, ed\.day, ed\.input, false\)\) setEditor\(null\)/)
     // 取り消しは確認つき
     assert.match(p, /<ConfirmDialog\s+open=\{delSession !== null\}/)
     assert.match(p, /<ConfirmDialog\s+open=\{delStaff !== null\}/)
@@ -272,6 +313,9 @@ describe('静的検査（段階3a の規律）', () => {
     assert.match(code('../src/pages/DaycarePage.tsx'), /\{ key: 'training', to: '\/record\/daycare\/training', label: '機能訓練' \}/)
     const card = code('../src/components/DaycareTrainingCard.tsx')
     assert.doesNotMatch(card, /\b(insert\w+|update\w+|softDelete\w+)\(/, 'カードからは書かない')
+    // 旗が閉じている間・表が無い間は、押しても書けない入口を出さない（反証 軽5）
+    assert.match(card, /getKindInputGate\('daycare_training'\)/)
+    assert.match(card, /\{state\.status !== 'missing' && gate !== 'closed' \? \(\s*<Link/)
     assert.match(code('../src/pages/DaycarePersonPage.tsx'), /<DaycareTrainingCard\s/)
   })
   it('純ロジックは端末に何も残さない（localStorage・supabase を使わない）', () => {

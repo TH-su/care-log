@@ -1,11 +1,12 @@
 // デイ（せせらぎ）段階3a: 1人の1日記録の画面の「機能訓練」のカード（読むだけ）。
 // その方・その日の個別機能訓練の実施記録を1行で出し、記録は機能訓練の画面（/record/daycare/training）で行う（入口を置く）。
-// 表が無い DB（0046 未適用）・旗が閉じている間も、読めた分だけ出す（書き込みはこの部品から行わない）。
+// 表が無い DB（0046 未適用）は「まだ使えません」、旗が閉じている間は「まだ使い始めていません」と出し、入口を出さない
+// （段階3a の反証 軽5: 試用中の画面に、押しても書けない入口を出さない）。書き込みはこの部品から行わない。
 // 端末に業務データを残さない（localStorage を使わない）。
 
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { fetchTrainingSessions, isTrainingMissingError } from '../lib/db'
+import { fetchTrainingSessions, getKindInputGate, isTrainingMissingError, kindBlockedMessage } from '../lib/db'
 import { sessionOf, sessionText } from '../lib/daycareTraining'
 import type { DaycareTrainingSession } from '../lib/daycareTraining'
 
@@ -20,9 +21,21 @@ interface Props {
 }
 
 type State = { status: 'loading' } | { status: 'missing' } | { status: 'error' } | { status: 'ready'; row: DaycareTrainingSession | null }
+/** 旗: null＝まだ分からない／open＝解禁／closed＝封鎖（観測済み）／unknown＝確かめられない */
+type Gate = 'open' | 'closed' | 'unknown' | null
 
 export function DaycareTrainingCard({ residentId, day, today, refreshKey = 0, staffName }: Props) {
   const [state, setState] = useState<State>({ status: 'loading' })
+  const [gate, setGate] = useState<Gate>(null)
+  useEffect(() => {
+    let alive = true
+    getKindInputGate('daycare_training')
+      .then((g) => alive && setGate(g.observed ? (g.value === true ? 'open' : 'closed') : 'unknown'))
+      .catch(() => alive && setGate('unknown'))
+    return () => {
+      alive = false
+    }
+  }, [refreshKey])
   useEffect(() => {
     let alive = true
     setState({ status: 'loading' })
@@ -45,15 +58,19 @@ export function DaycareTrainingCard({ residentId, day, today, refreshKey = 0, st
           ? '読み込んでいます…'
           : state.status === 'missing'
             ? 'デイの機能訓練の記録はまだ使えません（サーバー側の設定待ち）。'
+            : gate === 'closed' && state.status === 'ready' && state.row === null
+              ? `${kindBlockedMessage('daycare_training')}。`
             : state.status === 'error'
               ? '機能訓練の記録を読み込めませんでした。〔最新に更新〕を押してください。'
               : state.row === null
                 ? '記録なし'
                 : `${sessionText(state.row)}・指導員 ${staffName(state.row.instructor_id)}`}
       </p>
-      <Link to={to} className="inline-flex min-h-tap items-center rounded-full border border-primary bg-surface px-4 text-base font-bold text-primary">
-        機能訓練の画面で記録する<span aria-hidden="true"> ›</span>
-      </Link>
+      {state.status !== 'missing' && gate !== 'closed' ? (
+        <Link to={to} className="inline-flex min-h-tap items-center rounded-full border border-primary bg-surface px-4 text-base font-bold text-primary">
+          機能訓練の画面で記録する<span aria-hidden="true"> ›</span>
+        </Link>
+      ) : null}
     </section>
   )
 }

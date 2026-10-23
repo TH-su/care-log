@@ -158,7 +158,8 @@ export function trainingPayload(v: TrainingInput): {
 } {
   const cancelled = v.result === 'cancelled'
   const note = v.note.trim() === '' ? null : v.note
-  const cancelNote = cancelled && v.cancel_note.trim() !== '' ? v.cancel_note.trim() : null
+  // 一言は「その他」の時だけ送る（理由を替えた後に、見えない一言を残さない＝段階3a の反証 軽6）
+  const cancelNote = cancelled && v.cancel_reason === 'other' && v.cancel_note.trim() !== '' ? v.cancel_note.trim() : null
   return {
     result: v.result,
     started_at: hhmm(v.started_at) ?? '00:00',
@@ -201,6 +202,27 @@ export function sessionOf(list: readonly DaycareTrainingSession[], residentId: n
 /** 今日の対象者: その日に来た方（在席・帰宅）。欠席・予定だけの方・名簿に無い方は出さない（段階3の計画の 6章） */
 export function trainingTargets(rows: readonly DaycareBoardRow[]): number[] {
   return rows.filter((r) => r.state === 'present' || r.state === 'left').map((r) => r.residentId)
+}
+
+/**
+ * 〔完了〕の指導員の既定（段階3a の反証 中1）。その日の機能訓練指導員のうち、開始時刻 at（'HH:MM'）を含む時間帯の方
+ * （時間帯の無い行は終日とみなす）が1人に決まる時だけ、その方。at が空の時は、その日の指導員が1人だけならその方。
+ * 決まらない（0人・2人以上）時は null（〔完了〕は小窓を開き、職員に選んでもらう）
+ */
+export function instructorFor(list: readonly DaycareStaffing[], day: string, at: string): number | null {
+  const t = hhmm(at)
+  const ids = new Set<number>()
+  for (const s of list) {
+    if (s.day !== day || s.role !== 'trainer') continue
+    if (t !== null && s.from_time !== null && s.to_time !== null && !(s.from_time <= t && t < s.to_time)) continue
+    ids.add(s.staff_id)
+  }
+  return ids.size === 1 ? [...ids][0] : null
+}
+
+/** その日の記録のうち、今日の対象者に入っていない方の記録（到着を取り消した・欠席にした方など。画面は別の一覧で直せるように出す） */
+export function sessionsOutsideTargets(list: readonly DaycareTrainingSession[], targets: readonly number[], day: string): DaycareTrainingSession[] {
+  return list.filter((s) => s.day === day && !targets.includes(s.resident_id))
 }
 
 /** その日の配置の機能訓練指導員（職員ID・重なりなし・配置の順） */

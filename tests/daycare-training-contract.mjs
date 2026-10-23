@@ -353,6 +353,32 @@ export const TRAINING_CASES = [
     },
   },
   {
+    id: 'T13',
+    name: '写し: 同じ番号が2行来たら後ろの行を採り、結べなかった数に入れない。崩れた日付が1つでもあれば何も書かずに止まる（22008）',
+    async run(h) {
+      const r = await sync(
+        h,
+        [
+          { master_id: 'M001', latest_plan_date: '2026-08-01', next_due: '2026-11-01' },
+          { master_id: 'M001', latest_plan_date: '2026-09-01', next_due: '2026-12-01' },
+          { master_id: 'X999', latest_plan_date: '2026-09-01', next_due: '2026-12-01' },
+        ],
+        {},
+        { appRole: 'office' },
+      )
+      const due = await h.pg(`select resident_id, next_due::text from public.daycare_training_due where deleted_at is null order by resident_id`)
+      const bad = await sync(h, [{ master_id: 'M002', next_due: '2026-02-30' }], {}, { appRole: 'office' })
+      const after = await h.pg(`select count(*)::int as n from public.daycare_training_due where deleted_at is null and resident_id = 2`)
+      return {
+        r: Array.isArray(r) ? { written: r[0].r.written, unmatched: r[0].r.unmatched } : r,
+        due,
+        bad: Array.isArray(bad) ? 'wrote' : bad.error,
+        after: after[0].n,
+      }
+    },
+    expect: { r: { written: 1, unmatched: 1 }, due: [{ resident_id: '1', next_due: '2026-12-01' }], bad: '22008', after: 0 },
+  },
+  {
     id: 'T12',
     name: '変更の記録: 実施記録・居宅訪問・配置を直すと record_history に残る（業務日の列つき）',
     async run(h) {

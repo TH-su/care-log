@@ -393,7 +393,8 @@ if (A === null) {
       const so = code('../src/lib/stoppedOps.ts')
       assert.match(so, /daycare_activity_log: 'デイの活動'/)
       assert.match(so, /participation: \{ label: '参加', fmt: labelOf\(ACTIVITY_PARTICIPATION_LABEL\) \}/)
-      assert.match(so, /op\.table === 'daycare_activity_log'\)/)
+      // 〔いまの記録とくらべる〕の対象に活動が入っている（段階3a で機能訓練が後ろに並んだので、閉じ括弧か「||」のどちらか）
+      assert.match(so, /op\.table === 'daycare_activity_log'(\)| \|\|)/)
       assert.match(code('../src/lib/historyView.ts'), /daycare_activity_log: 'デイの活動'/)
     })
     it('活動の欄（部品）: 書き込みは活動の3つの関数だけ・活動だけの旗・合流には〔元に戻す〕を出さない・取り消しは確認つき', () => {
