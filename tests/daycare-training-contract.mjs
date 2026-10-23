@@ -403,4 +403,15 @@ export const TRAINING_CASES = [
       ],
     },
   },
+  {
+    id: 'T14',
+    name: '写しの初回（写しが空）で結べる番号が0件の時、関数は止まらず ok・written 0 を返し、設定の行だけを書く（0046 の挙動の記録。アプリは送る前に名簿と突き合わせて止める＝段階3c の反証 中1）',
+    async run(h) {
+      const r = await sync(h, [{ master_id: 'X001', latest_plan_date: '2026-09-01', next_due: '2026-12-01' }, { master_id: 'X002' }], {}, { appRole: 'office' })
+      const rows = await h.pg(`select count(*)::int as n from public.daycare_training_due where deleted_at is null`)
+      const settings = await h.pg(`select count(*)::int as n from public.daycare_training_due_settings`)
+      return { r: Array.isArray(r) ? { ok: r[0].r.ok, written: r[0].r.written, unmatched: r[0].r.unmatched } : r, rows: rows[0].n, settings: settings[0].n }
+    },
+    expect: { r: { ok: true, written: 0, unmatched: 2 }, rows: 0, settings: 1 },
+  },
 ]

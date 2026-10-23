@@ -23,6 +23,7 @@ import {
   fetchMyRole,
   fetchRecentTrainingSessions,
   fetchStaffing,
+  fetchTrainingDueCopy,
   fetchTrainingSessions,
   getKindInputGate,
   insertStaffing,
@@ -43,6 +44,9 @@ import {
 import type { MyRole } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
 import { DaycareHomeVisitSection } from '../components/DaycareHomeVisitSection'
+import { DaycareReviewDueSection } from '../components/DaycareReviewDueSection'
+import { TARGET_NO_PLAN_LABEL, orderTargetsByPlan } from '../lib/trainingDue'
+import type { DueCopyLoad } from '../lib/trainingDue'
 import { ConfirmDialog, ErrorBlock, LoadingBlock, ModalShell, useToast } from '../components/ui'
 import { buildDaycareBoard, canEditPastDaycareTimes } from '../lib/daycare'
 import {
@@ -107,6 +111,8 @@ interface TrainingData {
   /** 前回の内容を選ぶ元（読めない時は空＝前回なし扱い） */
   recent: DaycareTrainingSession[]
   missing: boolean
+  /** 計画書の期限の写し（段階3c。'missing'＝表が無い・'error'＝読めない） */
+  copy: DueCopyLoad | 'missing'
 }
 
 type Gate = { value: boolean; observed: boolean; forbidden?: true; outdated?: true }
@@ -197,12 +203,14 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
         if (isTrainingMissingError(e)) missing = true
         return null
       }
-      const [plan, attendance, sessions, staffing, recent] = await Promise.all([
+      const [plan, attendance, sessions, staffing, recent, copy] = await Promise.all([
         usable ? Promise.resolve(null) : fetchDaycarePlan(target),
         dayMissing ? Promise.resolve([] as DaycareAttendance[]) : fetchDaycareAttendance(target),
         fetchTrainingSessions(target).catch(onTrainingError),
         fetchStaffing(target).catch(onTrainingError),
         fetchRecentTrainingSessions(target).catch(() => [] as DaycareTrainingSession[]),
+        // 計画書の期限の写し（読むだけ・見直しの期限と対象者の並びに使う。読めない時は「確かめられません」）
+        fetchTrainingDueCopy().catch((e: unknown): 'missing' | 'error' => (isTrainingMissingError(e) ? 'missing' : 'error')),
       ])
       if (gen !== genRef.current || target !== dayRef.current) return
       setData({
@@ -214,6 +222,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
         staffing,
         recent: recent ?? [],
         missing,
+        copy,
       })
       setDataTick((n) => n + 1)
       setError(null)
@@ -266,6 +275,11 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
     [data, residents],
   )
   const targets = board === null ? [] : trainingTargets(board.rows)
+  // 計画書の写しで「計画がある・終了でない方」を上に（計画 6章）。写しが無い・読めない時は到着の並びのまま
+  const planOrder =
+    data === null || data.copy === 'missing'
+      ? null
+      : orderTargetsByPlan({ targets, copy: data.copy, people: residents.map((r) => ({ id: r.id, active: r.active })), today })
   const staffList = (staff ?? []).filter((s) => s.active !== false)
   const nameOf = (id: number) => residents.find((r) => r.id === id)?.name ?? `利用者ID ${id}`
   const staffName = (id: number | null) => (id === null ? '' : ((staff ?? []).find((s) => s.id === id)?.name ?? `職員ID ${id}`))
@@ -741,6 +755,16 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
         {staffMsg !== null && staffMsg.day === day ? msgBox(staffMsg.msg) : null}
       </section>
 
+      <DaycareReviewDueSection
+        today={today}
+        residents={residents}
+        copy={data.copy}
+        role={role}
+        actorId={actorId}
+        blockedReason={homeVisitBlocked()}
+        onSynced={scheduleReload}
+      />
+
       <DaycareHomeVisitSection
         today={today}
         residents={residents}
@@ -763,11 +787,21 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
             <span aria-hidden="true">▲ </span>機能訓練の記録を読み込めませんでした。通信状態を確認して、〔最新に更新〕を押してください。
           </p>
         ) : null}
+        {planOrder?.notice === 'error' && targets.length > 0 ? (
+          <p role="status" className="rounded border border-warn bg-warn-bg p-2 text-base text-ink">
+            <span aria-hidden="true">▲ </span>計画書の期限を確かめられません（写しを読み込めませんでした）。並びは到着の順のままです。
+          </p>
+        ) : planOrder?.notice === 'empty' && targets.length > 0 ? (
+          // 写しが0件（まだ写していない・1人も載っていない）の時も、並びを変えていないことを知らせる（段階3c の反証 中1）
+          <p role="status" className="rounded border border-border p-2 text-base text-ink">
+            <span aria-hidden="true">ⓘ </span>計画書の写しに載っている方がいないため、並びは到着の順のままです。
+          </p>
+        ) : null}
         {targets.length === 0 ? (
           <p className="text-base text-ink2">この日に来た方（在席・帰宅）がまだいません。到着を記録すると、ここに出ます。</p>
         ) : (
           <ul className="divide-y divide-border">
-            {targets.map((rid) => {
+            {(planOrder?.order ?? targets).map((rid) => {
               const s = sessionOf(sessions, rid, day)
               const prev = previousProgram(data.recent, rid, day)
               const add = pendingAdd(rid)
@@ -779,6 +813,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                   <div className="flex flex-wrap items-center justify-between gap-gap">
                     <div className="min-w-0">
                       <p className="text-lg font-bold text-ink">{name}</p>
+                      {planOrder?.noPlan.has(rid) ? <p className="text-sm text-ink2">{TARGET_NO_PLAN_LABEL[planOrder.noPlan.get(rid) ?? 'nocopy']}</p> : null}
                       <p className="text-base text-ink2">
                         {s !== null
                           ? `${sessionText(s)}・指導員 ${staffName(s.instructor_id)}`

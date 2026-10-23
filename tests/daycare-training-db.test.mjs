@@ -15,6 +15,7 @@ import { registerLoadFailure } from './ts-load.mjs'
 const lsStore = new Map()
 let DB = null
 let SO = null
+let SYNC = null
 let loadError = null
 try {
   const { registerHooks } = await import('node:module')
@@ -40,8 +41,10 @@ try {
       lsStore.delete(k)
     },
   }
-  DB = await import('../src/lib/db.ts?daycare-training')
+  // 写しの手順（trainingDueSync.ts）が読む db.ts と同じ実体にする（クエリを付けると別の実体になり、偽の DB がつながらない）
+  DB = await import('../src/lib/db.ts')
   SO = await import('../src/lib/stoppedOps.ts')
+  SYNC = await import('../src/lib/trainingDueSync.ts')
 } catch (e) {
   loadError = e
   DB = null
@@ -58,7 +61,10 @@ function fakeClient(state) {
       )
     const run = () => {
       state.calls.push({ table: q.table, action: q.action, payload: q.payload, filters: q.filters })
-      if (q.table === 'app_settings') return { data: q.single ? null : [], error: null, status: 200 }
+      if (q.table === 'app_settings') {
+        const hits = (state.app_settings ?? []).filter(hit)
+        return { data: q.single ? (hits[0] ?? null) : hits, error: null, status: 200 }
+      }
       if (state.missingDue && q.table.startsWith('daycare_training_due')) {
         return { data: null, error: { message: "Could not find the table 'public.daycare_training_due'", code: 'PGRST205' }, status: 404 }
       }
@@ -100,6 +106,7 @@ function fakeClient(state) {
         return { data: { ...row }, error: null, status: 201 }
       }
       if (state.selectFail && q.table === 'daycare_home_visits') return { data: null, error: { message: 'timeout', code: '' }, status: 0 }
+      if (state.residentsFail && q.table === 'residents') return { data: null, error: { message: 'server error', code: 'XX000' }, status: 500 }
       const hits = rows().filter(hit)
       if (q.single) return { data: hits[0] ? { ...hits[0] } : null, error: null, status: 200 }
       return { data: hits.map((r) => ({ ...r })), error: null, status: 200 }
@@ -150,7 +157,16 @@ function fakeClient(state) {
   }
   return {
     from: builder,
-    rpc: () => Promise.resolve({ data: null, error: { message: 'no', code: 'PGRST202' }, status: 404 }),
+    rpc: (fn, args) => {
+      state.calls.push({ table: null, action: 'rpc', fn, payload: args })
+      if (fn === 'my_account') return Promise.resolve({ data: { role: state.role ?? 'office' }, error: null, status: 200 })
+      if (fn === 'daycare_training_due_sync' && state.syncResult !== undefined) {
+        if (state.syncResult === 'missing') return Promise.resolve({ data: null, error: { message: 'no', code: 'PGRST202' }, status: 404 })
+        if (state.syncResult === 'forbidden') return Promise.resolve({ data: null, error: { message: 'training_due_office_only: x', code: '42501' }, status: 403 })
+        return Promise.resolve({ data: state.syncResult, error: null, status: 200 })
+      }
+      return Promise.resolve({ data: null, error: { message: 'no', code: 'PGRST202' }, status: 404 })
+    },
     channel: () => {
       const ch = { on: () => ch, subscribe: () => ch }
       return ch
@@ -537,6 +553,120 @@ if (DB === null) {
       assert.equal(st.calls.filter((c) => c.action !== 'select').length, 0, '読むだけ')
       st.missingDue = true
       await assert.rejects(DB.fetchTrainingDueCopy(), (e) => DB.isTrainingMissingError(e))
+      await done()
+    })
+  })
+
+  describe('計画書の期限の写し（段階3c・偽の Supabase・偽の計画書アプリ）', () => {
+    const FAKE_URL = 'https://script.google.com/macros/s/FAKE-TEST/exec'
+    const resident = (id, sourceId) => ({ id, source_id: sourceId, name: `見本 利用者${id}`, kana: null, room: String(100 + id), gender: null, care_level: null, active: true, needs_review: false, note_alias: null })
+    const INDEX = { v: 1, rows: { T001: { nameNorm: '見本花子', latestPlanDate: '2026-08-01', nextDue: '2026-11-01', status: 'signed' } }, settings: { dueRule: 'calendar', warnDays: 28, staff: [{ id: '1', name: '見本 職員一' }] } }
+    /** 計画書アプリへの通信を数える偽の fetch（本物へはつながない） */
+    const withFakePlanApp = async (fn) => {
+      const prev = globalThis.fetch
+      const seen = []
+      globalThis.fetch = async (url, init) => {
+        seen.push({ url, body: JSON.parse(init.body) })
+        return new Response(JSON.stringify({ ok: true, rev: 3, data: INDEX }), { status: 200 })
+      }
+      try {
+        return { out: await fn(), seen }
+      } finally {
+        globalThis.fetch = prev
+      }
+    }
+    it('事務所: 索引を読み、写す分だけを関数に渡す（写した職員はいまの記録者）。結果をそのまま返す', async () => {
+      const st = await fresh({ role: 'office', residents: [resident(1, 'T001')], syncResult: { ok: true, written: 1, unmatched: 0, cancelled: 0, synced_at: 'x' } })
+      lsStore.set('tp_cfg', JSON.stringify({ url: FAKE_URL, token: 'fake-token' }))
+      const { out, seen } = await withFakePlanApp(() => SYNC.syncTrainingPlanDue(4))
+      assert.deepEqual(out, { kind: 'done', result: { ok: true, written: 1, unmatched: 0, cancelled: 0 } })
+      assert.deepEqual(seen.map((x) => [x.url, x.body.action, x.body.key]), [[FAKE_URL, 'get', 'training_plan:index']])
+      const call = st.calls.find((c) => c.fn === 'daycare_training_due_sync')
+      assert.deepEqual(call.payload, {
+        p_rows: [{ master_id: 'T001', latest_plan_date: '2026-08-01', next_due: '2026-11-01', stop_reason: null, stop_from: null, plan_status: 'signed' }],
+        p_settings: { due_rule: 'calendar', warn_days: 28 },
+        p_staff: 4,
+      })
+      assert.equal(JSON.stringify(call.payload).includes('見本'), false, '氏名・職員の一覧は送らない')
+      assert.equal(lsStore.get('tp_cfg'), JSON.stringify({ url: FAKE_URL, token: 'fake-token' }), '接続設定は書き換えない')
+      await done()
+    })
+    it('現場: 役割を先に見て止める。接続設定を読まず、計画書アプリへも DB の関数へも送らない', async () => {
+      const st = await fresh({ role: 'field', syncResult: { ok: true, written: 1, unmatched: 0, cancelled: 0 } })
+      lsStore.set('tp_cfg', JSON.stringify({ url: FAKE_URL, token: 'fake-token' }))
+      const read = []
+      const realGet = globalThis.localStorage.getItem
+      globalThis.localStorage.getItem = (k) => {
+        read.push(k)
+        return realGet(k)
+      }
+      try {
+        const { out, seen } = await withFakePlanApp(() => SYNC.syncTrainingPlanDue(4))
+        assert.deepEqual(out, { kind: 'role' })
+        assert.equal(seen.length, 0)
+        assert.equal(read.includes('tp_cfg'), false)
+        assert.equal(st.calls.some((c) => c.fn === 'daycare_training_due_sync'), false)
+      } finally {
+        globalThis.localStorage.getItem = realGet
+      }
+      await done()
+    })
+    it('送る前の突き合わせ（反証 中1）: care-log の利用者と1人も結べない索引は、写しの関数を呼ばずに止める。名簿を読めない時も写さない', async () => {
+      const st = await fresh({ role: 'office', residents: [resident(1, 'X001'), resident(2, 'X002')], syncResult: { ok: true, written: 0, unmatched: 1, cancelled: 0 } })
+      lsStore.set('tp_cfg', JSON.stringify({ url: FAKE_URL, token: 'fake-token' }))
+      const { out } = await withFakePlanApp(() => SYNC.syncTrainingPlanDue(4))
+      assert.equal(out.kind, 'fail')
+      assert.match(out.text, /1人も結べなかったため、写しませんでした/)
+      assert.equal(st.calls.some((c) => c.fn === 'daycare_training_due_sync'), false)
+      st.residentsFail = true
+      const again = await withFakePlanApp(() => SYNC.syncTrainingPlanDue(4))
+      assert.equal(again.out.kind, 'fail')
+      assert.match(again.out.text, /名簿を読めなかった/)
+      assert.equal(st.calls.some((c) => c.fn === 'daycare_training_due_sync'), false)
+      await done()
+    })
+    it('写せる行が1つも無い索引は、名簿も読まず写しの関数も呼ばずに止める（確認の反証 軽1）', async () => {
+      const st = await fresh({ role: 'office', residents: [resident(1, 'T001')], syncResult: { ok: true, written: 0, unmatched: 0, cancelled: 0 } })
+      lsStore.set('tp_cfg', JSON.stringify({ url: FAKE_URL, token: 'fake-token' }))
+      const prev = globalThis.fetch
+      globalThis.fetch = async () => new Response(JSON.stringify({ ok: true, rev: 1, data: { v: 1, rows: {}, settings: {} } }), { status: 200 })
+      try {
+        const out = await SYNC.syncTrainingPlanDue(4)
+        assert.equal(out.kind, 'fail')
+        assert.match(out.text, /写せる利用者が1人もいなかったため、写しませんでした。何も書いていません/)
+        assert.equal(st.calls.some((c) => c.fn === 'daycare_training_due_sync'), false)
+        assert.equal(st.calls.some((c) => c.table === 'residents'), false)
+      } finally {
+        globalThis.fetch = prev
+      }
+      await done()
+    })
+    it('止めた時（空上書きの保護）は理由をそのまま返す。関数が無い DB は「まだ使えません」・現場の 42501 は権限の文', async () => {
+      await fresh({ role: 'office', syncResult: { ok: false, reason: 'nomatch', existing: 8, incoming: 6 } })
+      assert.deepEqual(await DB.syncTrainingDue([], { due_rule: 'calendar', warn_days: 28 }, 4), { ok: false, reason: 'nomatch', existing: 8, incoming: 6, cancel: null })
+      await fresh({ role: 'office', syncResult: 'missing' })
+      await assert.rejects(DB.syncTrainingDue([], { due_rule: 'calendar', warn_days: 28 }, 4), (e) => DB.isTrainingMissingError(e))
+      await fresh({ role: 'office', syncResult: 'forbidden' })
+      await assert.rejects(DB.syncTrainingDue([], { due_rule: 'calendar', warn_days: 28 }, 4), (e) => e instanceof DB.DbError && e.kind === 'forbidden')
+      await done()
+    })
+    it('機能訓練の旗が閉じている間は写さない（関数を呼ばない）', async () => {
+      lsStore.clear()
+      await DB.__testHooks.restartQueue()
+      const state = {
+        daycare_training_sessions: [],
+        daycare_staffing: [],
+        daycare_home_visits: [],
+        app_settings: [{ key: 'input_enabled_daycare_training', value: 'false' }],
+        calls: [],
+        nextId: 100,
+        down: false,
+        role: 'office',
+        syncResult: { ok: true, written: 1, unmatched: 0, cancelled: 0 },
+      }
+      DB.__testHooks.setClient(fakeClient(state), { kinds: { daycare_training: false } })
+      await assert.rejects(DB.syncTrainingDue([], { due_rule: 'calendar', warn_days: 28 }, 4), (e) => e instanceof DB.DbError && e.kind === 'blocked')
+      assert.equal(state.calls.some((c) => c.fn === 'daycare_training_due_sync'), false)
       await done()
     })
   })

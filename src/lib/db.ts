@@ -114,6 +114,7 @@ import type { DaycareStaffing, DaycareTrainingSession, StaffingRole, trainingPay
 import { EXPLAINED_TOS, HOME_VISIT_PURPOSES, HOME_VISIT_TEXT_MAX } from './daycareHomeVisit'
 import type { DaycareHomeVisit, ExplainedTo, HomeVisitPurpose, homeVisitPayload } from './daycareHomeVisit'
 import type { DueCopyRow, DueCopySettings } from './trainingDue'
+import type { TrainingDueCopyInput, TrainingDueSettingsInput, TrainingDueSyncResult } from './trainingPlanClient'
 import { addDays as addDaysIso } from './format'
 import { normalizeChoices, normalizeIncidentDetail, validateIncidentInput } from './incident'
 import type { IncidentInput } from './incident'
@@ -8994,6 +8995,43 @@ export function pendingHomeVisitOps(): PendingHomeVisitOp[] {
     }
   }
   return out
+}
+
+// ── デイ（せせらぎ）の記録 段階3c: 計画書の期限の写し（2026-10-23 追加・代表承認・0046 の関数・DB 変更なし） ──
+//
+// 0046 の daycare_training_due_sync を1回呼ぶ（1回の取引で入れ替え・利用者番号で結ぶ・空上書きの保護つき）。
+// 事務所・管理者だけ（RLS と関数の先頭の確かめ。現場は 42501）。入力解禁は機能訓練と同じ旗（旗が false の間は写さない）。
+// 写した職員は、呼ぶ側のいまの記録者の番号だけを渡す（積み残し 43）。値は送る前に trainingPlanClient.ts がそろえる（積み残し 44）
+
+
+/** 計画書の期限の写しを入れ替える（事務所・管理者だけ・旗が開いている時だけ）。失敗は DbError */
+export async function syncTrainingDue(
+  rows: readonly TrainingDueCopyInput[],
+  settings: TrainingDueSettingsInput,
+  staffId: number | null,
+): Promise<TrainingDueSyncResult> {
+  await assertKindWritable('daycare_training')
+  const sb = await getClient()
+  const res = (await bounded(
+    sb.rpc('daycare_training_due_sync', { p_rows: rows, p_settings: settings, p_staff: idNum(staffId) }),
+  )) as Res<unknown>
+  if (res.error !== null) {
+    if (isAuthFail(res)) {
+      fireAuthExpired()
+      throw new DbError('auth', MSG.authWrite)
+    }
+    if (isMissingRpc(res) || isMissingTable(res)) throw new DbError('server', TRAINING_MSG.missing)
+    if (isTransient(res)) throw new DbError('network', MSG.networkWrite)
+    throw rejectError('操作でき', errCode(res), res.status)
+  }
+  const r = asRecord(res.data)
+  if (r === null) throw new DbError('server', MSG.broken)
+  if (r.ok === true) {
+    return { ok: true, written: num(r.written) ?? 0, unmatched: num(r.unmatched) ?? 0, cancelled: num(r.cancelled) ?? 0 }
+  }
+  const reason = r.reason === 'empty' || r.reason === 'nomatch' || r.reason === 'too_many' ? r.reason : null
+  if (reason === null) throw new DbError('server', MSG.broken)
+  return { ok: false, reason, existing: num(r.existing) ?? 0, incoming: num(r.incoming), cancel: num(r.cancel) }
 }
 
 // ── デイ（せせらぎ）の記録 段階2c: 申し送りの印（2026-10-22 追加・代表承認・DB 変更なし） ─────────────

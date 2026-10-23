@@ -287,3 +287,135 @@ export function homeVisitCardLine(args: {
     ruleSource: dueRuleSource(copy),
   }
 }
+
+// ── 計画の見直しの期限（段階3c・計画 2.1）と今日の対象者の並び（計画 6章） ─────────────────────────
+
+/** 計画の見直しの期限の1行 */
+export interface ReviewDueRow {
+  residentId: number
+  /** 次の期限（写しの next_due。空なら作成日と規則から計算し直す。計画が無ければ ''） */
+  due: string
+  /** 最新の計画の作成日（無ければ null＝計画なし） */
+  planDate: string | null
+  state: Exclude<DueState, 'ended'>
+}
+
+/**
+ * 計画の見直しの期限の一覧（計画 2.1）。計画書アプリの一覧（buildAlerts）と同じ順で判定する:
+ * 終了（在籍でない・通知を止めた日が今日以前）は出さない → 作成日が無ければ none（計画なし）→ dueState。
+ * 期限は写しの next_due をそのまま使い、空なら作成日と規則から計算し直す（計画書アプリの 1135 行と同じ）。
+ * 並びは 期限切れ → 間近 → 計画なし → 期限内（同じ状態の中は期限の早い順・番号順）
+ */
+export function reviewDueList(args: { copy: readonly DueCopyRow[]; settings: DueCopySettings | null; people: readonly DuePerson[]; today: string }): ReviewDueRow[] {
+  const { copy, settings, people, today } = args
+  const rule = normalizeDueRule(settings?.due_rule)
+  const warn = normalizeWarnDays(settings?.warn_days)
+  const personOf = new Map(people.map((p) => [p.id, p]))
+  const out: ReviewDueRow[] = []
+  for (const c of copy) {
+    if (isEnded(personOf.get(c.resident_id), c, today)) continue
+    if (!isYmd(c.latest_plan_date)) {
+      out.push({ residentId: c.resident_id, due: '', planDate: null, state: 'none' })
+      continue
+    }
+    const due = isYmd(c.next_due) ? c.next_due : nextDueOf(c.latest_plan_date, rule)
+    out.push({ residentId: c.resident_id, due, planDate: c.latest_plan_date, state: dueState(due, today, warn) })
+  }
+  const rank: Record<ReviewDueRow['state'], number> = { overdue: 0, warn: 1, none: 2, ok: 3 }
+  return out.sort((a, b) => rank[a.state] - rank[b.state] || (a.due < b.due ? -1 : a.due > b.due ? 1 : 0) || a.residentId - b.residentId)
+}
+
+/** 見直しの一覧の数（期限切れ・間近・計画なし） */
+export function reviewDueCounts(rows: readonly ReviewDueRow[]): { overdue: number; warn: number; none: number } {
+  return {
+    overdue: rows.filter((r) => r.state === 'overdue').length,
+    warn: rows.filter((r) => r.state === 'warn').length,
+    none: rows.filter((r) => r.state === 'none').length,
+  }
+}
+
+/** 見直しの状態の言葉（記号と文字。色だけに頼らない） */
+export const REVIEW_STATE_LABEL: Record<Exclude<DueState, 'ended'>, string> = {
+  overdue: '▲ 期限切れ',
+  warn: '△ 間近',
+  none: '計画なし',
+  ok: '期限内',
+}
+
+/**
+ * 対象者の行に添える、下に回した理由（nocopy＝写しに行が無い／noplan＝計画書に計画なし／ended＝計画書の通知を止めている／
+ * inactive＝在籍でない方。過去の日を開くと、その後に在籍でなくなった方も到着の記録から対象者に出る＝段階3c の反証 軽3）
+ */
+export type TargetNoPlanReason = 'nocopy' | 'noplan' | 'ended' | 'inactive'
+export const TARGET_NO_PLAN_LABEL: Record<TargetNoPlanReason, string> = {
+  nocopy: '計画書の写しなし',
+  noplan: '計画書に計画なし',
+  ended: '計画書の通知を止めています',
+  inactive: '在籍でない方',
+}
+
+/**
+ * 今日の対象者の並び（計画 6章）。写しを読めた時は「計画がある・終了でない方」を上に、それ以外を下に（それぞれの中は元の並び）。
+ * notice: error＝写しを読めない（並びは元のまま・「計画書の期限を確かめられません」）／empty＝写しが0件（並びは元のまま）／null。
+ * noPlan＝下に回した方と、その理由（行に添える。notice がある時は空）
+ */
+export function orderTargetsByPlan(args: {
+  targets: readonly number[]
+  copy: DueCopyLoad
+  people: readonly DuePerson[]
+  today: string
+}): { order: number[]; noPlan: Map<number, TargetNoPlanReason>; notice: 'error' | 'empty' | null } {
+  const { targets, copy, people, today } = args
+  if (copy === 'error') return { order: [...targets], noPlan: new Map(), notice: 'error' }
+  if (copy.rows.length === 0) return { order: [...targets], noPlan: new Map(), notice: 'empty' }
+  const personOf = new Map(people.map((p) => [p.id, p]))
+  const copyOf = new Map(copy.rows.map((c) => [c.resident_id, c]))
+  const reasonOf = (rid: number): TargetNoPlanReason | null => {
+    if (personOf.get(rid)?.active === false) return 'inactive'
+    const c = copyOf.get(rid)
+    if (c === undefined) return 'nocopy'
+    if (isEnded(personOf.get(rid), c, today)) return 'ended'
+    return isYmd(c.latest_plan_date) ? null : 'noplan'
+  }
+  const top: number[] = []
+  const rest: number[] = []
+  const noPlan = new Map<number, TargetNoPlanReason>()
+  for (const rid of targets) {
+    const why = reasonOf(rid)
+    if (why === null) top.push(rid)
+    else {
+      rest.push(rid)
+      noPlan.set(rid, why)
+    }
+  }
+  return { order: [...top, ...rest], noPlan, notice: null }
+}
+
+/**
+ * 1人の画面のカードの見直しの1行の中身（文は画面が組む）。null＝出さない（終了の方）。
+ * error＝写しを読めない／nocopy＝写しにその方の行が無い（写しが0件の時も）／none＝計画なし／due＝次の期限と状態
+ */
+export function reviewCardLine(args: { copy: DueCopyLoad; residentId: number; active: boolean | undefined; today: string }):
+  | null
+  | { kind: 'error' }
+  | { kind: 'nocopy' }
+  | { kind: 'none' }
+  | { kind: 'due'; due: string; state: Exclude<DueState, 'ended'> } {
+  const { copy, residentId, active, today } = args
+  if (copy === 'error') return { kind: 'error' }
+  const c = copy.rows.find((r) => r.resident_id === residentId)
+  if (isEnded(active === undefined ? undefined : { id: residentId, active }, c, today)) return null
+  if (c === undefined) return { kind: 'nocopy' }
+  const row = reviewDueList({ copy: [c], settings: copy.settings, people: [], today })[0]
+  if (row === undefined || row.state === 'none') return { kind: 'none' }
+  return { kind: 'due', due: row.due, state: row.state }
+}
+
+/**
+ * 見直しの期限の区画の写しの状態（段階3c の反証 中1）。never＝まだ一度も写していない（設定の行も写しの行も無い）／
+ * empty＝写したが写しに1人も載っていない（0/0/0 を出すと「期限切れなし」と読めるので、別の知らせにする）／ok
+ */
+export function reviewCopyState(copy: { rows: readonly DueCopyRow[]; settings: DueCopySettings | null }): 'never' | 'empty' | 'ok' {
+  if (copy.rows.length > 0) return 'ok'
+  return copy.settings === null ? 'never' : 'empty'
+}
