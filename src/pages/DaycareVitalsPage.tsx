@@ -843,6 +843,26 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     return () => ro.disconnect()
   }, [tableBox])
 
+  // ── テンキーの高さ（今日の画面の改善 2回目）: 表の下に同じ高さの余白をとり、最後の行もテンキーの上へ送れるようにする（文字の大きさで変わるので測る） ──
+  const [kpBox, setKpBox] = useState<HTMLElement | null>(null)
+  const [kpHeight, setKpHeight] = useState(0)
+  useEffect(() => {
+    const el = kpBox
+    if (!el) {
+      setKpHeight(0)
+      return
+    }
+    const check = () => setKpHeight(Math.ceil(el.getBoundingClientRect().height))
+    check()
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', check)
+      return () => window.removeEventListener('resize', check)
+    }
+    const ro = new ResizeObserver(check)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [kpBox])
+
   // ── 描画 ──
   const header = (
     <div className="space-y-3">
@@ -987,7 +1007,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     active !== null && activeSlot !== null ? (
       // 今日の画面の改善 2回目（2026-10-24）: どの幅でも画面の下に出す（定時バイタルと同じ置き場所と並び）。
       // 押した時の動き（桁がそろうと次へ・SpO2 の次は次の方の体温・血圧の上は下と組で送る）と文言は変えない
-      <section aria-label="テンキー" className="fixed inset-x-0 bottom-14 z-40 border-t border-border-strong bg-surface p-3 lg:bottom-0">
+      <section ref={setKpBox} aria-label="テンキー" className="dc-keypad fixed inset-x-0 bottom-14 z-40 border-t border-border-strong bg-surface p-3 lg:bottom-0">
         <div className="mx-auto max-w-md">
           <div className="mb-2" aria-live="polite">
             <div className="flex flex-wrap items-baseline justify-between gap-gap">
@@ -1066,7 +1086,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     <div className="mx-auto w-full max-w-6xl space-y-4 p-4">
       {header}
       {limits.failed ? <VitalLimitsFailedNote className="" onRetry={() => void limits.refresh()} /> : null}
-      <div className={`min-w-0 space-y-2 ${active !== null ? 'pb-96' : ''}`}>
+      <div className="min-w-0 space-y-2">
         {shownRows.length === 0 ? (
           <div className="rounded-lg border border-border bg-surface p-4">
             <p className="text-base text-ink">
@@ -1240,6 +1260,8 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
           </>
         )}
       </div>
+      {/* テンキーを出している間は、テンキーと同じ高さの余白をとる（最後の行もテンキーに隠れない） */}
+      {active !== null ? <div aria-hidden="true" style={{ height: kpHeight }} /> : null}
       {keypad}
       <ConfirmDialog
         open={discardAsk}

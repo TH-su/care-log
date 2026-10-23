@@ -101,13 +101,16 @@ if (DC === null) {
   describe('静的検査（テンキーと、変えていない動き）', () => {
     const page = code('../src/pages/DaycareVitalsPage.tsx')
     it('テンキーはどの幅でも画面の下（右に常に出す置き方は無い）・数字3列（1 2 3 が上）＋右にボタン', () => {
-      assert.match(page, /<section aria-label="テンキー" className="fixed inset-x-0 bottom-14 z-40 border-t border-border-strong bg-surface p-3 lg:bottom-0">/)
+      assert.match(page, /<section ref=\{setKpBox\} aria-label="テンキー" className="dc-keypad fixed inset-x-0 bottom-14 z-40 border-t border-border-strong bg-surface p-3 lg:bottom-0">/)
+      // 文字を大きくしても画面の上へはみ出さない（収まらない分はテンキーの中でスクロール）
+      assert.match(read('../src/index.css'), /\.dc-keypad \{\s*max-height: calc\(100dvh - 3\.5rem\);\s*overflow-y: auto;/)
       assert.doesNotMatch(page, /lg:sticky|lg:w-80/)
       assert.match(page, /<div className="grid grid-cols-3 gap-gap">\s*\{DC_KEYPAD_KEYS\.map/)
       const keys = page.slice(page.indexOf('const DC_KEYPAD_KEYS'), page.indexOf(']\n', page.indexOf('const DC_KEYPAD_KEYS')) + 1)
       assert.deepEqual([...keys.matchAll(/\['([^']+)', '([^']+)'\]/g)].map((m) => m[1]), ['1', '2', '3', '4', '5', '6', '7', '8', '9', '.', '0', 'back'])
-      // テンキーを出している間は、下の行がテンキーに隠れないよう余白をとる
-      assert.match(page, /\$\{active !== null \? 'pb-96' : ''\}/)
+      // テンキーを出している間は、テンキーと同じ高さの余白をとる（最後の行もテンキーに隠れない）
+      assert.match(page, /\{active !== null \? <div aria-hidden="true" style=\{\{ height: kpHeight \}\} \/> : null\}/)
+      assert.match(page, /const check = \(\) => setKpHeight\(Math\.ceil\(el\.getBoundingClientRect\(\)\.height\)\)/)
     })
     it('右のボタンの文言と動きは今のまま（次へ・未測定・閉じる＝press の next・skip・close）', () => {
       assert.match(page, /onClick=\{\(\) => press\('next'\)\}[\s\S]{0,200}>\s*次へ\s*<\/button>/)

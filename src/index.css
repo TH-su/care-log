@@ -59,6 +59,17 @@
   display: grid;
   gap: var(--tap-gap);
 }
+/* デイのバイタル一括のテンキー（2026-10-24）: 文字を大きくしても画面の上へはみ出さない（収まらない分はテンキーの中でスクロール）。
+   下の帯（3.5rem＝bottom-14）の上に出す。広い画面（lg＝1024px 以上）は帯が無いので画面の高さまで */
+.dc-keypad {
+  max-height: calc(100dvh - 3.5rem);
+  overflow-y: auto;
+}
+@media (min-width: 1024px) {
+  .dc-keypad {
+    max-height: 100dvh;
+  }
+}
 @media (min-width: 60em) {
   .dc-meal-row {
     grid-template-columns: 11rem minmax(0, 1fr);
