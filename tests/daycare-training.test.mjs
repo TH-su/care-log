@@ -178,6 +178,12 @@ if (T === null) {
       assert.equal(T.instructorFor([allDay, staffing({ id: 4, staff_id: 6, from_time: '09:00', to_time: '10:00' })], D, '09:30'), 6, '同じ方の2行は1人')
       assert.equal(T.instructorFor([staffing({ id: 5, staff_id: 4, role: 'nurse' })], D, '10:00'), null, '看護職員は数えない')
       assert.equal(T.instructorFor([staffing({ id: 6, staff_id: 9, day: '2026-10-22' })], D, '10:00'), null, '他の日は数えない')
+      // 片側だけ時刻がある行は、無い側を一日の端とみなす（直しの確認の反証 軽1）
+      const untilNoon = staffing({ id: 7, staff_id: 11, from_time: null, to_time: '12:00' })
+      const fromOne = staffing({ id: 8, staff_id: 12, from_time: '13:00', to_time: null })
+      assert.equal(T.instructorFor([untilNoon], D, '14:40'), null, '「〜12:00」の方を午後に選ばない')
+      assert.equal(T.instructorFor([untilNoon, fromOne], D, '10:00'), 11)
+      assert.equal(T.instructorFor([untilNoon, fromOne], D, '14:40'), 12)
     })
     it('対象者でない方の記録（反証 中4）: その日の記録のうち、今日の対象者に入っていない方だけ', () => {
       const list = [
@@ -194,6 +200,11 @@ if (T === null) {
       assert.equal(T.trainingPayload(input({ ...base, cancel_reason: 'condition' })).cancel_note, null)
       assert.equal(T.trainingPayload(input({ ...base, cancel_reason: 'condition' })).duration_min, null)
       assert.equal(T.trainingPayload(input({ result: 'done', cancel_reason: null, cancel_note: '残り' })).cancel_note, null)
+      // 送らない一言の長さで保存を止めない（直しの確認の反証 軽2）。その他の時は長さを見る
+      const long = 'あ'.repeat(T.TRAINING_CANCEL_NOTE_MAX + 1)
+      const ok = input({ ...base, program: '歩行', instructor_id: 3, started_at: '10:00', cancel_reason: 'condition', cancel_note: long })
+      assert.equal(T.trainingInputErrors(ok).cancel_note, undefined)
+      assert.match(T.trainingInputErrors({ ...ok, cancel_reason: 'other' }).cancel_note ?? '', /字まで/)
     })
   })
 }
@@ -298,7 +309,10 @@ describe('静的検査（段階3a の規律）', () => {
     assert.match(p, /const start = d === todayIso\(\) \? defaultStartTime\(nowMinutes\(\), result === 'cancelled' \? 0 : minutes\) : ''/)
     assert.match(p, /instructor_id: instructorFor\(staffing, d, start\)/)
     // 送信待ちの配置も指導員として数える（反証 軽4）・対象者でない方の記録にも直す入口を残す（反証 中4）
-    assert.match(p, /const staffing = \[\.\.\.\(data\?\.staffing \?\? \[\]\), \.\.\.pendingStaffing\]/)
+    assert.match(p, /const staffingShown = \[\.\.\.\(data\?\.staffing \?\? \[\]\), \.\.\.pendingStaffing\]/)
+    // 送信待ちの配置は時間帯ごと数え、圏外で外した配置は数えない（直しの確認の反証 中1・軽5）
+    assert.match(p, /from_time: p\.fromTime, to_time: p\.toTime/)
+    assert.match(p, /const staffing = staffingShown\.filter\(\(s\) => !removedStaffing\.has\(s\.id\)\)/)
     assert.match(p, /const outside = sessionsOutsideTargets\(sessions, targets, day\)/)
     // 新しい記録の小窓は保存できるまで閉じない（反証 軽7）
     assert.match(p, /if \(await saveNew\(ed\.rid, ed\.day, ed\.input, false\)\) setEditor\(null\)/)

@@ -134,7 +134,8 @@ export function trainingInputErrors(v: TrainingInput): TrainingInputErrors {
   if (v.result === 'cancelled') {
     if (v.cancel_reason === null) out.cancel_reason = '中止の理由を選んでください。'
     else if (v.cancel_reason === 'other' && v.cancel_note.trim() === '') out.cancel_note = 'その他の理由を一言入れてください。'
-    if ([...v.cancel_note].length > TRAINING_CANCEL_NOTE_MAX) out.cancel_note = `一言は ${TRAINING_CANCEL_NOTE_MAX} 字までで入れてください。`
+    // 一言は「その他」の時だけ送るので、長さもその時だけ見る（理由を替えた後の見えない一言で保存できなくしない＝直しの確認の反証 軽2）
+    else if (v.cancel_reason === 'other' && [...v.cancel_note].length > TRAINING_CANCEL_NOTE_MAX) out.cancel_note = `一言は ${TRAINING_CANCEL_NOTE_MAX} 字までで入れてください。`
   } else {
     const m = parseMinutes(v.minutes)
     if (m === null) out.minutes = '時間（分）を数字で入れてください。'
@@ -206,7 +207,7 @@ export function trainingTargets(rows: readonly DaycareBoardRow[]): number[] {
 
 /**
  * 〔完了〕の指導員の既定（段階3a の反証 中1）。その日の機能訓練指導員のうち、開始時刻 at（'HH:MM'）を含む時間帯の方
- * （時間帯の無い行は終日とみなす）が1人に決まる時だけ、その方。at が空の時は、その日の指導員が1人だけならその方。
+ * （時間帯の無い行は終日、片側だけ時刻がある行は無い側を一日の端とみなす）が1人に決まる時だけ、その方。at が空の時は、その日の指導員が1人だけならその方。
  * 決まらない（0人・2人以上）時は null（〔完了〕は小窓を開き、職員に選んでもらう）
  */
 export function instructorFor(list: readonly DaycareStaffing[], day: string, at: string): number | null {
@@ -214,7 +215,8 @@ export function instructorFor(list: readonly DaycareStaffing[], day: string, at:
   const ids = new Set<number>()
   for (const s of list) {
     if (s.day !== day || s.role !== 'trainer') continue
-    if (t !== null && s.from_time !== null && s.to_time !== null && !(s.from_time <= t && t < s.to_time)) continue
+    // 片側だけ時刻がある行は、無い側を一日の始まり・終わりとみなす（「〜12:00」の方を午後に選ばない＝直しの確認の反証 軽1）
+    if (t !== null && !((s.from_time ?? '00:00') <= t && t < (s.to_time ?? '24:00'))) continue
     ids.add(s.staff_id)
   }
   return ids.size === 1 ? [...ids][0] : null

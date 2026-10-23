@@ -130,6 +130,7 @@ const FIELDS: Record<string, Record<string, FieldFmt>> = {
     duration_min: { label: '時間', fmt: (v) => (typeof v === 'number' ? `${v}分` : null) },
     program: { label: '内容', fmt: text },
     cancel_reason: { label: '中止の理由', fmt: labelOf(TRAINING_CANCEL_REASON_LABEL) },
+    cancel_note: { label: '中止の一言', fmt: text },
     note: { label: '備考', fmt: text },
   },
   daycare_staffing: {
@@ -191,6 +192,16 @@ const INCIDENT_DETAIL_TEXT: ReadonlyArray<[string, string]> = [
   ['other_notes', 'その他'],
 ]
 
+/**
+ * 職員の番号の欄（表ごと・欄の呼び名）。氏名は呼び出し側が渡す staffName で引く（渡されない・引けない時は「職員ID n」）。
+ * 指導員・補助を〔いまの記録とくらべる〕に出さないと、違いが見えないまま〔この端末の内容で直す〕で相手の指導員を
+ * 書き換えてしまう（段階3a の直しの確認の反証 中2）
+ */
+const STAFF_FIELDS: Record<string, Record<string, string>> = {
+  daycare_training_sessions: { instructor_id: '指導員', assisted_by: '補助' },
+  daycare_staffing: { staff_id: '職員' },
+}
+
 /** 言葉にしない列（行の印・記入者・版など） */
 const HIDDEN = new Set([
   'id',
@@ -216,12 +227,14 @@ export interface StoppedOpLine {
 
 /**
  * 中身の要約（対象・日付・値）。residentName は利用者の表示名（分からなければ「利用者ID n」などを返す関数）。
- * row を渡すと、その行（いまの記録）の同じ欄を同じ言葉で出す（くらべて見せる時）
+ * row を渡すと、その行（いまの記録）の同じ欄を同じ言葉で出す（くらべて見せる時）。
+ * staffName は職員の氏名（指導員・補助など。渡さなければ「職員ID n」と出す）
  */
 export function stoppedOpLines(
   op: Pick<StoppedOpLike, 'table' | 'kind' | 'payload'>,
   residentName: (id: number) => string,
   row?: Record<string, unknown> | null,
+  staffName?: (id: number) => string,
 ): StoppedOpLine[] {
   const src = row ?? op.payload
   const out: StoppedOpLine[] = []
@@ -258,6 +271,12 @@ export function stoppedOpLines(
       hidden += Object.keys(mineD).filter((dk) => !shown.has(dk) && dk !== 'subject_name').length
       continue
     }
+    const sf = STAFF_FIELDS[op.table]?.[k]
+    if (sf !== undefined) {
+      const v = src[k] ?? null
+      out.push({ label: sf, value: typeof v === 'number' ? (staffName?.(v) ?? `職員ID ${v}`) : 'なし' })
+      continue
+    }
     const ff = fields[k]
     if (ff === undefined) {
       hidden += 1
@@ -287,6 +306,7 @@ export function stoppedOpNeedsCompare(op: Pick<StoppedOpLike, 'table' | 'kind' |
       op.table === 'med_slots' ||
       op.table === 'daycare_attendance' ||
       op.table === 'daycare_activity_log' ||
-      op.table === 'daycare_training_sessions')
+      op.table === 'daycare_training_sessions' ||
+      op.table === 'daycare_staffing')
   )
 }

@@ -233,11 +233,14 @@ type StoppedMsg = { tone: 'ok' | 'warn' | 'danger'; text: string }
 function StoppedOpsList({
   ops,
   residentName,
+  staffName,
   onChanged,
   notify,
 }: {
   ops: StoppedOp[]
   residentName: (id: number) => string
+  /** 職員の氏名（指導員・補助など。引けなければ「職員ID n」） */
+  staffName: (id: number) => string
   /** 送り直し・取り下げの後（一覧と件数を取り直す） */
   onChanged: () => void
   /** 一覧から消える結果（送れた・取り下げた）の一言（画面下の通知で出す） */
@@ -360,7 +363,7 @@ function StoppedOpsList({
                 <dl className="mt-2 grid grid-cols-1 gap-1 text-base sm:grid-cols-2">
                   <div className="rounded border border-primary p-2">
                     <dt className="text-sm font-bold text-ink">この端末の中身</dt>
-                    {stoppedOpLines(op, residentName).map((l) => (
+                    {stoppedOpLines(op, residentName, undefined, staffName).map((l) => (
                       <dd key={`m-${l.label}`} className="text-base text-ink">
                         {l.label}：<span className="font-bold">{l.value}</span>
                       </dd>
@@ -376,7 +379,7 @@ function StoppedOpsList({
                             : '記録が見つかりません（取り消された可能性があります）。この端末の内容は送れないので、中身を確かめてから取り下げてください。'}
                         </dd>
                       ) : (
-                        stoppedOpLines(op, residentName, target).map((l) => (
+                        stoppedOpLines(op, residentName, target, staffName).map((l) => (
                           <dd key={`t-${l.label}`} className="text-base text-ink">
                             {l.label}：<span className="font-bold">{l.value}</span>
                           </dd>
@@ -458,7 +461,7 @@ function StoppedOpsList({
         body={
           askDrop === null
             ? ''
-            : `「${stoppedOpTitle(askDrop)}」（${stoppedOpLines(askDrop, residentName)
+            : `「${stoppedOpTitle(askDrop)}」（${stoppedOpLines(askDrop, residentName, undefined, staffName)
                 .map((l) => `${l.label}：${l.value}`)
                 .join('／')}）は送られず、この端末（同じ端末のほかのタブを含む）から外れます。元に戻せません。`
         }
@@ -1761,6 +1764,8 @@ export function SettingsPage() {
             const r = (residents ?? []).find((x) => x.id === id)
             return r ? `${r.room ? `${r.room} ` : ''}${r.name}` : `利用者ID ${id}`
           }}
+          // 名前の引き当て用（退職者も含む全員・F48）。取れていなければ在籍者の一覧、それも無ければ番号
+          staffName={(id) => (allStaff ?? staffList ?? []).find((x) => x.id === id)?.name ?? `職員ID ${id}`}
           onChanged={refreshQueueView}
           notify={show}
         />
