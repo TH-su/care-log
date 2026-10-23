@@ -425,6 +425,7 @@ declare
   v_existing integer;
   v_incoming integer;
   v_matched integer;
+  v_matched_rows integer;
   v_cancel integer;
   v_in jsonb;
   v_now timestamptz := now();
@@ -450,21 +451,25 @@ begin
   select count(*) into v_existing from public.daycare_training_due where deleted_at is null;
   v_incoming := pg_catalog.jsonb_array_length(p_rows);
 
-  -- 利用者番号（residents.source_id）で結べた行だけを、値をそろえて集める（同じ方が2行来たら1行に）
+  -- 利用者番号（residents.source_id）で結べた行だけを、値をそろえて集める。同じ方が2行来たら、後ろの行を採る（決め手を固定）
   select coalesce(pg_catalog.jsonb_agg(x), '[]'::jsonb) into v_in
     from (
       select distinct on (r.id)
              r.id as resident_id,
-             nullif(e->>'latest_plan_date', '')::date as latest_plan_date,
-             nullif(e->>'next_due', '')::date as next_due,
-             case when e->>'stop_reason' in ('discharge', 'stopped', 'notNeeded') then e->>'stop_reason' end as stop_reason,
-             nullif(e->>'stop_from', '')::date as stop_from,
-             case when e->>'plan_status' in ('none', 'draft_ai', 'reviewed', 'printed', 'signed') then e->>'plan_status' end as plan_status
-        from pg_catalog.jsonb_array_elements(p_rows) as e
-        join public.residents r on r.source_id = e->>'master_id'
-       order by r.id
+             nullif(e.v->>'latest_plan_date', '')::date as latest_plan_date,
+             nullif(e.v->>'next_due', '')::date as next_due,
+             case when e.v->>'stop_reason' in ('discharge', 'stopped', 'notNeeded') then e.v->>'stop_reason' end as stop_reason,
+             nullif(e.v->>'stop_from', '')::date as stop_from,
+             case when e.v->>'plan_status' in ('none', 'draft_ai', 'reviewed', 'printed', 'signed') then e.v->>'plan_status' end as plan_status
+        from pg_catalog.jsonb_array_elements(p_rows) with ordinality as e(v, ord)
+        join public.residents r on r.source_id = e.v->>'master_id'
+       order by r.id, e.ord desc
     ) x;
   v_matched := pg_catalog.jsonb_array_length(v_in);
+  -- 結べなかった行の数は、来た行のうち番号で結べなかった行の数（同じ方の2行目は「結べた」に数える）
+  select count(*) into v_matched_rows
+    from pg_catalog.jsonb_array_elements(p_rows) as e
+    join public.residents r on r.source_id = e->>'master_id';
   select count(*) into v_cancel
     from public.daycare_training_due d
    where d.deleted_at is null
@@ -505,7 +510,7 @@ begin
     set due_rule = excluded.due_rule, warn_days = excluded.warn_days,
         synced_at = excluded.synced_at, synced_by = excluded.synced_by, updated_at = excluded.updated_at;
 
-  return pg_catalog.jsonb_build_object('ok', true, 'written', v_matched, 'unmatched', v_incoming - v_matched,
+  return pg_catalog.jsonb_build_object('ok', true, 'written', v_matched, 'unmatched', v_incoming - v_matched_rows,
                                        'cancelled', v_cancel, 'synced_at', v_now);
 end;
 $fn$;

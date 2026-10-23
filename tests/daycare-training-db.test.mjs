@@ -1,0 +1,327 @@
+// デイ（せせらぎ）段階3a: db.ts の個別機能訓練・その日の配置の読み書きを、偽の Supabase で動かす（通信しない）。
+// 段階3a の反証 中5（試験が文面の写しで、振る舞いを確かめていなかった）を受けて足した。活動の試験（daycare-activity.test.mjs）と同じ作り。
+//
+// ・insertTrainingSession: 保存・先に記録あり（taken・合流しない）・自分の送信の行き違い・送信待ち・未来の日／崩れた形は送らない
+// ・送信待ちを送る時: 実施記録は他の端末の行と当たったら止める（stopped）→ 設定の〔いまの記録とくらべる〕の経路に載る・
+//   〔自分の内容で直す〕で相手の行を直す（結果を替えても両向きの check に当たらない形）
+// ・配置: 送信待ちを送る時に同じ鍵の行が先にあれば、届いたのと同じ（送信待ちから外れる・1行のまま）
+// ・updateTrainingSession: 変えた列だけ送る。結果を替える時は時間・理由・一言を一緒に送る
+// 個人情報は置かない（利用者・職員は数値IDだけ）。
+
+import { describe, it } from 'node:test'
+import assert from 'node:assert/strict'
+import { registerLoadFailure } from './ts-load.mjs'
+
+const lsStore = new Map()
+let DB = null
+let SO = null
+let loadError = null
+try {
+  const { registerHooks } = await import('node:module')
+  if (typeof registerHooks !== 'function') throw new Error('no registerHooks')
+  registerHooks({
+    resolve(specifier, context, next) {
+      if (/^\.{1,2}\//.test(specifier) && !/\.[a-zA-Z0-9]+$/.test(specifier)) {
+        try {
+          return next(`${specifier}.ts`, context)
+        } catch {
+          // .ts が無いものは元の指定へ戻す
+        }
+      }
+      return next(specifier, context)
+    },
+  })
+  globalThis.localStorage = {
+    getItem: (k) => (lsStore.has(k) ? lsStore.get(k) : null),
+    setItem: (k, v) => {
+      lsStore.set(k, String(v))
+    },
+    removeItem: (k) => {
+      lsStore.delete(k)
+    },
+  }
+  DB = await import('../src/lib/db.ts?daycare-training')
+  SO = await import('../src/lib/stoppedOps.ts')
+} catch (e) {
+  loadError = e
+  DB = null
+}
+
+/** 偽の Supabase（実施記録・配置・app_settings だけ）。down=true の間は書き込みが 503 */
+function fakeClient(state) {
+  const builder = (table) => {
+    const q = { table, filters: [], action: 'select', payload: null, single: false }
+    const rows = () => state[table] ?? []
+    const hit = (r) =>
+      q.filters.every(([op, k, v]) =>
+        op === 'eq' ? r[k] === v : op === 'is' ? (r[k] ?? null) === v : op === 'lt' ? r[k] < v : op === 'gte' ? r[k] >= v : op === 'neq' ? r[k] !== v : true,
+      )
+    const run = () => {
+      state.calls.push({ table: q.table, action: q.action, payload: q.payload, filters: q.filters })
+      if (q.table === 'app_settings') return { data: q.single ? null : [], error: null, status: 200 }
+      if (q.action === 'update') {
+        if (state.down) return { data: null, error: { message: 'Service Unavailable', code: '' }, status: 503 }
+        const r = rows().find(hit)
+        if (!r) return { data: null, error: null, status: 200 }
+        // DB の両向きの check の真似（実施記録）: 中止なら時間なし・理由あり、中止でなければ時間あり・理由なし
+        const next = { ...r, ...q.payload }
+        if (q.table === 'daycare_training_sessions') {
+          const c = next.result === 'cancelled'
+          if (c !== (next.duration_min === null) || c !== (next.cancel_reason !== null)) {
+            return { data: null, error: { message: 'check', code: '23514' }, status: 400 }
+          }
+        }
+        Object.assign(r, q.payload, { rev: r.rev + 1 })
+        return { data: { ...r }, error: null, status: 200 }
+      }
+      if (q.action === 'insert') {
+        if (state.down) return { data: null, error: { message: 'Service Unavailable', code: '' }, status: 503 }
+        const p = q.payload
+        const all = rows()
+        const taken =
+          all.some((r) => r.client_key === p.client_key) ||
+          (q.table === 'daycare_training_sessions'
+            ? all.some((r) => r.deleted_at === null && r.resident_id === p.resident_id && r.day === p.day)
+            : all.some((r) => r.deleted_at === null && r.day === p.day && r.staff_id === p.staff_id && r.role === p.role && (r.from_time ?? null) === (p.from_time ?? null)))
+        if (taken) return { data: null, error: { message: 'duplicate key', code: '23505' }, status: 409 }
+        const row = { id: state.nextId++, rev: 1, deleted_at: null, ...p }
+        all.push(row)
+        state[q.table] = all
+        return { data: { ...row }, error: null, status: 201 }
+      }
+      const hits = rows().filter(hit)
+      if (q.single) return { data: hits[0] ? { ...hits[0] } : null, error: null, status: 200 }
+      return { data: hits.map((r) => ({ ...r })), error: null, status: 200 }
+    }
+    const b = {
+      select: () => b,
+      insert(p) {
+        q.action = 'insert'
+        q.payload = p
+        return b
+      },
+      update(p) {
+        q.action = 'update'
+        q.payload = p
+        return b
+      },
+      eq(k, v) {
+        q.filters.push(['eq', k, v])
+        return b
+      },
+      is(k, v) {
+        q.filters.push(['is', k, v])
+        return b
+      },
+      lt(k, v) {
+        q.filters.push(['lt', k, v])
+        return b
+      },
+      gte(k, v) {
+        q.filters.push(['gte', k, v])
+        return b
+      },
+      neq(k, v) {
+        q.filters.push(['neq', k, v])
+        return b
+      },
+      order: () => b,
+      limit: () => b,
+      maybeSingle() {
+        q.single = true
+        return Promise.resolve(run())
+      },
+      then(ok, ng) {
+        return Promise.resolve(run()).then(ok, ng)
+      },
+    }
+    return b
+  }
+  return {
+    from: builder,
+    rpc: () => Promise.resolve({ data: null, error: { message: 'no', code: 'PGRST202' }, status: 404 }),
+    channel: () => {
+      const ch = { on: () => ch, subscribe: () => ch }
+      return ch
+    },
+    removeChannel: () => Promise.resolve(),
+    auth: {
+      onAuthStateChange() {
+        return { data: { subscription: { unsubscribe() {} } } }
+      },
+      getSession: () => Promise.resolve({ data: { session: { user: { id: 'u1' } } }, error: null }),
+    },
+  }
+}
+
+const DAY = '2026-10-21'
+const fields = (over = {}) => ({
+  result: 'done',
+  started_at: '10:00',
+  duration_min: 20,
+  program: '立ち上がり',
+  instructor_id: 3,
+  assisted_by: null,
+  cancel_reason: null,
+  cancel_note: null,
+  note: null,
+  ...over,
+})
+const sessionRow = (over = {}) => ({
+  id: 7,
+  resident_id: 1,
+  day: DAY,
+  started_at: '09:00:00',
+  duration_min: 10,
+  program: 'バランス',
+  result: 'partial',
+  cancel_reason: null,
+  cancel_note: null,
+  instructor_id: 2,
+  assisted_by: null,
+  note: null,
+  recorded_by: 2,
+  rev: 1,
+  client_key: 'other',
+  deleted_at: null,
+  ...over,
+})
+
+if (DB === null) {
+  registerLoadFailure('段階3a（機能訓練の db.ts）の試験', loadError, 'この Node は型の除去か解決フックを持たない（古い Node）', { hooks: true })
+} else {
+  const fresh = async (init = {}) => {
+    lsStore.clear()
+    await DB.__testHooks.restartQueue()
+    const state = { daycare_training_sessions: [], daycare_staffing: [], calls: [], nextId: 100, down: false, ...init }
+    DB.__testHooks.setClient(fakeClient(state))
+    return state
+  }
+  const done = async () => {
+    DB.__testHooks.setClient(null)
+    lsStore.clear()
+    await DB.__testHooks.restartQueue()
+  }
+
+  describe('insertTrainingSession（偽の Supabase・通信しない）', () => {
+    it('足せた時は saved。冪等キーを付け、内容・結果・時間・指導員を送る', async () => {
+      const st = await fresh()
+      const r = await DB.insertTrainingSession({ resident_id: 1, day: DAY, recorded_by: 4, ...fields() })
+      assert.equal(r.kind, 'saved')
+      assert.equal(r.row.program, '立ち上がり')
+      assert.equal(r.row.started_at, '10:00')
+      const ins = st.calls.find((c) => c.action === 'insert')
+      assert.match(ins.payload.client_key, /\S/)
+      assert.equal(ins.payload.duration_min, 20)
+      assert.equal(ins.payload.cancel_reason, null)
+      await done()
+    })
+    it('2台目が同じ方・同じ日を記録した時は taken（合流しない・先の行を返す）', async () => {
+      await fresh({ daycare_training_sessions: [sessionRow()] })
+      const r = await DB.insertTrainingSession({ resident_id: 1, day: DAY, recorded_by: 4, ...fields() })
+      assert.equal(r.kind, 'taken')
+      assert.equal(r.row.id, 7)
+      assert.equal(r.row.result, 'partial')
+      await done()
+    })
+    it('通信できない時は送信待ち（queued）。この端末の送信待ちに追加として出る', async () => {
+      const st = await fresh()
+      st.down = true
+      const r = await DB.insertTrainingSession({ resident_id: 2, day: DAY, recorded_by: 4, ...fields() })
+      assert.equal(r.kind, 'queued')
+      assert.deepEqual(
+        DB.pendingTrainingOps().map((p) => [p.kind, p.table, p.residentId, p.day, p.stopped]),
+        [['add', 'daycare_training_sessions', 2, DAY, false]],
+      )
+      await done()
+    })
+    it('未来の日・崩れた形（中止で時間あり・理由なし・内容が空・時間が範囲の外）は送らない（通信しない）', async () => {
+      const st = await fresh()
+      await assert.rejects(DB.insertTrainingSession({ resident_id: 1, day: '2999-01-01', recorded_by: 4, ...fields() }), /未来の日/)
+      for (const bad of [
+        fields({ result: 'cancelled', duration_min: 20, cancel_reason: 'condition' }),
+        fields({ result: 'cancelled', duration_min: null }),
+        fields({ program: '' }),
+        fields({ duration_min: 241 }),
+        fields({ cancel_reason: 'condition' }),
+      ]) {
+        await assert.rejects(DB.insertTrainingSession({ resident_id: 1, day: DAY, recorded_by: 4, ...bad }), /内容が足りません/)
+      }
+      assert.equal(st.calls.filter((c) => c.action === 'insert').length, 0)
+      await done()
+    })
+  })
+
+  describe('送信待ちを送る時（偽の Supabase）', () => {
+    it('実施記録: 圏外の間に他の端末が同じ方を記録していたら止める（stopped）。設定の〔いまの記録とくらべる〕の経路に載る', async () => {
+      const st = await fresh()
+      st.down = true
+      await DB.insertTrainingSession({ resident_id: 1, day: DAY, recorded_by: 4, ...fields({ result: 'cancelled', duration_min: null, cancel_reason: 'condition' }) })
+      st.daycare_training_sessions.push(sessionRow())
+      st.down = false
+      await DB.flushQueue(true)
+      const left = DB.pendingTrainingOps()
+      assert.deepEqual(left.map((p) => [p.kind, p.table, p.stopped]), [['add', 'daycare_training_sessions', true]])
+      assert.equal(st.daycare_training_sessions.filter((r) => r.resident_id === 1 && r.deleted_at === null).length, 1, '1件のまま')
+      assert.equal(SO.stoppedOpNeedsCompare({ table: 'daycare_training_sessions', kind: 'insert', state: 'conflict' }), true)
+      await done()
+    })
+    it('〔自分の内容で直す〕: 見せた相手の行（id・版）を、この端末の中身（中止）で直す。両向きの check に当たらない形で送る', async () => {
+      const st = await fresh()
+      st.down = true
+      await DB.insertTrainingSession({ resident_id: 1, day: DAY, recorded_by: 4, ...fields({ result: 'cancelled', duration_min: null, cancel_reason: 'condition' }) })
+      st.daycare_training_sessions.push(sessionRow())
+      st.down = false
+      await DB.flushQueue(true)
+      const stopped = DB.listStoppedOps().find((o) => o.table === 'daycare_training_sessions')
+      assert.ok(stopped, '設定の「送れていない記録」に出る')
+      assert.equal(stopped.state, 'conflict')
+      const target = await DB.fetchQueuedOpTarget(stopped.qid)
+      assert.deepEqual([target?.id, target?.rev, target?.result], [7, 1, 'partial'], '並べて見せる相手の行')
+      const qid = stopped.qid
+      const r = await DB.resendQueuedOp(qid, { id: 7, rev: 1 })
+      assert.equal(r, 'sent')
+      const row = st.daycare_training_sessions.find((x) => x.id === 7)
+      assert.deepEqual([row.result, row.duration_min, row.cancel_reason, row.rev], ['cancelled', null, 'condition', 2])
+      assert.deepEqual(DB.pendingTrainingOps(), [])
+      await done()
+    })
+    it('配置: 圏外の間に同じ日・同じ職員・同じ役割・同じ開始の時刻が入っていたら、届いたのと同じ（送信待ちから外れ・1行のまま）', async () => {
+      const st = await fresh()
+      st.down = true
+      const r = await DB.insertStaffing({ day: DAY, staff_id: 3, role: 'trainer', from_time: null, to_time: null, recorded_by: 4 })
+      assert.equal(r.kind, 'queued')
+      st.daycare_staffing.push({ id: 9, day: DAY, staff_id: 3, role: 'trainer', from_time: null, to_time: null, note: null, rev: 1, client_key: 'o-9', deleted_at: null })
+      st.down = false
+      await DB.flushQueue(true)
+      assert.deepEqual(DB.pendingTrainingOps(), [])
+      assert.equal(st.daycare_staffing.filter((x) => x.deleted_at === null).length, 1)
+      await done()
+    })
+  })
+
+  describe('updateTrainingSession（偽の Supabase）', () => {
+    it('変えた列だけ送る。結果を中止に替える時は、時間・理由・一言を一緒に送る', async () => {
+      const cur = { ...sessionRow(), started_at: '09:00' }
+      const st = await fresh({ daycare_training_sessions: [sessionRow()] })
+      const r1 = await DB.updateTrainingSession(cur, { ...fields({ result: 'partial', started_at: '09:00', duration_min: 15, program: 'バランス', instructor_id: 2 }) }, { editedBy: 4 })
+      assert.notEqual(r1, 'conflict')
+      const up1 = st.calls.filter((c) => c.action === 'update').at(-1)
+      assert.deepEqual(Object.keys(up1.payload).filter((k) => k !== 'edited_by').sort(), ['duration_min'])
+      const now = st.daycare_training_sessions[0]
+      const r2 = await DB.updateTrainingSession(
+        { ...cur, duration_min: 15, rev: now.rev },
+        fields({ result: 'cancelled', started_at: '09:00', duration_min: null, program: 'バランス', instructor_id: 2, cancel_reason: 'refused' }),
+        { editedBy: 4 },
+      )
+      assert.notEqual(r2, 'conflict')
+      const up2 = st.calls.filter((c) => c.action === 'update').at(-1)
+      assert.deepEqual(
+        Object.keys(up2.payload).filter((k) => k !== 'edited_by').sort(),
+        ['cancel_note', 'cancel_reason', 'duration_min', 'result'],
+      )
+      assert.deepEqual([now.result, now.duration_min, now.cancel_reason], ['cancelled', null, 'refused'])
+      await done()
+    })
+  })
+}

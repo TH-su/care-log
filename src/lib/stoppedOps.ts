@@ -286,6 +286,7 @@ export function stoppedOpNeedsCompare(op: Pick<StoppedOpLike, 'table' | 'kind' |
       op.table === 'med_admin' ||
       op.table === 'med_slots' ||
       op.table === 'daycare_attendance' ||
-      op.table === 'daycare_activity_log')
+      op.table === 'daycare_activity_log' ||
+      op.table === 'daycare_training_sessions')
   )
 }

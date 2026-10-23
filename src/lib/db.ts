@@ -3607,6 +3607,9 @@ async function sendQueuedOp(sb: SupabaseClient, op: QueueOp): Promise<SendResult
           if (st === 'deleting') return 'retry'
           if (st === 'same') return 'sent'
         }
+        // その日の配置（0046）は、同じ日・同じ職員・同じ役割・同じ開始の時刻の行が先にあれば、届いたのと同じ（止めない）。
+        // 機能訓練の実施記録は止める（結果の違う記録に合流しない。設定の〔いまの記録とくらべる〕で選ぶ）
+        if (op.table === 'daycare_staffing' && (await naturalKeyTaken(sb, op.table, op.payload))) return 'sent'
         if (await naturalKeyTaken(sb, op.table, op.payload)) return 'conflict'
         return 'retry'
       }
@@ -7270,6 +7273,13 @@ function insertAsUpdatePatch(table: string, payload: Record<string, unknown>): R
   // デイの到着・帰宅・欠席（0041）: 自然キー（利用者・日）と冪等キーを外した中身。自動の記録の印（auto）は持たない表
   if (table === 'daycare_attendance') {
     const out = omitKeys(payload, ['client_key', 'resident_id', 'day', 'id', 'rev', 'deleted_at'])
+    out.edited_by = idNum(payload.edited_by) ?? idNum(payload.recorded_by) ?? null
+    return out
+  }
+  // デイの機能訓練の実施記録（0046）: 自然キー（利用者・日）と冪等キーを外した中身（結果・時刻・時間・内容・指導員・理由・備考）。
+  // 全部を送るので、結果を替えても時間・理由の両向きの check に当たらない。記入者は直さない
+  if (table === 'daycare_training_sessions') {
+    const out = omitKeys(payload, ['client_key', 'resident_id', 'day', 'id', 'rev', 'deleted_at', 'recorded_by'])
     out.edited_by = idNum(payload.edited_by) ?? idNum(payload.recorded_by) ?? null
     return out
   }

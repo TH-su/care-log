@@ -58,9 +58,11 @@ import {
   TRAINING_RESULT_LABEL,
   defaultStartTime,
   dualRoleWithoutTime,
+  instructorFor,
   previousProgram,
   sessionOf,
   sessionText,
+  sessionsOutsideTargets,
   staffingTimeText,
   trainersOf,
   trainingInputErrors,
@@ -84,6 +86,9 @@ const MSG_NOT_PERSISTED =
   '送信できませんでした。この端末にも保存できていません（保存領域の空きが不足している可能性があります）。この画面を閉じずに、電波が戻ってからもう一度押してください。'
 const MSG_TAKEN = '先に別の端末で記録されていました。その記録を開きました。確かめてください。'
 const MSG_CONFLICT = '他の端末で先に直されていました。読み直しました。確かめてから、もう一度直してください。'
+const MSG_STOPPED =
+  '送れずに止まっている記録があります。設定の「送れていない記録」で、いまの記録とくらべて選ぶか、取り下げてください。'
+const MSG_PAST_START = '過去の日の記録です。開始時刻を実際の時刻で入れてください（押した時刻は使いません）。'
 
 /** 機能訓練の画面のルート（業務日は ?day= で持つ。今日は付けない） */
 export function trainingPath(day: string, today: string): string {
@@ -265,12 +270,24 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
   const gateOk = gate !== null && gate.observed && gate.value === true
   const canWrite = gateOk && !missing && data !== null && data.sessions !== null && data.staffing !== null && day <= today && !pastLocked
   const sessions = data?.sessions ?? []
-  const staffing = data?.staffing ?? []
+  const pending = pendingTrainingOps()
+  // 送信待ちの配置の追加（止まっていない分）も、配置として数える（圏外で入れた指導員で〔完了〕できるように・反証 軽4）。id は負の数
+  const pendingStaffing: DaycareStaffing[] = pending.flatMap((p, i) =>
+    p.kind === 'add' && p.table === 'daycare_staffing' && p.day === day && !p.stopped
+      ? [{ id: -(i + 1), day, staff_id: p.staffId, role: p.role, from_time: null, to_time: null, note: null, rev: 0 }]
+      : [],
+  )
+  const staffing = [...(data?.staffing ?? []), ...pendingStaffing]
   const trainers = trainersOf(staffing, day)
   const dual = dualRoleWithoutTime(staffing, day)
-  const pending = pendingTrainingOps()
-  const pendingAdd = (rid: number) => pending.some((p) => p.kind === 'add' && p.table === 'daycare_training_sessions' && p.residentId === rid && p.day === day)
-  const pendingRow = (rowId: number) => pending.find((p) => p.kind === 'update' && p.rowId === rowId)
+  // 対象者でない方の記録（到着を取り消した・欠席にした方。直す入口を残す＝反証 中4）
+  const outside = sessionsOutsideTargets(sessions, targets, day)
+  /** その方の今日の送信待ちの追加（stopped＝止まっている） */
+  const pendingAdd = (rid: number) =>
+    pending.find((p) => p.kind === 'add' && p.table === 'daycare_training_sessions' && p.residentId === rid && p.day === day)
+  /** 表と行の番号で探す（実施記録と配置は番号の採番が別＝反証 軽1） */
+  const pendingRow = (table: 'daycare_training_sessions' | 'daycare_staffing', rowId: number) =>
+    pending.find((p) => p.kind === 'update' && p.table === table && p.rowId === rowId)
 
   const precheck = (): string | null => {
     if (missing) return MSG_MISSING
@@ -297,12 +314,15 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
   /** 新しい記録の小窓の初めの値 */
   const freshInput = (rid: number, d: string, result: TrainingResult): TrainingInput => {
     const minutes = TRAINING_DEFAULT_MIN
+    // 過去の日は押した時刻を使わない（開始時刻は空にして入れてもらう＝反証 中2）
+    const start = d === todayIso() ? defaultStartTime(nowMinutes(), result === 'cancelled' ? 0 : minutes) : ''
     return {
       result,
-      started_at: defaultStartTime(nowMinutes(), result === 'cancelled' ? 0 : minutes),
+      started_at: start,
       minutes: String(minutes),
       program: previousProgram(data?.recent ?? [], rid, d) ?? '',
-      instructor_id: trainers[0] ?? null,
+      // 開始時刻の時間帯の機能訓練指導員が1人に決まる時だけ入れる（午前・午後で違う日に取り違えない＝反証 中1）
+      instructor_id: instructorFor(staffing, d, start),
       assisted_by: null,
       cancel_reason: null,
       cancel_note: '',
@@ -327,9 +347,11 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
       setRowMsg({ rid, day, msg: { tone: 'warn', text: why } })
       return
     }
-    setEditor({ rid, day, row: null, input: freshInput(rid, day, result) })
+    openNewWith(rid, day, freshInput(rid, day, result))
   }
   const openRow = (row: DaycareTrainingSession, note?: string) => setEditor({ rid: row.resident_id, day: row.day, row, input: inputOf(row), note })
+  const openNewWith = (rid: number, d: string, input: TrainingInput) =>
+    setEditor({ rid, day: d, row: null, input, note: d < todayIso() ? MSG_PAST_START : undefined })
 
   /** 〔完了〕1タップ。前回の内容と配置の指導員がそろっている時だけ小窓を出さずに保存する */
   const quickDone = async (rid: number) => {
@@ -340,15 +362,31 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
       return
     }
     const input = freshInput(rid, d, 'done')
-    if (input.program === '' || input.instructor_id === null) {
-      setEditor({ rid, day: d, row: null, input })
+    // 1タップで保存するのは、今日で・前回の内容があり・指導員が1人に決まる時だけ。ほかは小窓で確かめてもらう
+    if (d < todayIso() || input.program === '' || input.instructor_id === null) {
+      openNewWith(rid, d, input)
       return
     }
     await saveNew(rid, d, input, true)
   }
 
-  const saveNew = async (rid: number, d: string, input: TrainingInput, quick: boolean) => {
-    if (Object.keys(trainingInputErrors(input)).length > 0) return
+  /** 〔元に戻す〕（取り消し）。結果を必ず知らせる（取り消せなかった・送信待ち・止まった時も黙らない＝反証 軽2） */
+  const undoSession = async (row: DaycareTrainingSession) => {
+    try {
+      const r = await softDeleteTrainingSession(row, { editedBy: actorId })
+      if (r === 'queued') setRowMsg({ rid: row.resident_id, day: row.day, msg: queuedMsg() })
+      else if (r === 'conflict') setRowMsg({ rid: row.resident_id, day: row.day, msg: { tone: 'warn', text: `取り消せませんでした。${MSG_CONFLICT}` } })
+      else setRowMsg({ rid: row.resident_id, day: row.day, msg: { tone: 'info', text: '記録を取り消しました。' } })
+    } catch (e) {
+      setRowMsg({ rid: row.resident_id, day: row.day, msg: { tone: 'danger', text: `取り消せませんでした。${errText(e, row.day)}` } })
+    } finally {
+      scheduleReload()
+    }
+  }
+
+  /** 新しい記録を送る。小窓を閉じてよい（保存した・送信待ち）時は true。先の記録があった時は、その記録の小窓に替えるので false */
+  const saveNew = async (rid: number, d: string, input: TrainingInput, quick: boolean): Promise<boolean> => {
+    if (Object.keys(trainingInputErrors(input)).length > 0) return false
     setBusy(true)
     try {
       const r = await insertTrainingSession({ resident_id: rid, day: d, recorded_by: actorId, ...trainingPayload(input) })
@@ -357,15 +395,22 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
       } else if (r.kind === 'taken') {
         setRowMsg({ rid, day: d, msg: { tone: 'warn', text: MSG_TAKEN } })
         if (r.row !== null) openRow(r.row, MSG_TAKEN)
+        else setEditor(null)
+        return false
       } else {
         const row = r.row
         setRowMsg(null)
-        show(`${nameOf(rid)}さんの機能訓練を「${TRAINING_RESULT_LABEL[row.result]}」で記録しました${quick ? `（${row.program}・${row.duration_min ?? '—'}分）` : ''}`, () => {
-          void softDeleteTrainingSession(row, { editedBy: actorId }).then(() => scheduleReload())
+        const detail = quick ? `（${row.program}・${row.started_at.replace(/^0(\d)/, '$1')}から${row.duration_min ?? '—'}分・指導員 ${staffName(row.instructor_id)}）` : ''
+        show(`${nameOf(rid)}さんの機能訓練を「${TRAINING_RESULT_LABEL[row.result]}」で記録しました${detail}`, () => {
+          void undoSession(row)
         })
       }
+      return true
     } catch (e) {
-      setRowMsg({ rid, day: d, msg: { tone: 'danger', text: errText(e, d) } })
+      const text = errText(e, d)
+      if (quick) setRowMsg({ rid, day: d, msg: { tone: 'danger', text } })
+      else setEditor((cur) => (cur === null ? cur : { ...cur, note: text }))
+      return false
     } finally {
       setBusy(false)
       scheduleReload()
@@ -385,19 +430,21 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
       setEditor({ ...ed, note: why })
       return
     }
-    setEditor(null)
+    // 小窓は保存できるまで閉じない（拒否された時に入れた内容を失わない＝反証 軽7）
     if (ed.row === null) {
-      await saveNew(ed.rid, ed.day, ed.input, false)
+      if (await saveNew(ed.rid, ed.day, ed.input, false)) setEditor(null)
       return
     }
     setBusy(true)
     try {
       const r = await updateTrainingSession(ed.row, trainingPayload(ed.input), { editedBy: actorId })
+      setEditor(null)
       if (r === 'queued') setRowMsg({ rid: ed.rid, day: ed.day, msg: queuedMsg() })
       else if (r === 'conflict') setRowMsg({ rid: ed.rid, day: ed.day, msg: { tone: 'warn', text: MSG_CONFLICT } })
       else setRowMsg({ rid: ed.rid, day: ed.day, msg: { tone: 'info', text: '直しました。' } })
     } catch (e) {
-      setRowMsg({ rid: ed.rid, day: ed.day, msg: { tone: 'danger', text: errText(e, ed.day) } })
+      const text = errText(e, ed.day)
+      setEditor((cur) => (cur === null ? cur : { ...cur, note: text }))
     } finally {
       setBusy(false)
       scheduleReload()
@@ -608,17 +655,20 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
         {staffing.length > 0 ? (
           <ul className="divide-y divide-border">
             {STAFFING_ROLES.flatMap((r) => staffing.filter((s) => s.role === r)).map((s) => {
-              const p = pendingRow(s.id)
+              const p = s.id > 0 ? pendingRow('daycare_staffing', s.id) : undefined
               return (
                 <li key={s.id} className="flex flex-wrap items-center justify-between gap-gap py-2">
                   <p className="text-base text-ink">
                     <span className="font-bold">{STAFFING_ROLE_LABEL[s.role]}</span> {staffName(s.staff_id)}
                     {staffingTimeText(s) !== '' ? <span className="ml-2 text-ink2">{staffingTimeText(s)}</span> : null}
+                    {s.id < 0 ? <span className="ml-2 text-sm text-warn">（送信待ち）</span> : null}
                     {p !== undefined ? <span className="ml-2 text-sm text-warn">（{p.stopped ? '止まっています' : '送信待ち'}）</span> : null}
                   </p>
-                  <button type="button" disabled={!canWrite || busy} onClick={() => setDelStaff(s)} className={btn} aria-label={`${STAFFING_ROLE_LABEL[s.role]} ${staffName(s.staff_id)}さんを配置から外す`}>
-                    外す
-                  </button>
+                  {s.id > 0 ? (
+                    <button type="button" disabled={!canWrite || busy} onClick={() => setDelStaff(s)} className={btn} aria-label={`${STAFFING_ROLE_LABEL[s.role]} ${staffName(s.staff_id)}さんを配置から外す`}>
+                      外す
+                    </button>
+                  ) : null}
                 </li>
               )
             })}
@@ -681,8 +731,9 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
             {targets.map((rid) => {
               const s = sessionOf(sessions, rid, day)
               const prev = previousProgram(data.recent, rid, day)
-              const waiting = pendingAdd(rid)
-              const p = s === null ? undefined : pendingRow(s.id)
+              const add = pendingAdd(rid)
+              const waiting = add !== undefined
+              const p = s === null ? undefined : pendingRow('daycare_training_sessions', s.id)
               const name = nameOf(rid)
               return (
                 <li key={rid} className="space-y-2 py-2">
@@ -693,7 +744,9 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                         {s !== null
                           ? `${sessionText(s)}・指導員 ${staffName(s.instructor_id)}`
                           : waiting
-                            ? '記録（送信待ち）'
+                            ? add.stopped
+                              ? '記録（送れずに止まっています）'
+                              : '記録（送信待ち）'
                             : data.sessions === null
                               ? missing
                                 ? '（設定待ち）'
@@ -729,12 +782,32 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                       </Link>
                     </div>
                   </div>
+                  {add?.stopped === true || p?.stopped === true ? msgBox({ tone: 'warn', text: MSG_STOPPED }) : null}
                   {rowMsg !== null && rowMsg.rid === rid && rowMsg.day === day ? msgBox(rowMsg.msg) : null}
                 </li>
               )
             })}
           </ul>
         )}
+        {outside.length > 0 ? (
+          <div className="space-y-1 border-t border-border pt-2">
+            <h3 className="text-lg font-bold text-ink">対象者でない方の記録（{outside.length}件）</h3>
+            <p className="text-sm text-ink2">到着を取り消した・欠席にした方などの記録です。来ていない方の記録なら、開いて取り消してください。</p>
+            <ul className="divide-y divide-border">
+              {outside.map((s) => (
+                <li key={s.id} className="flex flex-wrap items-center justify-between gap-gap py-2">
+                  <p className="min-w-0 text-base text-ink">
+                    <span className="font-bold">{nameOf(s.resident_id)}</span> {sessionText(s)}
+                  </p>
+                  <button type="button" disabled={busy} onClick={() => openRow(s)} className={btn} aria-label={`${nameOf(s.resident_id)}さんの機能訓練の記録を開く（対象者でない方）`}>
+                    記録を開く
+                  </button>
+                </li>
+              ))}
+            </ul>
+            {rowMsg !== null && rowMsg.day === day && outside.some((s) => s.resident_id === rowMsg.rid) ? msgBox(rowMsg.msg) : null}
+          </div>
+        ) : null}
       </section>
 
       <ModalShell open={ed !== null} label={ed?.row === null ? '機能訓練を記録する' : '機能訓練の記録'} onClose={() => setEditor(null)}>
