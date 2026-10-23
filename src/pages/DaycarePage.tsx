@@ -350,6 +350,13 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     }
   }, [reloadKey])
 
+  // 入浴の旗（input_enabled_bath）も開くたびに取り直す（表示には使わない）。この画面の入浴の記録（〔予定どおり実施〕・区分・休み）は、
+  // 端末が「入浴を記録できる」を一度観測していれば、電波が無くても送信待ちに積まれる（db.ts の assertKindWritable）。
+  // 2026-10-24 に記録ハブから入浴のボタンとその旗の取得を外したので、この画面が自分で取る（確認の反証 中1）
+  useEffect(() => {
+    void getKindInputGate('bath').catch(() => undefined)
+  }, [reloadKey])
+
   // ── 名簿・個別の目標・休業日（1回） ──
   useEffect(() => {
     let alive = true

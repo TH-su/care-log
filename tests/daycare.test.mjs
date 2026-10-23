@@ -1369,6 +1369,13 @@ if (DC === null) {
       // 2026-10-24 入浴（デイ）の項目を外したので、入浴の判定（bathLocked）が抜けた
       assert.match(h, /key === 'daycare' \? daycareLocked : key === 'incident' \? incidentLocked : key === 'med' \? medLocked : locked/)
     })
+    it('デイの今日の画面は入浴の旗も自分で取る（2026-10-24 記録ハブが入浴の旗を取らなくなった後も、圏外の入浴の記録を送信待ちに積む・確認の反証 中1）', () => {
+      const p = read('../src/pages/DaycarePage.tsx')
+      assert.match(p, /useEffect\(\(\) => \{\n\s*void getKindInputGate\('bath'\)\.catch\(\(\) => undefined\)\n\s*\}, \[reloadKey\]\)/)
+      // 入浴の書き込みは input_enabled_bath の控えを見る（控えが「開いている」なら圏外でも送信待ちに積む）
+      const d = read('../src/lib/db.ts')
+      assert.match(d, /if \(table === 'bath_records'\) return assertKindWritable\('bath'\)/)
+    })
     it('記録ハブの並び（2026-10-24 入浴（デイ）を外した）と、画面に出る「デイ せせらぎ」の表記', () => {
       const h = read('../src/pages/RecordHubPage.tsx')
       const items = h.slice(h.indexOf('const ITEMS'), h.indexOf('const MED_GATE_UNKNOWN'))
