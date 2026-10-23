@@ -94,7 +94,7 @@ const MSG_GATE_UNKNOWN =
 const FILTER_LABEL: Record<DcVitalsFilter, string> = {
   present: '到着した方',
   planned: '予定の方全員',
-  all: '全員（欠席・入院を含む）',
+  all: '全員（休み・入院を含む）',
 }
 
 function readFilter(): DcVitalsFilter {
@@ -869,8 +869,8 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
             aria-pressed={filter === f}
             className={
               filter === f
-                ? 'min-h-tap rounded-full border border-primary bg-primary px-4 text-base font-bold text-primary-ink'
-                : 'min-h-tap rounded-full border border-border-strong bg-surface px-4 text-base text-ink'
+                ? 'min-h-tap rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink'
+                : 'min-h-tap rounded border border-border-strong bg-surface px-4 text-base text-ink'
             }
           >
             {filter === f ? <span aria-hidden="true">✓ </span> : null}
@@ -1026,7 +1026,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
               <p className="text-base text-ink">
                 {filter === 'present' ? '到着した方がまだいません。' : 'この日の対象の方がいません。'}
               </p>
-              <p className="mt-2 text-base text-ink2">「今日（到着・欠席）」で到着を記録すると、ここに並びます。</p>
+              <p className="mt-2 text-base text-ink2">「今日（到着・休み）」で到着を記録すると、ここに並びます。</p>
             </div>
           ) : (
             <ul className="space-y-3" aria-label="バイタルの一覧">
@@ -1096,7 +1096,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                                 type="button"
                                 onClick={() => addRecheck(row, slot)}
                                 disabled={!canWrite}
-                                className="min-h-tap rounded-full border-2 border-warn bg-warn-bg px-4 text-base font-bold text-ink disabled:opacity-60"
+                                className="min-h-tap rounded border-2 border-warn bg-warn-bg px-4 text-base font-bold text-ink disabled:opacity-60"
                               >
                                 ＋再測定
                               </button>

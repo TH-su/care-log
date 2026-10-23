@@ -368,7 +368,10 @@ if (DC === null) {
       assert.equal(DC.daycareBathStatus(bath({ auto: true }), true).kind, 'auto')
       assert.equal(DC.daycareBathStatus(bath({ auto: false, result: 'shower' }), true).kind, 'done')
       assert.equal(DC.daycareBathStatus(bath({ auto: false, result: 'cancel', cancel_reason: 'absent' }), true).kind, 'notBathed')
-      assert.equal(DC.daycareBathLabel(DC.daycareBathStatus(bath({ auto: true }), true)), '▲ 未確認（自動の記録: 全身浴）')
+      // 代表者の決定 2026-10-23 の 3: 自動の行は「済」とだけ出す（「自動」の文字は出さない）・行の無い予定は「予定」（固定し直し）
+      assert.equal(DC.daycareBathLabel(DC.daycareBathStatus(bath({ auto: true }), true)), '済')
+      assert.doesNotMatch(DC.daycareBathLabel(DC.daycareBathStatus(bath({ auto: true }), true)), /自動|未確認/)
+      assert.equal(DC.daycareBathLabel(DC.daycareBathStatus(null, true)), '予定')
       assert.equal(DC.daycareBathLabel(DC.daycareBathStatus(bath({ auto: false, result: 'partial' }), true)), '✓ 部分浴・清拭')
       assert.equal(DC.daycareBathLabel(DC.daycareBathStatus(bath({ auto: false, result: 'cancel', cancel_reason: 'absent' }), true)), '入浴していない（欠席）')
       assert.equal(DC.daycareBathLabel(DC.daycareBathStatus(bath({ auto: false, result: 'cancel', cancel_reason: null }), true)), '入浴していない（理由なし）')
@@ -378,6 +381,22 @@ if (DC === null) {
       assert.equal(DC.bathNeedsCheck(DC.daycareBathStatus(bath({ auto: true }), true)), true)
       assert.equal(DC.bathNeedsCheck(DC.daycareBathStatus(bath({ auto: false }), true)), false)
       assert.equal(DC.bathNeedsCheck(DC.daycareBathStatus(null, false)), false)
+    })
+    it('「入浴 未確認」の数（代表者の決定 2026-10-23 の 3）: 自動の行は数えない・12:30 より前の予定は数えない・12:30 を過ぎて行が無い方と、休みの方に残った自動の行だけ', () => {
+      const today = (nowHm) => ({ pastDay: false, nowHm })
+      const todo = DC.daycareBathStatus(null, true)
+      const auto = DC.daycareBathStatus(bath({ auto: true }), true)
+      const done = DC.daycareBathStatus(bath({ auto: false }), true)
+      assert.equal(DC.bathCountsUnchecked(auto, 'present', today('13:00')), false, '自動の行（済）は数えない')
+      assert.equal(DC.bathCountsUnchecked(todo, 'present', today('12:29')), false, '12:30 より前は「予定」')
+      assert.equal(DC.bathCountsUnchecked(todo, 'present', today('12:30')), true, '12:30 を過ぎても行が無い')
+      assert.equal(DC.bathCountsUnchecked(todo, 'left', today('15:00')), true)
+      assert.equal(DC.bathCountsUnchecked(todo, 'present', { pastDay: true, nowHm: '09:00' }), true, '過去の日は行が無ければ数える')
+      assert.equal(DC.bathCountsUnchecked(done, 'present', today('13:00')), false)
+      assert.equal(DC.bathCountsUnchecked(auto, 'absent', today('13:00')), true, '休みの方に自動の行が残っている')
+      assert.equal(DC.bathCountsUnchecked(todo, 'absent', today('13:00')), false)
+      assert.equal(DC.bathCountsUnchecked(todo, 'planned', today('13:00')), false, '予定（未到着）は数えない')
+      assert.equal(DC.DAYCARE_AUTO_BATH_AT, '12:30')
     })
   })
 
@@ -569,6 +588,10 @@ if (DC === null) {
           : false
     const handle = (q) => {
       if (opts.offline?.()) return { data: null, error: { message: 'offline' }, status: 0 }
+      // 0047 を当てる前の DB の再現: 自動の印の列を求める読み取りは 42703（列が無い）
+      if (opts.noAutoCols && q.action === 'select' && q.table === 'daycare_attendance' && typeof q.cols === 'string' && /arrived_auto/.test(q.cols)) {
+        return { data: null, error: { code: '42703', message: 'column daycare_attendance.arrived_auto does not exist' }, status: 400 }
+      }
       if (q.action === 'rpc') {
         db.rpcLog.push(q.fn)
         if (db.rpcMissing.has(q.fn)) return { data: null, error: { code: 'PGRST202', message: 'not found' }, status: 404 }
@@ -943,6 +966,85 @@ if (DC === null) {
     })
   })
 
+  describe('今日の画面の改善 1回目（0047: 自動の到着・帰宅の印・休みの理由「後で」）', () => {
+    const att = (over = {}) => ({ id: 1, resident_id: 1, day: T, arrived_at: '09:30', left_at: null, absent: false, absent_reason: null, note: null, recorded_by: null, rev: 1, arrived_auto: true, left_auto: false, ...over })
+    it('自動だけの行の見分け・人の時刻の有無（〔休み〕の確かめと、押した瞬間の自動の到着の扱い）', () => {
+      assert.equal(DC.isAutoOnlyAttendance(att()), true)
+      assert.equal(DC.isAutoOnlyAttendance(att({ left_at: '15:30', left_auto: true })), true)
+      assert.equal(DC.isAutoOnlyAttendance(att({ left_at: '15:10', left_auto: false })), false, '人が押した帰宅')
+      assert.equal(DC.isAutoOnlyAttendance(att({ arrived_auto: false })), false, '人が押した到着')
+      assert.equal(DC.isAutoOnlyAttendance(att({ recorded_by: 2 })), false, '記入者がいる')
+      assert.equal(DC.isAutoOnlyAttendance(att({ absent: true, arrived_at: null, absent_reason: 'later', arrived_auto: false })), false)
+      assert.equal(DC.isAutoOnlyAttendance(null), false)
+      assert.equal(DC.hasManualTimes(att()), false, '自動の到着だけなら確かめない')
+      assert.equal(DC.hasManualTimes(att({ arrived_auto: false })), true)
+      assert.equal(DC.hasManualTimes(att({ left_at: '15:10', left_auto: false })), true)
+      assert.equal(DC.hasManualTimes(att({ arrived_at: null, arrived_auto: false })), false)
+      assert.equal(DC.hasManualTimes(null), false)
+    })
+    it('「後で」の休みは検証を通る（選択肢の5つは変えない）', async () => {
+      assert.deepEqual(DC.validateAttendance({ absent: true, absent_reason: 'later', arrived_at: null, left_at: null }), { ok: true })
+      assert.equal(DC.validateAttendance({ absent: true, absent_reason: 'xyz', arrived_at: null, left_at: null }).ok, false)
+      const T2 = await import('../src/lib/types.ts')
+      assert.deepEqual([...T2.DAYCARE_ABSENT_REASONS], ['condition', 'hospital', 'wish', 'family', 'other'], '選択肢は5つのまま')
+      assert.deepEqual([...T2.DAYCARE_ABSENT_REASON_VALUES], ['condition', 'hospital', 'wish', 'family', 'other', 'later'])
+      assert.equal(T2.DAYCARE_ABSENT_REASON_LABEL.later, '理由は後で')
+    })
+    it('読み取り: 自動の印と「後で」を読む・時刻の無い側の印は持たない・列が無い DB では列を外して読み直し、印は無いとする', async () => {
+      const s = fakeServer()
+      DB.__testHooks.setClient(s.client)
+      s.db.daycare_attendance.push(
+        { id: 1, resident_id: 1, day: T, arrived_at: '09:30:00', left_at: '15:30:00', absent: false, absent_reason: null, note: null, recorded_by: null, rev: 1, arrived_auto: true, left_auto: true, deleted_at: null },
+        { id: 2, resident_id: 2, day: T, arrived_at: null, left_at: null, absent: true, absent_reason: 'later', note: null, recorded_by: 2, rev: 1, arrived_auto: true, left_auto: false, deleted_at: null },
+      )
+      const rows = await DB.fetchDaycareAttendance(T)
+      assert.deepEqual(rows.map((r) => [r.resident_id, r.arrived_auto, r.left_auto, r.absent_reason]), [[1, true, true, null], [2, false, false, 'later']])
+      assert.equal(DB.daycareAutoColumnsSeen(), true)
+      const old = fakeServer({ noAutoCols: true })
+      DB.__testHooks.setClient(old.client)
+      old.db.daycare_attendance.push({ id: 3, resident_id: 1, day: T, arrived_at: '09:30:00', left_at: null, absent: false, absent_reason: null, note: null, recorded_by: 2, rev: 1, deleted_at: null })
+      const r2 = await DB.fetchDaycareAttendance(T)
+      assert.deepEqual(r2.map((r) => [r.resident_id, r.arrived_at, r.arrived_auto]), [[1, '09:30', false]])
+      assert.equal(DB.daycareAutoColumnsSeen(), false, '0047 を当てる前の DB＝〔休み〕は理由を選ぶ小窓にする')
+      await reset()
+    })
+    it('修正: 自動の印は〔元に戻す〕で時刻と一緒に戻す時だけ送る・外す方は送らない（トリガが外す）・時刻の無い側には付けない', async () => {
+      const s = fakeServer()
+      DB.__testHooks.setClient(s.client)
+      s.db.daycare_attendance.push({ id: 5, resident_id: 1, day: T, arrived_at: null, left_at: null, absent: true, absent_reason: 'later', note: null, recorded_by: 2, rev: 2, arrived_auto: false, left_auto: false, deleted_at: null, edited_by: null })
+      const sent = []
+      const orig = s.client.from
+      s.client.from = (t) => {
+        const b = orig(t)
+        const up = b.update
+        b.update = (p) => {
+          sent.push({ ...p })
+          return up(p)
+        }
+        return b
+      }
+      const cur = (await DB.fetchDaycareAttendance(T))[0]
+      const back = await DB.updateDaycareAttendance(cur, { absent: false, absent_reason: null, arrived_at: '09:30', left_at: null, arrived_auto: true, left_auto: true }, { editedBy: 2 })
+      assert.equal(back.arrived_at, '09:30')
+      assert.equal(sent[0].arrived_auto, true)
+      assert.equal('left_auto' in sent[0], false, '帰宅の時刻が無いので帰宅の印は送らない')
+      const fix = await DB.updateDaycareAttendance({ ...back, arrived_auto: true }, { arrived_at: '09:45', arrived_auto: false }, { editedBy: 2 })
+      assert.equal(fix.arrived_at, '09:45')
+      assert.equal('arrived_auto' in sent[1], false, 'false は送らない（DB のトリガが外す）')
+      await reset()
+    })
+    it('〔元に戻す〕の取り消し: 時刻の無い休みの行だけ消せる（時刻のある行は消さない）', async () => {
+      const s = fakeServer()
+      DB.__testHooks.setClient(s.client)
+      const rest = await DB.insertDaycareAttendance({ resident_id: 1, day: T, arrived_at: null, left_at: null, absent: true, absent_reason: 'later', note: null, recorded_by: 2 })
+      assert.equal(rest.absent_reason, 'later')
+      assert.equal(await DB.softDeleteDaycareAttendance(rest, { editedBy: 2 }), true)
+      assert.notEqual(s.db.daycare_attendance.find((r) => r.id === rest.id).deleted_at, null)
+      await assert.rejects(() => DB.softDeleteDaycareAttendance(att({ id: 9 }), { editedBy: 2 }), /時刻のある記録は取り消せません/)
+      await reset()
+    })
+  })
+
   describe('予定（daycare_plan）の3値', () => {
     it('0行＝unknown・予定なしの1行＝none・行あり＝kv・関数が無い＝unknown＋missing', async () => {
       const s = fakeServer()
@@ -1080,6 +1182,59 @@ if (DC === null) {
     })
   })
 
+  describe('今日の画面の改善 1回目（静的・代表者の決定 2026-10-23 と親の回答 A1〜A5・B1〜B9）', () => {
+    const t = code('../src/pages/DaycarePage.tsx')
+    const list = t.slice(t.indexOf('<div className="rounded-lg border border-border bg-surface">'), t.indexOf('setPickerOpen(true)'))
+    it('画面には「自動」の文字を出さない（到着・帰宅・入浴とも時刻・状態だけ＝代表者の指示）', () => {
+      assert.ok(list.length > 1000)
+      assert.doesNotMatch(list.replace(/電波が戻ると自動で送信します/g, ''), /自動/)
+      assert.doesNotMatch(list, /arrived_auto|left_auto/, '一覧は印を見て見た目を変えない')
+    })
+    it('1人1行: 氏名・予定（押すと1人の記録へ）｜到着｜帰宅｜入浴｜昼食｜バイタル｜休み（右端）。水分・活動の札は外した（代表者の回答 A3）', () => {
+      assert.match(list, /className="dc-row-head [^"]*"[^>]*>\s*<span>氏名・予定<\/span>\s*<span>到着<\/span>\s*<span>帰宅<\/span>\s*<span>入浴<\/span>\s*<span>昼食<\/span>\s*<span>バイタル<\/span>\s*<span className="text-right">休み<\/span>/)
+      assert.match(list, /<Link\s+to=\{personPath\(row\.residentId, day, today\)\}/)
+      assert.match(list, /className=\{REST_BTN\}/)
+      assert.doesNotMatch(list, /水分|活動/)
+      assert.match(t, /const REST_BTN =\s*'inline-flex min-h-tap min-w-\[5rem\]/)
+      // 押せる範囲 44px・角は 6px（rounded-full を使わない）
+      assert.doesNotMatch(t, /rounded-full/)
+      for (const k of ['CELL_BTN', 'DANGER_CELL_BTN', 'PRIMARY_CELL_BTN', 'REST_BTN']) assert.match(t, new RegExp(`const ${k} =\\s*'inline-flex min-h-tap`))
+      const css = read('../src/index.css')
+      assert.match(css, /\.dc-row-head \{\s*display: none;\s*\}/)
+      assert.match(css, /@media \(min-width: 60em\) \{\s*\.dc-row,\s*\.dc-row-head \{\s*display: grid;\s*grid-template-columns: minmax\(0, 1fr\) 4\.5rem 4\.5rem 8rem 8rem 6\.5rem 6\.5rem;/)
+    })
+    it('時刻の欄を押すと直す小窓（今日は現場も・過去の日は事務所＝A4）。〔帰宅を取り消す〕は小窓の中', () => {
+      assert.match(list, /const timesOk = canChangeDaycareTimes\(day, today, role\)/)
+      assert.match(list, /timesOk && !disabled \? \(\s*<button\s+type="button"\s+onClick=\{\(\) => \{\s*if \(precheck\(row\)\) openTime\(row, 'fix'\)/)
+      assert.match(t, /\{timeFor\.mode === 'fix' && timeFor\.row\.attendance\?\.left_at \? \(/)
+    })
+    it('〔休み〕の1タップ: 0047 が無い DB では理由の小窓・人の時刻がある方だけ確かめ・押した瞬間の自動の到着は読み直して休みに直す', () => {
+      const rest = t.slice(t.indexOf('const onRest = '), t.indexOf('const restNow = '))
+      assert.match(rest, /if \(daycareAutoColumnsSeen\(\) !== true\) \{\s*setAbsentFor\(row\)\s*return\s*\}/)
+      assert.match(rest, /if \(a !== null && hasManualTimes\(a\)\) \{\s*setConfirm\(/)
+      const now = t.slice(t.indexOf('const restNow = '), t.indexOf('const undoRest = '))
+      assert.match(now, /absent_reason: 'later' as const, arrived_at: null, left_at: null/)
+      assert.match(now, /if \(r === 'conflict' && before === null\) \{[\s\S]*?isAutoOnlyAttendance\(now\)/)
+      assert.match(now, /await recordAbsentBath\(\{ residentId: id, day, bathingPlanned: row\.bathingPlanned, recordedBy: actorId \}\)/)
+    })
+    it('直後の〔元に戻す〕: 時刻と印を戻す・押す前に行が無ければ行を取り消す・入浴は自動と同じ区分に戻す（印は付けない＝端末は自動の記録を作らない）', () => {
+      const undo = t.slice(t.indexOf('const undoRest = '), t.indexOf('const onReasonPick = '))
+      assert.match(undo, /before === null\s*\? await softDeleteDaycareAttendance\(saved, \{ editedBy: actorId \}\)/)
+      assert.match(undo, /arrived_auto: before\.arrived_auto === true,\s*left_auto: before\.left_auto === true,/)
+      assert.match(undo, /resultForBathed\(day, closedDates\)/)
+      assert.match(undo, /await updateBath\(bath\.record, \{ result: back, cancel_reason: null \}, \{ editedBy: actorId \}\)/)
+      assert.doesNotMatch(undo, /auto: true/)
+    })
+    it('休みの文言（ボタン・状態・件数の帯）。入浴の理由の「欠席」は変えない（B6）', () => {
+      assert.match(t, /text: `休み（\$\{reason\}）`/)
+      assert.match(t, /\{ label: '休み', value: c\.absent \}/)
+      assert.match(t, /label: '今日（到着・休み）'/)
+      assert.match(code('../src/pages/DaycarePersonPage.tsx'), /return `休み（\$\{a\?\.absent_reason/)
+      const T2 = read('../src/lib/types.ts')
+      assert.match(T2, /absent: '欠席'/, '入浴の理由の表示は変えない')
+    })
+  })
+
   describe('配線（ルート・記録ハブ・旗）', () => {
     it('App.tsx に /record/daycare と /record/daycare/vitals・記録ハブの許可リスト cl_recordTab は元のまま', () => {
       const a = read('../src/App.tsx')
@@ -1189,7 +1344,12 @@ if (DC === null) {
       const t = code('../src/pages/DaycarePage.tsx')
       assert.match(t, /if \(canEditPastDaycareTimes\(role\)\) openTime\(row, 'arrive'\)/)
       assert.match(t, /if \(canEditPastDaycareTimes\(role\)\) openTime\(row, 'leave'\)/)
-      assert.match(t, /onClick=\{\(\) => askCancelLeave\(row\)\}\s*disabled=\{disabled \|\| !timesOk\}/)
+      // 今日の画面の改善 1回目（代表者の回答 A4）: 時刻の欄を押すと直す小窓（今日は現場も・過去の日は事務所だけ＝canChangeDaycareTimes）。
+      // 〔帰宅を取り消す〕は時刻を直す小窓の中へ移した（固定し直し・現場の過去の日は時刻の欄が押せない＝止める意図は同じ）
+      assert.match(t, /const timesOk = canChangeDaycareTimes\(day, today, role\)/)
+      assert.match(t, /timesOk && !disabled \? \(\s*<button/)
+      assert.match(t, /setTimeFor\(null\)\s*askCancelLeave\(r\)/)
+      assert.match(t, /if \(!canChangeDaycareTimes\(day, todayIso\(\), role\)\) \{\s*setMsg\(row\.residentId, \{ tone: 'warn', text: MSG_PAST_TIME_CLEAR \}\)/)
       assert.match(t, /disabled=\{disabled \|\| \(rowHasTimes && !timesOk\)\}/)
       assert.match(t, /if \(timesTouched && e instanceof DbError && e\.kind === 'forbidden' && dayRef\.current < todayIso\(\)\) return MSG_PAST_TIME/)
       assert.match(t, /text: errText\(e, touchesTimes\(patch, row\.attendance\)\)/)

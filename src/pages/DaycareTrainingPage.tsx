@@ -862,7 +862,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                       <Link
                         to={personPath(rid, day, today)}
                         aria-label={`${name}さんの1日の記録を開く`}
-                        className="inline-flex min-h-tap items-center rounded-full border border-primary bg-surface px-4 text-base font-bold text-primary"
+                        className="inline-flex min-h-tap items-center rounded border border-primary bg-surface px-4 text-base font-bold text-primary"
                       >
                         1日の記録<span aria-hidden="true"> ›</span>
                       </Link>

@@ -136,7 +136,7 @@ function stateText(row: DaycareBoardRow | undefined): string {
     const m = /^(\d{1,2}):(\d{2})/.exec(t ?? '')
     return m === null ? '' : ` ${Number(m[1])}:${m[2]}`
   }
-  if (row.state === 'absent') return `欠席（${a?.absent_reason ? DAYCARE_ABSENT_REASON_LABEL[a.absent_reason] : '理由なし'}）`
+  if (row.state === 'absent') return `休み（${a?.absent_reason ? DAYCARE_ABSENT_REASON_LABEL[a.absent_reason] : '理由なし'}）`
   if (row.state === 'left') return `帰宅${hm(a?.left_at)}`
   if (row.state === 'present') return `在席${hm(a?.arrived_at)}`
   if (row.hospitalized) return '入院中'
@@ -669,7 +669,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
       <div className="flex flex-wrap items-center justify-between gap-gap">
         <Link
           to={day === today ? '/record/daycare' : `/record/daycare`}
-          className="inline-flex min-h-tap items-center rounded-full border border-border-strong bg-surface px-4 text-base text-ink"
+          className="inline-flex min-h-tap items-center rounded border border-border-strong bg-surface px-4 text-base text-ink"
         >
           <span aria-hidden="true">‹ </span>デイの一覧へ
         </Link>

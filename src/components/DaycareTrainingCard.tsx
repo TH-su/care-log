@@ -126,7 +126,7 @@ export function DaycareTrainingCard({ residentId, day, today, refreshKey = 0, st
       {rline !== null ? <p className="text-base text-ink">{rline}</p> : null}
       {vline !== null ? <p className="text-base text-ink">{vline}</p> : null}
       {state.status !== 'missing' && gate !== 'closed' ? (
-        <Link to={to} className="inline-flex min-h-tap items-center rounded-full border border-primary bg-surface px-4 text-base font-bold text-primary">
+        <Link to={to} className="inline-flex min-h-tap items-center rounded border border-primary bg-surface px-4 text-base font-bold text-primary">
           機能訓練の画面で記録する<span aria-hidden="true"> ›</span>
         </Link>
       ) : null}
