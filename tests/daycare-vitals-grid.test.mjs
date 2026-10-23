@@ -68,7 +68,7 @@ if (DC === null) {
       assert.match(page, /<th scope="col" className="sticky left-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">\s*<span className="dc-vital-name block">氏名<\/span>\s*<\/th>/)
       // 氏名の列の幅は札の長さで広げない（7rem と画面幅の35% の小さい方・中で折り返す＝#45 の確認の反証 重）
       assert.match(page, /<div className="dc-vital-name">/)
-      assert.match(read('../src/index.css'), /\.dc-vital-name \{\s*width: min\(7rem, 35vw\);\s*overflow-wrap: anywhere;/)
+      assert.match(read('../src/index.css'), /\.dc-vital-name \{\s*width: min\(7rem, 35vw\);\s*(\/\*[\s\S]*?\*\/\s*)?min-width: 100%;\s*overflow-wrap: anywhere;/)
       assert.match(page, /<th scope="row" className="sticky left-0 z-20 bg-bg px-2 py-1 text-left font-normal">/)
       assert.match(page, /\{DAYCARE_VITAL_FIELDS\.map\(\(f\) => \(\s*<th key=\{f\} scope="col"/)
       const head = page.slice(page.indexOf('<thead>'), page.indexOf('</thead>'))
