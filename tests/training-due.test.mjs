@@ -218,6 +218,14 @@ if (D === null) {
       assert.equal(r.notice, null)
       assert.equal(D.TARGET_NO_PLAN_LABEL.ended, '計画書の通知を止めています')
     })
+    it('反証の直し: 写しの状態（まだ写していない・写したが1人も載っていない・あり）と、在籍でない方の理由（中1・軽3）', () => {
+      assert.equal(D.reviewCopyState({ rows: [], settings: null }), 'never')
+      assert.equal(D.reviewCopyState({ rows: [], settings: { due_rule: 'calendar', warn_days: 28, synced_at: '2026-10-23T00:00:00Z' } }), 'empty')
+      assert.equal(D.reviewCopyState({ rows, settings: null }), 'ok')
+      const r = D.orderTargetsByPlan({ targets: [1, 9], copy: { rows, settings: null }, people: [{ id: 1, active: false }], today })
+      assert.deepEqual([...r.noPlan.entries()], [[1, 'inactive'], [9, 'nocopy']])
+      assert.equal(D.TARGET_NO_PLAN_LABEL.inactive, '在籍でない方')
+    })
     it('カードの見直しの1行: 読めない・写しに無い・計画なし・期限と状態・終了は出さない', () => {
       assert.deepEqual(D.reviewCardLine({ copy: 'error', residentId: 1, active: true, today }), { kind: 'error' })
       assert.deepEqual(D.reviewCardLine({ copy: { rows, settings: null }, residentId: 9, active: true, today }), { kind: 'nocopy' })

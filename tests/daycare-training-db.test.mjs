@@ -106,6 +106,7 @@ function fakeClient(state) {
         return { data: { ...row }, error: null, status: 201 }
       }
       if (state.selectFail && q.table === 'daycare_home_visits') return { data: null, error: { message: 'timeout', code: '' }, status: 0 }
+      if (state.residentsFail && q.table === 'residents') return { data: null, error: { message: 'server error', code: 'XX000' }, status: 500 }
       const hits = rows().filter(hit)
       if (q.single) return { data: hits[0] ? { ...hits[0] } : null, error: null, status: 200 }
       return { data: hits.map((r) => ({ ...r })), error: null, status: 200 }
@@ -558,6 +559,7 @@ if (DB === null) {
 
   describe('計画書の期限の写し（段階3c・偽の Supabase・偽の計画書アプリ）', () => {
     const FAKE_URL = 'https://script.google.com/macros/s/FAKE-TEST/exec'
+    const resident = (id, sourceId) => ({ id, source_id: sourceId, name: `見本 利用者${id}`, kana: null, room: String(100 + id), gender: null, care_level: null, active: true, needs_review: false, note_alias: null })
     const INDEX = { v: 1, rows: { T001: { nameNorm: '見本花子', latestPlanDate: '2026-08-01', nextDue: '2026-11-01', status: 'signed' } }, settings: { dueRule: 'calendar', warnDays: 28, staff: [{ id: '1', name: '見本 職員一' }] } }
     /** 計画書アプリへの通信を数える偽の fetch（本物へはつながない） */
     const withFakePlanApp = async (fn) => {
@@ -574,7 +576,7 @@ if (DB === null) {
       }
     }
     it('事務所: 索引を読み、写す分だけを関数に渡す（写した職員はいまの記録者）。結果をそのまま返す', async () => {
-      const st = await fresh({ role: 'office', syncResult: { ok: true, written: 1, unmatched: 0, cancelled: 0, synced_at: 'x' } })
+      const st = await fresh({ role: 'office', residents: [resident(1, 'T001')], syncResult: { ok: true, written: 1, unmatched: 0, cancelled: 0, synced_at: 'x' } })
       lsStore.set('tp_cfg', JSON.stringify({ url: FAKE_URL, token: 'fake-token' }))
       const { out, seen } = await withFakePlanApp(() => SYNC.syncTrainingPlanDue(4))
       assert.deepEqual(out, { kind: 'done', result: { ok: true, written: 1, unmatched: 0, cancelled: 0 } })
@@ -607,6 +609,20 @@ if (DB === null) {
       } finally {
         globalThis.localStorage.getItem = realGet
       }
+      await done()
+    })
+    it('送る前の突き合わせ（反証 中1）: care-log の利用者と1人も結べない索引は、写しの関数を呼ばずに止める。名簿を読めない時も写さない', async () => {
+      const st = await fresh({ role: 'office', residents: [resident(1, 'X001'), resident(2, 'X002')], syncResult: { ok: true, written: 0, unmatched: 1, cancelled: 0 } })
+      lsStore.set('tp_cfg', JSON.stringify({ url: FAKE_URL, token: 'fake-token' }))
+      const { out } = await withFakePlanApp(() => SYNC.syncTrainingPlanDue(4))
+      assert.equal(out.kind, 'fail')
+      assert.match(out.text, /1人も結べなかったため、写しませんでした/)
+      assert.equal(st.calls.some((c) => c.fn === 'daycare_training_due_sync'), false)
+      st.residentsFail = true
+      const again = await withFakePlanApp(() => SYNC.syncTrainingPlanDue(4))
+      assert.equal(again.out.kind, 'fail')
+      assert.match(again.out.text, /名簿を読めなかった/)
+      assert.equal(st.calls.some((c) => c.fn === 'daycare_training_due_sync'), false)
       await done()
     })
     it('止めた時（空上書きの保護）は理由をそのまま返す。関数が無い DB は「まだ使えません」・現場の 42501 は権限の文', async () => {

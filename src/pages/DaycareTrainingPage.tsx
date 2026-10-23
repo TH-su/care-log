@@ -791,6 +791,11 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
           <p role="status" className="rounded border border-warn bg-warn-bg p-2 text-base text-ink">
             <span aria-hidden="true">▲ </span>計画書の期限を確かめられません（写しを読み込めませんでした）。並びは到着の順のままです。
           </p>
+        ) : planOrder?.notice === 'empty' && targets.length > 0 ? (
+          // 写しが0件（まだ写していない・1人も載っていない）の時も、並びを変えていないことを知らせる（段階3c の反証 中1）
+          <p role="status" className="rounded border border-border p-2 text-base text-ink">
+            <span aria-hidden="true">ⓘ </span>計画書の写しに載っている方がいないため、並びは到着の順のままです。
+          </p>
         ) : null}
         {targets.length === 0 ? (
           <p className="text-base text-ink2">この日に来た方（在席・帰宅）がまだいません。到着を記録すると、ここに出ます。</p>

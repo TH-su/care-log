@@ -31,11 +31,13 @@ interface Props {
 }
 
 type State = { status: 'loading' } | { status: 'missing' } | { status: 'error' } | { status: 'ready'; row: DaycareTrainingSession | null }
-/** 居宅訪問の期限の1行（copy＝写しの行と設定。読めない時は 'error'） */
+/**
+ * 居宅訪問と写しの読み込み（visits・copy はそれぞれ読めない時 'error'。片方が読めなくても、もう片方の行は出す
+ * ＝居宅訪問を読めない時に見直しの行まで消さない・段階3c の反証 軽1）
+ */
 type VisitState =
   | { status: 'loading' }
-  | { status: 'error' }
-  | { status: 'ready'; visits: DaycareHomeVisit[]; copy: { rows: DueCopyRow[]; settings: DueCopySettings | null } | 'error' }
+  | { status: 'ready'; visits: DaycareHomeVisit[] | 'error'; copy: { rows: DueCopyRow[]; settings: DueCopySettings | null } | 'error' }
 /** 旗: null＝まだ分からない／open＝解禁／closed＝封鎖（観測済み）／unknown＝確かめられない */
 type Gate = 'open' | 'closed' | 'unknown' | null
 
@@ -65,9 +67,9 @@ export function DaycareTrainingCard({ residentId, day, today, refreshKey = 0, st
   useEffect(() => {
     let alive = true
     setVisit({ status: 'loading' })
-    Promise.all([fetchHomeVisits(residentId), fetchTrainingDueCopy().catch(() => 'error' as const)])
-      .then(([visits, copy]) => alive && setVisit({ status: 'ready', visits, copy }))
-      .catch(() => alive && setVisit({ status: 'error' }))
+    Promise.all([fetchHomeVisits(residentId).catch(() => 'error' as const), fetchTrainingDueCopy().catch(() => 'error' as const)]).then(
+      ([visits, copy]) => alive && setVisit({ status: 'ready', visits, copy }),
+    )
     return () => {
       alive = false
     }
@@ -76,7 +78,7 @@ export function DaycareTrainingCard({ residentId, day, today, refreshKey = 0, st
   /** 居宅訪問の期限の1行（表が無い・読めない・終了の方は出さない、または確かめられないと出す） */
   const visitLine = (): string | null => {
     if (state.status === 'missing' || visit.status === 'loading') return null
-    if (visit.status === 'error') return '居宅訪問: 記録を読み込めませんでした（期限は確かめられません）'
+    if (visit.visits === 'error') return '居宅訪問: 記録を読み込めませんでした（期限は確かめられません）'
     const line = homeVisitCardLine({ visits: visit.visits, copy: visit.copy, residentId, active, today })
     if (line === null) return null
     if (line.kind === 'none') return '居宅訪問: 記録なし'
@@ -92,7 +94,7 @@ export function DaycareTrainingCard({ residentId, day, today, refreshKey = 0, st
 
   /** 計画の見直しの期限の1行（写しから・段階3c） */
   const reviewLine = (): string | null => {
-    if (state.status === 'missing' || visit.status === 'loading' || visit.status === 'error') return null
+    if (state.status === 'missing' || visit.status === 'loading') return null
     const line = reviewCardLine({ copy: visit.copy, residentId, active, today })
     if (line === null) return null
     if (line.kind === 'error') return '計画の見直し: 計画書の期限を確かめられません（写しを読み込めませんでした）'

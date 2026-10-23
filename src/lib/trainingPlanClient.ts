@@ -88,7 +88,15 @@ export function readTrainingPlanConfig(): { url: string; token: string } | 'inva
 
 // ───────────────────────── 索引のそろえ方（純関数） ─────────────────────────
 
-const ymdOrNull = (v: unknown): string | null => (isYmd(v) ? v : null)
+/**
+ * 日付をそろえる（実在する日付で、年が 1900〜2100 の時だけ。年 0000 などは Postgres の date が拒んで写し全体が止まるため
+ * null にする＝段階3c の反証 軽2。3b の isYmd は変えない）
+ */
+const ymdOrNull = (v: unknown): string | null => {
+  if (!isYmd(v)) return null
+  const y = Number(v.slice(0, 4))
+  return y >= 1900 && y <= 2100 ? v : null
+}
 
 /**
  * 索引（training_plan:index の data）から、写す分だけを取り出す。氏名・計画の id・数・職員の一覧などは捨てる。
@@ -104,7 +112,7 @@ export function normalizeTrainingPlanIndex(data: unknown): { rows: TrainingDueCo
     if (r === null || typeof r !== 'object' || Array.isArray(r)) continue
     const row = r as Record<string, unknown>
     const stop = row.stop !== null && typeof row.stop === 'object' && !Array.isArray(row.stop) ? (row.stop as Record<string, unknown>) : null
-    const stopOk = stop !== null && typeof stop.reason === 'string' && STOP_REASONS.includes(stop.reason) && isYmd(stop.from)
+    const stopOk = stop !== null && typeof stop.reason === 'string' && STOP_REASONS.includes(stop.reason) && ymdOrNull(stop.from) !== null
     rows.push({
       master_id: id,
       latest_plan_date: ymdOrNull(row.latestPlanDate),
@@ -195,11 +203,31 @@ export type TrainingDueSyncResult =
   | { ok: true; written: number; unmatched: number; cancelled: number }
   | { ok: false; reason: 'empty' | 'nomatch' | 'too_many'; existing: number; incoming: number | null; cancel: number | null }
 
+/** 写す行のうち、care-log の利用者番号（residents.source_id）と結べる行の数（送る前の突き合わせ） */
+export function countMatchable(rows: readonly TrainingDueCopyInput[], sourceIds: ReadonlySet<string>): number {
+  return rows.filter((r) => sourceIds.has(r.master_id)).length
+}
+
+/**
+ * 送る前の突き合わせで1人も結べなかった時の文（写しの関数を呼ばない）。写しがまだ空の初回は、写しの関数の
+ * 「結べる番号が0件」の守りが働かず、設定の行だけを書いて「今日写した・0人」に見えるため、送る前に止める（段階3c の反証 中1）
+ */
+export function trainingDueNoMatchText(incoming: number): string {
+  return `計画書アプリの利用者番号（${incoming}件）が、care-log の利用者と1人も結べなかったため、写しませんでした（接続先の取り違えか、利用者番号の形の違いの可能性があります）。何も書いていません。管理者に連絡してください。`
+}
+
 /**
  * 写しの結果を、事務所が次に何をすればよいか分かる文にする（計画 4章・止めた理由を平易に）。
  * 止めた時は「今の写しはそのまま」を必ず添える（何も書いていないことを伝える）
  */
 export function trainingDueSyncText(r: TrainingDueSyncResult): { tone: 'info' | 'warn'; text: string } {
+  if (r.ok && r.written === 0) {
+    // 送る前に突き合わせるので普通は来ない（名簿が変わった直後などの競り合いだけ）。「写しました（0人）」と言わない
+    return {
+      tone: 'warn',
+      text: `計画書アプリの利用者番号が、care-log の利用者と1人も結べず、写しに1人も載りませんでした（結べなかった ${r.unmatched}件）。利用者番号の形を確かめてください。`,
+    }
+  }
   if (r.ok) {
     const parts = [`計画書の期限を写しました（${r.written}人）。`]
     if (r.unmatched > 0)

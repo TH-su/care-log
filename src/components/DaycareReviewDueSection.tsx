@@ -11,7 +11,7 @@
 import { useState } from 'react'
 import { DbError, canWriteMasters } from '../lib/db'
 import type { MyRole } from '../lib/db'
-import { REVIEW_STATE_LABEL, normalizeDueRule, normalizeWarnDays, reviewDueCounts, reviewDueList } from '../lib/trainingDue'
+import { REVIEW_STATE_LABEL, normalizeDueRule, normalizeWarnDays, reviewCopyState, reviewDueCounts, reviewDueList } from '../lib/trainingDue'
 import type { DueCopyLoad, ReviewDueRow } from '../lib/trainingDue'
 import { readTrainingPlanConfig, trainingDueSyncText } from '../lib/trainingPlanClient'
 import { syncTrainingPlanDue } from '../lib/trainingDueSync'
@@ -78,6 +78,7 @@ export function DaycareReviewDueSection({ today, residents, copy, role, actorId,
   const rows: ReviewDueRow[] =
     loaded === null ? [] : reviewDueList({ copy: loaded.rows, settings: loaded.settings, people: residents.map((r) => ({ id: r.id, active: r.active })), today })
   const counts = reviewDueCounts(rows)
+  const cstate = loaded === null ? null : reviewCopyState(loaded)
   const syncedAt = loaded?.settings?.synced_at ?? null
   const syncedDay = syncedAt === null || Number.isNaN(new Date(syncedAt).getTime()) ? null : isoDate(new Date(syncedAt))
   const rule = normalizeDueRule(loaded?.settings?.due_rule)
@@ -136,12 +137,18 @@ export function DaycareReviewDueSection({ today, residents, copy, role, actorId,
         <p role="alert" className="rounded border border-danger bg-danger-bg p-2 text-base text-ink">
           <span aria-hidden="true">▲ </span>計画書の期限を確かめられません（写しを読み込めませんでした）。通信状態を確かめて、〔最新に更新〕を押してください。
         </p>
-      ) : syncedDay === null && copy.rows.length === 0 ? (
+      ) : cstate === 'never' ? (
         msgBox({
           tone: 'info',
           text: canCopy
             ? '計画書の期限はまだ写されていません。〔計画書の期限を写す〕を押してください。'
             : '計画書の期限はまだ写されていません。計画書アプリを使っている事務所の PC で〔計画書の期限を写す〕を押してください。',
+        })
+      ) : cstate === 'empty' ? (
+        // 写したのに1人も載っていない（0/0/0 を出すと「期限切れなし」と読めるので出さない＝段階3c の反証 中1）
+        msgBox({
+          tone: 'warn',
+          text: `計画書の写しに1人も載っていません${syncedDay === null ? '' : `（${fmtDayLabel(syncedDay)} に写したもの）`}。計画の見直しの期限は確かめられません。利用者番号が結べていない可能性があります。管理者に連絡してください。`,
         })
       ) : (
         <>

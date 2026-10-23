@@ -159,6 +159,26 @@ if (C === null) {
     })
   })
 
+  describe('反証の直し（段階3c）', () => {
+    it('年が 1900〜2100 の外の日付は null（年 0000 で写し全体が止まらないように・軽2）', () => {
+      const out = C.normalizeTrainingPlanIndex({ rows: { T001: { latestPlanDate: '0000-01-01', nextDue: '1899-12-31', stop: { reason: 'stopped', from: '0001-01-01' } }, T002: { latestPlanDate: '2100-12-31', nextDue: '1900-01-01' } } })
+      assert.deepEqual([out.rows[0].latest_plan_date, out.rows[0].next_due, out.rows[0].stop_reason, out.rows[0].stop_from], [null, null, null, null])
+      assert.deepEqual([out.rows[1].latest_plan_date, out.rows[1].next_due], ['2100-12-31', '1900-01-01'])
+    })
+    it('送る前の突き合わせ: care-log の利用者番号と結べる行の数。1人も結べない時の文は「何も書いていません」（中1）', () => {
+      const rows = C.normalizeTrainingPlanIndex(INDEX).rows
+      assert.equal(C.countMatchable(rows, new Set(['T001', 'T004', 'X'])), 2)
+      assert.equal(C.countMatchable(rows, new Set(['X'])), 0)
+      assert.match(C.trainingDueNoMatchText(4), /4件）が、care-log の利用者と1人も結べなかったため、写しませんでした.*何も書いていません/)
+    })
+    it('関数が ok でも1人も写っていなければ「写しました（0人）」と言わない（中1）', () => {
+      const t = C.trainingDueSyncText({ ok: true, written: 0, unmatched: 3, cancelled: 0 })
+      assert.equal(t.tone, 'warn')
+      assert.doesNotMatch(t.text, /写しました/)
+      assert.match(t.text, /1人も載りませんでした/)
+    })
+  })
+
   describe('写しの結果の文（trainingDueSyncText）', () => {
     it('書いた時は人数。結べなかった番号・外した方があれば添える', () => {
       assert.deepEqual(C.trainingDueSyncText({ ok: true, written: 5, unmatched: 0, cancelled: 0 }), { tone: 'info', text: '計画書の期限を写しました（5人）。' })
