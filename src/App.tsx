@@ -118,6 +118,9 @@ const DaycareVitalsPage = lazy(() => loadDaycareVitalsPage().then((m) => ({ defa
 const loadDaycarePersonPage = () => import('./pages/DaycarePersonPage')
 const DaycarePersonPage = lazy(() => loadDaycarePersonPage().then((m) => ({ default: m.DaycarePersonPage })))
 // デイ 段階2b（2026-10-22）: 活動・レクをまとめて記録する画面
+// 今日の画面の改善 2回目（2026-10-24）: デイの昼食・おやつをまとめて入れる画面
+const loadDaycareMealsPage = () => import('./pages/DaycareMealsPage')
+const DaycareMealsPage = lazy(() => loadDaycareMealsPage().then((m) => ({ default: m.DaycareMealsPage })))
 const loadDaycareActivityBulkPage = () => import('./pages/DaycareActivityBulkPage')
 const DaycareActivityBulkPage = lazy(() => loadDaycareActivityBulkPage().then((m) => ({ default: m.DaycareActivityBulkPage })))
 // デイ 段階3a（2026-10-23）: 個別機能訓練の画面（配置と実施記録）
@@ -591,6 +594,7 @@ function screenTitle(pathname: string): string {
   if (pathname === '/record/bath') return '入浴（デイ）'
   if (pathname === '/record/daycare') return 'デイ せせらぎ'
   if (pathname === '/record/daycare/vitals') return 'デイ バイタル一括'
+  if (pathname === '/record/daycare/meals') return 'デイ 食事一括'
   if (pathname.startsWith('/record/daycare/person/')) return 'デイ 1人の記録'
   if (pathname === '/record/daycare/bulk') return 'デイ 活動をまとめて'
   if (pathname === '/record/daycare/training') return 'デイ 機能訓練'
@@ -1654,6 +1658,8 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
             {/* デイ（せせらぎ）段階1（2026-10-22）。入力解禁は input_enabled_daycare（画面の中で確かめる） */}
             <Route path="/record/daycare" element={<DaycarePage actorId={actorId} staff={staff} />} />
             <Route path="/record/daycare/vitals" element={<DaycareVitalsPage actorId={actorId} staff={staff} />} />
+            {/* 今日の画面の改善 2回目（2026-10-24）: 昼食・おやつをまとめて入れる（入力解禁は input_enabled_daycare）。業務日は ?day= */}
+            <Route path="/record/daycare/meals" element={<DaycareMealsPage actorId={actorId} staff={staff} />} />
             {/* デイ 段階2a（2026-10-22）: 1人の1日記録（昼食・おやつ・水分・排泄の表示と入口）。業務日は ?day= */}
             <Route path="/record/daycare/person/:residentId" element={<DaycarePersonPage actorId={actorId} staff={staff} />} />
             {/* デイ 段階2b（2026-10-22）: 活動・レクをまとめて記録（入力解禁は input_enabled_daycare_activity）。業務日は ?day= */}
