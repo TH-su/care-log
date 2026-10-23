@@ -46,8 +46,8 @@ import type { MyRole } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
 import { DaycareHomeVisitSection } from '../components/DaycareHomeVisitSection'
 import { DaycareReviewDueSection } from '../components/DaycareReviewDueSection'
-import { TARGET_NO_PLAN_LABEL, orderTargetsByPlan, weekScopeIds } from '../lib/trainingDue'
-import type { DueCopyLoad } from '../lib/trainingDue'
+import { TARGET_NO_PLAN_LABEL, orderTargetsByPlan, weekScope } from '../lib/trainingDue'
+import type { DueCopyLoad, WeekScope } from '../lib/trainingDue'
 import { ConfirmDialog, ErrorBlock, LoadingBlock, ModalShell, useToast } from '../components/ui'
 import { buildDaycareBoard, canEditPastDaycareTimes } from '../lib/daycare'
 import {
@@ -158,9 +158,9 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
   const [dataTick, setDataTick] = useState(0)
   /**
    * 週間計画で、週のどこかの曜日にデイの予定がある方（見直しの期限の一覧を絞る・積み残し 51）。
-   * undefined＝読み込み中／null＝読めない（絞らない＝多めに出す）
+   * undefined＝読み込み中。ids が null なら絞らない（読めない・照合できない予定がある＝多めに出す）
    */
-  const [weekIds, setWeekIds] = useState<Set<number> | null | undefined>(undefined)
+  const [week, setWeek] = useState<WeekScope | undefined>(undefined)
   const { toast, show } = useToast()
   const genRef = useRef(0)
   const dayRef = useRef(day)
@@ -184,8 +184,8 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
       .then((r) => alive && setRole(r))
       .catch(() => {})
     fetchDaycarePlanWeek(todayIso())
-      .then((plans) => alive && setWeekIds(weekScopeIds(plans)))
-      .catch(() => alive && setWeekIds(null))
+      .then((plans) => alive && setWeek(weekScope(plans)))
+      .catch(() => alive && setWeek({ ids: null, reason: 'unread', unmatched: 0 }))
     return () => {
       alive = false
     }
@@ -772,7 +772,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
         actorId={actorId}
         blockedReason={homeVisitBlocked()}
         onSynced={scheduleReload}
-        scopeIds={weekIds}
+        scope={week}
       />
 
       <DaycareHomeVisitSection
