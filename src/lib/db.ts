@@ -111,6 +111,9 @@ import {
   trainingResultOf,
 } from './daycareTraining'
 import type { DaycareStaffing, DaycareTrainingSession, StaffingRole, trainingPayload } from './daycareTraining'
+import { EXPLAINED_TOS, HOME_VISIT_PURPOSES, HOME_VISIT_TEXT_MAX } from './daycareHomeVisit'
+import type { DaycareHomeVisit, ExplainedTo, HomeVisitPurpose, homeVisitPayload } from './daycareHomeVisit'
+import type { DueCopyRow, DueCopySettings } from './trainingDue'
 import { addDays as addDaysIso } from './format'
 import { normalizeChoices, normalizeIncidentDetail, validateIncidentInput } from './incident'
 import type { IncidentInput } from './incident'
@@ -228,6 +231,12 @@ const DAYCARE_ACTIVITY_COLS = 'id,resident_id,day,label,participation,note,recor
 const DAYCARE_TRAINING_COLS =
   'id,resident_id,day,started_at,duration_min,program,result,cancel_reason,cancel_note,instructor_id,assisted_by,note,recorded_by,rev'
 const DAYCARE_STAFFING_COLS = 'id,day,staff_id,role,from_time,to_time,note,rev'
+/** デイの個別機能訓練の居宅訪問（0046・段階3b） */
+const DAYCARE_HOME_VISIT_COLS =
+  'id,resident_id,visited_on,visitor_id,purpose,life_status,explained_to,explained_on,explanation,plan_revised,recorded_by,rev'
+/** 計画書の期限の写し（0046・段階3b は読むだけ。書くのは 3c の写しの関数） */
+const DAYCARE_TRAINING_DUE_COLS = 'resident_id,latest_plan_date,next_due,stop_reason,stop_from,plan_status,synced_at'
+const DAYCARE_TRAINING_DUE_SETTINGS_COLS = 'due_rule,warn_days,synced_at'
 /** デイの1日の予定の写し（0041）。plan_rows に氏名は入らない（サーバーが照合した結果だけ） */
 const DAYCARE_DAY_COLS = 'id,day,plan_source,plan_rev,plan_updated_at,plan_rows,opened_by,created_at,rev'
 /** 服薬の時間帯（0013_med_admin.sql）。監査列・client_key は端末へ持ち出さない */
@@ -1078,7 +1087,8 @@ function normalizeImportDay(row: unknown): ImportDay | null {
 // 1人1日1項目1行の自然キーを持ち、同じ項目・同じ度合いの行が先にあれば合流する（insertDaycareActivity・送信待ちの経路）
 // daycare_training_sessions（個別機能訓練の実施記録・1人1日1件）と daycare_staffing（その日の配置）も同じ経路（2026-10-23 デイ段階3・0046）。
 // 入力解禁は input_enabled_daycare_training。自然キーで当たったら止める（入浴と同じ扱い。結果の違う記録に合流しない）
-type LegacyTable = 'fluid_intake' | 'notes' | 'outings' | 'bath_records' | 'med_slots' | 'med_admin' | 'incidents' | 'daycare_attendance' | 'daycare_activity_log' | 'daycare_training_sessions' | 'daycare_staffing'
+// daycare_home_visits（居宅訪問・1人・1日・1目的に1件・2026-10-23 デイ段階3b・0046）も同じ経路・同じ旗。自然キーで当たったら止める
+type LegacyTable = 'fluid_intake' | 'notes' | 'outings' | 'bath_records' | 'med_slots' | 'med_admin' | 'incidents' | 'daycare_attendance' | 'daycare_activity_log' | 'daycare_training_sessions' | 'daycare_staffing' | 'daycare_home_visits'
 
 /** 列の並び・rev 照合の作法が共通の業務表（読み取りの列は colsOf） */
 type QueueTable = 'vitals' | 'meals' | LegacyTable
@@ -1168,6 +1178,7 @@ const LEGACY_TABLES: readonly LegacyTable[] = [
   'daycare_activity_log',
   'daycare_training_sessions',
   'daycare_staffing',
+  'daycare_home_visits',
 ]
 
 /** 旧版が使っていた退避キー。値は cl_sendQueue の中へ移し、移せたことを観測してから取り除く */
@@ -3864,6 +3875,8 @@ function colsOf(table: QueueTable): string {
       return DAYCARE_TRAINING_COLS
     case 'daycare_staffing':
       return DAYCARE_STAFFING_COLS
+    case 'daycare_home_visits':
+      return DAYCARE_HOME_VISIT_COLS
   }
 }
 
@@ -4081,6 +4094,12 @@ function naturalKeyOf(table: QueueTable, payload: Record<string, unknown>): Reco
     const day = dateStr(payload.day)
     return day === null ? null : { resident_id: residentId, day }
   }
+  // デイの居宅訪問（1人・1日・1目的に1件・0046）
+  if (table === 'daycare_home_visits') {
+    const day = dateStr(payload.visited_on)
+    const purpose = str(payload.purpose)
+    return day === null || (purpose !== 'initial' && purpose !== 'periodic') ? null : { resident_id: residentId, visited_on: day, purpose }
+  }
   return null
 }
 
@@ -4088,7 +4107,7 @@ function naturalKeyOf(table: QueueTable, payload: Record<string, unknown>): Reco
 async function naturalKeyTaken(sb: SupabaseClient, table: QueueTable, payload: Record<string, unknown>): Promise<boolean> {
   if (table === 'bath_records') return bathDayTaken(sb, payload)
   if (table === 'med_slots' || table === 'med_admin') return medKeyTaken(sb, table, payload)
-  if (table === 'daycare_attendance' || table === 'daycare_activity_log' || table === 'daycare_training_sessions') {
+  if (table === 'daycare_attendance' || table === 'daycare_activity_log' || table === 'daycare_training_sessions' || table === 'daycare_home_visits') {
     const key = naturalKeyOf(table, payload)
     return key !== null && (await findByKey(sb, table, key)) !== null
   }
@@ -4643,7 +4662,7 @@ async function writeGate(table: LegacyTable): Promise<void> {
   if (table === 'incidents') return assertKindWritable('incident')
   if (table === 'daycare_attendance') return assertKindWritable('daycare')
   if (table === 'daycare_activity_log') return assertKindWritable('daycare_activity')
-  if (table === 'daycare_training_sessions' || table === 'daycare_staffing') return assertKindWritable('daycare_training')
+  if (table === 'daycare_training_sessions' || table === 'daycare_staffing' || table === 'daycare_home_visits') return assertKindWritable('daycare_training')
   if (table === 'med_slots') {
     if (!isSupabaseConfigured()) throw new DbError('unconfigured', MSG.unconfigured)
     assertBuildCurrent() // 旗の封鎖は受けないが、古い版の止め（F28③）は受ける
@@ -7306,6 +7325,12 @@ function insertAsUpdatePatch(table: string, payload: Record<string, unknown>): R
     out.edited_by = idNum(payload.edited_by) ?? idNum(payload.recorded_by) ?? null
     return out
   }
+  // デイの居宅訪問（0046）: 自然キー（利用者・訪問日・目的）と冪等キーを外した中身（訪問者・生活の状況・説明・見直し）。記入者は直さない
+  if (table === 'daycare_home_visits') {
+    const out = omitKeys(payload, ['client_key', 'resident_id', 'visited_on', 'purpose', 'id', 'rev', 'deleted_at', 'recorded_by'])
+    out.edited_by = idNum(payload.edited_by) ?? idNum(payload.recorded_by) ?? null
+    return out
+  }
   // デイのその日の配置（0046）: 自然キー（日・職員・役割・開始の時刻）と冪等キーを外した中身（終わりの時刻・備考）。
   // 終わりの時刻だけが違って止まった追加を、相手の行の終わりの時刻で直す（直しの確認の反証 軽3）。記入者は直さない
   if (table === 'daycare_staffing') {
@@ -8742,6 +8767,230 @@ export function pendingTrainingOps(): PendingTrainingOp[] {
     } else if (q.kind === 'update' && q.rowId !== undefined) {
       const deleted = Object.prototype.hasOwnProperty.call(q.payload, 'deleted_at') && q.payload.deleted_at !== null
       out.push({ kind: 'update', table: q.table, rowId: q.rowId, deleted, stopped })
+    }
+  }
+  return out
+}
+
+// ── デイ（せせらぎ）の記録 段階3b: 個別機能訓練の居宅訪問と期限（2026-10-23 追加・代表承認・0046 の表・DB 変更なし） ──
+//
+// daycare_home_visits（1人・1日・1目的に1件）は実施記録と同じ経路（client_key・rev 照合・送信待ち・edited_by・soft delete）。
+//   入力解禁は機能訓練と同じ旗 input_enabled_daycare_training。過去の日は現場も書ける（守りの対象にしない＝計画 3.6・質問9）。
+//   未来の訪問日・説明の日は送らない（0046 のトリガも 22023・daycare_home_visit_future: で止める）。
+//   2台で同じ方・同じ日・同じ目的を記録した時（23505）: 合流しない。'taken'（画面は先の記録を開いて知らせる）。
+// daycare_training_due・daycare_training_due_settings（計画書の期限の写しと設定）は読むだけ（書くのは 3c の写しの関数）。
+
+/** 居宅訪問の取得上限（全員の生きている記録。期限切れの古い訪問も見つけるため、日数では絞らない） */
+const DAYCARE_HOME_VISIT_ROWS = 5000
+/** 写しの取得上限（1人1行） */
+const DAYCARE_TRAINING_DUE_ROWS = 2000
+
+const HOME_VISIT_MSG = {
+  bad: '居宅訪問の記録の内容が足りません。訪問日・訪問した職員・目的・確かめた生活の状況を確かめてください。',
+  future: '未来の日は入れられません。訪問日と説明した日を今日以前にしてください。',
+  dup: '同じ方・同じ日・同じ目的の居宅訪問の記録が、すでにあります。訪問日か目的を確かめてください。',
+} as const
+
+function normalizeHomeVisit(row: unknown): DaycareHomeVisit | null {
+  const r = asRecord(row)
+  if (!r) return null
+  const id = idNum(r.id)
+  const resident_id = idNum(r.resident_id)
+  const visited_on = dateStr(r.visited_on)
+  const visitor_id = idNum(r.visitor_id)
+  const purpose = oneOf<HomeVisitPurpose>(r.purpose, HOME_VISIT_PURPOSES)
+  const life_status = str(r.life_status)
+  const rev = num(r.rev)
+  if (id === null || resident_id === null || visited_on === null || visitor_id === null || purpose === null || life_status === null || rev === null) return null
+  return {
+    id,
+    resident_id,
+    visited_on,
+    visitor_id,
+    purpose,
+    life_status,
+    explained_to: oneOf<ExplainedTo>(r.explained_to, EXPLAINED_TOS),
+    explained_on: dateStr(r.explained_on),
+    explanation: str(r.explanation),
+    plan_revised: r.plan_revised === true,
+    recorded_by: idNum(r.recorded_by),
+    rev,
+  }
+}
+
+function normalizeDueCopyRow(row: unknown): DueCopyRow | null {
+  const r = asRecord(row)
+  if (!r) return null
+  const resident_id = idNum(r.resident_id)
+  if (resident_id === null) return null
+  return {
+    resident_id,
+    latest_plan_date: dateStr(r.latest_plan_date),
+    next_due: dateStr(r.next_due),
+    stop_reason: str(r.stop_reason),
+    stop_from: dateStr(r.stop_from),
+  }
+}
+
+/** 居宅訪問の生きている記録（訪問日の新しい順）。residentId を渡すとその方だけ（1人の画面のカード） */
+export async function fetchHomeVisits(residentId?: number): Promise<DaycareHomeVisit[]> {
+  const sb = await getClient()
+  let q = sb.from('daycare_home_visits').select(DAYCARE_HOME_VISIT_COLS).is('deleted_at', null)
+  if (residentId !== undefined) q = q.eq('resident_id', residentId)
+  const res = (await q.order('visited_on', { ascending: false }).order('id', { ascending: false }).limit(DAYCARE_HOME_VISIT_ROWS)) as Res<unknown>
+  if (res.error !== null) throw trainingReadError(res)
+  return list(res.data, normalizeHomeVisit, DAYCARE_HOME_VISIT_ROWS)
+}
+
+/**
+ * 計画書の期限の写し（読むだけ）。rows＝生きている写しの行（無ければ []）、settings＝規則と間近の日数（行が無ければ null）。
+ * 表が無い（0046 未適用）時は TRAINING_MSG.missing、読めない時は読み取りのエラー（画面は「確かめられません」と出し、
+ * 「計画なし」「期限内」に倒さない）
+ */
+export async function fetchTrainingDueCopy(): Promise<{ rows: DueCopyRow[]; settings: DueCopySettings | null }> {
+  const sb = await getClient()
+  const [rowsRes, setRes] = (await Promise.all([
+    sb.from('daycare_training_due').select(DAYCARE_TRAINING_DUE_COLS).is('deleted_at', null).order('resident_id', { ascending: true }).limit(DAYCARE_TRAINING_DUE_ROWS),
+    sb.from('daycare_training_due_settings').select(DAYCARE_TRAINING_DUE_SETTINGS_COLS).eq('id', 1).limit(1).maybeSingle(),
+  ])) as [Res<unknown>, Res<unknown>]
+  if (rowsRes.error !== null) throw trainingReadError(rowsRes)
+  if (setRes.error !== null) throw trainingReadError(setRes)
+  const s = asRecord(setRes.data)
+  const settings: DueCopySettings | null =
+    s === null ? null : { due_rule: str(s.due_rule) ?? 'calendar', warn_days: num(s.warn_days) ?? 28, synced_at: str(s.synced_at) }
+  return { rows: list(rowsRes.data, normalizeDueCopyRow, DAYCARE_TRAINING_DUE_ROWS), settings }
+}
+
+/**
+ * 居宅訪問の追加の結果。saved＝足した／taken＝同じ方・同じ日・同じ目的の記録が先にあった（row＝その行・読めなければ null。合流しない）／
+ * queued＝通信できず送信待ち
+ */
+export type HomeVisitAdd = { kind: 'saved'; row: DaycareHomeVisit } | { kind: 'taken'; row: DaycareHomeVisit | null } | { kind: 'queued' }
+
+type HomeVisitFields = ReturnType<typeof homeVisitPayload>
+
+/** 送る前の確かめ（DB の check・トリガと同じ決まり。崩れた形・未来の日は送らない） */
+function assertHomeVisitFields(f: HomeVisitFields): void {
+  const life = f.life_status.trim()
+  const ok =
+    dateStr(f.visited_on) === f.visited_on &&
+    f.visitor_id > 0 &&
+    (f.purpose === 'initial' || f.purpose === 'periodic') &&
+    life !== '' &&
+    [...life].length <= HOME_VISIT_TEXT_MAX &&
+    (f.explained_to === null || EXPLAINED_TOS.includes(f.explained_to)) &&
+    (f.explained_on === null || dateStr(f.explained_on) === f.explained_on) &&
+    (f.explanation === null || [...f.explanation].length <= HOME_VISIT_TEXT_MAX)
+  if (!ok) throw new DbError('server', HOME_VISIT_MSG.bad)
+  const today = localToday()
+  if (f.visited_on > today || (f.explained_on !== null && f.explained_on > today)) throw new DbError('server', HOME_VISIT_MSG.future)
+}
+
+/** 居宅訪問の追加。端末生成の冪等キー client_key を必ず付ける（再送しても1行）。未来の日・崩れた形は送らない */
+export async function insertHomeVisit(a: { resident_id: number; recorded_by: number | null } & HomeVisitFields): Promise<HomeVisitAdd> {
+  const f: HomeVisitFields = {
+    visited_on: a.visited_on,
+    visitor_id: a.visitor_id,
+    purpose: a.purpose,
+    life_status: a.life_status,
+    explained_to: a.explained_to,
+    explained_on: a.explained_on,
+    explanation: a.explanation,
+    plan_revised: a.plan_revised,
+  }
+  assertHomeVisitFields(f)
+  await writeGate('daycare_home_visits')
+  const payload = withClientKey({ resident_id: a.resident_id, ...f, recorded_by: idNum(a.recorded_by) })
+  const queued = async (): Promise<HomeVisitAdd> => {
+    await enqueue({ table: 'daycare_home_visits', kind: 'insert', payload })
+    return { kind: 'queued' }
+  }
+  const sb = await getClient()
+  const res = (await sb.from('daycare_home_visits').insert(payload).select(DAYCARE_HOME_VISIT_COLS).maybeSingle()) as Res<unknown>
+  if (res.error !== null) {
+    if (isAuthFail(res)) {
+      fireAuthExpired()
+      return queued()
+    }
+    if (isTransient(res)) return queued()
+    if (isMissingTable(res)) throw new DbError('server', TRAINING_MSG.missing)
+    if (isUniqueViolation(res)) {
+      const ck = clientKeyOf(payload)
+      // 自分の送信が既に載っている（再送の行き違い）→ 載っている行を返す
+      const landed = ck === null ? null : await findByKey(sb, 'daycare_home_visits', ck, DAYCARE_HOME_VISIT_COLS, true)
+      const mine = landed === null ? null : normalizeHomeVisit(landed.row)
+      if (mine !== null) return { kind: 'saved', row: mine }
+      // 他の端末が同じ方・同じ日・同じ目的を先に記録した: 合流せず、先の記録を返す（画面はそれを開いて知らせる）
+      const key = naturalKeyOf('daycare_home_visits', payload)
+      const other = key === null ? null : await findByKey(sb, 'daycare_home_visits', key, DAYCARE_HOME_VISIT_COLS)
+      return { kind: 'taken', row: other === null ? null : normalizeHomeVisit(other.row) }
+    }
+    throw rejectError('保存でき', errCode(res), res.status)
+  }
+  markSelfRow('daycare_home_visits', res.data, num(asRecord(res.data)?.rev))
+  kickAfterDelivered()
+  const row = normalizeHomeVisit(res.data)
+  if (row === null) throw new DbError('server', MSG.broken)
+  return { kind: 'saved', row }
+}
+
+/** 居宅訪問の修正（rev 照合の部分更新）。送るのは変えた列だけ（後日に説明を足す時は説明の欄だけが送られる） */
+export async function updateHomeVisit(
+  current: DaycareHomeVisit,
+  next: HomeVisitFields,
+  opts?: WriteOpts,
+): Promise<DaycareHomeVisit | Conflict | Queued> {
+  assertHomeVisitFields(next)
+  const sent: Record<string, unknown> = {}
+  const cur: Record<string, unknown> = { ...current }
+  for (const [k, v] of Object.entries(next)) if (cur[k] !== v) sent[k] = v
+  if (Object.keys(sent).length === 0) return current
+  // 訪問日・目的を変える時は、同じ方の別の記録と同じ鍵にならないかを先に確かめる（DB の 23505 を「サーバーエラー」と
+  // 見せない＝段階3b の反証 中1）。読めない時は送って DB に任せる（送信待ちに積む時も止めない）
+  const keyChanged = 'visited_on' in sent || 'purpose' in sent
+  const key = { resident_id: current.resident_id, visited_on: next.visited_on, purpose: next.purpose }
+  if (keyChanged) {
+    const sb = await getClient()
+    const other = await findByKey(sb, 'daycare_home_visits', key)
+    if (other !== null && other.id !== current.id) throw new DbError('server', HOME_VISIT_MSG.dup)
+  }
+  try {
+    return await updateRow('daycare_home_visits', current.id, current.rev, sent, normalizeHomeVisit, opts)
+  } catch (e) {
+    // 確かめを読めなかった・確かめの後に他の端末が同じ鍵で記録した時は、DB の 23505 で拒まれる。読み直して同じ鍵の別の
+    // 記録があれば、「サーバーエラー」でなく重なりの知らせにする（確認の反証 軽1）
+    if (keyChanged && e instanceof DbError && e.kind === 'server') {
+      const again = await findByKey(await getClient(), 'daycare_home_visits', key)
+      if (again !== null && again.id !== current.id) throw new DbError('server', HOME_VISIT_MSG.dup)
+    }
+    throw e
+  }
+}
+
+/** 居宅訪問の取り消し（deleted_at を付ける。物理削除はしない） */
+export async function softDeleteHomeVisit(current: DaycareHomeVisit, opts?: WriteOpts): Promise<true | Conflict | Queued> {
+  return softDelete('daycare_home_visits', current.id, current.rev, opts)
+}
+
+/** この端末の送信待ちにある居宅訪問の操作（画面が重ねて出す・読むだけ）。stopped＝止まった（競合・拒否）op */
+export type PendingHomeVisitOp =
+  | { kind: 'add'; residentId: number; visitedOn: string; purpose: HomeVisitPurpose; stopped: boolean }
+  | { kind: 'update'; rowId: number; deleted: boolean; stopped: boolean }
+
+export function pendingHomeVisitOps(): PendingHomeVisitOp[] {
+  const out: PendingHomeVisitOp[] = []
+  for (const q of queue) {
+    if (q.table !== 'daycare_home_visits') continue
+    const stopped = q.blocked !== undefined
+    if (q.kind === 'insert') {
+      const residentId = idNum(q.payload.resident_id)
+      const visitedOn = dateStr(q.payload.visited_on)
+      const purpose = oneOf<HomeVisitPurpose>(q.payload.purpose, HOME_VISIT_PURPOSES)
+      if (residentId === null || visitedOn === null || purpose === null) continue
+      out.push({ kind: 'add', residentId, visitedOn, purpose, stopped })
+    } else if (q.kind === 'update' && q.rowId !== undefined) {
+      const deleted = Object.prototype.hasOwnProperty.call(q.payload, 'deleted_at') && q.payload.deleted_at !== null
+      out.push({ kind: 'update', rowId: q.rowId, deleted, stopped })
     }
   }
   return out
@@ -10335,7 +10584,7 @@ export function subscribeDaycareActivityChanges(cb: (table: string, info?: Chang
  * デイの個別機能訓練の実施記録・その日の配置の Realtime を購読する表（2026-10-23 デイ段階3・0046）。段階1・2のチャンネルにも混ぜない
  * （0046 を当てる前の DB で、到着・欠席・活動の購読まで止まらないようにする）
  */
-const REALTIME_DAYCARE_TRAINING_TABLES = ['daycare_training_sessions', 'daycare_staffing'] as const
+const REALTIME_DAYCARE_TRAINING_TABLES = ['daycare_training_sessions', 'daycare_staffing', 'daycare_home_visits'] as const
 
 /**
  * デイの機能訓練の変更通知（機能訓練の画面だけが使う）。呼び方・渡す情報は subscribeChanges と同じ。

@@ -264,7 +264,8 @@ describe('静的検査（段階3a の規律）', () => {
   it('db.ts の配線: 送信待ちの表・機能訓練だけの旗・自然キー（利用者・日）・合流しない・別のチャンネル・読み取りは絞って上限つき', () => {
     const db = code('../src/lib/db.ts')
     assert.match(db, /type LegacyTable = [^\n]*'daycare_training_sessions' \| 'daycare_staffing'/)
-    assert.match(db, /if \(table === 'daycare_training_sessions' \|\| table === 'daycare_staffing'\) return assertKindWritable\('daycare_training'\)/)
+    // 段階3b で居宅訪問（daycare_home_visits）も同じ旗に入った
+    assert.match(db, /if \(table === 'daycare_training_sessions' \|\| table === 'daycare_staffing' \|\| table === 'daycare_home_visits'\) return assertKindWritable\('daycare_training'\)/)
     assert.match(db, /daycare_training: 'デイの機能訓練の記録はまだ使い始めていません（開始日に解禁します）'/)
     assert.match(db, /if \(table === 'daycare_training_sessions'\) \{\s*const day = dateStr\(payload\.day\)\s*return day === null \? null : \{ resident_id: residentId, day \}/)
     assert.match(db, /if \(table === 'daycare_staffing'\) return staffingKeyTaken\(sb, payload\)/)
@@ -274,7 +275,7 @@ describe('静的検査（段階3a の規律）', () => {
     assert.doesNotMatch(ins, /merged/)
     assert.match(ins, /if \(a\.day > localToday\(\)\) throw new DbError\('server', DAYCARE_MSG\.future\)/)
     // 段階1・2のチャンネルに混ぜない
-    assert.match(db, /const REALTIME_DAYCARE_TRAINING_TABLES = \['daycare_training_sessions', 'daycare_staffing'\] as const/)
+    assert.match(db, /const REALTIME_DAYCARE_TRAINING_TABLES = \['daycare_training_sessions', 'daycare_staffing', 'daycare_home_visits'\] as const/)
     assert.match(db, /sb\.channel\(`cl_dctrn_/)
     const reads = db.slice(db.indexOf('export async function fetchTrainingSessions'), db.indexOf('export type TrainingSessionAdd'))
     assert.equal((reads.match(/\.is\('deleted_at', null\)/g) ?? []).length, 3)

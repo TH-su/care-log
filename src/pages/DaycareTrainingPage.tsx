@@ -42,6 +42,7 @@ import {
 } from '../lib/db'
 import type { MyRole } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
+import { DaycareHomeVisitSection } from '../components/DaycareHomeVisitSection'
 import { ConfirmDialog, ErrorBlock, LoadingBlock, ModalShell, useToast } from '../components/ui'
 import { buildDaycareBoard, canEditPastDaycareTimes } from '../lib/daycare'
 import {
@@ -146,6 +147,8 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
   const [addFrom, setAddFrom] = useState('')
   const [addTo, setAddTo] = useState('')
   const [, setQueueTick] = useState(0)
+  /** 読み直しの回数（居宅訪問の区画も合わせて読み直す・段階3b） */
+  const [dataTick, setDataTick] = useState(0)
   const { toast, show } = useToast()
   const genRef = useRef(0)
   const dayRef = useRef(day)
@@ -212,6 +215,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
         recent: recent ?? [],
         missing,
       })
+      setDataTick((n) => n + 1)
       setError(null)
     } catch {
       if (gen !== genRef.current) return
@@ -300,6 +304,21 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
     if (missing) return MSG_MISSING
     if (pastLocked) return MSG_PAST
     if (!canWrite) {
+      return gate?.forbidden
+        ? FORBIDDEN_REASON
+        : gate?.outdated
+          ? OUTDATED_REASON
+          : gate?.observed
+            ? kindBlockedMessage('daycare_training')
+            : MSG_GATE_UNKNOWN
+    }
+    if (actorId === null) return MSG_NO_RECORDER
+    return null
+  }
+  /** 居宅訪問が書けない理由（過去の日の守りは受けない＝計画 3.6。旗・記録者だけを見る・段階3b） */
+  const homeVisitBlocked = (): string | null => {
+    if (missing) return MSG_MISSING
+    if (!(gateOk && !missing)) {
       return gate?.forbidden
         ? FORBIDDEN_REASON
         : gate?.outdated
@@ -545,8 +564,8 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
     'min-h-tap rounded border-2 border-primary bg-primary px-4 text-base font-bold text-primary-ink disabled:border-border-strong disabled:bg-surface disabled:text-ink3'
   const chipCls = (on: boolean) =>
     on
-      ? 'min-h-tap min-w-tap rounded border-2 border-primary bg-primary px-3 text-base font-bold text-primary-ink'
-      : 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-3 text-base text-ink disabled:text-ink3'
+      ? 'min-h-tap min-w-tap max-w-full rounded border-2 border-primary bg-primary px-3 text-base font-bold text-primary-ink'
+      : 'min-h-tap min-w-tap max-w-full rounded border border-border-strong bg-surface px-3 text-base text-ink disabled:text-ink3'
   const msgBox = (m: Msg) => (
     <p role="status" className={`rounded border p-2 text-base text-ink ${m.tone === 'info' ? 'border-primary bg-surface' : m.tone === 'warn' ? 'border-warn bg-warn-bg' : 'border-danger bg-danger-bg'}`}>
       <span aria-hidden="true">{m.tone === 'info' ? 'ⓘ ' : '▲ '}</span>
@@ -683,7 +702,8 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
             })}
           </ul>
         ) : null}
-        <fieldset className="space-y-2" disabled={!canWrite || busy}>
+        {/* min-w-0: fieldset は既定で中身の最小幅より狭くならず、選択欄の長い氏名に引っぱられて横にはみ出した（積み残し 47） */}
+        <fieldset className="min-w-0 space-y-2" disabled={!canWrite || busy}>
           <legend className="text-base font-bold text-ink">配置に入れる</legend>
           <div className="flex flex-wrap gap-gap" role="group" aria-label="役割">
             {STAFFING_ROLES.map((r) => (
@@ -694,9 +714,9 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
             ))}
           </div>
           <div className="flex flex-wrap items-end gap-gap">
-            <label className="text-sm text-ink2">
+            <label className="min-w-0 max-w-full text-sm text-ink2">
               職員
-              <select value={addStaffId} onChange={(e) => setAddStaffId(e.target.value)} className="mt-1 block min-h-tap rounded border border-border-strong bg-surface px-2 text-lg text-ink">
+              <select value={addStaffId} onChange={(e) => setAddStaffId(e.target.value)} className="mt-1 block min-h-tap max-w-full rounded border border-border-strong bg-surface px-2 text-lg text-ink">
                 <option value="">選んでください</option>
                 {staffList.map((s) => (
                   <option key={s.id} value={String(s.id)}>
@@ -720,6 +740,16 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
         </fieldset>
         {staffMsg !== null && staffMsg.day === day ? msgBox(staffMsg.msg) : null}
       </section>
+
+      <DaycareHomeVisitSection
+        today={today}
+        residents={residents}
+        targets={targets}
+        staff={staff}
+        actorId={actorId}
+        blockedReason={homeVisitBlocked()}
+        refreshKey={dataTick}
+      />
 
       <section aria-labelledby="h-targets" className="space-y-2 rounded-lg border border-border bg-surface p-3">
         <h2 id="h-targets" className="text-xl font-bold text-ink">
@@ -827,7 +857,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
               {nameOf(ed.rid)}さんの機能訓練（{fmtDayLabel(ed.day)}）
             </h2>
             {ed.note !== undefined ? msgBox({ tone: 'warn', text: ed.note }) : null}
-            <fieldset disabled={!canWrite || busy} className="space-y-3">
+            <fieldset disabled={!canWrite || busy} className="min-w-0 space-y-3">
               <div role="group" aria-label="結果" className="flex flex-wrap gap-gap">
                 {TRAINING_RESULTS.map((r) => (
                   <button
@@ -894,14 +924,14 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                 </label>
               </div>
               <div className="flex flex-wrap items-end gap-gap">
-                <label className="text-sm text-ink2">
+                <label className="min-w-0 max-w-full text-sm text-ink2">
                   指導員（直接行った職員）
                   <select
                     value={ed.input.instructor_id === null ? '' : String(ed.input.instructor_id)}
                     onChange={(e) => setInput({ instructor_id: e.target.value === '' ? null : Number(e.target.value) })}
                     aria-invalid={ed.showErr === true && edErr.instructor_id !== undefined}
                     aria-describedby={ed.showErr === true && edErr.instructor_id !== undefined ? 'tr-ins-err' : undefined}
-                    className="mt-1 block min-h-tap rounded border border-border-strong bg-surface px-2 text-lg text-ink"
+                    className="mt-1 block min-h-tap max-w-full rounded border border-border-strong bg-surface px-2 text-lg text-ink"
                   >
                     <option value="">選んでください</option>
                     {staffList.map((s) => (
@@ -913,12 +943,12 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                   </select>
                   {errLine('tr-ins-err', edErr.instructor_id)}
                 </label>
-                <label className="text-sm text-ink2">
+                <label className="min-w-0 max-w-full text-sm text-ink2">
                   補助（任意）
                   <select
                     value={ed.input.assisted_by === null ? '' : String(ed.input.assisted_by)}
                     onChange={(e) => setInput({ assisted_by: e.target.value === '' ? null : Number(e.target.value) })}
-                    className="mt-1 block min-h-tap rounded border border-border-strong bg-surface px-2 text-lg text-ink"
+                    className="mt-1 block min-h-tap max-w-full rounded border border-border-strong bg-surface px-2 text-lg text-ink"
                   >
                     <option value="">なし</option>
                     {staffList.map((s) => (

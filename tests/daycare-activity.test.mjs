@@ -370,7 +370,8 @@ if (A === null) {
       const db = code('../src/lib/db.ts')
       assert.match(db, /type LegacyTable = [^\n]*'daycare_activity_log'/)
       // 段階3a（2026-10-23）の機能訓練の2表が後ろに続く（固定し直し・意図は同じ＝活動は送信待ちの表に入っている）
-      assert.match(db, /'daycare_attendance',\n {2}'daycare_activity_log',\n {2}'daycare_training_sessions',\n {2}'daycare_staffing',\n\]/)
+      // 段階3b で末尾に居宅訪問（daycare_home_visits）が足された（活動の位置は変わらない）
+      assert.match(db, /'daycare_attendance',\n {2}'daycare_activity_log',\n {2}'daycare_training_sessions',\n {2}'daycare_staffing',\n {2}'daycare_home_visits',\n\]/)
       assert.match(db, /if \(table === 'daycare_activity_log'\) return assertKindWritable\('daycare_activity'\)/)
       assert.match(db, /daycare_activity: 'デイの活動の記録はまだ使い始めていません（開始日に解禁します）'/)
       assert.match(db, /return day === null \|\| label === null \|\| label === '' \? null : \{ resident_id: residentId, day, label \}/)
