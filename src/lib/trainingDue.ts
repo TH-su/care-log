@@ -340,7 +340,7 @@ export function filterReviewScope(rows: readonly ReviewDueRow[], daycareIds: Rea
 /** 週間計画から作った「予定がある方」（ids が null＝絞らない。reason＝絞らない理由・unmatched＝照合できない予定の件数） */
 export interface WeekScope {
   ids: Set<number> | null
-  reason: 'unread' | 'unmatched' | null
+  reason: 'unread' | 'unmatched' | 'noplan' | null
   unmatched: number
 }
 
@@ -348,6 +348,7 @@ export interface WeekScope {
  * 続いた7日分の予定（daycare_plan の結果。週間計画は曜日ごとなので、7日で全部の曜日になる）から、
  * どこかの曜日にデイの予定がある方（名簿と照合できた方）を集める。
  * ・1日でも読めない（null・unknown）・7日に足りない時は ids＝null（reason 'unread'・絞らない）
+ * ・週に1件も予定が無い時も ids＝null（reason 'noplan'・絞らない。週間計画が使われていない状態と見分けがつかないため）
  * ・名簿と照合できない予定（mismatch・ambiguous＝在籍の方の予定かもしれない）が1件でもある時も ids＝null
  *   （reason 'unmatched'・絞らない。予定のある方を知らせなしに一覧から外さない＝積み残し 51 の反証 中1）。
  *   外部利用者（external）と名簿の在籍者に居ない予定（absent_roster）は数えない（care-log の在籍の方ではない）
@@ -365,7 +366,11 @@ export function weekScope(
       else if (!r.external && (r.match === 'mismatch' || r.match === 'ambiguous')) unmatched += 1
     }
   }
-  return unmatched > 0 ? { ids: null, reason: 'unmatched', unmatched } : { ids, reason: null, unmatched: 0 }
+  if (unmatched > 0) return { ids: null, reason: 'unmatched', unmatched }
+  // 週に1件も予定が無い（在籍の方に結べた予定が無い）時も絞らない。週間計画がデイに使われていない・拾えていない状態と
+  // 見分けがつかないので、「計画なし 0人」に倒さず多めに出す（積み残し 51 の直しの確認 軽1）
+  if (ids.size === 0) return { ids: null, reason: 'noplan', unmatched: 0 }
+  return { ids, reason: null, unmatched: 0 }
 }
 
 /** 見直しの一覧の数（期限切れ・間近・計画なし） */

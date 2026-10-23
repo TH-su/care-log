@@ -233,6 +233,12 @@ if (D === null) {
       assert.deepEqual(D.weekScope([...base.slice(0, 6), day([row(null, 'mismatch'), row(null, 'ambiguous')])]), { ids: null, reason: 'unmatched', unmatched: 2 })
       assert.equal(D.weekScope([...base.slice(0, 6), day([row(null, 'absent_roster'), row(null, 'external', true)])]).reason, null, '在籍に居ない予定・外部利用者は数えない')
     })
+    it('週に1件も予定が無い時は絞らない（「計画なし 0人」に倒さない・直しの確認 軽1）', () => {
+      const none = { source: 'none', rows: [] }
+      assert.deepEqual(D.weekScope(Array(7).fill(none)), { ids: null, reason: 'noplan', unmatched: 0 })
+      const onlyExternal = { source: 'kv', rows: [{ resident_id: null, match: 'external', external: true }] }
+      assert.deepEqual(D.weekScope([onlyExternal, ...Array(6).fill(none)]), { ids: null, reason: 'noplan', unmatched: 0 }, '外部利用者だけの週も同じ')
+    })
     it('対象者の並び: 写しを読めない・0件の時は元の並びと知らせ。行がある時は計画がある方を上に（中は元の並び）、下の方には理由', () => {
       const targets = [7, 3, 1, 4, 2]
       assert.deepEqual(D.orderTargetsByPlan({ targets, copy: 'error', people: [], today }), { order: targets, noPlan: new Map(), notice: 'error' })

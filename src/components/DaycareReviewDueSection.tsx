@@ -185,7 +185,9 @@ export function DaycareReviewDueSection({ today, residents, copy, role, actorId,
               ? '週間計画を読めないため、計画のない方も含めて写しの全員を出しています。'
               : scope?.reason === 'unmatched'
                 ? `週間計画に名簿と照合できない予定が ${scope.unmatched}件あるため、計画のない方も含めて写しの全員を出しています（照合できない予定は、その曜日のデイの今日の画面に出ます）。`
-                : '計画書に計画がある方と、週間計画でデイの予定がある方（曜日を問わず）を出しています。'}
+                : scope?.reason === 'noplan'
+                  ? '週間計画にデイの予定が1件も見つからないため、計画のない方も含めて写しの全員を出しています。'
+                  : '計画書に計画がある方と、週間計画でデイの予定がある方（曜日を問わず）を出しています。'}
           </p>
           <button type="button" aria-expanded={open} aria-controls="review-due-list" onClick={toggle} className={btn}>
             {open ? '一覧を閉じる' : `一覧を開く（${rows.length}人）`}

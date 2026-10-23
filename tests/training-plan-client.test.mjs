@@ -269,6 +269,7 @@ describe('静的検査（段階3c の規律）', () => {
     assert.match(c, /const counts = reviewDueCounts\(rows\)/)
     assert.match(c, /\) : scope === undefined \? \(/)
     assert.match(c, /scope\?\.reason === 'unmatched'/)
+    assert.match(c, /scope\?\.reason === 'noplan'/)
     const db = code('../src/lib/db.ts')
     assert.match(db, /Array\.from\(\{ length: 7 \}, \(_, i\) => fetchDaycarePlan\(addDaysIso\(baseIso, i\)\)\.catch\(\(\) => null\)\)/)
   })
