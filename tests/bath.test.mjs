@@ -426,11 +426,15 @@ if (B === null) {
       assert.match(app, /'bathMonth'/)
       assert.match(app, /'入浴（デイ）'/)
     })
-    it('記録ハブは入浴だけ input_enabled_bath で封鎖を判定する', () => {
-      const hub = read('../src/pages/RecordHubPage.tsx')
-      assert.match(hub, /getKindInputGate\('bath'\)/)
-      // 2026-09-26 与薬チェックの追加で、与薬の旗（medLocked）が間に入った。入浴は bathLocked・その他は locked のまま
-      assert.match(hub, /key === 'bath' \? bathLocked : key === 'med' \? medLocked : locked/)
+    it('記録ハブに入浴（デイ）の項目は無い（2026-10-24 代表者の指示で外した）・入浴の画面のルートは残す', () => {
+      const hub = read('../src/pages/RecordHubPage.tsx').replace(/\/\/.*$/gm, '')
+      // 一覧のボタン・入浴の旗の取得・封鎖の理由文のどれも無い（デイの入浴は「デイ せせらぎ」の画面で記録する）
+      assert.equal(/\/record\/bath|入浴（デイ）|getKindInputGate\('bath'\)|bathLocked|bathGate/.test(hub), false)
+      // ブックマークで開いた人が壊れないよう、ルート・画面名・入浴の画面の旗の確かめは残す
+      const app = read('../src/App.tsx')
+      assert.match(app, /<Route path="\/record\/bath" element=\{<BathRecordPage actorId=\{actorId\} staff=\{staff\} \/>\} \/>/)
+      assert.match(app, /if \(pathname === '\/record\/bath'\) return '入浴（デイ）'/)
+      assert.match(read('../src/pages/BathRecordPage.tsx'), /getKindInputGate\('bath'\)/)
     })
     it('★入浴は「入浴した／入浴していない」の2つだけ（2026-10-01）: 記録画面・月次表・カルテ', () => {
       const page = read('../src/pages/BathRecordPage.tsx')

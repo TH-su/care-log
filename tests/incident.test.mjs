@@ -1148,7 +1148,8 @@ describe('事故・ヒヤリハットの配線（静的検査）', () => {
   it('記録ハブは事故だけ input_enabled_incident で封鎖を判定し（入浴・与薬・その他の判定は変えない）、その他に一覧と月次集計がある', () => {
     const hub = read('../src/pages/RecordHubPage.tsx')
     assert.match(hub, /getKindInputGate\('incident'\)/)
-    assert.match(hub, /key === 'incident' \? incidentLocked : key === 'bath' \? bathLocked : key === 'med' \? medLocked : locked/)
+    // 2026-10-24 入浴（デイ）の項目を外したので、入浴の判定（bathLocked）が抜けた
+    assert.match(hub, /key === 'incident' \? incidentLocked : key === 'med' \? medLocked : locked/)
     assert.match(hub, /to: '\/incident'/)
     const more = read('../src/pages/MorePage.tsx')
     assert.match(more, /to: '\/incident'/)
