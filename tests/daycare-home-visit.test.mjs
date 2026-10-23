@@ -139,6 +139,18 @@ describe('静的検査（段階3b の規律）', () => {
     const loader = c.slice(c.indexOf('const load = useCallback'), c.indexOf('const nameOf'))
     assert.doesNotMatch(loader, /insert|update|softDelete/)
   })
+  it('反証の直し: 重なる訪問日・目的は送る前に止める・先の記録を読めない時の文・書いた文を残す・古い応答を捨てる・在籍でない訪問者も氏名で出す・送信待ちを行に添える', () => {
+    const c = code('../src/components/DaycareHomeVisitSection.tsx')
+    assert.match(c, /visitsOf\(rid\)\.some\(\(v\) => v\.id !== editingRow\.id && v\.visited_on === ed\.input\.visited_on && v\.purpose === ed\.input\.purpose\)/)
+    assert.match(c, /else setEditor\(\{ \.\.\.ed, note: keep === '' \? MSG_TAKEN_UNREAD/)
+    assert.match(c, /この端末で書いた内容（保存されていません）/)
+    assert.match(c, /if \(gen !== genRef\.current\) return\s+setLoaded\(\{ status: 'ready'/)
+    assert.match(c, /（在籍でない）/)
+    assert.match(c, /送信待ちの訪問 \{pendingAddsOf\(r\.residentId\)/)
+    assert.match(c, /isoDate\(new Date\(syncedAt\)\)/)
+    assert.match(c, /homeVisitCopyNotice\(ready\.copy\)/)
+    assert.match(code('../src/components/DaycareTrainingCard.tsx'), /homeVisitCardLine\(\{ visits: visit\.visits, copy: visit\.copy, residentId, active, today \}\)/)
+  })
   it('types.ts は LS に1行足すだけ（UI 状態のキー）', () => {
     assert.match(read('../src/lib/types.ts'), /dcTrainingDueOpen: 'cl_dcTrainingDueOpen',\n\} as const/)
   })

@@ -260,7 +260,9 @@ export function stoppedOpLines(
   if (rid !== null) out.push({ label: '対象', value: residentName(rid) })
   else if (op.table === 'residents' && typeof op.payload.id === 'number') out.push({ label: '対象', value: residentName(op.payload.id) })
   for (const f of DAY_FIELDS) {
-    const d = op.payload[f] ?? src[f]
+    // いまの記録を並べる時は、その行の日付を先に読む（訪問日を直す送信待ちで、相手の行の日付まで
+    // この端末の値に見せない＝段階3b の反証 軽1。追加の送信待ちは自然キーなので、どちらを読んでも同じ）
+    const d = row !== undefined && row !== null ? (src[f] ?? op.payload[f]) : (op.payload[f] ?? src[f])
     if (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
       const [, m, dd] = d.split('-')
       out.push({ label: '日付', value: `${Number(m)}/${Number(dd)}` })

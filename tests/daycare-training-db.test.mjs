@@ -471,6 +471,26 @@ if (DB === null) {
       assert.deepEqual(Object.keys(up.payload).filter((k) => k !== 'edited_by').sort(), ['explained_on', 'explained_to'])
       await done()
     })
+    it('updateHomeVisit: 訪問日・目的を同じ方の別の記録と同じにする時は送らずに止める（反証 中1）。空いている日なら送る', async () => {
+      const other = visitRow({ id: 71, visited_on: '2026-10-20', client_key: 'other-71' })
+      const st = await fresh({ daycare_home_visits: [visitRow(), other] })
+      const cur = { ...visitRow() }
+      await assert.rejects(
+        DB.updateHomeVisit(cur, { ...visitFields({ visitor_id: 2, life_status: '先の記録（見本）' }), visited_on: '2026-10-20' }, { editedBy: 4 }),
+        /同じ方・同じ日・同じ目的の居宅訪問の記録が、すでにあります/,
+      )
+      assert.equal(st.calls.filter((c) => c.action === 'update').length, 0)
+      const r = await DB.updateHomeVisit(cur, { ...visitFields({ visitor_id: 2, life_status: '先の記録（見本）' }), visited_on: '2026-10-19' }, { editedBy: 4 })
+      assert.notEqual(r, 'conflict')
+      assert.equal(st.daycare_home_visits.find((x) => x.id === 70).visited_on, '2026-10-19')
+      await done()
+    })
+    it('くらべる画面の日付: いまの記録を並べる時は、その行の訪問日を出す（反証 軽1）', () => {
+      const op = { table: 'daycare_home_visits', kind: 'update', payload: { visited_on: '2026-10-21' } }
+      const pick = (lines) => lines.find((l) => l.label === '日付')?.value
+      assert.equal(pick(SO.stoppedOpLines(op, (id) => `利用者${id}`)), '10/21')
+      assert.equal(pick(SO.stoppedOpLines(op, (id) => `利用者${id}`, { visited_on: '2026-10-20', resident_id: 1 })), '10/20')
+    })
     it('fetchTrainingDueCopy: 写しの行は読むだけ。設定の行が無い時は null（暦の月・28日として数える）。表が無い時は「まだ使えません」', async () => {
       const st = await fresh({ daycare_training_due: [{ resident_id: 5, latest_plan_date: '2026-09-01', next_due: '2026-12-01', stop_reason: null, stop_from: null, plan_status: 'signed', synced_at: '2026-10-23T00:00:00Z', deleted_at: null }] })
       const r = await DB.fetchTrainingDueCopy()

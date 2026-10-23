@@ -8,7 +8,7 @@
 // ・居宅訪問は過去の日も現場が書ける（守りの対象にしない）。未来の日は送らない。2台で同じ方・同じ日・同じ目的は合流しない
 // ・開いただけでは書かない（多端末同期の原則9）。書き込みは insertHomeVisit・updateHomeVisit・softDeleteHomeVisit だけ
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   DbError,
   fetchHomeVisits,
@@ -33,9 +33,18 @@ import {
   homeVisitPayload,
 } from '../lib/daycareHomeVisit'
 import type { DaycareHomeVisit, HomeVisitInput } from '../lib/daycareHomeVisit'
-import { DUE_STATE_LABEL, homeVisitDueCounts, homeVisitDueList, latestVisit, normalizeDueRule, normalizeWarnDays } from '../lib/trainingDue'
+import {
+  DUE_STATE_LABEL,
+  dueRuleSource,
+  homeVisitCopyNotice,
+  homeVisitDueCounts,
+  homeVisitDueList,
+  latestVisit,
+  normalizeDueRule,
+  normalizeWarnDays,
+} from '../lib/trainingDue'
 import type { DueCopyRow, DueCopySettings, HomeVisitDueRow } from '../lib/trainingDue'
-import { fmtDayLabel } from '../lib/format'
+import { fmtDayLabel, isoDate } from '../lib/format'
 import { LS } from '../lib/types'
 import type { Resident, Staff } from '../lib/types'
 import { ConfirmDialog, ModalShell, useToast } from './ui'
@@ -44,6 +53,10 @@ const MSG_QUEUED = '電波が届かないため、この端末に保存しまし
 const MSG_NOT_PERSISTED =
   '送信できませんでした。この端末にも保存できていません（保存領域の空きが不足している可能性があります）。この画面を閉じずに、電波が戻ってからもう一度押してください。'
 const MSG_TAKEN = '同じ方・同じ日・同じ目的の居宅訪問が、先に別の端末で記録されていました。その記録を開きました。確かめてください。'
+/** 先の記録があったが読めなかった時（何も開いていないので「開きました」と言わない＝反証 軽2） */
+const MSG_TAKEN_UNREAD = '同じ方・同じ日・同じ目的の居宅訪問が、先に別の端末で記録されています。読み込めなかったので、〔最新に更新〕を押してから確かめてください。'
+/** 既存の記録の訪問日・目的を、同じ方の別の記録と同じにした時（DB の1人・1日・1目的に1件に当たる前に止める＝反証 中1） */
+const MSG_DUP = '同じ方・同じ日・同じ目的の居宅訪問の記録が、すでにあります。訪問日か目的を確かめてください。'
 const MSG_CONFLICT = '他の端末で先に直されていました。読み直しました。確かめてから、もう一度直してください。'
 const MSG_STOPPED = '送れずに止まっている居宅訪問の記録があります。設定の「送れていない記録」で、いまの記録とくらべて選ぶか、取り下げてください。'
 const MSG_HALF = '説明は「説明した相手」と「説明した日」をそろえて入れてください（片方だけの間は「説明の記録なし」と数えます）。'
@@ -106,7 +119,10 @@ export function DaycareHomeVisitSection({ today, residents, targets, staff, acto
   const [tick, setTick] = useState(0)
   const { toast, show } = useToast()
 
+  const genRef = useRef(0)
   const load = useCallback(async () => {
+    // 読み直しが重なった時に、古い応答で新しい結果を上書きしない（反証 軽9）
+    const gen = ++genRef.current
     try {
       const [visits, copy] = await Promise.all([
         fetchHomeVisits(),
@@ -115,8 +131,10 @@ export function DaycareHomeVisitSection({ today, residents, targets, staff, acto
           return 'error' as const
         }),
       ])
+      if (gen !== genRef.current) return
       setLoaded({ status: 'ready', visits, copy })
     } catch (e) {
+      if (gen !== genRef.current) return
       setLoaded(isTrainingMissingError(e) ? { status: 'missing' } : { status: 'error' })
     }
   }, [])
@@ -126,8 +144,11 @@ export function DaycareHomeVisitSection({ today, residents, targets, staff, acto
 
   const nameOf = (id: number) => residents.find((r) => r.id === id)?.name ?? `利用者ID ${id}`
   const staffList = (staff ?? []).filter((s) => s.active !== false)
+  const staffNameOf = (id: number) => (staff ?? []).find((s) => s.id === id)?.name ?? `職員ID ${id}`
   const pending = pendingHomeVisitOps()
   const stopped = pending.some((p) => p.stopped)
+  /** その方の送信待ちの追加（届くまで一覧は前の訪問のまま数えるので、行に添える＝反証 軽7） */
+  const pendingAddsOf = (rid: number) => pending.flatMap((p) => (p.kind === 'add' && p.residentId === rid ? [p] : []))
   const toggle = () => {
     setOpen((v) => {
       writeOpen(!v)
@@ -148,6 +169,11 @@ export function DaycareHomeVisitSection({ today, residents, targets, staff, acto
           today,
         })
   const counts = homeVisitDueCounts(rows)
+  const copyNotice = ready === null ? null : homeVisitCopyNotice(ready.copy)
+  const ruleSource = ready === null ? 'default' : dueRuleSource(ready.copy)
+  // 写した日時は日本時間の日付で出す（UTC の日付を切り出すと、0〜9時に写した分が前の日になる＝反証 軽6）
+  const syncedAt = copy?.settings?.synced_at ?? null
+  const syncedDay = syncedAt === null || Number.isNaN(new Date(syncedAt).getTime()) ? null : isoDate(new Date(syncedAt))
   const rule = normalizeDueRule(copy?.settings?.due_rule)
   const warn = normalizeWarnDays(copy?.settings?.warn_days)
 
@@ -202,6 +228,15 @@ export function DaycareHomeVisitSection({ today, residents, targets, staff, acto
       return
     }
     const rid = ed.rid
+    // 既存の記録の訪問日・目的を、同じ方の別の記録と同じにした時は送らずに知らせる（反証 中1）
+    const editingRow = ed.row
+    if (
+      editingRow !== null &&
+      visitsOf(rid).some((v) => v.id !== editingRow.id && v.visited_on === ed.input.visited_on && v.purpose === ed.input.purpose)
+    ) {
+      setEditor({ ...ed, note: MSG_DUP })
+      return
+    }
     setBusy(true)
     try {
       if (ed.row === null) {
@@ -210,11 +245,16 @@ export function DaycareHomeVisitSection({ today, residents, targets, staff, acto
           setEditor(null)
           setMsg(queuedMsg())
         } else if (r.kind === 'taken') {
-          if (r.row !== null) openRow(r.row, MSG_TAKEN)
-          else {
-            setEditor(null)
-            setMsg({ tone: 'warn', text: MSG_TAKEN })
-          }
+          // 先の記録を開く。この端末で書いた文は、知らせの中に残す（打ち直さずに写せるように＝反証 軽3。端末には保存しない）
+          const typed = [
+            ed.input.life_status.trim() !== '' ? `生活の状況「${ed.input.life_status.trim()}」` : '',
+            ed.input.explanation.trim() !== '' ? `説明の内容「${ed.input.explanation.trim()}」` : '',
+          ]
+            .filter((x) => x !== '')
+            .join('・')
+          const keep = typed === '' ? '' : `この端末で書いた内容（保存されていません）: ${typed}`
+          if (r.row !== null) openRow(r.row, keep === '' ? MSG_TAKEN : `${MSG_TAKEN} ${keep}`)
+          else setEditor({ ...ed, note: keep === '' ? MSG_TAKEN_UNREAD : `${MSG_TAKEN_UNREAD} ${keep}` })
         } else {
           setEditor(null)
           show(`${nameOf(rid)}さんの居宅訪問（${md(r.row.visited_on)}）を記録しました`)
@@ -315,16 +355,16 @@ export function DaycareHomeVisitSection({ today, residents, targets, staff, acto
           </ul>
           <p className="text-sm text-ink2">
             直近の訪問日から{RULE_TEXT[rule]}で数え、期限の{warn}日前から「間近」と出します（
-            {ready !== null && ready.copy === 'error'
+            {ruleSource === 'error'
               ? '計画書の設定を読めないため、既定の数え方で仮に出しています'
-              : copy?.settings?.synced_at
-                ? `計画書の設定・${fmtDayLabel(copy.settings.synced_at.slice(0, 10))}に写したもの`
+              : ruleSource === 'copied'
+                ? `計画書の設定・${syncedDay === null ? '写した日は不明' : `${fmtDayLabel(syncedDay)}に写したもの`}`
                 : '計画書の設定がまだ写されていないので既定の数え方'}
             ）。
           </p>
-          {ready !== null && ready.copy === 'error' ? (
+          {copyNotice === 'error' ? (
             msgBox({ tone: 'warn', text: '計画書の期限の写しを読み込めませんでした。訪問の記録が無い方と、終了した方を確かめられません。' })
-          ) : copy !== null && copy.rows.length === 0 ? (
+          ) : copyNotice === 'empty' ? (
             msgBox({ tone: 'info', text: '計画書の写しが無いため、訪問の記録が無い方は出ていません（居宅訪問の記録がある方だけを出しています）。' })
           ) : null}
           <button type="button" aria-expanded={open} aria-controls="home-visit-list" onClick={toggle} className={btn}>
@@ -345,6 +385,13 @@ export function DaycareHomeVisitSection({ today, residents, targets, staff, acto
                         <span className={stateCls(r)}>{stateText(r)}</span>
                         {r.visit !== null ? `　次の期限 ${fmtDayLabel(r.due)}・前回 ${md(r.visit.visited_on)}` : '　計画書の写しに計画があります'}
                       </p>
+                      {pendingAddsOf(r.residentId).length > 0 ? (
+                        <p className="text-sm text-ink">
+                          <span aria-hidden="true">ⓘ </span>
+                          送信待ちの訪問 {pendingAddsOf(r.residentId).map((p) => md(p.visitedOn)).join('・')}
+                          {pendingAddsOf(r.residentId).some((p) => p.stopped) ? '（止まっています）' : '（電波が戻ると送ります）'}
+                        </p>
+                      ) : null}
                       {r.noExplanation ? (
                         <p className="text-sm text-warn">
                           <span aria-hidden="true">▲ </span>前回の訪問に説明の記録（相手と日）がありません
@@ -454,6 +501,12 @@ export function DaycareHomeVisitSection({ today, residents, targets, staff, acto
                           {s.name}
                         </option>
                       ))}
+                      {/* 在籍でなくなった職員が訪問した記録も、空に見せずに氏名で出す（反証 軽8） */}
+                      {ed.input.visitor_id !== null && !staffList.some((s) => s.id === ed.input.visitor_id) ? (
+                        <option value={String(ed.input.visitor_id)}>
+                          {staffNameOf(ed.input.visitor_id)}（在籍でない）
+                        </option>
+                      ) : null}
                     </select>
                     {errLine('hv-visitor-err', edErr.visitor_id)}
                   </label>

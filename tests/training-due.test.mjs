@@ -152,6 +152,38 @@ if (D === null) {
     })
   })
 
+  describe('出し分けの判定（段階3b の反証 軽4・軽5・軽10）', () => {
+    const today = '2026-10-23'
+    it('終了: 止めた日は理由が3つのどれかの時だけ見る（理由の無い止めた日で期限切れの方を隠さない）', () => {
+      assert.equal(D.isEnded(undefined, copyRow({ stop_reason: null, stop_from: '2026-10-01' }), today), false)
+      assert.equal(D.isEnded(undefined, copyRow({ stop_reason: 'other', stop_from: '2026-10-01' }), today), false)
+      for (const r of ['discharge', 'stopped', 'notNeeded']) assert.equal(D.isEnded(undefined, copyRow({ stop_reason: r, stop_from: '2026-10-23' }), today), true)
+      assert.equal(D.isEnded(undefined, copyRow({ stop_reason: 'stopped', stop_from: '2026-10-24' }), today), false, '止めた日が先なら終了でない')
+      assert.equal(D.isEnded({ id: 1, active: false }, undefined, today), true)
+      const rows = D.homeVisitDueList({ visits: [visit({ visited_on: '2026-01-01' })], copy: [copyRow({ stop_reason: null, stop_from: '2026-10-01' })], settings: null, people: [], today })
+      assert.deepEqual(rows.map((r) => r.state), ['overdue'])
+    })
+    it('写しの知らせ: 読めない＝error・0件＝empty・行がある＝なし。数え方の出どころ: 読めない・設定の行なし・写した', () => {
+      assert.equal(D.homeVisitCopyNotice('error'), 'error')
+      assert.equal(D.homeVisitCopyNotice({ rows: [], settings: null }), 'empty')
+      assert.equal(D.homeVisitCopyNotice({ rows: [copyRow()], settings: null }), null)
+      assert.equal(D.dueRuleSource('error'), 'error')
+      assert.equal(D.dueRuleSource({ rows: [copyRow()], settings: null }), 'default')
+      assert.equal(D.dueRuleSource({ rows: [], settings: { due_rule: 'days90', warn_days: 7, synced_at: null } }), 'copied')
+    })
+    it('カードの1行: 終了の方は出さない・訪問が無ければ記録なし・あれば期限と状態と数え方の出どころ', () => {
+      const v = [visit({ visited_on: '2026-08-01', explained_to: null, explained_on: null })]
+      assert.equal(D.homeVisitCardLine({ visits: v, copy: { rows: [], settings: null }, residentId: 1, active: false, today }), null)
+      assert.equal(D.homeVisitCardLine({ visits: v, copy: { rows: [copyRow({ stop_reason: 'stopped', stop_from: today })], settings: null }, residentId: 1, active: true, today }), null)
+      assert.deepEqual(D.homeVisitCardLine({ visits: [], copy: 'error', residentId: 1, active: true, today }), { kind: 'none' })
+      const a = D.homeVisitCardLine({ visits: v, copy: 'error', residentId: 1, active: true, today })
+      assert.deepEqual([a.kind, a.due, a.state, a.noExplanation, a.ruleSource], ['due', '2026-11-01', 'warn', true, 'error'])
+      const b = D.homeVisitCardLine({ visits: v, copy: { rows: [], settings: { due_rule: 'days90', warn_days: 7, synced_at: null } }, residentId: 1, active: undefined, today })
+      assert.deepEqual([b.due, b.state, b.ruleSource], ['2026-10-30', 'warn', 'copied'])
+      assert.equal(D.homeVisitCardLine({ visits: v, copy: { rows: [], settings: null }, residentId: 1, active: true, today }).ruleSource, 'default')
+    })
+  })
+
   describe('静的検査', () => {
     it('純ロジックは時刻を読まない・端末に残さない（今日は呼び出し側が渡す）', () => {
       const src = readFileSync(new URL('../src/lib/trainingDue.ts', import.meta.url), 'utf8')

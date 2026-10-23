@@ -156,10 +156,17 @@ export function latestVisit<T extends DueVisit>(visits: readonly T[], residentId
   return best
 }
 
-/** 終了か（在籍でない・写しの通知を止めた日が今日以前）。計画書アプリの buildAlerts と同じ（写しの行がある時だけ止めた日を見る） */
+/** 通知を止める理由（計画書アプリの normalizeStop と同じ3つ） */
+const STOP_REASONS: readonly string[] = ['discharge', 'stopped', 'notNeeded']
+
+/**
+ * 終了か（在籍でない・写しの通知を止めた日が今日以前）。計画書アプリの buildAlerts と同じ（写しの行がある時だけ止めた日を見る）。
+ * 止めた日は、理由が3つのどれかの時だけ見る（計画書アプリの normalizeStop・stopActiveOn と同じ。理由の無い止めた日で
+ * 期限切れの方を一覧から隠さない＝段階3b の反証 軽4）
+ */
 export function isEnded(person: DuePerson | undefined, copy: DueCopyRow | undefined, today: string): boolean {
   if (person !== undefined && !person.active) return true
-  return copy !== undefined && isYmd(copy.stop_from) && copy.stop_from <= today
+  return copy !== undefined && copy.stop_reason !== null && STOP_REASONS.includes(copy.stop_reason) && isYmd(copy.stop_from) && copy.stop_from <= today
 }
 
 /** 居宅訪問の期限の1行 */
@@ -228,4 +235,55 @@ export const DUE_STATE_LABEL: Record<Exclude<DueState, 'ended'>, string> = {
   warn: '△ 間近',
   none: '居宅訪問の記録なし',
   ok: '期限内',
+}
+
+// ── 出し分けの判定（画面・カードが使う。段階3b の反証 軽10: 文言の有無でなく判定を試験で固定する） ─────────────
+
+/** 写しの読み込みの結果（'error'＝読めなかった） */
+export type DueCopyLoad = { rows: readonly DueCopyRow[]; settings: DueCopySettings | null } | 'error'
+
+/**
+ * 期限の区画の写しの知らせ。error＝読めない（終了と記録なしを確かめられない）／empty＝写しが0件（訪問の記録が無い方は出ていない）／
+ * null＝知らせない
+ */
+export function homeVisitCopyNotice(copy: DueCopyLoad): 'error' | 'empty' | null {
+  if (copy === 'error') return 'error'
+  return copy.rows.length === 0 ? 'empty' : null
+}
+
+/** 数え方の出どころ。error＝写しを読めず既定で仮に出している／default＝設定の行が無く既定／copied＝写した設定 */
+export function dueRuleSource(copy: DueCopyLoad): 'error' | 'default' | 'copied' {
+  if (copy === 'error') return 'error'
+  return copy.settings === null ? 'default' : 'copied'
+}
+
+/**
+ * 1人の画面のカードの居宅訪問の1行の中身（文は画面が組む）。null＝出さない（終了の方）。
+ * none＝記録なし／due＝次の期限と状態（ruleSource で数え方の出どころを添える）
+ */
+export function homeVisitCardLine(args: {
+  visits: readonly DueVisit[]
+  copy: DueCopyLoad
+  residentId: number
+  active: boolean | undefined
+  today: string
+}):
+  | null
+  | { kind: 'none' }
+  | { kind: 'due'; due: string; state: Exclude<DueState, 'ended'>; last: DueVisit; noExplanation: boolean; ruleSource: 'error' | 'default' | 'copied' } {
+  const { visits, copy, residentId, active, today } = args
+  const c = copy === 'error' ? null : copy
+  const copyRow = c?.rows.find((r) => r.resident_id === residentId)
+  if (isEnded(active === undefined ? undefined : { id: residentId, active }, copyRow, today)) return null
+  const last = latestVisit(visits, residentId)
+  if (last === null) return { kind: 'none' }
+  const due = nextDueOf(last.visited_on, c?.settings?.due_rule)
+  return {
+    kind: 'due',
+    due,
+    state: dueState(due, today, c?.settings?.warn_days),
+    last,
+    noExplanation: !hasExplanation(last),
+    ruleSource: dueRuleSource(copy),
+  }
 }

@@ -8788,6 +8788,7 @@ const DAYCARE_TRAINING_DUE_ROWS = 2000
 const HOME_VISIT_MSG = {
   bad: '居宅訪問の記録の内容が足りません。訪問日・訪問した職員・目的・確かめた生活の状況を確かめてください。',
   future: '未来の日は入れられません。訪問日と説明した日を今日以前にしてください。',
+  dup: '同じ方・同じ日・同じ目的の居宅訪問の記録が、すでにあります。訪問日か目的を確かめてください。',
 } as const
 
 function normalizeHomeVisit(row: unknown): DaycareHomeVisit | null {
@@ -8944,6 +8945,13 @@ export async function updateHomeVisit(
   const cur: Record<string, unknown> = { ...current }
   for (const [k, v] of Object.entries(next)) if (cur[k] !== v) sent[k] = v
   if (Object.keys(sent).length === 0) return current
+  // 訪問日・目的を変える時は、同じ方の別の記録と同じ鍵にならないかを先に確かめる（DB の 23505 を「サーバーエラー」と
+  // 見せない＝段階3b の反証 中1）。読めない時は送って DB に任せる（送信待ちに積む時も止めない）
+  if ('visited_on' in sent || 'purpose' in sent) {
+    const sb = await getClient()
+    const other = await findByKey(sb, 'daycare_home_visits', { resident_id: current.resident_id, visited_on: next.visited_on, purpose: next.purpose })
+    if (other !== null && other.id !== current.id) throw new DbError('server', HOME_VISIT_MSG.dup)
+  }
   return updateRow('daycare_home_visits', current.id, current.rev, sent, normalizeHomeVisit, opts)
 }
 

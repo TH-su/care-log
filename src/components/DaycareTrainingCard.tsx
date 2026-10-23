@@ -3,7 +3,8 @@
 // 表が無い DB（0046 未適用）は「まだ使えません」、旗が閉じている間は「まだ使い始めていません」と出し、入口を出さない
 // （段階3a の反証 軽5: 試用中の画面に、押しても書けない入口を出さない）。書き込みはこの部品から行わない。
 // 段階3b: その方の居宅訪問の期限を1行足す（直近の訪問日から数えた次の期限と状態・説明の記録の有無。規則は計画書の写しの設定）。
-// 写しの設定を読めない時は期限を出さず「確かめられません」（既定の数え方に倒さない）。
+// 写しを読めない時・設定の行が無い時は、既定の数え方（暦の月・28日）で出し、その旨を書き添える（機能訓練の画面の区画と同じ扱い）。
+// 居宅訪問の記録そのものを読めない時は「期限は確かめられません」と出す。
 // 端末に業務データを残さない（localStorage を使わない）。
 
 import { useEffect, useState } from 'react'
@@ -11,7 +12,7 @@ import { Link } from 'react-router-dom'
 import { fetchHomeVisits, fetchTrainingDueCopy, fetchTrainingSessions, getKindInputGate, isTrainingMissingError, kindBlockedMessage } from '../lib/db'
 import { sessionOf, sessionText } from '../lib/daycareTraining'
 import type { DaycareTrainingSession } from '../lib/daycareTraining'
-import { DUE_STATE_LABEL, dueState, hasExplanation, isEnded, latestVisit, nextDueOf } from '../lib/trainingDue'
+import { DUE_STATE_LABEL, homeVisitCardLine } from '../lib/trainingDue'
 import type { DaycareHomeVisit } from '../lib/daycareHomeVisit'
 import type { DueCopyRow, DueCopySettings } from '../lib/trainingDue'
 import { fmtDayLabel } from '../lib/format'
@@ -75,16 +76,16 @@ export function DaycareTrainingCard({ residentId, day, today, refreshKey = 0, st
   const visitLine = (): string | null => {
     if (state.status === 'missing' || visit.status === 'loading') return null
     if (visit.status === 'error') return '居宅訪問: 記録を読み込めませんでした（期限は確かめられません）'
-    // 写しを読めない時は、既定の数え方（暦の月・28日）で仮に出し、そう書き添える（機能訓練の画面の区画と同じ扱い）
-    const copy = visit.copy === 'error' ? null : visit.copy
-    const copyRow = copy?.rows.find((r) => r.resident_id === residentId)
-    if (isEnded(active === undefined ? undefined : { id: residentId, active }, copyRow, today)) return null
-    const last = latestVisit(visit.visits, residentId)
-    if (last === null) return '居宅訪問: 記録なし'
-    const due = nextDueOf(last.visited_on, copy?.settings?.due_rule)
-    const st = dueState(due, today, copy?.settings?.warn_days)
-    const caveat = copy === null ? '（計画書の設定を読めないため、既定の数え方で仮に出しています）' : ''
-    return `居宅訪問: 次の期限 ${fmtDayLabel(due)}（${DUE_STATE_LABEL[st]}）・前回 ${fmtDayLabel(last.visited_on)}${hasExplanation(last) ? '' : '・説明の記録なし'}${caveat}`
+    const line = homeVisitCardLine({ visits: visit.visits, copy: visit.copy, residentId, active, today })
+    if (line === null) return null
+    if (line.kind === 'none') return '居宅訪問: 記録なし'
+    const caveat =
+      line.ruleSource === 'error'
+        ? '（計画書の設定を読めないため、既定の数え方で仮に出しています）'
+        : line.ruleSource === 'default'
+          ? '（計画書の設定がまだ写されていないので既定の数え方）'
+          : ''
+    return `居宅訪問: 次の期限 ${fmtDayLabel(line.due)}（${DUE_STATE_LABEL[line.state]}）・前回 ${fmtDayLabel(line.last.visited_on)}${line.noExplanation ? '・説明の記録なし' : ''}${caveat}`
   }
   const vline = visitLine()
 
