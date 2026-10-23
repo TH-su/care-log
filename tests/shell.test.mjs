@@ -580,7 +580,8 @@ describe('F61 許可リスト外の案内（記録ハブ・その他）', () => 
     assert.match(hub, /\{forbidden \? \(/)
     assert.match(hub, /return g\.forbidden === true \? FORBIDDEN_REASON : unknown/)
     // 既存の封鎖の判定は変えない
-    assert.match(hub, /key === 'incident' \? incidentLocked : key === 'bath' \? bathLocked : key === 'med' \? medLocked : locked/)
+    // 2026-10-24 入浴（デイ）の項目を外したので、入浴の判定（bathLocked）が抜けた
+    assert.match(hub, /key === 'incident' \? incidentLocked : key === 'med' \? medLocked : locked/)
     const more = code('src/pages/MorePage.tsx')
     assert.match(more, /setLoadError\(FORBIDDEN_REASON\)/)
     assert.match(more, /onRetry=\{loadError === FORBIDDEN_REASON \? undefined : /)

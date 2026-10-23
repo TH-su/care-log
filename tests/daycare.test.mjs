@@ -1363,9 +1363,25 @@ if (DC === null) {
     })
     it('記録ハブはデイだけ input_enabled_daycare で判定する（他の項目の判定は変えない）', () => {
       const h = read('../src/pages/RecordHubPage.tsx')
-      assert.match(h, /\{ key: 'daycare', to: '\/record\/daycare', label: 'デイ（せせらぎ）' \}/)
+      // 2026-10-24 表記を「デイ（せせらぎ）」から「デイ せせらぎ」に改めた（代表者の指示）
+      assert.match(h, /\{ key: 'daycare', to: '\/record\/daycare', label: 'デイ せせらぎ' \}/)
       assert.match(h, /getKindInputGate\('daycare'\)/)
-      assert.match(h, /key === 'daycare' \? daycareLocked : key === 'incident' \? incidentLocked : key === 'bath' \? bathLocked : key === 'med' \? medLocked : locked/)
+      // 2026-10-24 入浴（デイ）の項目を外したので、入浴の判定（bathLocked）が抜けた
+      assert.match(h, /key === 'daycare' \? daycareLocked : key === 'incident' \? incidentLocked : key === 'med' \? medLocked : locked/)
+    })
+    it('記録ハブの並び（2026-10-24 入浴（デイ）を外した）と、画面に出る「デイ せせらぎ」の表記', () => {
+      const h = read('../src/pages/RecordHubPage.tsx')
+      const items = h.slice(h.indexOf('const ITEMS'), h.indexOf('const MED_GATE_UNKNOWN'))
+      assert.deepEqual(
+        [...items.matchAll(/key: '([a-zA-Z]+)'/g)].map((m) => m[1]),
+        ['vitals', 'meals', 'note', 'outing', 'med', 'incident', 'daycare'],
+      )
+      assert.match(h, /デイ せせらぎ: \{daycareGate\.observed/)
+      const app = read('../src/App.tsx')
+      assert.match(app, /if \(pathname === '\/record\/daycare'\) return 'デイ せせらぎ'/)
+      // 画面に出る文字（コメントを除く）に古い表記が残っていない
+      for (const f of ['../src/App.tsx', '../src/pages/RecordHubPage.tsx', '../src/pages/DaycarePage.tsx', '../src/pages/DaycarePersonPage.tsx', '../src/pages/DaycareVitalsPage.tsx', '../src/pages/DaycareActivityBulkPage.tsx', '../src/pages/DaycareTrainingPage.tsx'])
+        assert.equal(read(f).replace(/\/\/.*$/gm, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '').includes('デイ（せせらぎ）'), false, f)
     })
     it('db.ts: 到着・欠席は writeGate で input_enabled_daycare・Realtime は別のチャンネル', () => {
       const d = read('../src/lib/db.ts')

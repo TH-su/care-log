@@ -589,7 +589,7 @@ function screenTitle(pathname: string): string {
   if (pathname === '/record/note') return '申し送り'
   if (pathname === '/record/outing') return '外出・外泊'
   if (pathname === '/record/bath') return '入浴（デイ）'
-  if (pathname === '/record/daycare') return 'デイ（せせらぎ）'
+  if (pathname === '/record/daycare') return 'デイ せせらぎ'
   if (pathname === '/record/daycare/vitals') return 'デイ バイタル一括'
   if (pathname.startsWith('/record/daycare/person/')) return 'デイ 1人の記録'
   if (pathname === '/record/daycare/bulk') return 'デイ 活動をまとめて'
