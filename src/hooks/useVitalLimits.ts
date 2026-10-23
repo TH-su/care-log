@@ -6,6 +6,7 @@
 //   limits.refresh()                … 取り直す（〔読み直す〕・日報の読み込み）。戻り値は判定に使う行
 //
 // 行は読み込みの控え（cachedReads）を通す。reloadKey が変わるたびに取り直す（〔最新を読み込む〕・カードで足した後）。
+// 画面が前に戻った時と、前に出ている間は10分ごとにも取り直す（開いたままの画面に事務所で足した基準を届ける・2026-10-23）。
 // 取り直しに失敗しても、前に読めた行があればそれで判定を続ける（施設の基準へ戻すより正しい）。
 // 施設の基準（vitalThresholds()）は app_settings を読んだ後に差し替わるので、lookup は引くたびにいまの基準を見て、
 // 変わっていれば組み直す（反証 軽8: 描いた時の古い基準で判定し続けない＝2d-2 の前と同じく、いまの基準で判定する）。
@@ -15,6 +16,9 @@ import { thresholdsLookup } from '../lib/vitalLimits'
 import type { ResidentVitalLimit } from '../lib/vitalLimits'
 import { vitalThresholds } from '../lib/vitalThresholds'
 import type { VitalThresholds } from '../lib/vitalThresholds'
+
+/** 開いたままの画面で個人の基準を取り直す間隔（前に出ている間だけ） */
+export const VITAL_LIMITS_REFRESH_MS = 10 * 60 * 1000
 
 /** 個人の基準を読めなかった時の知らせ（各画面で同じ文） */
 export const VITAL_LIMITS_FAILED_TEXT = '個人の基準を読めませんでした（施設の基準で判定しています）。'
@@ -64,6 +68,24 @@ export function useVitalLimits(reloadKey: unknown = 0): VitalLimitsState {
   useEffect(() => {
     void refresh()
   }, [reloadKey, refresh])
+  // 開いたままの画面にも、事務所で足した個人の基準を届ける（2026-10-23・修正点 L2）。
+  // 以前は画面を開いた時と〔最新を読み込む〕を押した時だけ取り直し、朝から開いたままのデイのバイタル一括などでは
+  // 昼に足した基準が判定・〔＋再測定〕の出し分けに効かなかった。画面が前に戻った時と、前に出ている間は10分ごとに取り直す。
+  // 取り直しに失敗しても前に読めた行で判定を続ける（refresh の作りのまま）。画面が隠れている間は取りに行かない。
+  useEffect(() => {
+    const visible = () => typeof document === 'undefined' || document.visibilityState === 'visible'
+    const onVis = () => {
+      if (visible()) void refresh()
+    }
+    const iv = setInterval(() => {
+      if (visible()) void refresh()
+    }, VITAL_LIMITS_REFRESH_MS)
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVis)
+    return () => {
+      clearInterval(iv)
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVis)
+    }
+  }, [refresh])
   const lookup = useMemo(() => {
     let builtFor: VitalThresholds | null = null
     let inner: (residentId: number, day: string) => VitalThresholds = () => vitalThresholds()
