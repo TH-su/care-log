@@ -60,6 +60,8 @@ import {
   vitalLevel,
 } from '../lib/daycare'
 import type { DaycareBoardRow, DaycareVitalField, KeyedVital } from '../lib/daycare'
+import { useVitalLimits } from '../hooks/useVitalLimits'
+import { VitalLimitsFailedNote } from '../components/VitalLimitsFailedNote'
 import {
   DAYCARE_FLUID_STEPS,
   DAYCARE_MEAL_AMOUNTS,
@@ -163,6 +165,8 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   const [reloadKey, setReloadKey] = useState(0)
   const [residents, setResidents] = useState<Resident[]>([])
   const [targets, setTargets] = useState<Map<number, ResidentTargets>>(new Map())
+  // 段階2d-2: 個人のバイタルの閾値（印をその方のその日の基準で出す。読めない時は施設の基準・その旨を出す）
+  const limits = useVitalLimits(reloadKey)
   const [gate, setGate] = useState<{ value: boolean; observed: boolean; forbidden?: true; outdated?: true } | null>(null)
   const [mealState, setMealState] = useState<Record<string, SaveState>>({})
   /** 水分の一言（人・日ごと。いま開いている人・日の分だけ出す） */
@@ -769,6 +773,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   return (
     <div className="mx-auto w-full max-w-3xl space-y-4 p-4">
       {header}
+      {limits.failed ? <VitalLimitsFailedNote className="" /> : null}
 
       <section aria-label="この方" className="rounded-lg border border-border bg-surface p-3">
         <div className="flex flex-wrap items-center justify-between gap-gap">
@@ -804,7 +809,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
         <ul className="flex flex-wrap gap-x-4 gap-y-1 text-base text-ink">
           {DAYCARE_VITAL_FIELDS.map((f) => {
             const v = latestOf(f)
-            const lv = vitalLevel(f, v, targets.get(residentId))
+            const lv = vitalLevel(f, v, targets.get(residentId), limits.lookup(residentId, data.day))
             return (
               <li key={f}>
                 {DAYCARE_VITAL_LABEL[f]} <span className="font-num font-bold">{v === null ? '—' : v}</span>

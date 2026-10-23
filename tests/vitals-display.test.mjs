@@ -33,9 +33,14 @@ const vitalsSheet = read('pages/VitalsSheetPage.tsx')
 const daily = read('pages/DailySheetPage.tsx')
 
 let VA = null
+let TH = null
+let VL = null
 let loadError = null
 try {
   VA = await import('../src/lib/vitalAlerts.ts')
+  // 段階2d-2: 個人の閾値（読み上げの「（個人の基準）」・その日の基準での判定）
+  TH = await import('../src/lib/vitalThresholds.ts')
+  VL = await import('../src/lib/vitalLimits.ts')
 } catch (e) {
   loadError = e
 }
@@ -303,30 +308,45 @@ describe('4. 食事一括（MealsGridPage）', () => {
 describe('5. バイタル一括（VitalsGridPage）', () => {
   it('A1: 体温は judgeTemp で判定し、印が無くて平熱+1.0↑なら「平熱+1.2↑」、両方なら注記を値の下に（画面だけの .vmark-usual）', () => {
     assert.match(vitalsGrid, /function VitalValue\(/)
-    assert.match(vitalsGrid, /const j = judgeTemp\(value, usualTemp\)\s*const usualText = j\.level \? j\.note : j\.overUsual \? j\.mark : null/)
+    // 段階2d-2: 判定はその方のその日の基準（t＝個人の閾値。無い方は施設の基準そのもの）で行う（固定し直し・意図は同じ）
+    assert.match(vitalsGrid, /const j = judgeTemp\(value, usualTemp, t\)\s*const usualText = j\.level \? j\.note : j\.overUsual \? j\.mark : null/)
     assert.match(vitalsGrid, /<span className="vmark-usual" aria-hidden="true">/)
-    assert.match(vitalsGrid, /<LevelCell value=\{value\} level=\{spo2LevelFor\(value, target\)\} digits=\{FIELD_DIGITS\.spo2\} \/>/)
+    assert.match(vitalsGrid, /<LevelCell value=\{value\} level=\{spo2LevelFor\(value, target, t\)\} digits=\{FIELD_DIGITS\.spo2\} \/>/)
+    assert.match(vitalsGrid, /<LevelCell value=\{value\} level=\{LEVEL_BY\[field\]\(value, t\)\} digits=\{FIELD_DIGITS\[field\]\} \/>/)
+    assert.match(vitalsGrid, /limitsT=\{limits\.lookup\(row\.residentId, day\)\}/)
     assert.match(vitalsGrid, /void fetchUsualTemps\(day\)\.then/)
   })
 
   it('読み上げの語（newMarkWord）: 平熱との差・個別の下限を足す。当たらなければ空', { skip: !loaded }, () => {
-    const { newMarkWord } = evalDecls(vitalsGrid, ['function newMarkWord('], VA)
+    const { newMarkWord } = evalDecls(vitalsGrid, ['const LEVEL_BY', 'function newMarkWord('], { ...VA, ...TH, ...VL })
     const t = { id: 1, resident_id: 1, fluid_target_ml: null, spo2_warn_below: 95, spo2_danger_below: 90, rev: 1 }
-    assert.equal(newMarkWord('temp', 37.3, 36.2), '（平熱+1.1・平熱より高い）')
-    assert.equal(newMarkWord('temp', 37.8, 36.5), '（平熱+1.3・平熱より高い）') // 37.5↑ と両方＝注記
-    assert.equal(newMarkWord('temp', 37.4, 36.5), '') // +0.9 は出さない
-    assert.equal(newMarkWord('temp', 37.3, null), '') // 平熱なし（5回未満）
-    assert.equal(newMarkWord('spo2', 94, null, t), '（個別の下限 95% を下回る）')
-    assert.equal(newMarkWord('spo2', 94, null, undefined), '')
-    assert.equal(newMarkWord('spo2', 96, null, t), '') // 個別の下限より上 // 施設の基準（93% 未満）では当たらない
-    assert.equal(newMarkWord('pulse', 120, null, t), '')
+    // 段階2d-2: 5つ目の引数はその方のその日の基準。個人の値が無い方は施設の基準そのもの（今までと同じ語）
+    const base = TH.vitalThresholds()
+    assert.equal(newMarkWord('temp', 37.3, 36.2, undefined, base), '（平熱+1.1・平熱より高い）')
+    assert.equal(newMarkWord('temp', 37.8, 36.5, undefined, base), '（平熱+1.3・平熱より高い）') // 37.5↑ と両方＝注記
+    assert.equal(newMarkWord('temp', 37.4, 36.5, undefined, base), '') // +0.9 は出さない
+    assert.equal(newMarkWord('temp', 37.3, null, undefined, base), '') // 平熱なし（5回未満）
+    assert.equal(newMarkWord('spo2', 94, null, t, base), '（個別の下限 95% を下回る）')
+    assert.equal(newMarkWord('spo2', 94, null, undefined, base), '')
+    assert.equal(newMarkWord('spo2', 96, null, t, base), '') // 個別の下限より上 // 施設の基準（93% 未満）では当たらない
+    assert.equal(newMarkWord('pulse', 120, null, t, base), '')
+    // 個人の基準で印が付いた項目だけ「（個人の基準）」を足す（印が無い・施設の基準のままの項目には付けない）
+    const lim = { id: 1, resident_id: 1, valid_from: '2026-10-01', temp_warn_high: 37.2, temp_danger_high: null, temp_danger_low: null, sys_bp_danger_high: null, sys_bp_warn_low: null, dia_bp_danger_high: null, dia_bp_warn_low: null, pulse_danger_high: 90, pulse_warn_low: null }
+    const own = VL.thresholdsFor(lim, base).t
+    assert.equal(newMarkWord('pulse', 90, null, undefined, own), '（個人の基準）')
+    assert.equal(newMarkWord('pulse', 89, null, undefined, own), '')
+    assert.equal(newMarkWord('temp', 37.3, null, undefined, own), '（個人の基準）')
+    assert.equal(newMarkWord('temp', 37.3, 36.2, undefined, own), '（平熱+1.1・平熱より高い）（個人の基準）')
+    assert.equal(newMarkWord('sys_bp', 80, null, undefined, own), '') // 血圧は施設の基準のまま（89↓ でも注記なし）
   })
 })
 
 // ══════════════════════════════════════════════════════════════════════
 describe('6. バイタル一覧（VitalsSheetPage）', () => {
   it('A9: SpO2 の印はその方の下限（spo2LevelFor）。A1 は読み上げに足す（欄の見た目の印は SheetCell の対応待ち）', () => {
-    assert.match(vitalsSheet, /const level = !ok \? null : f === 'spo2' \? spo2LevelFor\(parsed, spo2Target\) : LEVEL_FN\[f\]\(parsed\)/)
+    // 段階2d-2: その方のその日の基準（limitsOn(day)）で判定する（固定し直し・意図は同じ）
+    assert.match(vitalsSheet, /const th = limitsOn\(day\)\s*const level = !ok \? null : f === 'spo2' \? spo2LevelFor\(parsed, spo2Target, th\) : LEVEL_BY\[f\]\(parsed, th\)/)
+    assert.match(vitalsSheet, /limitsOn=\{\(d\) => limits\.lookup\(row\.residentId, d\)\}/)
     assert.match(vitalsSheet, /\} \$\{FIELD_LABEL\[f\]\}\$\{newMark\}`\}/)
     assert.match(vitalsSheet, /void fetchUsualTemps\(anchor\)\.then/)
   })
@@ -367,10 +387,14 @@ describe('7. 日報（DailySheetPage）の発熱者・他症状者の欄', () =>
     assert.match(daily, /const VitalMarksContext = createContext<VitalMarks>\(NO_VITAL_MARKS\)/)
     assert.match(daily, /<VitalMarksContext\.Provider value=\{vitalMarks\}>/)
     assert.match(daily, /const marks = useContext\(VitalMarksContext\)/)
-    assert.match(daily, /const tj = vital \? judgeTemp\(vital\.temp, marks\.usual\.get\(vital\.resident_id\)\) : null/)
-    assert.match(daily, /spo2LevelFor\(vital\.spo2, marks\.targets\.get\(vital\.resident_id\)\)/)
+    // 段階2d-2: その方のその日の基準（個人の閾値）も同じ文脈で渡し、欄で引く（固定し直し・意図は同じ）
+    assert.match(daily, /const th = vital \? \(marks\.limitsFor\?\.\(vital\.resident_id, vital\.measured_on\) \?\? vitalThresholds\(\)\) : vitalThresholds\(\)/)
+    assert.match(daily, /const tj = vital \? judgeTemp\(vital\.temp, marks\.usual\.get\(vital\.resident_id\), th\) : null/)
+    assert.match(daily, /spo2LevelFor\(vital\.spo2, marks\.targets\.get\(vital\.resident_id\), th\)/)
+    assert.match(daily, /const vitalMarks = useMemo<VitalMarks>\(\(\) => \(\{ \.\.\.vitalMarks0, limitsFor: limits\.lookup \}\), \[vitalMarks0, limits\.lookup\]\)/)
     assert.match(daily, /<span className="vmark-usual px-1 text-right" aria-hidden="true">/)
     assert.doesNotMatch(daily, /<DaySheetMemo[^>]*vitalMarks/)
+    assert.doesNotMatch(daily, /<DaySheetMemo[^>]*limits/)
     assert.match(daily, /void fetchUsualTemps\(day\)\.then/)
   })
 })

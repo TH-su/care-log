@@ -49,6 +49,7 @@ import type { MyRole, RecordHistoryEntry } from '../lib/db'
 // 名簿とカルテ本体は読み込みの控え（裏での先読み・2026-10-17）を通す。一覧で方の行に指が触れた時にその方のカルテを
 // 先読みし、開いた方のカルテは控えに残す（次に開いた時は控えを先に出し、裏で取り直す）
 import { fetchKarte, fetchResidents, peekKarte, peekResidents, prefetchKarte } from '../lib/cachedReads'
+import { useVitalLimits, VITAL_LIMITS_FAILED_TEXT } from '../hooks/useVitalLimits'
 import {
   clampLines,
   fmtChangedAt,
@@ -77,7 +78,10 @@ import {
   splitThresholds,
 } from '../lib/chart'
 import type { AxisSpec } from '../lib/chart'
-import { vitalThresholds } from '../lib/vitalThresholds'
+import { diaBpLevelBy, pulseLevelBy, sysBpLevelBy, vitalThresholds } from '../lib/vitalThresholds'
+import type { VitalThresholds } from '../lib/vitalThresholds'
+import { changedFromText, lastChangeDay, thresholdsLookup } from '../lib/vitalLimits'
+import type { ResidentVitalLimit } from '../lib/vitalLimits'
 // バイタル・食事・水分の見やすさ（A1・A2・A3・A6・A9・2026-10-16）の判定。数の決め方は vitalAlerts.ts（純関数・試験あり）
 import {
   fluidProgress,
@@ -144,10 +148,7 @@ import {
   MED_STATUS_LABEL,
   OUTING_KIND_LABEL,
   SHIFT_LABEL,
-  diaBpLevel,
   isLowIntake,
-  pulseLevel,
-  sysBpLevel,
 } from '../lib/types'
 import type {
   BathRecord,
@@ -611,15 +612,16 @@ interface SeriesSpec {
   fillClass: string
   /** 2本目の系列は破線にして色以外でも区別できるようにする */
   dashed?: boolean
-  level(v: number | null): Level
+  /** 点の段階。day＝その点の日（段階2d-2: 個人の閾値はその日の基準で判定する。日の無い系列は省いてよい） */
+  level(v: number | null, day?: string): Level
   /** しきい値を外れた点の脇の記号（未指定は LEVEL_MARK の ↑↓。食事は表と同じ ▲） */
   levelMark?: string
   /** タップした値の表示で記号の代わりに出す言葉（未指定は levelMark／LEVEL_MARK） */
   levelLabel?: string
   /** 点ごとの記号（体温の「平熱+1.2↑」・A1）。返した文字が levelMark／LEVEL_MARK より優先。null は既定の記号 */
-  markOf?(v: number): string | null
+  markOf?(v: number, day?: string): string | null
   /** 点ごとの注記（体温の「平熱+1.2」）。タップした値の表示と数値の表に添える。null は添えない */
-  noteOf?(v: number): string | null
+  noteOf?(v: number, day?: string): string | null
 }
 
 interface BandSpec {
@@ -661,6 +663,8 @@ interface PanelSpec {
   alertWord?: string
   /** 読み上げに足す説明（平熱・個別の下限。グラフの中の線の文字は読み上げられないため言葉でも伝える） */
   speech?: string
+  /** 段階2d-2: 個人の基準で判定している時の注記（題の横に1行。個人の基準が無い方は出さない） */
+  note?: string
 }
 
 /** グラフを描く枠の実測値（幅・軸の文字の大きさ・左の列でいちばん長い文字の幅・画面の高さから決めたグラフの高さ） */
@@ -883,9 +887,9 @@ function VitalChart({ panel, days, box, height }: VitalChartProps) {
       days.forEach((d, i) => {
         const v = s.values.get(d)
         if (v == null) return
-        const lv = s.level(v)
+        const lv = s.level(v, d)
         if (!lv) return
-        const text = s.markOf?.(v) ?? s.levelMark ?? LEVEL_MARK[lv]
+        const text = s.markOf?.(v, d) ?? s.levelMark ?? LEVEL_MARK[lv]
         const w = Math.ceil(text.length * markCharW) + 2
         const cx = Math.min(width - w / 2, Math.max(padL + w / 2, x(i)))
         let base = y(v) - 7
@@ -943,8 +947,8 @@ function VitalChart({ panel, days, box, height }: VitalChartProps) {
     const parts = panel.series.map((s) => {
       const v = s.values.get(day)
       if (v == null) return `${s.label} —（未測定）`
-      const lv = s.level(v)
-      const note = s.noteOf?.(v) ?? null
+      const lv = s.level(v, day)
+      const note = s.noteOf?.(v, day) ?? null
       return `${s.label} ${fmtNum(v, panel.digits)}${panel.unit}${lv ? ` ${s.levelLabel ?? s.levelMark ?? LEVEL_MARK[lv]}` : ''}${note ? `（${note}）` : ''}`
     })
     return `${fmtDayLabel(day)}　${parts.join('　')}`
@@ -958,7 +962,7 @@ function VitalChart({ panel, days, box, height }: VitalChartProps) {
         if (vals.length === 0) return `${s.label}は記録がありません。`
         const max = Math.max(...vals)
         const min = Math.min(...vals)
-        const alerts = vals.filter((v) => s.level(v) != null).length
+        const alerts = Array.from(s.values.entries()).filter(([d, v]) => s.level(v, d) != null).length
         const tail = panel.noLevels ? '' : `、${panel.alertWord ?? 'しきい値を外れた記録'}${alerts}件`
         return `${s.label}は記録${vals.length}件、最高${fmtNum(max, panel.digits)}${panel.unit}、最低${fmtNum(min, panel.digits)}${panel.unit}${tail}。`
       })
@@ -1099,7 +1103,7 @@ function VitalChart({ panel, days, box, height }: VitalChartProps) {
           days.map((d, i) => {
             const v = s.values.get(d)
             if (v == null) return null
-            const lv = s.level(v)
+            const lv = s.level(v, d)
             return (
               <circle
                 key={`${s.label}-pt-${d}`}
@@ -1180,6 +1184,7 @@ function VitalPanel({ panel, days, box, height }: VitalPanelProps) {
         <h3 className="text-lg font-bold text-ink">{panel.title}</h3>
         {panel.unit ? <span className="text-sm text-ink2">単位 {panel.unit}</span> : null}
         {panel.legend ? <span className="text-sm text-ink2">{panel.legend}</span> : null}
+        {panel.note ? <span className="text-sm font-bold text-ink">{panel.note}</span> : null}
       </div>
       {rows.length === 0 ? (
         <p className="mt-2 text-base text-ink2">
@@ -1223,10 +1228,10 @@ function VitalPanel({ panel, days, box, height }: VitalPanelProps) {
                         </th>
                         {panel.series.map((s) => {
                           const v = s.values.get(d) ?? null
-                          const note = v == null ? null : (s.noteOf?.(v) ?? null)
+                          const note = v == null ? null : (s.noteOf?.(v, d) ?? null)
                           return (
                             <td key={s.label} className="py-2 pr-2 text-right">
-                              <LevelCell value={v} level={s.level(v)} digits={panel.digits} />
+                              <LevelCell value={v} level={s.level(v, d)} digits={panel.digits} />
                               {note ? <span className="ml-1 text-sm font-bold text-warn">{note}</span> : null}
                             </td>
                           )
@@ -1259,9 +1264,14 @@ interface VitalsSectionProps {
   usualSamples?: number | null
   /** 個別の目標（A9 の SpO2 の下限。無ければ undefined） */
   target: ResidentTargets | undefined
+  /**
+   * 段階2d-2: 個人の閾値の行（その方の分を含む全員分でよい）とその方の id。省く・行が null（読めない）なら全部の日が施設の基準。
+   * 基準の口（thresholdsLookup）は組み立てる時に、その時の施設の基準で作る（施設の基準は読み込みの後に差し替わるため）
+   */
+  limits?: { rows: readonly ResidentVitalLimit[] | null; residentId: number }
 }
 
-function VitalsSection({ vitals, days, weightPanel, printing, usual, usualAbsent = false, usualSamples = null, target }: VitalsSectionProps) {
+function VitalsSection({ vitals, days, weightPanel, printing, usual, usualAbsent = false, usualSamples = null, target, limits }: VitalsSectionProps) {
   const { ref, probeRef, box } = useChartBox()
   const chartH = printing ? CHART_H_PRINT : box.h
 
@@ -1272,15 +1282,26 @@ function VitalsSection({ vitals, days, weightPanel, printing, usual, usualAbsent
     const dia = dailySeries(sorted, 'dia_bp')
     const pulse = dailySeries(sorted, 'pulse')
     const spo2 = dailySeries(sorted, 'spo2')
-    // 帯・基準線の数値は vitalThresholds.ts の「いまの基準値」から（A8・2026-10-16。既定値なら今までと同じ数・同じ文字）
-    const th = vitalThresholds()
+    // 帯・基準線の数値は vitalThresholds.ts の「いまの基準値」から（A8・2026-10-16。既定値なら今までと同じ数・同じ文字）。
+    // 段階2d-2: 個人の閾値がある方は、点の印はその日の基準、帯と基準線は期間の最後の日の基準（計画の質問11）
+    const base = vitalThresholds()
+    const lookup = thresholdsLookup(limits?.rows ?? null, base)
+    const tOn = (d: string): VitalThresholds => (limits === undefined ? base : lookup(limits.residentId, d))
+    const lastDay = days[days.length - 1]
+    const th = lastDay === undefined ? base : tOn(lastDay)
+    const individual = days.some((d) => tOn(d) !== base)
+    const changed = lastChangeDay(days, tOn)
+    const limitNote = individual
+      ? `個人の基準で判定（カルテの「個人の閾値」）${changed !== null ? `・${changedFromText(changed)}（帯は最後の日の基準）` : ''}`
+      : undefined
     // A1: 平熱（直近30日の定時の中央値）の点線と、平熱+1.0℃以上の印。今の 37.5↑・38.1↑↑・35.5↓↓ の印はそのまま（重い方を出す）
     const usualText = fmtUsualTemp(usual)
     const rise = th.usualTempRise.toFixed(1)
-    const tempLevelOf = (v: number | null): Level => {
-      const j = judgeTemp(v, usual, th)
+    const tempLevelOf = (v: number | null, day?: string): Level => {
+      const j = judgeTemp(v, usual, day === undefined ? th : tOn(day))
       return j.level ?? (j.overUsual ? 'warn-high' : null)
     }
+    const tDay = (day?: string) => (day === undefined ? th : tOn(day))
     // A9: SpO2 の個別の下限（医師の指示がある方だけ）。無い方は施設の基準（帯）のまま
     const lim = spo2Limits(target, th)
     return [
@@ -1297,9 +1318,9 @@ function VitalsSection({ vitals, days, weightPanel, printing, usual, usualAbsent
             strokeClass: 'stroke-primary',
             fillClass: 'fill-primary',
             level: tempLevelOf,
-            markOf: (v) => judgeTemp(v, usual, th).mark,
-            noteOf: (v) => {
-              const j = judgeTemp(v, usual, th)
+            markOf: (v, day) => judgeTemp(v, usual, tDay(day)).mark,
+            noteOf: (v, day) => {
+              const j = judgeTemp(v, usual, tDay(day))
               return j.overUsual && j.diff !== null ? `平熱+${j.diff.toFixed(1)}` : null
             },
           },
@@ -1322,6 +1343,7 @@ function VitalsSection({ vitals, days, weightPanel, printing, usual, usualAbsent
                 : '平熱はまだ出していません（直近30日の定時の測定が5回未満）'
               : undefined,
         speech: usualText !== null ? `平熱は${usualText}℃（直近30日の定時の中央値）で、点線で示しています。` : undefined,
+        note: limitNote,
       },
       {
         key: 'bp',
@@ -1337,7 +1359,7 @@ function VitalsSection({ vitals, days, weightPanel, printing, usual, usualAbsent
             values: sys,
             strokeClass: 'stroke-primary',
             fillClass: 'fill-primary',
-            level: sysBpLevel,
+            level: (v, day) => sysBpLevelBy(v, tDay(day)),
           },
           {
             label: '下（拡張期）',
@@ -1345,7 +1367,7 @@ function VitalsSection({ vitals, days, weightPanel, printing, usual, usualAbsent
             strokeClass: 'stroke-link',
             fillClass: 'fill-link',
             dashed: true,
-            level: diaBpLevel,
+            level: (v, day) => diaBpLevelBy(v, tDay(day)),
           },
         ],
         bands: [{ lo: th.sysBp.dangerHigh, hi: 300, className: 'fill-danger-bg', label: `上${th.sysBp.dangerHigh}`, labelAt: th.sysBp.dangerHigh }],
@@ -1355,6 +1377,7 @@ function VitalsSection({ vitals, days, weightPanel, printing, usual, usualAbsent
           { y: th.diaBp.warnLow, label: `下${th.diaBp.warnLow}`, className: 'stroke-warn' },
         ],
         legend: '実線=上（収縮期）／破線=下（拡張期）',
+        note: limitNote,
       },
       {
         key: 'pulse',
@@ -1368,9 +1391,10 @@ function VitalsSection({ vitals, days, weightPanel, printing, usual, usualAbsent
             values: pulse,
             strokeClass: 'stroke-primary',
             fillClass: 'fill-primary',
-            level: pulseLevel,
+            level: (v, day) => pulseLevelBy(v, tDay(day)),
           },
         ],
+        note: limitNote,
         bands: [
           { lo: th.pulse.dangerHigh, hi: 250, className: 'fill-danger-bg', label: String(th.pulse.dangerHigh), labelAt: th.pulse.dangerHigh },
           { lo: 20, hi: th.pulse.warnLow, className: 'fill-warn-bg', label: String(th.pulse.warnLow), labelAt: th.pulse.warnLow },
@@ -1389,7 +1413,7 @@ function VitalsSection({ vitals, days, weightPanel, printing, usual, usualAbsent
             values: spo2,
             strokeClass: 'stroke-primary',
             fillClass: 'fill-primary',
-            level: (v) => spo2LevelFor(v, target, th),
+            level: (v, day) => spo2LevelFor(v, target, tDay(day)),
           },
         ],
         // 個別の下限がある方は、施設の基準の帯の代わりに個別の下限の線（注意・危険）を引く
@@ -1409,7 +1433,7 @@ function VitalsSection({ vitals, days, weightPanel, printing, usual, usualAbsent
         speech: lim.individual ? `この方は個別の下限があり、${lim.warnBelow}%未満で注意、${lim.dangerBelow}%未満で危険です。` : undefined,
       },
     ]
-  }, [vitals, usual, usualAbsent, usualSamples, target])
+  }, [vitals, days, usual, usualAbsent, usualSamples, target, limits])
 
   const hasAny = vitals.length > 0
 
@@ -2972,6 +2996,8 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
   const [targets, setTargets] = useState<Map<number, ResidentTargets>>(new Map())
   const [targetsState, setTargetsState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [targetsTick, setTargetsTick] = useState(0)
+  /** 段階2d-2: 個人の閾値（カードで足した・取り消した時に取り直す） */
+  const [limitsTick, setLimitsTick] = useState(0)
   /** 平熱（A1。undefined＝読み込み中・null＝出せない） */
   const [usual, setUsual] = useState<number | null | undefined>(undefined)
   /** 平熱の応答にこの方の行が無かった（30日に定時の体温が1回も無い・関数が無い・読めない）。5回未満（行はあるが null）と言い分ける */
@@ -3175,6 +3201,10 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
       cancelled = true
     }
   }, [tick, targetsTick])
+
+  // 個人の閾値（段階2d-2・0045）。読めない時は施設の基準で判定し「個人の基準を読めませんでした」を出す（表が無い DB は空＝施設の基準）
+  const limits = useVitalLimits(`${tick}|${targetsTick}|${limitsTick}`)
+  const vitalLimits = useMemo(() => ({ rows: limits.rows, residentId }), [limits.rows, residentId])
 
   // 平熱（A1。今日を含む直近30日の定時の中央値。db.ts が日ごとに1回だけ問い合わせて控える。失敗しても例外は来ない）
   useEffect(() => {
@@ -3395,6 +3425,8 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
                 fluids: data.fluids,
                 usual: usual ?? null,
                 target: target ?? null,
+                // 段階2d-2: その日の基準（個人の閾値）。印刷する時の施設の基準で作る
+                thresholdsFor: (d: string) => limits.lookup(residentId, d),
               })}
               name={resident.name}
               room={resident.room}
@@ -3416,8 +3448,8 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
           role={role}
         />
 
-        {/* 個人の閾値（段階2d・0045）。事務・管理者だけ足せる。判定への反映は段階2d の後半 */}
-        <VitalLimitsCard residentId={residentId} role={role} />
+        {/* 個人の閾値（段階2d・0045）。事務・管理者だけ足せる。足した・取り消した後は記録の印を取り直す（段階2d-2） */}
+        <VitalLimitsCard residentId={residentId} role={role} onChanged={() => setLimitsTick((n) => n + 1)} />
 
         {loading ? (
           <div className="mt-3">
@@ -3442,7 +3474,14 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
               usualAbsent={usualAbsent}
           usualSamples={usualSamples}
               target={target}
+              limits={vitalLimits}
             />
+            {limits.failed ? (
+              <p role="status" className="mt-2 rounded border border-warn bg-warn-bg p-2 text-sm text-ink">
+                <span aria-hidden="true">▲ </span>
+                {VITAL_LIMITS_FAILED_TEXT}
+              </p>
+            ) : null}
           </div>
           <div className={LANE}>
             <WeightSection

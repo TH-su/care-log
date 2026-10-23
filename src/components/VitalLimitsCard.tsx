@@ -31,6 +31,8 @@ import { ConfirmDialog } from './ui'
 interface Props {
   residentId: number
   role: MyRole | null | undefined
+  /** 足した・取り消した・読み直した後に呼ぶ（段階2d-2: 画面の印を取り直す） */
+  onChanged?: () => void
 }
 
 type Msg = { tone: 'ok' | 'warn' | 'danger'; text: string }
@@ -42,7 +44,7 @@ const emptyInput = (today: string): VitalLimitInput => {
 }
 const md = (iso: string) => `${Number(iso.slice(5, 7))}/${Number(iso.slice(8, 10))}`
 
-export function VitalLimitsCard({ residentId, role }: Props) {
+export function VitalLimitsCard({ residentId, role, onChanged }: Props) {
   const canEdit = canEditTargets(role)
   const uid = useId()
   const today = todayIso()
@@ -125,12 +127,14 @@ export function VitalLimitsCard({ residentId, role }: Props) {
       if (res === 'conflict') {
         setMsg({ tone: 'warn', text: '同じ開始日の行が先にあります。読み直しました。確かめてください（入力は消えていません）。' })
         setTick((n) => n + 1)
+        onChanged?.()
         return
       }
       setOpen(false)
       setInput(emptyInput(todayIso()))
       setMsg({ tone: 'ok', text: `${md(res.valid_from)} から効く個人の閾値を足しました。` })
       setTick((n) => n + 1)
+      onChanged?.()
     } catch (e) {
       if (ridRef.current !== rid) return
       setMsg({ tone: 'danger', text: e instanceof DbError ? e.message : '保存できませんでした。通信状態を確認して、もう一度お試しください（入力は消えていません）。' })
@@ -149,6 +153,7 @@ export function VitalLimitsCard({ residentId, role }: Props) {
       if (ridRef.current !== rid) return
       setMsg(res === true ? { tone: 'ok', text: '行を取り消しました。' } : { tone: 'warn', text: '他の端末が先に変えていました。読み直しました。' })
       setTick((n) => n + 1)
+      onChanged?.()
     } catch (e) {
       if (ridRef.current !== rid) return
       setMsg({ tone: 'danger', text: e instanceof DbError ? e.message : '取り消せませんでした。通信状態を確認して、もう一度お試しください。' })
@@ -183,8 +188,8 @@ export function VitalLimitsCard({ residentId, role }: Props) {
       <p className="mt-1 text-sm text-ink2">
         主治医の指示などで、この方だけ基準を変える時に使います。空欄の項目は施設の基準です。足した行は書き換えられず、開始日より前の日の記録には効きません。
       </p>
-      <p className="mt-1 rounded border border-warn bg-warn-bg p-2 text-sm">
-        <span aria-hidden="true">ⓘ </span>いまは記録の画面の印にはまだ効いていません（段階2d の後半の更新で効かせます）。ここで足した値は残ります。
+      <p className="mt-1 text-sm text-ink2">
+        足した値は、開始日からの記録の印（カルテ・バイタルの一覧・日報・時系列・要注意・デイ・温度板）に効きます。
       </p>
       {state === 'loading' ? <p className="mt-2 text-sm text-ink2">読み込んでいます…</p> : null}
       {state === 'error' ? (

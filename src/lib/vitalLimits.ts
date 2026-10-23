@@ -189,6 +189,73 @@ export function baseGroupText(g: VitalLimitGroup, base: VitalThresholds): string
   return `${VITAL_LIMIT_GROUP_LABEL[g]}（危険の高 ${p.dangerHigh}・注意の低 ${p.warnLow}）`
 }
 
+/**
+ * その方・その日の基準を引く口（段階2d-2・各画面の判定に渡す）。行が無い（null・空）時は、どの方・どの日でも base そのもの
+ * （同じ物を返す＝個人の値が無い方は今と同じ印になる）。行があっても、その方・その日に効く行が無い・全部空欄の行なら base。
+ * 同じ方・同じ日は一度だけ合成する（控えを持つ）
+ */
+export function thresholdsLookup(rows: readonly ResidentVitalLimit[] | null, base: VitalThresholds): (residentId: number, day: string) => VitalThresholds {
+  if (rows === null || rows.length === 0) return () => base
+  const memo = new Map<string, VitalThresholds>()
+  const residents = new Set(rows.map((r) => r.resident_id))
+  return (residentId: number, day: string) => {
+    if (!residents.has(residentId)) return base
+    const k = `${residentId}|${day}`
+    const hit = memo.get(k)
+    if (hit !== undefined) return hit
+    const t = thresholdsFor(limitFor(rows, residentId, day), base).t
+    memo.set(k, t)
+    return t
+  }
+}
+
+/** 体温・血圧・脈の基準が同じか（個人の閾値が変える項目だけを比べる） */
+export function sameVitalLimits(a: VitalThresholds, b: VitalThresholds): boolean {
+  if (a === b) return true
+  return (
+    a.temp.warnHigh === b.temp.warnHigh &&
+    a.temp.dangerHigh === b.temp.dangerHigh &&
+    a.temp.dangerLow === b.temp.dangerLow &&
+    a.sysBp.dangerHigh === b.sysBp.dangerHigh &&
+    a.sysBp.warnLow === b.sysBp.warnLow &&
+    a.diaBp.dangerHigh === b.diaBp.dangerHigh &&
+    a.diaBp.warnLow === b.diaBp.warnLow &&
+    a.pulse.dangerHigh === b.pulse.dangerHigh &&
+    a.pulse.warnLow === b.pulse.warnLow
+  )
+}
+
+/**
+ * 期間（古い順の日）の中で、基準が前の日と変わった一番新しい日（線・凡例は期間の最後の日の基準で描くので、その基準がいつから
+ * かを知らせる＝計画の質問11）。変わっていなければ null
+ */
+export function lastChangeDay(days: readonly string[], tFor: (day: string) => VitalThresholds): string | null {
+  for (let i = days.length - 1; i > 0; i -= 1) {
+    if (!sameVitalLimits(tFor(days[i]), tFor(days[i - 1]))) return days[i]
+  }
+  return null
+}
+
+/** 「〇/〇から基準が変わりました」（温度板の凡例の下・カルテのグラフの下に1行） */
+export function changedFromText(day: string): string {
+  return `${Number(day.slice(5, 7))}/${Number(day.slice(8, 10))}から基準が変わりました`
+}
+
+/** 個人の基準で判定した項目に添える注記（段階2d-2。要注意の理由・読み上げに足す。施設の基準のままの項目には付けない） */
+export const INDIVIDUAL_LIMIT_NOTE = '（個人の基準）'
+
+/**
+ * その項目（バイタルの列の名前）の基準が個人の値か。thresholdsFor は個人の値で作った組だけを新しい物にし、
+ * 施設の基準のままの組は base の物をそのまま使うので、組が base と別の物なら個人の値（SpO2 は個別の目標＝A9 の側なので常に false）
+ */
+export function isIndividualField(field: 'temp' | 'sys_bp' | 'dia_bp' | 'pulse' | 'spo2', t: VitalThresholds, base: VitalThresholds): boolean {
+  if (field === 'temp') return t.temp !== base.temp
+  if (field === 'sys_bp') return t.sysBp !== base.sysBp
+  if (field === 'dia_bp') return t.diaBp !== base.diaBp
+  if (field === 'pulse') return t.pulse !== base.pulse
+  return false
+}
+
 /** 施設の基準に戻した項目の知らせ（無ければ null） */
 export function fallbackNotice(fallback: ReadonlySet<VitalLimitGroup>): string | null {
   if (fallback.size === 0) return null

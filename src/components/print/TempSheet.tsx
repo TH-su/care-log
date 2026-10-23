@@ -21,6 +21,7 @@ import type { PrintAreaHandle } from './PrintArea'
 import { axisRange, scaleY } from './tempSheetModel'
 import type { TempSheetModel } from './tempSheetModel'
 import { fmtMl, fmtUsualTemp } from '../../lib/vitalAlerts'
+import { changedFromText } from '../../lib/vitalLimits'
 import './tempSheet.css'
 
 /** viewBox の幅（A4 縦の印刷できる幅 194mm と同じ数） */
@@ -248,6 +249,8 @@ export function TempSheet({ model, name, room, printedAt }: TempSheetProps) {
         体温 破線＝{th.temp.warnHigh.toFixed(1)}↑・{th.temp.dangerHigh.toFixed(1)}↑↑・{th.temp.dangerLow.toFixed(1)}↓↓
         {usualText !== null ? `　平熱+${th.usualTempRise.toFixed(1)}↑＝平熱より${th.usualTempRise.toFixed(1)}℃以上高い` : ''}
       </p>
+      {/* 段階2d-2（計画の質問11・承認済みの1点）: 期間の途中で個人の基準が変わった時だけ1行。線と凡例は期間の最後の日の基準 */}
+      {m.changedFrom !== null ? <p className="ts-legend">{changedFromText(m.changedFrom)}</p> : null}
       <SheetChart
         title="体温"
         unit="℃"

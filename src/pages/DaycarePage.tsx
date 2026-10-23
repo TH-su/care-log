@@ -81,6 +81,8 @@ import {
   vitalNeedsRecheck,
 } from '../lib/daycare'
 import type { DaycareBoardRow, KeyedVital } from '../lib/daycare'
+import { useVitalLimits } from '../hooks/useVitalLimits'
+import { VitalLimitsFailedNote } from '../components/VitalLimitsFailedNote'
 import { resultForBathed } from '../lib/bath'
 import { addDays, fmtDayLabel, todayIso } from '../lib/format'
 import { BATH_CANCEL_REASON_LABEL, BATH_RESULT_LABEL, DAYCARE_ABSENT_REASONS, DAYCARE_ABSENT_REASON_LABEL } from '../lib/types'
@@ -254,6 +256,8 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   const [residents, setResidents] = useState<Resident[]>([])
   const [active, setActive] = useState<Resident[]>([])
   const [targets, setTargets] = useState<Map<number, ResidentTargets>>(new Map())
+  // 段階2d-2: 個人のバイタルの閾値（〔＋再測定〕の印をその方の基準で出す。読めない時は施設の基準・その旨を出す）
+  const limits = useVitalLimits(reloadKey)
   const [closedDates, setClosedDates] = useState<string | null>(null)
   const [gate, setGate] = useState<{ value: boolean; observed: boolean; forbidden?: true; outdated?: true } | null>(null)
   const [extraIds, setExtraIds] = useState<number[]>([])
@@ -934,7 +938,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   const vitalsAbnormal = (id: number) => {
     const list = vitalsOf(id)
     const latest = list.length === 0 ? null : list.reduce((a, b) => (b.id > a.id ? b : a))
-    return latest !== null && vitalNeedsRecheck(latest, targets.get(id))
+    return latest !== null && vitalNeedsRecheck(latest, targets.get(id), limits.lookup(id, data.day))
   }
   const vitalsWaiting = board.rows.filter((r) => r.state === 'present' && !vitalsDone(r.residentId)).length
   // 入浴を確かめていない方（在席・帰宅で、予定ありの未記録か自動の記録のまま）
@@ -958,6 +962,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   return (
     <div className="mx-auto w-full max-w-5xl space-y-4 p-4">
       {header}
+      {limits.failed ? <VitalLimitsFailedNote className="" /> : null}
       <PlanBanners data={data} notInRoster={board.notInRoster} unconfirmed={board.unconfirmed} today={today} />
 
       <ul className="grid grid-cols-3 gap-gap sm:grid-cols-4 lg:grid-cols-7" aria-label="件数">

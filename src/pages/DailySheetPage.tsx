@@ -211,7 +211,14 @@ import { normalizeCategories, scheduleColorPatch } from '../lib/noteCategory'
 import { fetchResidentTargets, fetchUsualTemps, loadVitalThresholds } from '../lib/db'
 import { judgeTemp, spo2LevelFor } from '../lib/vitalAlerts'
 import { dailyFeverObservations, moveRowStatuses, rekeyHeld } from '../lib/daycare'
-import { vitalThresholds } from '../lib/vitalThresholds'
+import { diaBpLevelBy, pulseLevelBy, sysBpLevelBy, vitalThresholds } from '../lib/vitalThresholds'
+import type { VitalThresholds } from '../lib/vitalThresholds'
+// 段階2d-2: 個人のバイタルの閾値（発熱者・他症状者の欄の印と、発熱者に載せるデイの測定の選び方）
+import { fetchResidentVitalLimits } from '../lib/cachedReads'
+import { thresholdsLookup } from '../lib/vitalLimits'
+import type { ResidentVitalLimit } from '../lib/vitalLimits'
+import { useVitalLimits } from '../hooks/useVitalLimits'
+import { VitalLimitsFailedNote } from '../components/VitalLimitsFailedNote'
 import type { ResidentTargets } from '../lib/vitalAlerts'
 import {
   CategoryChips,
@@ -228,11 +235,8 @@ import {
   OUTING_KIND_LABEL,
   SHIFT_LABEL,
   VITAL_RANGE,
-  diaBpLevel,
   hasNoteAlias,
   noteDisplayName,
-  pulseLevel,
-  sysBpLevel,
 } from '../lib/types'
 import type {
   Attendance,
@@ -951,10 +955,10 @@ function errText(err: unknown): string {
   return ERR_SAVE
 }
 
-/** 血圧セルに出す記号は、上下のうち重い方を採る（記号は LEVEL_MARK 側で付く） */
-function bpLevel(sys: number | null, dia: number | null): Level {
-  const a = sysBpLevel(sys)
-  const b = diaBpLevel(dia)
+/** 血圧セルに出す記号は、上下のうち重い方を採る（記号は LEVEL_MARK 側で付く）。t＝その方のその日の基準（段階2d-2） */
+function bpLevel(sys: number | null, dia: number | null, t: VitalThresholds = vitalThresholds()): Level {
+  const a = sysBpLevelBy(sys, t)
+  const b = diaBpLevelBy(dia, t)
   const weight = (l: Level): number =>
     l === 'danger-high' || l === 'danger-low' ? 2 : l === 'warn-high' || l === 'warn-low' ? 1 : 0
   return weight(a) >= weight(b) ? a : b
@@ -2256,7 +2260,10 @@ export function DailySheetPage({
   // 発熱者・他症状者のバイタル欄の印（A1・A9）に使う平熱と個別の目標。表の読み込みとは別に読む（待たせない・失敗しても
   // 表は出す＝印が今の基準だけになる）。平熱は選んだ日について1回（db.ts が日ごとに控える）、目標と基準値は開いた時に1回。
   // 欄には文脈（VitalMarksContext）で渡す＝1日ぶんの枠（DaySheetMemo）を描き直さず、バイタルの欄だけが描き直る
-  const [vitalMarks, setVitalMarks] = useState<VitalMarks>(NO_VITAL_MARKS)
+  const [vitalMarks0, setVitalMarks] = useState<VitalMarks>(NO_VITAL_MARKS)
+  // 段階2d-2: 個人の閾値（開いた時に1回読む。読めない時は施設の基準で印を出し、その旨を出す）
+  const limits = useVitalLimits()
+  const vitalMarks = useMemo<VitalMarks>(() => ({ ...vitalMarks0, limitsFor: limits.lookup }), [vitalMarks0, limits.lookup])
   useEffect(() => {
     let alive = true
     void loadVitalThresholds().then(() => {
@@ -3163,6 +3170,8 @@ export function DailySheetPage({
           スクロールしても検索できる */}
       {headerSlot !== null ? createPortal(searchBar, headerSlot) : null}
 
+      {limits.failed ? <VitalLimitsFailedNote className="" /> : null}
+
       {phase === 'error' && everReady && (
         <div className="flex flex-wrap items-center gap-gap rounded-md border border-danger bg-danger-bg p-3">
           <p className="flex-1 text-base text-ink">
@@ -3618,7 +3627,15 @@ function DaySheet({
         // 基準値も待つ（発熱者に載せるデイの測定を、いまの基準で選ぶため。読めない時は今の基準のまま・起動中は控えから即返る）。
         // 待つのは上限まで（基準値の取得が詰まっても日報の表示を止めない＝反証レビュー4巡目 F5）
         let thresholdsDone = false
-        const thresholds = loadVitalThresholds().then(() => {
+        // 段階2d-2: 個人の閾値も同じ上限まで待つ（発熱の判定がその方の基準になるため。読めない時は施設の基準＝null）
+        let loadedLimits: readonly ResidentVitalLimit[] | null = null
+        const limitsP = fetchResidentVitalLimits().then(
+          (r) => {
+            loadedLimits = r.rows
+          },
+          () => undefined,
+        )
+        const thresholds = Promise.all([loadVitalThresholds(), limitsP]).then(() => {
           thresholdsDone = true
         })
         let waitTimer: ReturnType<typeof setTimeout> | null = null
@@ -3666,12 +3683,13 @@ function DaySheet({
         const obsAll = Array.isArray(report?.observations) ? report.observations.filter((v) => v != null).map(newer).map(withPending) : []
         const editing = new Set<number>()
         for (const v of obsAll) if (vitalConflictsRef.current[v.id] !== undefined || pendingRow('vitals', vitalTargetOf(v.id)) !== null) editing.add(v.id)
-        const usedThresholds = JSON.stringify(vitalThresholds())
-        const obs = dailyFeverObservations(obsAll, report?.daycareVitalIds, editing)
-        // 上限が先に来た時は、基準値が届いた後で、選ぶのに使った基準と違えば一言だけ出す（読み直さない・失敗では何もしない）
+        const usedThresholds = JSON.stringify([vitalThresholds(), loadedLimits ?? []])
+        const usedLookup = thresholdsLookup(loadedLimits, vitalThresholds())
+        const obs = dailyFeverObservations(obsAll, report?.daycareVitalIds, editing, (rid) => usedLookup(rid, day))
+        // 上限が先に来た時は、基準値（個人の閾値を含む）が届いた後で、選ぶのに使った基準と違えば一言だけ出す（読み直さない・失敗では何もしない）
         if (!thresholdsDone) {
           void thresholds.then(() => {
-            if (alive && aliveRef.current && JSON.stringify(vitalThresholds()) !== usedThresholds) setThresholdsLate(true)
+            if (alive && aliveRef.current && JSON.stringify([vitalThresholds(), loadedLimits ?? []]) !== usedThresholds) setThresholdsLate(true)
           })
         }
         const sym = Array.isArray(report?.symptoms)
@@ -6815,7 +6833,7 @@ function DayHeader({
           <div className="flex flex-wrap items-center gap-gap px-1 py-1">
             <p className="flex-1 text-warn">
               <span aria-hidden="true">▲ </span>
-              施設の基準値の読み込みが遅れたため、発熱者の欄（デイの測定）は前の基準で選んでいます。〔選び直す〕を押すと、いまの基準で選び直します。
+              施設の基準値（個人の基準を含む）の読み込みが遅れたため、発熱者の欄（デイの測定）は前の基準で選んでいます。〔選び直す〕を押すと、いまの基準で選び直します。
             </p>
             {/* 文言が案内するボタンをこの一言の横に置く（他の端末の更新の帯が出ていない時でも押せる＝反証レビュー7巡目 中1） */}
             {onReselect !== undefined && (
@@ -7161,6 +7179,8 @@ interface VitalMarks {
   usual: ReadonlyMap<number, number | null>
   /** 利用者ID → 個別の目標（無い方・読めない時は施設の基準） */
   targets: ReadonlyMap<number, ResidentTargets>
+  /** 段階2d-2: その方・その日の基準（個人の閾値。無い方・読めない時は施設の基準＝いまの基準値） */
+  limitsFor?: (residentId: number, day: string) => VitalThresholds
 }
 const NO_VITAL_MARKS: VitalMarks = { usual: new Map(), targets: new Map() }
 const VitalMarksContext = createContext<VitalMarks>(NO_VITAL_MARKS)
@@ -7287,16 +7307,18 @@ function VitalSetCells({
 
   // A1: 平熱との差（今の印はそのまま。印が無くて平熱+1.0℃以上なら「平+1.2↑」、両方なら注記「平+1.6」）。
   // A9: SpO2 は個別の下限がある方はその下限で判定する（無い方は今の 93%・90%）
-  const tj = vital ? judgeTemp(vital.temp, marks.usual.get(vital.resident_id)) : null
+  // 段階2d-2: その方のその日の基準（個人の閾値。無い方は施設の基準そのもの＝今と同じ印）
+  const th = vital ? (marks.limitsFor?.(vital.resident_id, vital.measured_on) ?? vitalThresholds()) : vitalThresholds()
+  const tj = vital ? judgeTemp(vital.temp, marks.usual.get(vital.resident_id), th) : null
   const tempUsual = tj ? (tj.level ? tj.note : tj.overUsual ? tj.mark : null) : null
 
   return (
     <>
       {cell('at', 'var(--w-pulse)', '時刻', null)}
       {cell('temp', 'var(--w-temp)', VITAL_FIELD_LABEL.temp, tj ? tj.level : null, tempUsual)}
-      {cell('spo2', 'var(--w-spo2)', VITAL_FIELD_LABEL.spo2, vital ? spo2LevelFor(vital.spo2, marks.targets.get(vital.resident_id)) : null)}
-      {cell('bp', W_BP, '血圧', vital ? bpLevel(vital.sys_bp, vital.dia_bp) : null)}
-      {cell('pulse', 'var(--w-pulse)', VITAL_FIELD_LABEL.pulse, vital ? pulseLevel(vital.pulse) : null)}
+      {cell('spo2', 'var(--w-spo2)', VITAL_FIELD_LABEL.spo2, vital ? spo2LevelFor(vital.spo2, marks.targets.get(vital.resident_id), th) : null)}
+      {cell('bp', W_BP, '血圧', vital ? bpLevel(vital.sys_bp, vital.dia_bp, th) : null)}
+      {cell('pulse', 'var(--w-pulse)', VITAL_FIELD_LABEL.pulse, vital ? pulseLevelBy(vital.pulse, th) : null)}
     </>
   )
 }

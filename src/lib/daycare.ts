@@ -19,10 +19,6 @@ import {
   BATH_RESULT_LABEL,
   DAYCARE_VITAL_KEY_PREFIX,
   VITAL_RANGE,
-  diaBpLevel,
-  pulseLevel,
-  sysBpLevel,
-  tempLevel,
 } from './types.ts'
 import type {
   BathRecord,
@@ -37,6 +33,8 @@ import type {
 import { DAYCARE_ABSENT_REASONS } from './types.ts'
 import { spo2LevelFor } from './vitalAlerts.ts'
 import type { ResidentTargets } from './vitalAlerts.ts'
+import { diaBpLevelBy, pulseLevelBy, sysBpLevelBy, tempLevelBy, vitalThresholds } from './vitalThresholds.ts'
+import type { VitalThresholds } from './vitalThresholds.ts'
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/
 const HM_RE = /^([01]\d|2[0-3]):([0-5]\d)$/
@@ -458,14 +456,17 @@ export function bpPairError(sys: number | null, dia: number | null): string | nu
   return null
 }
 
-/** 判定（施設の基準。SpO2 は既存の個別の下限＝resident_targets を使う。既存の画面と同じ印） */
-export function vitalLevel(field: DaycareVitalField, v: number | null, target?: ResidentTargets | null): Level {
+/**
+ * 判定（SpO2 は既存の個別の下限＝resident_targets を使う。既存の画面と同じ印）。
+ * t＝その方のその日の基準（段階2d-2: 個人の閾値＝vitalLimits.ts の thresholdsLookup）。省くと施設の基準（いまの基準値）
+ */
+export function vitalLevel(field: DaycareVitalField, v: number | null, target?: ResidentTargets | null, t: VitalThresholds = vitalThresholds()): Level {
   if (v === null) return null
-  if (field === 'temp') return tempLevel(v)
-  if (field === 'sys_bp') return sysBpLevel(v)
-  if (field === 'dia_bp') return diaBpLevel(v)
-  if (field === 'pulse') return pulseLevel(v)
-  return spo2LevelFor(v, target ?? null)
+  if (field === 'temp') return tempLevelBy(v, t)
+  if (field === 'sys_bp') return sysBpLevelBy(v, t)
+  if (field === 'dia_bp') return diaBpLevelBy(v, t)
+  if (field === 'pulse') return pulseLevelBy(v, t)
+  return spo2LevelFor(v, target ?? null, t)
 }
 
 /** 判定の言葉（色だけに頼らない＝記号と並べて出す） */
@@ -476,14 +477,14 @@ export const LEVEL_WORD: Record<Exclude<Level, null>, string> = {
   'danger-low': '危険・低い',
 }
 
-/** 1回の測定に基準を外れた欄があるか（〔＋再測定〕を出す） */
-export function vitalNeedsRecheck(v: Partial<Record<DaycareVitalField, number | null>>, target?: ResidentTargets | null): boolean {
-  return DAYCARE_VITAL_FIELDS.some((f) => vitalLevel(f, v[f] ?? null, target) !== null)
+/** 1回の測定に基準を外れた欄があるか（〔＋再測定〕を出す）。t＝その方のその日の基準（段階2d-2・省くと施設の基準） */
+export function vitalNeedsRecheck(v: Partial<Record<DaycareVitalField, number | null>>, target?: ResidentTargets | null, t: VitalThresholds = vitalThresholds()): boolean {
+  return DAYCARE_VITAL_FIELDS.some((f) => vitalLevel(f, v[f] ?? null, target, t) !== null)
 }
 
-/** 最初に基準を外れた欄（再測定はそこから入れ始める）。無ければ体温 */
-export function firstAbnormalField(v: Partial<Record<DaycareVitalField, number | null>>, target?: ResidentTargets | null): DaycareVitalField {
-  return DAYCARE_VITAL_FIELDS.find((f) => vitalLevel(f, v[f] ?? null, target) !== null) ?? 'temp'
+/** 最初に基準を外れた欄（再測定はそこから入れ始める）。無ければ体温。t＝その方のその日の基準（段階2d-2・省くと施設の基準） */
+export function firstAbnormalField(v: Partial<Record<DaycareVitalField, number | null>>, target?: ResidentTargets | null, t: VitalThresholds = vitalThresholds()): DaycareVitalField {
+  return DAYCARE_VITAL_FIELDS.find((f) => vitalLevel(f, v[f] ?? null, target, t) !== null) ?? 'temp'
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -559,9 +560,12 @@ export function bathNeedsCheck(st: DaycareBathStatus): boolean {
 
 // ── 日報の「発熱者」に載せるデイの測定（代表者の決定 2026-10-22） ──────────
 
-/** 発熱（注意の高値以上＝今の基準 37.5℃以上）か。タイムラインの「▲発熱」（TimelinePage の isFever）と同じ判定 */
-export function isFeverTemp(temp: number | null | undefined): boolean {
-  const lv = tempLevel(typeof temp === 'number' ? temp : null)
+/**
+ * 発熱（注意の高値以上＝今の基準 37.5℃以上）か。タイムラインの「▲発熱」（TimelinePage の isFever）と同じ判定。
+ * t＝その方のその日の基準（段階2d-2: 個人の閾値）。省くと施設の基準
+ */
+export function isFeverTemp(temp: number | null | undefined, t: VitalThresholds = vitalThresholds()): boolean {
+  const lv = tempLevelBy(typeof temp === 'number' ? temp : null, t)
   return lv === 'warn-high' || lv === 'danger-high'
 }
 
@@ -571,16 +575,19 @@ export function isFeverTemp(temp: number | null | undefined): boolean {
  * daycareIds が分からない（undefined）時は今までどおり全部載せる（消すより載せる）。
  * keepIds＝日報で直している最中の行（止まった控え・送信待ち）。その方のデイの測定は発熱が無くても載せ続ける（隠すと「他の端末で
  * 取り消された」と誤って裁かれ、送信待ちの印も見えなくなるため＝反証レビュー4巡目 F1・F9）
+ * tFor＝その方のその日の基準（段階2d-2: 個人の閾値。日報の日の分）。省くと施設の基準
  */
 export function dailyFeverObservations<T extends { id: number; resident_id: number; temp: number | null }>(
   list: readonly T[],
   daycareIds: readonly number[] | undefined,
   keepIds?: ReadonlySet<number>,
+  tFor?: (residentId: number) => VitalThresholds,
 ): T[] {
   if (daycareIds === undefined) return [...list]
   const dc = new Set(daycareIds)
   const shown = new Set<number>()
-  for (const v of list) if (dc.has(v.id) && (isFeverTemp(v.temp) || (keepIds !== undefined && keepIds.has(v.id)))) shown.add(v.resident_id)
+  for (const v of list)
+    if (dc.has(v.id) && (isFeverTemp(v.temp, tFor?.(v.resident_id)) || (keepIds !== undefined && keepIds.has(v.id)))) shown.add(v.resident_id)
   return list.filter((v) => !dc.has(v.id) || shown.has(v.resident_id))
 }
 

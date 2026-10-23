@@ -8,7 +8,7 @@
 //   - 入力封鎖中（native_input_enabled=false）は入力導線を隠さずディセーブル＋理由文
 //   - supabase へは触れず db.ts の関数だけを呼ぶ。個人情報を console・localStorage に出さない
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Chip,
@@ -41,10 +41,20 @@ import {
   fetchAllResidents,
   fetchAllStaff,
   fetchResidents,
+  fetchResidentTargets,
   peekAllResidents,
   peekAllStaff,
   peekResidents,
+  peekResidentTargets,
 } from '../lib/cachedReads'
+// 段階2d-2: 個人のバイタルの閾値（印・発熱の件数・基準外の一覧をその方のその日の基準で）と、SpO2 の個別の下限（A9）
+import { useVitalLimits } from '../hooks/useVitalLimits'
+import { VitalLimitsFailedNote } from '../components/VitalLimitsFailedNote'
+import { INDIVIDUAL_LIMIT_NOTE, isIndividualField } from '../lib/vitalLimits'
+import { spo2LevelFor } from '../lib/vitalAlerts'
+import type { ResidentTargets } from '../lib/vitalAlerts'
+import { diaBpLevelBy, pulseLevelBy, sysBpLevelBy, tempLevelBy, vitalThresholds } from '../lib/vitalThresholds'
+import type { VitalThresholds } from '../lib/vitalThresholds'
 import { NoteConflictResolver } from '../components/ConflictResolver'
 import type { NoteConflictTarget } from '../components/ConflictResolver'
 import { NoteHistoryDialog } from '../components/NoteHistoryDialog'
@@ -59,14 +69,8 @@ import {
   MEAL_STATUS_LABEL,
   OUTING_KIND_LABEL,
   SHIFT_LABEL,
-  diaBpLevel,
   isLowIntake,
   noteDisplayName,
-  pulseLevel,
-  spo2Level,
-  sysBpLevel,
-  tempLevel,
-  vitalHasAlert,
 } from '../lib/types'
 import type {
   DayData,
@@ -214,10 +218,37 @@ function roomText(r: Resident | undefined): string {
   return r?.room ?? '—'
 }
 
-/** 発熱（注意高値以上）の判定。色だけでなく件数の根拠を1か所に集約する */
-function isFever(v: Vital): boolean {
-  const lv = tempLevel(v.temp)
+/**
+ * 段階2d-2: バイタルの判定に使う、その方のその日の基準（個人の閾値）と個別の目標（A9 の SpO2 の下限）。
+ * 個人の値が無い方は施設の基準そのもの（今と同じ印）。TimelinePage が読み、日のカード・バイタルの表が使う
+ */
+interface VitalJudge {
+  tFor: (residentId: number, day: string) => VitalThresholds
+  targetOf: (residentId: number) => ResidentTargets | undefined
+}
+const VitalJudgeContext = createContext<VitalJudge>({ tFor: () => vitalThresholds(), targetOf: () => undefined })
+
+/** 発熱（注意高値以上）の判定。色だけでなく件数の根拠を1か所に集約する。t＝その方のその日の基準（段階2d-2） */
+function isFever(v: Vital, t: VitalThresholds): boolean {
+  const lv = tempLevelBy(v.temp, t)
   return lv === 'warn-high' || lv === 'danger-high'
+}
+
+/** 1件のバイタルに基準外の項目があるか（types.ts の vitalHasAlert と同じ並び。基準はその方のその日・SpO2 は個別の下限） */
+function vitalAlertBy(v: Vital, judge: VitalJudge): boolean {
+  const t = judge.tFor(v.resident_id, v.measured_on)
+  return !!(
+    tempLevelBy(v.temp, t) ||
+    sysBpLevelBy(v.sys_bp, t) ||
+    diaBpLevelBy(v.dia_bp, t) ||
+    pulseLevelBy(v.pulse, t) ||
+    spo2LevelFor(v.spo2, judge.targetOf(v.resident_id), t)
+  )
+}
+
+/** 個人の基準で印が付いた欄の読み上げ（見た目の欄は変えない） */
+function OwnLimit({ on }: { on: boolean }) {
+  return on ? <span className="sr-only">{INDIVIDUAL_LIMIT_NOTE}</span> : null
 }
 
 /** 欠食（喫食以外の状態＝外出・入院・拒食） */
@@ -317,6 +348,24 @@ export function TimelinePage({
   }, [residentsProp, residentsReload])
 
   const residents = residentsProp ?? loadedResidents ?? NO_RESIDENTS
+
+  // 段階2d-2: 個人の閾値と個別の目標（開いた時に1回読む。読めない時は施設の基準で判定する・閾値は読めない旨を出す）
+  const limits = useVitalLimits(residentsReload)
+  const [targets, setTargets] = useState<Map<number, ResidentTargets>>(() => peekResidentTargets() ?? new Map())
+  useEffect(() => {
+    let alive = true
+    fetchResidentTargets()
+      .then((m) => {
+        if (alive) setTargets(m)
+      })
+      .catch(() => {
+        // 読めない時は施設の基準（SpO2 93%・90%）で判定する
+      })
+    return () => {
+      alive = false
+    }
+  }, [residentsReload])
+  const vitalJudge = useMemo<VitalJudge>(() => ({ tFor: limits.lookup, targetOf: (id) => targets.get(id) }), [limits.lookup, targets])
 
   // 名前の引き当てに使う利用者（退居者も含む全員・F48・2026-10-10）。退居された方の過去の申し送り・バイタル等の対象が
   // 「利用者ID n」になっていた。全員表の行（residents）は在籍者のまま。読めなければ在籍者だけで引く（今までどおり）
@@ -634,7 +683,9 @@ export function TimelinePage({
   const showEmpty = !loading && !error && days.length === 0
 
   return (
+    <VitalJudgeContext.Provider value={vitalJudge}>
     <div className="mx-auto w-full max-w-3xl px-3 pb-8">
+      {limits.failed ? <VitalLimitsFailedNote /> : null}
       {/* 入力封鎖中の理由（隠さずに理由を出す。閲覧・検索・カルテは全機能有効） */}
       {!inputEnabled && (
         <p
@@ -775,6 +826,7 @@ export function TimelinePage({
 
       {toast}
     </div>
+    </VitalJudgeContext.Provider>
   )
 }
 
@@ -884,13 +936,15 @@ const DaySection = memo(function DaySection(props: DaySectionProps) {
     [onMarkRead],
   )
 
+  // 段階2d-2: 発熱の件数はその方のその日の基準で数える
+  const judge = useContext(VitalJudgeContext)
   const summary = useMemo(() => {
     const unread = actorId == null ? 0 : day.notes.filter((n) => !(n.my_read === true || readLocal.has(n.id))).length
     const feverIds = new Set<number>()
     const measuredIds = new Set<number>()
     for (const v of day.vitals) {
       measuredIds.add(v.resident_id)
-      if (isFever(v)) feverIds.add(v.resident_id)
+      if (isFever(v, judge.tFor(v.resident_id, v.measured_on))) feverIds.add(v.resident_id)
     }
     const lowIds = new Set<number>()
     for (const m of day.meals) if (isLowIntake(m)) lowIds.add(m.resident_id)
@@ -905,7 +959,7 @@ const DaySection = memo(function DaySection(props: DaySectionProps) {
       outing: outingIds.size,
       unmeasured,
     }
-  }, [actorId, day.notes, day.vitals, day.meals, day.outings, readLocal, residents])
+  }, [actorId, day.notes, day.vitals, day.meals, day.outings, readLocal, residents, judge])
 
   // ピン留め枠に出す行: ①その日に有効な継続（day.pinned）②その日の最重要（‼）
   // ui-design.md §2「重要度=最重要 or 継続フラグ有効中のみ表示」／PLAN.md 設計2「‼最重要・継続」。
@@ -1771,6 +1825,7 @@ interface VitalsBlockProps {
 
 function VitalsBlock({ vitals, residents, residentById, imported, onOpenKarte }: VitalsBlockProps) {
   const [showAll, setShowAll] = useState(false)
+  const judge = useContext(VitalJudgeContext)
 
   const { alerts, normalCount, unmeasured, primaryByResident } = useMemo(() => {
     const order = new Map<number, number>()
@@ -1780,12 +1835,12 @@ function VitalsBlock({ vitals, residents, residentById, imported, onOpenKarte }:
     const primary = new Map<number, Vital>()
     for (const v of vitals) {
       measured.add(v.resident_id)
-      if (vitalHasAlert(v)) alertIds.add(v.resident_id)
+      if (vitalAlertBy(v, judge)) alertIds.add(v.resident_id)
       const cur = primary.get(v.resident_id)
       if (!cur || (cur.kind !== 'routine' && v.kind === 'routine')) primary.set(v.resident_id, v)
     }
     const rows = vitals
-      .filter(vitalHasAlert)
+      .filter((v) => vitalAlertBy(v, judge))
       .slice()
       .sort((a, b) => {
         const oa = order.get(a.resident_id) ?? Number.MAX_SAFE_INTEGER
@@ -1798,7 +1853,7 @@ function VitalsBlock({ vitals, residents, residentById, imported, onOpenKarte }:
       unmeasured: residents.length > 0 ? residents.filter((r) => !measured.has(r.id)).length : null,
       primaryByResident: primary,
     }
-  }, [vitals, residents])
+  }, [vitals, residents, judge])
 
   const title =
     `バイタル ▲異常${new Set(alerts.map((v) => v.resident_id)).size}名` +
@@ -1859,6 +1914,8 @@ interface VitalsTableProps {
 }
 
 function VitalsTable({ rows, residentById, onOpenKarte, showKind }: VitalsTableProps) {
+  const judge = useContext(VitalJudgeContext)
+  const base = vitalThresholds()
   return (
     <table className="w-full border-collapse text-left">
       <thead>
@@ -1888,6 +1945,17 @@ function VitalsTable({ rows, residentById, onOpenKarte, showKind }: VitalsTableP
           const v = typeof row === 'number' ? null : row
           const residentId = typeof row === 'number' ? row : row.resident_id
           const r = residentById.get(residentId)
+          // その方のその日の基準（個人の値が無い方は施設の基準そのもの）。SpO2 は個別の下限（A9）
+          const t = v ? judge.tFor(v.resident_id, v.measured_on) : base
+          const lv = v
+            ? {
+                temp: tempLevelBy(v.temp, t),
+                sys: sysBpLevelBy(v.sys_bp, t),
+                dia: diaBpLevelBy(v.dia_bp, t),
+                pulse: pulseLevelBy(v.pulse, t),
+                spo2: spo2LevelFor(v.spo2, judge.targetOf(v.resident_id), t),
+              }
+            : null
           return (
             <tr key={v ? `v${v.id}` : `r${residentId}`} className="border-b border-border">
               <td className="whitespace-nowrap px-2 py-3 text-sm text-ink2 tabular">{roomText(r)}</td>
@@ -1905,22 +1973,25 @@ function VitalsTable({ rows, residentById, onOpenKarte, showKind }: VitalsTableP
                 )}
               </td>
               <td className="whitespace-nowrap px-2 py-3">
-                <LevelCell value={v ? v.temp : null} level={v ? tempLevel(v.temp) : null} digits={1} />
+                <LevelCell value={v ? v.temp : null} level={lv ? lv.temp : null} digits={1} />
+                <OwnLimit on={!!lv?.temp && isIndividualField('temp', t, base)} />
               </td>
               <td className="whitespace-nowrap px-2 py-3">
                 <span className="inline-flex items-center gap-1">
-                  <LevelCell value={v ? v.sys_bp : null} level={v ? sysBpLevel(v.sys_bp) : null} />
+                  <LevelCell value={v ? v.sys_bp : null} level={lv ? lv.sys : null} />
                   <span aria-hidden="true" className="text-sm text-ink3">
                     /
                   </span>
-                  <LevelCell value={v ? v.dia_bp : null} level={v ? diaBpLevel(v.dia_bp) : null} />
+                  <LevelCell value={v ? v.dia_bp : null} level={lv ? lv.dia : null} />
+                  <OwnLimit on={(!!lv?.sys && isIndividualField('sys_bp', t, base)) || (!!lv?.dia && isIndividualField('dia_bp', t, base))} />
                 </span>
               </td>
               <td className="whitespace-nowrap px-2 py-3">
-                <LevelCell value={v ? v.pulse : null} level={v ? pulseLevel(v.pulse) : null} />
+                <LevelCell value={v ? v.pulse : null} level={lv ? lv.pulse : null} />
+                <OwnLimit on={!!lv?.pulse && isIndividualField('pulse', t, base)} />
               </td>
               <td className="whitespace-nowrap px-2 py-3">
-                <LevelCell value={v ? v.spo2 : null} level={v ? spo2Level(v.spo2) : null} />
+                <LevelCell value={v ? v.spo2 : null} level={lv ? lv.spo2 : null} />
               </td>
             </tr>
           )
