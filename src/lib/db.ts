@@ -3706,13 +3706,15 @@ async function verifyLandedUpdate(sb: SupabaseClient, op: RowQueueOp, cols: stri
 
 /**
  * 退避したデイの到着・帰宅の update を、自動の帰宅で1つ進んだ版に乗せ替えて送る（0047・反証 中2）。
- * いまの行の帰宅が自動の印付きの時だけ（印の列が無い DB・印が無い＝人が変えた時は、従来どおり止める）。送る中身は op のまま
+ * 進んだ1歩が定時の処理の帰宅だった時だけ: いまの行の帰宅が自動の印付きで、最後に書き換えた職員（edited_by）が空
+ * （0049: 定時の処理の帰宅は edited_by を空にする。人の書き換えは端末が必ず添える＝別の端末の人の直しを黙って上書きしない・
+ * 確認の反証 軽1）。印の列が無い DB・0049 の前（edited_by が残る）・人が変えた時は、従来どおり止める。送る中身は op のまま
  */
 async function rebaseOverAutoLeave(sb: SupabaseClient, op: RowQueueOp, cols: string, rev: number): Promise<SendResult> {
-  const cur = await bounded(sb.from('daycare_attendance').select('id,rev,left_auto').eq('id', op.rowId as number).is('deleted_at', null).limit(1).maybeSingle())
+  const cur = await bounded(sb.from('daycare_attendance').select('id,rev,left_auto,edited_by').eq('id', op.rowId as number).is('deleted_at', null).limit(1).maybeSingle())
   if (cur.error !== null) return isTransient(cur) ? 'retry' : 'conflict'
   const c = asRecord(cur.data)
-  if (c === null || num(c.rev) !== rev || c.left_auto !== true) return 'conflict'
+  if (c === null || num(c.rev) !== rev || c.left_auto !== true || c.edited_by !== null) return 'conflict'
   const res = await sendWithEditor(withEditorNull(op.payload), (p) =>
     bounded(
       sb
@@ -4082,8 +4084,18 @@ async function overrideAutoRow(
   // デイの到着・帰宅は印の列まで読む（0047 の無い DB では列が無く読めない＝上書きせず従来どおり止める）
   const found = await findByKey(sb, table, key, table === 'daycare_attendance' ? DAYCARE_ATTENDANCE_AUTO_COLS : 'id,rev,auto')
   if (found === null) return null
-  const isAutoRow = table === 'daycare_attendance' ? isAutoOnlyAttendance(normalizeDaycareAttendance(found.row)) : asRecord(found.row)?.auto === true
+  const autoAtt = table === 'daycare_attendance' ? normalizeDaycareAttendance(found.row) : null
+  const isAutoRow = table === 'daycare_attendance' ? isAutoOnlyAttendance(autoAtt) : asRecord(found.row)?.auto === true
   if (!isAutoRow) return null
+  // 送信待ちの手の〔到着〕（帰宅の時刻を持たない）が、自動の到着と自動の帰宅まで入った行に届いた時は、自動の帰宅を残す
+  // （手の到着と自動の帰宅は普通にある形。帰宅が到着より前になる時だけ帰宅を外す＝確認の反証 軽2）
+  if (autoAtt !== null && payload.absent !== true && (payload.left_at ?? null) === null && autoAtt.left_at !== null) {
+    const arrived = hmOf(payload.arrived_at)
+    if (arrived === null || autoAtt.left_at >= arrived) {
+      delete patch.left_at
+      delete patch.left_auto
+    }
+  }
   const recorder = idNum(payload.recorded_by)
   const sent = {
     ...patch,
@@ -9345,8 +9357,11 @@ async function findBathOf(residentId: number, dayIso: string): Promise<BathRecor
 
 /** 欠席の日の入浴の結果 */
 export type AbsentBathResult =
-  /** 「中止・欠席」にした（追加した・直した） */
-  | { status: 'done'; record: BathRecord }
+  /**
+   * 「中止・欠席」にした（追加した・直した）。inserted＝行を新しく作った／autoResult＝自動の行（区分）を直した。
+   * 休みの直後の〔元に戻す〕は、端末の一覧の値ではなく、これで戻し方を決める（0047・確認の反証 軽3）
+   */
+  | { status: 'done'; record: BathRecord; inserted?: true; autoResult?: BathResult }
   /** 送信待ちに残した（電波が戻れば送る。自動の行があれば再送の時に合流する） */
   | { status: 'queued' }
   /** 入浴の予定も行も無い */
@@ -9403,7 +9418,7 @@ export async function recordAbsentBath(p: {
         const r = await insertAbsent()
         if (r === QUEUED) return { status: 'queued' }
         if (r === CONFLICT) continue
-        return { status: 'done', record: r }
+        return { status: 'done', record: r, inserted: true }
       } catch (e2) {
         return blockedOf(e2) ?? { status: 'blocked', message: e2 instanceof Error ? e2.message : MSG.networkWrite }
       }
@@ -9418,12 +9433,14 @@ export async function recordAbsentBath(p: {
         const r = await updateBath(action.record, { result: 'cancel', cancel_reason: 'absent' }, opts)
         if (r === QUEUED) return { status: 'queued' }
         if (r === CONFLICT) return { status: 'conflict' }
-        return { status: 'done', record: r }
+        return action.record.auto && action.record.result !== 'cancel'
+          ? { status: 'done', record: r, autoResult: action.record.result }
+          : { status: 'done', record: r }
       }
       const r = await insertAbsent()
       if (r === QUEUED) return { status: 'queued' }
       if (r === CONFLICT) continue // 読んだ後に行ができた → 読み直して更新（1回だけ）
-      return { status: 'done', record: r }
+      return { status: 'done', record: r, inserted: true }
     } catch (e) {
       return blockedOf(e) ?? { status: 'blocked', message: e instanceof Error ? e.message : MSG.networkWrite }
     }

@@ -1,5 +1,5 @@
 // 移行 0047（デイ 今日の画面の改善 1回目: 自動の到着・帰宅・休みの理由「後で」）と 0048（その反証1回の直し: 取り戻しは60分まで・
-// 自動にしない方の判定を到着・帰宅で同じに・入院は今の週間計画でも見る）の契約。素の Postgres で tests/daycare-auto-pg.mjs が流す。
+// 自動にしない方の判定を到着・帰宅で同じに・入院は今の週間計画でも見る）・0049（確認の反証 軽1: 自動の帰宅で edited_by を空に）の契約。素の Postgres で tests/daycare-auto-pg.mjs が流す。
 // 決定文書（【AI取締役】の 20261023_今日の画面の改善_決定_v1.md）の 3「1回目」と 4「守ること」を、DB の層で確かめる。
 //
 // ・定時の処理は時刻を引数で受ける本体（private.daycare_auto_attendance_at）を、時刻をずらして呼ぶ（cron は動かさない）。
@@ -397,15 +397,17 @@ export const AUTO_CASES = [
       await tick(h, '09:31')
       const dup = code(await h.as({}, (q) => q(`insert into public.daycare_attendance (resident_id, day, absent, absent_reason, recorded_by, client_key) values (1, $1::date, true, 'later', 1, 'c-au10-1') returning id`, [D])))
       const fix = code(await h.as({}, (q) => q(`update public.daycare_attendance set absent = true, absent_reason = 'later', arrived_at = null, left_at = null, edited_by = 1 where day = $1::date and resident_id = 1 returning id`, [D])))
-      // 3 の方は 10:00 の開始の前に休み
+      // 3 の方は 10:00 の開始の前に休み → 10:05（60分の枠の中）に流しても入れない（確認の反証 軽4: 枠の中の時刻で確かめる）
       const first = code(await h.as({}, (q) => q(`insert into public.daycare_attendance (resident_id, day, absent, absent_reason, recorded_by, client_key) values (3, $1::date, true, 'later', 1, 'c-au10-3') returning id`, [D])))
+      const t3 = await tick(h, '10:05')
       const t = await tick(h, '12:01')
-      return { dup, fix, first, t, rows: (await att(h)).filter((x) => x[0] === 1 || x[0] === 3) }
+      return { dup, fix, first, t3: t3.arrived, t, rows: (await att(h)).filter((x) => x[0] === 1 || x[0] === 3) }
     },
     expect: {
       dup: '23505',
       fix: 'ok',
       first: 'ok',
+      t3: 0,
       t: { day: D, arrived: 0, left: 1, snapshot: false, skipped: null },
       rows: [
         [1, null, null, false, false, true, 'later'],
@@ -464,6 +466,21 @@ export const AUTO_CASES = [
         [3, '10:00', null],
       ],
     },
+  },
+  {
+    id: 'AU15',
+    name: '0049: 自動の帰宅は edited_by（最後に書き換えた職員）を空にする（人の直しの後でも。端末が乗せ替えてよいかを見分ける＝確認の反証 軽1）',
+    async run(h) {
+      await prepare(h)
+      await tick(h, '09:31')
+      // 人が到着の時刻を直した（edited_by あり・帰宅の印は無いまま）
+      await h.as({}, (q) => q(`update public.daycare_attendance set arrived_at = '09:40', edited_by = 2 where day = $1::date and resident_id = 1 returning id`, [D]))
+      const before = (await h.pg(`select edited_by from public.daycare_attendance where day = $1::date and resident_id = 1`, [D]))[0].edited_by
+      await tick(h, '15:31')
+      const after = (await h.pg(`select to_char(left_at, 'HH24:MI') as l, left_auto, edited_by from public.daycare_attendance where day = $1::date and resident_id = 1`, [D]))[0]
+      return { before, after }
+    },
+    expect: { before: '2', after: { l: '15:30', left_auto: true, edited_by: null } },
   },
   {
     id: 'AU12',

@@ -770,7 +770,8 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   const restNow = async (row: DaycareBoardRow) => {
     const id = row.residentId
     const patch = { absent: true, absent_reason: 'later' as const, arrived_at: null, left_at: null }
-    const prevBath = bathOf(id)
+    // 押した時に、この後に 12:30 の自動の入浴が来るはずだったか（休みで作った入浴の行を〔元に戻す〕で自動と同じ区分にしてよいか）
+    const beforeAutoBath = row.autoBath === true && day === todayIso() && nowHm() < DAYCARE_AUTO_BATH_AT
     setRowBusy(id, true)
     let before: DaycareAttendance | null = row.attendance
     let saved: DaycareAttendance | null
@@ -803,7 +804,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     afterAbsentBath(row, bath)
     show(
       `${nameOf(id)}さんを休みにしました（理由は行の〔理由〕から選べます）`,
-      saved === null ? undefined : () => void undoRest(row, saved, before, prevBath, bath),
+      saved === null ? undefined : () => void undoRest(row, saved, before, beforeAutoBath, bath),
     )
     scheduleReload()
   }
@@ -818,7 +819,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
    * tests/med.test.mjs を守る）ので、戻した区分は人の記録と同じ「✓ 全身浴」と出る。
    * 人が入れた入浴の行は休みで直していない（確認を挟む）ので触らない
    */
-  const undoRest = async (row: DaycareBoardRow, saved: DaycareAttendance, before: DaycareAttendance | null, prevBath: BathRecord | null, bath: AbsentBathResult) => {
+  const undoRest = async (row: DaycareBoardRow, saved: DaycareAttendance, before: DaycareAttendance | null, beforeAutoBath: boolean, bath: AbsentBathResult) => {
     const id = row.residentId
     try {
       const r =
@@ -848,14 +849,16 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       setMsg(id, { tone: 'danger', text: errText(e, true) })
       return
     }
-    if (bath.status === 'done' && bath.record.result === 'cancel' && bath.record.cancel_reason === 'absent' && (prevBath === null || (prevBath.auto && prevBath.result !== 'cancel'))) {
-      // 休みで作った行を自動と同じ区分にしてよいか: 12:30 の自動の相手で、今日の 12:30 より前（この後に自動が来るはずだった）
-      const beforeAutoBath = row.autoBath === true && day === todayIso() && nowHm() < DAYCARE_AUTO_BATH_AT
+    // 戻し方は、休みの処理が実際にした事（recordAbsentBath の結果）で決める（端末の一覧の値は古いことがある＝確認の反証 軽3）:
+    // 自動の行を直した → 元の区分に戻す／行を新しく作った → 押した時に 12:30 の自動の相手で 12:30 より前なら自動と同じ区分、
+    // それ以外は行を取り消す（入浴したことにしない）。人の入浴の行は確認を挟んで別に直すので、ここでは触らない
+    const restored = bath.status === 'done' && bath.record.result === 'cancel' && bath.record.cancel_reason === 'absent' && (bath.autoResult !== undefined || bath.inserted === true)
+    if (bath.status === 'done' && restored) {
       const back: 'full' | 'visit' =
-        prevBath !== null && (prevBath.result === 'full' || prevBath.result === 'visit') ? prevBath.result : resultForBathed(day, closedDates) === 'visit' ? 'visit' : 'full'
+        bath.autoResult === 'full' || bath.autoResult === 'visit' ? bath.autoResult : resultForBathed(day, closedDates) === 'visit' ? 'visit' : 'full'
       try {
         const b =
-          prevBath === null && !beforeAutoBath
+          bath.inserted === true && !beforeAutoBath
             ? await softDeleteBath(bath.record.id, bath.record.rev, { editedBy: actorId })
             : await updateBath(bath.record, { result: back, cancel_reason: null }, { editedBy: actorId })
         if (b === 'conflict') setMsg(id, { tone: 'warn', text: '休みは取り消しました。入浴の記録が他の端末で直されていたため、入浴は戻していません。入浴の欄で確かめてください。' })
