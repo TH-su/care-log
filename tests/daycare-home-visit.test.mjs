@@ -81,6 +81,20 @@ if (H === null) {
       })
       assert.equal(H.homeVisitPayload(input({ explained_to: 'user', explained_on: '2026-10-21', explanation: '説明（見本）' })).explained_on, '2026-10-21')
     })
+    it('既存の記録の訪問日・目的の重なり（反証 中1・確認の反証 軽4）: 同じ方の別の記録と同じ鍵なら true。自分・別の方・取り消し待ちは数えない', () => {
+      const visits = [
+        { id: 1, resident_id: 1, visited_on: '2026-10-20', purpose: 'periodic' },
+        { id: 2, resident_id: 1, visited_on: '2026-10-21', purpose: 'initial' },
+        { id: 3, resident_id: 2, visited_on: '2026-10-19', purpose: 'periodic' },
+      ]
+      const me = { id: 1, resident_id: 1 }
+      assert.equal(H.homeVisitKeyTaken(visits, me, '2026-10-21', 'initial'), true, '日付と目的を両方変えて重なる')
+      assert.equal(H.homeVisitKeyTaken(visits, { id: 2, resident_id: 1 }, '2026-10-20', 'periodic'), true, '日付と目的を変えて 1 と重なる')
+      assert.equal(H.homeVisitKeyTaken(visits, me, '2026-10-21', 'periodic'), false, '目的が違えば重ならない')
+      assert.equal(H.homeVisitKeyTaken(visits, me, '2026-10-20', 'periodic'), false, '自分とは重ならない')
+      assert.equal(H.homeVisitKeyTaken(visits, me, '2026-10-19', 'periodic'), false, '別の方とは重ならない')
+      assert.equal(H.homeVisitKeyTaken(visits, me, '2026-10-21', 'initial', new Set([2])), false, '取り消し待ちは数えない')
+    })
     it('初めの値: 訪問日＝今日・訪問者＝記録者・目的＝前の訪問があれば定期／無ければ初回', () => {
       assert.deepEqual(
         [H.freshHomeVisitInput(TODAY, 4, true).visited_on, H.freshHomeVisitInput(TODAY, 4, true).visitor_id, H.freshHomeVisitInput(TODAY, 4, true).purpose],
@@ -141,7 +155,9 @@ describe('静的検査（段階3b の規律）', () => {
   })
   it('反証の直し: 重なる訪問日・目的は送る前に止める・先の記録を読めない時の文・書いた文を残す・古い応答を捨てる・在籍でない訪問者も氏名で出す・送信待ちを行に添える', () => {
     const c = code('../src/components/DaycareHomeVisitSection.tsx')
-    assert.match(c, /visitsOf\(rid\)\.some\(\(v\) => v\.id !== editingRow\.id && v\.visited_on === ed\.input\.visited_on && v\.purpose === ed\.input\.purpose\)/)
+    assert.match(c, /homeVisitKeyTaken\(visitsOf\(rid\), editingRow, ed\.input\.visited_on, ed\.input\.purpose, removedIds\)/)
+    assert.match(c, /p\.kind === 'update' && p\.deleted && !p\.stopped \? \[p\.rowId\]/)
+    assert.match(c, /\{staff !== null && staff !== undefined \? '（在籍でない）' : ''\}/)
     assert.match(c, /else setEditor\(\{ \.\.\.ed, note: keep === '' \? MSG_TAKEN_UNREAD/)
     assert.match(c, /この端末で書いた内容（保存されていません）/)
     assert.match(c, /if \(gen !== genRef\.current\) return\s+setLoaded\(\{ status: 'ready'/)

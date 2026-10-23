@@ -74,6 +74,11 @@ function fakeClient(state) {
             return { data: null, error: { message: 'check', code: '23514' }, status: 400 }
           }
         }
+        if (q.table === 'daycare_home_visits') {
+          if (typeof state.beforeUpdate === 'function') state.beforeUpdate()
+          const clash = rows().some((x) => x !== r && x.deleted_at === null && x.resident_id === next.resident_id && x.visited_on === next.visited_on && x.purpose === next.purpose)
+          if (clash) return { data: null, error: { message: 'duplicate key value violates unique constraint "uq_daycare_home_visit"', code: '23505' }, status: 409 }
+        }
         Object.assign(r, q.payload, { rev: r.rev + 1 })
         return { data: { ...r }, error: null, status: 200 }
       }
@@ -94,6 +99,7 @@ function fakeClient(state) {
         state[q.table] = all
         return { data: { ...row }, error: null, status: 201 }
       }
+      if (state.selectFail && q.table === 'daycare_home_visits') return { data: null, error: { message: 'timeout', code: '' }, status: 0 }
       const hits = rows().filter(hit)
       if (q.single) return { data: hits[0] ? { ...hits[0] } : null, error: null, status: 200 }
       return { data: hits.map((r) => ({ ...r })), error: null, status: 200 }
@@ -483,6 +489,38 @@ if (DB === null) {
       const r = await DB.updateHomeVisit(cur, { ...visitFields({ visitor_id: 2, life_status: '先の記録（見本）' }), visited_on: '2026-10-19' }, { editedBy: 4 })
       assert.notEqual(r, 'conflict')
       assert.equal(st.daycare_home_visits.find((x) => x.id === 70).visited_on, '2026-10-19')
+      await done()
+    })
+    it('updateHomeVisit の重なりの確かめ（確認の反証 軽1・軽5）: 取り消し済みの行とは重ならない・目的だけ変えても重なれば止める', async () => {
+      const gone = visitRow({ id: 72, visited_on: '2026-10-19', client_key: 'gone-72', deleted_at: '2026-10-22T00:00:00Z' })
+      const initial = visitRow({ id: 73, purpose: 'initial', client_key: 'init-73' })
+      const st = await fresh({ daycare_home_visits: [visitRow(), gone, initial] })
+      const base = { ...visitFields({ visitor_id: 2, life_status: '先の記録（見本）' }) }
+      // 取り消し済みの 10/19・定期とは重ならない（送る）
+      await DB.updateHomeVisit({ ...visitRow() }, { ...base, visited_on: '2026-10-19' }, { editedBy: 4 })
+      assert.equal(st.daycare_home_visits.find((x) => x.id === 70).visited_on, '2026-10-19')
+      // 目的だけを初回に変えると、10/21・初回（73）と重なる→ 送らずに止める
+      const cur = { ...st.daycare_home_visits.find((x) => x.id === 73), purpose: 'periodic', id: 74, rev: 1 }
+      st.daycare_home_visits.push({ ...cur, client_key: 'p-74' })
+      const before = st.calls.filter((c) => c.action === 'update').length
+      await assert.rejects(DB.updateHomeVisit(cur, { ...base, purpose: 'initial' }, { editedBy: 4 }), /すでにあります/)
+      assert.equal(st.calls.filter((c) => c.action === 'update').length, before)
+      await done()
+    })
+    it('updateHomeVisit: 確かめを読めない時は止めずに送る。確かめの後に他の端末が同じ鍵で記録した時（23505）は重なりの知らせにする', async () => {
+      const st = await fresh({ daycare_home_visits: [visitRow()] })
+      const base = { ...visitFields({ visitor_id: 2, life_status: '先の記録（見本）' }) }
+      st.selectFail = true
+      const r = await DB.updateHomeVisit({ ...visitRow() }, { ...base, visited_on: '2026-10-18' }, { editedBy: 4 })
+      assert.notEqual(r, 'conflict')
+      assert.equal(st.daycare_home_visits.find((x) => x.id === 70).visited_on, '2026-10-18', '読めなくても送った')
+      st.selectFail = false
+      // 確かめの時は空いていたが、送るまでに他の端末が 10/17・定期を記録した
+      st.beforeUpdate = () => {
+        if (!st.daycare_home_visits.some((x) => x.id === 80)) st.daycare_home_visits.push(visitRow({ id: 80, visited_on: '2026-10-17', client_key: 'race-80' }))
+      }
+      const now = st.daycare_home_visits.find((x) => x.id === 70)
+      await assert.rejects(DB.updateHomeVisit({ ...visitRow(), visited_on: now.visited_on, rev: now.rev }, { ...base, visited_on: '2026-10-17' }, { editedBy: 4 }), /すでにあります/)
       await done()
     })
     it('くらべる画面の日付: いまの記録を並べる時は、その行の訪問日を出す（反証 軽1）', () => {

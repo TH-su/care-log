@@ -136,3 +136,19 @@ export function homeVisitInputOf(row: DaycareHomeVisit): HomeVisitInput {
     plan_revised: row.plan_revised,
   }
 }
+
+/**
+ * 既存の記録（editing）の訪問日・目的を変えた時、同じ方の別の記録と同じ鍵（利用者・訪問日・目的）になるか（段階3b の反証 中1）。
+ * removedIds＝この端末で取り消しを送信待ちにしている記録（届けば消えるので重なりとみなさない＝確認の反証 軽4）
+ */
+export function homeVisitKeyTaken(
+  visits: readonly Pick<DaycareHomeVisit, 'id' | 'resident_id' | 'visited_on' | 'purpose'>[],
+  editing: Pick<DaycareHomeVisit, 'id' | 'resident_id'>,
+  visitedOn: string,
+  purpose: HomeVisitPurpose | null,
+  removedIds: ReadonlySet<number> = new Set(),
+): boolean {
+  return visits.some(
+    (v) => v.id !== editing.id && v.resident_id === editing.resident_id && !removedIds.has(v.id) && v.visited_on === visitedOn && v.purpose === purpose,
+  )
+}

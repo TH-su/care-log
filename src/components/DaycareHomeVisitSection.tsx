@@ -30,6 +30,7 @@ import {
   freshHomeVisitInput,
   homeVisitInputErrors,
   homeVisitInputOf,
+  homeVisitKeyTaken,
   homeVisitPayload,
 } from '../lib/daycareHomeVisit'
 import type { DaycareHomeVisit, HomeVisitInput } from '../lib/daycareHomeVisit'
@@ -54,7 +55,8 @@ const MSG_NOT_PERSISTED =
   '送信できませんでした。この端末にも保存できていません（保存領域の空きが不足している可能性があります）。この画面を閉じずに、電波が戻ってからもう一度押してください。'
 const MSG_TAKEN = '同じ方・同じ日・同じ目的の居宅訪問が、先に別の端末で記録されていました。その記録を開きました。確かめてください。'
 /** 先の記録があったが読めなかった時（何も開いていないので「開きました」と言わない＝反証 軽2） */
-const MSG_TAKEN_UNREAD = '同じ方・同じ日・同じ目的の居宅訪問が、先に別の端末で記録されています。読み込めなかったので、〔最新に更新〕を押してから確かめてください。'
+const MSG_TAKEN_UNREAD =
+  '同じ方・同じ日・同じ目的の居宅訪問が、先に別の端末で記録されています。読み込めなかったので、もう一度〔記録する〕を押すと、その記録を開きます（書いた内容は消えません）。'
 /** 既存の記録の訪問日・目的を、同じ方の別の記録と同じにした時（DB の1人・1日・1目的に1件に当たる前に止める＝反証 中1） */
 const MSG_DUP = '同じ方・同じ日・同じ目的の居宅訪問の記録が、すでにあります。訪問日か目的を確かめてください。'
 const MSG_CONFLICT = '他の端末で先に直されていました。読み直しました。確かめてから、もう一度直してください。'
@@ -230,10 +232,9 @@ export function DaycareHomeVisitSection({ today, residents, targets, staff, acto
     const rid = ed.rid
     // 既存の記録の訪問日・目的を、同じ方の別の記録と同じにした時は送らずに知らせる（反証 中1）
     const editingRow = ed.row
-    if (
-      editingRow !== null &&
-      visitsOf(rid).some((v) => v.id !== editingRow.id && v.visited_on === ed.input.visited_on && v.purpose === ed.input.purpose)
-    ) {
+    // この端末で取り消しを送信待ちにしている記録は、届けば消えるので重なりとみなさない（確認の反証 軽4）
+    const removedIds = new Set(pending.flatMap((p) => (p.kind === 'update' && p.deleted && !p.stopped ? [p.rowId] : [])))
+    if (editingRow !== null && homeVisitKeyTaken(visitsOf(rid), editingRow, ed.input.visited_on, ed.input.purpose, removedIds)) {
       setEditor({ ...ed, note: MSG_DUP })
       return
     }
@@ -504,7 +505,9 @@ export function DaycareHomeVisitSection({ today, residents, targets, staff, acto
                       {/* 在籍でなくなった職員が訪問した記録も、空に見せずに氏名で出す（反証 軽8） */}
                       {ed.input.visitor_id !== null && !staffList.some((s) => s.id === ed.input.visitor_id) ? (
                         <option value={String(ed.input.visitor_id)}>
-                          {staffNameOf(ed.input.visitor_id)}（在籍でない）
+                          {staffNameOf(ed.input.visitor_id)}
+                          {/* 名簿を読めていない時は在籍かどうか分からないので言い切らない（確認の反証 軽3） */}
+                          {staff !== null && staff !== undefined ? '（在籍でない）' : ''}
                         </option>
                       ) : null}
                     </select>

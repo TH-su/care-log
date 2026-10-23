@@ -8947,12 +8947,24 @@ export async function updateHomeVisit(
   if (Object.keys(sent).length === 0) return current
   // 訪問日・目的を変える時は、同じ方の別の記録と同じ鍵にならないかを先に確かめる（DB の 23505 を「サーバーエラー」と
   // 見せない＝段階3b の反証 中1）。読めない時は送って DB に任せる（送信待ちに積む時も止めない）
-  if ('visited_on' in sent || 'purpose' in sent) {
+  const keyChanged = 'visited_on' in sent || 'purpose' in sent
+  const key = { resident_id: current.resident_id, visited_on: next.visited_on, purpose: next.purpose }
+  if (keyChanged) {
     const sb = await getClient()
-    const other = await findByKey(sb, 'daycare_home_visits', { resident_id: current.resident_id, visited_on: next.visited_on, purpose: next.purpose })
+    const other = await findByKey(sb, 'daycare_home_visits', key)
     if (other !== null && other.id !== current.id) throw new DbError('server', HOME_VISIT_MSG.dup)
   }
-  return updateRow('daycare_home_visits', current.id, current.rev, sent, normalizeHomeVisit, opts)
+  try {
+    return await updateRow('daycare_home_visits', current.id, current.rev, sent, normalizeHomeVisit, opts)
+  } catch (e) {
+    // 確かめを読めなかった・確かめの後に他の端末が同じ鍵で記録した時は、DB の 23505 で拒まれる。読み直して同じ鍵の別の
+    // 記録があれば、「サーバーエラー」でなく重なりの知らせにする（確認の反証 軽1）
+    if (keyChanged && e instanceof DbError && e.kind === 'server') {
+      const again = await findByKey(await getClient(), 'daycare_home_visits', key)
+      if (again !== null && again.id !== current.id) throw new DbError('server', HOME_VISIT_MSG.dup)
+    }
+    throw e
+  }
 }
 
 /** 居宅訪問の取り消し（deleted_at を付ける。物理削除はしない） */
