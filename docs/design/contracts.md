@@ -23,15 +23,15 @@ L0承認済み。詳細設計の正本: `docs/PLAN.md`・`docs/design/db-design.
 
 `/`=タイムライン ・ `/record`=記録ハブ ・ `/record/vitals` ・ `/record/meals` ・ `/record/note` ・ `/record/outing` ・ `/karte`=利用者一覧 ・ `/karte/:id` ・ `/search` ・ `/settings` ・ `/login`
 
-追加（2026-09-26・代表承認）: `/record/bath`=入浴（デイ）の記録（記録ハブの5つ目）・`/bath/month`=入浴 月次表（「その他」から。`LS.view` の既知値 `bathMonth`）
+追加（2026-09-26・代表承認）: `/record/bath`=入浴（デイ）の記録（記録ハブの5つ目 → 2026-10-24 に記録ハブから外した。ルート・画面は残す＝ブックマークと「入浴 月次表」の〔入浴の記録を開く〕から開ける）・`/bath/month`=入浴 月次表（「その他」から。`LS.view` の既知値 `bathMonth`）
 
-追加（2026-09-26・代表承認）: `/record/med`=与薬チェック（記録ハブの6つ目）・`/med/slots`=服薬の時間帯・`/med/month`=与薬 月次表
+追加（2026-09-26・代表承認）: `/record/med`=与薬チェック（記録ハブの6つ目 → 2026-10-24 から5つ目）・`/med/slots`=服薬の時間帯・`/med/month`=与薬 月次表
 （後の2つは「その他」から。`LS.view` の既知値 `medSlots` / `medMonth`）
 
-追加（2026-09-26・代表承認）: `/incident`=事故・ヒヤリハット 一覧（「その他」と記録ハブの7つ目）・`/incident/new`・`/incident/:id`=入力・編集（事故報告書の印刷を含む）・
+追加（2026-09-26・代表承認）: `/incident`=事故・ヒヤリハット 一覧（「その他」と記録ハブの7つ目 → 2026-10-24 から6つ目）・`/incident/new`・`/incident/:id`=入力・編集（事故報告書の印刷を含む）・
 `/incident/summary`=委員会用の月次集計（「その他」から）。`LS.view` の既知値 `incident`（入力・編集も一覧の配下）/ `incidentSummary`
 
-追加（2026-10-22・代表承認・デイ段階1）: `/record/daycare`=デイ（せせらぎ）の今日（到着・在席・帰宅・欠席・入浴のボタン。記録ハブの8つ目）・
+追加（2026-10-22・代表承認・デイ段階1）: `/record/daycare`=デイ せせらぎ の今日（到着・在席・帰宅・欠席・入浴のボタン。記録ハブの8つ目 → 2026-10-24 から7つ目。画面名は 2026-10-24 に「デイ（せせらぎ）」から「デイ せせらぎ」へ。入浴の旗 input_enabled_bath もこの画面が開くたびに取り直す＝圏外の入浴の記録を送信待ちに積むため）・
 `/record/daycare/vitals`=デイのバイタル一括（同じ画面の上の切り替え）。`cl_view` は 'record' の配下。`cl_recordTab` の許可リスト（ui-design.md §9）は変えない
 （ベースURLから開いた時は記録ハブへ戻る・再読み込みは URL で戻る）
 
