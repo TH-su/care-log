@@ -625,6 +625,22 @@ if (DB === null) {
       assert.equal(st.calls.some((c) => c.fn === 'daycare_training_due_sync'), false)
       await done()
     })
+    it('写せる行が1つも無い索引は、名簿も読まず写しの関数も呼ばずに止める（確認の反証 軽1）', async () => {
+      const st = await fresh({ role: 'office', residents: [resident(1, 'T001')], syncResult: { ok: true, written: 0, unmatched: 0, cancelled: 0 } })
+      lsStore.set('tp_cfg', JSON.stringify({ url: FAKE_URL, token: 'fake-token' }))
+      const prev = globalThis.fetch
+      globalThis.fetch = async () => new Response(JSON.stringify({ ok: true, rev: 1, data: { v: 1, rows: {}, settings: {} } }), { status: 200 })
+      try {
+        const out = await SYNC.syncTrainingPlanDue(4)
+        assert.equal(out.kind, 'fail')
+        assert.match(out.text, /写せる利用者が1人もいなかったため、写しませんでした。何も書いていません/)
+        assert.equal(st.calls.some((c) => c.fn === 'daycare_training_due_sync'), false)
+        assert.equal(st.calls.some((c) => c.table === 'residents'), false)
+      } finally {
+        globalThis.fetch = prev
+      }
+      await done()
+    })
     it('止めた時（空上書きの保護）は理由をそのまま返す。関数が無い DB は「まだ使えません」・現場の 42501 は権限の文', async () => {
       await fresh({ role: 'office', syncResult: { ok: false, reason: 'nomatch', existing: 8, incoming: 6 } })
       assert.deepEqual(await DB.syncTrainingDue([], { due_rule: 'calendar', warn_days: 28 }, 4), { ok: false, reason: 'nomatch', existing: 8, incoming: 6, cancel: null })

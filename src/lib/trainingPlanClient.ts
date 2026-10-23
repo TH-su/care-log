@@ -216,11 +216,16 @@ export function trainingDueNoMatchText(incoming: number): string {
   return `計画書アプリの利用者番号（${incoming}件）が、care-log の利用者と1人も結べなかったため、写しませんでした（接続先の取り違えか、利用者番号の形の違いの可能性があります）。何も書いていません。管理者に連絡してください。`
 }
 
+/** 索引に写せる行が1つも無かった時の文（写しの関数を呼ばない。写しが空の初回は関数の守りが働かず設定の行だけを書くため＝確認の反証 軽1） */
+export const TRAINING_DUE_EMPTY_INDEX_TEXT =
+  '計画書アプリの一覧に、写せる利用者が1人もいなかったため、写しませんでした。何も書いていません。計画書アプリの一覧を確かめてください。'
+
 /**
  * 写しの結果を、事務所が次に何をすればよいか分かる文にする（計画 4章・止めた理由を平易に）。
  * 止めた時は「今の写しはそのまま」を必ず添える（何も書いていないことを伝える）
  */
 export function trainingDueSyncText(r: TrainingDueSyncResult): { tone: 'info' | 'warn'; text: string } {
+  if (r.ok && r.written === 0 && r.unmatched === 0) return { tone: 'warn', text: TRAINING_DUE_EMPTY_INDEX_TEXT.replace('写しませんでした。何も書いていません。', '写しに1人も載りませんでした。') }
   if (r.ok && r.written === 0) {
     // 送る前に突き合わせるので普通は来ない（名簿が変わった直後などの競り合いだけ）。「写しました（0人）」と言わない
     return {
