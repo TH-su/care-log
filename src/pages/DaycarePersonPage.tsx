@@ -773,7 +773,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   return (
     <div className="mx-auto w-full max-w-3xl space-y-4 p-4">
       {header}
-      {limits.failed ? <VitalLimitsFailedNote className="" /> : null}
+      {limits.failed ? <VitalLimitsFailedNote className="" onRetry={() => void limits.refresh()} /> : null}
 
       <section aria-label="この方" className="rounded-lg border border-border bg-surface p-3">
         <div className="flex flex-wrap items-center justify-between gap-gap">

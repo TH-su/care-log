@@ -145,6 +145,55 @@ if (L === null) {
     })
   })
 
+  describe('反証の直し（グラフごとの注記・「（個人の基準）」の付け方）', () => {
+    it('中2: 組ごと（体温・血圧・脈）に個人の値か・変わった日を見る。体温だけの行は血圧・脈に出ない', () => {
+      const look = L.thresholdsLookup([lim({ valid_from: '2026-10-10', temp_warn_high: 37.2 })], BASE)
+      const days = ['2026-10-09', '2026-10-10', '2026-10-11']
+      const tOn = (d) => look(7, d)
+      assert.equal(days.some((d) => L.groupIsIndividual('temp', tOn(d), BASE)), true)
+      assert.equal(days.some((d) => L.groupIsIndividual('bp', tOn(d), BASE)), false)
+      assert.equal(days.some((d) => L.groupIsIndividual('pulse', tOn(d), BASE)), false)
+      assert.equal(L.lastChangeDay(days, tOn, (a, b) => L.sameGroupLimits('temp', a, b)), '2026-10-10')
+      assert.equal(L.lastChangeDay(days, tOn, (a, b) => L.sameGroupLimits('bp', a, b)), null)
+      assert.equal(L.lastChangeDay(days, tOn, (a, b) => L.sameGroupLimits('pulse', a, b)), null)
+      // 血圧は上・下のどちらかが個人の値なら個人
+      const t = L.thresholdsFor(lim({ dia_bp_warn_low: 55 }), BASE).t
+      assert.equal(L.groupIsIndividual('bp', t, BASE), true)
+      assert.equal(L.sameGroupLimits('bp', t, BASE), false)
+      assert.equal(L.sameGroupLimits('temp', t, BASE), true)
+    })
+    it('軽3: ownLevel は個人の基準で印が決まった時だけ true（施設の基準でも同じ印・印なし・SpO2 は false）', () => {
+      const t = L.thresholdsFor(lim({ temp_warn_high: 37.2, sys_bp_danger_high: 160 }), BASE).t
+      assert.equal(L.ownLevel('temp', 37.3, t, BASE), true)
+      assert.equal(L.ownLevel('temp', 35.0, t, BASE), false, '↓↓ は施設の基準でも同じ')
+      assert.equal(L.ownLevel('temp', 38.5, t, BASE), false, '↑↑ は施設の基準でも同じ')
+      assert.equal(L.ownLevel('temp', 36.5, t, BASE), false, '印なし')
+      assert.equal(L.ownLevel('sys_bp', 85, t, BASE), false, '↓ は施設の 90 で付いた印')
+      assert.equal(L.ownLevel('sys_bp', 155, t, BASE), false, '個人の 160 で印が消えた値には付けない（印が無い）')
+      assert.equal(L.ownLevel('spo2', 80, t, BASE), false)
+      assert.equal(L.ownLevel('temp', 37.3, BASE, BASE), false, '個人の値が無い方')
+      assert.equal(L.ownLevel('temp', null, t, BASE), false)
+    })
+    it('軽3: 要注意の理由は、施設の基準でも同じ印の項目に「（個人の基準）」を付けない', () => {
+      const day = '2026-10-16'
+      const look = L.thresholdsLookup([lim({ temp_warn_high: 37.2, sys_bp_danger_high: 160 })], T.vitalThresholds())
+      const out = VA.buildDayAlerts({
+        day,
+        today: day,
+        nowMin: 600,
+        residentIds: [7],
+        vitals: [vital(7, day, { temp: 35.0 }), vital(7, day, { sys_bp: 85, dia_bp: 60, measured_at: '10:00:00' }), vital(7, day, { temp: 37.3, measured_at: '11:00:00' })],
+        meals: [],
+        fluidTotals: new Map(),
+        notes: [],
+        usualTemps: new Map(),
+        targets: new Map(),
+        thresholdsFor: (rid) => look(rid, day),
+      })
+      assert.deepEqual(out[0].reasons.map((r) => r.label), ['体温 35.0↓↓', '血圧 85↓/60', '体温 37.3↑（個人の基準）'])
+    })
+  })
+
   describe('温度板（tempSheetModel.ts）', () => {
     const today = '2026-10-16'
     const days = TS.sheetDays(today)

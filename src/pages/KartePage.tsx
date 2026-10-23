@@ -49,7 +49,8 @@ import type { MyRole, RecordHistoryEntry } from '../lib/db'
 // 名簿とカルテ本体は読み込みの控え（裏での先読み・2026-10-17）を通す。一覧で方の行に指が触れた時にその方のカルテを
 // 先読みし、開いた方のカルテは控えに残す（次に開いた時は控えを先に出し、裏で取り直す）
 import { fetchKarte, fetchResidents, peekKarte, peekResidents, prefetchKarte } from '../lib/cachedReads'
-import { useVitalLimits, VITAL_LIMITS_FAILED_TEXT } from '../hooks/useVitalLimits'
+import { useVitalLimits } from '../hooks/useVitalLimits'
+import { VitalLimitsFailedNote } from '../components/VitalLimitsFailedNote'
 import {
   clampLines,
   fmtChangedAt,
@@ -80,8 +81,8 @@ import {
 import type { AxisSpec } from '../lib/chart'
 import { diaBpLevelBy, pulseLevelBy, sysBpLevelBy, vitalThresholds } from '../lib/vitalThresholds'
 import type { VitalThresholds } from '../lib/vitalThresholds'
-import { changedFromText, lastChangeDay, thresholdsLookup } from '../lib/vitalLimits'
-import type { ResidentVitalLimit } from '../lib/vitalLimits'
+import { changedFromText, groupIsIndividual, lastChangeDay, sameGroupLimits, thresholdsLookup } from '../lib/vitalLimits'
+import type { LimitChartGroup, ResidentVitalLimit } from '../lib/vitalLimits'
 // バイタル・食事・水分の見やすさ（A1・A2・A3・A6・A9・2026-10-16）の判定。数の決め方は vitalAlerts.ts（純関数・試験あり）
 import {
   fluidProgress,
@@ -1184,7 +1185,8 @@ function VitalPanel({ panel, days, box, height }: VitalPanelProps) {
         <h3 className="text-lg font-bold text-ink">{panel.title}</h3>
         {panel.unit ? <span className="text-sm text-ink2">単位 {panel.unit}</span> : null}
         {panel.legend ? <span className="text-sm text-ink2">{panel.legend}</span> : null}
-        {panel.note ? <span className="text-sm font-bold text-ink">{panel.note}</span> : null}
+        {/* 画面だけ（カルテの印刷の版面は変えない＝原則2・反証 中2） */}
+        {panel.note ? <span className="text-sm font-bold text-ink print:hidden">{panel.note}</span> : null}
       </div>
       {rows.length === 0 ? (
         <p className="mt-2 text-base text-ink2">
@@ -1289,11 +1291,12 @@ function VitalsSection({ vitals, days, weightPanel, printing, usual, usualAbsent
     const tOn = (d: string): VitalThresholds => (limits === undefined ? base : lookup(limits.residentId, d))
     const lastDay = days[days.length - 1]
     const th = lastDay === undefined ? base : tOn(lastDay)
-    const individual = days.some((d) => tOn(d) !== base)
-    const changed = lastChangeDay(days, tOn)
-    const limitNote = individual
-      ? `個人の基準で判定（カルテの「個人の閾値」）${changed !== null ? `・${changedFromText(changed)}（帯は最後の日の基準）` : ''}`
-      : undefined
+    // 注記はグラフごと（体温・血圧・脈）に、その組の基準だけで見る（反証 中2: 体温だけの個人の値で血圧・脈に出さない）
+    const limitNote = (g: LimitChartGroup): string | undefined => {
+      if (!days.some((d) => groupIsIndividual(g, tOn(d), base))) return undefined
+      const changed = lastChangeDay(days, tOn, (a, b) => sameGroupLimits(g, a, b))
+      return `個人の基準で判定（カルテの「個人の閾値」）${changed !== null ? `・${changedFromText(changed)}（帯は最後の日の基準）` : ''}`
+    }
     // A1: 平熱（直近30日の定時の中央値）の点線と、平熱+1.0℃以上の印。今の 37.5↑・38.1↑↑・35.5↓↓ の印はそのまま（重い方を出す）
     const usualText = fmtUsualTemp(usual)
     const rise = th.usualTempRise.toFixed(1)
@@ -1343,7 +1346,7 @@ function VitalsSection({ vitals, days, weightPanel, printing, usual, usualAbsent
                 : '平熱はまだ出していません（直近30日の定時の測定が5回未満）'
               : undefined,
         speech: usualText !== null ? `平熱は${usualText}℃（直近30日の定時の中央値）で、点線で示しています。` : undefined,
-        note: limitNote,
+        note: limitNote('temp'),
       },
       {
         key: 'bp',
@@ -1377,7 +1380,7 @@ function VitalsSection({ vitals, days, weightPanel, printing, usual, usualAbsent
           { y: th.diaBp.warnLow, label: `下${th.diaBp.warnLow}`, className: 'stroke-warn' },
         ],
         legend: '実線=上（収縮期）／破線=下（拡張期）',
-        note: limitNote,
+        note: limitNote('bp'),
       },
       {
         key: 'pulse',
@@ -1394,7 +1397,7 @@ function VitalsSection({ vitals, days, weightPanel, printing, usual, usualAbsent
             level: (v, day) => pulseLevelBy(v, tDay(day)),
           },
         ],
-        note: limitNote,
+        note: limitNote('pulse'),
         bands: [
           { lo: th.pulse.dangerHigh, hi: 250, className: 'fill-danger-bg', label: String(th.pulse.dangerHigh), labelAt: th.pulse.dangerHigh },
           { lo: 20, hi: th.pulse.warnLow, className: 'fill-warn-bg', label: String(th.pulse.warnLow), labelAt: th.pulse.warnLow },
@@ -3476,12 +3479,7 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
               target={target}
               limits={vitalLimits}
             />
-            {limits.failed ? (
-              <p role="status" className="mt-2 rounded border border-warn bg-warn-bg p-2 text-sm text-ink">
-                <span aria-hidden="true">▲ </span>
-                {VITAL_LIMITS_FAILED_TEXT}
-              </p>
-            ) : null}
+            {limits.failed ? <VitalLimitsFailedNote className="mt-2" onRetry={() => void limits.refresh()} /> : null}
           </div>
           <div className={LANE}>
             <WeightSection

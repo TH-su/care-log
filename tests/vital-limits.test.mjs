@@ -298,9 +298,18 @@ if (L === null) {
       // 判定の部品は基準を引数で受ける（daycare.ts・chart.ts は個人の閾値の表を知らない。vitalAlerts.ts は注記の文だけ借りる）
       assert.doesNotMatch(code('../src/lib/daycare.ts'), /vitalLimits|fetchResidentVitalLimits/)
       assert.doesNotMatch(code('../src/lib/chart.ts'), /vitalLimits|thresholdsFor/)
-      assert.match(code('../src/lib/vitalAlerts.ts'), /import \{ INDIVIDUAL_LIMIT_NOTE \} from '\.\/vitalLimits\.ts'/)
+      assert.match(code('../src/lib/vitalAlerts.ts'), /import \{ INDIVIDUAL_LIMIT_NOTE, ownLevel \} from '\.\/vitalLimits\.ts'/)
       const hook = code('../src/hooks/useVitalLimits.ts')
-      assert.match(hook, /const lookup = useMemo\(\(\) => thresholdsLookup\(rows, base\), \[rows, base\]\)/)
+      // 引くたびにいまの施設の基準を見て、変わっていれば組み直す（反証 軽8）
+      assert.match(hook, /const base = vitalThresholds\(\)\s*if \(base !== builtFor\) \{\s*inner = thresholdsLookup\(rows, base\)/)
+      // 画面は行を直接読まない（読むのは部品だけ。日報の選び方も部品の refresh＝欄の印と同じ行・反証 軽10・中1）
+      for (const f of pages) assert.doesNotMatch(code(`../src/pages/${f}`), /fetchResidentVitalLimits\(/, f)
+      assert.match(code('../src/pages/DailySheetPage.tsx'), /const limitsP = refreshLimits\(\)\.then\(/)
+      // 読めない時の知らせは〔個人の基準を読み直す〕つき（反証 軽5）・紙に出さない
+      const note = code('../src/components/VitalLimitsFailedNote.tsx')
+      assert.match(note, /print:hidden/)
+      assert.match(note, /onClick=\{onRetry\}/)
+      for (const f of SCREENS) assert.match(code(`../src/pages/${f}.tsx`), /<VitalLimitsFailedNote[^>]*onRetry=\{\(\) => void limits\.refresh\(\)\}/, f)
       // カードで足した・取り消した後は、カルテの印を取り直す
       const karte = code('../src/pages/KartePage.tsx')
       assert.match(karte, /<VitalLimitsCard residentId=\{residentId\} role=\{role\} onChanged=\{\(\) => setLimitsTick\(\(n\) => n \+ 1\)\} \/>/)

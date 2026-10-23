@@ -16,6 +16,7 @@
 // 個人情報は扱わない（数値と日付だけ）。
 
 import type { VitalThresholds } from './vitalThresholds.ts'
+import { diaBpLevelBy, pulseLevelBy, sysBpLevelBy, tempLevelBy } from './vitalThresholds.ts'
 
 /** 個人の閾値の項目（施設の基準の一式と1対1の9項目） */
 export const VITAL_LIMIT_FIELDS = [
@@ -229,11 +230,33 @@ export function sameVitalLimits(a: VitalThresholds, b: VitalThresholds): boolean
  * 期間（古い順の日）の中で、基準が前の日と変わった一番新しい日（線・凡例は期間の最後の日の基準で描くので、その基準がいつから
  * かを知らせる＝計画の質問11）。変わっていなければ null
  */
-export function lastChangeDay(days: readonly string[], tFor: (day: string) => VitalThresholds): string | null {
+export function lastChangeDay(
+  days: readonly string[],
+  tFor: (day: string) => VitalThresholds,
+  same: (a: VitalThresholds, b: VitalThresholds) => boolean = sameVitalLimits,
+): string | null {
   for (let i = days.length - 1; i > 0; i -= 1) {
-    if (!sameVitalLimits(tFor(days[i]), tFor(days[i - 1]))) return days[i]
+    if (!same(tFor(days[i]), tFor(days[i - 1]))) return days[i]
   }
   return null
+}
+
+/** カルテのグラフの組（体温・血圧・脈）。段階2d-2 の反証 中2: 注記と「変わった日」はグラフごとに、その組の基準だけで見る */
+export type LimitChartGroup = 'temp' | 'bp' | 'pulse'
+
+/** その組の基準が個人の値か（thresholdsFor は個人の値で作った組だけを新しい物にする） */
+export function groupIsIndividual(g: LimitChartGroup, t: VitalThresholds, base: VitalThresholds): boolean {
+  if (g === 'temp') return t.temp !== base.temp
+  if (g === 'bp') return t.sysBp !== base.sysBp || t.diaBp !== base.diaBp
+  return t.pulse !== base.pulse
+}
+
+/** その組の基準の数が同じか（lastChangeDay の same に渡す） */
+export function sameGroupLimits(g: LimitChartGroup, a: VitalThresholds, b: VitalThresholds): boolean {
+  if (g === 'temp') return a.temp.warnHigh === b.temp.warnHigh && a.temp.dangerHigh === b.temp.dangerHigh && a.temp.dangerLow === b.temp.dangerLow
+  if (g === 'bp')
+    return a.sysBp.dangerHigh === b.sysBp.dangerHigh && a.sysBp.warnLow === b.sysBp.warnLow && a.diaBp.dangerHigh === b.diaBp.dangerHigh && a.diaBp.warnLow === b.diaBp.warnLow
+  return a.pulse.dangerHigh === b.pulse.dangerHigh && a.pulse.warnLow === b.pulse.warnLow
 }
 
 /** 「〇/〇から基準が変わりました」（温度板の凡例の下・カルテのグラフの下に1行） */
@@ -248,6 +271,17 @@ export const INDIVIDUAL_LIMIT_NOTE = '（個人の基準）'
  * その項目（バイタルの列の名前）の基準が個人の値か。thresholdsFor は個人の値で作った組だけを新しい物にし、
  * 施設の基準のままの組は base の物をそのまま使うので、組が base と別の物なら個人の値（SpO2 は個別の目標＝A9 の側なので常に false）
  */
+/**
+ * その値の印が個人の基準で決まったか（段階2d-2 の反証 軽3）。t で判定した印があり、施設の基準 base で判定した印と違う時だけ true
+ * （施設の基準でも同じ印になる値＝35.0↓↓ など・印が付かない値には「（個人の基準）」を付けない）。SpO2 は個別の目標の側なので常に false
+ */
+export function ownLevel(field: 'temp' | 'sys_bp' | 'dia_bp' | 'pulse' | 'spo2', v: number | null | undefined, t: VitalThresholds, base: VitalThresholds): boolean {
+  if (typeof v !== 'number' || t === base || field === 'spo2') return false
+  const by = field === 'temp' ? tempLevelBy : field === 'sys_bp' ? sysBpLevelBy : field === 'dia_bp' ? diaBpLevelBy : pulseLevelBy
+  const lv = by(v, t)
+  return lv !== null && lv !== by(v, base)
+}
+
 export function isIndividualField(field: 'temp' | 'sys_bp' | 'dia_bp' | 'pulse' | 'spo2', t: VitalThresholds, base: VitalThresholds): boolean {
   if (field === 'temp') return t.temp !== base.temp
   if (field === 'sys_bp') return t.sysBp !== base.sysBp

@@ -50,7 +50,7 @@ import {
 // 段階2d-2: 個人のバイタルの閾値（印・発熱の件数・基準外の一覧をその方のその日の基準で）と、SpO2 の個別の下限（A9）
 import { useVitalLimits } from '../hooks/useVitalLimits'
 import { VitalLimitsFailedNote } from '../components/VitalLimitsFailedNote'
-import { INDIVIDUAL_LIMIT_NOTE, isIndividualField } from '../lib/vitalLimits'
+import { INDIVIDUAL_LIMIT_NOTE, ownLevel } from '../lib/vitalLimits'
 import { spo2LevelFor } from '../lib/vitalAlerts'
 import type { ResidentTargets } from '../lib/vitalAlerts'
 import { diaBpLevelBy, pulseLevelBy, sysBpLevelBy, tempLevelBy, vitalThresholds } from '../lib/vitalThresholds'
@@ -685,7 +685,7 @@ export function TimelinePage({
   return (
     <VitalJudgeContext.Provider value={vitalJudge}>
     <div className="mx-auto w-full max-w-3xl px-3 pb-8">
-      {limits.failed ? <VitalLimitsFailedNote /> : null}
+      {limits.failed ? <VitalLimitsFailedNote onRetry={() => void limits.refresh()} /> : null}
       {/* 入力封鎖中の理由（隠さずに理由を出す。閲覧・検索・カルテは全機能有効） */}
       {!inputEnabled && (
         <p
@@ -1974,7 +1974,7 @@ function VitalsTable({ rows, residentById, onOpenKarte, showKind }: VitalsTableP
               </td>
               <td className="whitespace-nowrap px-2 py-3">
                 <LevelCell value={v ? v.temp : null} level={lv ? lv.temp : null} digits={1} />
-                <OwnLimit on={!!lv?.temp && isIndividualField('temp', t, base)} />
+                <OwnLimit on={!!v && ownLevel('temp', v.temp, t, base)} />
               </td>
               <td className="whitespace-nowrap px-2 py-3">
                 <span className="inline-flex items-center gap-1">
@@ -1983,12 +1983,12 @@ function VitalsTable({ rows, residentById, onOpenKarte, showKind }: VitalsTableP
                     /
                   </span>
                   <LevelCell value={v ? v.dia_bp : null} level={lv ? lv.dia : null} />
-                  <OwnLimit on={(!!lv?.sys && isIndividualField('sys_bp', t, base)) || (!!lv?.dia && isIndividualField('dia_bp', t, base))} />
+                  <OwnLimit on={!!v && (ownLevel('sys_bp', v.sys_bp, t, base) || ownLevel('dia_bp', v.dia_bp, t, base))} />
                 </span>
               </td>
               <td className="whitespace-nowrap px-2 py-3">
                 <LevelCell value={v ? v.pulse : null} level={lv ? lv.pulse : null} />
-                <OwnLimit on={!!lv?.pulse && isIndividualField('pulse', t, base)} />
+                <OwnLimit on={!!v && ownLevel('pulse', v.pulse, t, base)} />
               </td>
               <td className="whitespace-nowrap px-2 py-3">
                 <LevelCell value={v ? v.spo2 : null} level={lv ? lv.spo2 : null} />

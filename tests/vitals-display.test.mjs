@@ -338,6 +338,9 @@ describe('5. バイタル一括（VitalsGridPage）', () => {
     assert.equal(newMarkWord('temp', 37.3, null, undefined, own), '（個人の基準）')
     assert.equal(newMarkWord('temp', 37.3, 36.2, undefined, own), '（平熱+1.1・平熱より高い）（個人の基準）')
     assert.equal(newMarkWord('sys_bp', 80, null, undefined, own), '') // 血圧は施設の基準のまま（89↓ でも注記なし）
+    // 反証 軽3: 施設の基準でも同じ印になる値（38.5↑↑・35.0↓↓）には付けない
+    assert.equal(newMarkWord('temp', 38.5, null, undefined, own), '')
+    assert.equal(newMarkWord('temp', 35.0, null, undefined, own), '')
   })
 })
 
@@ -394,7 +397,9 @@ describe('7. 日報（DailySheetPage）の発熱者・他症状者の欄', () =>
     assert.match(daily, /const vitalMarks = useMemo<VitalMarks>\(\(\) => \(\{ \.\.\.vitalMarks0, limitsFor: limits\.lookup \}\), \[vitalMarks0, limits\.lookup\]\)/)
     assert.match(daily, /<span className="vmark-usual px-1 text-right" aria-hidden="true">/)
     assert.doesNotMatch(daily, /<DaySheetMemo[^>]*vitalMarks/)
-    assert.doesNotMatch(daily, /<DaySheetMemo[^>]*limits/)
+    // 枠には変わらない取り直しの口（limits.refresh）だけを渡し、行・lookup は渡さない（描き直さない）
+    assert.doesNotMatch(daily, /<DaySheetMemo[^>]*limits\.(rows|lookup)/)
+    assert.match(daily, /refreshLimits=\{limits\.refresh\}/)
     assert.match(daily, /void fetchUsualTemps\(day\)\.then/)
   })
 })

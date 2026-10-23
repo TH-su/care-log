@@ -1018,7 +1018,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   return (
     <div className="mx-auto w-full max-w-6xl space-y-4 p-4">
       {header}
-      {limits.failed ? <VitalLimitsFailedNote className="" /> : null}
+      {limits.failed ? <VitalLimitsFailedNote className="" onRetry={() => void limits.refresh()} /> : null}
       <div className="lg:flex lg:items-start lg:gap-4">
         <div className={`min-w-0 flex-1 space-y-3 ${active !== null ? 'pb-96 lg:pb-0' : ''}`}>
           {shownRows.length === 0 ? (

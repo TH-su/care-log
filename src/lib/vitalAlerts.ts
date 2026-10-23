@@ -18,7 +18,7 @@ import type { MedDayRow } from './med.ts'
 import { MEAL_CHART_SLOTS, mealIntake } from './chart.ts'
 import { FLUID_TARGET_RANGE, MEAL_FULL, SPO2_LIMIT_RANGE, diaBpLevelBy, pulseLevelBy, spo2LevelBy, sysBpLevelBy, tempLevelBy, vitalThresholds } from './vitalThresholds.ts'
 import type { VitalThresholds } from './vitalThresholds.ts'
-import { INDIVIDUAL_LIMIT_NOTE } from './vitalLimits.ts'
+import { INDIVIDUAL_LIMIT_NOTE, ownLevel } from './vitalLimits.ts'
 
 // ══════════════════════════════════════════════════════════════
 // 個別の目標（resident_targets・0034）と平熱（vital_usual_temps・0034）の形
@@ -421,7 +421,8 @@ function vitalReasons(v: Vital, usual: number | null | undefined, target: Reside
     const j = judgeTemp(v.temp, usual, t)
     if (j.level) {
       // 今の印（重い方）＋両方当たる時は平熱差の注記: 「体温 37.8↑（平熱+1.3）」
-      const own = t.temp !== facility.temp ? INDIVIDUAL_LIMIT_NOTE : ''
+      // 個人の基準で印が決まった時だけ（施設の基準でも同じ印には付けない＝反証 軽3）
+      const own = ownLevel('temp', v.temp, t, facility) ? INDIVIDUAL_LIMIT_NOTE : ''
       out.push({ ...base, severity: sevOf(j.level), label: `体温 ${v.temp.toFixed(1)}${j.mark}${j.note ? `（${j.note}）` : ''}${own}` })
     } else if (j.overUsual) {
       // 平熱との差だけ: 「体温 37.3（平熱+1.0↑）」
@@ -433,11 +434,11 @@ function vitalReasons(v: Vital, usual: number | null | undefined, target: Reside
   if (sl || dl) {
     const part = (x: number | null, lv: Level) => `${x ?? '—'}${lv ? LEVEL_MARK[lv] : ''}`
     const severity = sl === 'danger-high' || dl === 'danger-high' ? 'danger' : 'warn'
-    const own = (sl && t.sysBp !== facility.sysBp) || (dl && t.diaBp !== facility.diaBp) ? INDIVIDUAL_LIMIT_NOTE : ''
+    const own = ownLevel('sys_bp', v.sys_bp, t, facility) || ownLevel('dia_bp', v.dia_bp, t, facility) ? INDIVIDUAL_LIMIT_NOTE : ''
     out.push({ ...base, severity, label: `血圧 ${part(v.sys_bp, sl)}/${part(v.dia_bp, dl)}${own}` })
   }
   const pl = pulseLevelBy(v.pulse, t)
-  if (pl) out.push({ ...base, severity: sevOf(pl), label: `脈拍 ${v.pulse}${LEVEL_MARK[pl]}${t.pulse !== facility.pulse ? INDIVIDUAL_LIMIT_NOTE : ''}` })
+  if (pl) out.push({ ...base, severity: sevOf(pl), label: `脈拍 ${v.pulse}${LEVEL_MARK[pl]}${ownLevel('pulse', v.pulse, t, facility) ? INDIVIDUAL_LIMIT_NOTE : ''}` })
   const ol = spo2LevelFor(v.spo2, target, t)
   if (ol) {
     const lim = spo2Limits(target, t)
