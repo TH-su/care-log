@@ -123,11 +123,27 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
   const [residents, setResidents] = useState<Resident[]>([])
   const [gate, setGate] = useState<{ value: boolean; observed: boolean; forbidden?: true; outdated?: true } | null>(null)
   const [mealState, setMealState] = useState<Record<string, SaveState>>({})
+  /** 順番待ちの保存（人・日・枠ごと・押した順）。送り終わるまで画面に重ねて出す */
+  const [waiting, setWaiting] = useState<Record<string, { id: number; values: Partial<Record<MealField, number | string | null>> }[]>>({})
+  const waitSeqRef = useRef(0)
+  /** 人・日・枠ごとの順番待ちの末尾 */
+  const chainRef = useRef(new Map<string, Promise<void>>())
   const [queueTick, setQueueTick] = useState(0)
   const { toast, show } = useToast()
   const genRef = useRef(0)
   const dayRef = useRef(day)
   dayRef.current = day
+  /**
+   * いちばん新しいデータの控え（読み込みと自分の保存の応答で、描画を待たずにすぐ入れ替える）。
+   * 順番待ちの保存は、送る時にここから基準を取る（前の保存の応答が描画に出る前でも、最新の値を基準にする＝#45 の確認の反証 中）
+   */
+  const dataRef = useRef<MealsData | null>(null)
+  /** 自分の保存の応答の時刻（行の id ごと）。その後に始まった読み込みには載っている */
+  const savedAtRef = useRef(new Map<number, number>())
+  const commitData = useCallback((next: MealsData) => {
+    dataRef.current = next
+    setData(next)
+  }, [])
 
   useEffect(() => {
     const t = window.setInterval(() => setToday(todayIso()), 60_000)
@@ -150,6 +166,7 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
 
   const load = useCallback(async (target: string, quiet: boolean) => {
     const gen = ++genRef.current
+    const startedAt = Date.now()
     if (!quiet) {
       setLoading(true)
       setError(null)
@@ -170,13 +187,22 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
         fetchDaycareIntake(target),
       ])
       if (gen !== genRef.current || target !== dayRef.current) return
-      setData({
+      // 読み込みを始めた後に自分の保存の応答で受け取った行は、読んだ行より新しいことがある（版 rev の大きい方を残す）
+      const prev = dataRef.current
+      const meals = intake.meals.map((m) => {
+        const mine = prev !== null && prev.day === target ? prev.meals.find((x) => x.meal.id === m.meal.id) : undefined
+        return mine !== undefined && (savedAtRef.current.get(m.meal.id) ?? 0) > startedAt && mine.meal.rev > m.meal.rev ? mine : m
+      })
+      if (prev !== null && prev.day === target)
+        for (const mine of prev.meals)
+          if ((savedAtRef.current.get(mine.meal.id) ?? 0) > startedAt && !meals.some((m) => m.meal.id === mine.meal.id)) meals.push(mine)
+      commitData({
         day: target,
         planRows: usable && snapshot !== null ? snapshot.plan_rows : (plan?.rows ?? []),
         planSource: usable && snapshot !== null ? snapshot.plan_source : (plan?.source ?? 'unknown'),
         missing: missing || plan?.missing === true,
         attendance,
-        meals: intake.meals,
+        meals,
       })
       setError(null)
     } catch {
@@ -185,7 +211,7 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
     } finally {
       if (gen === genRef.current) setLoading(false)
     }
-  }, [])
+  }, [commitData])
 
   useEffect(() => {
     // 日の切り替えと〔最新に更新〕では、その場限りの知らせ（保存しました・保存できませんでした）を外す。
@@ -242,10 +268,10 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
 
   // ── 昼食・おやつ（1人の画面と同じ決まり） ──
   const targetOf = (residentId: number, slot: MealSlot2): MealTarget => ({ residentId, day, slot })
-  const mealRowFor = (t: MealTarget): DaycareMealRow | null =>
-    data === null || data.day !== t.day
-      ? null
-      : (data.meals.find((m) => m.meal.resident_id === t.residentId && m.meal.meal_slot === t.slot) ?? null)
+  const mealRowFor = (t: MealTarget): DaycareMealRow | null => {
+    const d = dataRef.current
+    return d === null || d.day !== t.day ? null : (d.meals.find((m) => m.meal.resident_id === t.residentId && m.meal.meal_slot === t.slot) ?? null)
+  }
   /**
    * 画面に出す値: 送信待ち（まだ送っていない・送っている途中）の値だけ重ねる。止まった値（食い違い）・拒まれた値は重ねず、
    * サーバーの値を出して帯の下で知らせる（1人の画面・既存の食事一括と同じ）
@@ -253,9 +279,14 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
   const mealShownFor = (t: MealTarget): Pick<Meal, 'main_amount' | 'side_amount' | 'status'> | null => {
     const cur = mealRowFor(t)?.meal ?? null
     const p = pendingRow('meals', t)
-    if (p === null || p.state !== 'pending') return cur
-    const pick = <K extends MealField>(f: K): Meal[K] | null =>
-      (f in p.values ? (p.values[f] as Meal[K] | null) : (cur?.[f] ?? null)) as Meal[K] | null
+    const wait = waiting[mealKeyOf(t)] ?? []
+    if ((p === null || p.state !== 'pending') && wait.length === 0) return cur
+    const pick = <K extends MealField>(f: K): Meal[K] | null => {
+      // 順番待ちの値（後に押した方）→ 送信待ちの値 → サーバーの値
+      for (let i = wait.length - 1; i >= 0; i--) if (f in wait[i].values) return wait[i].values[f] as Meal[K] | null
+      if (p !== null && p.state === 'pending' && f in p.values) return p.values[f] as Meal[K] | null
+      return (cur?.[f] ?? null) as Meal[K] | null
+    }
     return { main_amount: pick('main_amount'), side_amount: pick('side_amount'), status: pick('status') }
   }
   const setMealFor = (t: MealTarget, st: SaveState | null) =>
@@ -277,19 +308,48 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
   }
 
   /**
-   * 昼食・おやつの欄を保存する（既存の saveMealEdits。基準は読んだ時のサーバーの値。rebase は〔あなたの値で直す〕・〔元に戻す〕）。
-   * 送り先（t）は押した時の人・日・枠で固定する（応答の前に日を切り替えても、次の日へ書かない）
+   * 昼食・おやつの欄を保存する（既存の saveMealEdits。rebase は〔あなたの値で直す〕・〔元に戻す〕）。
+   * 送り先（t）は押した時の人・日・枠で固定する（応答の前に日を切り替えても、次の日へ書かない）。
+   * 同じ人・日・枠は順番待ちにして、前の保存の応答を待ってから次を送る（基準をいちばん新しいサーバーの値にする。
+   * 続けて押した時に値が古い値へ戻って見える・自分の書き込みを「他の端末が先に記録しました」と出す、を防ぐ＝
+   * care-log の食事一括の行ごとの順番待ちと同じ・#45 の確認の反証 中）。順番待ちの値は画面に重ねて出す
    */
-  const saveMeal = async (
+  const saveMeal = (
     t: MealTarget,
     patch: Partial<Record<MealField, number | string | null>>,
     opts: { rebase?: Record<string, unknown>; undoable?: boolean } = {},
-  ) => {
+  ): Promise<void> => {
     const why = precheck()
     if (why !== null) {
       setMealFor(t, { kind: 'error', text: why })
-      return
+      return Promise.resolve()
     }
+    const k = mealKeyOf(t)
+    const id = ++waitSeqRef.current
+    setWaiting((prev) => ({ ...prev, [k]: [...(prev[k] ?? []), { id, values: patch }] }))
+    const tail = (chainRef.current.get(k) ?? Promise.resolve())
+      .then(() => sendMeal(t, patch, opts))
+      .catch(() => {})
+      .finally(() => {
+        setWaiting((prev) => {
+          const rest = (prev[k] ?? []).filter((w) => w.id !== id)
+          const next = { ...prev }
+          if (rest.length === 0) delete next[k]
+          else next[k] = rest
+          return next
+        })
+        if (chainRef.current.get(k) === tail) chainRef.current.delete(k)
+      })
+    chainRef.current.set(k, tail)
+    return tail
+  }
+
+  /** 順番が来た保存を送る（基準・記入者・〔元に戻す〕の値は、送る時のいちばん新しい値から取る） */
+  const sendMeal = async (
+    t: MealTarget,
+    patch: Partial<Record<MealField, number | string | null>>,
+    opts: { rebase?: Record<string, unknown>; undoable?: boolean },
+  ) => {
     const before = mealShownFor(t)
     const cur = mealRowFor(t)?.meal ?? null
     const send: Record<string, { value: unknown; base: unknown }> = {}
@@ -314,16 +374,18 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
       if (r.row !== null) {
         const saved = r.row
         const wrote = r.applied.length > 0
-        setData((prev) => {
-          if (prev === null || prev.day !== saved.meal_on) return prev
+        const prev = dataRef.current
+        // 日を移った後の応答は前の日の表に入れない
+        if (prev !== null && prev.day === saved.meal_on) {
           const old = prev.meals.find((m) => m.meal.id === saved.id)
           const meals = [
             ...prev.meals.filter((m) => m.meal.id !== saved.id),
             // 画面の入力の印は、実際に書けた時だけ（同じ値＝何も書かなかった時は edited_by が付かない）
             { meal: saved, imported: old?.imported ?? false, editedInApp: (old?.editedInApp ?? false) || wrote },
           ]
-          return { ...prev, meals }
-        })
+          savedAtRef.current.set(saved.id, Date.now())
+          commitData({ ...prev, meals })
+        }
       }
       if (r.held === true) {
         const p = pendingRow('meals', t)
@@ -535,7 +597,10 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
               const source = mealSourceLabel(mealRowFor(lt))
               const stL = mealState[mealKeyOf(lt)]
               const stS = mealState[mealKeyOf(stg)]
-              const mark = mealBandMark([stL?.kind as MealSaveKind | undefined, stS?.kind as MealSaveKind | undefined])
+              // 順番待ちが残っている枠は「送信中」（前の応答の「保存済み」を出したままにしない）
+              const kindOf = (t: MealTarget, st: SaveState | undefined): MealSaveKind | undefined =>
+                (waiting[mealKeyOf(t)]?.length ?? 0) > 0 ? 'saving' : (st?.kind as MealSaveKind | undefined)
+              const mark = mealBandMark([kindOf(lt, stL), kindOf(stg, stS)])
               return (
                 <li key={rid} className="dc-meal-row p-3">
                   <div className="min-w-0 space-y-1">

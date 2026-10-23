@@ -65,7 +65,10 @@ if (DC === null) {
     it('1行1人の表（横スクロールは枠の中だけ・氏名の列は左に残す・列は 氏名｜KT｜上｜下｜P｜SpO2｜再測定｜状態）', () => {
       assert.match(page, /<table className="w-full min-w-max border-collapse text-base">/)
       assert.match(page, /className="relative overflow-x-auto"/)
-      assert.match(page, /<th scope="col" className="sticky left-0 z-20 min-w-32 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">\s*氏名\s*<\/th>/)
+      assert.match(page, /<th scope="col" className="sticky left-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">\s*<span className="dc-vital-name block">氏名<\/span>\s*<\/th>/)
+      // 氏名の列の幅は札の長さで広げない（7rem と画面幅の35% の小さい方・中で折り返す＝#45 の確認の反証 重）
+      assert.match(page, /<div className="dc-vital-name">/)
+      assert.match(read('../src/index.css'), /\.dc-vital-name \{\s*width: min\(7rem, 35vw\);\s*overflow-wrap: anywhere;/)
       assert.match(page, /<th scope="row" className="sticky left-0 z-20 bg-bg px-2 py-1 text-left font-normal">/)
       assert.match(page, /\{DAYCARE_VITAL_FIELDS\.map\(\(f\) => \(\s*<th key=\{f\} scope="col"/)
       const head = page.slice(page.indexOf('<thead>'), page.indexOf('</thead>'))

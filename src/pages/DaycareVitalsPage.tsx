@@ -1122,8 +1122,8 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                 <thead>
                   <tr className="border-b border-border-strong bg-surface2 text-left">
                     {/* 氏名の列は横スクロールしても左に残す（sticky）。背景は見出し行と同じ色 */}
-                    <th scope="col" className="sticky left-0 z-20 min-w-32 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
-                      氏名
+                    <th scope="col" className="sticky left-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
+                      <span className="dc-vital-name block">氏名</span>
                     </th>
                     {DAYCARE_VITAL_FIELDS.map((f) => (
                       <th key={f} scope="col" className="w-24 px-2 py-2 text-sm font-bold text-ink2">
@@ -1175,22 +1175,25 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                           <tr className={`align-middle ${detail || !isLast ? '' : 'border-b border-border'}`}>
                             {/* 氏名の列は横スクロールしても左に残す（sticky）。背景はページの地の色（下を流れる欄を透かさない） */}
                             <th scope="row" className="sticky left-0 z-20 bg-bg px-2 py-1 text-left font-normal">
-                              {si === 0 ? (
-                                <>
-                                  <span className="block text-base font-bold text-ink">{nameOf(row.residentId)}</span>
-                                  <span className="block text-sm text-ink2">{basis}</span>
-                                  {slots.length > 1 || time !== null ? (
-                                    <span className="block text-sm text-ink2">1回目{time !== null ? `（${time}）` : ''}</span>
-                                  ) : null}
-                                </>
-                              ) : (
-                                <span className="block text-sm text-ink2">
-                                  <span aria-hidden="true">↳ </span>
-                                  再測定 {si}
-                                  {time !== null ? `（${time}）` : ''}
-                                  <span className="sr-only">：{nameOf(row.residentId)}</span>
-                                </span>
-                              )}
+                              {/* 氏名の列の幅は dc-vital-name で決める（札が長くても列を広げず、中で折り返す＝確認の反証 重） */}
+                              <div className="dc-vital-name">
+                                {si === 0 ? (
+                                  <>
+                                    <span className="block text-base font-bold text-ink">{nameOf(row.residentId)}</span>
+                                    <span className="block text-sm text-ink2">{basis}</span>
+                                    {slots.length > 1 || time !== null ? (
+                                      <span className="block text-sm text-ink2">1回目{time !== null ? `（${time}）` : ''}</span>
+                                    ) : null}
+                                  </>
+                                ) : (
+                                  <span className="block text-sm text-ink2">
+                                    <span aria-hidden="true">↳ </span>
+                                    再測定 {si}
+                                    {time !== null ? `（${time}）` : ''}
+                                    <span className="sr-only">：{nameOf(row.residentId)}</span>
+                                  </span>
+                                )}
+                              </div>
                             </th>
                             {DAYCARE_VITAL_FIELDS.map((f) => {
                               const { v, local } = valueOf(slot, f)

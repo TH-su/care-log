@@ -87,8 +87,20 @@ if (DP === null) {
       assert.match(page, /const mealKeyOf = \(t: MealTarget\) => `\$\{t\.residentId\}:\$\{t\.day\}:\$\{t\.slot\}`/)
       assert.match(page, /\.\.\.\(cur === null \? \{ fill: \{ recorded_by: actorId \} \} : \{\}\),\s*editedBy: actorId,\s*rebase: opts\.rebase !== undefined,/)
     })
-    it('送信待ちの値だけ重ねて出す（止まった値・拒まれた値は重ねない）', () => {
-      assert.match(page, /if \(p === null \|\| p\.state !== 'pending'\) return cur/)
+    it('送信待ちの値・順番待ちの値だけ重ねて出す（止まった値・拒まれた値は重ねない）', () => {
+      assert.match(page, /if \(\(p === null \|\| p\.state !== 'pending'\) && wait\.length === 0\) return cur/)
+      assert.match(page, /if \(p !== null && p\.state === 'pending' && f in p\.values\) return p\.values\[f\]/)
+    })
+    it('同じ人・日・枠は順番待ち（前の応答を待ってから次を送る）・基準は送る時のいちばん新しい値（#45 の確認の反証 中）', () => {
+      assert.match(page, /const tail = \(chainRef\.current\.get\(k\) \?\? Promise\.resolve\(\)\)\s*\.then\(\(\) => sendMeal\(t, patch, opts\)\)/)
+      assert.match(page, /chainRef\.current\.set\(k, tail\)/)
+      // 送る時の基準は、描画を待たずに入れ替わる控え（dataRef）から取る
+      assert.match(page, /const mealRowFor = \(t: MealTarget\): DaycareMealRow \| null => \{\s*const d = dataRef\.current/)
+      assert.match(page, /const commitData = useCallback\(\(next: MealsData\) => \{\s*dataRef\.current = next\s*setData\(next\)/)
+      // 順番待ちが残る枠は「送信中」
+      assert.match(page, /\(waiting\[mealKeyOf\(t\)\]\?\.length \?\? 0\) > 0 \? 'saving'/)
+      // 読み込みを始めた後に受け取った自分の保存の応答は、版の大きい方を残す
+      assert.match(page, /\(savedAtRef\.current\.get\(m\.meal\.id\) \?\? 0\) > startedAt && mine\.meal\.rev > m\.meal\.rev \? mine : m/)
     })
     it('〔元に戻す〕はオンラインで実際に書けた時だけ・同じ日の間だけ（送信待ちの時は出さない）', () => {
       assert.match(page, /if \(r === 'queued'\) \{\s*setMealFor\(t, \{ kind: 'queued', persisted: isQueuePersisted\(\) \}\)\s*return\s*\}/)
@@ -125,7 +137,7 @@ if (DP === null) {
       assert.match(css, /@media \(min-width: 60em\) \{\s*\.dc-meal-row \{\s*grid-template-columns: 11rem minmax\(0, 1fr\);/)
     })
     it('日を移った後の応答は前の日の表に入れない・画面の入力の印は実際に書けた時だけ（#45 の反証 軽5）', () => {
-      assert.match(page, /if \(prev === null \|\| prev\.day !== saved\.meal_on\) return prev/)
+      assert.match(page, /if \(prev !== null && prev\.day === saved\.meal_on\) \{/)
       assert.match(page, /editedInApp: \(old\?\.editedInApp \?\? false\) \|\| wrote/)
     })
     it('知らせの出し直し: 止まった・拒まれた値・まだ届いていない値（開き直した時も「未送信」）・届いたら外す（#45 の反証 中2・軽5）', () => {
