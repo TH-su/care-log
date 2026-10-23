@@ -167,7 +167,7 @@ export function DaycareHomeVisitSection({ today, residents, targets, staff, acto
 
   const ready = loaded.status === 'ready' ? loaded : null
   const copy = ready !== null && ready.copy !== 'error' ? ready.copy : null
-  const dueScope = scope === undefined ? undefined : { week: scope.ids, arrived: targets }
+  const dueScope = scope === undefined ? undefined : { week: scope.ids, known: scope.known, arrived: targets }
   const rows: HomeVisitDueRow[] =
     ready === null
       ? []
@@ -181,6 +181,13 @@ export function DaycareHomeVisitSection({ today, residents, targets, staff, acto
         })
   /** 訪問の記録だけがある方を外しているか（写しが読めない・まだ写していない時は外さない＝多めに出す側） */
   const narrows = homeVisitNarrows(dueScope, copy?.rows ?? [])
+  /** 週間計画で絞れない時に出している方（実際に足している方だけを書く。写しが読めない時に「計画がある方」と書かない＝反証 軽2） */
+  const unnarrowedWho = (() => {
+    const parts = ['居宅訪問の記録がある方']
+    if (copy !== null) parts.push('計画書の写しに載っている方')
+    if (scope !== undefined && scope.known.size > 0) parts.push('週間計画で名簿と照合できた予定がある方')
+    return `${parts.join('・')}と、その日に来た方`
+  })()
   const counts = homeVisitDueCounts(rows)
   /** その方が計画書の写しで計画を持つか（記録なしの行の添え書き。一覧に足す時と同じ isYmd で見る） */
   const hasPlan = (rid: number) => (copy?.rows ?? []).some((c) => c.resident_id === rid && isYmd(c.latest_plan_date))
@@ -381,7 +388,7 @@ export function DaycareHomeVisitSection({ today, residents, targets, staff, acto
           </p>
           <p className="text-sm text-ink2">
             {scope.ids === null
-              ? `${scope.reason === 'unmatched' ? `週間計画に名簿と照合できない予定が ${scope.unmatched}件ある` : scope.reason === 'noplan' ? '週間計画にデイの予定が1件も見つからない' : '週間計画を読めない'}ため、居宅訪問の記録がある方・計画書に計画がある方と、その日に来た方を出しています。`
+              ? `${scope.reason === 'unmatched' ? `週間計画に名簿と照合できない予定が ${scope.unmatched}件ある` : scope.reason === 'noplan' ? '週間計画にデイの予定が1件も見つからない' : '週間計画を読めない'}ため、${unnarrowedWho}を出しています。`
               : !narrows
                 ? `計画書の写しが${copy === null ? '読めない' : '無い'}ため、居宅訪問の記録がある方、週間計画でデイの予定がある方（曜日を問わず）、その日に来た方を出しています（訪問の記録が無い方は「記録なし」）。`
                 : '計画書に計画がある方、週間計画でデイの予定がある方（曜日を問わず）、その日に来た方を出しています（訪問の記録が無い方は「記録なし」）。'}
@@ -389,7 +396,10 @@ export function DaycareHomeVisitSection({ today, residents, targets, staff, acto
           {copyNotice === 'error' ? (
             msgBox({ tone: 'warn', text: '計画書の期限の写しを読み込めませんでした。計画がある方と、終了した方を確かめられません。' })
           ) : copyNotice === 'empty' && scope.ids === null ? (
-            msgBox({ tone: 'info', text: '計画書の写しが無く、週間計画でも絞れないため、訪問の記録が無い方は、その日に来た方だけを出しています。' })
+            msgBox({
+              tone: 'info',
+              text: `計画書の写しが無く、週間計画でも絞れないため、訪問の記録が無い方は、${scope.known.size > 0 ? '週間計画で名簿と照合できた予定がある方と、' : ''}その日に来た方だけを出しています。`,
+            })
           ) : null}
           <button type="button" aria-expanded={open} aria-controls="home-visit-list" onClick={toggle} className={btn}>
             {open ? '一覧を閉じる' : `一覧を開く（${rows.length}人）`}

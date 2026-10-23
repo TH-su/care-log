@@ -91,9 +91,11 @@ export function DaycareReviewDueSection({ today, residents, copy, role, actorId,
           settings: loaded.settings,
           people: residents.map((r) => ({ id: r.id, active: r.active })),
           today,
-          scope: { week: scope?.ids ?? null, arrived },
+          scope: { week: scope?.ids ?? null, known: scope?.known, arrived },
         })
   const counts = reviewDueCounts(rows)
+  /** 週間計画で絞れない時に出している方（照合できた予定の方も足している時はそう書く＝反証 中1） */
+  const allWho = scope !== undefined && scope.known.size > 0 ? '写しの全員と、週間計画で名簿と照合できた予定がある方、その日に来た方' : '写しの全員と、その日に来た方'
   const cstate = loaded === null ? null : reviewCopyState(loaded)
   const syncedAt = loaded?.settings?.synced_at ?? null
   const syncedDay = syncedAt === null || Number.isNaN(new Date(syncedAt).getTime()) ? null : isoDate(new Date(syncedAt))
@@ -187,11 +189,11 @@ export function DaycareReviewDueSection({ today, residents, copy, role, actorId,
           <p className="text-sm text-ink2">
             期限は計画書アプリが計算した値をそのまま使い、期限の{warn}日前から「間近」と出します（計画書の設定: {RULE_TEXT[rule]}）。
             {scope?.reason === 'unread'
-              ? '週間計画を読めないため、計画のない方も含めて写しの全員と、その日に来た方を出しています。'
+              ? `週間計画を読めないため、計画のない方も含めて${allWho}を出しています。`
               : scope?.reason === 'unmatched'
-                ? `週間計画に名簿と照合できない予定が ${scope.unmatched}件あるため、計画のない方も含めて写しの全員と、その日に来た方を出しています（照合できない予定は、その曜日のデイの今日の画面に出ます）。`
+                ? `週間計画に名簿と照合できない予定が ${scope.unmatched}件あるため、計画のない方も含めて${allWho}を出しています（照合できない予定は、その曜日のデイの今日の画面に出ます）。`
                 : scope?.reason === 'noplan'
-                  ? '週間計画にデイの予定が1件も見つからないため、計画のない方も含めて写しの全員と、その日に来た方を出しています。'
+                  ? `週間計画にデイの予定が1件も見つからないため、計画のない方も含めて${allWho}を出しています。`
                   : '計画書に計画がある方、週間計画でデイの予定がある方（曜日を問わず）、その日に来た方を出しています。'}
             計画書の写しに載っていない方も「計画なし」に数えます。
           </p>

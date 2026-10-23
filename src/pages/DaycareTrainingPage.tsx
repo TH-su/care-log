@@ -185,7 +185,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
       .catch(() => {})
     fetchDaycarePlanWeek(todayIso())
       .then((plans) => alive && setWeek(weekScope(plans)))
-      .catch(() => alive && setWeek({ ids: null, reason: 'unread', unmatched: 0 }))
+      .catch(() => alive && setWeek({ ids: null, reason: 'unread', unmatched: 0, known: new Set() }))
     return () => {
       alive = false
     }
