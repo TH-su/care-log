@@ -64,7 +64,7 @@ export function CategoryToggles({
         disabled={off}
         onClick={() => onChange(toggleCategory(value, c))}
         // 印の付いた札は分類の色で塗る（文字と ✓ でも分かる）。付いていない札は白地に分類の色の枠
-        className={`dsheet-cat-btn min-h-tap shrink-0 rounded-full px-3 text-base ${on ? `${categoryClass(c)} dsheet-cat-on` : `dsheet-cat-off dsheet-cat-off-${NOTE_CATEGORIES.indexOf(c) + 1}`} disabled:opacity-50`}
+        className={`dsheet-cat-btn min-h-tap shrink-0 rounded px-3 text-base ${on ? `${categoryClass(c)} dsheet-cat-on` : `dsheet-cat-off dsheet-cat-off-${NOTE_CATEGORIES.indexOf(c) + 1}`} disabled:opacity-50`}
       >
         <span aria-hidden="true">{on ? '✓ ' : ''}</span>
         {c}

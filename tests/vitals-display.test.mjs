@@ -233,7 +233,8 @@ describe('3. 食事一覧（MealsSheetPage）', () => {
   it('A6: 食事のマスの地を mealShade の段階で塗り、半分以下は斜線。低摂取の ▲ と文字色は残す（地だけ置き換える）', () => {
     assert.match(mealsSheet, /const shade = mealShade\(eff\)/)
     assert.match(mealsSheet, /`cl-shade-bg-\$\{shade\.stage\}\$\{shade\.hatched \? ' cl-shade-hatch' : ''\}`/)
-    assert.match(mealsSheet, /className=\{`\$\{CELL_BASE\} \$\{shadeClass\} \$\{busy \? `relative \$\{BUSY_RING\}` : ''\}`\}/)
+    // 2026-10-24 今日の画面の改善 3回目: 末尾にデイの枠（cl-dc-frame・線だけで地は塗らない）を足した。地の濃淡はそのまま
+    assert.match(mealsSheet, /className=\{`\$\{CELL_BASE\} \$\{shadeClass\} \$\{busy \? `relative \$\{BUSY_RING\}` : ''\}\$\{dc \? ' cl-dc-frame' : ''\}`\}/)
     // ▲（lowMark）と低摂取の文字色はそのまま
     assert.match(mealsSheet, /const toneClass = low \? 'text-warn font-bold' : SLOT_TEXT\[slot\]/)
     assert.match(mealsSheet, /lowMark=\{low\}/)

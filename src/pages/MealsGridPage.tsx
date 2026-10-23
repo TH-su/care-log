@@ -37,7 +37,9 @@ import {
   saveMealEdits,
   softDeleteFluid,
   subscribeChanges,
+  fetchDaycareArrivals,
 } from '../lib/db'
+import { daycareArrivalKey } from '../lib/daycare'
 import type { ChangeInfo, PendingCellRow } from '../lib/db'
 import { getActorId, touchActivity } from '../lib/actor'
 import { addDays, fmtDayLabel, toHalfWidth, todayIso } from '../lib/format'
@@ -473,6 +475,8 @@ function AmountRow({ label, groupLabel, value, onPick, busy = null, busyId, pres
 
 interface MealRowProps {
   resident: Resident
+  /** その日にデイへ到着した方で、いま「昼」を選んでいる（カードに枠と「デイ」の札・2026-10-24 今日の画面の改善 3回目） */
+  dcArrived?: boolean
   main: number | null
   side: number | null
   status: MealStatus | null
@@ -526,6 +530,7 @@ interface MealRowProps {
 
 const MealRow = memo(function MealRow({
   resident,
+  dcArrived = false,
   main,
   side,
   status,
@@ -605,7 +610,8 @@ const MealRow = memo(function MealRow({
   }
 
   return (
-    <li className="rounded-md border border-border bg-surface p-3">
+    // デイに到着した方の昼食は、カードに info の線の枠（内側 2px・塗りは使わない）と氏名の横の「デイ」の札
+    <li className={`rounded-md border border-border bg-surface p-3${dcArrived ? ' cl-dc-frame' : ''}`}>
       <div className="flex flex-wrap items-center gap-gap">
         <span className="tabular w-14 shrink-0 text-sm text-ink3">{resident.room ?? '—'}</span>
         {/* 食い違いを解決した後のフォーカスの戻り先（タブ順には入れない） */}
@@ -618,6 +624,11 @@ const MealRow = memo(function MealRow({
           {/* 他の端末がこの方の食事を入力中（「✎」・読み上げは「入力中: 職員B」） */}
           {rowBusy !== null ? <RowBusyMark text={rowBusy} /> : null}
         </span>
+        {dcArrived ? (
+          <span className="shrink-0 rounded border border-info px-2 text-sm font-bold text-info">
+            デイ<span className="sr-only">に来所</span>
+          </span>
+        ) : null}
         {shade ? (
           // A6: この食事の主食・副食（地の濃淡＋半分以下は斜線。読み上げは文字で）
           <span
@@ -872,6 +883,23 @@ export function MealsGridPage({
   /** 日を切り替えて、新しい日の記録を読み終えるまで（前の日の値を新しい日の値として押させない） */
   const [daySwitching, setDaySwitching] = useState(false)
   const [slot, setSlot] = useState<MealSlot>(() => slotForHour(new Date().getHours()))
+  // 今日の画面の改善 3回目（2026-10-24）: その日にデイへ到着した方（昼食のカードの枠と「デイ」の札・画面だけ）。
+  // 開いた日の分を1回で読む。〔最新を読み込む〕でも読み直す。読めない時（通信・権限・表が無い）は印を出さないだけ（画面は止めない）
+  const [dcArrivals, setDcArrivals] = useState<ReadonlySet<string>>(() => new Set())
+  const [dcTick, setDcTick] = useState(0)
+  useEffect(() => {
+    let alive = true
+    fetchDaycareArrivals(day, day)
+      .then((s) => {
+        if (alive) setDcArrivals(s)
+      })
+      .catch(() => {
+        if (alive) setDcArrivals(new Set())
+      })
+    return () => {
+      alive = false
+    }
+  }, [day, dcTick])
   // フロアは一覧から作る（居室未設定の利用者も FLOOR_OTHER で必ず表示できるようにする）。
   // 選んだ階は UI 状態として保存し、復元した値が一覧に無ければ下の effect で先頭へ倒す（F68）
   const [floor, setFloor] = useState<string>(() => readMealsFloor() ?? '1')
@@ -1802,6 +1830,7 @@ export function MealsGridPage({
 
   const onReload = useCallback(() => {
     void load()
+    setDcTick((n) => n + 1)
   }, [load])
 
   /**
@@ -2325,6 +2354,7 @@ export function MealsGridPage({
                 <MealRow
                   key={r.id}
                   resident={r}
+                  dcArrived={slot === 'lunch' && dcArrivals.has(daycareArrivalKey(r.id, day))}
                   busyMain={presence.cellBusy(at('main_amount'))}
                   busySide={presence.cellBusy(at('side_amount'))}
                   busyStatus={presence.cellBusy(at('status'))}

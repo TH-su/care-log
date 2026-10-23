@@ -517,6 +517,25 @@
   font-size: 0.85em;
   letter-spacing: -0.02em;
 }
+/* デイの印（2026-10-24 今日の画面の改善 3回目・決定7）: その日にデイへ到着した方の昼食の欄・カード。
+   枠は info の線を内側に 2px（行の高さを変えない・塗りは使わない＝濃淡と低摂取の黄色はそのまま）。
+   「デ」は主食の数字の前の小さな印（色だけに頼らない）。画面だけで、印刷では出さない */
+.cl-dc-frame {
+  outline: 2px solid var(--c-info);
+  outline-offset: -2px;
+}
+.cl-dc-mark {
+  color: var(--c-info);
+  font-weight: var(--fw-bold);
+}
+@media print {
+  .cl-dc-frame {
+    outline: none;
+  }
+  .cl-dc-mark {
+    display: none;
+  }
+}
 /* 記号を持つセルは数字側もわずかに詰めて余裕を作る（:has 非対応環境では何も起きない） */
 .sheet-cell:has(> .sheet-mark) {
   letter-spacing: -0.02em;
@@ -1322,7 +1341,8 @@ main:has(.dsheet-frame) {
 .dsheet-cat-off-7 { border-color: var(--dsheet-cat-7-line); }
 .dsheet-cat-btn.dsheet-cat-on {
   border-width: 2px;
-  border-radius: 9999px;
+  /* ボタンの角は 6px（2026-10-24 今日の画面の改善 3回目・決定5。印刷に出る札 .dsheet-cat は 4px のまま） */
+  border-radius: var(--r-md);
   padding: 0 var(--sp-3);
   line-height: inherit;
   font-weight: var(--fw-bold);

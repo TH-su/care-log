@@ -75,6 +75,8 @@ import { discardPendingRow, fetchLatestMeal, pendingRow, saveMealEdits } from '.
 import type { PendingCellRow } from '../lib/db'
 // 摂取低下（A2）・濃淡（A6）・水分の目標（A3）。基準値は app_settings の上書きを起動中に1回読む（A8）
 import { loadVitalThresholds, queuePending } from '../lib/db'
+import { fetchDaycareArrivals } from '../lib/db'
+import { daycareArrivalKey } from '../lib/daycare'
 import { fluidProgress, mealLowLabel, mealLowStreaks, mealShade } from '../lib/vitalAlerts'
 import type { ResidentTargets } from '../lib/vitalAlerts'
 import { focusOf, useCellPresence } from '../hooks/useCellPresence'
@@ -666,6 +668,8 @@ interface AmountHalfProps {
   buttonRef: (el: HTMLButtonElement | null) => void
   /** 低摂取の記号を出す（背景色だけに頼らない） */
   lowMark?: boolean
+  /** その日にデイへ到着した方の昼食（主食の数字の前に「デ」・画面だけ） */
+  dcMark?: boolean
   /** 保存できていない状態の記号 */
   phaseMark?: { mark: string; label: string; cls: string }
   ariaLabel: string
@@ -696,6 +700,7 @@ function AmountHalf({
   buttonRef,
   lowMark = false,
   phaseMark,
+  dcMark = false,
   ariaLabel,
   describedBy,
   onOpen,
@@ -740,6 +745,12 @@ function AmountHalf({
       {/* 記号は sheet-mark（数字用フォント＝半角幅・0.85em）で描く。
           和文フォントのままだと全角幅になり、30px の主食・副食列（--w-meal）から
           はみ出して折り返す＝22px 行の密度が崩れるため（SheetCell と同じ扱い） */}
+      {/* その日にデイへ到着した方の昼食の「デ」（主食の数字の前・画面だけ＝印刷では CSS で消す・2026-10-24） */}
+      {dcMark ? (
+        <span className="sheet-mark cl-dc-mark" aria-hidden="true">
+          デ
+        </span>
+      ) : null}
       {phaseMark ? (
         <span className={`sheet-mark ${phaseMark.cls}`} aria-hidden="true">
           {phaseMark.mark}
@@ -1365,6 +1376,25 @@ export function MealsSheetPage({
     void load()
   }, [load])
 
+  // 今日の画面の改善 3回目（2026-10-24）: その日にデイへ到着した方（昼食の欄の「デ」と枠・画面だけ＝印刷は変えない・決定7）。
+  // 表示中の日の範囲を1回の読み取りでまとめて読む（日数ぶん問い合わせない）。〔最新〕でも読み直す。
+  // 読めない時（通信・権限・表が無い）は印を出さないだけ（表は止めない）
+  const [dcArrivals, setDcArrivals] = useState<ReadonlySet<string>>(() => new Set())
+  const [dcTick, setDcTick] = useState(0)
+  useEffect(() => {
+    let alive = true
+    fetchDaycareArrivals(fromIso, toIso)
+      .then((s) => {
+        if (alive) setDcArrivals(s)
+      })
+      .catch(() => {
+        if (alive) setDcArrivals(new Set())
+      })
+    return () => {
+      alive = false
+    }
+  }, [fromIso, toIso, dcTick])
+
   // 基準値（A8）と個別の目標（A3）は画面を開いた時に1回だけ読む（表の読み込みを待たせない・失敗しても表は出す）
   useEffect(() => {
     let alive = true
@@ -1894,6 +1924,7 @@ export function MealsSheetPage({
     closeEdit()
     setFluidTarget(null)
     void load()
+    setDcTick((n) => n + 1)
   }, [closeEdit, load])
 
   /**
@@ -2829,6 +2860,9 @@ export function MealsSheetPage({
                               ? 'bg-warn-bg'
                               : ''
                           const halfWord = shade?.hatched ? '。主食と副食の合計が半分以下' : ''
+                          // その日にデイへ到着した方の昼食（枠と「デ」・画面だけ）
+                          const dc = slot === 'lunch' && dcArrivals.has(daycareArrivalKey(r.id, d))
+                          const dcWord = dc ? '。デイに来所' : ''
                           const absentStatus =
                             eff.status != null && eff.status !== 'eaten' ? eff.status : null
                           const slotLabel = MEAL_SLOT_LABEL[slot]
@@ -2853,7 +2887,7 @@ export function MealsSheetPage({
                               style={{ width: W_MEAL2, minWidth: W_MEAL2, height: ROW_H }}
                               // 位置の基準（relative）は「✎」を置く時だけ付ける（2026-10-18 iPhone のカクつき対策）。全部のマスに付けると
                               // 11日×38人で約1,250個の重ねて描く単位ができ、指で動かすたびの描き直しが重くなる。吹き出しは fixed なので要らない
-                              className={`${CELL_BASE} ${shadeClass} ${busy ? `relative ${BUSY_RING}` : ''}`}
+                              className={`${CELL_BASE} ${shadeClass} ${busy ? `relative ${BUSY_RING}` : ''}${dc ? ' cl-dc-frame' : ''}`}
                             >
                               {busy && busyId ? <BusyMark busy={busy} id={busyId} /> : null}
                               {absentStatus ? (
@@ -2862,13 +2896,18 @@ export function MealsSheetPage({
                                   ref={btnRefFor(`${key}|main_amount`)}
                                   type="button"
                                   disabled={!canInput}
-                                  aria-label={`${r.name} ${dayLabel} ${slotLabel} ${MEAL_STATUS_LABEL[absentStatus]}${halfWord}。食事の状態を変える`}
+                                  aria-label={`${r.name} ${dayLabel} ${slotLabel} ${MEAL_STATUS_LABEL[absentStatus]}${halfWord}${dcWord}。食事の状態を変える`}
                                   aria-describedby={busyId}
                                   onClick={() => openAmount(target, 'main_amount', eff.main_amount)}
                                   // tokens.css の 44px 下限を打ち消す（22px 行の密度を保つ）
                                   style={{ minHeight: ROW_H }}
                                   className="block h-full w-full bg-transparent text-center text-ink2 disabled:opacity-60"
                                 >
+                                  {dc ? (
+                                    <span className="sheet-mark cl-dc-mark" aria-hidden="true">
+                                      デ
+                                    </span>
+                                  ) : null}
                                   {mark ? (
                                     <span className={mark.cls} aria-hidden="true">
                                       {mark.mark}
@@ -2889,7 +2928,8 @@ export function MealsSheetPage({
                                     editInvalid={editInvalid}
                                     inputRef={editInputRef}
                                     buttonRef={btnRefFor(`${key}|main_amount`)}
-                                    ariaLabel={`${r.name} ${dayLabel} ${slotLabel} 主食 ${eff.main_amount ?? '未入力'}${low ? '。低摂取' : ''}${halfWord}`}
+                                    dcMark={dc}
+                                    ariaLabel={`${r.name} ${dayLabel} ${slotLabel} 主食 ${eff.main_amount ?? '未入力'}${low ? '。低摂取' : ''}${halfWord}${dcWord}`}
                                     describedBy={busyId}
                                     onOpen={() => openAmount(target, 'main_amount', eff.main_amount)}
                                     onText={setEditText}
@@ -2908,7 +2948,7 @@ export function MealsSheetPage({
                                     buttonRef={btnRefFor(`${key}|side_amount`)}
                                     lowMark={low}
                                     phaseMark={mark}
-                                    ariaLabel={`${r.name} ${dayLabel} ${slotLabel} 副食 ${eff.side_amount ?? '未入力'}${low ? '。低摂取' : ''}${mark ? `。${mark.label}` : ''}`}
+                                    ariaLabel={`${r.name} ${dayLabel} ${slotLabel} 副食 ${eff.side_amount ?? '未入力'}${low ? '。低摂取' : ''}${mark ? `。${mark.label}` : ''}${dcWord}`}
                                     describedBy={busyId}
                                     onOpen={() => openAmount(target, 'side_amount', eff.side_amount)}
                                     onText={setEditText}
@@ -3093,6 +3133,8 @@ export function MealsSheetPage({
         と数字は、いちばん新しい日まで続いている日数です（＋はそれより前から続いている）。
         {/* A3 の凡例（棒は画面だけなので、説明も紙に出さない） */}
         <span className="print:hidden">水分の欄の下の細い棒は、1日の目標に対する割合です（押すと目標の量と割合が出ます）。</span>
+        {/* デイの印の凡例（2026-10-24 今日の画面の改善 3回目。印は画面だけなので、説明も紙に出さない） */}
+        {dcArrivals.size > 0 ? <span className="print:hidden">デ・枠＝その日にデイへ来た方（昼食）。</span> : null}
       </p>
 
       <ConflictResolver

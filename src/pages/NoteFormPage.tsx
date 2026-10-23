@@ -1250,8 +1250,8 @@ export function NoteFormPage() {
                         onClick={() => toggleTag(tag)}
                         className={
                           on
-                            ? 'min-h-tap rounded-full border border-primary bg-primary px-4 text-base font-bold text-primary-ink disabled:border-border disabled:bg-surface2 disabled:text-ink3'
-                            : 'min-h-tap rounded-full border border-border bg-surface px-4 text-base text-ink disabled:bg-surface2 disabled:text-ink3'
+                            ? 'min-h-tap rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink disabled:border-border disabled:bg-surface2 disabled:text-ink3'
+                            : 'min-h-tap rounded border border-border bg-surface px-4 text-base text-ink disabled:bg-surface2 disabled:text-ink3'
                         }
                       >
                         <span aria-hidden="true" className={on ? 'mr-1' : 'mr-1 invisible'}>
@@ -1328,8 +1328,8 @@ export function NoteFormPage() {
                           onClick={() => pickPhraseCat(c.id)}
                           className={
                             on
-                              ? 'min-h-tap max-w-full rounded-full border border-primary bg-primary px-4 text-base font-bold text-primary-ink disabled:border-border disabled:bg-surface2 disabled:text-ink3'
-                              : 'min-h-tap max-w-full rounded-full border border-border bg-surface px-4 text-base text-ink disabled:bg-surface2 disabled:text-ink3'
+                              ? 'min-h-tap max-w-full rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink disabled:border-border disabled:bg-surface2 disabled:text-ink3'
+                              : 'min-h-tap max-w-full rounded border border-border bg-surface px-4 text-base text-ink disabled:bg-surface2 disabled:text-ink3'
                           }
                         >
                           <span aria-hidden="true" className={on ? 'mr-1' : 'mr-1 invisible'}>
