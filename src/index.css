@@ -53,6 +53,38 @@
 .dc-row-head {
   display: none;
 }
+/* デイの食事一括（2026-10-24 今日の画面の改善 2回目）: 1人1帯。狭い画面は氏名の下にボタン、広い画面（60em 以上）は
+   左に氏名の列・右にボタン。切り替えの幅は em で決める（文字を大きくした時も氏名の列がつぶれない＝今日の画面と同じ） */
+.dc-meal-row {
+  display: grid;
+  gap: var(--tap-gap);
+}
+/* デイのバイタル一括の氏名の列（2026-10-24 確認の反証 重）: 表は自動の幅（min-w-max）なので、基準の札（個別: SpO2 …・個人の基準）の
+   1行の幅がそのまま列の幅になり、文字を大きくした時・狭い画面で sticky の列が枠を覆って欄が押せなくなった。
+   列の幅を「7rem と画面幅の35% の小さい方」に決め、長い札・氏名は列の中で折り返す（文字の大きさと画面の幅のどちらでも欄の帯が残る） */
+.dc-vital-name {
+  width: min(7rem, 35vw);
+  /* 表に余りの幅がある広い画面では、列の幅いっぱいに広げる（％の最小幅は列の幅の計算には効かないので、上の上限はそのまま） */
+  min-width: 100%;
+  overflow-wrap: anywhere;
+}
+/* デイのバイタル一括のテンキー（2026-10-24）: 文字を大きくしても画面の上へはみ出さない（収まらない分はテンキーの中でスクロール）。
+   下の帯（3.5rem＝bottom-14）の上に出す。広い画面（lg＝1024px 以上）は帯が無いので画面の高さまで */
+.dc-keypad {
+  max-height: calc(100dvh - 3.5rem);
+  overflow-y: auto;
+}
+@media (min-width: 1024px) {
+  .dc-keypad {
+    max-height: 100dvh;
+  }
+}
+@media (min-width: 60em) {
+  .dc-meal-row {
+    grid-template-columns: 11rem minmax(0, 1fr);
+    align-items: start;
+  }
+}
 @media (min-width: 60em) {
   .dc-row,
   .dc-row-head {

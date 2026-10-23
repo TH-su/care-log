@@ -112,3 +112,31 @@ export function settleQueuedFluid(held: { base: number; ml: number }, now: numbe
   const remain = held.ml - landed
   return remain > 0 ? { base: now, ml: remain } : null
 }
+
+// ── 今日の画面の改善 2回目: デイの食事一括（/record/daycare/meals・2026-10-24 代表承認・決定 6／親の回答 1〜2） ──
+
+/** 食事一括に並べる方: その日に来た方（在席・帰宅）だけを、今日の一覧の並びのまま（休み・未到着・入院中は出さない） */
+export function mealBulkRows<T extends Pick<DaycareBoardRow, 'residentId' | 'state'>>(rows: readonly T[]): T[] {
+  return rows.filter((r) => r.state === 'present' || r.state === 'left')
+}
+
+/** 食事一括の画面のルート（業務日は ?day= で持つ。今日は付けない） */
+export function mealBulkPath(day: string, today: string): string {
+  return `/record/daycare/meals${day === today ? '' : `?day=${day}`}`
+}
+
+/** 昼食・おやつの保存の状態の種類（画面の SaveState の kind と同じ名前） */
+export type MealSaveKind = 'saving' | 'saved' | 'queued' | 'conflict' | 'held' | 'rejected' | 'error'
+
+/**
+ * 1人の帯の端に出す保存の印（昼食・おやつのうち、いちばん手当てが要る方を出す）。
+ * 食い違い・止まり・拒否・失敗 → ▲ 要確認／送信中 → ↻／送信待ち → ⚠ 未送信／保存できた → ✓ 保存済み。何も無ければ null
+ */
+export function mealBandMark(kinds: readonly (MealSaveKind | undefined)[]): { mark: string; text: string; tone: 'ok' | 'info' | 'warn' } | null {
+  const has = (k: MealSaveKind) => kinds.includes(k)
+  if (has('conflict') || has('held') || has('rejected') || has('error')) return { mark: '▲', text: '要確認', tone: 'warn' }
+  if (has('saving')) return { mark: '↻', text: '送信中', tone: 'info' }
+  if (has('queued')) return { mark: '⚠', text: '未送信', tone: 'warn' }
+  if (has('saved')) return { mark: '✓', text: '保存済み', tone: 'ok' }
+  return null
+}

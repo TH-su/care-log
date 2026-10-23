@@ -182,11 +182,13 @@ function hmShort(t: string | null): string {
   return m === null ? '' : `${Number(m[1])}:${m[2]}`
 }
 
-/** デイの画面の上の切り替え（今日／バイタル／活動）。今いる画面は塗りと aria-current で示す */
-export function DaycareNav({ current }: { current: 'today' | 'vitals' | 'activity' | 'training' }) {
-  const items: { key: 'today' | 'vitals' | 'activity' | 'training'; to: string; label: string }[] = [
+/** デイの画面の上の切り替え（今日／バイタル／食事／活動／機能訓練）。今いる画面は塗りと aria-current で示す */
+export function DaycareNav({ current }: { current: 'today' | 'vitals' | 'meals' | 'activity' | 'training' }) {
+  const items: { key: 'today' | 'vitals' | 'meals' | 'activity' | 'training'; to: string; label: string }[] = [
     { key: 'today', to: '/record/daycare', label: '今日（到着・休み）' },
     { key: 'vitals', to: '/record/daycare/vitals', label: 'バイタル一括' },
+    // 今日の画面の改善 2回目（2026-10-24）: 昼食・おやつをまとめて入れる
+    { key: 'meals', to: '/record/daycare/meals', label: '食事一括' },
     // 段階2b（2026-10-22）: 活動・レクをまとめて記録
     { key: 'activity', to: '/record/daycare/bulk', label: '活動をまとめて' },
     // 段階3a（2026-10-23）: 個別機能訓練（配置と実施記録）

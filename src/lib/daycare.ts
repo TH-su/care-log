@@ -415,6 +415,30 @@ export const DAYCARE_VITAL_UNIT: Record<DaycareVitalField, string> = {
   pulse: '回/分',
   spo2: '%',
 }
+/** 表の列の見出し（定時バイタルの表と同じ短い呼び名。読み上げは DAYCARE_VITAL_LABEL・今日の画面の改善 2回目 2026-10-24） */
+export const DAYCARE_VITAL_HEAD: Record<DaycareVitalField, string> = {
+  temp: 'KT',
+  sys_bp: '上',
+  dia_bp: '下',
+  pulse: 'P',
+  spo2: 'SpO2',
+}
+
+/**
+ * 表の「状態」の列に出す短い印（今日の画面の改善 2回目）。kind は画面の保存の状態、pend は送信待ちの状態。
+ * 食い違い・止まり・拒否・失敗 → ▲ 要確認／送信中 → ↻ 送信中／送信待ち → ⚠ 未送信／保存できた → ✓ 保存済み／無し → null。
+ * 詳しい文と解き方のボタンは行の下に出す（SlotStatus）
+ */
+export function dcVitalSlotMark(
+  kind: 'saving' | 'saved' | 'queued' | 'held' | 'conflict' | 'error' | undefined,
+  pend: 'pending' | 'conflict' | 'rejected' | null,
+): { mark: string; text: string; tone: 'ok' | 'info' | 'warn' } | null {
+  if (kind === 'conflict' || kind === 'error' || kind === 'held' || pend === 'conflict' || pend === 'rejected') return { mark: '▲', text: '要確認', tone: 'warn' }
+  if (kind === 'saving') return { mark: '↻', text: '送信中', tone: 'info' }
+  if (kind === 'queued' || pend === 'pending') return { mark: '⚠', text: '未送信', tone: 'warn' }
+  if (kind === 'saved') return { mark: '✓', text: '保存済み', tone: 'ok' }
+  return null
+}
 
 /** その欄の桁数（入れた時点で決まる）。体温は小数点なしなら3桁 */
 function digitsWanted(field: DaycareVitalField, first: string): number {

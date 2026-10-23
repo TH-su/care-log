@@ -16,7 +16,7 @@
 //   saveVitalEdits の入口で効く）／氏名・値を localStorage・console に出さない（保存するのは絞り込みの既知値だけ）／
 //   色だけに頼らない（記号＋言葉）／押す所は 44px 以上・テンキーは 56px
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   DbError,
   FORBIDDEN_REASON,
@@ -48,9 +48,11 @@ import { registerUnsaved } from '../lib/leaveGuard'
 import { DaycareNav } from './DaycarePage'
 import {
   DAYCARE_VITAL_FIELDS,
+  DAYCARE_VITAL_HEAD,
   DAYCARE_VITAL_LABEL,
   DAYCARE_VITAL_UNIT,
   DC_VITALS_FILTERS,
+  dcVitalSlotMark,
   LEVEL_WORD,
   bpPairError,
   buildDaycareBoard,
@@ -143,6 +145,17 @@ interface Active {
 
 const fmtVal = (f: DaycareVitalField, v: number | null | undefined): string =>
   v === null || v === undefined ? '—' : f === 'temp' ? v.toFixed(1) : String(v)
+
+/**
+ * テンキーの数字の並び（今日の画面の改善 2回目・2026-10-24）: 定時バイタルと同じ「数字3列（1 2 3 が上）＋右にボタン」。
+ * 押した時の動き（press）と右のボタンの文言（次へ・未測定・閉じる）は変えない
+ */
+const DC_KEYPAD_KEYS: readonly (readonly [string, string])[] = [
+  ['1', '1'], ['2', '2'], ['3', '3'],
+  ['4', '4'], ['5', '5'], ['6', '6'],
+  ['7', '7'], ['8', '8'], ['9', '9'],
+  ['.', '.'], ['0', '0'], ['back', '⌫'],
+]
 
 function levelTone(lv: Level): string {
   if (lv === 'danger-high' || lv === 'danger-low') return 'border-2 border-danger bg-danger-bg'
@@ -811,6 +824,50 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     await saveSlot(slot, edits, base)
   }
 
+  // ── 表の横スクロールの枠（今日の画面の改善 2回目・定時バイタルと同じ）。表が枠より広い（横にスクロールできる）時だけ手がかりを出す ──
+  const [tableBox, setTableBox] = useState<HTMLDivElement | null>(null)
+  const [tableScrolls, setTableScrolls] = useState(false)
+  /** 表の枠の幅（行の下の詳しい文を、この幅で折り返して左に残すため） */
+  const [tableBoxWidth, setTableBoxWidth] = useState(0)
+  useEffect(() => {
+    const el = tableBox
+    if (!el) return
+    const check = () => {
+      setTableScrolls(el.scrollWidth > el.clientWidth + 1)
+      setTableBoxWidth(el.clientWidth)
+    }
+    check()
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', check)
+      return () => window.removeEventListener('resize', check)
+    }
+    // 枠（画面幅・文字の大きさ）と表（行の増減）の両方の大きさの変化で測り直す
+    const ro = new ResizeObserver(check)
+    ro.observe(el)
+    if (el.firstElementChild) ro.observe(el.firstElementChild)
+    return () => ro.disconnect()
+  }, [tableBox])
+
+  // ── テンキーの高さ（今日の画面の改善 2回目）: 表の下に同じ高さの余白をとり、最後の行もテンキーの上へ送れるようにする（文字の大きさで変わるので測る） ──
+  const [kpBox, setKpBox] = useState<HTMLElement | null>(null)
+  const [kpHeight, setKpHeight] = useState(0)
+  useEffect(() => {
+    const el = kpBox
+    if (!el) {
+      setKpHeight(0)
+      return
+    }
+    const check = () => setKpHeight(Math.ceil(el.getBoundingClientRect().height))
+    check()
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', check)
+      return () => window.removeEventListener('resize', check)
+    }
+    const ro = new ResizeObserver(check)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [kpBox])
+
   // ── 描画 ──
   const header = (
     <div className="space-y-3">
@@ -953,64 +1010,79 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
 
   const keypad =
     active !== null && activeSlot !== null ? (
-      <section
-        aria-label="テンキー"
-        className="fixed inset-x-0 bottom-0 z-40 border-t border-border-strong bg-surface p-3 lg:sticky lg:top-20 lg:z-auto lg:w-80 lg:shrink-0 lg:rounded-lg lg:border"
-      >
-        <div className="mb-2" aria-live="polite">
-          <p className="text-base text-ink">
-            {nameOf(active.residentId)}・{DAYCARE_VITAL_LABEL[active.field]}
-            {active.seq > 1 ? `（再測定 ${active.seq - 1}）` : ''}
-          </p>
-          <p className="font-num text-2xl font-bold text-ink">
-            {buf === '' ? '—' : buf}
-            <span className="ml-1 text-base font-normal text-ink2">{DAYCARE_VITAL_UNIT[active.field]}</span>
-          </p>
-          {kpError !== null ? (
-            <p role="alert" className="mt-1 rounded border border-danger bg-danger-bg p-2 text-sm text-ink">
-              <span aria-hidden="true">▲ </span>
-              {kpError}
-            </p>
-          ) : (
-            <p className="text-sm text-ink2">
-              {(() => {
-                const cur = valueOf(activeSlot, active.field).v
-                const pv = prevOf(active.residentId)[active.field]
-                const parts: string[] = []
-                if (cur !== null) parts.push(`いまの値 ${fmtVal(active.field, cur)}`)
-                if (pv !== undefined) parts.push(`前回 ${fmtVal(active.field, pv.value)}`)
-                if (active.field === 'temp') parts.push('「365」で 36.5')
-                return parts.join('・')
-              })()}
-            </p>
-          )}
-        </div>
-        <div className="grid grid-cols-4 gap-gap">
-          {[
-            ['7', '7'], ['8', '8'], ['9', '9'], ['back', '⌫'],
-            ['4', '4'], ['5', '5'], ['6', '6'], ['skip', '未測定'],
-            ['1', '1'], ['2', '2'], ['3', '3'], ['next', '次へ'],
-            ['0', '0'], ['.', '.'], ['close', '閉じる'],
-          ].map(([k, label]) => (
-            <button
-              key={k}
-              type="button"
-              onClick={() => press(k)}
-              aria-label={k === 'back' ? '1文字消す' : k === 'skip' ? '未測定（空欄のまま次の欄へ）' : k === '.' ? '小数点' : undefined}
-              disabled={k === '.' && active.field !== 'temp'}
-              className={`min-h-14 rounded border text-xl ${
-                k === 'next'
-                  ? 'border-primary bg-primary font-bold text-primary-ink'
-                  : k === 'close'
-                    ? 'col-span-2 border-border-strong bg-surface text-base text-ink'
-                    : k === 'skip'
-                      ? 'border-border-strong bg-surface2 text-base text-ink'
-                      : 'border-border-strong bg-surface2 font-num text-ink disabled:text-ink3'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
+      // 今日の画面の改善 2回目（2026-10-24）: どの幅でも画面の下に出す（定時バイタルと同じ置き場所と並び）。
+      // 押した時の動き（桁がそろうと次へ・SpO2 の次は次の方の体温・血圧の上は下と組で送る）と文言は変えない
+      <section ref={setKpBox} aria-label="テンキー" className="dc-keypad fixed inset-x-0 bottom-14 z-40 border-t border-border-strong bg-surface p-3 lg:bottom-0">
+        <div className="mx-auto max-w-md">
+          <div className="mb-2" aria-live="polite">
+            <div className="flex flex-wrap items-baseline justify-between gap-gap">
+              <p className="text-base text-ink">
+                <span className="font-bold">{nameOf(active.residentId)}</span>
+                <span className="ml-2">
+                  {DAYCARE_VITAL_LABEL[active.field]}
+                  {active.seq > 1 ? `（再測定 ${active.seq - 1}）` : ''}
+                </span>
+              </p>
+              <p className="font-num text-2xl font-bold text-ink">
+                {buf === '' ? '—' : buf}
+                <span className="ml-1 text-base font-normal text-ink2">{DAYCARE_VITAL_UNIT[active.field]}</span>
+              </p>
+            </div>
+            {kpError !== null ? (
+              <p role="alert" className="mt-1 rounded border border-danger bg-danger-bg p-2 text-sm text-ink">
+                <span aria-hidden="true">▲ </span>
+                {kpError}
+              </p>
+            ) : (
+              <p className="text-sm text-ink2">
+                {(() => {
+                  const cur = valueOf(activeSlot, active.field).v
+                  const pv = prevOf(active.residentId)[active.field]
+                  const parts: string[] = []
+                  if (cur !== null) parts.push(`いまの値 ${fmtVal(active.field, cur)}`)
+                  if (pv !== undefined) parts.push(`前回 ${fmtVal(active.field, pv.value)}`)
+                  if (active.field === 'temp') parts.push('「365」で 36.5')
+                  return parts.join('・')
+                })()}
+              </p>
+            )}
+          </div>
+          <div className="flex gap-gap">
+            <div className="grid grid-cols-3 gap-gap">
+              {DC_KEYPAD_KEYS.map(([k, label]) => (
+                <button
+                  key={k}
+                  type="button"
+                  onClick={() => press(k)}
+                  aria-label={k === 'back' ? '1文字消す' : k === '.' ? '小数点' : undefined}
+                  disabled={k === '.' && active.field !== 'temp'}
+                  className="min-h-16 w-14 rounded border border-border-strong bg-surface2 font-num text-xl font-bold text-ink disabled:text-ink3"
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="flex flex-1 flex-col gap-gap">
+              <button
+                type="button"
+                onClick={() => press('next')}
+                className="min-h-16 rounded border border-primary bg-primary px-3 text-xl font-bold text-primary-ink"
+              >
+                次へ
+              </button>
+              <button
+                type="button"
+                onClick={() => press('skip')}
+                aria-label="未測定（空欄のまま次の欄へ）"
+                className="min-h-tap rounded border border-border-strong bg-surface2 px-3 text-base text-ink"
+              >
+                未測定
+              </button>
+              <button type="button" onClick={() => press('close')} className="min-h-tap rounded border border-border-strong bg-surface px-3 text-base text-ink">
+                閉じる
+              </button>
+            </div>
+          </div>
         </div>
       </section>
     ) : null
@@ -1019,49 +1091,110 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     <div className="mx-auto w-full max-w-6xl space-y-4 p-4">
       {header}
       {limits.failed ? <VitalLimitsFailedNote className="" onRetry={() => void limits.refresh()} /> : null}
-      <div className="lg:flex lg:items-start lg:gap-4">
-        <div className={`min-w-0 flex-1 space-y-3 ${active !== null ? 'pb-96 lg:pb-0' : ''}`}>
-          {shownRows.length === 0 ? (
-            <div className="rounded-lg border border-border bg-surface p-4">
-              <p className="text-base text-ink">
-                {filter === 'present' ? '到着した方がまだいません。' : 'この日の対象の方がいません。'}
+      <div className="min-w-0 space-y-2">
+        {shownRows.length === 0 ? (
+          <div className="rounded-lg border border-border bg-surface p-4">
+            <p className="text-base text-ink">
+              {filter === 'present' ? '到着した方がまだいません。' : 'この日の対象の方がいません。'}
+            </p>
+            <p className="mt-2 text-base text-ink2">「今日（到着・休み）」で到着を記録すると、ここに並びます。</p>
+          </div>
+        ) : (
+          <>
+            {/* 表が画面より広い時だけ出す手がかり（広い画面では出ない＝定時バイタルと同じ） */}
+            {tableScrolls ? (
+              <p className="text-sm text-ink2">
+                <span aria-hidden="true">⇆ </span>
+                表は横にスクロールできます（氏名の列は左に残ります）
               </p>
-              <p className="mt-2 text-base text-ink2">「今日（到着・休み）」で到着を記録すると、ここに並びます。</p>
-            </div>
-          ) : (
-            <ul className="space-y-3" aria-label="バイタルの一覧">
-              {shownRows.map((row) => {
-                const slots = slotsOf(row.residentId)
-                const prev = prevOf(row.residentId)
-                const target = targets.get(row.residentId)
-                const th = limits.lookup(row.residentId, data.day)
-                const own = th !== vitalThresholds()
-                return (
-                  <li key={row.residentId} className="rounded-lg border border-border bg-surface p-3">
-                    <div className="mb-2 flex flex-wrap items-baseline justify-between gap-gap">
-                      <p className="text-lg font-bold text-ink">{nameOf(row.residentId)}</p>
-                      <p className="text-sm text-ink2">
-                        {target?.spo2_warn_below != null
-                          ? `個別: SpO2 ${target.spo2_warn_below}/${target.spo2_danger_below}${own ? '・個人の基準' : ''}`
-                          : own
-                            ? '個人の基準'
-                            : '施設の基準'}
-                      </p>
-                    </div>
-                    {slots.map((slot, si) => {
+            ) : null}
+            {/* 今日の画面の改善 2回目（2026-10-24）: 定時バイタルと同じ1行1人の表。再測定はその方の行のすぐ下に「↳ 再測定 n」の行で足す。
+                横スクロールはこの枠の中だけ（ページ全体を広げない）。relative は表の中の読み上げ用の文字の基準をこの枠にするため */}
+            <div
+              ref={setTableBox}
+              role="region"
+              aria-label={`${fmtDayLabel(day)}のデイのバイタル入力表${tableScrolls ? '（横にスクロールできます）' : ''}`}
+              tabIndex={tableScrolls ? 0 : undefined}
+              className="relative overflow-x-auto"
+            >
+              <table className="w-full min-w-max border-collapse text-base">
+                <caption className="sr-only">{fmtDayLabel(day)}のデイのバイタル入力表</caption>
+                <thead>
+                  <tr className="border-b border-border-strong bg-surface2 text-left">
+                    {/* 氏名の列は横スクロールしても左に残す（sticky）。背景は見出し行と同じ色 */}
+                    <th scope="col" className="sticky left-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
+                      <span className="dc-vital-name block">氏名</span>
+                    </th>
+                    {DAYCARE_VITAL_FIELDS.map((f) => (
+                      <th key={f} scope="col" className="w-24 px-2 py-2 text-sm font-bold text-ink2">
+                        <span aria-hidden="true">{DAYCARE_VITAL_HEAD[f]}</span>
+                        <span className="sr-only">{DAYCARE_VITAL_LABEL[f]}</span>
+                      </th>
+                    ))}
+                    <th scope="col" className="w-28 px-2 py-2 text-sm font-bold text-ink2">
+                      再測定
+                    </th>
+                    <th scope="col" className="w-28 px-2 py-2 text-sm font-bold text-ink2">
+                      状態
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {shownRows.map((row) => {
+                    const slots = slotsOf(row.residentId)
+                    const prev = prevOf(row.residentId)
+                    const target = targets.get(row.residentId)
+                    const th = limits.lookup(row.residentId, data.day)
+                    const own = th !== vitalThresholds()
+                    const basis =
+                      target?.spo2_warn_below != null
+                        ? `個別: SpO2 ${target.spo2_warn_below}/${target.spo2_danger_below}${own ? '・個人の基準' : ''}`
+                        : own
+                          ? '個人の基準'
+                          : '施設の基準'
+                    return slots.map((slot, si) => {
                       const st = slotState.get(slot.key)
                       const pend = pendingRow('vitals', targetOf(slot))
                       const vals: Partial<Record<DaycareVitalField, number | null>> = {}
                       for (const f of DAYCARE_VITAL_FIELDS) vals[f] = valueOf(slot, f).v
                       const abnormal = vitalNeedsRecheck(vals, target, th)
                       const isLast = si === slots.length - 1
+                      const shown: SlotState | undefined =
+                        (st === undefined || st.kind === 'held') && pend !== null && pend.state === 'conflict' && pend.conflicts.length > 0
+                          ? { kind: 'conflict', conflicts: withCurrentMine(slot, pend.conflicts) }
+                          : st !== undefined && st.kind === 'conflict'
+                            ? { kind: 'conflict', conflicts: withCurrentMine(slot, st.conflicts) }
+                            : st
+                      const mark = dcVitalSlotMark(shown?.kind, pend?.state ?? null)
+                      // 詳しい文と解き方のボタンは、行の下の1行に出す（送信中は状態の列の印だけ）。保存済みでも送信待ちが動いていれば
+                      // （同じ端末の別のタブなど）その文を出す（前の SlotStatus と同じ出し方＝#45 の反証 軽4）
+                      const detail = shown?.kind === 'saving' ? false : (shown !== undefined && shown.kind !== 'saved') || pend !== null
+                      const time = slot.vital?.measured_at ? slot.vital.measured_at.slice(0, 5) : null
                       return (
-                        <div key={slot.key} className={si > 0 ? 'mt-3 border-t border-border pt-3' : ''}>
-                          <p className="mb-1 text-sm text-ink2">
-                            {si === 0 ? '1回目' : `↳ 再測定 ${si}`}
-                            {slot.vital?.measured_at ? `（${slot.vital.measured_at.slice(0, 5)}）` : ''}
-                          </p>
-                          <div className="grid grid-cols-5 gap-gap">
+                        <Fragment key={slot.key}>
+                          <tr className={`align-middle ${detail || !isLast ? '' : 'border-b border-border'}`}>
+                            {/* 氏名の列は横スクロールしても左に残す（sticky）。背景はページの地の色（下を流れる欄を透かさない） */}
+                            <th scope="row" className="sticky left-0 z-20 bg-bg px-2 py-1 text-left font-normal">
+                              {/* 氏名の列の幅は dc-vital-name で決める（札が長くても列を広げず、中で折り返す＝確認の反証 重） */}
+                              <div className="dc-vital-name">
+                                {si === 0 ? (
+                                  <>
+                                    <span className="block text-base font-bold text-ink">{nameOf(row.residentId)}</span>
+                                    <span className="block text-sm text-ink2">{basis}</span>
+                                    {slots.length > 1 || time !== null ? (
+                                      <span className="block text-sm text-ink2">1回目{time !== null ? `（${time}）` : ''}</span>
+                                    ) : null}
+                                  </>
+                                ) : (
+                                  <span className="block text-sm text-ink2">
+                                    <span aria-hidden="true">↳ </span>
+                                    再測定 {si}
+                                    {time !== null ? `（${time}）` : ''}
+                                    <span className="sr-only">：{nameOf(row.residentId)}</span>
+                                  </span>
+                                )}
+                              </div>
+                            </th>
                             {DAYCARE_VITAL_FIELDS.map((f) => {
                               const { v, local } = valueOf(slot, f)
                               const lv = vitalLevel(f, v, target, th)
@@ -1069,62 +1202,85 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                               const pv = prev[f]
                               const word = lv === null ? '' : LEVEL_WORD[lv]
                               return (
-                                <button
-                                  key={f}
-                                  type="button"
-                                  onClick={() => openCell(slot, f)}
-                                  disabled={!canWrite}
-                                  aria-label={`${nameOf(row.residentId)} ${DAYCARE_VITAL_LABEL[f]} ${v === null ? '未入力' : fmtVal(f, v)}${word ? ` ${word}` : ''}${pv ? `、前回 ${fmtVal(f, pv.value)}` : ''}${local ? '、未送信' : ''}`}
-                                  className={`flex min-h-14 flex-col items-center justify-center rounded px-1 py-1 ${levelTone(lv)} ${
-                                    isActive ? 'outline outline-4 outline-focus' : ''
-                                  } disabled:opacity-100`}
-                                >
-                                  <span className="text-sm leading-tight text-ink2">{DAYCARE_VITAL_LABEL[f]}</span>
-                                  <span className="font-num text-xl font-bold text-ink">
-                                    {fmtVal(f, v)}
-                                    {lv !== null ? <span aria-hidden="true">{LEVEL_MARK[lv]}</span> : null}
-                                  </span>
-                                  {lv !== null ? <span className="text-sm font-bold leading-tight text-ink">{word.split('・')[0]}</span> : null}
-                                  <span className="text-sm leading-tight text-ink2">{pv ? `前回 ${fmtVal(f, pv.value)}` : '前回 —'}</span>
-                                </button>
+                                <td key={f} className="px-1 py-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => openCell(slot, f)}
+                                    disabled={!canWrite}
+                                    aria-label={`${nameOf(row.residentId)} ${DAYCARE_VITAL_LABEL[f]} ${v === null ? '未入力' : fmtVal(f, v)}${word ? ` ${word}` : ''}${pv ? `、前回 ${fmtVal(f, pv.value)}` : ''}${local ? '、未送信' : ''}`}
+                                    className={`flex min-h-14 w-full flex-col items-center justify-center rounded px-1 text-center ${
+                                      isActive ? 'border-2 border-primary bg-accent-bg' : levelTone(lv)
+                                    } disabled:opacity-100`}
+                                  >
+                                    {v === null ? (
+                                      // 空の欄だけ前回の値を薄く出す（定時バイタルと同じ・親の回答 4）
+                                      <span className="font-num text-sm text-ink3" aria-hidden="true">
+                                        {pv ? `前回${fmtVal(f, pv.value)}` : '—'}
+                                      </span>
+                                    ) : (
+                                      <>
+                                        <span className="font-num text-xl font-bold text-ink">
+                                          {fmtVal(f, v)}
+                                          {lv !== null ? <span aria-hidden="true">{LEVEL_MARK[lv]}</span> : null}
+                                        </span>
+                                        {lv !== null ? <span className="text-sm font-bold leading-tight text-ink">{word.split('・')[0]}</span> : null}
+                                      </>
+                                    )}
+                                  </button>
+                                </td>
                               )
                             })}
-                          </div>
-                          <div className="mt-2 flex flex-wrap items-center gap-gap">
-                            {abnormal && isLast ? (
-                              <button
-                                type="button"
-                                onClick={() => addRecheck(row, slot)}
-                                disabled={!canWrite}
-                                className="min-h-tap rounded border-2 border-warn bg-warn-bg px-4 text-base font-bold text-ink disabled:opacity-60"
-                              >
-                                ＋再測定
-                              </button>
-                            ) : null}
-                            <SlotStatus
-                              st={
-                                (st === undefined || st.kind === 'held') && pend !== null && pend.state === 'conflict' && pend.conflicts.length > 0
-                                  ? { kind: 'conflict', conflicts: withCurrentMine(slot, pend.conflicts) }
-                                  : st !== undefined && st.kind === 'conflict'
-                                    ? { kind: 'conflict', conflicts: withCurrentMine(slot, st.conflicts) }
-                                    : st
-                              }
-                              pend={pend?.state ?? null}
-                              onTake={(c) => void resolveTake(slot, c)}
-                              onMine={(c) => void resolveMine(slot, c)}
-                            />
-                          </div>
-                        </div>
+                            <td className="px-1 py-1">
+                              {abnormal && isLast ? (
+                                <button
+                                  type="button"
+                                  onClick={() => addRecheck(row, slot)}
+                                  disabled={!canWrite}
+                                  aria-label={`${nameOf(row.residentId)}さんの再測定を足す`}
+                                  className="min-h-tap w-full rounded border-2 border-warn bg-warn-bg px-2 text-base font-bold text-ink disabled:opacity-60"
+                                >
+                                  ＋再測定
+                                </button>
+                              ) : null}
+                            </td>
+                            <td className="px-2 py-1">
+                              {mark !== null ? (
+                                // 送信中・保存済みも読み上げで知らせる（前の SlotStatus の role="status" と同じ＝#45 の反証 軽3）
+                                <span role="status" className={`text-sm font-bold ${mark.tone === 'ok' ? 'text-ok' : mark.tone === 'warn' ? 'text-warn' : 'text-ink2'}`}>
+                                  <span aria-hidden="true">{mark.mark} </span>
+                                  {mark.text}
+                                </span>
+                              ) : null}
+                            </td>
+                          </tr>
+                          {detail ? (
+                            <tr className={isLast ? 'border-b border-border' : ''}>
+                              {/* 詳しい文の行は表の幅を広げない（定時バイタルの F01 手直し 2026-10-10 と同じ形・#45 の反証 重1）。
+                                  表は自動の幅（min-w-max）なので、長い文の1行ぶんの幅が氏名の列に配られて表が広がり、
+                                  欄が sticky の氏名の列の下に隠れて押せなくなる。幅0＋最小100% の箱で表の幅の計算から外し、
+                                  文は表の枠の幅で折り返して、横スクロールしても左に残す（sticky） */}
+                              <td colSpan={DAYCARE_VITAL_FIELDS.length + 3} className="p-0">
+                                <div className="w-0 min-w-full">
+                                  <div className="sticky left-0 px-2 pb-2" style={{ maxWidth: tableBoxWidth > 0 ? tableBoxWidth : undefined }}>
+                                    <SlotStatus st={shown} pend={pend?.state ?? null} onTake={(c) => void resolveTake(slot, c)} onMine={(c) => void resolveMine(slot, c)} />
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          ) : null}
+                        </Fragment>
                       )
-                    })}
-                  </li>
-                )
-              })}
-            </ul>
-          )}
-        </div>
-        {keypad}
+                    })
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
       </div>
+      {/* テンキーを出している間は、テンキーと同じ高さの余白をとる（最後の行もテンキーに隠れない） */}
+      {active !== null ? <div aria-hidden="true" style={{ height: kpHeight }} /> : null}
+      {keypad}
       <ConfirmDialog
         open={discardAsk}
         title="保存せずに移りますか"
