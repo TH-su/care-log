@@ -277,8 +277,10 @@ export function BathMonthPage() {
           {LEGEND}（未は今日まで）
         </p>
         <p className="mt-1 text-sm">
-          <Link to="/record/bath" className="inline-flex min-h-tap items-center text-link">
-            入浴の記録を開く<span aria-hidden="true"> ›</span>
+          {/* 2026-10-24 行き先を入浴の画面（/record/bath）からデイ せせらぎの今日の画面へ（デイの入浴はそこで記録する・代表者の回答）。
+              入浴の画面のルートは残す（ブックマークで開ける） */}
+          <Link to="/record/daycare" className="inline-flex min-h-tap items-center text-link">
+            デイ せせらぎの今日を開く<span aria-hidden="true"> ›</span>
           </Link>
         </p>
       </SectionCard>

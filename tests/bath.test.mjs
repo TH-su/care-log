@@ -436,6 +436,11 @@ if (B === null) {
       assert.match(app, /if \(pathname === '\/record\/bath'\) return '入浴（デイ）'/)
       assert.match(read('../src/pages/BathRecordPage.tsx'), /getKindInputGate\('bath'\)/)
     })
+    it('入浴 月次表のリンクはデイ せせらぎの今日の画面へ（2026-10-24 代表者の回答・入浴の画面へのリンクは無い）', () => {
+      const month = read('../src/pages/BathMonthPage.tsx')
+      assert.match(month, /<Link to="\/record\/daycare" className="inline-flex min-h-tap items-center text-link">\n\s*デイ せせらぎの今日を開く<span aria-hidden="true"> ›<\/span>/)
+      assert.equal(/\/record\/bath|入浴の記録を開く/.test(month.replace(/\/\/.*$/gm, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '')), false)
+    })
     it('★入浴は「入浴した／入浴していない」の2つだけ（2026-10-01）: 記録画面・月次表・カルテ', () => {
       const page = read('../src/pages/BathRecordPage.tsx')
       assert.match(page, /\{BATH_SHOWN\.map\(\(r\) =>/)
