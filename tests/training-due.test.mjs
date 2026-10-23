@@ -184,6 +184,51 @@ if (D === null) {
     })
   })
 
+  describe('計画の見直しの期限・今日の対象者の並び・カードの1行（段階3c）', () => {
+    const today = '2026-10-23'
+    const rows = [
+      copyRow({ resident_id: 1, latest_plan_date: '2026-08-01', next_due: '2026-11-01' }), // 間近
+      copyRow({ resident_id: 2, latest_plan_date: '2026-06-01', next_due: '2026-09-01' }), // 期限切れ
+      copyRow({ resident_id: 3, latest_plan_date: null, next_due: null }), // 計画なし
+      copyRow({ resident_id: 4, latest_plan_date: '2026-09-01', next_due: '2026-12-01', stop_reason: 'stopped', stop_from: '2026-10-23' }), // 終了
+      copyRow({ resident_id: 5, latest_plan_date: '2027-01-31', next_due: null }), // 期限が空 → 作成日から計算し直す
+      copyRow({ resident_id: 6, latest_plan_date: '2026-09-15', next_due: '2026-12-15' }), // 期限内
+    ]
+    it('見直しの一覧: 終了は出さない・作成日が無ければ計画なし・期限が空なら作成日と規則から計算し直す・並びは 期限切れ → 間近 → 計画なし → 期限内', () => {
+      const list = D.reviewDueList({ copy: rows, settings: null, people: [{ id: 6, active: true }], today })
+      assert.deepEqual(list.map((r) => [r.residentId, r.state, r.due]), [
+        [2, 'overdue', '2026-09-01'],
+        [1, 'warn', '2026-11-01'],
+        [3, 'none', ''],
+        [6, 'ok', '2026-12-15'],
+        [5, 'ok', '2027-04-30'],
+      ])
+      assert.deepEqual(D.reviewDueCounts(list), { overdue: 1, warn: 1, none: 1 })
+      const days90 = D.reviewDueList({ copy: [rows[4]], settings: { due_rule: 'days90', warn_days: 28, synced_at: null }, people: [], today })
+      assert.equal(days90[0].due, '2027-05-01', '規則は写しの設定から')
+      assert.deepEqual(D.reviewDueList({ copy: rows, settings: null, people: [{ id: 6, active: false }], today }).map((r) => r.residentId).includes(6), false, '在籍でない方は出さない')
+    })
+    it('対象者の並び: 写しを読めない・0件の時は元の並びと知らせ。行がある時は計画がある方を上に（中は元の並び）、下の方には理由', () => {
+      const targets = [7, 3, 1, 4, 2]
+      assert.deepEqual(D.orderTargetsByPlan({ targets, copy: 'error', people: [], today }), { order: targets, noPlan: new Map(), notice: 'error' })
+      assert.deepEqual(D.orderTargetsByPlan({ targets, copy: { rows: [], settings: null }, people: [], today }), { order: targets, noPlan: new Map(), notice: 'empty' })
+      const r = D.orderTargetsByPlan({ targets, copy: { rows, settings: null }, people: [], today })
+      assert.deepEqual(r.order, [1, 2, 7, 3, 4])
+      assert.deepEqual([...r.noPlan.entries()], [[7, 'nocopy'], [3, 'noplan'], [4, 'ended']])
+      assert.equal(r.notice, null)
+      assert.equal(D.TARGET_NO_PLAN_LABEL.ended, '計画書の通知を止めています')
+    })
+    it('カードの見直しの1行: 読めない・写しに無い・計画なし・期限と状態・終了は出さない', () => {
+      assert.deepEqual(D.reviewCardLine({ copy: 'error', residentId: 1, active: true, today }), { kind: 'error' })
+      assert.deepEqual(D.reviewCardLine({ copy: { rows, settings: null }, residentId: 9, active: true, today }), { kind: 'nocopy' })
+      assert.deepEqual(D.reviewCardLine({ copy: { rows: [], settings: null }, residentId: 1, active: true, today }), { kind: 'nocopy' })
+      assert.deepEqual(D.reviewCardLine({ copy: { rows, settings: null }, residentId: 3, active: true, today }), { kind: 'none' })
+      assert.deepEqual(D.reviewCardLine({ copy: { rows, settings: null }, residentId: 1, active: true, today }), { kind: 'due', due: '2026-11-01', state: 'warn' })
+      assert.equal(D.reviewCardLine({ copy: { rows, settings: null }, residentId: 4, active: true, today }), null)
+      assert.equal(D.reviewCardLine({ copy: { rows, settings: null }, residentId: 1, active: false, today }), null)
+    })
+  })
+
   describe('静的検査', () => {
     it('純ロジックは時刻を読まない・端末に残さない（今日は呼び出し側が渡す）', () => {
       const src = readFileSync(new URL('../src/lib/trainingDue.ts', import.meta.url), 'utf8')

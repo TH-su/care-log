@@ -822,6 +822,8 @@ export const LS = {
    * 利用者・期限・記録は保存しない
    */
   dcTrainingDueOpen: 'cl_dcTrainingDueOpen',
+  /** デイの機能訓練の画面で、計画の見直しの期限の一覧を開いているか（'1'／'0'・2026-10-23 デイ段階3c・UI 状態のみ） */
+  dcTrainingReviewOpen: 'cl_dcTrainingReviewOpen',
 } as const
 
 /**

@@ -119,9 +119,12 @@ describe('静的検査（段階3b の規律）', () => {
     const fetchV = db.slice(db.indexOf('export async function fetchHomeVisits'), db.indexOf('export async function fetchTrainingDueCopy'))
     assert.doesNotMatch(fetchV, /\.gte\(|\.lt\(/)
     assert.match(fetchV, /\.limit\(DAYCARE_HOME_VISIT_ROWS\)/)
-    // 写しは読むだけ（3b では写しの表・設定の表・写しの関数へ書かない）
+    // 写しの表・設定の表へは直接書かない。写しの関数を呼ぶのは 3c の syncTrainingDue の1か所だけ（3b の読み取りからは呼ばない）
     assert.doesNotMatch(db, /from\('daycare_training_due(_settings)?'\)\.(insert|update|upsert|delete)/)
-    assert.doesNotMatch(db, /rpc\('daycare_training_due_sync'/)
+    assert.equal((db.match(/rpc\('daycare_training_due_sync'/g) ?? []).length, 1)
+    const syncFn = db.slice(db.indexOf('export async function syncTrainingDue'), db.indexOf('// ── デイ（せせらぎ）の記録 段階2c'))
+    assert.match(syncFn, /rpc\('daycare_training_due_sync'/)
+    assert.doesNotMatch(db.slice(db.indexOf('export async function fetchTrainingDueCopy'), db.indexOf('export type HomeVisitAdd')), /rpc\(|\.insert\(|\.update\(/)
     // 未来の日は送らない
     assert.match(db, /if \(f\.visited_on > today \|\| \(f\.explained_on !== null && f\.explained_on > today\)\) throw new DbError\('server', HOME_VISIT_MSG\.future\)/)
   })
@@ -168,7 +171,8 @@ describe('静的検査（段階3b の規律）', () => {
     assert.match(code('../src/components/DaycareTrainingCard.tsx'), /homeVisitCardLine\(\{ visits: visit\.visits, copy: visit\.copy, residentId, active, today \}\)/)
   })
   it('types.ts は LS に1行足すだけ（UI 状態のキー）', () => {
-    assert.match(read('../src/lib/types.ts'), /dcTrainingDueOpen: 'cl_dcTrainingDueOpen',\n\} as const/)
+    // 段階3c で後ろに dcTrainingReviewOpen が続く（固定し直し・意図は同じ＝UI 状態のキーを1つ足しただけ）
+    assert.match(read('../src/lib/types.ts'), /\n {2}dcTrainingDueOpen: 'cl_dcTrainingDueOpen',\n/)
   })
   it('機能訓練の画面: 区画を配置と対象者のあいだに置く・居宅訪問は過去の日の守りを受けない（旗と記録者だけ）', () => {
     const p = code('../src/pages/DaycareTrainingPage.tsx')
