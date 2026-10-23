@@ -1025,6 +1025,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
         today={today}
         refreshKey={reloadKey}
         staffName={(id) => (staff ?? []).find((s) => s.id === id)?.name ?? `職員ID ${id}`}
+        active={resident?.active}
       />
 
       <section aria-labelledby="h-ex" className={sectionCls}>

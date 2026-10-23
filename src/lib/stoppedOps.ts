@@ -20,6 +20,7 @@ import {
 } from './types'
 import { ACTIVITY_PARTICIPATION_LABEL } from './daycareActivity'
 import { STAFFING_ROLE_LABEL, TRAINING_CANCEL_REASON_LABEL, TRAINING_RESULT_LABEL } from './daycareTraining'
+import { EXPLAINED_TO_LABEL, HOME_VISIT_PURPOSE_LABEL } from './daycareHomeVisit'
 
 /** listStoppedOps の1件のうち、言葉にするのに使う分（db.ts の StoppedOp と同じ形） */
 export interface StoppedOpLike {
@@ -46,6 +47,7 @@ export const STOPPED_TABLE_LABEL: Record<string, string> = {
   daycare_activity_log: 'デイの活動',
   daycare_training_sessions: 'デイの機能訓練',
   daycare_staffing: 'デイの配置',
+  daycare_home_visits: 'デイの居宅訪問',
 }
 
 /** 取り消し（deleted_at を付ける修正）か */
@@ -78,7 +80,7 @@ export function stoppedOpReason(op: Pick<StoppedOpLike, 'state' | 'errCode'>): s
 }
 
 /** 記録の日付になる列（表ごとに1つ） */
-const DAY_FIELDS: readonly string[] = ['bath_on', 'admin_on', 'taken_on', 'start_on', 'occurred_on', 'note_on', 'day']
+const DAY_FIELDS: readonly string[] = ['bath_on', 'admin_on', 'taken_on', 'start_on', 'occurred_on', 'note_on', 'day', 'visited_on']
 
 /** 値の言葉（ラベル付きの欄） */
 type FieldFmt = { label: string; fmt: (v: unknown) => string | null }
@@ -95,6 +97,13 @@ const hm = (v: unknown): string | null => {
   const d = new Date(v)
   if (Number.isNaN(d.getTime())) return null
   return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+/** 日付の欄（'YYYY-MM-DD' → 'm/d'） */
+const md = (v: unknown): string | null => {
+  if (typeof v !== 'string') return null
+  const m = /^\d{4}-(\d{2})-(\d{2})/.exec(v)
+  return m ? `${Number(m[1])}/${Number(m[2])}` : null
 }
 
 /** 表ごとに見せる欄（ここに無い列は「ほか n 項目」とだけ数える） */
@@ -132,6 +141,14 @@ const FIELDS: Record<string, Record<string, FieldFmt>> = {
     cancel_reason: { label: '中止の理由', fmt: labelOf(TRAINING_CANCEL_REASON_LABEL) },
     cancel_note: { label: '中止の一言', fmt: text },
     note: { label: '備考', fmt: text },
+  },
+  daycare_home_visits: {
+    purpose: { label: '目的', fmt: labelOf(HOME_VISIT_PURPOSE_LABEL) },
+    life_status: { label: '生活の状況', fmt: text },
+    explained_to: { label: '説明した相手', fmt: labelOf(EXPLAINED_TO_LABEL) },
+    explained_on: { label: '説明した日', fmt: md },
+    explanation: { label: '説明の内容', fmt: text },
+    plan_revised: { label: '計画の見直し', fmt: (v) => (v === true ? '見直した' : v === false ? '見直していない' : null) },
   },
   daycare_staffing: {
     role: { label: '役割', fmt: labelOf(STAFFING_ROLE_LABEL) },
@@ -200,6 +217,7 @@ const INCIDENT_DETAIL_TEXT: ReadonlyArray<[string, string]> = [
 const STAFF_FIELDS: Record<string, Record<string, string>> = {
   daycare_training_sessions: { instructor_id: '指導員', assisted_by: '補助' },
   daycare_staffing: { staff_id: '職員' },
+  daycare_home_visits: { visitor_id: '訪問した職員' },
 }
 
 /** 言葉にしない列（行の印・記入者・版など） */
@@ -307,6 +325,7 @@ export function stoppedOpNeedsCompare(op: Pick<StoppedOpLike, 'table' | 'kind' |
       op.table === 'daycare_attendance' ||
       op.table === 'daycare_activity_log' ||
       op.table === 'daycare_training_sessions' ||
-      op.table === 'daycare_staffing')
+      op.table === 'daycare_staffing' ||
+      op.table === 'daycare_home_visits')
   )
 }

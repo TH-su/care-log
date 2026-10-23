@@ -817,6 +817,11 @@ export const LS = {
    * 'all'（予定＋記録のある方）。利用者・日付・入力値は保存しない
    */
   dcVitalsFilter: 'cl_dcVitalsFilter',
+  /**
+   * デイの機能訓練の画面で、居宅訪問の期限の一覧を開いているか（'1'＝開く／'0'＝閉じる・2026-10-23 デイ段階3b・UI 状態のみ）。
+   * 利用者・期限・記録は保存しない
+   */
+  dcTrainingDueOpen: 'cl_dcTrainingDueOpen',
 } as const
 
 /**
