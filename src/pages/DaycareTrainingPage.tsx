@@ -50,6 +50,7 @@ import { DaycareReviewDueSection } from '../components/DaycareReviewDueSection'
 import { TARGET_NO_PLAN_LABEL, targetPlanTags, weekScope } from '../lib/trainingDue'
 import type { DueCopyLoad, WeekScope } from '../lib/trainingDue'
 import { ConfirmDialog, ErrorBlock, LoadingBlock, ModalShell, useToast } from '../components/ui'
+import { writeDaycareHandoffFor } from '../lib/daycareHandoff'
 import { buildDaycareBoard, canEditPastDaycareTimes } from '../lib/daycare'
 import {
   STAFFING_ROLES,
@@ -600,7 +601,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
   const header = (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-gap">
-        <DaycareNav current="training" />
+        <DaycareNav current="training" handoff={() => writeDaycareHandoffFor({ rows: board?.rows ?? null, residents, boardDay: data?.day ?? null, today })} />
         <RecorderBar actorId={actorId} staff={staff ?? null} />
       </div>
       <div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">

@@ -36,6 +36,7 @@ import {
 import type { PendingActivityOp } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
 import { ErrorBlock, LoadingBlock } from '../components/ui'
+import { writeDaycareHandoffFor } from '../lib/daycareHandoff'
 import { buildDaycareBoard } from '../lib/daycare'
 import {
   ACTIVITY_LABEL_MAX,
@@ -275,7 +276,7 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
   const header = (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-gap">
-        <DaycareNav current="activity" />
+        <DaycareNav current="activity" handoff={() => writeDaycareHandoffFor({ rows: board?.rows ?? null, residents, boardDay: data?.day ?? null, today })} />
         <RecorderBar actorId={actorId} staff={staff ?? null} />
       </div>
       <div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">

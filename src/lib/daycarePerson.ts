@@ -88,10 +88,13 @@ const MASTER_ID_RE = /^[0-9A-Za-z_-]{1,32}$/
 /** 排泄ケアアプリ（care-log と同じサイトの haiben-record 配下＝th-su.github.io/haiben-record/。care-tools には無い。氏名は URL に載せない） */
 export const HAIBEN_APP_PATH = '../haiben-record/haiben-record.html'
 
-/** 排泄ケアアプリを開くリンク。source_id が受け付ける形でなければアプリの最初の画面を開く */
+/**
+ * 排泄ケアアプリを開くリンク（デイの1人の画面から）。2026-10-25（§9.7・§9.8 の A4）からデイの表示（?view=daycare）で開き、
+ * その方を入力で選ぶ（?masterId=）。source_id が受け付ける形でなければデイの表示だけを開く。押す前に受け渡しのキーを書く（画面側）
+ */
 export function haibenAppHref(sourceId: string | null | undefined): string {
   const id = typeof sourceId === 'string' ? sourceId.trim() : ''
-  return MASTER_ID_RE.test(id) ? `${HAIBEN_APP_PATH}?masterId=${encodeURIComponent(id)}` : HAIBEN_APP_PATH
+  return MASTER_ID_RE.test(id) ? `${HAIBEN_APP_PATH}?view=daycare&masterId=${encodeURIComponent(id)}` : `${HAIBEN_APP_PATH}?view=daycare`
 }
 
 /**

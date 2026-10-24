@@ -1,0 +1,19 @@
+// 写し元: TH-su/haiben-record の haiben-record.html（origin/main f84130e・2026-10-25）の受け渡しのキーの名前と hbDcParse を一字一句そのまま。
+// tests/daycare-handoff.test.mjs が node:vm で評価し、care-log の書く値を排泄ケアアプリの読み方で読めるかを確かめる。
+// 写し元が手元にある時は、写し元の同じ行・同じ関数がこの写しと一致するかも確かめる（排泄ケアアプリ側で読み方が変わったのに写しが古いままになるのを止める）
+//@----
+var DC_MARK_KEY='hbcr_daycare',DC_HANDOFF_KEY='su_daycare_handoff_v1';
+function hbDcParse(raw,td){
+  if(raw==null||raw==='')return {st:'none'};
+  var o=null;try{o=JSON.parse(String(raw))}catch(e){return {st:'bad'}}
+  if(!o||typeof o!=='object'||Array.isArray(o)||o.v!==1)return {st:'bad'};
+  if(typeof o.day!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(o.day)||!Array.isArray(o.mids)||o.mids.length>1000)return {st:'bad'};
+  var seen={},mids=[],badN=0;
+  o.mids.forEach(function(m){
+    var s=(typeof m==='string'||typeof m==='number')?String(m).trim():'';
+    if(!/^[0-9A-Za-z_-]{1,32}$/.test(s)){badN++;return}
+    if(seen[s])return;
+    seen[s]=1;mids.push(s);
+  });
+  return {st:o.day===td?'ok':'stale',day:o.day,mids:mids,badN:badN};
+}

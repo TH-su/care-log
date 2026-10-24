@@ -178,7 +178,13 @@ if (DP === null) {
           ['training', '/record/daycare/training', '機能訓練'],
         ],
       )
-      assert.match(code('../src/pages/DaycareMealsPage.tsx'), /<DaycareNav current="meals" \/>/)
+      // 2026-10-25（§9.7）: 食事一括の次に〔排泄〕（別のアプリ＝a・同じタブ・押した直前に受け渡しのキーを書く）
+      const full = p.slice(p.indexOf('export function DaycareNav'), p.indexOf('/** 予定の帯'))
+      assert.match(full, /\.\.\.\(it\.key === 'meals' \? \[excretion\] : \[\]\)/)
+      assert.match(full, /<a\s+key="excretion"\s+href=\{HAIBEN_DAYCARE_HREF\}\s+onClick=\{\(\) => handoff\?\.\(\)\}/)
+      assert.match(full, /排泄<span className="ml-1 text-sm">（別アプリ）<\/span>/)
+      assert.doesNotMatch(full, /target="_blank"/, '同じタブで開く')
+      assert.match(code('../src/pages/DaycareMealsPage.tsx'), /<DaycareNav current="meals" handoff=\{\(\) => writeDaycareHandoffFor\(\{ rows: board\?\.rows \?\? null, residents, boardDay: data\?\.day \?\? null, today \}\)\} \/>/)
     })
     it('App.tsx: ルート・画面名・遅れて読む', () => {
       const a = code('../src/App.tsx')
