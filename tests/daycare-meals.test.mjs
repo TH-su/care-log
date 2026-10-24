@@ -159,7 +159,7 @@ if (DP === null) {
     it('3状態: 読み込み中・読めない時の再試行・予定の方がいない時の案内', () => {
       assert.match(page, /<LoadingBlock label="その日の昼食・おやつを読み込んでいます…" \/>/)
       assert.match(page, /<ErrorBlock message=\{error\} onRetry=\{\(\) => setReloadKey\(\(n\) => n \+ 1\)\} \/>/)
-      assert.match(page, /この日の予定の方がいません（休み・入院中の方は出しません）。予定外で来た方は、今日の画面の〔予定にない方を追加〕から到着を記録すると、ここに出ます。/)
+      assert.match(page, /この日の予定の方がいません（休み・入院中の方は出しません）。予定外で来た方は、今日の画面の〔予定にない方を追加〕で足したカードを押し、〔予定外で到着〕を押すと、ここに出ます。/)
       assert.doesNotMatch(page, /来た方（在席・帰宅）/)
     })
   })

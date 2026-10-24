@@ -391,7 +391,7 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
         ) : null}
 
         {targets.length === 0 ? (
-          <p className="text-base text-ink2">この日の予定の方がいません（休み・入院中の方は出しません）。予定外で来た方は、今日の画面の〔予定にない方を追加〕から到着を記録すると、ここに出ます。</p>
+          <p className="text-base text-ink2">この日の予定の方がいません（休み・入院中の方は出しません）。予定外で来た方は、今日の画面の〔予定にない方を追加〕で足したカードを押し、〔予定外で到着〕を押すと、ここに出ます。</p>
         ) : (
           <fieldset className="space-y-1">
             <legend className="text-base font-bold text-ink">入れる方（{targets.length}人。外したい方だけ外してください）</legend>

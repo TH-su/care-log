@@ -1095,7 +1095,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
             <p className="text-base text-ink">
               {filter === 'all' ? 'この日のデイの予定・記録はまだありません。' : 'この日の予定の方がいません（休み・入院中の方は「全員」で出せます）。'}
             </p>
-            <p className="mt-2 text-base text-ink2">予定外で来た方は「今日（到着・休み）」の〔予定にない方を追加〕から到着を記録すると、ここに並びます。</p>
+            <p className="mt-2 text-base text-ink2">予定外で来た方は「今日（到着・休み）」の〔予定にない方を追加〕で足したカードを押し、〔予定外で到着〕を押すと、ここに並びます。</p>
           </div>
         ) : (
           <>

@@ -176,7 +176,7 @@ function PlanBanners({ data, notInRoster, unconfirmed, today }: { data: DayData;
   } else if (data.planSource === 'unknown') {
     out.push(
       <p key="unknown" role="alert" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">
-        <span aria-hidden="true">▲ </span>予定を確かめられません（週間計画の写しが読めません）。「予定なし」ではありません。来所した方は〔予定にない方を追加〕から記録できます。
+        <span aria-hidden="true">▲ </span>予定を確かめられません（週間計画の写しが読めません）。「予定なし」ではありません。来所した方は〔予定にない方を追加〕でカードを足し、そのカードを押した1人の画面の〔予定外で到着〕で記録できます。
       </p>,
     )
   } else if (data.planSource === 'none') {
@@ -196,7 +196,7 @@ function PlanBanners({ data, notInRoster, unconfirmed, today }: { data: DayData;
   if (unconfirmed > 0) {
     out.push(
       <p key="unc" role="status" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">
-        <span aria-hidden="true">▲ </span>週間計画と照合できない予定 {unconfirmed} 件（氏名の食い違いなど）。事務所で週間計画を確かめてください。来所した方は〔予定にない方を追加〕から記録できます。
+        <span aria-hidden="true">▲ </span>週間計画と照合できない予定 {unconfirmed} 件（氏名の食い違いなど）。事務所で週間計画を確かめてください。来所した方は〔予定にない方を追加〕でカードを足し、そのカードを押した1人の画面の〔予定外で到着〕で記録できます。
       </p>,
     )
   }
@@ -533,8 +533,8 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       {day < today ? (
         <p role="status" className="rounded-lg border border-border bg-surface2 p-3 text-sm text-ink2">
           {canEditPastDaycareTimes(role)
-            ? '過去の日を表示しています。到着・帰宅は時刻を入れて記録します（事務所のログイン）。行の時刻を押すと直せます。'
-            : '過去の日を表示しています。到着・帰宅の時刻は事務所のログインで入力・修正します。休み・入浴は記録できます（時刻が入っている方の休み・帰宅の取り消しは事務所）。'}
+            ? '過去の日を表示しています。到着・帰宅は、カードを押した1人の画面で時刻を入れて記録・修正します（事務所のログイン）。'
+            : '過去の日を表示しています。到着・帰宅の時刻は事務所のログインで入力・修正します。休みはカードの〔休み〕、入浴はカードを押した1人の画面で記録できます（時刻が入っている方の休み・帰宅の取り消しは事務所）。'}
         </p>
       ) : null}
       {gate !== null && !(gate.observed && gate.value === true) ? (
@@ -614,7 +614,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
               ? '予定を確かめられないため、一覧を出せません（「利用者なし」ではありません）。'
               : 'この日の予定・記録はまだありません。'}
           </p>
-          <p className="mt-2 text-base text-ink2">来所した方は〔予定にない方を追加〕から到着を記録できます。</p>
+          <p className="mt-2 text-base text-ink2">来所した方は〔予定にない方を追加〕でカードを足し、そのカードを押した1人の画面の〔予定外で到着〕で記録できます。</p>
         </div>
       ) : (
         // カード（2026-10-24 代表者の決定 §9.4 の1〜3）: 五十音の通しの並び（見出しなし）。カードを押すと1人の画面へ

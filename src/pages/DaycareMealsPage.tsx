@@ -41,7 +41,7 @@ import {
 import type { CellConflict, CellEditInput, DaycareMealRow, MealCellField, MealTarget } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
 import { ErrorBlock, LoadingBlock, useToast } from '../components/ui'
-import { buildDaycareBoard } from '../lib/daycare'
+import { buildDaycareBoard, fmtPlanTimes } from '../lib/daycare'
 import type { DaycareBoardRow } from '../lib/daycare'
 import {
   DAYCARE_MEAL_AMOUNTS,
@@ -97,14 +97,20 @@ type SaveState =
 
 const mealKeyOf = (t: MealTarget) => `${t.residentId}:${t.day}:${t.slot}`
 
-/** 帯の氏名の下の一言（在席 9:35／帰宅 15:30） */
-function cameText(row: DaycareBoardRow): string {
+/**
+ * 帯の氏名の下の一言（在席 9:35／帰宅 15:30／未到着（予定 9:30〜15:30））。2026-10-24（§9.4 の4）に到着の前の方も並ぶように
+ * なったので、到着の記録が無い方は「在席」と出さず「未到着」と出す（反証 中1）
+ */
+function cameText(row: Pick<DaycareBoardRow, 'state' | 'attendance' | 'plans' | 'planned' | 'dup'>): string {
   const a = row.attendance
   const hm = (t: string | null | undefined) => {
     const m = /^(\d{1,2}):(\d{2})/.exec(t ?? '')
     return m === null ? '' : ` ${Number(m[1])}:${m[2]}`
   }
-  return row.state === 'left' ? `帰宅${hm(a?.left_at)}` : `在席${hm(a?.arrived_at)}`
+  if (row.state === 'left') return `帰宅${hm(a?.left_at)}`
+  if (row.state === 'present') return `在席${hm(a?.arrived_at)}`
+  if (row.planned && !row.dup && row.plans.length === 1) return `未到着（予定 ${fmtPlanTimes(row.plans)}）`
+  return '未到着'
 }
 
 export interface DaycareMealsPageProps {
@@ -582,7 +588,7 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
 
         {came.length === 0 ? (
           <p className="rounded-lg border border-border bg-surface p-3 text-base text-ink2">
-            この日の予定の方がいません（休み・入院中の方は出しません）。予定外で来た方は、今日の画面の〔予定にない方を追加〕から到着を記録すると、ここに出ます。
+            この日の予定の方がいません（休み・入院中の方は出しません）。予定外で来た方は、今日の画面の〔予定にない方を追加〕で足したカードを押し、〔予定外で到着〕を押すと、ここに出ます。
           </p>
         ) : (
           <ul className="divide-y divide-border rounded-lg border border-border bg-surface">

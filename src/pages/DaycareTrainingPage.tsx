@@ -811,7 +811,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
           </p>
         ) : null}
         {targets.length === 0 ? (
-          <p className="text-base text-ink2">この日の予定の方がいません（休み・入院中の方は出しません）。予定外で来た方は、今日の画面の〔予定にない方を追加〕から到着を記録すると、ここに出ます。</p>
+          <p className="text-base text-ink2">この日の予定の方がいません（休み・入院中の方は出しません）。予定外で来た方は、今日の画面の〔予定にない方を追加〕で足したカードを押し、〔予定外で到着〕を押すと、ここに出ます。</p>
         ) : (
           <ul className="divide-y divide-border">
             {targets.map((rid) => {

@@ -4,7 +4,7 @@
 // 2026-10-24（代表者の決定 §9.4 の1〜2）: 今日の画面をカードにし、カードに残すボタンを〔休み〕（休みの方は〔取消〕）だけにしたので、
 //   到着・帰宅・時刻の直し・休みの理由・休みの取り消し・入浴の操作はこの画面で行う（今日の画面と同じ部品＝DaycareAttendanceOps）。
 //   書き込みの下準備（入浴の旗の観測・役割・休業日・開所の写し）はこの画面が自分で取る（入口の画面に頼らない＝M-085）。
-//   今日で記録の無い在籍中の方は「予定外」として〔到着〕を出す（今日の画面の〔予定にない方を追加〕から来た方）。
+//   今日で記録の無い在籍中の方は「予定外」として〔予定外で到着〕を出す（今日の画面の〔予定にない方を追加〕から来た方・〔休み〕は出さない）。
 // 〔前の方〕〔次の方〕は、一括の画面と同じ方（予定の方のうち休み・入院中を除く全員と予定外で来た方）を五十音で回る。
 //
 // 規律（段階1と同じ）:
@@ -213,9 +213,19 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   const residentRef = useRef(residentId)
   residentRef.current = residentId
 
+  // 時計（60秒ごと・画面に戻った時に今日を取り直す＝今日の画面と同じ）。到着・休みをこの画面で押すので、前の日のまま眠っていた端末を
+  // 起こした直後に前の日へ書かないように、画面に戻った時にもすぐ取り直す（反証 軽4）
   useEffect(() => {
-    const t = window.setInterval(() => setToday(todayIso()), 60_000)
-    return () => window.clearInterval(t)
+    const tick = () => setToday(todayIso())
+    const t = window.setInterval(tick, 60_000)
+    const vis = () => {
+      if (document.visibilityState === 'visible') tick()
+    }
+    document.addEventListener('visibilitychange', vis)
+    return () => {
+      window.clearInterval(t)
+      document.removeEventListener('visibilitychange', vis)
+    }
   }, [])
 
   useEffect(() => {
@@ -363,7 +373,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   }, [scheduleReload])
 
   const resident = useMemo(() => residents.find((r) => r.id === residentId) ?? null, [residents, residentId])
-  // 今日の画面の〔予定にない方を追加〕から来た方（予定も記録も無い在籍中の方）は、予定外として足す（〔到着〕を出す）
+  // 今日の画面の〔予定にない方を追加〕から来た方（予定も記録も無い在籍中の方）は、予定外として足す（〔予定外で到着〕を出す）
   const extraSelf = resident !== null && resident.active
   const board = useMemo(
     () =>
@@ -947,7 +957,10 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
             {row.state === 'absent' ? null : hospitalizedPlanned ? (
               <p className="text-base text-ink2">週間計画で入院中です。</p>
             ) : extraNoRecord && hospitalMeal ? (
-              <p className="text-base text-ink2">この日のデイの予定はありません。食事の記録が「入院」のため、ここからは到着を記録しません。</p>
+              <p className="text-base text-ink2">
+                {data.planSource === 'unknown' ? '予定を確かめられません（週間計画の写しが読めません）。' : 'この日のデイの予定はありません。'}
+                食事の記録が「入院」のため、ここからは到着を記録しません。
+              </p>
             ) : (
               <p className="text-base text-ink">
                 到着 <span className="font-num font-bold">{att?.arrived_at ? hmShort(att.arrived_at) : '—'}</span>
@@ -995,14 +1008,20 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
                       時刻を直す
                     </button>
                   ) : null}
-                  <button type="button" onClick={() => ops.onRest(row)} disabled={opsDisabled || (hasTimes(row) && !timesOk)} className={opRest}>
-                    休み
-                  </button>
+                  {/* 予定も記録も無い方（予定外で開いた方・日を送って予定の無い日に来た方）には〔休み〕を出さない（休みは予定の方の記録＝反証 軽2） */}
+                  {extraNoRecord ? null : (
+                    <button type="button" onClick={() => ops.onRest(row)} disabled={opsDisabled || (hasTimes(row) && !timesOk)} className={opRest}>
+                      休み
+                    </button>
+                  )}
                 </>
               )}
             </div>
             {extraNoRecord && !hospitalMeal ? (
-              <p className="text-sm text-ink2">この日のデイの予定はありません。来所した時だけ〔予定外で到着〕を押してください。</p>
+              <p className="text-sm text-ink2">
+                {data.planSource === 'unknown' ? '予定を確かめられません（週間計画の写しが読めません）。' : 'この日のデイの予定はありません。'}
+                来所した時だけ〔予定外で到着〕を押してください。
+              </p>
             ) : null}
             {!timesOk && day < today ? (
               <p className="text-sm text-ink2">過去の日の到着・帰宅の時刻は、事務所のログインで入力・修正します。</p>

@@ -1480,7 +1480,25 @@ if (DC === null) {
     it('案内の「どこで」は画面ごと（カード＝1人の画面へ・1人の画面＝この画面のボタン）。行の欄を指す古い案内は残さない', () => {
       assert.match(ops, /arriveHint: 'カードを押して、1人の画面の〔到着〕を押してください'/)
       assert.match(ops, /reasonHint: '理由は、カードを押した1人の画面で選べます'/)
-      for (const x of [ops, t, person]) assert.doesNotMatch(x, /行の入浴の欄|行の〔理由〕|行の〔休み〕|この行の入浴/)
+      for (const x of [ops, t, person]) assert.doesNotMatch(x, /行の入浴の欄|行の〔理由〕|行の〔休み〕|この行の入浴|行の時刻/)
+      // 反証 軽1: 〔予定にない方を追加〕の後は「カードを押して〔予定外で到着〕」（追加しただけでは到着にならない）。過去の日の帯も操作の新しい場所を指す
+      const pages = ['DaycarePage', 'DaycareVitalsPage', 'DaycareMealsPage', 'DaycareActivityBulkPage', 'DaycareTrainingPage'].map((f) => code(`../src/pages/${f}.tsx`))
+      for (const x of pages) {
+        assert.doesNotMatch(x, /〔予定にない方を追加〕から(到着を)?記録/)
+        if (x.includes('〔予定にない方を追加〕')) assert.match(x, /〔予定外で到着〕/)
+      }
+      assert.match(t, /'過去の日を表示しています。到着・帰宅は、カードを押した1人の画面で時刻を入れて記録・修正します（事務所のログイン）。'/)
+      assert.match(t, /休みはカードの〔休み〕、入浴はカードを押した1人の画面で記録できます/)
+    })
+    it('反証の直し: 食事一括で到着の前の方を「在席」と出さない（中1）・1人の画面は予定も記録も無い方に〔休み〕を出さない（軽2）・画面に戻った時に今日を取り直す（軽4）・ボタンは 44px（軽5）', () => {
+      const meals = code('../src/pages/DaycareMealsPage.tsx')
+      const ct = meals.slice(meals.indexOf('function cameText('), meals.indexOf('export interface DaycareMealsPageProps'))
+      assert.match(ct, /if \(row\.state === 'present'\) return `在席/)
+      assert.match(ct, /return `未到着（予定 \$\{fmtPlanTimes\(row\.plans\)\}）`/)
+      assert.match(ct, /return '未到着'/)
+      assert.match(att, /\{extraNoRecord \? null : \(\s*<button type="button" onClick=\{\(\) => ops\.onRest\(row\)\}/)
+      assert.match(person, /const vis = \(\) => \{\s*if \(document\.visibilityState === 'visible'\) tick\(\)\s*\}\s*document\.addEventListener\('visibilitychange', vis\)/)
+      for (const k of ['opBtn', 'opPrimary', 'opDanger', 'opRest']) assert.match(person, new RegExp(`const ${k} =\\s*'min-h-tap min-w-`))
     })
     it('0047 が無い DB の〔休み〕（理由の小窓）・8秒の〔元に戻す〕・入浴の「中止（欠席）」連動はカードの〔休み〕から今までどおり', () => {
       assert.match(ops, /`\$\{nameOf\(id\)\}さんを休みにしました（\$\{place\.reasonHint\}）`,\s*saved === null \? undefined : \(\) => void undoRest\(row, saved, before, beforeAutoBath, bath\),/)
