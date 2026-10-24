@@ -56,7 +56,18 @@ import { RecorderBar } from '../components/RecorderBar'
 import { DaycareActivitySection } from '../components/DaycareActivitySection'
 import { DaycareTrainingCard } from '../components/DaycareTrainingCard'
 import { hasTimes, hmShort, useDaycareAttendanceOps } from '../components/DaycareAttendanceOps'
-import { daycareDayMemo, memoForDay, memoWithAttendance, memoWithBath, memoWithoutAttendance, rememberDaycareDay, updateDaycareDayMemo } from '../lib/daycareDayMemo'
+import {
+  daycareDayMemo,
+  memoForDay,
+  memoWithAttendance,
+  memoWithBath,
+  memoWithFluid,
+  memoWithMeal,
+  memoWithoutAttendance,
+  memoWithoutFluid,
+  rememberDaycareDay,
+  updateDaycareDayMemo,
+} from '../lib/daycareDayMemo'
 import { useDaycareNoteMarks } from '../components/DaycareNoteMark'
 import { activityText } from '../lib/daycareActivity'
 import { activityMarkText, excretionMarkText, fluidMarkText, mealMarkText, vitalMarkText } from '../lib/daycareNoteMark'
@@ -123,8 +134,16 @@ interface PersonData {
   fluids: FluidIntake[]
   /** 食事・水分を読めたか（読めない時はその欄だけ「読めませんでした」・出欠と入浴の操作は動かす＝親の検収 軽3） */
   intakeOk: boolean
-  /** 電波が無く、今日の画面が読んだ控え（daycareDayMemo）で開いた時の控えの時刻。サーバーから読めた時は null */
+  /**
+   * 食事・水分を、この読み込みでサーバーから読めたか（親の反証 中1・2026-10-25）。intakeOk（表示に使える値がある）と分ける:
+   * 静かな読み直しで食事・水分だけ読めなかった時は、前の値を出す（intakeOk）が、送信待ちの水分の消し込み・控えへの書き込みは
+   * 「今回読めた」時だけ行う（古い一覧を最新として消し込まない）
+   */
+  intakeFresh: boolean
+  /** サーバーの控え（daycareDayMemo）で開いた時の控えの「読んだ時点」。サーバーから読めた時は null */
   memoAt: number | null
+  /** この一覧をサーバーから読めた時刻（控えに入れる「読んだ時点」） */
+  readAt: number
 }
 
 type MealSlot2 = 'lunch' | 'snack'
@@ -331,7 +350,10 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           meals: intake?.meals ?? (keep ? prev.meals : []),
           fluids: intake?.fluids ?? (keep ? prev.fluids : []),
           intakeOk: intake !== null || keep,
-          memoAt: null,
+          intakeFresh: intake !== null,
+          // 控えで開いた画面の食事・水分を残した時は、控えのまま（サーバーの値へ上げない＝帯を残し、控えに書き戻さない）
+          memoAt: keep ? prev.memoAt : null,
+          readAt: keep && prev.memoAt !== null ? prev.readAt : Date.now(),
         }
       })
       setError(null)
@@ -353,7 +375,9 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           meals: m.meals,
           fluids: m.fluids,
           intakeOk: m.intakeOk,
+          intakeFresh: false,
           memoAt: m.savedAt,
+          readAt: m.savedAt,
         })
         setError(null)
         return
@@ -411,9 +435,9 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
     }
   }, [scheduleReload])
 
-  // サーバーから読めた一覧は控えにも入れる（次の方へ移った先で電波が切れても開ける）。控えで開いた時・食事が読めない時は入れない
+  // サーバーから読めた一覧は控えにも入れる（次の方へ移った先で電波が切れても開ける）。控えで開いた時・食事を今回読めなかった時は入れない
   useEffect(() => {
-    if (data === null || data.memoAt !== null || !data.intakeOk || data.missing) return
+    if (data === null || data.memoAt !== null || !data.intakeFresh || data.missing) return
     rememberDaycareDay({
       day: data.day,
       planRows: data.planRows,
@@ -427,7 +451,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
       fluids: data.fluids,
       intakeOk: data.intakeOk,
       residents,
-      savedAt: Date.now(),
+      savedAt: data.readAt,
     })
   }, [data, residents])
 
@@ -628,6 +652,11 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
       if (r.row !== null) {
         const saved = r.row
         const wrote = r.applied.length > 0
+        // 画面と同じ形で控えも直す（親の反証 中2）。取り込み・画面の入力の印は、いま出している行から引き継ぐ
+        const oldRow = (data?.meals ?? []).find((m) => m.meal.id === saved.id)
+        updateDaycareDayMemo((m) =>
+          memoWithMeal(m, { meal: saved, imported: oldRow?.imported ?? false, editedInApp: (oldRow?.editedInApp ?? false) || wrote }),
+        )
         setData((prev) => {
           if (prev === null || prev.day !== saved.meal_on) return prev
           const old = prev.meals.find((m) => m.meal.id === saved.id)
@@ -738,8 +767,8 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   // 未送信が1件も無ければ、送信待ちの水分も残さない（届いた後に読み直している＝消し込みの取りこぼしの安全網）。
   // 取り消しを送った行は、その行の日の読み込みでサーバーから消えたら外す（別の日を読んだだけでは外さない＝2a の確認の反証 軽4）
   useEffect(() => {
-    // 食事・水分を読めていない時（空の一覧）は消し込まない（確認の反証 中2）
-    if (data === null || !data.intakeOk) return
+    // 食事・水分を今回サーバーから読めていない時（空の一覧・前の値・控えの値）は消し込まない（確認の反証 中2・親の反証 中1）
+    if (data === null || !data.intakeFresh) return
     const visible = data.fluids.filter((f) => !hiddenFluidIds.has(f.id))
     const nothingQueued = queuePending() === 0
     setQueuedFluids((prev) => {
@@ -768,7 +797,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
     setFluidMsg((m) => {
       if (m === null || m.queued === undefined) return m
       if ('add' in m.queued) return queuedFluids[m.key] === undefined ? null : m
-      if (data === null || !data.intakeOk || !m.key.endsWith(`:${data.day}`)) return m
+      if (data === null || !data.intakeFresh || !m.key.endsWith(`:${data.day}`)) return m
       const delId = m.queued.delId
       return data.fluids.some((f) => f.id === delId) ? m : null
     })
@@ -815,6 +844,8 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
         return
       }
       const saved = r
+      // 画面と同じ形で控えにも足す（控えで開いている間に書けた水分を、前の方・次の方で戻っても出す＝親の反証 中2）
+      updateDaycareDayMemo((m) => memoWithFluid(m, saved))
       setData((prev) => (prev === null || prev.day !== saved.taken_on ? prev : { ...prev, fluids: [...prev.fluids, saved] }))
       setFluidMsg((m) => (m !== null && m.key === key ? null : m))
       if (residentRef.current === rid && dayRef.current === d) {
@@ -842,6 +873,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
         const persisted = isQueuePersisted()
         setFluidMsg({ key, tone: persisted ? 'info' : 'danger', text: `${fmtMl(f.amount_ml)} の取り消し：${persisted ? MSG_QUEUED : MSG_NOT_PERSISTED}`, queued: { delId: f.id } })
       } else if (r === true) {
+        updateDaycareDayMemo((m) => memoWithoutFluid(m, f))
         setData((prev) => (prev === null ? prev : { ...prev, fluids: prev.fluids.filter((x) => x.id !== f.id) }))
         if (!fromUndo) show(`水分 ${fmtMl(f.amount_ml)} を取り消しました`)
       } else {
@@ -907,7 +939,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
         // 電波が無く、今日の画面が読んだ控えで開いた（親の検収 中1）。押した記録は送信待ちに積み、電波が戻ると送って読み直す
         <p role="status" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">
           <span aria-hidden="true">▲ </span>
-          電波が無いため、今日の一覧で読んだ時点（{new Date(data.memoAt).toTimeString().slice(0, 5)}）の内容です。押した記録は送信待ちに積みます（電波が戻ると自動で送信します）。
+          サーバーに届かないため、今日の一覧で読んだ時点（{new Date(data.memoAt).toTimeString().slice(0, 5)}）の内容です。押した記録は送信待ちに積みます（つながると自動で送信します）。
         </p>
       ) : null}
       {data?.missing ? (

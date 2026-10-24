@@ -91,6 +91,43 @@ describe('書けた記録を控えにも映す（親の確かめ 中2・2026-10-
   })
 })
 
+describe('食事・水分の控え（親の反証 中2・軽3・2026-10-25）', () => {
+  const fluid = (id, rid, day, ml) => ({ id, resident_id: rid, taken_on: day, taken_at: '10:00:00', amount_ml: ml, kind: 'water', note: null, recorded_by: null, rev: 1 })
+  const meal = (id, rid, day, extra = {}) => ({ id, resident_id: rid, meal_on: day, meal_slot: 'lunch', main_amount: null, side_amount: null, status: null, note: null, recorded_by: null, rev: 1, ...extra })
+  it('書けた水分・昼食を控えにも映す（A さんの水分 → 別の方 → 戻るで残る）・取り消しは外す・違う日は触らない', () => {
+    M.clearDaycareDayMemo()
+    M.rememberDaycareDay(memoOf('2026-10-25', { fluids: [fluid(1, 3, '2026-10-25', 600)] }))
+    M.updateDaycareDayMemo((m) => M.memoWithFluid(m, fluid(2, 3, '2026-10-25', 200)))
+    assert.deepEqual(M.daycareDayMemo().fluids.map((f) => f.amount_ml), [600, 200])
+    // 同じ行を2回足さない
+    M.updateDaycareDayMemo((m) => M.memoWithFluid(m, fluid(2, 3, '2026-10-25', 200)))
+    assert.equal(M.daycareDayMemo().fluids.length, 2)
+    M.updateDaycareDayMemo((m) => M.memoWithoutFluid(m, { id: 1, taken_on: '2026-10-25' }))
+    assert.deepEqual(M.daycareDayMemo().fluids.map((f) => f.id), [2])
+    const row = { meal: meal(7, 3, '2026-10-25', { main_amount: 6, side_amount: 4, status: 'eaten', rev: 2 }), imported: false, editedInApp: true }
+    M.updateDaycareDayMemo((m) => M.memoWithMeal(m, row))
+    M.updateDaycareDayMemo((m) => M.memoWithMeal(m, { ...row, meal: { ...row.meal, main_amount: 7, rev: 3 } }))
+    assert.deepEqual(M.daycareDayMemo().meals.map((r) => [r.meal.id, r.meal.main_amount]), [[7, 7]])
+    // 違う日は触らない
+    const m = M.daycareDayMemo()
+    assert.equal(M.memoWithFluid(m, fluid(9, 3, '2026-10-24', 100)), m)
+    assert.equal(M.memoWithoutFluid(m, { id: 2, taken_on: '2026-10-24' }), m)
+    assert.equal(M.memoWithMeal(m, { ...row, meal: meal(8, 3, '2026-10-24') }), m)
+    M.clearDaycareDayMemo()
+  })
+  it('食事・水分を読めなかった一覧で控えを書き直す時は、同じ日の前の控えの食事・水分を残す（別の日・前も読めていない時は残さない）', () => {
+    const prev = memoOf('2026-10-25', { fluids: [fluid(1, 3, '2026-10-25', 600)], intakeOk: true })
+    const next = memoOf('2026-10-25', { fluids: [], intakeOk: false, savedAt: 9 })
+    const merged = M.mergeDaycareMemo(prev, next)
+    assert.deepEqual(merged.fluids.map((f) => f.amount_ml), [600])
+    assert.equal(merged.intakeOk, true)
+    assert.equal(merged.savedAt, 9, '出欠などは新しい一覧')
+    assert.equal(M.mergeDaycareMemo(memoOf('2026-10-24', { fluids: [fluid(1, 3, '2026-10-24', 600)] }), next).intakeOk, false, '別の日の値は使わない')
+    assert.equal(M.mergeDaycareMemo({ ...prev, intakeOk: false }, next).intakeOk, false)
+    assert.deepEqual(M.mergeDaycareMemo(null, next).fluids, [])
+  })
+})
+
 describe('静的検査', () => {
   const memo = code('../src/lib/daycareDayMemo.ts')
   const today = code('../src/pages/DaycarePage.tsx')
@@ -103,9 +140,13 @@ describe('静的検査', () => {
     assert.match(today, /rememberDaycareDay\(\{\s*day: data\.day,/)
     assert.match(today, /fetchDaycareIntake\(target\)\.catch\(\(\) => null\)/)
     assert.match(today, /intakeOk: intake !== null,/)
-    assert.match(today, /fluids: data\.fluids,\s*intakeOk: data\.intakeOk,/)
-    assert.match(person, /if \(data === null \|\| data\.memoAt !== null \|\| !data\.intakeOk \|\| data\.missing\) return\s*rememberDaycareDay\(/)
-    assert.match(person, /intakeOk: m\.intakeOk,\s*memoAt: m\.savedAt,/)
+    assert.match(today, /intakeOk: data\.intakeOk,\s*residents,\s*savedAt: data\.readAt,/)
+    // 親の反証 中1: 1人の画面は「今回サーバーから読めた」時だけ控えに入れる（前の値・控えの値を書き戻さない）
+    assert.match(person, /if \(data === null \|\| data\.memoAt !== null \|\| !data\.intakeFresh \|\| data\.missing\) return\s*rememberDaycareDay\(/)
+    assert.match(person, /intakeOk: m\.intakeOk,\s*intakeFresh: false,\s*memoAt: m\.savedAt,\s*readAt: m\.savedAt,/)
+    // 親の反証 軽4: 帯の「読んだ時点」はサーバーから読めた時刻（控えに入れた時刻ではない）
+    assert.match(person, /residents,\s*savedAt: data\.readAt,/)
+    assert.doesNotMatch(today + person, /savedAt: Date\.now\(\)/)
   })
   it('控えはログアウト・ログインのし直しで捨てる（次の人に前の人の控えを見せない＝確認の反証 軽2）', () => {
     const c = code('../src/lib/cachedReads.ts')
@@ -116,14 +157,18 @@ describe('静的検査', () => {
   })
   it('静かな読み直しで食事・水分だけ読めない時は今の食事・水分を残し、消し込みは読めた時だけ（確認の反証 中2）', () => {
     assert.match(person, /const keep = intake === null && quiet && prev !== null && prev\.day === target && prev\.intakeOk/)
-    assert.match(person, /fluids: intake\?\.fluids \?\? \(keep \? prev\.fluids : \[\]\),\s*intakeOk: intake !== null \|\| keep,/)
-    assert.match(person, /if \(data === null \|\| !data\.intakeOk\) return\s*const visible = data\.fluids\.filter/)
-    assert.match(person, /if \(data === null \|\| !data\.intakeOk \|\| !m\.key\.endsWith/)
+    assert.match(person, /fluids: intake\?\.fluids \?\? \(keep \? prev\.fluids : \[\]\),\s*intakeOk: intake !== null \|\| keep,\s*intakeFresh: intake !== null,/)
+    // 親の反証 中1: 消し込みは「今回読めた」時だけ（前の値を出している時は走らない）・控えの値をサーバーの値へ上げない
+    assert.match(person, /if \(data === null \|\| !data\.intakeFresh\) return\s*const visible = data\.fluids\.filter/)
+    assert.match(person, /if \(data === null \|\| !data\.intakeFresh \|\| !m\.key\.endsWith/)
+    assert.match(person, /memoAt: keep \? prev\.memoAt : null,/)
   })
   it('1人の画面は読み込みの失敗の時だけ、同じ日の控えで開く（静かな読み直しの失敗では今の内容を残す）・帯で知らせる・名簿も控えから', () => {
     assert.match(person, /const m = memoForDay\(daycareDayMemo\(\), target, e\)\s*if \(m !== null && target === dayRef\.current && !quiet\) \{/)
     assert.match(person, /memoAt: m\.savedAt,/)
-    assert.match(person, /電波が無いため、今日の一覧で読んだ時点（/)
+    // 親の反証 軽5: 5xx・429 も「通信の失敗」に入るので、帯は「サーバーに届かないため」
+    assert.match(person, /サーバーに届かないため、今日の一覧で読んだ時点（/)
+    assert.doesNotMatch(person + today, /電波が無いため、今日の一覧で読んだ時点/)
     assert.match(person, /押した記録は送信待ちに積みます/)
     assert.match(person, /const m = daycareDayMemo\(\)\s*if \(alive && m !== null && m\.residents\.length > 0\) setResidents/)
     // 1人の値はその方の residentId で選ぶ（控えは1日分の一覧。別の方の値を使わない）
@@ -132,7 +177,7 @@ describe('静的検査', () => {
   it('今日の画面も、読み込みの失敗の時だけ同じ日の控えで開き、同じ帯を出す・控えで開いた時は控えを書き直さない（親の確かめ 中1）', () => {
     assert.match(today, /const m = memoForDay\(daycareDayMemo\(\), target, e\)\s*if \(m !== null && target === dayRef\.current && !quiet\) \{/)
     assert.match(today, /activities: null,\s*intakeOk: m\.intakeOk,\s*memoAt: m\.savedAt,/)
-    assert.match(today, /電波が無いため、今日の一覧で読んだ時点（/)
+    assert.match(today, /サーバーに届かないため、今日の一覧で読んだ時点（/)
     assert.match(today, /if \(data === null \|\| data\.missing \|\| data\.memoAt !== null\) return\s*rememberDaycareDay\(/)
     assert.match(today, /if \(!onMemo\) return\s*const t = window\.setInterval\(\(\) => scheduleReload\(\), 30_000\)/)
   })
@@ -142,6 +187,11 @@ describe('静的検査', () => {
       assert.match(x, /dropAttendance: \(saved\) => \{\s*updateDaycareDayMemo\(\(m\) => memoWithoutAttendance\(m, saved\)\)/)
       assert.match(x, /putBath: \(r\) => \{\s*updateDaycareDayMemo\(\(m\) => memoWithBath\(m, r\)\)/)
     }
+  })
+  it('1人の画面は、書けた水分・昼食・おやつを画面と同じ形で控えにも映す（親の反証 中2）', () => {
+    assert.match(person, /updateDaycareDayMemo\(\(m\) => memoWithFluid\(m, saved\)\)\s*setData\(\(prev\) => \(prev === null \|\| prev\.day !== saved\.taken_on/)
+    assert.match(person, /updateDaycareDayMemo\(\(m\) => memoWithoutFluid\(m, f\)\)/)
+    assert.match(person, /updateDaycareDayMemo\(\(m\) =>\s*memoWithMeal\(m, \{ meal: saved, imported: oldRow\?\.imported \?\? false/)
   })
   it('送信待ちの到着がある方は、控えで戻っても〔到着〕を押せない（同じ方・同じ日の追加の送信待ちを見る＝2件目を積まない）', () => {
     const db = code('../src/lib/db.ts')
