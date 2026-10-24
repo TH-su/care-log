@@ -97,7 +97,7 @@ import { matchBathPlan, monthDays, monthRange, validateBathInput } from './bath'
 import type { BathPlanEntry, BathPlanRow } from './bath'
 import { normalizeMedSlots, validateMedAdminInput } from './med'
 // デイ（せせらぎ）の記録 段階1（2026-10-22・0041）。純ロジックは daycare.ts
-import { absentBathAction, hmOf, isAutoOnlyAttendance, isDaycareVitalKey, validateAttendance } from './daycare'
+import { absentBathAction, daycareArrivalKeys, hmOf, isAutoOnlyAttendance, isDaycareVitalKey, validateAttendance } from './daycare'
 import type { KeyedVital } from './daycare'
 import { activityLabelError, normalizeActivityLabel, participationOf } from './daycareActivity'
 import type { ActivityParticipation, DaycareActivity } from './daycareActivity'
@@ -8266,6 +8266,30 @@ export async function fetchDaycareAttendance(dayIso: string): Promise<DaycareAtt
   const rows = list(res.data, normalizeDaycareAttendance, DAYCARE_DAY_ROWS)
   await assertSessionIfEmpty(sb, rows.length) // anon で読んだ0件を「未記録」と出さない（F58）
   return rows
+}
+
+/**
+ * 日の範囲のデイの到着（care-log の食事の画面の「デイ」の印・2026-10-24 今日の画面の改善 3回目・読むだけ）。
+ * 到着の時刻があり、休みでなく、消していない記録の (利用者, 日) を、1回の読み取りでまとめて返す（日数ぶん問い合わせない）。
+ * 読む列は 0041 からある列だけ（0047 の自動の印の列には触れない＝列の有る無しに左右されない）。
+ * 読めない時（通信・権限・表が無い）は例外。呼ぶ側は印を出さないだけにして画面を止めない
+ */
+export async function fetchDaycareArrivals(fromIso: string, toIso: string): Promise<Set<string>> {
+  assertDay(fromIso)
+  assertDay(toIso)
+  const sb = await getClient()
+  const res = (await (sb
+    .from('daycare_attendance')
+    .select('resident_id,day,arrived_at,absent')
+    .gte('day', fromIso)
+    .lte('day', toIso)
+    .eq('absent', false)
+    .not('arrived_at', 'is', null)
+    .is('deleted_at', null)
+    .limit(MAX_ROWS) as unknown as Promise<Res<unknown>>)) as Res<unknown>
+  if (res.error !== null) throw daycareReadError(res)
+  const rows = Array.isArray(res.data) ? (res.data as { resident_id: unknown; day: unknown; arrived_at: unknown; absent: unknown }[]) : []
+  return daycareArrivalKeys(rows)
 }
 
 /** 保存前の検証（画面と同じ関数）。未来の日は止める */

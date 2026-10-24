@@ -830,3 +830,27 @@ export function editsHeldInQueue(
     (f) => Object.prototype.hasOwnProperty.call(pendingValues, f) && (pendingValues[f] ?? null) === (edits[f as DaycareVitalField] ?? null),
   )
 }
+
+// ── 今日の画面の改善 3回目（2026-10-24）: care-log の食事の画面の「デイ」の印 ──
+
+/** 食事の画面の「デイ」の印の鍵（利用者 × 日） */
+export function daycareArrivalKey(residentId: number, day: string): string {
+  return `${residentId}:${day}`
+}
+
+/**
+ * その日にデイへ到着した記録がある方の鍵の集まり。到着の時刻があり、休みでない記録だけ（消した記録は読み込みで除く）。
+ * 定時の処理が入れた到着も含める（記録としては到着）。形の崩れた行は数えない
+ */
+export function daycareArrivalKeys(rows: readonly { resident_id: unknown; day: unknown; arrived_at: unknown; absent: unknown }[]): Set<string> {
+  const out = new Set<string>()
+  for (const r of rows) {
+    const id = typeof r.resident_id === 'number' ? r.resident_id : Number(r.resident_id)
+    if (!Number.isSafeInteger(id) || id <= 0) continue
+    if (typeof r.day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(r.day)) continue
+    if (r.absent === true) continue
+    if (typeof r.arrived_at !== 'string' || r.arrived_at === '') continue
+    out.add(daycareArrivalKey(id, r.day))
+  }
+  return out
+}

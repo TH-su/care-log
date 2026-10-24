@@ -3363,7 +3363,7 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
                     <button
                       type="button"
                       onClick={() => jumpToSection(j.id, barRef.current)}
-                      className="inline-flex min-h-tap items-center whitespace-nowrap rounded-full border border-border-strong bg-surface px-3 text-sm text-link"
+                      className="inline-flex min-h-tap items-center whitespace-nowrap rounded border border-border-strong bg-surface px-3 text-sm text-link"
                     >
                       {j.label}
                     </button>

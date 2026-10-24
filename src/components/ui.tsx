@@ -42,15 +42,17 @@ export interface ChipProps {
  * ※チップを折り返して並べる側は行間も gap-gap 以上あけること（縦拡張どうしの重なり防止）。
  */
 export function Chip({ children, tone = 'plain', onClick, className = '' }: ChipProps) {
-  const base = `inline-flex min-h-8 items-center gap-1 rounded-full border px-3 py-1 text-sm ${CHIP_TONE[tone]}`
+  const base = `inline-flex min-h-8 items-center gap-1 border px-3 py-1 text-sm ${CHIP_TONE[tone]}`
   if (!onClick) {
-    return <span className={`${base} ${className}`}>{children}</span>
+    // 押せない札は丸いまま（丸い札＝押せないことを形でも見分ける）
+    return <span className={`${base} rounded-full ${className}`}>{children}</span>
   }
+  // 押せるチップ（ボタン）の角は 6px（2026-10-24 今日の画面の改善 3回目・決定5＝ボタンの角を care-log 全体へ）
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`${base} relative before:absolute before:inset-x-0 before:-inset-y-1.5 ${className}`}
+      className={`${base} rounded relative before:absolute before:inset-x-0 before:-inset-y-1.5 ${className}`}
     >
       {children}
     </button>
