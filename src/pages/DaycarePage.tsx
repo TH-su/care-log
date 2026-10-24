@@ -190,7 +190,7 @@ export function DaycareNav({ current }: { current: 'today' | 'vitals' | 'meals' 
     // 今日の画面の改善 2回目（2026-10-24）: 昼食・おやつをまとめて入れる
     { key: 'meals', to: '/record/daycare/meals', label: '食事一括' },
     // 段階2b（2026-10-22）: 活動・レクをまとめて記録
-    { key: 'activity', to: '/record/daycare/bulk', label: '活動をまとめて' },
+    { key: 'activity', to: '/record/daycare/bulk', label: '活動一括' },
     // 段階3a（2026-10-23）: 個別機能訓練（配置と実施記録）
     { key: 'training', to: '/record/daycare/training', label: '機能訓練' },
   ]

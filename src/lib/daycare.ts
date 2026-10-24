@@ -283,18 +283,35 @@ function timeKey(t: string | null): string {
 }
 
 /**
- * 1日の一覧を組む。並びは予定の開始時刻 → 名簿の並び（居室順）。予定に無い人（記録のある人・足した人）は後ろ。
+ * 五十音の並べ替えのキー（2026-10-24 代表者の決定・§9.4）: ふりがな（無ければ氏名）を NFKC にそろえ、カタカナをひらがなにする。
+ * どちらも無い（名簿に居ない）方は null＝後ろ
+ */
+export function kanaSortKey(r: { name?: string | null; kana?: string | null } | undefined): string | null {
+  if (r === undefined) return null
+  const src = typeof r.kana === 'string' && r.kana.trim() !== '' ? r.kana : typeof r.name === 'string' && r.name.trim() !== '' ? r.name : null
+  if (src === null) return null
+  return src
+    .normalize('NFKC')
+    .trim()
+    .replace(/[ァ-ヶ]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60))
+}
+
+const KANA_COLLATOR = new Intl.Collator('ja')
+
+/**
+ * 1日の一覧を組む。並びは氏名の五十音（ふりがな、無ければ氏名。同じなら利用者ID）。予定外・予定 要確認も五十音の位置に入れる
+ * （2026-10-24 代表者の決定「デイの並びは居室順と関係ないので五十音順」。名簿の取得の並び＝居室順は care-log 全体の共有なので変えない）。
  * 名簿（residents）は退居された方も含めて渡してよい（記録のある方の名前を引くため）。予定の照合はサーバー（daycare_plan）の結果をそのまま使う
  */
 export function buildDaycareBoard(p: {
   planRows: readonly DaycarePlanRow[]
   source: DaycarePlanSource
-  residents: readonly Pick<Resident, 'id'>[]
+  residents: readonly (Pick<Resident, 'id'> & Partial<Pick<Resident, 'name' | 'kana'>>)[]
   attendance: readonly DaycareAttendance[]
   extraIds?: readonly number[]
 }): DaycareBoard {
-  const order = new Map<number, number>()
-  p.residents.forEach((r, i) => order.set(r.id, i))
+  const sortKey = new Map<number, string | null>()
+  for (const r of p.residents) sortKey.set(r.id, kanaSortKey(r))
   const byResident = new Map<number, DaycareBoardRow>()
   const notInRoster = new Set<string>()
   const unconfirmed = new Set<string>()
@@ -357,11 +374,15 @@ export function buildDaycareBoard(p: {
   }
   for (const r of rows) r.plans.sort((a, b) => timeKey(a.start).localeCompare(timeKey(b.start)))
   rows.sort((a, b) => {
-    if (a.extra !== b.extra) return a.extra ? 1 : -1
-    const ta = a.dup ? '99:98' : timeKey(a.plans[0]?.start ?? null)
-    const tb = b.dup ? '99:98' : timeKey(b.plans[0]?.start ?? null)
-    if (ta !== tb) return ta.localeCompare(tb)
-    return (order.get(a.residentId) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.residentId) ?? Number.MAX_SAFE_INTEGER) || a.residentId - b.residentId
+    const ka = sortKey.get(a.residentId) ?? null
+    const kb = sortKey.get(b.residentId) ?? null
+    if (ka !== kb) {
+      if (ka === null) return 1
+      if (kb === null) return -1
+      const c = KANA_COLLATOR.compare(ka, kb)
+      if (c !== 0) return c
+    }
+    return a.residentId - b.residentId
   })
   const counts: DaycareBoardCounts = { planned: 0, present: 0, left: 0, absent: 0, waiting: 0, hospitalized: 0 }
   for (const r of rows) {
@@ -376,6 +397,14 @@ export function buildDaycareBoard(p: {
     else if (r.planned) counts.waiting += 1
   }
   return { source: p.source, rows, notInRoster: notInRoster.size, unconfirmed: unconfirmed.size, counts }
+}
+
+/**
+ * 一括の画面（バイタル一括・食事一括・活動一括・機能訓練）に出す方（2026-10-24 代表者の決定 §9.4 の4）: 予定の方のうち、
+ * 休み・入院中を除く全員（到着の前の方も入る）と、予定外で来た方（在席・帰宅）。並びは一覧のまま（五十音）
+ */
+export function daycareBulkRows<T extends Pick<DaycareBoardRow, 'residentId' | 'state' | 'planned' | 'hospitalized'>>(rows: readonly T[]): T[] {
+  return rows.filter((r) => r.state === 'present' || r.state === 'left' || (r.state === 'planned' && r.planned && !r.hospitalized))
 }
 
 /** 予定の時間の表示（'9:30〜12:00／13:00〜15:30'）。時刻の無い予定は '時間未定' */
@@ -755,11 +784,14 @@ export function previousVitalOf(
   return out
 }
 
-/** バイタル一括の絞り込み（UI 状態・既知値だけ） */
-export type DcVitalsFilter = 'present' | 'planned' | 'all'
-export const DC_VITALS_FILTERS: readonly DcVitalsFilter[] = ['present', 'planned', 'all']
+/**
+ * バイタル一括の絞り込み（UI 状態・既知値だけ）。planned＝予定の方（daycareBulkRows・既定）／all＝全員（休み・入院を含む）。
+ * 2026-10-24（§9.4 の4）に「到着した方」（'present'）を外した。端末に 'present' が残っていても新しい既定（planned）に読み替える
+ */
+export type DcVitalsFilter = 'planned' | 'all'
+export const DC_VITALS_FILTERS: readonly DcVitalsFilter[] = ['planned', 'all']
 export function readDcVitalsFilter(raw: unknown): DcVitalsFilter {
-  return typeof raw === 'string' && (DC_VITALS_FILTERS as readonly string[]).includes(raw) ? (raw as DcVitalsFilter) : 'present'
+  return typeof raw === 'string' && (DC_VITALS_FILTERS as readonly string[]).includes(raw) ? (raw as DcVitalsFilter) : 'planned'
 }
 
 /** 'YYYY-MM-DD' の形か */

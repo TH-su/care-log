@@ -6,6 +6,7 @@
 // ・〔完了〕の既定: 内容＝その方の前回（中止を除く）・時間＝20分・指導員＝その日の配置の機能訓練指導員・開始時刻＝押した時刻−時間
 // ・前回コピーは内容だけ（DESIGN v1 の決まり。時間・結果はコピーしない）
 // 個人情報は扱わない（内容・時刻・数値・職員ID だけ。氏名は画面が持つ）。
+import { daycareBulkRows } from './daycare.ts'
 import type { DaycareBoardRow } from './daycare.ts'
 
 export type TrainingResult = 'done' | 'partial' | 'cancelled'
@@ -200,9 +201,12 @@ export function sessionOf(list: readonly DaycareTrainingSession[], residentId: n
   return list.find((s) => s.resident_id === residentId && s.day === day) ?? null
 }
 
-/** 今日の対象者: その日に来た方（在席・帰宅）。欠席・予定だけの方・名簿に無い方は出さない（段階3の計画の 6章） */
-export function trainingTargets(rows: readonly DaycareBoardRow[]): number[] {
-  return rows.filter((r) => r.state === 'present' || r.state === 'left').map((r) => r.residentId)
+/**
+ * 今日の対象者: 一括の画面と同じ（予定の方のうち休み・入院中を除く全員と、予定外で来た方＝daycareBulkRows・2026-10-24 §9.4 の4。
+ * それまでは段階3の計画の 6章で在席・帰宅だけ）。名簿に無い方は出さない
+ */
+export function trainingTargets(rows: readonly Pick<DaycareBoardRow, 'residentId' | 'state' | 'planned' | 'hospitalized'>[]): number[] {
+  return daycareBulkRows(rows).map((r) => r.residentId)
 }
 
 /**

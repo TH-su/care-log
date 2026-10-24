@@ -6,6 +6,7 @@
 // ・排泄は排泄ケアアプリを読むだけ（excretionClient）。入口は体重管理アプリと同じ作りで ?masterId=<residents.source_id>
 // 個人情報は扱わない（数値と記号だけ。氏名は画面が持つ）。
 
+import { daycareBulkRows } from './daycare.ts'
 import type { DaycareBoardRow } from './daycare.ts'
 import type { FluidIntake, Meal } from './types.ts'
 
@@ -115,9 +116,12 @@ export function settleQueuedFluid(held: { base: number; ml: number }, now: numbe
 
 // ── 今日の画面の改善 2回目: デイの食事一括（/record/daycare/meals・2026-10-24 代表承認・決定 6／親の回答 1〜2） ──
 
-/** 食事一括に並べる方: その日に来た方（在席・帰宅）だけを、今日の一覧の並びのまま（休み・未到着・入院中は出さない） */
-export function mealBulkRows<T extends Pick<DaycareBoardRow, 'residentId' | 'state'>>(rows: readonly T[]): T[] {
-  return rows.filter((r) => r.state === 'present' || r.state === 'left')
+/**
+ * 食事一括に並べる方: 一括の画面と同じ（予定の方のうち休み・入院中を除く全員と、予定外で来た方＝daycareBulkRows）。今日の一覧の並びのまま。
+ * 到着の前でも入れられる（2026-10-24 代表者の決定 §9.4 の4。それまでは在席・帰宅だけ）
+ */
+export function mealBulkRows<T extends Pick<DaycareBoardRow, 'residentId' | 'state' | 'planned' | 'hospitalized'>>(rows: readonly T[]): T[] {
+  return daycareBulkRows(rows)
 }
 
 /** 食事一括の画面のルート（業務日は ?day= で持つ。今日は付けない） */

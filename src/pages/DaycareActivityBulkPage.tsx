@@ -1,8 +1,10 @@
 // デイ（せせらぎ）段階2b: 活動・レクをまとめて記録する画面（/record/daycare/bulk・?day= で業務日）。
 // 2026-10-22 代表者承認・段階2の計画 v1 の 1.1（まとめて記録）／1.2（活動〔全員〕は2タップ）。
 //
-// ・今日のレク: 活動を1つ選ぶ（定型のチップか〔その他〕）→〔チェックした n人に入れる〕。相手は、その日に来た方（在席・帰宅）で、
+// ・今日のレク: 活動を1つ選ぶ（定型のチップか〔その他〕）→〔チェックした n人に入れる〕。相手は、一括の画面と同じ方（予定の方のうち
+//   休み・入院中を除く全員と予定外で来た方＝activityTargets・2026-10-24 §9.4 の4。それまでは在席・帰宅だけ）で、
 //   はじめは全員にチェックが付いている（外したい方だけ外す）。入れる度合いは「参加」。変える時は1人の画面で
+// ・画面の名前は「活動一括」（2026-10-24 §9.4。それまでは「活動をまとめて」。ルートと切り替えの key は変えない）
 // ・保存は1人ずつ insertDaycareActivity（2台で同じレクを入れても、同じ度合いなら1行に合流・違えば「先に記録があります」）
 // ・下に1人ずつの活動の一覧と、その方の1日の記録（前回コピーつき）への入口
 // ・入力解禁は活動だけの旗 input_enabled_daycare_activity。表が無い DB は「設定待ち」
@@ -345,9 +347,9 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
 
       <section aria-labelledby="h-bulk" className="space-y-3 rounded-lg border border-border bg-surface p-3">
         <h2 id="h-bulk" className="text-xl font-bold text-ink">
-          活動をまとめて記録
+          活動一括
         </h2>
-        <p className="text-base text-ink2">活動を1つ選び、その日に来た方（在席・帰宅）にまとめて「参加」で入れます。度合いを変える時は、その方の記録の画面で直してください。</p>
+        <p className="text-base text-ink2">活動を1つ選び、予定の方（休み・入院中を除く）と予定外で来た方にまとめて「参加」で入れます。度合いを変える時は、その方の記録の画面で直してください。</p>
         {data.activities === null && !missing ? (
           <div role="alert" className="space-y-2 rounded border border-danger bg-danger-bg p-2 text-base text-ink">
             <p>
@@ -389,7 +391,7 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
         ) : null}
 
         {targets.length === 0 ? (
-          <p className="text-base text-ink2">この日に来た方（在席・帰宅）がまだいません。到着を記録すると、ここに出ます。</p>
+          <p className="text-base text-ink2">この日の予定の方がいません（休み・入院中の方は出しません）。予定外で来た方は、今日の画面の〔予定にない方を追加〕から到着を記録すると、ここに出ます。</p>
         ) : (
           <fieldset className="space-y-1">
             <legend className="text-base font-bold text-ink">入れる方（{targets.length}人。外したい方だけ外してください）</legend>
@@ -444,7 +446,7 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
           1人ずつの活動
         </h2>
         {targets.length === 0 ? (
-          <p className="text-base text-ink2">この日に来た方はまだいません。</p>
+          <p className="text-base text-ink2">この日の予定の方がいません。</p>
         ) : (
           <ul className="divide-y divide-border">
             {targets.map((rid) => {

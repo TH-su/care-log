@@ -1,6 +1,7 @@
 // デイ（せせらぎ）のバイタル一括（ルート /record/daycare/vitals）。2026-10-22 デイ段階1・代表承認。
 //
-// 一覧＝その日のデイの方（既定は「到着した方」。絞り込みは端末の UI 状態 cl_dcVitalsFilter）。1人に1回目の行、
+// 一覧＝その日のデイの方（既定は「予定の方」＝休み・入院中を除く予定の方と予定外で来た方。2026-10-24 §9.4 の4 で「到着した方」を外した。
+// 絞り込みは端末の UI 状態 cl_dcVitalsFilter）。1人に1回目の行、
 // 基準を外れた時は〔＋再測定〕で2回目以降の行を足す。欄を押すとテンキー（広い画面は右に常設・狭い画面は下から）。
 // 欄送りは桁数で自動（体温 365→36.5・血圧の上と脈は先頭が1か2なら3桁・血圧の下と SpO2 は先頭が1なら3桁）。
 // SpO2 が埋まると次の方の体温へ。物理キーボード（数字・.・Backspace・Enter・Esc）も効く。
@@ -56,6 +57,7 @@ import {
   LEVEL_WORD,
   bpPairError,
   buildDaycareBoard,
+  daycareBulkRows,
   daycareVitalKey,
   daycareVitalSlots,
   editsHeldInQueue,
@@ -94,8 +96,7 @@ const MSG_GATE_UNKNOWN =
   'デイの記録を使える期間かどうかを確認できませんでした（通信エラー）。電波状態を確認して、再試行してください。記録の閲覧はこのままできます。'
 
 const FILTER_LABEL: Record<DcVitalsFilter, string> = {
-  present: '到着した方',
-  planned: '予定の方全員',
+  planned: '予定の方',
   all: '全員（休み・入院を含む）',
 }
 
@@ -103,7 +104,7 @@ function readFilter(): DcVitalsFilter {
   try {
     return readDcVitalsFilter(window.localStorage.getItem(LS.dcVitalsFilter))
   } catch {
-    return 'present'
+    return 'planned'
   }
 }
 function writeFilter(v: DcVitalsFilter): void {
@@ -343,11 +344,8 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   )
   const shownRows: DaycareBoardRow[] = useMemo(() => {
     if (board === null) return []
-    return board.rows.filter((r) => {
-      if (filter === 'all') return true
-      if (filter === 'present') return r.state === 'present' || r.state === 'left'
-      return r.state !== 'absent' && !(r.hospitalized && r.state === 'planned')
-    })
+    // 予定の方＝一括の4画面と同じ関数（daycareBulkRows・食事一括・活動一括・機能訓練とそろえる）
+    return filter === 'all' ? board.rows : daycareBulkRows(board.rows)
   }, [board, filter])
 
   const nameOf = useCallback((id: number) => residents.find((r) => r.id === id)?.name ?? `利用者ID ${id}`, [residents])
@@ -1095,9 +1093,9 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
         {shownRows.length === 0 ? (
           <div className="rounded-lg border border-border bg-surface p-4">
             <p className="text-base text-ink">
-              {filter === 'present' ? '到着した方がまだいません。' : 'この日の対象の方がいません。'}
+              {filter === 'all' ? 'この日のデイの予定・記録はまだありません。' : 'この日の予定の方がいません（休み・入院中の方は「全員」で出せます）。'}
             </p>
-            <p className="mt-2 text-base text-ink2">「今日（到着・休み）」で到着を記録すると、ここに並びます。</p>
+            <p className="mt-2 text-base text-ink2">予定外で来た方は「今日（到着・休み）」の〔予定にない方を追加〕から到着を記録すると、ここに並びます。</p>
           </div>
         ) : (
           <>

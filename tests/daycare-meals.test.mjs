@@ -46,15 +46,18 @@ if (DP === null) {
   registerLoadFailure('デイ 食事一括の試験', loadError, 'この Node は型の除去か解決フックを持たない（古い Node）', { hooks: true })
 } else {
   describe('純ロジック', () => {
-    it('並べる方: 在席・帰宅だけ（休み・予定・入院中は出さない）・一覧の並びのまま', () => {
+    it('並べる方: 一括の画面と同じ（予定の方のうち休み・入院中を除く全員＋予定外で来た方・2026-10-24 §9.4 の4）・一覧の並びのまま', () => {
+      // 到着の前（予定）の方も出す＝食事は到着の前でも入れられる（意図した変更。それまでは在席・帰宅だけ）
       const rows = [
-        { residentId: 4, state: 'present' },
-        { residentId: 2, state: 'absent' },
-        { residentId: 9, state: 'left' },
-        { residentId: 1, state: 'planned' },
-        { residentId: 7, state: 'present' },
+        { residentId: 4, state: 'present', planned: true, hospitalized: false },
+        { residentId: 2, state: 'absent', planned: true, hospitalized: false },
+        { residentId: 9, state: 'left', planned: false, hospitalized: false },
+        { residentId: 1, state: 'planned', planned: true, hospitalized: false },
+        { residentId: 5, state: 'planned', planned: true, hospitalized: true },
+        { residentId: 6, state: 'planned', planned: false, hospitalized: false },
+        { residentId: 7, state: 'present', planned: true, hospitalized: true },
       ]
-      assert.deepEqual(DP.mealBulkRows(rows).map((r) => r.residentId), [4, 9, 7])
+      assert.deepEqual(DP.mealBulkRows(rows).map((r) => r.residentId), [4, 9, 1, 7])
       assert.deepEqual(DP.mealBulkRows([]), [])
     })
     it('画面のルート: 今日は ?day= を付けない・それ以外は付ける', () => {
@@ -153,15 +156,16 @@ if (DP === null) {
       assert.match(page, /onClick=\{\(\) => onTake\(st\.target, st\.conflicts\.map\(\(c\) => c\.field\)\)\}/)
       assert.match(page, /onClick=\{\(\) => onMine\(st\.target, st\.conflicts\)\}/)
     })
-    it('3状態: 読み込み中・読めない時の再試行・来た方がいない時の案内', () => {
+    it('3状態: 読み込み中・読めない時の再試行・予定の方がいない時の案内', () => {
       assert.match(page, /<LoadingBlock label="その日の昼食・おやつを読み込んでいます…" \/>/)
       assert.match(page, /<ErrorBlock message=\{error\} onRetry=\{\(\) => setReloadKey\(\(n\) => n \+ 1\)\} \/>/)
-      assert.match(page, /この日に来た方（在席・帰宅）はまだいません。/)
+      assert.match(page, /この日の予定の方がいません（休み・入院中の方は出しません）。予定外で来た方は、今日の画面の〔予定にない方を追加〕から到着を記録すると、ここに出ます。/)
+      assert.doesNotMatch(page, /来た方（在席・帰宅）/)
     })
   })
 
   describe('配線（切り替え・ルート・画面名）と、care-log の食事一括を変えていないこと', () => {
-    it('デイの切り替えは「今日／バイタル一括／食事一括／活動／機能訓練」の順', () => {
+    it('デイの切り替えは「今日／バイタル一括／食事一括／活動一括／機能訓練」の順（2026-10-24「活動をまとめて」→「活動一括」・ルートと key は変えない）', () => {
       const p = code('../src/pages/DaycarePage.tsx')
       const nav = p.slice(p.indexOf('export function DaycareNav'), p.indexOf('return (', p.indexOf('export function DaycareNav')))
       assert.deepEqual(
@@ -170,7 +174,7 @@ if (DP === null) {
           ['today', '/record/daycare', '今日（到着・休み）'],
           ['vitals', '/record/daycare/vitals', 'バイタル一括'],
           ['meals', '/record/daycare/meals', '食事一括'],
-          ['activity', '/record/daycare/bulk', '活動をまとめて'],
+          ['activity', '/record/daycare/bulk', '活動一括'],
           ['training', '/record/daycare/training', '機能訓練'],
         ],
       )

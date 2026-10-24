@@ -237,7 +237,7 @@ if (DC === null) {
       assert.equal(b.unconfirmed, 2)
       assert.deepEqual(b.rows.map((r) => r.residentId), [3])
     })
-    it('重複（dup）は「予定 要確認」で落とさない（時間のある予定の後ろ）・入院中は未到着に数えない・予定外の記録と足した人は最後', () => {
+    it('重複（dup）は「予定 要確認」で落とさない・入院中は未到着に数えない・予定外の記録と足した人も一覧に入る（並びは五十音＝名簿に名前が無ければ利用者ID）', () => {
       const b = DC.buildDaycareBoard({
         planRows: [planRow({ sched_id: 'd1', resident_id: 1, dup: true }), planRow({ sched_id: 'd2', resident_id: 1, dup: true }), planRow({ sched_id: 'h', resident_id: 2, hospitalized: true })],
         source: 'kv',
@@ -245,7 +245,8 @@ if (DC === null) {
         attendance: [att(10, 3, { arrived_at: '10:00' })],
         extraIds: [4],
       })
-      assert.deepEqual(b.rows.map((r) => [r.residentId, r.dup, r.extra]), [[2, false, false], [1, true, false], [3, false, true], [4, false, true]])
+      // 2026-10-24（§9.4 の3）: 予定外・予定 要確認も末尾に回さず五十音の位置（この名簿は名前が無いので利用者IDの順）
+      assert.deepEqual(b.rows.map((r) => [r.residentId, r.dup, r.extra]), [[1, true, false], [2, false, false], [3, false, true], [4, false, true]])
       assert.equal(b.counts.hospitalized, 1)
       assert.equal(b.counts.planned, 1)
       assert.equal(b.counts.present, 1)
@@ -262,6 +263,47 @@ if (DC === null) {
       assert.equal(b.unconfirmed, 1)
       assert.deepEqual(b.rows.map((r) => [r.residentId, r.extra, r.bathingPlanned]), [[3, true, true]])
       assert.deepEqual(DC.absentBathAction(null, b.rows[0].bathingPlanned), { kind: 'insert' })
+    })
+    it('並びは五十音（ふりがな、無ければ氏名・NFKC とカタカナ→ひらがなでそろえる・同じなら利用者ID）。予定の時刻・予定外・予定 要確認・居室で分けない（2026-10-24 §9.4）', () => {
+      const names = [
+        { id: 1, name: '架空 ウメ', kana: 'カクウ ウメ' },
+        { id: 2, name: '架空 イネ', kana: 'かくう いね' },
+        { id: 3, name: '試験 アオ', kana: 'ｼｹﾝ ｱｵ' },
+        { id: 4, name: 'あさひ', kana: null },
+        { id: 5, name: '架空 イネ', kana: 'かくう いね' },
+        { id: 6, name: '', kana: '' },
+      ]
+      const b = DC.buildDaycareBoard({
+        planRows: [
+          planRow({ sched_id: 'p1', resident_id: 1, start_time: '09:00' }),
+          planRow({ sched_id: 'p2', resident_id: 2, start_time: '13:00' }),
+          planRow({ sched_id: 'p3', resident_id: 3, dup: true }),
+          planRow({ sched_id: 'p5', resident_id: 5, start_time: '08:30' }),
+        ],
+        source: 'kv',
+        residents: names,
+        attendance: [att(10, 4, { arrived_at: '10:00' })],
+        extraIds: [6, 99],
+      })
+      // あさひ（ふりがな無し→氏名）→ かくう いね（2・5 は同じキー→ID）→ かくう うめ（全角カタカナ）→ しけん あお（半角カナ→NFKC）→ 名前の無い方・名簿に居ない方はID順で後ろ
+      assert.deepEqual(b.rows.map((r) => r.residentId), [4, 2, 5, 1, 3, 6, 99])
+      assert.equal(DC.kanaSortKey({ name: 'x', kana: 'ヴァ ｶﾞ' }), 'ゔぁ が')
+      assert.equal(DC.kanaSortKey({ name: '氏名', kana: '  ' }), '氏名')
+      assert.equal(DC.kanaSortKey(undefined), null)
+    })
+    it('一括の画面に出す方（daycareBulkRows）: 予定の方のうち休み・入院中を除く全員＋予定外で来た方（2026-10-24 §9.4 の4）', () => {
+      const rows = [
+        { residentId: 1, state: 'planned', planned: true, hospitalized: false },
+        { residentId: 2, state: 'present', planned: true, hospitalized: false },
+        { residentId: 3, state: 'left', planned: true, hospitalized: false },
+        { residentId: 4, state: 'absent', planned: true, hospitalized: false },
+        { residentId: 5, state: 'planned', planned: true, hospitalized: true },
+        { residentId: 6, state: 'present', planned: true, hospitalized: true },
+        { residentId: 7, state: 'present', planned: false, hospitalized: false },
+        { residentId: 8, state: 'planned', planned: false, hospitalized: false },
+        { residentId: 9, state: 'absent', planned: false, hospitalized: false },
+      ]
+      assert.deepEqual(DC.daycareBulkRows(rows).map((r) => r.residentId), [1, 2, 3, 6, 7])
     })
     it('unknown と none は行を作らない（画面は帯で出し分ける）', () => {
       assert.equal(DC.buildDaycareBoard({ planRows: [], source: 'unknown', residents: roster, attendance: [] }).rows.length, 0)
@@ -543,9 +585,12 @@ if (DC === null) {
       assert.deepEqual(p.pulse, { value: 66, on: '2026-10-22' }, '今日のホームの定時は前回に数える')
       assert.equal(p.spo2, undefined)
     })
-    it('絞り込みは既知値だけ（壊れた値・知らない値は既定）', () => {
+    it('絞り込みは既知値だけ（壊れた値・知らない値は既定）。2026-10-24 §9.4 の4: 「予定の方」（既定）と「全員」の2つ・端末に残る「到着した方」は新しい既定へ', () => {
+      assert.deepEqual([...DC.DC_VITALS_FILTERS], ['planned', 'all'])
       assert.equal(DC.readDcVitalsFilter('planned'), 'planned')
-      for (const bad of [null, '', 'xxx', '__proto__', 'x'.repeat(10000), 5]) assert.equal(DC.readDcVitalsFilter(bad), 'present')
+      assert.equal(DC.readDcVitalsFilter('all'), 'all')
+      assert.equal(DC.readDcVitalsFilter('present'), 'planned', '前の版で選んだ「到着した方」は新しい既定')
+      for (const bad of [null, '', 'xxx', '__proto__', 'x'.repeat(10000), 5]) assert.equal(DC.readDcVitalsFilter(bad), 'planned')
     })
   })
 
