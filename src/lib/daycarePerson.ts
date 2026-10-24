@@ -85,8 +85,8 @@ export function fluidAmountError(text: string): string | null {
 
 /** 排泄ケアアプリの ?masterId= が受け付ける形（体重管理アプリと同じ・haiben-record.html の hbReadMasterIdParam） */
 const MASTER_ID_RE = /^[0-9A-Za-z_-]{1,32}$/
-/** 排泄ケアアプリ（care-log と同じサイトの care-tools 配下。氏名は URL に載せない） */
-export const HAIBEN_APP_PATH = '../care-tools/haiben-record.html'
+/** 排泄ケアアプリ（care-log と同じサイトの haiben-record 配下＝th-su.github.io/haiben-record/。care-tools には無い。氏名は URL に載せない） */
+export const HAIBEN_APP_PATH = '../haiben-record/haiben-record.html'
 
 /** 排泄ケアアプリを開くリンク。source_id が受け付ける形でなければアプリの最初の画面を開く */
 export function haibenAppHref(sourceId: string | null | undefined): string {

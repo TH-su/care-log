@@ -129,12 +129,12 @@ if (DP === null) {
 
   describe('排泄ケアアプリの入口・前の方／次の方・業務日', () => {
     it('入口は care-tools の排泄ケアアプリ（相対パス）＋?masterId=source_id。受け付けない形は最初の画面', () => {
-      assert.equal(DP.haibenAppHref('M001'), '../care-tools/haiben-record.html?masterId=M001')
-      assert.equal(DP.haibenAppHref(' wm_12-a '), '../care-tools/haiben-record.html?masterId=wm_12-a')
-      assert.equal(DP.haibenAppHref('見本 一郎'), '../care-tools/haiben-record.html', '氏名など受け付けない形は付けない')
-      assert.equal(DP.haibenAppHref(''), '../care-tools/haiben-record.html')
-      assert.equal(DP.haibenAppHref(null), '../care-tools/haiben-record.html')
-      assert.equal(DP.haibenAppHref('x'.repeat(33)), '../care-tools/haiben-record.html')
+      assert.equal(DP.haibenAppHref('M001'), '../haiben-record/haiben-record.html?masterId=M001')
+      assert.equal(DP.haibenAppHref(' wm_12-a '), '../haiben-record/haiben-record.html?masterId=wm_12-a')
+      assert.equal(DP.haibenAppHref('見本 一郎'), '../haiben-record/haiben-record.html', '氏名など受け付けない形は付けない')
+      assert.equal(DP.haibenAppHref(''), '../haiben-record/haiben-record.html')
+      assert.equal(DP.haibenAppHref(null), '../haiben-record/haiben-record.html')
+      assert.equal(DP.haibenAppHref('x'.repeat(33)), '../haiben-record/haiben-record.html')
     })
     it('前の方／次の方は一括の画面と同じ方（予定の方のうち休み・入院中を除く全員＋予定外で来た方）を一覧の並びで回る（2026-10-24 §9.4: 到着をこの画面で押すので、到着の前の方も回る）', () => {
       const rows = [
