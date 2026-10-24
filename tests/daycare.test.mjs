@@ -1376,7 +1376,10 @@ if (DC === null) {
       assert.doesNotMatch(t, /rounded-full/)
       assert.doesNotMatch(list, /あ行|か行/)
       const css = read('../src/index.css')
-      assert.match(css, /\.dc-cards \{\s*display: grid;\s*grid-template-columns: repeat\(auto-fill, minmax\(min\(205px, 100%\), 1fr\)\);/)
+      // 最小幅はふつうの文字で 205px（入居者マスタの .rlist と同じ）。rem なので文字を大きくすると列が減る
+      assert.match(css, /\.dc-cards \{\s*display: grid;\s*grid-template-columns: repeat\(auto-fill, minmax\(min\(12\.8rem, 100%\), 1fr\)\);/)
+      // 氏名・ふりがな・予定は切らずに折り返す（ふりがなは〔休み〕の横に置かない）
+      assert.doesNotMatch(list.slice(0, list.indexOf('</ul>')), /\btruncate\b/)
       assert.match(css, /\.dc-card-link::after \{\s*content: '';\s*position: absolute;\s*inset: 0;/)
       assert.doesNotMatch(css, /\.dc-(row|row-head|cell-label|span2)\s*[,{]/, '1人1行の表は外した')
     })

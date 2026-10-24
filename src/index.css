@@ -47,13 +47,14 @@
 }
 
 /* デイの今日のカード（2026-10-24 代表者の決定 §9.4・src/pages/DaycarePage.tsx。それまでの1人1行の表 .dc-row は外した）。
-   列の数は幅で自動: カードの最小幅 205px（入居者マスタ care-tools/resident-master.html の .rlist と同じ）で、タブレット横
-   1024〜1180px は4列・768px は3列・狭い幅は2→1列。min(205px, 100%) で、文字を大きくした iPhone でも横にはみ出さない。
+   列の数は幅で自動: カードの最小幅 12.8rem（ふつうの文字の大きさで 205px＝入居者マスタ care-tools/resident-master.html の .rlist と同じ）で、
+   タブレット横 1024〜1180px は4列・768px は3列・狭い幅は2→1列。rem なので文字を大きくした端末では列が減る（カードが詰まらない）。
+   min(…, 100%) で、表示を拡大した iPhone でも横にはみ出さない。
    カード全体を押すと1人の画面（.dc-card-link の ::after がカードを覆う）。〔休み〕〔取消〕は z-index で上に出す（リンクの中に入れない）。
    キーボードで氏名のリンクに来た時は、カード全体に枠を出す（:has。読めない古いブラウザは氏名の枠だけ） */
 .dc-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(205px, 100%), 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(12.8rem, 100%), 1fr));
   gap: var(--tap-gap);
 }
 .dc-card-link::after {

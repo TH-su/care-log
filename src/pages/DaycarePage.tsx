@@ -419,7 +419,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     (id: number) => residents.find((r) => r.id === id)?.name ?? `利用者ID ${id}`,
     [residents],
   )
-  /** ふりがな（カードの氏名の下。無ければ空の行＝カードの高さをそろえる） */
+  /** ふりがな（カードの氏名の下。無ければ出さない） */
   const kanaOf = (id: number) => residents.find((r) => r.id === id)?.kana ?? null
   const bathOf = useCallback((id: number) => data?.baths.find((b) => b.resident_id === id) ?? null, [data])
   /** 段階2a: 行の昼食の欄。水分・活動の札は 1人1行にした時に一覧から外し、1人の記録の画面で見る（代表者の回答 A3・2026-10-23） */
@@ -655,14 +655,14 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                 key={row.residentId}
                 className={`dc-card relative flex min-w-0 flex-col gap-1 rounded-lg border p-3 ${absent ? 'border-border bg-surface2' : 'border-border-strong bg-surface'}`}
               >
-                <div className="flex items-start gap-2">
-                  {/* 氏名・ふりがな（押すと1人の記録へ。カード全体を押せる＝.dc-card-link の ::after） */}
-                  <Link to={personPath(row.residentId, day, today)} className="dc-card-link min-w-0 flex-1 rounded">
-                    <span className={`block truncate text-lg font-bold ${absent ? 'text-ink2' : 'text-ink'}`}>
+                <div className="flex flex-wrap items-start gap-2">
+                  {/* 氏名（押すと1人の記録へ。カード全体を押せる＝.dc-card-link の ::after）。長い氏名は切らずに折り返す。
+                      カードが狭い時（拡大表示・大きな文字）は〔休み〕を氏名の下へ回す（氏名の幅を 5 文字分は残す） */}
+                  <Link to={personPath(row.residentId, day, today)} className="dc-card-link min-w-[5em] flex-1 rounded">
+                    <span className={`block break-words text-lg font-bold ${absent ? 'text-ink2' : 'text-ink'}`}>
                       {name}
                       <span className="sr-only">さんの1日の記録を開く</span>
                     </span>
-                    <span className="block truncate text-sm text-ink2">{kana ?? ' '}</span>
                   </Link>
                   {/* 休み（リンクの外の別のボタン。休みの方は〔取消〕だけ・理由は1人の画面で選ぶ） */}
                   {absent ? (
@@ -687,7 +687,9 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                     </button>
                   )}
                 </div>
-                <p className="truncate text-sm text-ink2">
+                {/* ふりがなは〔休み〕の下の幅いっぱいに出す（ボタンの横だと 1024px の4列で切れた） */}
+                {kana !== null && kana !== '' ? <p className="break-words text-sm text-ink2">{kana}</p> : null}
+                <p className="break-words text-sm text-ink2">
                   {planText}
                   {row.bathingPlanned ? '・入浴' : ''}
                 </p>
@@ -699,10 +701,13 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                 ) : row.hospitalized && row.state === 'planned' ? (
                   <p className="text-base text-ink2">入院中</p>
                 ) : (
-                  <p className="text-base text-ink">
-                    到着 <span className="font-num font-bold">{a?.arrived_at ? hmShort(a.arrived_at) : '—'}</span>
-                    <span className="ml-3">帰宅 </span>
-                    <span className="font-num font-bold">{a?.left_at ? hmShort(a.left_at) : '—'}</span>
+                  <p className="flex flex-wrap gap-x-3 text-base text-ink">
+                    <span className="whitespace-nowrap">
+                      到着 <span className="font-num font-bold">{a?.arrived_at ? hmShort(a.arrived_at) : '—'}</span>
+                    </span>
+                    <span className="whitespace-nowrap">
+                      帰宅 <span className="font-num font-bold">{a?.left_at ? hmShort(a.left_at) : '—'}</span>
+                    </span>
                   </p>
                 )}
                 {/* 入浴・昼食・バイタルの状態（文字だけ・押せない。記録は1人の画面・食事一括・バイタル一括） */}
