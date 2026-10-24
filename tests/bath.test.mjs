@@ -448,9 +448,14 @@ if (B === null) {
       assert.equal(month.replace(/\/\/.*$/gm, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '').includes('入浴の記録を開く'), false)
     })
     it('デイの画面の休みで入浴の行が他の端末で直されていた時の案内は、入口のある所を指す（2026-10-24）', () => {
-      const p = read('../src/pages/DaycarePage.tsx')
-      assert.match(p, /入浴の記録は直していません。この行の入浴か、入浴の画面（「その他」→「入浴 月次表」→〔入浴の記録を直す ›〕）で確かめてください。/)
-      assert.equal(p.replace(/\/\/.*$/gm, '').includes('入浴の画面で確かめてください'), false)
+      // 2026-10-24（§9.4）: 休み・入浴の操作は今日の画面と1人の画面で同じ部品（DaycareAttendanceOps）に移した。
+      // 「この行の入浴」は、カードからは「カードを押して1人の画面の入浴」、1人の画面では「この画面の入浴」（固定し直し・入口を指す意図は同じ）
+      const p = read('../src/components/DaycareAttendanceOps.tsx')
+      assert.match(p, /入浴の記録は直していません。\$\{place\.bathCheck\}か、入浴の画面（「その他」→「入浴 月次表」→〔入浴の記録を直す ›〕）で確かめてください。/)
+      assert.match(p, /board: \{[\s\S]*?bathCheck: 'カードを押して1人の画面の入浴',/)
+      assert.match(p, /person: \{[\s\S]*?bathCheck: 'この画面の入浴',/)
+      for (const f of ['../src/components/DaycareAttendanceOps.tsx', '../src/pages/DaycarePage.tsx', '../src/pages/DaycarePersonPage.tsx'])
+        assert.equal(read(f).replace(/\/\/.*$/gm, '').includes('入浴の画面で確かめてください'), false, f)
     })
     it('★入浴は「入浴した／入浴していない」の2つだけ（2026-10-01）: 記録画面・月次表・カルテ', () => {
       const page = read('../src/pages/BathRecordPage.tsx')
