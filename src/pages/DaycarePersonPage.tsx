@@ -56,6 +56,7 @@ import { RecorderBar } from '../components/RecorderBar'
 import { DaycareActivitySection } from '../components/DaycareActivitySection'
 import { DaycareTrainingCard } from '../components/DaycareTrainingCard'
 import { hasTimes, hmShort, useDaycareAttendanceOps } from '../components/DaycareAttendanceOps'
+import { daycareDayMemo, memoForDay, rememberDaycareDay } from '../lib/daycareDayMemo'
 import { useDaycareNoteMarks } from '../components/DaycareNoteMark'
 import { activityText } from '../lib/daycareActivity'
 import { activityMarkText, excretionMarkText, fluidMarkText, mealMarkText, vitalMarkText } from '../lib/daycareNoteMark'
@@ -105,6 +106,8 @@ const MSG_NOT_PERSISTED =
   '送信できませんでした。この端末にも保存できていません（保存領域の空きが不足している可能性があります）。この画面を閉じずに、電波が戻ってからもう一度押してください。'
 const MSG_GATE_UNKNOWN =
   'デイの記録を使える期間かどうかを確認できませんでした（通信エラー）。電波状態を確認して、再試行してください。記録の閲覧はこのままできます。'
+/** 食事・水分を読めなかった（その欄だけ止める。出欠・入浴の操作は動かす＝親の検収 軽3） */
+const MSG_INTAKE_FAILED = '昼食・おやつ・水分の記録を読めませんでした。通信状態を確認して〔再試行〕を押してください（到着・休み・入浴はこのまま記録できます）。'
 
 interface PersonData {
   day: string
@@ -118,6 +121,10 @@ interface PersonData {
   vitals: KeyedVital[]
   meals: DaycareMealRow[]
   fluids: FluidIntake[]
+  /** 食事・水分を読めたか（読めない時はその欄だけ「読めませんでした」・出欠と入浴の操作は動かす＝親の検収 軽3） */
+  intakeOk: boolean
+  /** 電波が無く、今日の画面が読んだ控え（daycareDayMemo）で開いた時の控えの時刻。サーバーから読めた時は null */
+  memoAt: number | null
 }
 
 type MealSlot2 = 'lunch' | 'snack'
@@ -274,7 +281,11 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
         setTargets(tg)
         setClosedDates(closed)
       })
-      .catch(() => {})
+      .catch(() => {
+        // 名簿が読めない（電波が無い）時は、今日の画面が読んだ控えの名簿で氏名を出す（控えは画面のメモリだけ）
+        const m = daycareDayMemo()
+        if (alive && m !== null && m.residents.length > 0) setResidents((prev) => (prev.length > 0 ? prev : m.residents))
+      })
     return () => {
       alive = false
     }
@@ -301,7 +312,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
         missing ? Promise.resolve([] as DaycareAttendance[]) : fetchDaycareAttendance(target),
         fetchBathDay(target).catch(() => [] as BathRecord[]),
         fetchDaycareVitals(target).catch(() => ({ live: [] as KeyedVital[], keys: [] as string[] })),
-        fetchDaycareIntake(target),
+        fetchDaycareIntake(target).catch(() => null),
       ])
       if (gen !== genRef.current || target !== dayRef.current) return
       setData({
@@ -313,12 +324,35 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
         attendance,
         baths,
         vitals: dv.live,
-        meals: intake.meals,
-        fluids: intake.fluids,
+        meals: intake?.meals ?? [],
+        fluids: intake?.fluids ?? [],
+        intakeOk: intake !== null,
+        memoAt: null,
       })
       setError(null)
-    } catch {
+    } catch (e) {
       if (gen !== genRef.current) return
+      // 電波が無い（通信の失敗）: 今日の画面が読んだ同じ日の控えがあれば、それで開く（到着・休み・入浴は送信待ちに積める＝親の検収 中1）。
+      // 静かな読み直し（他の端末の変更・送信待ちの減り）の失敗では、いま出している内容を残す
+      const m = memoForDay(daycareDayMemo(), target, e)
+      if (m !== null && target === dayRef.current && !quiet) {
+        setData({
+          day: m.day,
+          planRows: m.planRows,
+          planSource: m.planSource,
+          snapshot: m.snapshot,
+          missing: m.missing,
+          attendance: m.attendance,
+          baths: m.baths,
+          vitals: m.vitals,
+          meals: m.meals,
+          fluids: m.fluids,
+          intakeOk: true,
+          memoAt: m.savedAt,
+        })
+        setError(null)
+        return
+      }
       if (!quiet) setError(ERR_LOAD)
     } finally {
       if (gen === genRef.current) setLoading(false)
@@ -371,6 +405,25 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
       if (reloadTimer.current !== null) window.clearTimeout(reloadTimer.current)
     }
   }, [scheduleReload])
+
+  // サーバーから読めた一覧は控えにも入れる（次の方へ移った先で電波が切れても開ける）。控えで開いた時・食事が読めない時は入れない
+  useEffect(() => {
+    if (data === null || data.memoAt !== null || !data.intakeOk || data.missing) return
+    rememberDaycareDay({
+      day: data.day,
+      planRows: data.planRows,
+      planSource: data.planSource,
+      snapshot: data.snapshot,
+      missing: data.missing,
+      attendance: data.attendance,
+      baths: data.baths,
+      vitals: data.vitals,
+      meals: data.meals,
+      fluids: data.fluids,
+      residents,
+      savedAt: Date.now(),
+    })
+  }, [data, residents])
 
   const resident = useMemo(() => residents.find((r) => r.id === residentId) ?? null, [residents, residentId])
   // 今日の画面の〔予定にない方を追加〕から来た方（予定も記録も無い在籍中の方）は、予定外として足す（〔予定外で到着〕を出す）
@@ -486,10 +539,12 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
       return next
     })
 
+  /** 昼食・おやつ・水分の書き込みの前の確かめ（食事・水分を読めていない時は書かない＝基準の値が分からないため） */
   const precheck = (): string | null => {
     if (!canWrite) {
       return gate?.forbidden ? FORBIDDEN_REASON : gate?.outdated ? OUTDATED_REASON : gate?.observed ? kindBlockedMessage('daycare') : MSG_GATE_UNKNOWN
     }
+    if (data !== null && !data.intakeOk) return MSG_INTAKE_FAILED
     if (actorId === null) return MSG_NO_RECORDER
     return null
   }
@@ -825,6 +880,13 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           {gate.forbidden ? FORBIDDEN_REASON : gate.outdated ? OUTDATED_REASON : gate.observed ? `${kindBlockedMessage('daycare')}。記録の閲覧はできます。` : MSG_GATE_UNKNOWN}
         </p>
       ) : null}
+      {data !== null && data.memoAt !== null ? (
+        // 電波が無く、今日の画面が読んだ控えで開いた（親の検収 中1）。押した記録は送信待ちに積み、電波が戻ると送って読み直す
+        <p role="status" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">
+          <span aria-hidden="true">▲ </span>
+          電波が無いため、今日の一覧で読んだ時点（{new Date(data.memoAt).toTimeString().slice(0, 5)}）の内容です。押した記録は送信待ちに積みます（電波が戻ると自動で送信します）。
+        </p>
+      ) : null}
       {data?.missing ? (
         <p role="alert" className="rounded-lg border border-danger bg-danger-bg p-3 text-base text-ink">
           <span aria-hidden="true">▲ </span>デイの記録はまだ使えません（サーバー側の設定待ち）。管理者に連絡してください。
@@ -905,6 +967,19 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   const queuedNow = queuedFluids[personKey] ?? null
   const fluidTotal = fluidTotalOf(fluidsOf, residentId, data.day) + (queuedNow?.ml ?? 0)
   const sectionCls = 'rounded-lg border border-border bg-surface p-3 space-y-2'
+  /** 昼食・おやつ・水分の欄を押せるか（食事・水分を読めていない時は押せない） */
+  const intakeWritable = canWrite && data.intakeOk
+  const intakeFailedNote = data.intakeOk ? null : (
+    <div role="alert" className="space-y-2 rounded border border-warn bg-warn-bg p-2 text-base text-ink">
+      <p>
+        <span aria-hidden="true">▲ </span>
+        {MSG_INTAKE_FAILED}
+      </p>
+      <button type="button" onClick={() => setReloadKey((n) => n + 1)} className="min-h-tap rounded border border-border-strong bg-surface px-4 text-base text-ink">
+        再試行
+      </button>
+    </div>
+  )
   const chipCls = (on: boolean) =>
     on
       ? 'min-h-tap min-w-tap rounded border-2 border-primary bg-primary px-2 text-lg font-bold text-primary-ink'
@@ -1108,6 +1183,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
         )}
       </section>
 
+      {intakeFailedNote}
       <section aria-labelledby="h-lunch" className={sectionCls}>
         <div className="flex flex-wrap items-baseline justify-between gap-gap">
           <h3 id="h-lunch" className="text-lg font-bold text-ink">
@@ -1128,7 +1204,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
                   type="button"
                   aria-pressed={lunch?.[f] === n && (lunch?.status ?? 'eaten') === 'eaten'}
                   aria-label={`${f === 'main_amount' ? '主食' : '副食'} ${n}割`}
-                  disabled={!canWrite}
+                  disabled={!intakeWritable}
                   onClick={() => void saveMeal(targetOf('lunch'), withEaten(lunch?.status, { [f]: n }))}
                   className={chipCls(lunch?.[f] === n && (lunch?.status ?? 'eaten') === 'eaten')}
                 >
@@ -1142,7 +1218,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           <button
             type="button"
             aria-pressed={lunch?.status === 'refused'}
-            disabled={!canWrite}
+            disabled={!intakeWritable}
             onClick={() => void saveMeal(targetOf('lunch'), { status: lunch?.status === 'refused' ? 'eaten' : 'refused' })}
             className={chipCls(lunch?.status === 'refused')}
           >
@@ -1171,7 +1247,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
               key={c.value}
               type="button"
               aria-pressed={snack?.main_amount === c.value && (snack?.status ?? 'eaten') === 'eaten'}
-              disabled={!canWrite}
+              disabled={!intakeWritable}
               onClick={() => void saveMeal(targetOf('snack'), withEaten(snack?.status, { main_amount: c.value }))}
               className={chipCls(snack?.main_amount === c.value && (snack?.status ?? 'eaten') === 'eaten')}
             >
@@ -1199,7 +1275,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
             <button
               key={ml}
               type="button"
-              disabled={!canWrite || fluidBusy}
+              disabled={!intakeWritable || fluidBusy}
               onClick={() => void addFluid(ml)}
               className="min-h-tap rounded border border-primary bg-surface px-4 text-lg font-bold text-primary disabled:border-border disabled:text-ink3"
             >
@@ -1218,7 +1294,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           </label>
           <button
             type="button"
-            disabled={!canWrite || fluidBusy || fluidOther === '' || otherErr !== null}
+            disabled={!intakeWritable || fluidBusy || fluidOther === '' || otherErr !== null}
             onClick={() => {
               const n = Number(fluidOther.normalize('NFKC').trim())
               setFluidOther('')
@@ -1257,7 +1333,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
                 </span>
                 <button
                   type="button"
-                  disabled={!canWrite}
+                  disabled={!intakeWritable}
                   onClick={() => setDelFluid(f)}
                   aria-label={`${f.taken_at === null ? '時刻なし' : f.taken_at.slice(0, 5)} の ${fmtMl(f.amount_ml)} を取り消す`}
                   className="min-h-tap rounded border border-danger px-3 text-base text-danger disabled:border-border disabled:text-ink3"

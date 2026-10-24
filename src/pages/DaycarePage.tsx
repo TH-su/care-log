@@ -58,6 +58,7 @@ import type { DaycareActivity } from '../lib/daycareActivity'
 import { RecorderBar } from '../components/RecorderBar'
 import { ErrorBlock, LoadingBlock, ResidentPickerModal, useToast } from '../components/ui'
 import { hasTimes, hmShort, useDaycareAttendanceOps } from '../components/DaycareAttendanceOps'
+import { rememberDaycareDay } from '../lib/daycareDayMemo'
 import {
   bathCountsUnchecked,
   buildDaycareBoard,
@@ -406,6 +407,31 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       if (reloadTimer.current !== null) window.clearTimeout(reloadTimer.current)
     }
   }, [scheduleReload])
+
+  // ── その日の一覧の控え（画面のメモリだけ・端末には残さない＝daycareDayMemo）。電波の無い所でカードを押した時、1人の画面は
+  // 通信の失敗の時だけこの控えで開く（到着・休み・入浴は送信待ちに積める＝親の検収 中1・2026-10-24） ──
+  useEffect(() => {
+    if (data === null || data.missing) return
+    rememberDaycareDay({
+      day: data.day,
+      planRows: data.planRows,
+      planSource: data.planSource,
+      snapshot: data.snapshot,
+      missing: data.missing,
+      attendance: data.attendance,
+      baths: data.baths,
+      vitals: data.vitals,
+      meals: data.meals,
+      fluids: data.fluids,
+      residents,
+      savedAt: Date.now(),
+    })
+  }, [data, residents])
+  // 1人の画面の部品を先に読んでおく（電波の無い所でカードを押しても画面を開ける。電波がある時だけ・失敗は黙って次の機会に）
+  useEffect(() => {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return
+    void import('./DaycarePersonPage').catch(() => undefined)
+  }, [])
 
   // ── 一覧 ──
   const board = useMemo(

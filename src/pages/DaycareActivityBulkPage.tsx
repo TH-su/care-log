@@ -3,7 +3,8 @@
 //
 // ・今日のレク: 活動を1つ選ぶ（定型のチップか〔その他〕）→〔チェックした n人に入れる〕。相手は、一括の画面と同じ方（予定の方のうち
 //   休み・入院中を除く全員と予定外で来た方＝activityTargets・2026-10-24 §9.4 の4。それまでは在席・帰宅だけ）で、
-//   はじめは全員にチェックが付いている（外したい方だけ外す）。入れる度合いは「参加」。変える時は1人の画面で
+//   はじめは来た方（在席・帰宅）にだけチェックが付いている（まだ来ていない方は「（未到着）」の印・チェックなし＝親の検収 中2）。
+//   入れる度合いは「参加」。変える時は1人の画面で
 // ・画面の名前は「活動一括」（2026-10-24 §9.4。それまでは「活動をまとめて」。ルートと切り替えの key は変えない）
 // ・保存は1人ずつ insertDaycareActivity（2台で同じレクを入れても、同じ度合いなら1行に合流・違えば「先に記録があります」）
 // ・下に1人ずつの活動の一覧と、その方の1日の記録（前回コピーつき）への入口
@@ -41,6 +42,7 @@ import {
   DAYCARE_ACTIVITY_CHIPS,
   activitiesOf,
   activityLabelError,
+  activityDefaultChecked,
   activityTargets,
   activityText,
   bulkResultText,
@@ -91,7 +93,8 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
   const [gate, setGate] = useState<{ value: boolean; observed: boolean; forbidden?: true; outdated?: true } | null>(null)
   const [label, setLabel] = useState<string | null>(null)
   const [otherText, setOtherText] = useState('')
-  const [unchecked, setUnchecked] = useState<Set<number>>(new Set())
+  /** 人が押して変えたチェック（rid → チェックの有無）。押していない方は activityDefaultChecked（来た方だけ最初からチェック） */
+  const [picked, setPicked] = useState<Map<number, boolean>>(new Map())
   const [running, setRunning] = useState(false)
   const [result, setResult] = useState<{ day: string; tone: 'info' | 'warn'; text: string } | null>(null)
   const [, setQueueTick] = useState(0)
@@ -163,7 +166,7 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
 
   useEffect(() => {
     setResult(null)
-    setUnchecked(new Set())
+    setPicked(new Map())
     void load(day, false)
   }, [day, reloadKey, load])
 
@@ -214,7 +217,9 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
   const chosen = label === null ? null : label === '' ? normalizeActivityLabel(otherText) : label
   const chosenErr = label === '' ? (otherText === '' ? null : activityLabelError(otherText)) : null
   const chosenOk = chosen !== null && chosen !== '' && activityLabelError(chosen) === null
-  const sendTo = chosenOk ? targets.filter((rid) => !unchecked.has(rid) && !has(rid, chosen)) : []
+  const rowOf = (rid: number) => board?.rows.find((r) => r.residentId === rid)
+  const isChecked = (rid: number) => picked.get(rid) ?? activityDefaultChecked(rowOf(rid))
+  const sendTo = chosenOk ? targets.filter((rid) => isChecked(rid) && !has(rid, chosen)) : []
 
   const precheck = (): string | null => {
     if (missing) return MSG_MISSING
@@ -394,7 +399,7 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
           <p className="text-base text-ink2">この日の予定の方がいません（休み・入院中の方は出しません）。予定外で来た方は、今日の画面の〔予定にない方を追加〕で足したカードを押し、〔予定外で到着〕を押すと、ここに出ます。</p>
         ) : (
           <fieldset className="space-y-1">
-            <legend className="text-base font-bold text-ink">入れる方（{targets.length}人。外したい方だけ外してください）</legend>
+            <legend className="text-base font-bold text-ink">入れる方（{targets.length}人。来た方には最初からチェックが付いています。外したい方だけ外してください）</legend>
             <ul className="grid gap-1 sm:grid-cols-2">
               {targets.map((rid) => {
                 const done = chosenOk && chosen !== null && has(rid, chosen)
@@ -404,18 +409,15 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                       <input
                         type="checkbox"
                         className="h-6 w-6"
-                        checked={!unchecked.has(rid) && !done}
+                        checked={isChecked(rid) && !done}
                         disabled={done || running}
                         onChange={(e) =>
-                          setUnchecked((prev) => {
-                            const next = new Set(prev)
-                            if (e.target.checked) next.delete(rid)
-                            else next.add(rid)
-                            return next
-                          })
+                          setPicked((prev) => new Map(prev).set(rid, e.target.checked))
                         }
                       />
                       <span>{nameOf(rid)}</span>
+                      {/* まだ来ていない方は最初のチェックを外し、印を出す（親の検収 中2） */}
+                      {!done && !activityDefaultChecked(rowOf(rid)) ? <span className="text-sm text-ink2">（未到着）</span> : null}
                       {done ? <span className="text-sm text-ok">（記録済み）</span> : null}
                     </label>
                   </li>

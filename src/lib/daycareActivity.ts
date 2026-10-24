@@ -110,6 +110,14 @@ export function activityTargets(rows: readonly Pick<DaycareBoardRow, 'residentId
   return daycareBulkRows(rows).map((r) => r.residentId)
 }
 
+/**
+ * 活動一括で最初からチェックを付けるか（2026-10-24 親の検収 中2）: 来た方（在席・帰宅）だけ。まだ来ていない方（予定のまま）は一覧に出すが
+ * 最初のチェックは外す（休みにしても活動の記録は残るので、来ていない方に「参加」を入れない）。2回目に表にする時もこの決まりを引き継ぐ
+ */
+export function activityDefaultChecked(row: Pick<DaycareBoardRow, 'state'> | undefined): boolean {
+  return row !== undefined && (row.state === 'present' || row.state === 'left')
+}
+
 /** 追加の結果（1人分）。merged＝同じ項目・同じ度合いの行が先にあった（1行に合流）／taken＝違う度合いで先にあった */
 export type ActivityAddOutcome = 'saved' | 'merged' | 'taken' | 'queued' | 'error'
 

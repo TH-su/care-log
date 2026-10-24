@@ -215,6 +215,13 @@ if (A === null) {
         { residentId: 6, state: 'planned', planned: false, hospitalized: false },
       ]
       assert.deepEqual(A.activityTargets(rows), [1, 3, 4])
+      // 親の検収 中2: 最初からチェックを付けるのは来た方（在席・帰宅）だけ。まだ来ていない方は一覧に出すがチェックを外す
+      assert.deepEqual(rows.map((r) => A.activityDefaultChecked(r)), [true, false, true, false, false, false])
+      assert.equal(A.activityDefaultChecked(undefined), false)
+      const b = read('../src/pages/DaycareActivityBulkPage.tsx')
+      assert.match(b, /const isChecked = \(rid: number\) => picked\.get\(rid\) \?\? activityDefaultChecked\(rowOf\(rid\)\)/)
+      assert.match(b, /const sendTo = chosenOk \? targets\.filter\(\(rid\) => isChecked\(rid\) && !has\(rid, chosen\)\) : \[\]/)
+      assert.match(b, /!activityDefaultChecked\(rowOf\(rid\)\) \? <span className="text-sm text-ink2">（未到着）<\/span>/)
     })
     it('まとめて記録の結果の文は人数で出す（合流・送信待ち・先に違う度合い・失敗を分ける）', () => {
       assert.equal(A.bulkResultText('体操', ['saved', 'saved', 'merged']), '「体操」: 2人に入れました。1人は同じ記録が先にありました。')
