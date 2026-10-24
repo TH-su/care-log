@@ -527,6 +527,12 @@
 .cl-dc-mark {
   color: var(--c-info);
   font-weight: var(--fw-bold);
+  /* 「デ10」でも 30px の欄の中で左右に 2px 以上あけ、内側の枠の線に「デ」がかからないようにする（#46 の反証 軽3） */
+  font-size: 0.7em;
+  letter-spacing: 0;
+}
+.cl-dc-amount {
+  letter-spacing: -0.1em;
 }
 @media print {
   .cl-dc-frame {
@@ -534,6 +540,10 @@
   }
   .cl-dc-mark {
     display: none;
+  }
+  /* 紙は今のまま（数字の字の間を詰めない） */
+  .cl-dc-amount {
+    letter-spacing: inherit;
   }
 }
 /* 記号を持つセルは数字側もわずかに詰めて余裕を作る（:has 非対応環境では何も起きない） */

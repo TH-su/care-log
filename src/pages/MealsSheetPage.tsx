@@ -75,8 +75,8 @@ import { discardPendingRow, fetchLatestMeal, pendingRow, saveMealEdits } from '.
 import type { PendingCellRow } from '../lib/db'
 // 摂取低下（A2）・濃淡（A6）・水分の目標（A3）。基準値は app_settings の上書きを起動中に1回読む（A8）
 import { loadVitalThresholds, queuePending } from '../lib/db'
-import { fetchDaycareArrivals } from '../lib/db'
 import { daycareArrivalKey } from '../lib/daycare'
+import { useDaycareArrivals } from '../hooks/useDaycareArrivals'
 import { fluidProgress, mealLowLabel, mealLowStreaks, mealShade } from '../lib/vitalAlerts'
 import type { ResidentTargets } from '../lib/vitalAlerts'
 import { focusOf, useCellPresence } from '../hooks/useCellPresence'
@@ -740,7 +740,7 @@ function AmountHalf({
       // 当てないと 22px 行が 44px に広がり、スプシの密度（--sheet-row-h）が再現できない
       // （当たり判定は ::before で下方向へ広げる。詰まった行で 44px に届かない分は表示倍率 200% で解決する）
       style={{ width, minWidth: width, minHeight: ROW_H }}
-      className={`${box} tabular bg-transparent ${toneClass} disabled:opacity-60`}
+      className={`${box} tabular bg-transparent ${toneClass} disabled:opacity-60${dcMark ? ' cl-dc-amount' : ''}`}
     >
       {/* 記号は sheet-mark（数字用フォント＝半角幅・0.85em）で描く。
           和文フォントのままだと全角幅になり、30px の主食・副食列（--w-meal）から
@@ -1377,23 +1377,9 @@ export function MealsSheetPage({
   }, [load])
 
   // 今日の画面の改善 3回目（2026-10-24）: その日にデイへ到着した方（昼食の欄の「デ」と枠・画面だけ＝印刷は変えない・決定7）。
-  // 表示中の日の範囲を1回の読み取りでまとめて読む（日数ぶん問い合わせない）。〔最新〕でも読み直す。
+  // 表示中の日の範囲を1回の読み取りでまとめて読む（日数ぶん問い合わせない）。到着・休みが変わったら読み直す（useDaycareArrivals）。
   // 読めない時（通信・権限・表が無い）は印を出さないだけ（表は止めない）
-  const [dcArrivals, setDcArrivals] = useState<ReadonlySet<string>>(() => new Set())
-  const [dcTick, setDcTick] = useState(0)
-  useEffect(() => {
-    let alive = true
-    fetchDaycareArrivals(fromIso, toIso)
-      .then((s) => {
-        if (alive) setDcArrivals(s)
-      })
-      .catch(() => {
-        if (alive) setDcArrivals(new Set())
-      })
-    return () => {
-      alive = false
-    }
-  }, [fromIso, toIso, dcTick])
+  const { arrivals: dcArrivals, refresh: refreshDcArrivals } = useDaycareArrivals(fromIso, toIso)
 
   // 基準値（A8）と個別の目標（A3）は画面を開いた時に1回だけ読む（表の読み込みを待たせない・失敗しても表は出す）
   useEffect(() => {
@@ -1924,8 +1910,8 @@ export function MealsSheetPage({
     closeEdit()
     setFluidTarget(null)
     void load()
-    setDcTick((n) => n + 1)
-  }, [closeEdit, load])
+    refreshDcArrivals()
+  }, [closeEdit, load, refreshDcArrivals])
 
   /**
    * 相手の行が取り消されていた食事の控えを、新しい行として保存する（〔新しい行として保存〕。行ごとの順番待ちを通す）。
@@ -2887,7 +2873,8 @@ export function MealsSheetPage({
                               style={{ width: W_MEAL2, minWidth: W_MEAL2, height: ROW_H }}
                               // 位置の基準（relative）は「✎」を置く時だけ付ける（2026-10-18 iPhone のカクつき対策）。全部のマスに付けると
                               // 11日×38人で約1,250個の重ねて描く単位ができ、指で動かすたびの描き直しが重くなる。吹き出しは fixed なので要らない
-                              className={`${CELL_BASE} ${shadeClass} ${busy ? `relative ${BUSY_RING}` : ''}${dc ? ' cl-dc-frame' : ''}`}
+                              // デイの枠は、他の端末が入力中の間は出さない（入力中の点線と同じ線になって取り違えるため・#46 の反証 中2）
+                              className={`${CELL_BASE} ${shadeClass} ${busy ? `relative ${BUSY_RING}` : ''}${dc && !busy ? ' cl-dc-frame' : ''}`}
                             >
                               {busy && busyId ? <BusyMark busy={busy} id={busyId} /> : null}
                               {absentStatus ? (
@@ -3134,7 +3121,10 @@ export function MealsSheetPage({
         {/* A3 の凡例（棒は画面だけなので、説明も紙に出さない） */}
         <span className="print:hidden">水分の欄の下の細い棒は、1日の目標に対する割合です（押すと目標の量と割合が出ます）。</span>
         {/* デイの印の凡例（2026-10-24 今日の画面の改善 3回目。印は画面だけなので、説明も紙に出さない） */}
-        {dcArrivals.size > 0 ? <span className="print:hidden">デ・枠＝その日にデイへ来た方（昼食）。</span> : null}
+        {/* 表に出ている行（階の絞り込みの後）に印が1つ以上ある時だけ（#46 の反証 軽6） */}
+        {visible.some((r) => dayList.some((d) => dcArrivals.has(daycareArrivalKey(r.id, d)))) ? (
+          <span className="print:hidden">デ・枠＝その日にデイへ来た方（昼食）。</span>
+        ) : null}
       </p>
 
       <ConflictResolver

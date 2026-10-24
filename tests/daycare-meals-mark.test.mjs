@@ -73,17 +73,45 @@ if (DC === null) {
     })
   })
 
+  describe('静的検査: 到着の読み直し（src/hooks/useDaycareArrivals.ts・#46 の反証 重1）', () => {
+    const h = code('../src/hooks/useDaycareArrivals.ts')
+    it('到着・休みの変更の知らせ（Realtime）・画面に戻った時・電波が戻った時・5分ごとに読み直す（続けて来ても1秒まとめる）', () => {
+      assert.match(h, /const off = subscribeDaycareChanges\(\(\) => later\(\)\)/)
+      assert.match(h, /window\.addEventListener\('online', later\)/)
+      assert.match(h, /document\.addEventListener\('visibilitychange', onVisible\)/)
+      assert.match(h, /const REFRESH_MS = 5 \* 60_000/)
+      assert.match(h, /const iv = window\.setInterval\(later, REFRESH_MS\)/)
+      assert.match(h, /const DEBOUNCE_MS = 1000/)
+      // 片付け（知らせの購読・合図・時計）
+      assert.match(h, /off\(\)\s*window\.removeEventListener\('online', later\)\s*document\.removeEventListener\('visibilitychange', onVisible\)\s*window\.clearInterval\(iv\)/)
+    })
+    it('読めない時: 範囲が変わった後なら空（印を出さない）・同じ範囲の読み直しの失敗なら前の印を残す', () => {
+      assert.match(h, /fetchDaycareArrivals\(fromIso, toIso\)/)
+      assert.match(h, /\.catch\(\(\) => \{\s*if \(!alive\) return\s*if \(okRangeRef\.current !== range\) setArrivals\(new Set\(\)\)\s*\}\)/)
+      assert.match(h, /\}, \[fromIso, toIso, tick\]\)/)
+    })
+  })
+
   describe('静的検査: 食事の表（MealsSheetPage）', () => {
     const p = code('../src/pages/MealsSheetPage.tsx')
-    it('表示中の日の範囲を1回で読む・〔最新〕でも読み直す・読めない時は印を出さないだけ', () => {
-      assert.match(p, /fetchDaycareArrivals\(fromIso, toIso\)\s*\.then\(\(s\) => \{\s*if \(alive\) setDcArrivals\(s\)\s*\}\)\s*\.catch\(\(\) => \{\s*if \(alive\) setDcArrivals\(new Set\(\)\)\s*\}\)/)
-      assert.match(p, /\}, \[fromIso, toIso, dcTick\]\)/)
-      assert.match(p, /void load\(\)\s*setDcTick\(\(n\) => n \+ 1\)/)
+    it('表示中の日の範囲を1回で読み、変わったら読み直す（useDaycareArrivals）・〔最新〕でも読み直す', () => {
+      assert.match(p, /const \{ arrivals: dcArrivals, refresh: refreshDcArrivals \} = useDaycareArrivals\(fromIso, toIso\)/)
+      assert.match(p, /void load\(\)\s*refreshDcArrivals\(\)/)
+    })
+    it('他の端末が入力中の欄には、デイの枠を出さない（入力中の点線と取り違えない・#46 の反証 中2）', () => {
+      assert.match(p, /\$\{dc && !busy \? ' cl-dc-frame' : ''\}/)
+    })
+    it('「デ10」でも枠の線にかからない（デイの欄だけ数字の字の間を詰める・紙は詰めない・#46 の反証 軽3）', () => {
+      assert.match(p, /\$\{dcMark \? ' cl-dc-amount' : ''\}/)
+      const css = read('../src/styles/sheet.css')
+      assert.match(css, /\.cl-dc-mark \{[^}]*font-size: 0\.7em;\s*letter-spacing: 0;\s*\}/)
+      assert.match(css, /\.cl-dc-amount \{\s*letter-spacing: -0\.1em;\s*\}/)
+      assert.match(css, /@media print \{[^@]*\.cl-dc-amount \{\s*letter-spacing: inherit;\s*\}/)
     })
     it('昼食の欄だけ: 枠（cl-dc-frame）・主食の数字の前の「デ」（副食には付けない）・読み上げ「デイに来所」', () => {
       assert.match(p, /const dc = slot === 'lunch' && dcArrivals\.has\(daycareArrivalKey\(r\.id, d\)\)/)
       assert.match(p, /const dcWord = dc \? '。デイに来所' : ''/)
-      assert.match(p, /\$\{dc \? ' cl-dc-frame' : ''\}/)
+      assert.match(p, /\$\{dc && !busy \? ' cl-dc-frame' : ''\}/)
       assert.equal((p.match(/dcMark=\{dc\}/g) ?? []).length, 1)
       assert.match(p, /dcMark=\{dc\}\s*ariaLabel=\{`\$\{r\.name\} \$\{dayLabel\} \$\{slotLabel\} 主食 /)
       assert.ok(p.includes("副食 ${eff.side_amount ?? '未入力'}${low ? '。低摂取' : ''}${mark ? `。${mark.label}` : ''}${dcWord}`}"))
@@ -93,27 +121,27 @@ if (DC === null) {
       // 塗りは使わない（濃淡・低摂取の地はそのまま）
       assert.doesNotMatch(p, /cl-dc-frame[^`'"]*bg-/)
     })
-    it('凡例は画面だけ（印刷に出さない）', () => {
-      assert.match(p, /\{dcArrivals\.size > 0 \? <span className="print:hidden">デ・枠＝その日にデイへ来た方（昼食）。<\/span> : null\}/)
+    it('凡例は画面だけ（印刷に出さない）・表に出ている行に印がある時だけ（#46 の反証 軽6）', () => {
+      assert.match(p, /\{visible\.some\(\(r\) => dayList\.some\(\(d\) => dcArrivals\.has\(daycareArrivalKey\(r\.id, d\)\)\)\) \? \(\s*<span className="print:hidden">デ・枠＝その日にデイへ来た方（昼食）。<\/span>\s*\) : null\}/)
     })
     it('印刷には出さない（CSS: 枠と「デ」を print で消す）・枠は info の線を内側に 2px（行の高さを変えない）', () => {
       const css = read('../src/styles/sheet.css')
       assert.match(css, /\.cl-dc-frame \{\s*outline: 2px solid var\(--c-info\);\s*outline-offset: -2px;\s*\}/)
-      assert.match(css, /@media print \{\s*\.cl-dc-frame \{\s*outline: none;\s*\}\s*\.cl-dc-mark \{\s*display: none;\s*\}\s*\}/)
+      assert.match(css, /@media print \{\s*\.cl-dc-frame \{\s*outline: none;\s*\}\s*\.cl-dc-mark \{\s*display: none;\s*\}/)
     })
   })
 
   describe('静的検査: 食事一括（MealsGridPage）', () => {
     const p = code('../src/pages/MealsGridPage.tsx')
-    it('開いた日の分を1回で読む・〔最新を読み込む〕でも読み直す・読めない時は印を出さないだけ', () => {
-      assert.match(p, /fetchDaycareArrivals\(day, day\)\s*\.then\(\(s\) => \{\s*if \(alive\) setDcArrivals\(s\)\s*\}\)\s*\.catch\(\(\) => \{\s*if \(alive\) setDcArrivals\(new Set\(\)\)\s*\}\)/)
-      assert.match(p, /\}, \[day, dcTick\]\)/)
-      assert.match(p, /void load\(\)\s*setDcTick\(\(n\) => n \+ 1\)/)
+    it('開いた日の分を1回で読み、変わったら読み直す（useDaycareArrivals）・〔最新を読み込む〕でも読み直す', () => {
+      assert.match(p, /const \{ arrivals: dcArrivals, refresh: refreshDcArrivals \} = useDaycareArrivals\(day, day\)/)
+      assert.match(p, /void load\(\)\s*refreshDcArrivals\(\)/)
     })
     it('「昼」を選んでいる時だけ: カードの枠と氏名の横の「デイ」の札（読み上げは「デイに来所」）', () => {
       assert.match(p, /dcArrived=\{slot === 'lunch' && dcArrivals\.has\(daycareArrivalKey\(r\.id, day\)\)\}/)
       assert.match(p, /<li className=\{`rounded-md border border-border bg-surface p-3\$\{dcArrived \? ' cl-dc-frame' : ''\}`\}>/)
-      assert.match(p, /\{dcArrived \? \(\s*<span className="shrink-0 rounded border border-info px-2 text-sm font-bold text-info">\s*デイ<span className="sr-only">に来所<\/span>/)
+      // 押せない札なので丸い札・印刷には出さない（#46 の反証 軽4・軽5）
+      assert.match(p, /\{dcArrived \? \(\s*<span className="shrink-0 rounded-full border border-info px-2 text-sm font-bold text-info print:hidden">\s*デイ<span className="sr-only">に来所<\/span>/)
     })
   })
 
@@ -136,7 +164,8 @@ if (DC === null) {
       }
       // どれも <span>（押せない札・横棒）。<button> には付いていない
       for (const h of hits) assert.match(h, /<span |\$\{base\} rounded-full/, h)
-      assert.equal(hits.length, 7, hits.join('\n'))
+      // 押せない札7か所＋食事一括の「デイ」の札（今回・押せない札）＝8
+      assert.equal(hits.length, 8, hits.join('\n'))
     })
     it('ボタンは rounded（6px）: 申し送りの分類・申し送りの入力・カルテの欄へ移動・押せるチップ', () => {
       assert.match(code('../src/components/noteCategory.tsx'), /className=\{`dsheet-cat-btn min-h-tap shrink-0 rounded px-3 text-base/)

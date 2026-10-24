@@ -37,9 +37,9 @@ import {
   saveMealEdits,
   softDeleteFluid,
   subscribeChanges,
-  fetchDaycareArrivals,
 } from '../lib/db'
 import { daycareArrivalKey } from '../lib/daycare'
+import { useDaycareArrivals } from '../hooks/useDaycareArrivals'
 import type { ChangeInfo, PendingCellRow } from '../lib/db'
 import { getActorId, touchActivity } from '../lib/actor'
 import { addDays, fmtDayLabel, toHalfWidth, todayIso } from '../lib/format'
@@ -625,7 +625,8 @@ const MealRow = memo(function MealRow({
           {rowBusy !== null ? <RowBusyMark text={rowBusy} /> : null}
         </span>
         {dcArrived ? (
-          <span className="shrink-0 rounded border border-info px-2 text-sm font-bold text-info">
+          // 押せない札なので丸い札（押せるボタンは 6px）。画面だけ＝印刷には出さない（#46 の反証 軽4・軽5）
+          <span className="shrink-0 rounded-full border border-info px-2 text-sm font-bold text-info print:hidden">
             デイ<span className="sr-only">に来所</span>
           </span>
         ) : null}
@@ -884,22 +885,9 @@ export function MealsGridPage({
   const [daySwitching, setDaySwitching] = useState(false)
   const [slot, setSlot] = useState<MealSlot>(() => slotForHour(new Date().getHours()))
   // 今日の画面の改善 3回目（2026-10-24）: その日にデイへ到着した方（昼食のカードの枠と「デイ」の札・画面だけ）。
-  // 開いた日の分を1回で読む。〔最新を読み込む〕でも読み直す。読めない時（通信・権限・表が無い）は印を出さないだけ（画面は止めない）
-  const [dcArrivals, setDcArrivals] = useState<ReadonlySet<string>>(() => new Set())
-  const [dcTick, setDcTick] = useState(0)
-  useEffect(() => {
-    let alive = true
-    fetchDaycareArrivals(day, day)
-      .then((s) => {
-        if (alive) setDcArrivals(s)
-      })
-      .catch(() => {
-        if (alive) setDcArrivals(new Set())
-      })
-    return () => {
-      alive = false
-    }
-  }, [day, dcTick])
+  // 開いた日の分を1回で読み、到着・休みが変わったら読み直す（useDaycareArrivals）。〔最新を読み込む〕でも読み直す。
+  // 読めない時（通信・権限・表が無い）は印を出さないだけ（画面は止めない）
+  const { arrivals: dcArrivals, refresh: refreshDcArrivals } = useDaycareArrivals(day, day)
   // フロアは一覧から作る（居室未設定の利用者も FLOOR_OTHER で必ず表示できるようにする）。
   // 選んだ階は UI 状態として保存し、復元した値が一覧に無ければ下の effect で先頭へ倒す（F68）
   const [floor, setFloor] = useState<string>(() => readMealsFloor() ?? '1')
@@ -1830,8 +1818,8 @@ export function MealsGridPage({
 
   const onReload = useCallback(() => {
     void load()
-    setDcTick((n) => n + 1)
-  }, [load])
+    refreshDcArrivals()
+  }, [load, refreshDcArrivals])
 
   /**
    * 相手の行が取り消されていた行の控えを、新しい行として保存する（〔新しい行として保存〕。行ごとの順番待ちを通す）
