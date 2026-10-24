@@ -467,31 +467,33 @@ export const REVIEW_STATE_LABEL: Record<Exclude<DueState, 'ended'>, string> = {
 }
 
 /**
- * 対象者の行に添える、下に回した理由（nocopy＝写しに行が無い／noplan＝計画書に計画なし／ended＝計画書の通知を止めている／
- * inactive＝在籍でない方。過去の日を開くと、その後に在籍でなくなった方も到着の記録から対象者に出る＝段階3c の反証 軽3）
+ * 対象者の行に添える札（nocopy＝写しに行が無い／noplan＝計画書に計画なし／ended＝計画書の通知を止めている／
+ * inactive＝在籍でない方。過去の日を開くと、その後に在籍でなくなった方も到着の記録から対象者に出る＝段階3c の反証 軽3）。
+ * 2026-10-24（代表者の決定 §9.4 の5）: 写しに行が無い方と計画の無い方は、どちらも「計画書なし」の札にまとめた
  */
 export type TargetNoPlanReason = 'nocopy' | 'noplan' | 'ended' | 'inactive'
 export const TARGET_NO_PLAN_LABEL: Record<TargetNoPlanReason, string> = {
-  nocopy: '計画書の写しなし',
-  noplan: '計画書に計画なし',
+  nocopy: '計画書なし',
+  noplan: '計画書なし',
   ended: '計画書の通知を止めています',
   inactive: '在籍でない方',
 }
 
 /**
- * 今日の対象者の並び（計画 6章）。写しを読めた時は「計画がある・終了でない方」を上に、それ以外を下に（それぞれの中は元の並び）。
- * notice: error＝写しを読めない（並びは元のまま・「計画書の期限を確かめられません」）／empty＝写しが0件（並びは元のまま）／null。
- * noPlan＝下に回した方と、その理由（行に添える。notice がある時は空）
+ * 今日の対象者に添える札（計画 6章）。2026-10-24（代表者の決定 §9.4 の5）に、計画書の有無で上下に分ける並べ替えをやめ
+ * （並びは一覧の五十音のまま）、札だけを返す形にした（それまでは orderTargetsByPlan）。
+ * notice: error＝写しを読めない（札は出さない・「計画書の期限を確かめられません」）／empty＝写しが0件（札は出さない）／null。
+ * noPlan＝札を添える方と、その理由（notice がある時は空）
  */
-export function orderTargetsByPlan(args: {
+export function targetPlanTags(args: {
   targets: readonly number[]
   copy: DueCopyLoad
   people: readonly DuePerson[]
   today: string
-}): { order: number[]; noPlan: Map<number, TargetNoPlanReason>; notice: 'error' | 'empty' | null } {
+}): { noPlan: Map<number, TargetNoPlanReason>; notice: 'error' | 'empty' | null } {
   const { targets, copy, people, today } = args
-  if (copy === 'error') return { order: [...targets], noPlan: new Map(), notice: 'error' }
-  if (copy.rows.length === 0) return { order: [...targets], noPlan: new Map(), notice: 'empty' }
+  if (copy === 'error') return { noPlan: new Map(), notice: 'error' }
+  if (copy.rows.length === 0) return { noPlan: new Map(), notice: 'empty' }
   const personOf = new Map(people.map((p) => [p.id, p]))
   const copyOf = new Map(copy.rows.map((c) => [c.resident_id, c]))
   const reasonOf = (rid: number): TargetNoPlanReason | null => {
@@ -501,18 +503,12 @@ export function orderTargetsByPlan(args: {
     if (isEnded(personOf.get(rid), c, today)) return 'ended'
     return isYmd(c.latest_plan_date) ? null : 'noplan'
   }
-  const top: number[] = []
-  const rest: number[] = []
   const noPlan = new Map<number, TargetNoPlanReason>()
   for (const rid of targets) {
     const why = reasonOf(rid)
-    if (why === null) top.push(rid)
-    else {
-      rest.push(rid)
-      noPlan.set(rid, why)
-    }
+    if (why !== null) noPlan.set(rid, why)
   }
-  return { order: [...top, ...rest], noPlan, notice: null }
+  return { noPlan, notice: null }
 }
 
 /**

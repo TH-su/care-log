@@ -252,8 +252,10 @@ describe('静的検査（段階3c の規律）', () => {
     assert.ok(c.indexOf(") : cstate === 'empty' ? (") < c.indexOf('期限切れ {counts.overdue}人'), '数は empty の分岐の後（ok の時だけ）')
     assert.match(c, /const cstate = loaded === null \? null : reviewCopyState\(loaded\)/)
     const p = code('../src/pages/DaycareTrainingPage.tsx')
-    assert.match(p, /planOrder\?\.notice === 'empty' && targets\.length > 0 \? \(/)
-    assert.match(p, /計画書の写しに載っている方がいないため、並びは到着の順のままです/)
+    // 2026-10-24（§9.4 の5）: 並べ替えをやめ札だけにした（固定し直し・写しが0件の時も知らせる意図は同じ）
+    assert.match(p, /planTags\?\.notice === 'empty' && targets\.length > 0 \? \(/)
+    assert.match(p, /計画書の写しに載っている方がいないため、「計画書なし」の札は出していません/)
+    assert.doesNotMatch(p, /並びは到着の順のまま/)
     const card = code('../src/components/DaycareTrainingCard.tsx')
     assert.match(card, /fetchHomeVisits\(residentId\)\.catch\(\(\) => 'error' as const\), fetchTrainingDueCopy\(\)\.catch\(\(\) => 'error' as const\)/)
     const review = card.slice(card.indexOf('const reviewLine'), card.indexOf('const rline'))
