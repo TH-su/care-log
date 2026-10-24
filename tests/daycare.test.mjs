@@ -1471,7 +1471,10 @@ if (DC === null) {
     it('1人の画面: 予定も記録も無い在籍中の方は「予定外」として足し、ボタンは〔予定外で到着〕と分ける（親の回答 A3）。入院の方には出さない', () => {
       assert.match(person, /const extraSelf = resident !== null && resident\.active/)
       assert.match(person, /extraIds: extraSelf \? \[residentId\] : \[\]/)
-      assert.match(person, /const extraNoRecord = row !== undefined && row\.extra && !row\.planned && att === null/)
+      // 確認の反証 軽1: 「記録が無い」は時刻も休みも無いこと（〔元に戻す〕・〔取消〕の後の空の行も同じ）。自動の入浴の相手は予定のある方と同じ
+      assert.match(person, /const extraNoRecord = row !== undefined && row\.extra && !row\.planned && row\.autoBath !== true && !hasTimes\(row\) && att\?\.absent !== true/)
+      // 確認の反証 軽2: 読み上げも、予定を確かめられない日は「予定を確かめられません」
+      assert.match(att, /data\.planSource === 'unknown' \? '予定を確かめられません' : 'この日のデイの予定はありません'/)
       assert.match(att, /\{extraNoRecord \? '予定外で到着' : '到着'\}/)
       // 入院中: 週間計画の入院中（hospitalizedPlanned）と、その日の食事の記録の「入院」には出さない
       assert.match(person, /const hospitalMeal = data\.meals\.some\(\(m\) => m\.meal\.resident_id === residentId && m\.meal\.status === 'hospital'\)/)

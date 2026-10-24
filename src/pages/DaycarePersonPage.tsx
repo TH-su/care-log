@@ -884,9 +884,11 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   /**
    * 予定も記録も無い在籍中の方（今日の画面の〔予定にない方を追加〕から来た方）: ボタンの名前を〔予定外で到着〕と分ける
    * （予定の無い方の画面を誤って開いても、ふつうの〔到着〕と見分けられる＝2026-10-24 親の回答 A3）。
-   * care-log の名簿には入院の印が無いので、入院中かはその日の昼食・おやつの記録の「入院」で見て、入院の方には出さない
+   * care-log の名簿には入院の印が無いので、入院中かはその日の昼食・おやつの記録の「入院」で見て、入院の方には出さない。
+   * 「記録が無い」は行の有無でなく「到着・帰宅の時刻も休みも無い」で見る（到着の〔元に戻す〕・休みの〔取消〕の後の空の行でも同じ扱い＝確認の反証 軽1）。
+   * 照合できない予定でも 12:30 の自動の入浴の相手（autoBath）は予定のある方と同じに扱う（〔到着〕〔休み〕を出す＝休みで自動の入浴を「中止（欠席）」に直せる）
    */
-  const extraNoRecord = row !== undefined && row.extra && !row.planned && att === null
+  const extraNoRecord = row !== undefined && row.extra && !row.planned && row.autoBath !== true && !hasTimes(row) && att?.absent !== true
   const hospitalMeal = data.meals.some((m) => m.meal.resident_id === residentId && m.meal.status === 'hospital')
   /** 休みの方に入浴の記録（自動・人の入浴）が残っている＝「欠席」に直す要る */
   const absentBathLeft = row !== undefined && row.state === 'absent' && (bst.kind === 'auto' || bst.kind === 'done')
@@ -985,7 +987,11 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
                       type="button"
                       onClick={() => void ops.onArrive(row)}
                       disabled={opsDisabled || !timesOk}
-                      aria-label={extraNoRecord ? `${name}さんを予定外で到着にする（この日のデイの予定はありません）` : undefined}
+                      aria-label={
+                        extraNoRecord
+                          ? `${name}さんを予定外で到着にする（${data.planSource === 'unknown' ? '予定を確かめられません' : 'この日のデイの予定はありません'}）`
+                          : undefined
+                      }
                       className={opPrimary}
                     >
                       {extraNoRecord ? '予定外で到着' : '到着'}
