@@ -5,7 +5,8 @@
 //    書く・消す（偽の localStorage）
 // 2. 排泄ケアアプリの読み方との一致: 写し元（haiben-record.html の受け渡しのキーの名前と hbDcParse）を一字一句そのまま
 //    tests/fixtures/haiben-dc-parse.src.txt に置き、node:vm で評価して、care-log が書く値を読ませる（今日＝'ok'・前の日＝'stale'・mids が同じ）。
-//    写し元が手元にある時は、写し元の同じ行・同じ関数が写しと一致するかも確かめる（無い時・古い時は飛ばす＝CI と同じ作法）
+//    写し元（手元の haiben-record の origin/main）がある時は、写し元の同じ行・同じ関数が写しと一致するかも確かめる。
+//    写し元が無い CI はスキップにせず記録だけ残す（CI はスキップが1件でもあると公開を止める＝excretion-parity と同じ作法）
 // 3. 静的検査: 〔排泄〕の入口・押した直前に書く・ログアウトで消す・1人の画面の入口
 // 個人情報は置かない（利用者は記号の source_id だけ）。
 
@@ -41,18 +42,20 @@ try {
 if (H === null) registerLoadFailure('デイから排泄ケアアプリへの受け渡し', loadErr, 'この Node は TypeScript を直接読み込めない（Node 22.18 以降で実行してください）')
 
 const FIXTURE = new URL('./fixtures/haiben-dc-parse.src.txt', import.meta.url)
-const HAIBEN_REPO = '/Users/Takeshi/Claude/Repos/haiben-record'
+// 置き場所は HAIBEN_REPO で差し替えられる（CI と同じ「無い」場合を手元で確かめる時に使う）
+const HAIBEN_REPO = process.env.HAIBEN_REPO ?? '/Users/Takeshi/Claude/Repos/haiben-record'
 /**
- * 照合する写し元: HAIBEN_HTML（手で指定）→ 手元の haiben-record の origin/main（git show・公開している版＝手元の作業ファイルが古くても比べられる）。
- * どちらも無い（CI）時は null＝飛ばす
+ * 照合する写し元: HAIBEN_HTML（手で指定）→ 手元の haiben-record の origin/main（git show・最後に fetch した公開の版＝手元の作業ファイルが
+ * 古くても比べられる。上流が変わったのに fetch していなければ気づけないので、写しを取り直す時は fetch してから流す）。
+ * 手元に haiben-record が無い（CI）時は null。手元にあるのに読めない時は、原因を隠さず失敗にする（{ error }）
  */
 function haibenSource() {
   if (process.env.HAIBEN_HTML) return { html: readFileSync(process.env.HAIBEN_HTML, 'utf8'), from: process.env.HAIBEN_HTML }
   if (!existsSync(`${HAIBEN_REPO}/.git`)) return null
   try {
     return { html: execFileSync('git', ['-C', HAIBEN_REPO, 'show', 'origin/main:haiben-record.html'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }), from: 'origin/main' }
-  } catch {
-    return null
+  } catch (e) {
+    return { error: `手元の haiben-record から origin/main:haiben-record.html を読めません（fetch していない・ref が違うなど）: ${String(e).slice(0, 200)}` }
   }
 }
 
@@ -139,19 +142,20 @@ if (H !== null) {
       assert.equal(H.HAIBEN_DAYCARE_HREF, '../haiben-record/haiben-record.html?view=daycare')
       assert.match(fixtureCode(), /function hbDcParse\(raw,td\)\{/)
     })
-    it('写し元（手元の haiben-record の origin/main）のキーの名前と hbDcParse が写しと一字一句同じ（写し元が無い CI は飛ばす）', (t) => {
+    it('写し元（手元の haiben-record の origin/main）のキーの名前と hbDcParse が写しと一字一句同じ（違えば写しを見直す）', (t) => {
       const src = haibenSource()
       if (src === null) {
-        t.skip('写し元（haiben-record）が手元に無いので飛ばしました（CI）')
+        // CI はスキップが1件でもあると公開を止めるので、スキップにせず記録だけ残す（写しどうしの照合は上の試験が行う＝excretion-parity と同じ作法）
+        t.diagnostic('写し元の排泄ケアアプリ（haiben-record）がこの端末に無い（CI など）。写しだけで照合した')
         return
       }
+      assert.ok(!('error' in src), src.error)
       const html = src.html
-      // デイの表示より前の版（受け渡しのキーの名前も hbDcParse も無い）だけを飛ばす。どちらかがあれば一致を求める
-      // （関数の名前や引数が変わった時を「古い」と見なして飛ばさない＝反証 中2）
-      if (!html.includes('su_daycare_handoff_v1') && !html.includes('hbDcParse')) {
-        t.skip(`写し元（${src.from}）がデイの表示より前の版なので飛ばしました。haiben-record を fetch してから流してください`)
-        return
-      }
+      // 写し元にキーの名前も hbDcParse も無い＝名前が変わった（v2 など）か、デイの表示より前の版。どちらも写しを見直す（飛ばさない＝反証 中2）
+      assert.ok(
+        html.includes('su_daycare_handoff_v1') || html.includes('hbDcParse'),
+        `写し元（${src.from}）に受け渡しのキーの名前も hbDcParse も見つかりません。haiben-record を fetch するか、写しを取り直してください`,
+      )
       const fx = fixtureCode()
       const [keyLine] = fx.split('\n')
       assert.ok(html.includes(keyLine), 'キーの名前の行が同じ')
@@ -185,6 +189,10 @@ describe('静的検査', () => {
     ])
       assert.match(code(`../src/pages/${f}.tsx`), new RegExp(`<DaycareNav current="${cur}" handoff=\\{\\(\\) => writeDaycareHandoffFor\\(\\{ rows: board\\?\\.rows \\?\\? null, residents, boardDay: data\\?\\.day \\?\\? null, today \\}\\)\\} />`), f)
     assert.match(person, /href=\{haibenAppHref\(resident\?\.source_id\)\}\s*onClick=\{\(\) => writeDaycareHandoffFor\(\{ rows: board\?\.rows \?\? null, residents, boardDay: data\?\.day \?\? null, today \}\)\}/)
+    // 確認の反証 軽1: 1人の画面のリンクも中クリック・長押しのメニューで書く
+    const link = person.slice(person.indexOf('href={haibenAppHref('), person.indexOf('排泄ケアアプリで記録する'))
+    assert.match(link, /onAuxClick=\{\(\) => writeDaycareHandoffFor\(/)
+    assert.match(link, /onContextMenu=\{\(\) => writeDaycareHandoffFor\(/)
   })
   it('ログアウト（App の後片付け）で消す・記録者の切り替え（resetDataCache）では消さない（反証 軽3）・置き場は localStorage だけ（氏名・記録を入れない）', () => {
     const app = code('../src/App.tsx')

@@ -1468,6 +1468,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           // 押した直前に受け渡しのキーを書き直す（排泄ケアアプリはデイの表示で開き、その方を選ぶ＝§9.7・§9.8 の A4）
           onClick={() => writeDaycareHandoffFor({ rows: board?.rows ?? null, residents, boardDay: data?.day ?? null, today })}
           onAuxClick={() => writeDaycareHandoffFor({ rows: board?.rows ?? null, residents, boardDay: data?.day ?? null, today })}
+          onContextMenu={() => writeDaycareHandoffFor({ rows: board?.rows ?? null, residents, boardDay: data?.day ?? null, today })}
           className="inline-flex min-h-tap items-center rounded border border-border-strong px-4 text-base text-link"
         >
           排泄ケアアプリで記録する<span aria-hidden="true"> ›</span>
