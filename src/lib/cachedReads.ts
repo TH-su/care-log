@@ -47,7 +47,6 @@ import { LS, SHEET_DAYS } from './types'
 import { addDaysIso, jstClock } from '../pages/alertsModel'
 import type { Resident } from './types'
 import { clearDaycareDayMemo } from './daycareDayMemo'
-import { clearDaycareHandoff } from './daycareHandoff'
 
 // ── キーと当たり判定の情報 ─────────────────────────────────────────────────
 
@@ -275,8 +274,6 @@ export function startCacheSync(): () => void {
 export function resetDataCache(): void {
   dataCache.clearAll()
   clearDaycareDayMemo()
-  // デイから排泄ケアアプリへの受け渡し（su_daycare_handoff_v1）も消す（次にログインした人へ前の一覧を渡さない＝§9.7）
-  clearDaycareHandoff()
   forgetUsualTemps()
   clearExcretionCache()
   clearWeightCache()

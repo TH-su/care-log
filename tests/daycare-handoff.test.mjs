@@ -11,6 +11,7 @@
 
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import { registerLoadFailure } from './ts-load.mjs'
@@ -40,7 +41,20 @@ try {
 if (H === null) registerLoadFailure('デイから排泄ケアアプリへの受け渡し', loadErr, 'この Node は TypeScript を直接読み込めない（Node 22.18 以降で実行してください）')
 
 const FIXTURE = new URL('./fixtures/haiben-dc-parse.src.txt', import.meta.url)
-const HAIBEN_HTML = process.env.HAIBEN_HTML ?? '/Users/Takeshi/Claude/Repos/haiben-record/haiben-record.html'
+const HAIBEN_REPO = '/Users/Takeshi/Claude/Repos/haiben-record'
+/**
+ * 照合する写し元: HAIBEN_HTML（手で指定）→ 手元の haiben-record の origin/main（git show・公開している版＝手元の作業ファイルが古くても比べられる）。
+ * どちらも無い（CI）時は null＝飛ばす
+ */
+function haibenSource() {
+  if (process.env.HAIBEN_HTML) return { html: readFileSync(process.env.HAIBEN_HTML, 'utf8'), from: process.env.HAIBEN_HTML }
+  if (!existsSync(`${HAIBEN_REPO}/.git`)) return null
+  try {
+    return { html: execFileSync('git', ['-C', HAIBEN_REPO, 'show', 'origin/main:haiben-record.html'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }), from: 'origin/main' }
+  } catch {
+    return null
+  }
+}
 
 function fixtureCode() {
   const raw = readFileSync(FIXTURE, 'utf8')
@@ -83,13 +97,16 @@ if (H !== null) {
     })
     it('書く・消す（書けない端末では false で止めない）。一覧が無い画面は書かない', () => {
       store.clear()
-      assert.equal(H.writeDaycareHandoffFor({ rows, residents, day: '2026-10-25', today: '2026-10-25' }), true)
+      assert.equal(H.writeDaycareHandoffFor({ rows, residents, boardDay: '2026-10-25', today: '2026-10-25' }), true)
       const saved = JSON.parse(store.get('su_daycare_handoff_v1'))
       assert.deepEqual(saved.mids, ['T001', 'T002', 'wm_5-a'])
       assert.equal(typeof saved.at, 'number')
-      assert.equal(H.writeDaycareHandoffFor({ rows: null, residents, day: '2026-10-25', today: '2026-10-25' }), false)
+      assert.equal(H.writeDaycareHandoffFor({ rows: null, residents, boardDay: '2026-10-25', today: '2026-10-25' }), false)
       store.clear()
-      assert.equal(H.writeDaycareHandoffFor({ rows, residents, day: '2026-10-24', today: '2026-10-25' }), false, '過去の日の画面は書かない')
+      assert.equal(H.writeDaycareHandoffFor({ rows, residents, boardDay: '2026-10-24', today: '2026-10-25' }), false, '過去の日の画面は書かない')
+      // 反証 重1: 日付を今日へ切り替えた直後・日をまたいだ直後で、まだ前の日の一覧（boardDay＝前の日）しか無い時は書かない
+      assert.equal(H.writeDaycareHandoffFor({ rows, residents, boardDay: '2026-10-24', today: '2026-10-25' }), false)
+      assert.equal(H.writeDaycareHandoffFor({ rows, residents, boardDay: null, today: '2026-10-25' }), false, '一覧がまだ無い')
       assert.equal(store.has('su_daycare_handoff_v1'), false)
       store.set('su_daycare_handoff_v1', '{}')
       H.clearDaycareHandoff()
@@ -122,20 +139,24 @@ if (H !== null) {
       assert.equal(H.HAIBEN_DAYCARE_HREF, '../haiben-record/haiben-record.html?view=daycare')
       assert.match(fixtureCode(), /function hbDcParse\(raw,td\)\{/)
     })
-    it('写し元が手元にあれば、写し元のキーの名前と hbDcParse が写しと一字一句同じ（無い・古い時は飛ばす）', (t) => {
-      if (!existsSync(HAIBEN_HTML)) {
-        t.skip('写し元（haiben-record.html）が手元に無いので飛ばしました（CI）')
+    it('写し元（手元の haiben-record の origin/main）のキーの名前と hbDcParse が写しと一字一句同じ（写し元が無い CI は飛ばす）', (t) => {
+      const src = haibenSource()
+      if (src === null) {
+        t.skip('写し元（haiben-record）が手元に無いので飛ばしました（CI）')
         return
       }
-      const html = readFileSync(HAIBEN_HTML, 'utf8')
-      if (!html.includes('function hbDcParse(raw,td){')) {
-        t.skip('手元の写し元がデイの表示（haiben-record #2）より古いので飛ばしました。git pull してから流してください')
+      const html = src.html
+      // デイの表示より前の版（受け渡しのキーの名前も hbDcParse も無い）だけを飛ばす。どちらかがあれば一致を求める
+      // （関数の名前や引数が変わった時を「古い」と見なして飛ばさない＝反証 中2）
+      if (!html.includes('su_daycare_handoff_v1') && !html.includes('hbDcParse')) {
+        t.skip(`写し元（${src.from}）がデイの表示より前の版なので飛ばしました。haiben-record を fetch してから流してください`)
         return
       }
       const fx = fixtureCode()
       const [keyLine] = fx.split('\n')
       assert.ok(html.includes(keyLine), 'キーの名前の行が同じ')
       const i = html.indexOf('function hbDcParse(raw,td){')
+      assert.ok(i >= 0, `写し元（${src.from}）の hbDcParse の形が変わった（写しを取り直して照合し直す）`)
       const fn = html.slice(i, html.indexOf('\n}\n', i) + 3)
       assert.equal(fx.slice(fx.indexOf('function hbDcParse(')), fn, 'hbDcParse が写しと同じ')
     })
@@ -146,22 +167,29 @@ describe('静的検査', () => {
   const today = code('../src/pages/DaycarePage.tsx')
   const person = code('../src/pages/DaycarePersonPage.tsx')
   it('今日の画面は、今日の一覧を作るたびに書き直す（過去の日は作る関数が null）', () => {
-    assert.match(today, /if \(board === null \|\| data === null \|\| data\.day !== day\) return\s*writeDaycareHandoffFor\(\{ rows: board\.rows, residents, day, today \}\)/)
+    assert.match(today, /if \(board === null \|\| data === null \|\| data\.day !== day\) return\s*writeDaycareHandoffFor\(\{ rows: board\.rows, residents, boardDay: data\.day, today \}\)/)
     assert.match(today, /\}, \[board, data, residents, day, today\]\)/)
   })
-  it('〔排泄〕を押した直前に書き直す（今日の画面・一括の4画面・1人の画面）', () => {
-    assert.match(today, /<DaycareNav current="today" handoff=\{\(\) => writeDaycareHandoffFor\(\{ rows: board\?\.rows \?\? null, residents, day, today \}\)\} \/>/)
+  it('〔排泄〕を押した直前に書き直す（今日の画面・一括の4画面・1人の画面）。日は画面の日付でなく一覧を読んだ日（data.day＝反証 重1）', () => {
+    assert.match(today, /<DaycareNav current="today" handoff=\{\(\) => writeDaycareHandoffFor\(\{ rows: board\?\.rows \?\? null, residents, boardDay: data\?\.day \?\? null, today \}\)\} \/>/)
+    // 中クリック・長押しのメニューで新しいタブに開く時も書く（反証 軽4）・読み上げの名前は見えている文字から（反証 軽5）
+    const nav = today.slice(today.indexOf('export function DaycareNav'), today.indexOf('/** 予定の帯'))
+    assert.match(nav, /onClick=\{\(\) => handoff\?\.\(\)\}\s*onAuxClick=\{\(\) => handoff\?\.\(\)\}\s*onContextMenu=\{\(\) => handoff\?\.\(\)\}/)
+    assert.doesNotMatch(nav, /aria-label="排泄/)
+    assert.match(nav, /排泄<span className="ml-1 text-sm">（別アプリ）<\/span>\s*<span className="sr-only">：排泄ケアアプリのデイの表示へ移ります<\/span>/)
     for (const [f, cur] of [
       ['DaycareVitalsPage', 'vitals'],
       ['DaycareMealsPage', 'meals'],
       ['DaycareActivityBulkPage', 'activity'],
       ['DaycareTrainingPage', 'training'],
     ])
-      assert.match(code(`../src/pages/${f}.tsx`), new RegExp(`<DaycareNav current="${cur}" handoff=\\{\\(\\) => writeDaycareHandoffFor\\(\\{ rows: board\\?\\.rows \\?\\? null, residents, day, today \\}\\)\\} />`), f)
-    assert.match(person, /href=\{haibenAppHref\(resident\?\.source_id\)\}\s*onClick=\{\(\) => writeDaycareHandoffFor\(\{ rows: board\?\.rows \?\? null, residents, day, today \}\)\}/)
+      assert.match(code(`../src/pages/${f}.tsx`), new RegExp(`<DaycareNav current="${cur}" handoff=\\{\\(\\) => writeDaycareHandoffFor\\(\\{ rows: board\\?\\.rows \\?\\? null, residents, boardDay: data\\?\\.day \\?\\? null, today \\}\\)\\} />`), f)
+    assert.match(person, /href=\{haibenAppHref\(resident\?\.source_id\)\}\s*onClick=\{\(\) => writeDaycareHandoffFor\(\{ rows: board\?\.rows \?\? null, residents, boardDay: data\?\.day \?\? null, today \}\)\}/)
   })
-  it('ログアウト（resetDataCache）で消す・置き場は localStorage だけ（氏名・記録を入れない）', () => {
-    assert.match(code('../src/lib/cachedReads.ts'), /clearDaycareDayMemo\(\)\s*clearDaycareHandoff\(\)/)
+  it('ログアウト（App の後片付け）で消す・記録者の切り替え（resetDataCache）では消さない（反証 軽3）・置き場は localStorage だけ（氏名・記録を入れない）', () => {
+    const app = code('../src/App.tsx')
+    assert.match(app, /offSync\?\.\(\)\s*clearDaycareHandoff\(\)\s*const m = cacheModRef\.current/)
+    assert.doesNotMatch(code('../src/lib/cachedReads.ts'), /clearDaycareHandoff/)
     const h = code('../src/lib/daycareHandoff.ts')
     assert.doesNotMatch(h, /sessionStorage|indexedDB|\.name\b|kana|room/)
     assert.match(h, /return \{ v: 1, day: p\.day, at: p\.now, mids: daycareBulkSourceIds\(p\.rows, p\.residents\) \}/)

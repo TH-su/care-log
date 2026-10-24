@@ -61,6 +61,7 @@ import {
 } from './lib/appVersion'
 import { deviceTimeZoneWarning } from './lib/format'
 import { installUserActivity, waitUserQuiet } from './lib/userActivity'
+import { clearDaycareHandoff } from './lib/daycareHandoffKey'
 
 // ── 接続設定（VITE_ 変数）──────────────────────────────────────────
 // 型は src/vite-env.d.ts（vite/client）で付くが、未設定・非 Vite 実行でも落ちないようキャスト経由で読む。
@@ -1232,6 +1233,9 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
     return () => {
       alive = false
       offSync?.()
+      // ログアウト: デイから排泄ケアアプリへの受け渡しのキーも消す（次にログインした人へ前の一覧を渡さない＝§9.7。
+      // 記録者の切り替えの resetDataCache では消さない＝消すと別のタブの排泄ケアアプリが施設の表示に戻る）
+      clearDaycareHandoff()
       const m = cacheModRef.current
       if (m !== null) m.resetDataCache()
       else void import('./lib/cachedReads').then((mm) => mm.resetDataCache()).catch(() => undefined)

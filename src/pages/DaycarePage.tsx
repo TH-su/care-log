@@ -160,11 +160,15 @@ export function DaycareNav({ current, handoff }: { current: 'today' | 'vitals' |
     <a
       key="excretion"
       href={HAIBEN_DAYCARE_HREF}
+      // 押した直前に書く。中クリック（auxclick）・長押しのメニュー（contextmenu）から新しいタブで開く時も書く（反証 軽4）
       onClick={() => handoff?.()}
-      aria-label="排泄（排泄ケアアプリのデイの表示へ移ります）"
+      onAuxClick={() => handoff?.()}
+      onContextMenu={() => handoff?.()}
       className={navCls}
     >
+      {/* 読み上げの名前は見えている文字から始める（「排泄（別アプリ）」＝声の操作で言える。反証 軽5） */}
       排泄<span className="ml-1 text-sm">（別アプリ）</span>
+      <span className="sr-only">：排泄ケアアプリのデイの表示へ移ります</span>
     </a>
   )
   return (
@@ -506,7 +510,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   // 〔元に戻す〕の後＝出欠が変わると一覧が作り直される）。過去の日は書かない。控えで開いた今日の一覧からは書いてよい
   useEffect(() => {
     if (board === null || data === null || data.day !== day) return
-    writeDaycareHandoffFor({ rows: board.rows, residents, day, today })
+    writeDaycareHandoffFor({ rows: board.rows, residents, boardDay: data.day, today })
   }, [board, data, residents, day, today])
   const nameOf = useCallback(
     (id: number) => residents.find((r) => r.id === id)?.name ?? `利用者ID ${id}`,
@@ -592,7 +596,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   const header = (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-gap">
-        <DaycareNav current="today" handoff={() => writeDaycareHandoffFor({ rows: board?.rows ?? null, residents, day, today })} />
+        <DaycareNav current="today" handoff={() => writeDaycareHandoffFor({ rows: board?.rows ?? null, residents, boardDay: data?.day ?? null, today })} />
         <RecorderBar actorId={actorId} staff={staff ?? null} />
       </div>
       <div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">
