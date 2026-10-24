@@ -41,6 +41,7 @@ import {
 import type { CellConflict, CellEditInput, DaycareMealRow, MealCellField, MealTarget } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
 import { ErrorBlock, LoadingBlock, useToast } from '../components/ui'
+import { writeDaycareHandoffFor } from '../lib/daycareHandoff'
 import { buildDaycareBoard, fmtPlanTimes } from '../lib/daycare'
 import type { DaycareBoardRow } from '../lib/daycare'
 import {
@@ -495,7 +496,7 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
   const header = (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-gap">
-        <DaycareNav current="meals" />
+        <DaycareNav current="meals" handoff={() => writeDaycareHandoffFor({ rows: board?.rows ?? null, residents, day, today })} />
         <RecorderBar actorId={actorId} staff={staff ?? null} />
       </div>
       <div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">

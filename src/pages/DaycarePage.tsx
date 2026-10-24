@@ -58,6 +58,7 @@ import type { DaycareActivity } from '../lib/daycareActivity'
 import { RecorderBar } from '../components/RecorderBar'
 import { ErrorBlock, LoadingBlock, ResidentPickerModal, useToast } from '../components/ui'
 import { hasTimes, hmShort, useDaycareAttendanceOps } from '../components/DaycareAttendanceOps'
+import { HAIBEN_DAYCARE_HREF, writeDaycareHandoffFor } from '../lib/daycareHandoff'
 import { daycareDayMemo, memoForDay, memoWithAttendance, memoWithBath, memoWithoutAttendance, rememberDaycareDay, updateDaycareDayMemo } from '../lib/daycareDayMemo'
 import {
   bathCountsUnchecked,
@@ -138,8 +139,12 @@ function stateLabel(row: DaycareBoardRow): { mark: string; text: string; tone: '
   return { mark: '○', text: row.extra ? '予定外' : '予定', tone: 'plain' }
 }
 
-/** デイの画面の上の切り替え（今日／バイタル／食事／活動／機能訓練）。今いる画面は塗りと aria-current で示す */
-export function DaycareNav({ current }: { current: 'today' | 'vitals' | 'meals' | 'activity' | 'training' }) {
+/**
+ * デイの画面の上の切り替え（今日／バイタル／食事／排泄／活動／機能訓練）。今いる画面は塗りと aria-current で示す。
+ * 〔排泄〕（2026-10-25 §9.7）は別のアプリ（排泄ケアアプリのデイの表示）へ同じタブで移る＝Link でなく a。押した直前に handoff を呼ぶ
+ * （今日の一覧を持つ画面は受け渡しのキーを書き直す。今日の一覧が無い画面は渡さない＝書かずに移る）
+ */
+export function DaycareNav({ current, handoff }: { current: 'today' | 'vitals' | 'meals' | 'activity' | 'training'; handoff?: () => void }) {
   const items: { key: 'today' | 'vitals' | 'meals' | 'activity' | 'training'; to: string; label: string }[] = [
     { key: 'today', to: '/record/daycare', label: '今日（到着・休み）' },
     { key: 'vitals', to: '/record/daycare/vitals', label: 'バイタル一括' },
@@ -150,9 +155,21 @@ export function DaycareNav({ current }: { current: 'today' | 'vitals' | 'meals' 
     // 段階3a（2026-10-23）: 個別機能訓練（配置と実施記録）
     { key: 'training', to: '/record/daycare/training', label: '機能訓練' },
   ]
+  const navCls = 'flex min-h-tap items-center rounded border border-border-strong bg-surface px-4 text-base text-ink'
+  const excretion = (
+    <a
+      key="excretion"
+      href={HAIBEN_DAYCARE_HREF}
+      onClick={() => handoff?.()}
+      aria-label="排泄（排泄ケアアプリのデイの表示へ移ります）"
+      className={navCls}
+    >
+      排泄<span className="ml-1 text-sm">（別アプリ）</span>
+    </a>
+  )
   return (
     <nav aria-label="デイの画面" className="flex flex-wrap gap-gap print:hidden">
-      {items.map((it) => (
+      {items.flatMap((it) => [
         <Link
           key={it.key}
           to={it.to}
@@ -165,8 +182,10 @@ export function DaycareNav({ current }: { current: 'today' | 'vitals' | 'meals' 
         >
           {current === it.key ? <span aria-hidden="true">✓ </span> : null}
           {it.label}
-        </Link>
-      ))}
+        </Link>,
+        // 記録の順（バイタル → 食事 → 排泄）に、食事一括の次へ置く
+        ...(it.key === 'meals' ? [excretion] : []),
+      ])}
     </nav>
   )
 }
@@ -483,6 +502,12 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         : buildDaycareBoard({ planRows: data.planRows, source: data.planSource, residents, attendance: data.attendance, extraIds }),
     [data, residents, extraIds],
   )
+  // 排泄ケアアプリへの受け渡し（su_daycare_handoff_v1・§9.7）: 今日の一覧を作るたびに書き直す（開いた時・休みとその取り消し・
+  // 〔元に戻す〕の後＝出欠が変わると一覧が作り直される）。過去の日は書かない。控えで開いた今日の一覧からは書いてよい
+  useEffect(() => {
+    if (board === null || data === null || data.day !== day) return
+    writeDaycareHandoffFor({ rows: board.rows, residents, day, today })
+  }, [board, data, residents, day, today])
   const nameOf = useCallback(
     (id: number) => residents.find((r) => r.id === id)?.name ?? `利用者ID ${id}`,
     [residents],
@@ -567,7 +592,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   const header = (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-gap">
-        <DaycareNav current="today" />
+        <DaycareNav current="today" handoff={() => writeDaycareHandoffFor({ rows: board?.rows ?? null, residents, day, today })} />
         <RecorderBar actorId={actorId} staff={staff ?? null} />
       </div>
       <div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">

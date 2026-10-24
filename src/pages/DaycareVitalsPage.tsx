@@ -78,6 +78,7 @@ import {
   vitalNeedsRecheck,
   vitalRangeError,
 } from '../lib/daycare'
+import { writeDaycareHandoffFor } from '../lib/daycareHandoff'
 import type { DaycareBoardRow, DaycareReleaseIssue, DaycareVitalField, DaycareVitalSlot, DcVitalsFilter, KeyedVital } from '../lib/daycare'
 import { useVitalLimits } from '../hooks/useVitalLimits'
 import { vitalThresholds } from '../lib/vitalThresholds'
@@ -870,7 +871,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   const header = (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-gap">
-        <DaycareNav current="vitals" />
+        <DaycareNav current="vitals" handoff={() => writeDaycareHandoffFor({ rows: board?.rows ?? null, residents, day, today })} />
         <RecorderBar actorId={actorId} staff={staff ?? null} />
       </div>
       <div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">

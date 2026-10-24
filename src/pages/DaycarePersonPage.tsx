@@ -56,6 +56,7 @@ import { RecorderBar } from '../components/RecorderBar'
 import { DaycareActivitySection } from '../components/DaycareActivitySection'
 import { DaycareTrainingCard } from '../components/DaycareTrainingCard'
 import { hasTimes, hmShort, useDaycareAttendanceOps } from '../components/DaycareAttendanceOps'
+import { writeDaycareHandoffFor } from '../lib/daycareHandoff'
 import {
   daycareDayMemo,
   memoForDay,
@@ -1464,6 +1465,8 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
         )}
         <a
           href={haibenAppHref(resident?.source_id)}
+          // 押した直前に受け渡しのキーを書き直す（排泄ケアアプリはデイの表示で開き、その方を選ぶ＝§9.7・§9.8 の A4）
+          onClick={() => writeDaycareHandoffFor({ rows: board?.rows ?? null, residents, day, today })}
           className="inline-flex min-h-tap items-center rounded border border-border-strong px-4 text-base text-link"
         >
           排泄ケアアプリで記録する<span aria-hidden="true"> ›</span>
