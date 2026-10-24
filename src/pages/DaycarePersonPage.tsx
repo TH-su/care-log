@@ -1,7 +1,11 @@
 // デイ（せせらぎ）段階2a: 1人の1日記録（/record/daycare/person/:residentId・業務日は ?day=）。
 //
-// 上から バイタル（要約・入力はバイタル一括）・入浴（状態・操作は今日の画面）・昼食・おやつ・水分・排泄（表示と入口）。
-// 〔前の方〕〔次の方〕で在席・帰宅の方を順に回る。
+// 上から この方（到着・帰宅・休み）・バイタル（要約・入力はバイタル一括）・入浴・昼食・おやつ・水分・排泄（表示と入口）。
+// 2026-10-24（代表者の決定 §9.4 の1〜2）: 今日の画面をカードにし、カードに残すボタンを〔休み〕（休みの方は〔取消〕）だけにしたので、
+//   到着・帰宅・時刻の直し・休みの理由・休みの取り消し・入浴の操作はこの画面で行う（今日の画面と同じ部品＝DaycareAttendanceOps）。
+//   書き込みの下準備（入浴の旗の観測・役割・休業日・開所の写し）はこの画面が自分で取る（入口の画面に頼らない＝M-085）。
+//   今日で記録の無い在籍中の方は「予定外」として〔予定外で到着〕を出す（今日の画面の〔予定にない方を追加〕から来た方・〔休み〕は出さない）。
+// 〔前の方〕〔次の方〕は、一括の画面と同じ方（予定の方のうち休み・入院中を除く全員と予定外で来た方）を五十音で回る。
 //
 // 規律（段階1と同じ）:
 //   ・取得・保存は db.ts の関数だけ。昼食・おやつは既存の saveMealEdits（meals の lunch・snack）、水分は既存の insertFluid・
@@ -18,6 +22,7 @@ import {
   DbError,
   FORBIDDEN_REASON,
   OUTDATED_REASON,
+  cachedMyRole,
   discardPendingRow,
   fetchAllResidents,
   fetchBathDay,
@@ -26,12 +31,16 @@ import {
   fetchDaycareIntake,
   fetchDaycarePlan,
   fetchDaycareVitals,
+  fetchMyRole,
   fetchResidentTargets,
+  getAppSetting,
   getKindInputGate,
+  hasPendingDaycareAttendance,
   insertFluid,
   isQueuePersisted,
   isSelfWrite,
   kindBlockedMessage,
+  openDaycareDay,
   pendingRow,
   queuePending,
   queueSubscribe,
@@ -40,11 +49,14 @@ import {
   subscribeBathChanges,
   subscribeChanges,
   subscribeDaycareChanges,
+  subscribeMyRole,
 } from '../lib/db'
-import type { CellConflict, CellEditInput, DaycareMealRow, MealCellField, MealTarget } from '../lib/db'
+import type { CellConflict, CellEditInput, DaycareMealRow, MealCellField, MealTarget, MyRole } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
 import { DaycareActivitySection } from '../components/DaycareActivitySection'
 import { DaycareTrainingCard } from '../components/DaycareTrainingCard'
+import { hasTimes, hmShort, useDaycareAttendanceOps } from '../components/DaycareAttendanceOps'
+import { daycareDayMemo, memoForDay, memoWithAttendance, memoWithBath, memoWithoutAttendance, rememberDaycareDay, updateDaycareDayMemo } from '../lib/daycareDayMemo'
 import { useDaycareNoteMarks } from '../components/DaycareNoteMark'
 import { activityText } from '../lib/daycareActivity'
 import { activityMarkText, excretionMarkText, fluidMarkText, mealMarkText, vitalMarkText } from '../lib/daycareNoteMark'
@@ -55,8 +67,10 @@ import {
   DAYCARE_VITAL_UNIT,
   LEVEL_WORD,
   buildDaycareBoard,
+  canChangeDaycareTimes,
   daycareBathLabel,
   daycareBathStatus,
+  fmtPlanTimes,
   nowHm,
   vitalLevel,
 } from '../lib/daycare'
@@ -92,17 +106,25 @@ const MSG_NOT_PERSISTED =
   '送信できませんでした。この端末にも保存できていません（保存領域の空きが不足している可能性があります）。この画面を閉じずに、電波が戻ってからもう一度押してください。'
 const MSG_GATE_UNKNOWN =
   'デイの記録を使える期間かどうかを確認できませんでした（通信エラー）。電波状態を確認して、再試行してください。記録の閲覧はこのままできます。'
+/** 食事・水分を読めなかった（その欄だけ止める。出欠・入浴の操作は動かす＝親の検収 軽3） */
+const MSG_INTAKE_FAILED = '昼食・おやつ・水分の記録を読めませんでした。通信状態を確認して〔再試行〕を押してください（到着・休み・入浴はこのまま記録できます）。'
 
 interface PersonData {
   day: string
   planRows: DaycarePlanRow[]
   planSource: DaycarePlanSource
+  /** その日の写し（無ければ null）。開所の最初のタップ（今日だけ）で作る＝ensureOpened */
+  snapshot: DaycareDay | null
   missing: boolean
   attendance: DaycareAttendance[]
   baths: BathRecord[]
   vitals: KeyedVital[]
   meals: DaycareMealRow[]
   fluids: FluidIntake[]
+  /** 食事・水分を読めたか（読めない時はその欄だけ「読めませんでした」・出欠と入浴の操作は動かす＝親の検収 軽3） */
+  intakeOk: boolean
+  /** 電波が無く、今日の画面が読んだ控え（daycareDayMemo）で開いた時の控えの時刻。サーバーから読めた時は null */
+  memoAt: number | null
 }
 
 type MealSlot2 = 'lunch' | 'snack'
@@ -169,6 +191,11 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   // 段階2d-2: 個人のバイタルの閾値（印をその方のその日の基準で出す。読めない時は施設の基準・その旨を出す）
   const limits = useVitalLimits(reloadKey)
   const [gate, setGate] = useState<{ value: boolean; observed: boolean; forbidden?: true; outdated?: true } | null>(null)
+  /** ログインの役割（事務所・管理者だけ過去の日の到着・帰宅の時刻を入れられる。分からない間は現場と同じ扱い） */
+  const [role, setRole] = useState<MyRole | null | undefined>(cachedMyRole())
+  /** 休業日（入浴の「全身浴」を休業日は訪問介護で入浴にする） */
+  const [closedDates, setClosedDates] = useState<string | null>(null)
+  const opening = useRef<Promise<void> | null>(null)
   const [mealState, setMealState] = useState<Record<string, SaveState>>({})
   /** 水分の一言（人・日ごと。いま開いている人・日の分だけ出す） */
   // queued: 送信待ちにした旨の一言（add＝足した分が載ったら・delId＝取り消した行がサーバーから消えたら外す）
@@ -193,9 +220,19 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   const residentRef = useRef(residentId)
   residentRef.current = residentId
 
+  // 時計（60秒ごと・画面に戻った時に今日を取り直す＝今日の画面と同じ）。到着・休みをこの画面で押すので、前の日のまま眠っていた端末を
+  // 起こした直後に前の日へ書かないように、画面に戻った時にもすぐ取り直す（反証 軽4）
   useEffect(() => {
-    const t = window.setInterval(() => setToday(todayIso()), 60_000)
-    return () => window.clearInterval(t)
+    const tick = () => setToday(todayIso())
+    const t = window.setInterval(tick, 60_000)
+    const vis = () => {
+      if (document.visibilityState === 'visible') tick()
+    }
+    document.addEventListener('visibilitychange', vis)
+    return () => {
+      window.clearInterval(t)
+      document.removeEventListener('visibilitychange', vis)
+    }
   }, [])
 
   useEffect(() => {
@@ -209,15 +246,46 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
     }
   }, [reloadKey])
 
+  // 入浴の旗（input_enabled_bath）も開くたびに取り直す（表示には使わない）。この画面の入浴の記録（〔予定どおり実施〕・区分・休み）は、
+  // 端末が「入浴を記録できる」を一度観測していれば、電波が無くても送信待ちに積まれる（db.ts の assertKindWritable）。
+  // 今日の画面と同じく、この画面が自分で取る（入口の画面に頼らない＝M-085・#43）
+  useEffect(() => {
+    void getKindInputGate('bath').catch(() => undefined)
+  }, [reloadKey])
+
   useEffect(() => {
     let alive = true
-    Promise.all([fetchAllResidents(), fetchResidentTargets().catch(() => new Map<number, ResidentTargets>())])
-      .then(([all, tg]) => {
+    const ask = () => {
+      void fetchMyRole().then((r) => {
+        if (alive) setRole(r)
+      })
+    }
+    ask()
+    const off = subscribeMyRole(ask)
+    return () => {
+      alive = false
+      off()
+    }
+  }, [])
+
+  useEffect(() => {
+    let alive = true
+    Promise.all([
+      fetchAllResidents(),
+      fetchResidentTargets().catch(() => new Map<number, ResidentTargets>()),
+      getAppSetting('daycare_closed_dates').catch(() => null),
+    ])
+      .then(([all, tg, closed]) => {
         if (!alive) return
         setResidents(all)
         setTargets(tg)
+        setClosedDates(closed)
       })
-      .catch(() => {})
+      .catch(() => {
+        // 名簿が読めない（電波が無い）時は、今日の画面が読んだ控えの名簿で氏名を出す（控えは画面のメモリだけ）
+        const m = daycareDayMemo()
+        if (alive && m !== null && m.residents.length > 0) setResidents((prev) => (prev.length > 0 ? prev : m.residents))
+      })
     return () => {
       alive = false
     }
@@ -244,23 +312,52 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
         missing ? Promise.resolve([] as DaycareAttendance[]) : fetchDaycareAttendance(target),
         fetchBathDay(target).catch(() => [] as BathRecord[]),
         fetchDaycareVitals(target).catch(() => ({ live: [] as KeyedVital[], keys: [] as string[] })),
-        fetchDaycareIntake(target),
+        fetchDaycareIntake(target).catch(() => null),
       ])
       if (gen !== genRef.current || target !== dayRef.current) return
-      setData({
-        day: target,
-        planRows: usable && snapshot !== null ? snapshot.plan_rows : (plan?.rows ?? []),
-        planSource: usable && snapshot !== null ? snapshot.plan_source : (plan?.source ?? 'unknown'),
-        missing: missing || plan?.missing === true,
-        attendance,
-        baths,
-        vitals: dv.live,
-        meals: intake.meals,
-        fluids: intake.fluids,
+      setData((prev) => {
+        // 静かな読み直し（他の端末の変更・送信待ちの減り）で食事・水分だけ読めない時は、いまの食事・水分を残す（空の一覧を
+        // 「サーバーに何も無い」と見て、送信待ちの水分の消し込み・取り消した行の隠しを誤らせない＝確認の反証 中2）
+        const keep = intake === null && quiet && prev !== null && prev.day === target && prev.intakeOk
+        return {
+          day: target,
+          planRows: usable && snapshot !== null ? snapshot.plan_rows : (plan?.rows ?? []),
+          planSource: usable && snapshot !== null ? snapshot.plan_source : (plan?.source ?? 'unknown'),
+          snapshot,
+          missing: missing || plan?.missing === true,
+          attendance,
+          baths,
+          vitals: dv.live,
+          meals: intake?.meals ?? (keep ? prev.meals : []),
+          fluids: intake?.fluids ?? (keep ? prev.fluids : []),
+          intakeOk: intake !== null || keep,
+          memoAt: null,
+        }
       })
       setError(null)
-    } catch {
+    } catch (e) {
       if (gen !== genRef.current) return
+      // 電波が無い（通信の失敗）: 今日の画面が読んだ同じ日の控えがあれば、それで開く（到着・休み・入浴は送信待ちに積める＝親の検収 中1）。
+      // 静かな読み直し（他の端末の変更・送信待ちの減り）の失敗では、いま出している内容を残す
+      const m = memoForDay(daycareDayMemo(), target, e)
+      if (m !== null && target === dayRef.current && !quiet) {
+        setData({
+          day: m.day,
+          planRows: m.planRows,
+          planSource: m.planSource,
+          snapshot: m.snapshot,
+          missing: m.missing,
+          attendance: m.attendance,
+          baths: m.baths,
+          vitals: m.vitals,
+          meals: m.meals,
+          fluids: m.fluids,
+          intakeOk: m.intakeOk,
+          memoAt: m.savedAt,
+        })
+        setError(null)
+        return
+      }
       if (!quiet) setError(ERR_LOAD)
     } finally {
       if (gen === genRef.current) setLoading(false)
@@ -314,10 +411,44 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
     }
   }, [scheduleReload])
 
+  // サーバーから読めた一覧は控えにも入れる（次の方へ移った先で電波が切れても開ける）。控えで開いた時・食事が読めない時は入れない
+  useEffect(() => {
+    if (data === null || data.memoAt !== null || !data.intakeOk || data.missing) return
+    rememberDaycareDay({
+      day: data.day,
+      planRows: data.planRows,
+      planSource: data.planSource,
+      snapshot: data.snapshot,
+      missing: data.missing,
+      attendance: data.attendance,
+      baths: data.baths,
+      vitals: data.vitals,
+      meals: data.meals,
+      fluids: data.fluids,
+      intakeOk: data.intakeOk,
+      residents,
+      savedAt: Date.now(),
+    })
+  }, [data, residents])
+
+  // 控えで開いている間は、30秒ごとに静かに読み直す（電波が「切れた」と扱われないまま戻った時＝弱い電波・電波の無い Wi-Fi でも、
+  // サーバーの内容に戻して帯を消す＝確認の反証 軽3）。読めない間は今の内容のまま
+  const onMemo = data !== null && data.memoAt !== null
+  useEffect(() => {
+    if (!onMemo) return
+    const t = window.setInterval(() => scheduleReload(), 30_000)
+    return () => window.clearInterval(t)
+  }, [onMemo, scheduleReload])
+
   const resident = useMemo(() => residents.find((r) => r.id === residentId) ?? null, [residents, residentId])
+  // 今日の画面の〔予定にない方を追加〕から来た方（予定も記録も無い在籍中の方）は、予定外として足す（〔予定外で到着〕を出す）
+  const extraSelf = resident !== null && resident.active
   const board = useMemo(
-    () => (data === null ? null : buildDaycareBoard({ planRows: data.planRows, source: data.planSource, residents, attendance: data.attendance })),
-    [data, residents],
+    () =>
+      data === null
+        ? null
+        : buildDaycareBoard({ planRows: data.planRows, source: data.planSource, residents, attendance: data.attendance, extraIds: extraSelf ? [residentId] : [] }),
+    [data, residents, extraSelf, residentId],
   )
   const row = board?.rows.find((r) => r.residentId === residentId)
   const nav = board === null ? { prev: null, next: null } : personNav(board.rows, residentId)
@@ -342,6 +473,64 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   }, [resident, residents, exTick])
 
   const canWrite = gate !== null && gate.observed && gate.value === true && !(data?.missing ?? false) && day <= today
+
+  /** 開所の最初のタップ（今日だけ）: その日の予定の写しを作る。通信できない時は次のタップでもう一度（記録は止めない）＝今日の画面と同じ */
+  const ensureOpened = useCallback(async () => {
+    if (data === null || (data.snapshot !== null && data.snapshot.plan_source !== 'unknown') || day !== todayIso()) return
+    if (opening.current !== null) return opening.current
+    opening.current = (async () => {
+      try {
+        const snap = await openDaycareDay(day, actorId)
+        setData((prev) =>
+          prev !== null && prev.day === snap.day
+            ? snap.plan_source === 'unknown'
+              ? { ...prev, snapshot: snap }
+              : { ...prev, snapshot: snap, planRows: snap.plan_rows, planSource: snap.plan_source }
+            : prev,
+        )
+      } catch {
+        // 写しは次のタップで作り直す（到着・休みの記録そのものは止めない）
+      } finally {
+        opening.current = null
+      }
+    })()
+    return opening.current
+  }, [data, day, actorId])
+
+  // ── 到着・帰宅・休み・入浴（今日の画面と同じ部品。2026-10-24 §9.4 でカードから移した操作） ──
+  const ops = useDaycareAttendanceOps({
+    place: 'person',
+    day,
+    today,
+    role,
+    gate,
+    canWrite: gate !== null && gate.observed && gate.value === true && !(data?.missing ?? false),
+    actorId,
+    closedDates,
+    nameOf,
+    bathOf: (id) => (data === null ? null : (data.baths.find((b) => b.resident_id === id) ?? null)),
+    // 画面の data を直す時に、控えも同じ形で直す（控えで開いている間に書けた記録を、前の方・次の方や今日の画面でも出す＝親の確かめ 中2）
+    putAttendance: (r) => {
+      updateDaycareDayMemo((m) => memoWithAttendance(m, r))
+      setData((prev) => {
+        if (prev === null || prev.day !== r.day) return prev
+        const others = prev.attendance.filter((a) => a.id !== r.id && a.resident_id !== r.resident_id)
+        return { ...prev, attendance: [...others, r] }
+      })
+    },
+    dropAttendance: (saved) => {
+      updateDaycareDayMemo((m) => memoWithoutAttendance(m, saved))
+      setData((prev) => (prev === null || prev.day !== saved.day ? prev : { ...prev, attendance: prev.attendance.filter((a) => a.id !== saved.id) }))
+    },
+    putBath: (r) => {
+      updateDaycareDayMemo((m) => memoWithBath(m, r))
+      setData((prev) => (prev === null || prev.day !== r.bath_on ? prev : { ...prev, baths: [...prev.baths.filter((b) => b.resident_id !== r.resident_id), r] }))
+    },
+    scheduleReload,
+    ensureOpened,
+    show,
+    resetKey: `${residentId}:${reloadKey}`,
+  })
 
   // ── 昼食・おやつ ──
   const targetOf = (slot: MealSlot2): MealTarget => ({ residentId, day, slot })
@@ -372,10 +561,12 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
       return next
     })
 
+  /** 昼食・おやつ・水分の書き込みの前の確かめ（食事・水分を読めていない時は書かない＝基準の値が分からないため） */
   const precheck = (): string | null => {
     if (!canWrite) {
       return gate?.forbidden ? FORBIDDEN_REASON : gate?.outdated ? OUTDATED_REASON : gate?.observed ? kindBlockedMessage('daycare') : MSG_GATE_UNKNOWN
     }
+    if (data !== null && !data.intakeOk) return MSG_INTAKE_FAILED
     if (actorId === null) return MSG_NO_RECORDER
     return null
   }
@@ -547,7 +738,8 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   // 未送信が1件も無ければ、送信待ちの水分も残さない（届いた後に読み直している＝消し込みの取りこぼしの安全網）。
   // 取り消しを送った行は、その行の日の読み込みでサーバーから消えたら外す（別の日を読んだだけでは外さない＝2a の確認の反証 軽4）
   useEffect(() => {
-    if (data === null) return
+    // 食事・水分を読めていない時（空の一覧）は消し込まない（確認の反証 中2）
+    if (data === null || !data.intakeOk) return
     const visible = data.fluids.filter((f) => !hiddenFluidIds.has(f.id))
     const nothingQueued = queuePending() === 0
     setQueuedFluids((prev) => {
@@ -576,7 +768,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
     setFluidMsg((m) => {
       if (m === null || m.queued === undefined) return m
       if ('add' in m.queued) return queuedFluids[m.key] === undefined ? null : m
-      if (data === null || !m.key.endsWith(`:${data.day}`)) return m
+      if (data === null || !data.intakeOk || !m.key.endsWith(`:${data.day}`)) return m
       const delId = m.queued.delId
       return data.fluids.some((f) => f.id === delId) ? m : null
     })
@@ -711,6 +903,13 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           {gate.forbidden ? FORBIDDEN_REASON : gate.outdated ? OUTDATED_REASON : gate.observed ? `${kindBlockedMessage('daycare')}。記録の閲覧はできます。` : MSG_GATE_UNKNOWN}
         </p>
       ) : null}
+      {data !== null && data.memoAt !== null ? (
+        // 電波が無く、今日の画面が読んだ控えで開いた（親の検収 中1）。押した記録は送信待ちに積み、電波が戻ると送って読み直す
+        <p role="status" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">
+          <span aria-hidden="true">▲ </span>
+          電波が無いため、今日の一覧で読んだ時点（{new Date(data.memoAt).toTimeString().slice(0, 5)}）の内容です。押した記録は送信待ちに積みます（電波が戻ると自動で送信します）。
+        </p>
+      ) : null}
       {data?.missing ? (
         <p role="alert" className="rounded-lg border border-danger bg-danger-bg p-3 text-base text-ink">
           <span aria-hidden="true">▲ </span>デイの記録はまだ使えません（サーバー側の設定待ち）。管理者に連絡してください。
@@ -757,13 +956,53 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
     return null
   }
   const bath = data.baths.find((b) => b.resident_id === residentId) ?? null
-  const bathText = daycareBathLabel(daycareBathStatus(bath, row?.bathingPlanned ?? false))
+  const bst = daycareBathStatus(bath, row?.bathingPlanned ?? false)
+  const bathText = daycareBathLabel(bst)
+  // 到着・帰宅・休み・入浴の操作の出し分け（今日の画面の1人1行と同じ決まり。2026-10-24 にカードからこの画面へ移した）
+  const att = row?.attendance ?? null
+  const attPending = row !== undefined && hasPendingDaycareAttendance(residentId, day, att?.id ?? null)
+  const opsDisabled = !canWrite || ops.busy.has(residentId) || attPending
+  /** 到着・帰宅の時刻を変える操作: 今日は誰でも・過去の日は事務所のログインだけ（0042 のトリガと同じ規則） */
+  const timesOk = canChangeDaycareTimes(day, today, role)
+  const attended = row !== undefined && (row.state === 'present' || row.state === 'left')
+  const hospitalizedPlanned = row !== undefined && row.hospitalized && row.state === 'planned'
+  /**
+   * 予定も記録も無い在籍中の方（今日の画面の〔予定にない方を追加〕から来た方）: ボタンの名前を〔予定外で到着〕と分ける
+   * （予定の無い方の画面を誤って開いても、ふつうの〔到着〕と見分けられる＝2026-10-24 親の回答 A3）。
+   * care-log の名簿には入院の印が無いので、入院中かはその日の昼食・おやつの記録の「入院」で見て、入院の方には出さない。
+   * 「記録が無い」は行の有無でなく「到着・帰宅の時刻も休みも無い」で見る（到着の〔元に戻す〕・休みの〔取消〕の後の空の行でも同じ扱い＝確認の反証 軽1）。
+   * 照合できない予定でも 12:30 の自動の入浴の相手（autoBath）は予定のある方と同じに扱う（〔到着〕〔休み〕を出す＝休みで自動の入浴を「中止（欠席）」に直せる）
+   */
+  const extraNoRecord = row !== undefined && row.extra && !row.planned && row.autoBath !== true && !hasTimes(row) && att?.absent !== true
+  const hospitalMeal = data.meals.some((m) => m.meal.resident_id === residentId && m.meal.status === 'hospital')
+  /** 休みの方に入浴の記録（自動・人の入浴）が残っている＝「欠席」に直す要る */
+  const absentBathLeft = row !== undefined && row.state === 'absent' && (bst.kind === 'auto' || bst.kind === 'done')
+  const opsMsg = ops.rowMsg.get(residentId)
+  const opBtn = 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-4 text-base text-ink disabled:text-ink3'
+  const opPrimary =
+    'min-h-tap min-w-tap rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink disabled:border-border disabled:bg-surface2 disabled:text-ink3'
+  const opDanger = 'min-h-tap min-w-tap rounded border border-danger bg-surface px-4 text-base text-danger disabled:border-border disabled:text-ink3'
+  const opRest =
+    'min-h-tap min-w-[5rem] rounded border-2 border-border-strong bg-surface px-4 text-base font-bold text-ink disabled:border-border disabled:text-ink3'
   const lunchRow = mealRowOf('lunch')
   const lunch = mealShown('lunch')
   const snack = mealShown('snack')
   const queuedNow = queuedFluids[personKey] ?? null
   const fluidTotal = fluidTotalOf(fluidsOf, residentId, data.day) + (queuedNow?.ml ?? 0)
   const sectionCls = 'rounded-lg border border-border bg-surface p-3 space-y-2'
+  /** 昼食・おやつ・水分の欄を押せるか（食事・水分を読めていない時は押せない） */
+  const intakeWritable = canWrite && data.intakeOk
+  const intakeFailedNote = data.intakeOk ? null : (
+    <div role="alert" className="space-y-2 rounded border border-warn bg-warn-bg p-2 text-base text-ink">
+      <p>
+        <span aria-hidden="true">▲ </span>
+        {MSG_INTAKE_FAILED}
+      </p>
+      <button type="button" onClick={() => setReloadKey((n) => n + 1)} className="min-h-tap rounded border border-border-strong bg-surface px-4 text-base text-ink">
+        再試行
+      </button>
+    </div>
+  )
   const chipCls = (on: boolean) =>
     on
       ? 'min-h-tap min-w-tap rounded border-2 border-primary bg-primary px-2 text-lg font-bold text-primary-ink'
@@ -780,9 +1019,13 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
         <div className="flex flex-wrap items-center justify-between gap-gap">
           <div className="min-w-0">
             <h2 className="text-xl font-bold text-ink">{name}</h2>
-            <p className="text-base text-ink2">{stateText(row)}</p>
+            {resident?.kana ? <p className="text-sm text-ink2">{resident.kana}</p> : null}
+            <p className="text-base text-ink2">
+              {stateText(row)}
+              {row !== undefined && row.planned && !row.dup && row.plans.length === 1 ? `（予定 ${fmtPlanTimes(row.plans)}）` : null}
+            </p>
           </div>
-          <div className="flex flex-wrap gap-gap" role="group" aria-label="在席の方を順に">
+          <div className="flex flex-wrap gap-gap" role="group" aria-label="予定の方を順に">
             <button
               type="button"
               onClick={() => nav.prev !== null && navigate(personPath(nav.prev, day, today))}
@@ -801,6 +1044,110 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
             </button>
           </div>
         </div>
+      </section>
+
+      <section aria-labelledby="h-att" className={sectionCls}>
+        <h3 id="h-att" className="text-lg font-bold text-ink">
+          到着・帰宅・休み
+        </h3>
+        {row === undefined ? (
+          <p className="text-base text-ink2">この日の予定・記録はありません（在籍中の方ではないため、ここからは記録できません）。</p>
+        ) : (
+          <>
+            {row.state === 'absent' ? null : hospitalizedPlanned ? (
+              <p className="text-base text-ink2">週間計画で入院中です。</p>
+            ) : extraNoRecord && hospitalMeal ? (
+              <p className="text-base text-ink2">
+                {data.planSource === 'unknown' ? '予定を確かめられません（週間計画の写しが読めません）。' : 'この日のデイの予定はありません。'}
+                食事の記録が「入院」のため、ここからは到着を記録しません。
+              </p>
+            ) : (
+              <p className="text-base text-ink">
+                到着 <span className="font-num font-bold">{att?.arrived_at ? hmShort(att.arrived_at) : '—'}</span>
+                <span className="ml-4">帰宅 </span>
+                <span className="font-num font-bold">{att?.left_at ? hmShort(att.left_at) : '—'}</span>
+              </p>
+            )}
+            <div className="flex flex-wrap gap-gap" role="group" aria-label="到着・帰宅・休みの操作">
+              {row.state === 'absent' ? (
+                <>
+                  <button type="button" onClick={() => ops.askAbsent(row)} disabled={opsDisabled} className={opBtn}>
+                    理由を選ぶ
+                  </button>
+                  <button type="button" onClick={() => ops.askCancelAbsent(row)} disabled={opsDisabled} className={opDanger}>
+                    休みを取り消す
+                  </button>
+                </>
+              ) : hospitalizedPlanned || (extraNoRecord && hospitalMeal) ? null : (
+                <>
+                  {att?.arrived_at ? null : (
+                    <button
+                      type="button"
+                      onClick={() => void ops.onArrive(row)}
+                      disabled={opsDisabled || !timesOk}
+                      aria-label={
+                        extraNoRecord
+                          ? `${name}さんを予定外で到着にする（${data.planSource === 'unknown' ? '予定を確かめられません' : 'この日のデイの予定はありません'}）`
+                          : undefined
+                      }
+                      className={opPrimary}
+                    >
+                      {extraNoRecord ? '予定外で到着' : '到着'}
+                    </button>
+                  )}
+                  {row.state === 'present' ? (
+                    <button type="button" onClick={() => void ops.onLeave(row)} disabled={opsDisabled || !timesOk} className={opPrimary}>
+                      帰宅
+                    </button>
+                  ) : null}
+                  {hasTimes(row) && timesOk ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (ops.precheck(row)) ops.openTime(row, 'fix')
+                      }}
+                      disabled={opsDisabled}
+                      className={opBtn}
+                    >
+                      時刻を直す
+                    </button>
+                  ) : null}
+                  {/* 予定も記録も無い方（予定外で開いた方・日を送って予定の無い日に来た方）には〔休み〕を出さない（休みは予定の方の記録＝反証 軽2） */}
+                  {extraNoRecord ? null : (
+                    <button type="button" onClick={() => ops.onRest(row)} disabled={opsDisabled || (hasTimes(row) && !timesOk)} className={opRest}>
+                      休み
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+            {extraNoRecord && !hospitalMeal ? (
+              <p className="text-sm text-ink2">
+                {data.planSource === 'unknown' ? '予定を確かめられません（週間計画の写しが読めません）。' : 'この日のデイの予定はありません。'}
+                来所した時だけ〔予定外で到着〕を押してください。
+              </p>
+            ) : null}
+            {!timesOk && day < today ? (
+              <p className="text-sm text-ink2">過去の日の到着・帰宅の時刻は、事務所のログインで入力・修正します。</p>
+            ) : null}
+          </>
+        )}
+        {attPending ? (
+          <p className="text-sm text-ink2" role="status">
+            <span aria-hidden="true">↻ </span>未送信の記録があります（電波が戻ると自動で送信します）
+          </p>
+        ) : null}
+        {opsMsg !== undefined ? (
+          <p
+            role={opsMsg.tone === 'danger' ? 'alert' : 'status'}
+            className={`rounded border p-2 text-sm text-ink ${
+              opsMsg.tone === 'danger' ? 'border-danger bg-danger-bg' : opsMsg.tone === 'warn' ? 'border-warn bg-warn-bg' : 'border-border bg-surface2'
+            }`}
+          >
+            {opsMsg.tone === 'danger' || opsMsg.tone === 'warn' ? <span aria-hidden="true">▲ </span> : null}
+            {opsMsg.text}
+          </p>
+        ) : null}
       </section>
 
       <section aria-labelledby="h-vital" className={sectionCls}>
@@ -837,12 +1184,29 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
         <h3 id="h-bath" className="text-lg font-bold text-ink">
           入浴
         </h3>
-        <p className="text-base text-ink">{bathText}</p>
-        <Link to="/record/daycare" className="inline-flex min-h-tap items-center rounded border border-border-strong px-4 text-base text-link">
-          今日の一覧で入浴を記録する<span aria-hidden="true"> ›</span>
-        </Link>
+        <p className={absentBathLeft ? 'rounded border-2 border-warn bg-warn-bg p-2 text-base font-bold text-ink' : 'text-base text-ink'}>
+          {absentBathLeft ? <span aria-hidden="true">▲ </span> : null}
+          {bathText}
+          {absentBathLeft ? '（休みの方に入浴の記録が残っています）' : null}
+        </p>
+        {/* 入浴の操作（2026-10-24 に今日の画面の入浴の欄から移した。来た方は区分・中止、休みの方は残った入浴を「欠席」に直す） */}
+        {row !== undefined && (attended || absentBathLeft) ? (
+          <div className="flex flex-wrap gap-gap" role="group" aria-label="入浴の記録">
+            {attended && bst.kind === 'todo' ? (
+              <button type="button" onClick={() => ops.onBathAsPlanned(row)} disabled={opsDisabled} className={opPrimary}>
+                予定どおり実施
+              </button>
+            ) : null}
+            <button type="button" onClick={() => ops.openBath(row)} disabled={opsDisabled} className={opBtn}>
+              {absentBathLeft ? '入浴を「欠席」に直す' : '区分・中止を選ぶ'}
+            </button>
+          </div>
+        ) : (
+          <p className="text-sm text-ink2">入浴は、到着の後に記録できます。</p>
+        )}
       </section>
 
+      {intakeFailedNote}
       <section aria-labelledby="h-lunch" className={sectionCls}>
         <div className="flex flex-wrap items-baseline justify-between gap-gap">
           <h3 id="h-lunch" className="text-lg font-bold text-ink">
@@ -851,7 +1215,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           {mealSourceLabel(lunchRow) !== null ? <span className="text-sm text-ink2">{mealSourceLabel(lunchRow)}</span> : null}
         </div>
         <p className="text-base text-ink">
-          いま: <span className="font-bold">{lunchLabel(lunch)}</span>
+          いま: <span className="font-bold">{data.intakeOk ? lunchLabel(lunch) : '—（読めませんでした）'}</span>
         </p>
         {(['main_amount', 'side_amount'] as const).map((f) => (
           <div key={f} role="group" aria-label={f === 'main_amount' ? '昼食 主食の割合' : '昼食 副食の割合'}>
@@ -863,7 +1227,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
                   type="button"
                   aria-pressed={lunch?.[f] === n && (lunch?.status ?? 'eaten') === 'eaten'}
                   aria-label={`${f === 'main_amount' ? '主食' : '副食'} ${n}割`}
-                  disabled={!canWrite}
+                  disabled={!intakeWritable}
                   onClick={() => void saveMeal(targetOf('lunch'), withEaten(lunch?.status, { [f]: n }))}
                   className={chipCls(lunch?.[f] === n && (lunch?.status ?? 'eaten') === 'eaten')}
                 >
@@ -877,7 +1241,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           <button
             type="button"
             aria-pressed={lunch?.status === 'refused'}
-            disabled={!canWrite}
+            disabled={!intakeWritable}
             onClick={() => void saveMeal(targetOf('lunch'), { status: lunch?.status === 'refused' ? 'eaten' : 'refused' })}
             className={chipCls(lunch?.status === 'refused')}
           >
@@ -898,7 +1262,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           おやつ
         </h3>
         <p className="text-base text-ink">
-          いま: <span className="font-bold">{snackLabel(snack)}</span>
+          いま: <span className="font-bold">{data.intakeOk ? snackLabel(snack) : '—（読めませんでした）'}</span>
         </p>
         <div className="flex flex-wrap gap-gap" role="group" aria-label="おやつ">
           {DAYCARE_SNACK_CHOICES.map((c) => (
@@ -906,7 +1270,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
               key={c.value}
               type="button"
               aria-pressed={snack?.main_amount === c.value && (snack?.status ?? 'eaten') === 'eaten'}
-              disabled={!canWrite}
+              disabled={!intakeWritable}
               onClick={() => void saveMeal(targetOf('snack'), withEaten(snack?.status, { main_amount: c.value }))}
               className={chipCls(snack?.main_amount === c.value && (snack?.status ?? 'eaten') === 'eaten')}
             >
@@ -927,14 +1291,14 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           水分
         </h3>
         <p className="text-base text-ink">
-          この日の合計 <span className="font-num text-xl font-bold">{fmtMl(fluidTotal)}</span>
+          この日の合計 <span className="font-num text-xl font-bold">{data.intakeOk ? fmtMl(fluidTotal) : '—（読めませんでした）'}</span>
         </p>
         <div className="flex flex-wrap items-end gap-gap" role="group" aria-label="水分を足す">
           {DAYCARE_FLUID_STEPS.map((ml) => (
             <button
               key={ml}
               type="button"
-              disabled={!canWrite || fluidBusy}
+              disabled={!intakeWritable || fluidBusy}
               onClick={() => void addFluid(ml)}
               className="min-h-tap rounded border border-primary bg-surface px-4 text-lg font-bold text-primary disabled:border-border disabled:text-ink3"
             >
@@ -953,7 +1317,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           </label>
           <button
             type="button"
-            disabled={!canWrite || fluidBusy || fluidOther === '' || otherErr !== null}
+            disabled={!intakeWritable || fluidBusy || fluidOther === '' || otherErr !== null}
             onClick={() => {
               const n = Number(fluidOther.normalize('NFKC').trim())
               setFluidOther('')
@@ -977,7 +1341,9 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           </p>
         ) : null}
         <ul aria-label="この日の水分の記録" className="space-y-1">
-          {fluidsOf.length === 0 && queuedNow === null ? <li className="text-base text-ink2">まだ記録はありません</li> : null}
+          {fluidsOf.length === 0 && queuedNow === null ? (
+            <li className="text-base text-ink2">{data.intakeOk ? 'まだ記録はありません' : '読めませんでした（上の〔再試行〕を押してください）'}</li>
+          ) : null}
           {queuedNow !== null ? (
             <li className={`text-base ${queuedNow.lost ? 'text-danger' : 'text-ink2'}`}>
               <span aria-hidden="true">⚠ </span>
@@ -992,7 +1358,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
                 </span>
                 <button
                   type="button"
-                  disabled={!canWrite}
+                  disabled={!intakeWritable}
                   onClick={() => setDelFluid(f)}
                   aria-label={`${f.taken_at === null ? '時刻なし' : f.taken_at.slice(0, 5)} の ${fmtMl(f.amount_ml)} を取り消す`}
                   className="min-h-tap rounded border border-danger px-3 text-base text-danger disabled:border-border disabled:text-ink3"
@@ -1074,6 +1440,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
       </section>
 
       {marks.dialogs}
+      {ops.dialogs}
       <ConfirmDialog
         open={delFluid !== null}
         title="水分の記録を取り消しますか"

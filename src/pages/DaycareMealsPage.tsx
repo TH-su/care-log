@@ -1,7 +1,8 @@
 // デイ せせらぎ 今日の画面の改善 2回目: 昼食・おやつをまとめて入れる画面（/record/daycare/meals・業務日は ?day=）。
 // 2026-10-24 代表承認（決定 6・親の回答 1〜2）。
 //
-// ・並べるのは、その日に来た方（在席・帰宅）だけ（休み・未到着・入院中は出さない）。今日の一覧の並びのまま1人1帯
+// ・並べるのは、一括の画面と同じ方（予定の方のうち休み・入院中を除く全員と、予定外で来た方＝mealBulkRows）。到着の前でも入れられる
+//   （2026-10-24 代表者の決定 §9.4 の4。それまでは在席・帰宅だけ）。今日の一覧の並び（五十音）のまま1人1帯
 // ・帯の中に、昼食の主食 0〜10・副食 0〜10・〔拒食〕・おやつ（全部・半分・食べない）のボタンを常に出す。押すとすぐ保存し、
 //   帯の端に保存の印（✓ 保存済み・⚠ 未送信・▲ 要確認）を出す（care-log の食事一括と同じ操作感。MealsGridPage そのものは変えない）
 // ・決まりはデイの1人の画面（DaycarePersonPage）の昼食・おやつと同じ:
@@ -40,7 +41,7 @@ import {
 import type { CellConflict, CellEditInput, DaycareMealRow, MealCellField, MealTarget } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
 import { ErrorBlock, LoadingBlock, useToast } from '../components/ui'
-import { buildDaycareBoard } from '../lib/daycare'
+import { buildDaycareBoard, fmtPlanTimes } from '../lib/daycare'
 import type { DaycareBoardRow } from '../lib/daycare'
 import {
   DAYCARE_MEAL_AMOUNTS,
@@ -96,14 +97,20 @@ type SaveState =
 
 const mealKeyOf = (t: MealTarget) => `${t.residentId}:${t.day}:${t.slot}`
 
-/** 帯の氏名の下の一言（在席 9:35／帰宅 15:30） */
-function cameText(row: DaycareBoardRow): string {
+/**
+ * 帯の氏名の下の一言（在席 9:35／帰宅 15:30／未到着（予定 9:30〜15:30））。2026-10-24（§9.4 の4）に到着の前の方も並ぶように
+ * なったので、到着の記録が無い方は「在席」と出さず「未到着」と出す（反証 中1）
+ */
+function cameText(row: Pick<DaycareBoardRow, 'state' | 'attendance' | 'plans' | 'planned' | 'dup'>): string {
   const a = row.attendance
   const hm = (t: string | null | undefined) => {
     const m = /^(\d{1,2}):(\d{2})/.exec(t ?? '')
     return m === null ? '' : ` ${Number(m[1])}:${m[2]}`
   }
-  return row.state === 'left' ? `帰宅${hm(a?.left_at)}` : `在席${hm(a?.arrived_at)}`
+  if (row.state === 'left') return `帰宅${hm(a?.left_at)}`
+  if (row.state === 'present') return `在席${hm(a?.arrived_at)}`
+  if (row.planned && !row.dup && row.plans.length === 1) return `未到着（予定 ${fmtPlanTimes(row.plans)}）`
+  return '未到着'
 }
 
 export interface DaycareMealsPageProps {
@@ -574,14 +581,14 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
             昼食・おやつ
           </h2>
           <p className="text-base text-ink2">
-            その日に来た方 <span className="font-num font-bold text-ink">{came.length}</span>人
+            予定の方 <span className="font-num font-bold text-ink">{came.length}</span>人
           </p>
         </div>
         <p className="text-base text-ink2">押すとすぐ保存します。昼食は care-log の食事の昼食と同じ記録です。</p>
 
         {came.length === 0 ? (
           <p className="rounded-lg border border-border bg-surface p-3 text-base text-ink2">
-            この日に来た方（在席・帰宅）はまだいません。今日の画面で到着を記録すると、ここに出ます。
+            この日の予定の方がいません（休み・入院中の方は出しません）。予定外で来た方は、今日の画面の〔予定にない方を追加〕で足したカードを押し、〔予定外で到着〕を押すと、ここに出ます。
           </p>
         ) : (
           <ul className="divide-y divide-border rounded-lg border border-border bg-surface">

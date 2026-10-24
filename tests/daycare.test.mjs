@@ -237,7 +237,7 @@ if (DC === null) {
       assert.equal(b.unconfirmed, 2)
       assert.deepEqual(b.rows.map((r) => r.residentId), [3])
     })
-    it('重複（dup）は「予定 要確認」で落とさない（時間のある予定の後ろ）・入院中は未到着に数えない・予定外の記録と足した人は最後', () => {
+    it('重複（dup）は「予定 要確認」で落とさない・入院中は未到着に数えない・予定外の記録と足した人も一覧に入る（並びは五十音＝名簿に名前が無ければ利用者ID）', () => {
       const b = DC.buildDaycareBoard({
         planRows: [planRow({ sched_id: 'd1', resident_id: 1, dup: true }), planRow({ sched_id: 'd2', resident_id: 1, dup: true }), planRow({ sched_id: 'h', resident_id: 2, hospitalized: true })],
         source: 'kv',
@@ -245,7 +245,8 @@ if (DC === null) {
         attendance: [att(10, 3, { arrived_at: '10:00' })],
         extraIds: [4],
       })
-      assert.deepEqual(b.rows.map((r) => [r.residentId, r.dup, r.extra]), [[2, false, false], [1, true, false], [3, false, true], [4, false, true]])
+      // 2026-10-24（§9.4 の3）: 予定外・予定 要確認も末尾に回さず五十音の位置（この名簿は名前が無いので利用者IDの順）
+      assert.deepEqual(b.rows.map((r) => [r.residentId, r.dup, r.extra]), [[1, true, false], [2, false, false], [3, false, true], [4, false, true]])
       assert.equal(b.counts.hospitalized, 1)
       assert.equal(b.counts.planned, 1)
       assert.equal(b.counts.present, 1)
@@ -262,6 +263,51 @@ if (DC === null) {
       assert.equal(b.unconfirmed, 1)
       assert.deepEqual(b.rows.map((r) => [r.residentId, r.extra, r.bathingPlanned]), [[3, true, true]])
       assert.deepEqual(DC.absentBathAction(null, b.rows[0].bathingPlanned), { kind: 'insert' })
+    })
+    it('並びは五十音（ふりがな、無ければ氏名・NFKC とカタカナ→ひらがなでそろえる・同じなら利用者ID）。予定の時刻・予定外・予定 要確認・居室で分けない（2026-10-24 §9.4）', () => {
+      const names = [
+        { id: 1, name: '架空 ウメ', kana: 'カクウ ウメ' },
+        { id: 2, name: '架空 イネ', kana: 'かくう いね' },
+        { id: 3, name: '試験 アオ', kana: 'ｼｹﾝ ｱｵ' },
+        { id: 4, name: 'あさひ', kana: null },
+        { id: 5, name: '架空 イネ', kana: 'かくう いね' },
+        { id: 6, name: '', kana: '' },
+      ]
+      const b = DC.buildDaycareBoard({
+        planRows: [
+          planRow({ sched_id: 'p1', resident_id: 1, start_time: '09:00' }),
+          planRow({ sched_id: 'p2', resident_id: 2, start_time: '13:00' }),
+          planRow({ sched_id: 'p3', resident_id: 3, dup: true }),
+          planRow({ sched_id: 'p5', resident_id: 5, start_time: '08:30' }),
+        ],
+        source: 'kv',
+        residents: names,
+        attendance: [att(10, 4, { arrived_at: '10:00' })],
+        extraIds: [6, 99],
+      })
+      // あさひ（ふりがな無し→氏名）→ かくう いね（2・5 は同じキー→ID）→ かくう うめ（全角カタカナ）→ しけん あお（半角カナ→NFKC）→ 名前の無い方・名簿に居ない方はID順で後ろ
+      assert.deepEqual(b.rows.map((r) => r.residentId), [4, 2, 5, 1, 3, 6, 99])
+      assert.equal(DC.kanaSortKey({ name: 'x', kana: 'ヴァ ｶﾞ' }), 'ゔぁ が')
+      assert.equal(DC.kanaSortKey({ name: '氏名', kana: '  ' }), '氏名')
+      assert.equal(DC.kanaSortKey(undefined), null)
+    })
+    it('一括の画面に出す方（daycareBulkRows）: 予定の方のうち休み・入院中を除く全員＋予定外で来た方（2026-10-24 §9.4 の4）', () => {
+      const rows = [
+        { residentId: 1, state: 'planned', planned: true, hospitalized: false },
+        { residentId: 2, state: 'present', planned: true, hospitalized: false },
+        { residentId: 3, state: 'left', planned: true, hospitalized: false },
+        { residentId: 4, state: 'absent', planned: true, hospitalized: false },
+        { residentId: 5, state: 'planned', planned: true, hospitalized: true },
+        { residentId: 6, state: 'present', planned: true, hospitalized: true },
+        { residentId: 7, state: 'present', planned: false, hospitalized: false },
+        { residentId: 8, state: 'planned', planned: false, hospitalized: false },
+        { residentId: 9, state: 'absent', planned: false, hospitalized: false },
+      ]
+      assert.deepEqual(DC.daycareBulkRows(rows).map((r) => r.residentId), [1, 2, 3, 6, 7])
+      // 受け渡し（§9.7）のキーに使う source_id の配列（並びは一覧のまま・名簿に居ない方と空の source_id は除く・重複なし）
+      const residents = [{ id: 1, source_id: 'T001' }, { id: 2, source_id: ' T002 ' }, { id: 3, source_id: '' }, { id: 6, source_id: 'T006' }, { id: 4, source_id: 'T004' }, { id: 7, source_id: 'T006' }]
+      assert.deepEqual(DC.daycareBulkSourceIds(rows, residents), ['T001', 'T002', 'T006'])
+      assert.deepEqual(DC.daycareBulkSourceIds([], residents), [])
     })
     it('unknown と none は行を作らない（画面は帯で出し分ける）', () => {
       assert.equal(DC.buildDaycareBoard({ planRows: [], source: 'unknown', residents: roster, attendance: [] }).rows.length, 0)
@@ -543,9 +589,12 @@ if (DC === null) {
       assert.deepEqual(p.pulse, { value: 66, on: '2026-10-22' }, '今日のホームの定時は前回に数える')
       assert.equal(p.spo2, undefined)
     })
-    it('絞り込みは既知値だけ（壊れた値・知らない値は既定）', () => {
+    it('絞り込みは既知値だけ（壊れた値・知らない値は既定）。2026-10-24 §9.4 の4: 「予定の方」（既定）と「全員」の2つ・端末に残る「到着した方」は新しい既定へ', () => {
+      assert.deepEqual([...DC.DC_VITALS_FILTERS], ['planned', 'all'])
       assert.equal(DC.readDcVitalsFilter('planned'), 'planned')
-      for (const bad of [null, '', 'xxx', '__proto__', 'x'.repeat(10000), 5]) assert.equal(DC.readDcVitalsFilter(bad), 'present')
+      assert.equal(DC.readDcVitalsFilter('all'), 'all')
+      assert.equal(DC.readDcVitalsFilter('present'), 'planned', '前の版で選んだ「到着した方」は新しい既定')
+      for (const bad of [null, '', 'xxx', '__proto__', 'x'.repeat(10000), 5]) assert.equal(DC.readDcVitalsFilter(bad), 'planned')
     })
   })
 
@@ -1292,42 +1341,68 @@ if (DC === null) {
   })
 
   describe('今日の画面の改善 1回目（静的・代表者の決定 2026-10-23 と親の回答 A1〜A5・B1〜B9）', () => {
+    // 2026-10-24（代表者の決定 §9.4）: 一覧は1人1行の表からカードに、操作と小窓は今日の画面と1人の画面で同じ部品
+    // （src/components/DaycareAttendanceOps.tsx）に移した。下の検査は場所を移しただけ（固定し直し・意図は同じ）
     const t = code('../src/pages/DaycarePage.tsx')
-    const list = t.slice(t.indexOf('<div className="rounded-lg border border-border bg-surface">'), t.indexOf('setPickerOpen(true)'))
-    it('画面には「自動」の文字を出さない（到着・帰宅・入浴とも時刻・状態だけ＝代表者の指示）', () => {
+    const ops = code('../src/components/DaycareAttendanceOps.tsx')
+    const person = code('../src/pages/DaycarePersonPage.tsx')
+    const list = t.slice(t.indexOf('<ul className="dc-cards"'), t.indexOf('setPickerOpen(true)'))
+    const att = person.slice(person.indexOf('<section aria-labelledby="h-att"'), person.indexOf('<section aria-labelledby="h-vital"'))
+    it('画面には「自動」の文字を出さない（到着・帰宅・入浴とも時刻・状態だけ＝代表者の指示）。カードも1人の画面の到着・帰宅も', () => {
       assert.ok(list.length > 1000)
-      assert.doesNotMatch(list.replace(/電波が戻ると自動で送信します/g, ''), /自動/)
-      assert.doesNotMatch(list, /arrived_auto|left_auto/, '一覧は印を見て見た目を変えない')
+      assert.ok(att.length > 1000)
+      for (const x of [list, att]) {
+        assert.doesNotMatch(x.replace(/電波が戻ると自動で送信します/g, ''), /自動/)
+        assert.doesNotMatch(x, /arrived_auto|left_auto/, '一覧は印を見て見た目を変えない')
+      }
     })
-    it('1人1行: 氏名・予定（押すと1人の記録へ）｜到着｜帰宅｜入浴｜昼食｜バイタル｜休み（右端）。水分・活動の札は外した（代表者の回答 A3）', () => {
-      assert.match(list, /className="dc-row-head [^"]*"[^>]*>\s*<span>氏名・予定<\/span>\s*<span>到着<\/span>\s*<span>帰宅<\/span>\s*<span>入浴<\/span>\s*<span>昼食<\/span>\s*<span>バイタル<\/span>\s*<span className="text-right">休み<\/span>/)
-      assert.match(list, /<Link\s+to=\{personPath\(row\.residentId, day, today\)\}/)
-      assert.match(list, /className=\{REST_BTN\}/)
-      assert.doesNotMatch(list, /水分|活動/)
+    it('カード（§9.4 の1〜3）: 五十音の通し（見出しなし）・氏名とふりがな・予定・到着と帰宅・入浴と昼食とバイタルは文字だけ・ボタンは〔休み〕（休みの方は〔取消〕）だけ・リンクの外', () => {
+      assert.match(list, /<Link to=\{personPath\(row\.residentId, day, today\)\} className="dc-card-link /)
+      // 〔休み〕〔取消〕はリンクの外（リンクの閉じタグの後）・押せる範囲 44px
+      const link = list.slice(list.indexOf('<Link to={personPath'), list.indexOf('</Link>'))
+      assert.doesNotMatch(link, /<button/)
+      assert.match(list, /<\/Link>[\s\S]*?onClick=\{\(\) => ops\.askCancelAbsent\(row\)\}[\s\S]*?className=\{`relative z-\[1\] shrink-0 \$\{DANGER_CELL_BTN\}`\}/)
+      assert.match(list, /onClick=\{\(\) => ops\.onRest\(row\)\}\s*disabled=\{disabled \|\| \(rowHasTimes && !timesOk\)\}[\s\S]*?className=\{`relative z-\[1\] shrink-0 \$\{REST_BTN\}`\}/)
       assert.match(t, /const REST_BTN =\s*'inline-flex min-h-tap min-w-\[5rem\]/)
-      // 押せる範囲 44px・角は 6px（rounded-full を使わない）
+      assert.match(t, /const DANGER_CELL_BTN =\s*'inline-flex min-h-tap min-w-tap/)
+      // カードに残すボタンは2つだけ（到着・帰宅・時刻・理由・入浴はカードに出さない）
+      assert.equal((list.slice(0, list.indexOf('</ul>')).match(/<button/g) ?? []).length, 2)
+      assert.doesNotMatch(list, /onArrive|onLeave|openTime|askAbsent|openBath|onBathAsPlanned/)
+      // 入浴・昼食・バイタルは押せない文字だけ（▲ と枠で注意を示す＝色だけに頼らない）
+      assert.match(list, /入浴 \{bathText\}/)
+      assert.match(list, /昼食 \{attended \|\| lunch !== null \? lunchShortLabel\(lunch\) : '—'\}/)
+      assert.match(list, /バイタル \{vAbn \? '▲ 要確認' : vDone \? '✓ 済' : attended \? '未' : '—'\}/)
+      // 休みの方はその位置のまま薄く（地の色と文字の色。透明度は使わない）・「休み（理由）」
+      assert.match(list, /absent \? 'border-border bg-surface2' : 'border-border-strong bg-surface'/)
+      assert.doesNotMatch(list, /opacity-/)
+      assert.match(list, /<span aria-hidden="true">✕ <\/span>\s*\{stateLabel\(row\)\.text\}/)
+      // 角は 6px（rounded-full を使わない）・五十音の見出しは付けない
       assert.doesNotMatch(t, /rounded-full/)
-      for (const k of ['CELL_BTN', 'DANGER_CELL_BTN', 'PRIMARY_CELL_BTN', 'REST_BTN']) assert.match(t, new RegExp(`const ${k} =\\s*'inline-flex min-h-tap`))
+      assert.doesNotMatch(list, /あ行|か行/)
       const css = read('../src/index.css')
-      assert.match(css, /\.dc-row-head \{\s*display: none;\s*\}/)
-      assert.match(css, /@media \(min-width: 60em\) \{\s*\.dc-row,\s*\.dc-row-head \{\s*display: grid;\s*grid-template-columns: minmax\(0, 1fr\) 4\.5rem 4\.5rem 8rem 8rem 6\.5rem 6\.5rem;/)
+      // 最小幅はふつうの文字で 205px（入居者マスタの .rlist と同じ）。rem なので文字を大きくすると列が減る
+      assert.match(css, /\.dc-cards \{\s*display: grid;\s*grid-template-columns: repeat\(auto-fill, minmax\(min\(12\.8rem, 100%\), 1fr\)\);/)
+      // 氏名・ふりがな・予定は切らずに折り返す（ふりがなは〔休み〕の横に置かない）
+      assert.doesNotMatch(list.slice(0, list.indexOf('</ul>')), /\btruncate\b/)
+      assert.match(css, /\.dc-card-link::after \{\s*content: '';\s*position: absolute;\s*inset: 0;/)
+      assert.doesNotMatch(css, /\.dc-(row|row-head|cell-label|span2)\s*[,{]/, '1人1行の表は外した')
     })
-    it('時刻の欄を押すと直す小窓（今日は現場も・過去の日は事務所＝A4）。〔帰宅を取り消す〕は小窓の中', () => {
-      assert.match(list, /const timesOk = canChangeDaycareTimes\(day, today, role\)/)
-      assert.match(list, /timesOk && !disabled \? \(\s*<button\s+type="button"\s+onClick=\{\(\) => \{\s*if \(precheck\(row\)\) openTime\(row, 'fix'\)/)
-      assert.match(t, /\{timeFor\.mode === 'fix' && timeFor\.row\.attendance\?\.left_at \? \(/)
+    it('時刻の直しは1人の画面（今日は現場も・過去の日は事務所＝A4）。〔帰宅を取り消す〕は小窓の中', () => {
+      assert.match(person, /const timesOk = canChangeDaycareTimes\(day, today, role\)/)
+      assert.match(att, /\{hasTimes\(row\) && timesOk \? \(\s*<button\s+type="button"\s+onClick=\{\(\) => \{\s*if \(ops\.precheck\(row\)\) ops\.openTime\(row, 'fix'\)/)
+      assert.match(ops, /\{timeFor\.mode === 'fix' && timeFor\.row\.attendance\?\.left_at \? \(/)
     })
     it('〔休み〕の1タップ: 0047 が無い DB では理由の小窓・人の時刻がある方だけ確かめ・押した瞬間の自動の到着は読み直して休みに直す', () => {
-      const rest = t.slice(t.indexOf('const onRest = '), t.indexOf('const restNow = '))
+      const rest = ops.slice(ops.indexOf('const onRest = '), ops.indexOf('const restNow = '))
       assert.match(rest, /if \(daycareAutoColumnsSeen\(\) !== true\) \{\s*setAbsentFor\(row\)\s*return\s*\}/)
       assert.match(rest, /if \(a !== null && hasManualTimes\(a\)\) \{\s*setConfirm\(/)
-      const now = t.slice(t.indexOf('const restNow = '), t.indexOf('const undoRest = '))
+      const now = ops.slice(ops.indexOf('const restNow = '), ops.indexOf('const undoRest = '))
       assert.match(now, /absent_reason: 'later' as const, arrived_at: null, left_at: null/)
       assert.match(now, /if \(r === 'conflict' && before === null\) \{[\s\S]*?isAutoOnlyAttendance\(now\)/)
       assert.match(now, /await recordAbsentBath\(\{ residentId: id, day, bathingPlanned: row\.bathingPlanned, recordedBy: actorId \}\)/)
     })
     it('直後の〔元に戻す〕: 時刻と印を戻す・押す前に行が無ければ行を取り消す・入浴は自動と同じ区分に戻す（印は付けない＝端末は自動の記録を作らない）', () => {
-      const undo = t.slice(t.indexOf('const undoRest = '), t.indexOf('const onReasonPick = '))
+      const undo = ops.slice(ops.indexOf('const undoRest = '), ops.indexOf('const onReasonPick = '))
       assert.match(undo, /before === null\s*\? await softDeleteDaycareAttendance\(saved, \{ editedBy: actorId \}\)/)
       assert.match(undo, /arrived_auto: before\.arrived_auto === true,\s*left_auto: before\.left_auto === true,/)
       assert.match(undo, /resultForBathed\(day, closedDates\)/)
@@ -1335,7 +1410,7 @@ if (DC === null) {
       assert.doesNotMatch(undo, /auto: true/)
       // 反証 中4: 休みで作った行を自動と同じ区分にするのは、12:30 の自動の相手で今日の 12:30 より前の時だけ。それ以外は行を取り消す
       // 確認の反証 軽3: 押した時（restNow）に 12:30 の自動の相手で 12:30 より前だったかを控え、戻し方は recordAbsentBath の結果で決める
-      const now = t.slice(t.indexOf('const restNow = '), t.indexOf('const undoRest = '))
+      const now = ops.slice(ops.indexOf('const restNow = '), ops.indexOf('const undoRest = '))
       assert.match(now, /const beforeAutoBath = row\.autoBath === true && day === todayIso\(\) && nowHm\(\) < DAYCARE_AUTO_BATH_AT/)
       assert.match(undo, /bath\.inserted === true && !beforeAutoBath\s*\? await softDeleteBath\(bath\.record\.id, bath\.record\.rev, \{ editedBy: actorId \}\)/)
       assert.match(undo, /bath\.autoResult === 'full' \|\| bath\.autoResult === 'visit' \? bath\.autoResult/)
@@ -1348,9 +1423,89 @@ if (DC === null) {
       assert.match(t, /text: `休み（\$\{reason\}）`/)
       assert.match(t, /\{ label: '休み', value: c\.absent \}/)
       assert.match(t, /label: '今日（到着・休み）'/)
-      assert.match(code('../src/pages/DaycarePersonPage.tsx'), /return `休み（\$\{a\?\.absent_reason/)
+      assert.match(person, /return `休み（\$\{a\?\.absent_reason/)
       const T2 = read('../src/lib/types.ts')
       assert.match(T2, /absent: '欠席'/, '入浴の理由の表示は変えない')
+    })
+  })
+
+  describe('今日のカードと1人の画面の操作（静的・2026-10-24 代表者の決定 §9.4）', () => {
+    const t = code('../src/pages/DaycarePage.tsx')
+    const ops = code('../src/components/DaycareAttendanceOps.tsx')
+    const person = code('../src/pages/DaycarePersonPage.tsx')
+    const att = person.slice(person.indexOf('<section aria-labelledby="h-att"'), person.indexOf('<section aria-labelledby="h-vital"'))
+    const bathSec = person.slice(person.indexOf('<section aria-labelledby="h-bath"'), person.indexOf('<section aria-labelledby="h-lunch"'))
+    it('操作の本体は1か所（DaycareAttendanceOps）。今日の画面と1人の画面が同じ部品を使い、書き写しを持たない', () => {
+      assert.match(t, /const ops = useDaycareAttendanceOps\(\{\s*place: 'board',/)
+      assert.match(person, /const ops = useDaycareAttendanceOps\(\{\s*place: 'person',/)
+      for (const x of [t, person]) {
+        assert.doesNotMatch(x, /const (onRest|restNow|undoRest|onArrive|onLeave|writeBath|onAbsentPick|saveTime) = /)
+        assert.doesNotMatch(x, /recordAbsentBath|insertDaycareAttendance|updateDaycareAttendance|softDeleteDaycareAttendance|insertBath\(|updateBath\(/)
+      }
+      assert.match(t, /\{ops\.dialogs\}/)
+      assert.match(person, /\{ops\.dialogs\}/)
+    })
+    it('1人の画面: 到着（今日は1タップ・過去の日は事務所の小窓）・帰宅・時刻の直し・〔休み〕・理由・休みの取り消し・入浴の操作がある', () => {
+      assert.match(att, /onClick=\{\(\) => void ops\.onArrive\(row\)\}\s*disabled=\{opsDisabled \|\| !timesOk\}/)
+      assert.match(att, /onClick=\{\(\) => void ops\.onLeave\(row\)\} disabled=\{opsDisabled \|\| !timesOk\}/)
+      assert.match(att, /onClick=\{\(\) => ops\.onRest\(row\)\} disabled=\{opsDisabled \|\| \(hasTimes\(row\) && !timesOk\)\}/)
+      assert.match(att, /onClick=\{\(\) => ops\.askAbsent\(row\)\} disabled=\{opsDisabled\}[^>]*>\s*理由を選ぶ/)
+      assert.match(att, /onClick=\{\(\) => ops\.askCancelAbsent\(row\)\} disabled=\{opsDisabled\}[^>]*>\s*休みを取り消す/)
+      assert.match(bathSec, /onClick=\{\(\) => ops\.onBathAsPlanned\(row\)\} disabled=\{opsDisabled\}/)
+      assert.match(bathSec, /onClick=\{\(\) => ops\.openBath\(row\)\} disabled=\{opsDisabled\}/)
+      assert.match(bathSec, /'入浴を「欠席」に直す' : '区分・中止を選ぶ'/)
+      assert.doesNotMatch(bathSec, /今日の一覧で入浴を記録する/)
+      // 過去の日の到着・帰宅は事務所の時刻の小窓（0042 と同じ規則）
+      assert.match(ops, /if \(canEditPastDaycareTimes\(role\)\) openTime\(row, 'arrive'\)/)
+      // 押せない間（未送信・送信中・旗が閉じている）は止める
+      assert.match(person, /const opsDisabled = !canWrite \|\| ops\.busy\.has\(residentId\) \|\| attPending/)
+    })
+    it('1人の画面は書き込みの下準備を自分で取る（入浴の旗・役割・休業日・開所の写し＝M-085）', () => {
+      assert.match(person, /useEffect\(\(\) => \{\n\s*void getKindInputGate\('bath'\)\.catch\(\(\) => undefined\)\n\s*\}, \[reloadKey\]\)/)
+      assert.match(person, /const ask = \(\) => \{\s*void fetchMyRole\(\)\.then\(\(r\) => \{\s*if \(alive\) setRole\(r\)/)
+      assert.match(person, /const off = subscribeMyRole\(ask\)/)
+      assert.match(person, /getAppSetting\('daycare_closed_dates'\)\.catch\(\(\) => null\)/)
+      assert.match(person, /const snap = await openDaycareDay\(day, actorId\)/)
+      assert.match(person, /snapshot,\n\s*missing: missing \|\| plan\?\.missing === true,/)
+    })
+    it('1人の画面: 予定も記録も無い在籍中の方は「予定外」として足し、ボタンは〔予定外で到着〕と分ける（親の回答 A3）。入院の方には出さない', () => {
+      assert.match(person, /const extraSelf = resident !== null && resident\.active/)
+      assert.match(person, /extraIds: extraSelf \? \[residentId\] : \[\]/)
+      // 確認の反証 軽1: 「記録が無い」は時刻も休みも無いこと（〔元に戻す〕・〔取消〕の後の空の行も同じ）。自動の入浴の相手は予定のある方と同じ
+      assert.match(person, /const extraNoRecord = row !== undefined && row\.extra && !row\.planned && row\.autoBath !== true && !hasTimes\(row\) && att\?\.absent !== true/)
+      // 確認の反証 軽2: 読み上げも、予定を確かめられない日は「予定を確かめられません」
+      assert.match(att, /data\.planSource === 'unknown' \? '予定を確かめられません' : 'この日のデイの予定はありません'/)
+      assert.match(att, /\{extraNoRecord \? '予定外で到着' : '到着'\}/)
+      // 入院中: 週間計画の入院中（hospitalizedPlanned）と、その日の食事の記録の「入院」には出さない
+      assert.match(person, /const hospitalMeal = data\.meals\.some\(\(m\) => m\.meal\.resident_id === residentId && m\.meal\.status === 'hospital'\)/)
+      assert.match(att, /\) : hospitalizedPlanned \|\| \(extraNoRecord && hospitalMeal\) \? null : \(/)
+    })
+    it('案内の「どこで」は画面ごと（カード＝1人の画面へ・1人の画面＝この画面のボタン）。行の欄を指す古い案内は残さない', () => {
+      assert.match(ops, /arriveHint: 'カードを押して、1人の画面の〔到着〕を押してください'/)
+      assert.match(ops, /reasonHint: '理由は、カードを押した1人の画面で選べます'/)
+      for (const x of [ops, t, person]) assert.doesNotMatch(x, /行の入浴の欄|行の〔理由〕|行の〔休み〕|この行の入浴|行の時刻/)
+      // 反証 軽1: 〔予定にない方を追加〕の後は「カードを押して〔予定外で到着〕」（追加しただけでは到着にならない）。過去の日の帯も操作の新しい場所を指す
+      const pages = ['DaycarePage', 'DaycareVitalsPage', 'DaycareMealsPage', 'DaycareActivityBulkPage', 'DaycareTrainingPage'].map((f) => code(`../src/pages/${f}.tsx`))
+      for (const x of pages) {
+        assert.doesNotMatch(x, /〔予定にない方を追加〕から(到着を)?記録/)
+        if (x.includes('〔予定にない方を追加〕')) assert.match(x, /〔予定外で到着〕/)
+      }
+      assert.match(t, /'過去の日を表示しています。到着・帰宅は、カードを押した1人の画面で時刻を入れて記録・修正します（事務所のログイン）。'/)
+      assert.match(t, /休みはカードの〔休み〕、入浴はカードを押した1人の画面で記録できます/)
+    })
+    it('反証の直し: 食事一括で到着の前の方を「在席」と出さない（中1）・1人の画面は予定も記録も無い方に〔休み〕を出さない（軽2）・画面に戻った時に今日を取り直す（軽4）・ボタンは 44px（軽5）', () => {
+      const meals = code('../src/pages/DaycareMealsPage.tsx')
+      const ct = meals.slice(meals.indexOf('function cameText('), meals.indexOf('export interface DaycareMealsPageProps'))
+      assert.match(ct, /if \(row\.state === 'present'\) return `在席/)
+      assert.match(ct, /return `未到着（予定 \$\{fmtPlanTimes\(row\.plans\)\}）`/)
+      assert.match(ct, /return '未到着'/)
+      assert.match(att, /\{extraNoRecord \? null : \(\s*<button type="button" onClick=\{\(\) => ops\.onRest\(row\)\}/)
+      assert.match(person, /const vis = \(\) => \{\s*if \(document\.visibilityState === 'visible'\) tick\(\)\s*\}\s*document\.addEventListener\('visibilitychange', vis\)/)
+      for (const k of ['opBtn', 'opPrimary', 'opDanger', 'opRest']) assert.match(person, new RegExp(`const ${k} =\\s*'min-h-tap min-w-`))
+    })
+    it('0047 が無い DB の〔休み〕（理由の小窓）・8秒の〔元に戻す〕・入浴の「中止（欠席）」連動はカードの〔休み〕から今までどおり', () => {
+      assert.match(ops, /`\$\{nameOf\(id\)\}さんを休みにしました（\$\{place\.reasonHint\}）`,\s*saved === null \? undefined : \(\) => void undoRest\(row, saved, before, beforeAutoBath, bath\),/)
+      assert.match(ops, /<ModalShell open=\{absentFor !== null\} label="休みの理由"/)
     })
   })
 
@@ -1405,11 +1560,15 @@ if (DC === null) {
       assert.match(v, /fill: slotDay === todayIso\(\) \? \{ measured_at: nowHm\(\), recorded_by: actor \} : \{ recorded_by: actor \}/)
       assert.match(v, /const usable = snapshot !== null && snapshot\.plan_source !== 'unknown'/)
       const t = code('../src/pages/DaycarePage.tsx')
-      assert.match(t, /const timesOk = canChangeDaycareTimes\(day, today, role\)\s*const stampDisabled = disabled \|\| !timesOk/)
-      assert.match(t, /onClick=\{\(\) => void onArrive\(row\)\}\s*disabled=\{stampDisabled\}/)
-      assert.match(t, /onClick=\{\(\) => void onLeave\(row\)\}\s*disabled=\{stampDisabled\}/)
+      // 2026-10-24（§9.4）: 到着・帰宅のボタンは1人の画面へ、操作の本体は DaycareAttendanceOps へ移した（固定し直し・意図は同じ）
+      const person = code('../src/pages/DaycarePersonPage.tsx')
+      const ops = code('../src/components/DaycareAttendanceOps.tsx')
+      assert.match(person, /const timesOk = canChangeDaycareTimes\(day, today, role\)/)
+      assert.match(person, /onClick=\{\(\) => void ops\.onArrive\(row\)\}\s*disabled=\{opsDisabled \|\| !timesOk\}/)
+      assert.match(person, /onClick=\{\(\) => void ops\.onLeave\(row\)\} disabled=\{opsDisabled \|\| !timesOk\}/)
       assert.match(t, /data\.snapshot !== null && data\.snapshot\.plan_source !== 'unknown'/)
-      assert.match(t, /arrived_at: prev\?\.arrived_at \?\? null, left_at: prev\?\.left_at \?\? null/)
+      assert.match(person, /data\.snapshot !== null && data\.snapshot\.plan_source !== 'unknown'/)
+      assert.match(ops, /arrived_at: prev\?\.arrived_at \?\? null, left_at: prev\?\.left_at \?\? null/)
       const m = sql('../supabase/migrations/0041_daycare_stage1.sql')
       assert.match(m, /create function public\.daycare_open_day\(p_day date, p_staff bigint default null\)\s+returns jsonb\s+language plpgsql\s+volatile\s+security definer/)
       assert.doesNotMatch(m, /create policy "insert_auth" on public\.daycare_days/)
@@ -1484,19 +1643,23 @@ if (DC === null) {
       assert.match(m, /if v_role is distinct from 'field' then\s+return new;/)
       assert.match(m, /errcode = '42501'/)
       const t = code('../src/pages/DaycarePage.tsx')
-      assert.match(t, /if \(canEditPastDaycareTimes\(role\)\) openTime\(row, 'arrive'\)/)
-      assert.match(t, /if \(canEditPastDaycareTimes\(role\)\) openTime\(row, 'leave'\)/)
-      // 今日の画面の改善 1回目（代表者の回答 A4）: 時刻の欄を押すと直す小窓（今日は現場も・過去の日は事務所だけ＝canChangeDaycareTimes）。
-      // 〔帰宅を取り消す〕は時刻を直す小窓の中へ移した（固定し直し・現場の過去の日は時刻の欄が押せない＝止める意図は同じ）
-      assert.match(t, /const timesOk = canChangeDaycareTimes\(day, today, role\)/)
-      assert.match(t, /timesOk && !disabled \? \(\s*<button/)
-      assert.match(t, /setTimeFor\(null\)\s*askCancelLeave\(r\)/)
-      assert.match(t, /if \(!canChangeDaycareTimes\(day, todayIso\(\), role\)\) \{\s*setMsg\(row\.residentId, \{ tone: 'warn', text: MSG_PAST_TIME_CLEAR \}\)/)
+      // 2026-10-24（§9.4）: 操作の本体は DaycareAttendanceOps、時刻の欄のボタンは1人の画面の〔時刻を直す〕へ移した（固定し直し・意図は同じ）
+      const ops = code('../src/components/DaycareAttendanceOps.tsx')
+      const person = code('../src/pages/DaycarePersonPage.tsx')
+      assert.match(ops, /if \(canEditPastDaycareTimes\(role\)\) openTime\(row, 'arrive'\)/)
+      assert.match(ops, /if \(canEditPastDaycareTimes\(role\)\) openTime\(row, 'leave'\)/)
+      // 今日の画面の改善 1回目（代表者の回答 A4）: 時刻を直す小窓（今日は現場も・過去の日は事務所だけ＝canChangeDaycareTimes）。
+      // 〔帰宅を取り消す〕は時刻を直す小窓の中（現場の過去の日は〔時刻を直す〕が出ない＝止める意図は同じ）
+      assert.match(person, /const timesOk = canChangeDaycareTimes\(day, today, role\)/)
+      assert.match(person, /\{hasTimes\(row\) && timesOk \? \(\s*<button/)
+      assert.match(ops, /setTimeFor\(null\)\s*askCancelLeave\(r\)/)
+      assert.match(ops, /if \(!canChangeDaycareTimes\(day, todayIso\(\), role\)\) \{\s*setMsg\(row\.residentId, \{ tone: 'warn', text: MSG_PAST_TIME_CLEAR \}\)/)
       assert.match(t, /disabled=\{disabled \|\| \(rowHasTimes && !timesOk\)\}/)
-      assert.match(t, /if \(timesTouched && e instanceof DbError && e\.kind === 'forbidden' && dayRef\.current < todayIso\(\)\) return MSG_PAST_TIME/)
-      assert.match(t, /text: errText\(e, touchesTimes\(patch, row\.attendance\)\)/)
-      assert.match(t, /text: errText\(e, touchesTimes\(patch, row\)\)/)
-      assert.match(t, /type="time"/)
+      assert.match(person, /disabled=\{opsDisabled \|\| \(hasTimes\(row\) && !timesOk\)\}/)
+      assert.match(ops, /if \(timesTouched && e instanceof DbError && e\.kind === 'forbidden' && dayRef\.current < todayIso\(\)\) return MSG_PAST_TIME/)
+      assert.match(ops, /text: errText\(e, touchesTimes\(patch, row\.attendance\)\)/)
+      assert.match(ops, /text: errText\(e, touchesTimes\(patch, row\)\)/)
+      assert.match(ops, /type="time"/)
     })
     it('反証レビュー4巡目の直し（静的）: 帯の後に入れた値も片づけてから移る・違う日の静かな読み直しは失敗を出す・拒まれた値は帯で知らせる・0042 は付け替えと復活も見る', () => {
       const v = code('../src/pages/DaycareVitalsPage.tsx')

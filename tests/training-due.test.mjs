@@ -297,21 +297,25 @@ if (D === null) {
         '範囲を渡さない時は 3b の決まりのまま',
       )
     })
-    it('対象者の並び: 写しを読めない・0件の時は元の並びと知らせ。行がある時は計画がある方を上に（中は元の並び）、下の方には理由', () => {
+    it('対象者の札（2026-10-24 §9.4 の5: 並べ替えをやめ札だけ）: 写しを読めない・0件の時は札を出さず知らせ。行がある時は計画の無い方に理由', () => {
       const targets = [7, 3, 1, 4, 2]
-      assert.deepEqual(D.orderTargetsByPlan({ targets, copy: 'error', people: [], today }), { order: targets, noPlan: new Map(), notice: 'error' })
-      assert.deepEqual(D.orderTargetsByPlan({ targets, copy: { rows: [], settings: null }, people: [], today }), { order: targets, noPlan: new Map(), notice: 'empty' })
-      const r = D.orderTargetsByPlan({ targets, copy: { rows, settings: null }, people: [], today })
-      assert.deepEqual(r.order, [1, 2, 7, 3, 4])
+      assert.deepEqual(D.targetPlanTags({ targets, copy: 'error', people: [], today }), { noPlan: new Map(), notice: 'error' })
+      assert.deepEqual(D.targetPlanTags({ targets, copy: { rows: [], settings: null }, people: [], today }), { noPlan: new Map(), notice: 'empty' })
+      const r = D.targetPlanTags({ targets, copy: { rows, settings: null }, people: [], today })
       assert.deepEqual([...r.noPlan.entries()], [[7, 'nocopy'], [3, 'noplan'], [4, 'ended']])
       assert.equal(r.notice, null)
+      assert.equal('order' in r, false, '並べ替えは返さない（並びは一覧の五十音のまま）')
+      assert.equal(D.orderTargetsByPlan, undefined)
+      // 写しに行が無い方と計画の無い方は、どちらも「計画書なし」
+      assert.equal(D.TARGET_NO_PLAN_LABEL.nocopy, '計画書なし')
+      assert.equal(D.TARGET_NO_PLAN_LABEL.noplan, '計画書なし')
       assert.equal(D.TARGET_NO_PLAN_LABEL.ended, '計画書の通知を止めています')
     })
     it('反証の直し: 写しの状態（まだ写していない・写したが1人も載っていない・あり）と、在籍でない方の理由（中1・軽3）', () => {
       assert.equal(D.reviewCopyState({ rows: [], settings: null }), 'never')
       assert.equal(D.reviewCopyState({ rows: [], settings: { due_rule: 'calendar', warn_days: 28, synced_at: '2026-10-23T00:00:00Z' } }), 'empty')
       assert.equal(D.reviewCopyState({ rows, settings: null }), 'ok')
-      const r = D.orderTargetsByPlan({ targets: [1, 9], copy: { rows, settings: null }, people: [{ id: 1, active: false }], today })
+      const r = D.targetPlanTags({ targets: [1, 9], copy: { rows, settings: null }, people: [{ id: 1, active: false }], today })
       assert.deepEqual([...r.noPlan.entries()], [[1, 'inactive'], [9, 'nocopy']])
       assert.equal(D.TARGET_NO_PLAN_LABEL.inactive, '在籍でない方')
     })

@@ -46,6 +46,7 @@ import { LS, SHEET_DAYS } from './types'
 // 今日の要注意と同じ日の数え方（日本時間の今日・UTC で数える日の足し引き）。純粋な部品
 import { addDaysIso, jstClock } from '../pages/alertsModel'
 import type { Resident } from './types'
+import { clearDaycareDayMemo } from './daycareDayMemo'
 
 // ── キーと当たり判定の情報 ─────────────────────────────────────────────────
 
@@ -272,6 +273,7 @@ export function startCacheSync(): () => void {
 /** 控えを全部捨てる（ログアウト・記録者の変更・ログインのし直し）。外部 GAS の控えと平熱も捨てる */
 export function resetDataCache(): void {
   dataCache.clearAll()
+  clearDaycareDayMemo()
   forgetUsualTemps()
   clearExcretionCache()
   clearWeightCache()

@@ -6,6 +6,7 @@
 // ・排泄は排泄ケアアプリを読むだけ（excretionClient）。入口は体重管理アプリと同じ作りで ?masterId=<residents.source_id>
 // 個人情報は扱わない（数値と記号だけ。氏名は画面が持つ）。
 
+import { daycareBulkRows } from './daycare.ts'
 import type { DaycareBoardRow } from './daycare.ts'
 import type { FluidIntake, Meal } from './types.ts'
 
@@ -34,6 +35,18 @@ export function lunchLabel(meal: Pick<Meal, 'main_amount' | 'side_amount' | 'sta
   const s = meal.side_amount
   if (m === null && s === null) return '記録なし'
   return `主食 ${m === null ? '—' : `${m}割`}・副食 ${s === null ? '—' : `${s}割`}`
+}
+
+/** 今日の画面のカードの昼食の短い一言（2026-10-24 §9.4 の1。'主6・副4'・拒食・外出・入院。記録が無ければ '—'） */
+export function lunchShortLabel(meal: Pick<Meal, 'main_amount' | 'side_amount' | 'status'> | null | undefined): string {
+  if (meal === null || meal === undefined) return '—'
+  if (meal.status === 'refused') return '拒食'
+  if (meal.status === 'out') return '外出'
+  if (meal.status === 'hospital') return '入院'
+  const m = meal.main_amount
+  const s = meal.side_amount
+  if (m === null && s === null) return '—'
+  return `主${m === null ? '—' : m}・副${s === null ? '—' : s}`
 }
 
 /** おやつの表示（3択の名前・それ以外の値は割合のまま） */
@@ -81,9 +94,13 @@ export function haibenAppHref(sourceId: string | null | undefined): string {
   return MASTER_ID_RE.test(id) ? `${HAIBEN_APP_PATH}?masterId=${encodeURIComponent(id)}` : HAIBEN_APP_PATH
 }
 
-/** 1人の画面の〔前の方〕〔次の方〕: デイの一覧の並びで、在席・帰宅の方だけを回る（欠席・未到着は飛ばす） */
-export function personNav(rows: readonly Pick<DaycareBoardRow, 'residentId' | 'state'>[], residentId: number): { prev: number | null; next: number | null } {
-  const here = rows.filter((r) => r.state === 'present' || r.state === 'left').map((r) => r.residentId)
+/**
+ * 1人の画面の〔前の方〕〔次の方〕: デイの一覧の並び（五十音）で、一括の画面と同じ方（予定の方のうち休み・入院中を除く全員と
+ * 予定外で来た方＝daycareBulkRows）を回る。2026-10-24（§9.4）に到着をこの画面で押すようにしたので、到着の前の方も回る
+ * （それまでは在席・帰宅の方だけ）。休み・入院中の方を開いている時は端へ
+ */
+export function personNav(rows: readonly Pick<DaycareBoardRow, 'residentId' | 'state' | 'planned' | 'hospitalized'>[], residentId: number): { prev: number | null; next: number | null } {
+  const here = daycareBulkRows(rows).map((r) => r.residentId)
   const i = here.indexOf(residentId)
   if (i < 0) return { prev: here.length > 0 ? here[here.length - 1] : null, next: here.length > 0 ? here[0] : null }
   return { prev: i > 0 ? here[i - 1] : null, next: i < here.length - 1 ? here[i + 1] : null }
@@ -115,9 +132,12 @@ export function settleQueuedFluid(held: { base: number; ml: number }, now: numbe
 
 // ── 今日の画面の改善 2回目: デイの食事一括（/record/daycare/meals・2026-10-24 代表承認・決定 6／親の回答 1〜2） ──
 
-/** 食事一括に並べる方: その日に来た方（在席・帰宅）だけを、今日の一覧の並びのまま（休み・未到着・入院中は出さない） */
-export function mealBulkRows<T extends Pick<DaycareBoardRow, 'residentId' | 'state'>>(rows: readonly T[]): T[] {
-  return rows.filter((r) => r.state === 'present' || r.state === 'left')
+/**
+ * 食事一括に並べる方: 一括の画面と同じ（予定の方のうち休み・入院中を除く全員と、予定外で来た方＝daycareBulkRows）。今日の一覧の並びのまま。
+ * 到着の前でも入れられる（2026-10-24 代表者の決定 §9.4 の4。それまでは在席・帰宅だけ）
+ */
+export function mealBulkRows<T extends Pick<DaycareBoardRow, 'residentId' | 'state' | 'planned' | 'hospitalized'>>(rows: readonly T[]): T[] {
+  return daycareBulkRows(rows)
 }
 
 /** 食事一括の画面のルート（業務日は ?day= で持つ。今日は付けない） */

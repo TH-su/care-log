@@ -130,14 +130,16 @@ if (T === null) {
       assert.equal(T.previousProgram(list, 7, '2026-10-20'), '筋力')
       assert.equal(T.previousProgram(list, 9, '2026-10-20'), null)
     })
-    it('今日の対象者はその日に来た方（在席・帰宅）だけ。欠席・予定だけの方は出さない', () => {
+    it('今日の対象者は一括の画面と同じ（予定の方のうち休み・入院中を除く全員＋予定外で来た方・2026-10-24 §9.4 の4）', () => {
       const rows = [
-        { residentId: 1, state: 'present' },
-        { residentId: 2, state: 'left' },
-        { residentId: 3, state: 'absent' },
-        { residentId: 4, state: 'planned' },
+        { residentId: 1, state: 'present', planned: true, hospitalized: false },
+        { residentId: 2, state: 'left', planned: false, hospitalized: false },
+        { residentId: 3, state: 'absent', planned: true, hospitalized: false },
+        { residentId: 4, state: 'planned', planned: true, hospitalized: false },
+        { residentId: 5, state: 'planned', planned: true, hospitalized: true },
+        { residentId: 6, state: 'planned', planned: false, hospitalized: false },
       ]
-      assert.deepEqual(T.trainingTargets(rows), [1, 2])
+      assert.deepEqual(T.trainingTargets(rows), [1, 2, 4])
     })
     it('配置: その日の機能訓練指導員（重なりなし）・時間帯を分けずに両方の役割に入っている方を知らせる', () => {
       const list = [

@@ -3,7 +3,8 @@
 //
 // ・その日の配置: 機能訓練指導員・看護職員を職員が選ぶ（手入力が正本・資格の判定はしない）。時間帯は任意。
 //   機能訓練指導員が1人もいない日・時間帯を分けずに両方の役割に入っている方は、止めずに知らせる
-// ・今日の対象者: その日に来た方（在席・帰宅）。〔完了〕は1タップ（内容＝前回・時間＝20分・指導員＝その日の配置の機能訓練指導員・
+// ・今日の対象者: 一括の画面と同じ方（予定の方のうち休み・入院中を除く全員と予定外で来た方＝trainingTargets・2026-10-24 §9.4 の4）。
+//   並びは一覧の五十音のまま（計画書の有無で上下に分けない）。計画書の無い方には「計画書なし」の札（§9.4 の5）。〔完了〕は1タップ（内容＝前回・時間＝20分・指導員＝その日の配置の機能訓練指導員・
 //   開始時刻＝押した時刻−時間。取り消しはトーストの〔元に戻す〕）。前回の内容が無い方・配置に指導員がいない時は、小窓で入れる
 // ・〔一部〕〔中止〕〔記録を開く〕は小窓。中止は時間を持たず理由が必須（その他は一言も）。記録がある方には〔完了〕を出さない（1人1日1件）
 // ・過去の日は事務所のログインだけが入力・修正できる（0046 のトリガと同じ決まり。現場は見るだけ）
@@ -46,7 +47,7 @@ import type { MyRole } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
 import { DaycareHomeVisitSection } from '../components/DaycareHomeVisitSection'
 import { DaycareReviewDueSection } from '../components/DaycareReviewDueSection'
-import { TARGET_NO_PLAN_LABEL, orderTargetsByPlan, weekScope } from '../lib/trainingDue'
+import { TARGET_NO_PLAN_LABEL, targetPlanTags, weekScope } from '../lib/trainingDue'
 import type { DueCopyLoad, WeekScope } from '../lib/trainingDue'
 import { ConfirmDialog, ErrorBlock, LoadingBlock, ModalShell, useToast } from '../components/ui'
 import { buildDaycareBoard, canEditPastDaycareTimes } from '../lib/daycare'
@@ -284,11 +285,11 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
     [data, residents],
   )
   const targets = board === null ? [] : trainingTargets(board.rows)
-  // 計画書の写しで「計画がある・終了でない方」を上に（計画 6章）。写しが無い・読めない時は到着の並びのまま
-  const planOrder =
+  // 計画書の写しで、計画の無い方に札を添える（2026-10-24 §9.4 の5: 並びは一覧の五十音のまま・上下に分けない）。写しが無い・読めない時は札を出さない
+  const planTags =
     data === null || data.copy === 'missing'
       ? null
-      : orderTargetsByPlan({ targets, copy: data.copy, people: residents.map((r) => ({ id: r.id, active: r.active })), today })
+      : targetPlanTags({ targets, copy: data.copy, people: residents.map((r) => ({ id: r.id, active: r.active })), today })
   const staffList = (staff ?? []).filter((s) => s.active !== false)
   const nameOf = (id: number) => residents.find((r) => r.id === id)?.name ?? `利用者ID ${id}`
   const staffName = (id: number | null) => (id === null ? '' : ((staff ?? []).find((s) => s.id === id)?.name ?? `職員ID ${id}`))
@@ -792,28 +793,28 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
           {day === today ? '今日' : 'この日'}の対象者
         </h2>
         <p className="text-base text-ink2">
-          その日に来た方（在席・帰宅）です。〔完了〕は前回と同じ内容・{TRAINING_DEFAULT_MIN}分・配置の機能訓練指導員で記録します（違う時は〔一部〕か、記録の後に〔記録を開く〕で直してください）。
+          予定の方（休み・入院中を除く）と予定外で来た方です（五十音順）。〔完了〕は前回と同じ内容・{TRAINING_DEFAULT_MIN}分・配置の機能訓練指導員で記録します（違う時は〔一部〕か、記録の後に〔記録を開く〕で直してください）。
         </p>
         {data.sessions === null && !missing ? (
           <p role="alert" className="rounded border border-danger bg-danger-bg p-2 text-base text-ink">
             <span aria-hidden="true">▲ </span>機能訓練の記録を読み込めませんでした。通信状態を確認して、〔最新に更新〕を押してください。
           </p>
         ) : null}
-        {planOrder?.notice === 'error' && targets.length > 0 ? (
+        {planTags?.notice === 'error' && targets.length > 0 ? (
           <p role="status" className="rounded border border-warn bg-warn-bg p-2 text-base text-ink">
-            <span aria-hidden="true">▲ </span>計画書の期限を確かめられません（写しを読み込めませんでした）。並びは到着の順のままです。
+            <span aria-hidden="true">▲ </span>計画書の期限を確かめられません（写しを読み込めませんでした）。「計画書なし」の札は出していません。
           </p>
-        ) : planOrder?.notice === 'empty' && targets.length > 0 ? (
-          // 写しが0件（まだ写していない・1人も載っていない）の時も、並びを変えていないことを知らせる（段階3c の反証 中1）
+        ) : planTags?.notice === 'empty' && targets.length > 0 ? (
+          // 写しが0件（まだ写していない・1人も載っていない）の時も、札を出していないことを知らせる（段階3c の反証 中1）
           <p role="status" className="rounded border border-border p-2 text-base text-ink">
-            <span aria-hidden="true">ⓘ </span>計画書の写しに載っている方がいないため、並びは到着の順のままです。
+            <span aria-hidden="true">ⓘ </span>計画書の写しに載っている方がいないため、「計画書なし」の札は出していません。
           </p>
         ) : null}
         {targets.length === 0 ? (
-          <p className="text-base text-ink2">この日に来た方（在席・帰宅）がまだいません。到着を記録すると、ここに出ます。</p>
+          <p className="text-base text-ink2">この日の予定の方がいません（休み・入院中の方は出しません）。予定外で来た方は、今日の画面の〔予定にない方を追加〕で足したカードを押し、〔予定外で到着〕を押すと、ここに出ます。</p>
         ) : (
           <ul className="divide-y divide-border">
-            {(planOrder?.order ?? targets).map((rid) => {
+            {targets.map((rid) => {
               const s = sessionOf(sessions, rid, day)
               const prev = previousProgram(data.recent, rid, day)
               const add = pendingAdd(rid)
@@ -825,7 +826,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                   <div className="flex flex-wrap items-center justify-between gap-gap">
                     <div className="min-w-0">
                       <p className="text-lg font-bold text-ink">{name}</p>
-                      {planOrder?.noPlan.has(rid) ? <p className="text-sm text-ink2">{TARGET_NO_PLAN_LABEL[planOrder.noPlan.get(rid) ?? 'nocopy']}</p> : null}
+                      {planTags?.noPlan.has(rid) ? <p className="text-sm text-ink2">{TARGET_NO_PLAN_LABEL[planTags.noPlan.get(rid) ?? 'nocopy']}</p> : null}
                       <p className="text-base text-ink2">
                         {s !== null
                           ? `${sessionText(s)}・指導員 ${staffName(s.instructor_id)}`
@@ -878,7 +879,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
         {outside.length > 0 ? (
           <div className="space-y-1 border-t border-border pt-2">
             <h3 className="text-lg font-bold text-ink">対象者でない方の記録（{outside.length}件）</h3>
-            <p className="text-sm text-ink2">到着を取り消した・欠席にした方などの記録です。来ていない方の記録なら、開いて取り消してください。</p>
+            <p className="text-sm text-ink2">休みにした方・入院中の方などの記録です。来ていない方の記録なら、開いて取り消してください。</p>
             <ul className="divide-y divide-border">
               {outside.map((s) => (
                 <li key={s.id} className="flex flex-wrap items-center justify-between gap-gap py-2">

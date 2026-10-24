@@ -171,6 +171,9 @@ const PAGE_PRELOADS: readonly (() => Promise<unknown>)[] = [
   loadTimelinePage,
   loadMorePage,
   loadRecordHubPage,
+  // デイの今日の画面と1人の画面（2026-10-24）: 電波の無い所でカードを押しても1人の画面を開けるように先に読む
+  loadDaycarePage,
+  loadDaycarePersonPage,
   loadVitalsGridPage,
   loadMealsGridPage,
   loadNoteFormPage,
@@ -596,7 +599,7 @@ function screenTitle(pathname: string): string {
   if (pathname === '/record/daycare/vitals') return 'デイ バイタル一括'
   if (pathname === '/record/daycare/meals') return 'デイ 食事一括'
   if (pathname.startsWith('/record/daycare/person/')) return 'デイ 1人の記録'
-  if (pathname === '/record/daycare/bulk') return 'デイ 活動をまとめて'
+  if (pathname === '/record/daycare/bulk') return 'デイ 活動一括'
   if (pathname === '/record/daycare/training') return 'デイ 機能訓練'
   if (pathname === '/bath/month') return '入浴 月次表'
   if (pathname === '/record/med') return '与薬チェック'

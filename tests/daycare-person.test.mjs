@@ -136,18 +136,21 @@ if (DP === null) {
       assert.equal(DP.haibenAppHref(null), '../haiben-record/haiben-record.html')
       assert.equal(DP.haibenAppHref('x'.repeat(33)), '../haiben-record/haiben-record.html')
     })
-    it('前の方／次の方は在席・帰宅の方だけを一覧の並びで回る（欠席・未到着は飛ばす）', () => {
+    it('前の方／次の方は一括の画面と同じ方（予定の方のうち休み・入院中を除く全員＋予定外で来た方）を一覧の並びで回る（2026-10-24 §9.4: 到着をこの画面で押すので、到着の前の方も回る）', () => {
       const rows = [
-        { residentId: 1, state: 'present' },
-        { residentId: 2, state: 'absent' },
-        { residentId: 3, state: 'planned' },
-        { residentId: 4, state: 'left' },
-        { residentId: 5, state: 'present' },
+        { residentId: 1, state: 'present', planned: true, hospitalized: false },
+        { residentId: 2, state: 'absent', planned: true, hospitalized: false },
+        { residentId: 3, state: 'planned', planned: true, hospitalized: false },
+        { residentId: 6, state: 'planned', planned: true, hospitalized: true },
+        { residentId: 4, state: 'left', planned: false, hospitalized: false },
+        { residentId: 5, state: 'present', planned: true, hospitalized: false },
       ]
-      assert.deepEqual(DP.personNav(rows, 1), { prev: null, next: 4 })
-      assert.deepEqual(DP.personNav(rows, 4), { prev: 1, next: 5 })
+      assert.deepEqual(DP.personNav(rows, 1), { prev: null, next: 3 })
+      assert.deepEqual(DP.personNav(rows, 3), { prev: 1, next: 4 })
+      assert.deepEqual(DP.personNav(rows, 4), { prev: 3, next: 5 })
       assert.deepEqual(DP.personNav(rows, 5), { prev: 4, next: null })
-      assert.deepEqual(DP.personNav(rows, 3), { prev: 5, next: 1 }, '在席でない方を開いている時は端へ')
+      assert.deepEqual(DP.personNav(rows, 2), { prev: 5, next: 1 }, '休みの方を開いている時は端へ')
+      assert.deepEqual(DP.personNav(rows, 6), { prev: 5, next: 1 }, '入院中の方を開いている時は端へ')
       assert.deepEqual(DP.personNav([], 3), { prev: null, next: null })
     })
     it('業務日の URL: 今日は付けない・過去の日は ?day=・壊れた値と未来の日は今日', () => {
@@ -242,7 +245,8 @@ if (DP === null) {
   describe('静的検査（段階2a の規律）', () => {
     const page = code('../src/pages/DaycarePersonPage.tsx')
     it('書き込みは既存の saveMealEdits・insertFluid・softDeleteFluid・discardPendingRow だけ（新しい書き込みの経路を作らない）', () => {
-      const writes = page.match(/\b(save\w+|insert\w+|update\w+|delete\w+|softDelete\w+|upsert\w+|discard\w+)\(/g) ?? []
+      // updateDaycareDayMemo は画面のメモリの控えを直すだけ（DB へは書かない＝2026-10-25 親の確かめ 中2）なので数えない
+      const writes = (page.replace(/\bupdateDaycareDayMemo\(/g, '').match(/\b(save\w+|insert\w+|update\w+|delete\w+|softDelete\w+|upsert\w+|discard\w+)\(/g)) ?? []
       const names = [...new Set(writes.map((w) => w.slice(0, -1)))].sort()
       assert.deepEqual(names, ['discardPendingRow', 'insertFluid', 'saveMeal', 'saveMealEdits', 'softDeleteFluid'])
       assert.doesNotMatch(page, /supabase|\.from\(|\.rpc\(/)

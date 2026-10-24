@@ -205,14 +205,23 @@ if (A === null) {
       assert.equal(A.previousActivities(rows, '2026-10-19'), null)
       assert.deepEqual(A.copyItems(p.items, [{ label: '体操' }]), [{ label: '歌', participation: 'observed' }])
     })
-    it('まとめて記録の相手は、その日に来た方（在席・帰宅）だけ。欠席・未到着・予定は入れない', () => {
+    it('活動一括の相手は一括の画面と同じ（予定の方のうち休み・入院中を除く全員＋予定外で来た方・2026-10-24 §9.4 の4）', () => {
       const rows = [
-        { residentId: 1, state: 'present' },
-        { residentId: 2, state: 'absent' },
-        { residentId: 3, state: 'left' },
-        { residentId: 4, state: 'planned' },
+        { residentId: 1, state: 'present', planned: true, hospitalized: false },
+        { residentId: 2, state: 'absent', planned: true, hospitalized: false },
+        { residentId: 3, state: 'left', planned: false, hospitalized: false },
+        { residentId: 4, state: 'planned', planned: true, hospitalized: false },
+        { residentId: 5, state: 'planned', planned: true, hospitalized: true },
+        { residentId: 6, state: 'planned', planned: false, hospitalized: false },
       ]
-      assert.deepEqual(A.activityTargets(rows), [1, 3])
+      assert.deepEqual(A.activityTargets(rows), [1, 3, 4])
+      // 親の検収 中2: 最初からチェックを付けるのは来た方（在席・帰宅）だけ。まだ来ていない方は一覧に出すがチェックを外す
+      assert.deepEqual(rows.map((r) => A.activityDefaultChecked(r)), [true, false, true, false, false, false])
+      assert.equal(A.activityDefaultChecked(undefined), false)
+      const b = read('../src/pages/DaycareActivityBulkPage.tsx')
+      assert.match(b, /const isChecked = \(rid: number\) => picked\.get\(rid\) \?\? activityDefaultChecked\(rowOf\(rid\)\)/)
+      assert.match(b, /const sendTo = chosenOk \? targets\.filter\(\(rid\) => isChecked\(rid\) && !has\(rid, chosen\)\) : \[\]/)
+      assert.match(b, /!activityDefaultChecked\(rowOf\(rid\)\) \? <span className="text-sm text-ink2">（未到着）<\/span>/)
     })
     it('まとめて記録の結果の文は人数で出す（合流・送信待ち・先に違う度合い・失敗を分ける）', () => {
       assert.equal(A.bulkResultText('体操', ['saved', 'saved', 'merged']), '「体操」: 2人に入れました。1人は同じ記録が先にありました。')
@@ -441,7 +450,7 @@ if (A === null) {
       assert.match(p, /<DaycareActivitySection\s+residentId=\{residentId\}\s+residentName=\{name\}\s+day=\{data\.day\}\s+today=\{today\}\s+actorId=\{actorId\}\s+show=\{show\}\s+refreshKey=\{reloadKey\}\s+markSlot=\{\(a\) => marks\.button\(\{ kind: 'activity', id: a\.id \}, activityMarkText\(activityText\(a\)\)\)\}\s+\/>/)
       assert.doesNotMatch(p, /DaycareActivity\(|insertDaycareActivity/)
     })
-    it('まとめて記録の画面: 書き込みは insertDaycareActivity だけ・相手は activityTargets（在席・帰宅）・端末に業務データを残さない', () => {
+    it('活動一括の画面: 書き込みは insertDaycareActivity だけ・相手は activityTargets（一括の画面と同じ方）・端末に業務データを残さない', () => {
       const b = code('../src/pages/DaycareActivityBulkPage.tsx')
       const writes = b.match(/\b(save\w+|insert\w+|update\w+|delete\w+|softDelete\w+|upsert\w+|discard\w+)\(/g) ?? []
       assert.deepEqual([...new Set(writes.map((w) => w.slice(0, -1)))].sort(), ['insertDaycareActivity'])
@@ -449,7 +458,7 @@ if (A === null) {
       assert.match(b, /getKindInputGate\('daycare_activity'\)/)
       assert.doesNotMatch(b, /supabase|\.from\(|\.rpc\(|localStorage/)
     })
-    it('デイの一覧: 活動を読めない時は印を出さない（「記録なし」に見せない）・切り替えに〔活動をまとめて〕・ルート', () => {
+    it('デイの一覧: 活動を読めない時は印を出さない（「記録なし」に見せない）・切り替えに〔活動一括〕・ルート', () => {
       const d = code('../src/pages/DaycarePage.tsx')
       assert.match(d, /const activities = await fetchDaycareActivities\(target\)\.catch\(\(\) => null\)/)
       // 今日の画面の改善 1回目（代表者の回答 A3・2026-10-23）で、活動・水分の札は一覧から外し、1人の記録の画面で見る（固定し直し）。
@@ -458,10 +467,15 @@ if (A === null) {
       const person = code('../src/pages/DaycarePersonPage.tsx')
       assert.match(person, /import \{ activityText \} from '\.\.\/lib\/daycareActivity'/)
       assert.match(person, /fluidTotalOf\(/)
-      assert.match(d, /\{ key: 'activity', to: '\/record\/daycare\/bulk', label: '活動をまとめて' \}/)
+      // 2026-10-24（§9.4）: 「活動をまとめて」→「活動一括」。ルートと key は変えない（固定し直し）
+      assert.match(d, /\{ key: 'activity', to: '\/record\/daycare\/bulk', label: '活動一括' \}/)
       const app = code('../src/App.tsx')
       assert.match(app, /<Route path="\/record\/daycare\/bulk" element=\{<DaycareActivityBulkPage actorId=\{actorId\} staff=\{staff\} \/>\} \/>/)
-      assert.match(app, /if \(pathname === '\/record\/daycare\/bulk'\) return 'デイ 活動をまとめて'/)
+      assert.match(app, /if \(pathname === '\/record\/daycare\/bulk'\) return 'デイ 活動一括'/)
+      const b = code('../src/pages/DaycareActivityBulkPage.tsx')
+      assert.match(b, /<h2 id="h-bulk" className="text-xl font-bold text-ink">\s*活動一括\s*<\/h2>/)
+      for (const f of ['../src/App.tsx', '../src/pages/DaycarePage.tsx', '../src/pages/DaycareActivityBulkPage.tsx'])
+        assert.equal(code(f).includes('活動をまとめて'), false, f)
     })
     it('純ロジックは端末に何も残さない（localStorage を使わない）', () => {
       assert.doesNotMatch(code('../src/lib/daycareActivity.ts'), /localStorage|supabase/)
