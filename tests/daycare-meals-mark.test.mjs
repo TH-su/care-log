@@ -164,7 +164,8 @@ if (DC === null) {
       }
       // どれも <span>（押せない札・横棒）。<button> には付いていない
       for (const h of hits) assert.match(h, /<span |\$\{base\} rounded-full/, h)
-      // 押せない札7か所＋食事一括の「デイ」の札（今回・押せない札）＝8
+      // 押せない札7か所（食事一括の「デイ」の札＝今回を含む）＋カルテの水分の横棒1か所＝8
+      // （食事の表の水分の横棒 .cl-fluid-bar は sheet.css の border-radius: 9999px で、ここには数えない）
       assert.equal(hits.length, 8, hits.join('\n'))
     })
     it('ボタンは rounded（6px）: 申し送りの分類・申し送りの入力・カルテの欄へ移動・押せるチップ', () => {
