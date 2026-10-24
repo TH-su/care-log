@@ -7,7 +7,8 @@
 // 規律:
 // - 端末の保存（localStorage・sessionStorage・IndexedDB）には置かない（氏名・記録を端末に残さない）。画面を閉じる・再読み込みで消える
 // - 使うのは「通信の失敗」の時だけ（サーバーの拒否・権限・設定待ちの時は使わない＝今のエラーのまま）。違う日の控えは使わない
-// - 業務の値の正本はサーバー。控えは「読んだ時点の内容」と帯で知らせて出すだけで、控えから書き込みを組み立てない
+// - 業務の値の正本はサーバー。控えは「読んだ時点の内容」と帯で知らせて出す。控えで開いた画面から書く時は控えの rev で組むが、
+//   書き込みは rev 照合なので、サーバーの rev と違えば食い違いで止まる（上書きしない）。送信待ちも送る時に同じ照合を受ける
 
 import type { DaycareMealRow } from './db'
 import type { KeyedVital } from './daycare'
@@ -28,16 +29,27 @@ export interface DaycareDayMemo {
   intakeOk: boolean
   /** 名簿（退居された方も含む・氏名を引くため）。読めていない時は空 */
   residents: Resident[]
-  /** 控えた時刻（Date.now()） */
+  /** サーバーから読めた時刻（Date.now()。帯の「読んだ時点」に出す＝控えに入れた時刻ではない） */
   savedAt: number
 }
 
 let memo: DaycareDayMemo | null = null
 
-/** その日の一覧を控える（前の控えは捨てる＝1日分だけ）。名簿が空の時は前の控えの名簿を残す */
+/**
+ * その日の一覧を控える（前の控えは捨てる＝1日分だけ）。名簿が空の時は前の控えの名簿を残す。
+ * 食事・水分を読めなかった一覧（intakeOk=false）の時は、同じ日の前の控えの食事・水分（読めた値）を残す（親の反証 軽3・2026-10-25）
+ */
 export function rememberDaycareDay(m: DaycareDayMemo): void {
-  const residents = m.residents.length === 0 && memo !== null ? memo.residents : m.residents
-  memo = { ...m, residents }
+  memo = mergeDaycareMemo(memo, m)
+}
+
+/** rememberDaycareDay の中身（純関数）: 前の控え prev に新しい一覧 next を重ねる */
+export function mergeDaycareMemo(prev: DaycareDayMemo | null, next: DaycareDayMemo): DaycareDayMemo {
+  const residents = next.residents.length === 0 && prev !== null ? prev.residents : next.residents
+  const keepIntake = !next.intakeOk && prev !== null && prev.day === next.day && prev.intakeOk
+  return keepIntake
+    ? { ...next, residents, meals: prev.meals, fluids: prev.fluids, intakeOk: true }
+    : { ...next, residents }
 }
 
 /** いまの控え（無ければ null） */
@@ -69,6 +81,24 @@ export function memoWithoutAttendance(m: DaycareDayMemo, r: DaycareAttendance): 
 export function memoWithBath(m: DaycareDayMemo, r: BathRecord): DaycareDayMemo {
   if (m.day !== r.bath_on) return m
   return { ...m, baths: [...m.baths.filter((b) => b.resident_id !== r.resident_id), r] }
+}
+
+/** 控えに書けた水分の行を足す（画面の insertFluid の後と同じ）。違う日・同じ行が既にある時は元のまま */
+export function memoWithFluid(m: DaycareDayMemo, f: FluidIntake): DaycareDayMemo {
+  if (m.day !== f.taken_on || m.fluids.some((x) => x.id === f.id)) return m
+  return { ...m, fluids: [...m.fluids, f] }
+}
+
+/** 控えから取り消した水分の行を外す（画面の softDeleteFluid の後と同じ）。違う日は元のまま */
+export function memoWithoutFluid(m: DaycareDayMemo, f: Pick<FluidIntake, 'id' | 'taken_on'>): DaycareDayMemo {
+  if (m.day !== f.taken_on) return m
+  return { ...m, fluids: m.fluids.filter((x) => x.id !== f.id) }
+}
+
+/** 控えの昼食・おやつの行を、書けた行で置き換える（画面の saveMealEdits の後と同じ。取り込み・画面の入力の印は渡された値）。違う日は元のまま */
+export function memoWithMeal(m: DaycareDayMemo, row: DaycareMealRow): DaycareDayMemo {
+  if (m.day !== row.meal.meal_on) return m
+  return { ...m, meals: [...m.meals.filter((x) => x.meal.id !== row.meal.id), row] }
 }
 
 /** 控えを消す（ログアウト・ログインのし直し＝cachedReads の resetDataCache。次にログインした人へ前の人の控えを見せない） */

@@ -112,8 +112,10 @@ interface DayData {
   activities: DaycareActivity[] | null
   /** 昼食・おやつ・水分を読めたか（読めない時の空の一覧を控えに「読めた」として入れない＝確認の反証 中1） */
   intakeOk: boolean
-  /** 電波が無く、控え（daycareDayMemo）で開いた時の控えの時刻。サーバーから読めた時は null（親の確かめ 中1・2026-10-25） */
+  /** サーバーに届かず、控え（daycareDayMemo）で開いた時の控えの「読んだ時点」。サーバーから読めた時は null（親の確かめ 中1・2026-10-25） */
   memoAt: number | null
+  /** この一覧をサーバーから読めた時刻（控えに入れる「読んだ時点」＝親の反証 軽4） */
+  readAt: number
 }
 
 /** カードの〔取消〕（押せる範囲 44px・角は 6px） */
@@ -362,6 +364,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         activities,
         intakeOk: intake !== null,
         memoAt: null,
+        readAt: Date.now(),
       }
       setData(next)
       setError(null)
@@ -386,6 +389,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
           activities: null,
           intakeOk: m.intakeOk,
           memoAt: m.savedAt,
+          readAt: m.savedAt,
         })
         // 名簿が読めていない（電波が無い）時は控えの名簿で氏名を出す（控えは画面のメモリだけ）
         if (m.residents.length > 0) setResidents((prev) => (prev.length > 0 ? prev : m.residents))
@@ -455,9 +459,10 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       vitals: data.vitals,
       meals: data.meals,
       fluids: data.fluids,
+      // 食事・水分を読めなかった一覧の時は、控えの食事・水分を前の値のまま残す（rememberDaycareDay の中＝親の反証 軽3）
       intakeOk: data.intakeOk,
       residents,
-      savedAt: Date.now(),
+      savedAt: data.readAt,
     })
   }, [data, residents])
   // 控えで開いている間は、30秒ごとに静かに読み直す（1人の画面と同じ。読めた時にサーバーの内容に戻して帯を消す）
@@ -617,7 +622,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         // 電波が無く、控えで開いた（1人の画面と同じ帯＝親の確かめ 中1）。押した記録は送信待ちに積み、電波が戻ると送って読み直す
         <p role="status" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">
           <span aria-hidden="true">▲ </span>
-          電波が無いため、今日の一覧で読んだ時点（{new Date(data.memoAt).toTimeString().slice(0, 5)}）の内容です。押した記録は送信待ちに積みます（電波が戻ると自動で送信します）。
+          サーバーに届かないため、今日の一覧で読んだ時点（{new Date(data.memoAt).toTimeString().slice(0, 5)}）の内容です。押した記録は送信待ちに積みます（つながると自動で送信します）。
         </p>
       ) : null}
     </div>
