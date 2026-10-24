@@ -58,7 +58,7 @@ import type { DaycareActivity } from '../lib/daycareActivity'
 import { RecorderBar } from '../components/RecorderBar'
 import { ErrorBlock, LoadingBlock, ResidentPickerModal, useToast } from '../components/ui'
 import { hasTimes, hmShort, useDaycareAttendanceOps } from '../components/DaycareAttendanceOps'
-import { rememberDaycareDay } from '../lib/daycareDayMemo'
+import { daycareDayMemo, memoForDay, memoWithAttendance, memoWithBath, memoWithoutAttendance, rememberDaycareDay, updateDaycareDayMemo } from '../lib/daycareDayMemo'
 import {
   bathCountsUnchecked,
   buildDaycareBoard,
@@ -112,6 +112,8 @@ interface DayData {
   activities: DaycareActivity[] | null
   /** 昼食・おやつ・水分を読めたか（読めない時の空の一覧を控えに「読めた」として入れない＝確認の反証 中1） */
   intakeOk: boolean
+  /** 電波が無く、控え（daycareDayMemo）で開いた時の控えの時刻。サーバーから読めた時は null（親の確かめ 中1・2026-10-25） */
+  memoAt: number | null
 }
 
 /** カードの〔取消〕（押せる範囲 44px・角は 6px） */
@@ -359,11 +361,37 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         fluids: intake?.fluids ?? [],
         activities,
         intakeOk: intake !== null,
+        memoAt: null,
       }
       setData(next)
       setError(null)
-    } catch {
+    } catch (e) {
       if (gen !== genRef.current) return
+      // 電波が無い（通信の失敗）: 同じ日の控えがあれば、それで開く（1人の画面から戻った時も開ける・カードの〔休み〕は送信待ちに積める
+      // ＝親の確かめ 中1）。静かな読み直しの失敗では、いま出している内容を残す
+      const m = memoForDay(daycareDayMemo(), target, e)
+      if (m !== null && target === dayRef.current && !quiet) {
+        setData({
+          day: m.day,
+          planRows: m.planRows,
+          planSource: m.planSource,
+          snapshot: m.snapshot,
+          missing: m.missing,
+          attendance: m.attendance,
+          baths: m.baths,
+          vitals: m.vitals,
+          meals: m.meals,
+          fluids: m.fluids,
+          // 活動は控えに無い（読めない＝印を出さない）
+          activities: null,
+          intakeOk: m.intakeOk,
+          memoAt: m.savedAt,
+        })
+        // 名簿が読めていない（電波が無い）時は控えの名簿で氏名を出す（控えは画面のメモリだけ）
+        if (m.residents.length > 0) setResidents((prev) => (prev.length > 0 ? prev : m.residents))
+        setError(null)
+        return
+      }
       if (!quiet) setError(ERR_LOAD)
     } finally {
       if (gen === genRef.current) setLoading(false)
@@ -414,7 +442,8 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   // ── その日の一覧の控え（画面のメモリだけ・端末には残さない＝daycareDayMemo）。電波の無い所でカードを押した時、1人の画面は
   // 通信の失敗の時だけこの控えで開く（到着・休み・入浴は送信待ちに積める＝親の検収 中1・2026-10-24） ──
   useEffect(() => {
-    if (data === null || data.missing) return
+    // 控えで開いた時は控えを書き直さない（書けた記録は put…で控えにも映す）
+    if (data === null || data.missing || data.memoAt !== null) return
     rememberDaycareDay({
       day: data.day,
       planRows: data.planRows,
@@ -431,6 +460,13 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       savedAt: Date.now(),
     })
   }, [data, residents])
+  // 控えで開いている間は、30秒ごとに静かに読み直す（1人の画面と同じ。読めた時にサーバーの内容に戻して帯を消す）
+  const onMemo = data !== null && data.memoAt !== null
+  useEffect(() => {
+    if (!onMemo) return
+    const t = window.setInterval(() => scheduleReload(), 30_000)
+    return () => window.clearInterval(t)
+  }, [onMemo, scheduleReload])
   // 1人の画面の部品は App の先読み（PAGE_PRELOADS）が読んでおく（電波の無い所でカードを押しても画面を開ける。先読みの失敗を
   // 「部品の取得失敗」と見分けない守りと、新しい版の確かめは App の仕組みに任せる＝確認の反証 軽1）
 
@@ -493,16 +529,23 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     closedDates,
     nameOf,
     bathOf,
-    putAttendance: (r) =>
+    // 画面の data を直す時に、控えも同じ形で直す（控えで開いている間に書けた記録を、前の方・次の方や戻った先でも出す＝親の確かめ 中2）
+    putAttendance: (r) => {
+      updateDaycareDayMemo((m) => memoWithAttendance(m, r))
       setData((prev) => {
         if (prev === null || prev.day !== r.day) return prev
         const others = prev.attendance.filter((a) => a.id !== r.id && a.resident_id !== r.resident_id)
         return { ...prev, attendance: [...others, r] }
-      }),
-    dropAttendance: (saved) =>
-      setData((prev) => (prev === null || prev.day !== saved.day ? prev : { ...prev, attendance: prev.attendance.filter((a) => a.id !== saved.id) })),
-    putBath: (r) =>
-      setData((prev) => (prev === null || prev.day !== r.bath_on ? prev : { ...prev, baths: [...prev.baths.filter((b) => b.resident_id !== r.resident_id), r] })),
+      })
+    },
+    dropAttendance: (saved) => {
+      updateDaycareDayMemo((m) => memoWithoutAttendance(m, saved))
+      setData((prev) => (prev === null || prev.day !== saved.day ? prev : { ...prev, attendance: prev.attendance.filter((a) => a.id !== saved.id) }))
+    },
+    putBath: (r) => {
+      updateDaycareDayMemo((m) => memoWithBath(m, r))
+      setData((prev) => (prev === null || prev.day !== r.bath_on ? prev : { ...prev, baths: [...prev.baths.filter((b) => b.resident_id !== r.resident_id), r] }))
+    },
     scheduleReload,
     ensureOpened,
     show,
@@ -568,6 +611,13 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         <p role="status" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">
           <span aria-hidden="true">▲ </span>
           {gate.forbidden ? FORBIDDEN_REASON : gate.outdated ? OUTDATED_REASON : gate.observed ? `${kindBlockedMessage('daycare')}。記録の閲覧はできます。` : MSG_GATE_UNKNOWN}
+        </p>
+      ) : null}
+      {data !== null && data.day === day && data.memoAt !== null ? (
+        // 電波が無く、控えで開いた（1人の画面と同じ帯＝親の確かめ 中1）。押した記録は送信待ちに積み、電波が戻ると送って読み直す
+        <p role="status" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">
+          <span aria-hidden="true">▲ </span>
+          電波が無いため、今日の一覧で読んだ時点（{new Date(data.memoAt).toTimeString().slice(0, 5)}）の内容です。押した記録は送信待ちに積みます（電波が戻ると自動で送信します）。
         </p>
       ) : null}
     </div>

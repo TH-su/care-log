@@ -56,7 +56,7 @@ import { RecorderBar } from '../components/RecorderBar'
 import { DaycareActivitySection } from '../components/DaycareActivitySection'
 import { DaycareTrainingCard } from '../components/DaycareTrainingCard'
 import { hasTimes, hmShort, useDaycareAttendanceOps } from '../components/DaycareAttendanceOps'
-import { daycareDayMemo, memoForDay, rememberDaycareDay } from '../lib/daycareDayMemo'
+import { daycareDayMemo, memoForDay, memoWithAttendance, memoWithBath, memoWithoutAttendance, rememberDaycareDay, updateDaycareDayMemo } from '../lib/daycareDayMemo'
 import { useDaycareNoteMarks } from '../components/DaycareNoteMark'
 import { activityText } from '../lib/daycareActivity'
 import { activityMarkText, excretionMarkText, fluidMarkText, mealMarkText, vitalMarkText } from '../lib/daycareNoteMark'
@@ -509,16 +509,23 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
     closedDates,
     nameOf,
     bathOf: (id) => (data === null ? null : (data.baths.find((b) => b.resident_id === id) ?? null)),
-    putAttendance: (r) =>
+    // 画面の data を直す時に、控えも同じ形で直す（控えで開いている間に書けた記録を、前の方・次の方や今日の画面でも出す＝親の確かめ 中2）
+    putAttendance: (r) => {
+      updateDaycareDayMemo((m) => memoWithAttendance(m, r))
       setData((prev) => {
         if (prev === null || prev.day !== r.day) return prev
         const others = prev.attendance.filter((a) => a.id !== r.id && a.resident_id !== r.resident_id)
         return { ...prev, attendance: [...others, r] }
-      }),
-    dropAttendance: (saved) =>
-      setData((prev) => (prev === null || prev.day !== saved.day ? prev : { ...prev, attendance: prev.attendance.filter((a) => a.id !== saved.id) })),
-    putBath: (r) =>
-      setData((prev) => (prev === null || prev.day !== r.bath_on ? prev : { ...prev, baths: [...prev.baths.filter((b) => b.resident_id !== r.resident_id), r] })),
+      })
+    },
+    dropAttendance: (saved) => {
+      updateDaycareDayMemo((m) => memoWithoutAttendance(m, saved))
+      setData((prev) => (prev === null || prev.day !== saved.day ? prev : { ...prev, attendance: prev.attendance.filter((a) => a.id !== saved.id) }))
+    },
+    putBath: (r) => {
+      updateDaycareDayMemo((m) => memoWithBath(m, r))
+      setData((prev) => (prev === null || prev.day !== r.bath_on ? prev : { ...prev, baths: [...prev.baths.filter((b) => b.resident_id !== r.resident_id), r] }))
+    },
     scheduleReload,
     ensureOpened,
     show,

@@ -245,7 +245,8 @@ if (DP === null) {
   describe('静的検査（段階2a の規律）', () => {
     const page = code('../src/pages/DaycarePersonPage.tsx')
     it('書き込みは既存の saveMealEdits・insertFluid・softDeleteFluid・discardPendingRow だけ（新しい書き込みの経路を作らない）', () => {
-      const writes = page.match(/\b(save\w+|insert\w+|update\w+|delete\w+|softDelete\w+|upsert\w+|discard\w+)\(/g) ?? []
+      // updateDaycareDayMemo は画面のメモリの控えを直すだけ（DB へは書かない＝2026-10-25 親の確かめ 中2）なので数えない
+      const writes = (page.replace(/\bupdateDaycareDayMemo\(/g, '').match(/\b(save\w+|insert\w+|update\w+|delete\w+|softDelete\w+|upsert\w+|discard\w+)\(/g)) ?? []
       const names = [...new Set(writes.map((w) => w.slice(0, -1)))].sort()
       assert.deepEqual(names, ['discardPendingRow', 'insertFluid', 'saveMeal', 'saveMealEdits', 'softDeleteFluid'])
       assert.doesNotMatch(page, /supabase|\.from\(|\.rpc\(/)

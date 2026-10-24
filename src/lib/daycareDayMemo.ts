@@ -45,6 +45,32 @@ export function daycareDayMemo(): DaycareDayMemo | null {
   return memo
 }
 
+/**
+ * 書けた記録を控えにも映す（今日の画面・1人の画面が画面の data を直す時に同じ形で直す＝親の確かめ 中2・2026-10-25）。
+ * 控えの日と違う日の記録は触らない。控えから書き込みを組み立てない（画面に出す値を合わせるだけ）
+ */
+export function updateDaycareDayMemo(fn: (m: DaycareDayMemo) => DaycareDayMemo): void {
+  if (memo !== null) memo = fn(memo)
+}
+
+/** 控えの出欠の行を、書けた行で置き換える（同じ行・同じ方の行を外して足す＝画面の putAttendance と同じ）。違う日は元のまま */
+export function memoWithAttendance(m: DaycareDayMemo, r: DaycareAttendance): DaycareDayMemo {
+  if (m.day !== r.day) return m
+  return { ...m, attendance: [...m.attendance.filter((a) => a.id !== r.id && a.resident_id !== r.resident_id), r] }
+}
+
+/** 控えから取り消した出欠の行を外す（画面の dropAttendance と同じ）。違う日は元のまま */
+export function memoWithoutAttendance(m: DaycareDayMemo, r: DaycareAttendance): DaycareDayMemo {
+  if (m.day !== r.day) return m
+  return { ...m, attendance: m.attendance.filter((a) => a.id !== r.id) }
+}
+
+/** 控えの入浴の行を、書けた行で置き換える（同じ方の行を外して足す＝画面の putBath と同じ）。違う日は元のまま */
+export function memoWithBath(m: DaycareDayMemo, r: BathRecord): DaycareDayMemo {
+  if (m.day !== r.bath_on) return m
+  return { ...m, baths: [...m.baths.filter((b) => b.resident_id !== r.resident_id), r] }
+}
+
 /** 控えを消す（ログアウト・ログインのし直し＝cachedReads の resetDataCache。次にログインした人へ前の人の控えを見せない） */
 export function clearDaycareDayMemo(): void {
   memo = null

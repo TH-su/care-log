@@ -59,6 +59,38 @@ describe('純ロジック', () => {
   })
 })
 
+describe('書けた記録を控えにも映す（親の確かめ 中2・2026-10-25）', () => {
+  const att = (id, rid, day, extra = {}) => ({ id, resident_id: rid, day, arrived_at: null, left_at: null, absent: false, absent_reason: null, note: null, recorded_by: null, rev: 1, ...extra })
+  it('A さんの到着 → 別の方を開く → A さんへ戻る: 控えに到着が残る（同じ方の古い行は置き換え・別の方の行は触らない）', () => {
+    M.clearDaycareDayMemo()
+    M.rememberDaycareDay(memoOf('2026-10-22', { attendance: [att(1, 3, '2026-10-22'), att(2, 4, '2026-10-22')] }))
+    // A（3）の到着が書けた（行の id が同じ・rev が上がった）
+    M.updateDaycareDayMemo((m) => M.memoWithAttendance(m, att(1, 3, '2026-10-22', { arrived_at: '09:30', rev: 2 })))
+    // 別の方（4）の画面を控えで開いても、A の行はそのまま
+    const now = M.daycareDayMemo()
+    assert.deepEqual(now.attendance.map((a) => [a.resident_id, a.arrived_at, a.rev]).sort(), [[3, '09:30', 2], [4, null, 1]])
+    // 行が無かった方の初めての行（id が新しい）も足す
+    M.updateDaycareDayMemo((m) => M.memoWithAttendance(m, att(9, 5, '2026-10-22', { absent: true, absent_reason: 'later' })))
+    assert.equal(M.daycareDayMemo().attendance.filter((a) => a.resident_id === 5).length, 1)
+    // 取り消した行は外す
+    M.updateDaycareDayMemo((m) => M.memoWithoutAttendance(m, att(9, 5, '2026-10-22')))
+    assert.equal(M.daycareDayMemo().attendance.some((a) => a.resident_id === 5), false)
+    M.clearDaycareDayMemo()
+  })
+  it('控えの日と違う日の記録は触らない・控えが無ければ何もしない', () => {
+    const m = memoOf('2026-10-22')
+    assert.equal(M.memoWithAttendance(m, att(7, 3, '2026-10-23', { arrived_at: '09:30' })), m)
+    assert.equal(M.memoWithoutAttendance(m, att(1, 3, '2026-10-23')), m)
+    const bath = { id: 5, resident_id: 3, bath_on: '2026-10-23', result: 'full', cancel_reason: null, auto: false, note: null, recorded_by: null, rev: 1 }
+    assert.equal(M.memoWithBath(m, bath), m)
+    const bath22 = { ...bath, bath_on: '2026-10-22' }
+    assert.deepEqual(M.memoWithBath(m, bath22).baths, [bath22])
+    M.clearDaycareDayMemo()
+    M.updateDaycareDayMemo((x) => M.memoWithAttendance(x, att(1, 3, '2026-10-22')))
+    assert.equal(M.daycareDayMemo(), null)
+  })
+})
+
 describe('静的検査', () => {
   const memo = code('../src/lib/daycareDayMemo.ts')
   const today = code('../src/pages/DaycarePage.tsx')
@@ -96,6 +128,26 @@ describe('静的検査', () => {
     assert.match(person, /const m = daycareDayMemo\(\)\s*if \(alive && m !== null && m\.residents\.length > 0\) setResidents/)
     // 1人の値はその方の residentId で選ぶ（控えは1日分の一覧。別の方の値を使わない）
     assert.match(person, /const row = board\?\.rows\.find\(\(r\) => r\.residentId === residentId\)/)
+  })
+  it('今日の画面も、読み込みの失敗の時だけ同じ日の控えで開き、同じ帯を出す・控えで開いた時は控えを書き直さない（親の確かめ 中1）', () => {
+    assert.match(today, /const m = memoForDay\(daycareDayMemo\(\), target, e\)\s*if \(m !== null && target === dayRef\.current && !quiet\) \{/)
+    assert.match(today, /activities: null,\s*intakeOk: m\.intakeOk,\s*memoAt: m\.savedAt,/)
+    assert.match(today, /電波が無いため、今日の一覧で読んだ時点（/)
+    assert.match(today, /if \(data === null \|\| data\.missing \|\| data\.memoAt !== null\) return\s*rememberDaycareDay\(/)
+    assert.match(today, /if \(!onMemo\) return\s*const t = window\.setInterval\(\(\) => scheduleReload\(\), 30_000\)/)
+  })
+  it('今日の画面と1人の画面は、書けた記録を画面の data と控えの両方に映す（putAttendance・dropAttendance・putBath・親の確かめ 中2）', () => {
+    for (const x of [today, person]) {
+      assert.match(x, /putAttendance: \(r\) => \{\s*updateDaycareDayMemo\(\(m\) => memoWithAttendance\(m, r\)\)/)
+      assert.match(x, /dropAttendance: \(saved\) => \{\s*updateDaycareDayMemo\(\(m\) => memoWithoutAttendance\(m, saved\)\)/)
+      assert.match(x, /putBath: \(r\) => \{\s*updateDaycareDayMemo\(\(m\) => memoWithBath\(m, r\)\)/)
+    }
+  })
+  it('送信待ちの到着がある方は、控えで戻っても〔到着〕を押せない（同じ方・同じ日の追加の送信待ちを見る＝2件目を積まない）', () => {
+    const db = code('../src/lib/db.ts')
+    assert.match(db, /if \(q\.kind === 'insert'\) \{\s*if \(idNum\(q\.payload\.resident_id\) === residentId && dateStr\(q\.payload\.day\) === day\) return true/)
+    assert.match(person, /const attPending = row !== undefined && hasPendingDaycareAttendance\(residentId, day, att\?\.id \?\? null\)/)
+    assert.match(person, /const opsDisabled = !canWrite \|\| ops\.busy\.has\(residentId\) \|\| attPending/)
   })
   it('1人の画面の部品は App の先読み（PAGE_PRELOADS）で読んでおく（先読みの失敗を部品の取得失敗と見分けない守りに乗る＝確認の反証 軽1）', () => {
     const app = code('../src/App.tsx')
