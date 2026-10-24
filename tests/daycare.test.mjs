@@ -304,6 +304,10 @@ if (DC === null) {
         { residentId: 9, state: 'absent', planned: false, hospitalized: false },
       ]
       assert.deepEqual(DC.daycareBulkRows(rows).map((r) => r.residentId), [1, 2, 3, 6, 7])
+      // 受け渡し（§9.7）のキーに使う source_id の配列（並びは一覧のまま・名簿に居ない方と空の source_id は除く・重複なし）
+      const residents = [{ id: 1, source_id: 'T001' }, { id: 2, source_id: ' T002 ' }, { id: 3, source_id: '' }, { id: 6, source_id: 'T006' }, { id: 4, source_id: 'T004' }, { id: 7, source_id: 'T006' }]
+      assert.deepEqual(DC.daycareBulkSourceIds(rows, residents), ['T001', 'T002', 'T006'])
+      assert.deepEqual(DC.daycareBulkSourceIds([], residents), [])
     })
     it('unknown と none は行を作らない（画面は帯で出し分ける）', () => {
       assert.equal(DC.buildDaycareBoard({ planRows: [], source: 'unknown', residents: roster, attendance: [] }).rows.length, 0)
@@ -1442,7 +1446,7 @@ if (DC === null) {
       assert.match(person, /\{ops\.dialogs\}/)
     })
     it('1人の画面: 到着（今日は1タップ・過去の日は事務所の小窓）・帰宅・時刻の直し・〔休み〕・理由・休みの取り消し・入浴の操作がある', () => {
-      assert.match(att, /onClick=\{\(\) => void ops\.onArrive\(row\)\} disabled=\{opsDisabled \|\| !timesOk\}/)
+      assert.match(att, /onClick=\{\(\) => void ops\.onArrive\(row\)\}\s*disabled=\{opsDisabled \|\| !timesOk\}/)
       assert.match(att, /onClick=\{\(\) => void ops\.onLeave\(row\)\} disabled=\{opsDisabled \|\| !timesOk\}/)
       assert.match(att, /onClick=\{\(\) => ops\.onRest\(row\)\} disabled=\{opsDisabled \|\| \(hasTimes\(row\) && !timesOk\)\}/)
       assert.match(att, /onClick=\{\(\) => ops\.askAbsent\(row\)\} disabled=\{opsDisabled\}[^>]*>\s*理由を選ぶ/)
@@ -1464,9 +1468,14 @@ if (DC === null) {
       assert.match(person, /const snap = await openDaycareDay\(day, actorId\)/)
       assert.match(person, /snapshot,\n\s*missing: missing \|\| plan\?\.missing === true,/)
     })
-    it('1人の画面: 予定も記録も無い在籍中の方は「予定外」として足す（〔予定にない方を追加〕から来た方に〔到着〕を出す）', () => {
+    it('1人の画面: 予定も記録も無い在籍中の方は「予定外」として足し、ボタンは〔予定外で到着〕と分ける（親の回答 A3）。入院の方には出さない', () => {
       assert.match(person, /const extraSelf = resident !== null && resident\.active/)
       assert.match(person, /extraIds: extraSelf \? \[residentId\] : \[\]/)
+      assert.match(person, /const extraNoRecord = row !== undefined && row\.extra && !row\.planned && att === null/)
+      assert.match(att, /\{extraNoRecord \? '予定外で到着' : '到着'\}/)
+      // 入院中: 週間計画の入院中（hospitalizedPlanned）と、その日の食事の記録の「入院」には出さない
+      assert.match(person, /const hospitalMeal = data\.meals\.some\(\(m\) => m\.meal\.resident_id === residentId && m\.meal\.status === 'hospital'\)/)
+      assert.match(att, /\) : hospitalizedPlanned \|\| \(extraNoRecord && hospitalMeal\) \? null : \(/)
     })
     it('案内の「どこで」は画面ごと（カード＝1人の画面へ・1人の画面＝この画面のボタン）。行の欄を指す古い案内は残さない', () => {
       assert.match(ops, /arriveHint: 'カードを押して、1人の画面の〔到着〕を押してください'/)
@@ -1534,7 +1543,7 @@ if (DC === null) {
       const person = code('../src/pages/DaycarePersonPage.tsx')
       const ops = code('../src/components/DaycareAttendanceOps.tsx')
       assert.match(person, /const timesOk = canChangeDaycareTimes\(day, today, role\)/)
-      assert.match(person, /onClick=\{\(\) => void ops\.onArrive\(row\)\} disabled=\{opsDisabled \|\| !timesOk\}/)
+      assert.match(person, /onClick=\{\(\) => void ops\.onArrive\(row\)\}\s*disabled=\{opsDisabled \|\| !timesOk\}/)
       assert.match(person, /onClick=\{\(\) => void ops\.onLeave\(row\)\} disabled=\{opsDisabled \|\| !timesOk\}/)
       assert.match(t, /data\.snapshot !== null && data\.snapshot\.plan_source !== 'unknown'/)
       assert.match(person, /data\.snapshot !== null && data\.snapshot\.plan_source !== 'unknown'/)

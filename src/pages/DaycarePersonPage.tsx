@@ -871,6 +871,13 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   const timesOk = canChangeDaycareTimes(day, today, role)
   const attended = row !== undefined && (row.state === 'present' || row.state === 'left')
   const hospitalizedPlanned = row !== undefined && row.hospitalized && row.state === 'planned'
+  /**
+   * 予定も記録も無い在籍中の方（今日の画面の〔予定にない方を追加〕から来た方）: ボタンの名前を〔予定外で到着〕と分ける
+   * （予定の無い方の画面を誤って開いても、ふつうの〔到着〕と見分けられる＝2026-10-24 親の回答 A3）。
+   * care-log の名簿には入院の印が無いので、入院中かはその日の昼食・おやつの記録の「入院」で見て、入院の方には出さない
+   */
+  const extraNoRecord = row !== undefined && row.extra && !row.planned && att === null
+  const hospitalMeal = data.meals.some((m) => m.meal.resident_id === residentId && m.meal.status === 'hospital')
   /** 休みの方に入浴の記録（自動・人の入浴）が残っている＝「欠席」に直す要る */
   const absentBathLeft = row !== undefined && row.state === 'absent' && (bst.kind === 'auto' || bst.kind === 'done')
   const opsMsg = ops.rowMsg.get(residentId)
@@ -939,6 +946,8 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           <>
             {row.state === 'absent' ? null : hospitalizedPlanned ? (
               <p className="text-base text-ink2">週間計画で入院中です。</p>
+            ) : extraNoRecord && hospitalMeal ? (
+              <p className="text-base text-ink2">この日のデイの予定はありません。食事の記録が「入院」のため、ここからは到着を記録しません。</p>
             ) : (
               <p className="text-base text-ink">
                 到着 <span className="font-num font-bold">{att?.arrived_at ? hmShort(att.arrived_at) : '—'}</span>
@@ -956,11 +965,17 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
                     休みを取り消す
                   </button>
                 </>
-              ) : hospitalizedPlanned ? null : (
+              ) : hospitalizedPlanned || (extraNoRecord && hospitalMeal) ? null : (
                 <>
                   {att?.arrived_at ? null : (
-                    <button type="button" onClick={() => void ops.onArrive(row)} disabled={opsDisabled || !timesOk} className={opPrimary}>
-                      到着
+                    <button
+                      type="button"
+                      onClick={() => void ops.onArrive(row)}
+                      disabled={opsDisabled || !timesOk}
+                      aria-label={extraNoRecord ? `${name}さんを予定外で到着にする（この日のデイの予定はありません）` : undefined}
+                      className={opPrimary}
+                    >
+                      {extraNoRecord ? '予定外で到着' : '到着'}
                     </button>
                   )}
                   {row.state === 'present' ? (
@@ -986,6 +1001,9 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
                 </>
               )}
             </div>
+            {extraNoRecord && !hospitalMeal ? (
+              <p className="text-sm text-ink2">この日のデイの予定はありません。来所した時だけ〔予定外で到着〕を押してください。</p>
+            ) : null}
             {!timesOk && day < today ? (
               <p className="text-sm text-ink2">過去の日の到着・帰宅の時刻は、事務所のログインで入力・修正します。</p>
             ) : null}

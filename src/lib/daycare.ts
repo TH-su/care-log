@@ -407,6 +407,24 @@ export function daycareBulkRows<T extends Pick<DaycareBoardRow, 'residentId' | '
   return rows.filter((r) => r.state === 'present' || r.state === 'left' || (r.state === 'planned' && r.planned && !r.hospitalized))
 }
 
+/**
+ * 一括の画面に出す方（daycareBulkRows）の source_id（利用者No）を一覧の並びのまま返す。排泄ケアアプリへの受け渡し（§9.7）の
+ * キーはこの結果から作る。名簿に居ない方・source_id の空の方は除く。同じ source_id は1回だけ
+ */
+export function daycareBulkSourceIds(
+  rows: readonly Pick<DaycareBoardRow, 'residentId' | 'state' | 'planned' | 'hospitalized'>[],
+  residents: readonly Pick<Resident, 'id' | 'source_id'>[],
+): string[] {
+  const sid = new Map<number, string>()
+  for (const r of residents) if (typeof r.source_id === 'string' && r.source_id.trim() !== '') sid.set(r.id, r.source_id.trim())
+  const out: string[] = []
+  for (const r of daycareBulkRows(rows)) {
+    const s = sid.get(r.residentId)
+    if (s !== undefined && !out.includes(s)) out.push(s)
+  }
+  return out
+}
+
 /** 予定の時間の表示（'9:30〜12:00／13:00〜15:30'）。時刻の無い予定は '時間未定' */
 export function fmtPlanTimes(plans: readonly DaycarePlanEntry[]): string {
   const hm = (t: string | null) => {

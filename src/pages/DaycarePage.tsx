@@ -653,7 +653,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
             return (
               <li
                 key={row.residentId}
-                className={`dc-card relative flex min-w-0 flex-col gap-1 rounded-lg border p-3 ${absent ? 'border-border bg-surface2' : 'border-border-strong bg-surface'}`}
+                className={`dc-card relative flex min-w-0 flex-col gap-0.5 rounded-lg border p-3 ${absent ? 'border-border bg-surface2' : 'border-border-strong bg-surface'}`}
               >
                 <div className="flex flex-wrap items-start gap-2">
                   {/* 氏名（押すと1人の記録へ。カード全体を押せる＝.dc-card-link の ::after）。長い氏名は切らずに折り返す。
