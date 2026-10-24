@@ -24,6 +24,8 @@ export interface DaycareDayMemo {
   vitals: KeyedVital[]
   meals: DaycareMealRow[]
   fluids: FluidIntake[]
+  /** 食事・水分を読めたか（読めなかった時の空の一覧を「記録なし」として使わない＝確認の反証 中1） */
+  intakeOk: boolean
   /** 名簿（退居された方も含む・氏名を引くため）。読めていない時は空 */
   residents: Resident[]
   /** 控えた時刻（Date.now()） */
@@ -43,14 +45,16 @@ export function daycareDayMemo(): DaycareDayMemo | null {
   return memo
 }
 
-/** 試験用: 控えを消す */
+/** 控えを消す（ログアウト・ログインのし直し＝cachedReads の resetDataCache。次にログインした人へ前の人の控えを見せない） */
 export function clearDaycareDayMemo(): void {
   memo = null
 }
 
-/** 通信の失敗か（DbError の network・fetch の TypeError）。サーバーの拒否・権限・設定待ちは false */
+/**
+ * 通信の失敗か（db.ts の DbError の kind 'network' だけ。fetch の失敗は db.ts が network に直す）。サーバーの拒否・権限・設定待ち・
+ * コードの不具合（素の TypeError など）は false＝控えで隠さない（確認の反証 軽4）
+ */
 export function isNetworkReadError(e: unknown): boolean {
-  if (e instanceof TypeError) return true
   return typeof e === 'object' && e !== null && (e as { kind?: unknown }).kind === 'network'
 }
 

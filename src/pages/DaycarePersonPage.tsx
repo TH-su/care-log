@@ -315,19 +315,24 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
         fetchDaycareIntake(target).catch(() => null),
       ])
       if (gen !== genRef.current || target !== dayRef.current) return
-      setData({
-        day: target,
-        planRows: usable && snapshot !== null ? snapshot.plan_rows : (plan?.rows ?? []),
-        planSource: usable && snapshot !== null ? snapshot.plan_source : (plan?.source ?? 'unknown'),
-        snapshot,
-        missing: missing || plan?.missing === true,
-        attendance,
-        baths,
-        vitals: dv.live,
-        meals: intake?.meals ?? [],
-        fluids: intake?.fluids ?? [],
-        intakeOk: intake !== null,
-        memoAt: null,
+      setData((prev) => {
+        // 静かな読み直し（他の端末の変更・送信待ちの減り）で食事・水分だけ読めない時は、いまの食事・水分を残す（空の一覧を
+        // 「サーバーに何も無い」と見て、送信待ちの水分の消し込み・取り消した行の隠しを誤らせない＝確認の反証 中2）
+        const keep = intake === null && quiet && prev !== null && prev.day === target && prev.intakeOk
+        return {
+          day: target,
+          planRows: usable && snapshot !== null ? snapshot.plan_rows : (plan?.rows ?? []),
+          planSource: usable && snapshot !== null ? snapshot.plan_source : (plan?.source ?? 'unknown'),
+          snapshot,
+          missing: missing || plan?.missing === true,
+          attendance,
+          baths,
+          vitals: dv.live,
+          meals: intake?.meals ?? (keep ? prev.meals : []),
+          fluids: intake?.fluids ?? (keep ? prev.fluids : []),
+          intakeOk: intake !== null || keep,
+          memoAt: null,
+        }
       })
       setError(null)
     } catch (e) {
@@ -347,7 +352,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           vitals: m.vitals,
           meals: m.meals,
           fluids: m.fluids,
-          intakeOk: true,
+          intakeOk: m.intakeOk,
           memoAt: m.savedAt,
         })
         setError(null)
@@ -420,10 +425,20 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
       vitals: data.vitals,
       meals: data.meals,
       fluids: data.fluids,
+      intakeOk: data.intakeOk,
       residents,
       savedAt: Date.now(),
     })
   }, [data, residents])
+
+  // 控えで開いている間は、30秒ごとに静かに読み直す（電波が「切れた」と扱われないまま戻った時＝弱い電波・電波の無い Wi-Fi でも、
+  // サーバーの内容に戻して帯を消す＝確認の反証 軽3）。読めない間は今の内容のまま
+  const onMemo = data !== null && data.memoAt !== null
+  useEffect(() => {
+    if (!onMemo) return
+    const t = window.setInterval(() => scheduleReload(), 30_000)
+    return () => window.clearInterval(t)
+  }, [onMemo, scheduleReload])
 
   const resident = useMemo(() => residents.find((r) => r.id === residentId) ?? null, [residents, residentId])
   // 今日の画面の〔予定にない方を追加〕から来た方（予定も記録も無い在籍中の方）は、予定外として足す（〔予定外で到着〕を出す）
@@ -716,7 +731,8 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   // 未送信が1件も無ければ、送信待ちの水分も残さない（届いた後に読み直している＝消し込みの取りこぼしの安全網）。
   // 取り消しを送った行は、その行の日の読み込みでサーバーから消えたら外す（別の日を読んだだけでは外さない＝2a の確認の反証 軽4）
   useEffect(() => {
-    if (data === null) return
+    // 食事・水分を読めていない時（空の一覧）は消し込まない（確認の反証 中2）
+    if (data === null || !data.intakeOk) return
     const visible = data.fluids.filter((f) => !hiddenFluidIds.has(f.id))
     const nothingQueued = queuePending() === 0
     setQueuedFluids((prev) => {
@@ -745,7 +761,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
     setFluidMsg((m) => {
       if (m === null || m.queued === undefined) return m
       if ('add' in m.queued) return queuedFluids[m.key] === undefined ? null : m
-      if (data === null || !m.key.endsWith(`:${data.day}`)) return m
+      if (data === null || !data.intakeOk || !m.key.endsWith(`:${data.day}`)) return m
       const delId = m.queued.delId
       return data.fluids.some((f) => f.id === delId) ? m : null
     })
@@ -1192,7 +1208,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           {mealSourceLabel(lunchRow) !== null ? <span className="text-sm text-ink2">{mealSourceLabel(lunchRow)}</span> : null}
         </div>
         <p className="text-base text-ink">
-          いま: <span className="font-bold">{lunchLabel(lunch)}</span>
+          いま: <span className="font-bold">{data.intakeOk ? lunchLabel(lunch) : '—（読めませんでした）'}</span>
         </p>
         {(['main_amount', 'side_amount'] as const).map((f) => (
           <div key={f} role="group" aria-label={f === 'main_amount' ? '昼食 主食の割合' : '昼食 副食の割合'}>
@@ -1239,7 +1255,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           おやつ
         </h3>
         <p className="text-base text-ink">
-          いま: <span className="font-bold">{snackLabel(snack)}</span>
+          いま: <span className="font-bold">{data.intakeOk ? snackLabel(snack) : '—（読めませんでした）'}</span>
         </p>
         <div className="flex flex-wrap gap-gap" role="group" aria-label="おやつ">
           {DAYCARE_SNACK_CHOICES.map((c) => (
@@ -1268,7 +1284,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           水分
         </h3>
         <p className="text-base text-ink">
-          この日の合計 <span className="font-num text-xl font-bold">{fmtMl(fluidTotal)}</span>
+          この日の合計 <span className="font-num text-xl font-bold">{data.intakeOk ? fmtMl(fluidTotal) : '—（読めませんでした）'}</span>
         </p>
         <div className="flex flex-wrap items-end gap-gap" role="group" aria-label="水分を足す">
           {DAYCARE_FLUID_STEPS.map((ml) => (
@@ -1318,7 +1334,9 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           </p>
         ) : null}
         <ul aria-label="この日の水分の記録" className="space-y-1">
-          {fluidsOf.length === 0 && queuedNow === null ? <li className="text-base text-ink2">まだ記録はありません</li> : null}
+          {fluidsOf.length === 0 && queuedNow === null ? (
+            <li className="text-base text-ink2">{data.intakeOk ? 'まだ記録はありません' : '読めませんでした（上の〔再試行〕を押してください）'}</li>
+          ) : null}
           {queuedNow !== null ? (
             <li className={`text-base ${queuedNow.lost ? 'text-danger' : 'text-ink2'}`}>
               <span aria-hidden="true">⚠ </span>

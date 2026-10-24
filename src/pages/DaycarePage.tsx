@@ -110,6 +110,8 @@ interface DayData {
   fluids: FluidIntake[]
   /** 活動・レク（段階2b・行の小さな印）。null＝読めない（0044 未適用・通信エラー）＝印を出さない（「記録なし」に見せない） */
   activities: DaycareActivity[] | null
+  /** 昼食・おやつ・水分を読めたか（読めない時の空の一覧を控えに「読めた」として入れない＝確認の反証 中1） */
+  intakeOk: boolean
 }
 
 /** カードの〔取消〕（押せる範囲 44px・角は 6px） */
@@ -340,7 +342,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         missing ? Promise.resolve([] as DaycareAttendance[]) : fetchDaycareAttendance(target),
         fetchBathDay(target).catch(() => [] as BathRecord[]),
         fetchDaycareVitals(target).catch(() => ({ live: [] as KeyedVital[], keys: [] as string[] })),
-        fetchDaycareIntake(target).catch(() => ({ meals: [] as DaycareMealRow[], fluids: [] as FluidIntake[] })),
+        fetchDaycareIntake(target).catch(() => null),
       ])
       const activities = await fetchDaycareActivities(target).catch(() => null)
       if (gen !== genRef.current || target !== dayRef.current) return
@@ -353,9 +355,10 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         attendance,
         baths,
         vitals: dv.live,
-        meals: intake.meals,
-        fluids: intake.fluids,
+        meals: intake?.meals ?? [],
+        fluids: intake?.fluids ?? [],
         activities,
+        intakeOk: intake !== null,
       }
       setData(next)
       setError(null)
@@ -423,15 +426,13 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       vitals: data.vitals,
       meals: data.meals,
       fluids: data.fluids,
+      intakeOk: data.intakeOk,
       residents,
       savedAt: Date.now(),
     })
   }, [data, residents])
-  // 1人の画面の部品を先に読んでおく（電波の無い所でカードを押しても画面を開ける。電波がある時だけ・失敗は黙って次の機会に）
-  useEffect(() => {
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) return
-    void import('./DaycarePersonPage').catch(() => undefined)
-  }, [])
+  // 1人の画面の部品は App の先読み（PAGE_PRELOADS）が読んでおく（電波の無い所でカードを押しても画面を開ける。先読みの失敗を
+  // 「部品の取得失敗」と見分けない守りと、新しい版の確かめは App の仕組みに任せる＝確認の反証 軽1）
 
   // ── 一覧 ──
   const board = useMemo(

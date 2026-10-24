@@ -171,6 +171,9 @@ const PAGE_PRELOADS: readonly (() => Promise<unknown>)[] = [
   loadTimelinePage,
   loadMorePage,
   loadRecordHubPage,
+  // デイの今日の画面と1人の画面（2026-10-24）: 電波の無い所でカードを押しても1人の画面を開けるように先に読む
+  loadDaycarePage,
+  loadDaycarePersonPage,
   loadVitalsGridPage,
   loadMealsGridPage,
   loadNoteFormPage,
