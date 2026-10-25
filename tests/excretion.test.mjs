@@ -465,8 +465,91 @@ describe('入院中の扱いと「照合できない方」の数え方（本人�
     assert.match(page, /if \(unlinked > 0\) \{/)
     const karte = read('../src/pages/KartePage.tsx')
     assert.match(karte, /isHospitalDay\(data\.meals, residentId, toIso\)/)
-    assert.match(karte, /\{view\.hospital \? \(/)
+    // 2026-10-25（§9.9）: デイだけの方の分岐を前に足した（固定し直し・入院の日の文は今までどおり）
+    assert.match(karte, /\) : view\.hospital \? \(/)
     assert.match(karte, /\{MSG_STOOL_HOSPITAL\}/)
+  })
+})
+
+describe('デイだけの方（cfg.dayOnly・2026-10-25 代表者の決定 §9.9）', { skip: X === null ? TS_UNSUPPORTED : false }, () => {
+  const NOW = new Date(2026, 9, 16, 15, 0).getTime()
+  // 利用者01 は施設の方（dayOnly 無し）・利用者 02 はデイだけの方
+  const withDayOnly = (cfg02) => HB_RES.map((r) => (String(r.id) === '12' ? { ...r, cfg: cfg02 } : r))
+  const old = { id: 's', type: 'stool', datetime: dtOf(NOW - 80 * H1), date: dtOf(NOW - 80 * H1).slice(0, 10), stoolAmt: '多量' }
+
+  it('読み取り: cfg（文字の JSON・オブジェクト）の "dayOnly": true の時だけ true。無い・true 以外の値・壊れた JSON は false', () => {
+    const dayOnlyOf = (cfg) => X.parseExcretionPayload({ residents: withDayOnly(cfg), records: [] }).residents.find((r) => r.id === '12').dayOnly
+    assert.equal(dayOnlyOf('{"stoolWarnD":1,"stoolDangerD":2,"dayOnly":true}'), true)
+    assert.equal(dayOnlyOf({ dayOnly: true }), true)
+    assert.equal(dayOnlyOf('{"stoolWarnD":1}'), false, '無い')
+    for (const bad of ['{"dayOnly":"true"}', '{"dayOnly":1}', '{"dayOnly":"yes"}', '{"dayOnly":false}', '{"dayOnly":null}', '{"dayOnly":', '', 'dayOnly', null])
+      assert.equal(dayOnlyOf(bad), false, String(bad))
+    // しきい値の読み取りは今までどおり
+    const r = X.parseExcretionPayload({ residents: withDayOnly('{"stoolWarnD":1,"stoolDangerD":2,"dayOnly":true}'), records: [] }).residents.find((x) => x.id === '12')
+    assert.deepEqual(r.cfg, { stoolWarnD: 1, stoolDangerD: 2 })
+    // dayOnly の無い方はすべて false
+    assert.equal(X.parseExcretionPayload({ residents: HB_RES, records: [] }).residents.every((x) => x.dayOnly === false), true)
+  })
+
+  it('今日の要注意: デイだけの方は「排便なし◯日」を出さない（照合できない人数にも数えない）。施設の方は今までどおり', () => {
+    const records = [
+      { ...old, id: 's1', residentId: 11 },
+      { ...old, id: 's2', residentId: 12 },
+    ]
+    const shown = CL.filter((r) => r.active)
+    const before = X.stoolAlertReasons(X.parseExcretionPayload({ residents: HB_RES, records }), shown, shown, NOW)
+    const after = X.stoolAlertReasons(X.parseExcretionPayload({ residents: withDayOnly('{"stoolWarnD":1,"stoolDangerD":2,"dayOnly":true}'), records }), shown, shown, NOW)
+    assert.equal(before.reasons.has(2), true, 'デイだけの印が無ければ出る')
+    assert.equal(after.reasons.has(2), false, 'デイだけの方は出さない')
+    assert.deepEqual(after.reasons.get(1), before.reasons.get(1), '施設の方は前と同じ')
+    assert.equal(after.unlinked, before.unlinked)
+  })
+
+  it('カルテ・1人の画面: デイだけの方は view.dayOnly（日数の判定を出さない）・記録の一覧はそのまま。施設の方は前と同じ判定', () => {
+    const records = [
+      { ...old, id: 's1', residentId: 11 },
+      { ...old, id: 's2', residentId: 12 },
+    ]
+    const snap = X.parseExcretionPayload({ residents: withDayOnly('{"dayOnly":true}'), records })
+    const v = X.excretionViewFor(snap, CL[1], CL, NOW)
+    assert.equal(v.linked, true)
+    assert.equal(v.dayOnly, true)
+    assert.equal(v.days.length, 14)
+    assert.equal(v.days.some((d) => d.stools.length > 0), true, '記録の一覧は出す')
+    assert.equal(X.MSG_STOOL_DAY_ONLY, 'デイの日の記録だけ（施設では記録していません）')
+    const base = X.excretionViewFor(X.parseExcretionPayload({ residents: HB_RES, records }), CL[0], CL, NOW)
+    const same = X.excretionViewFor(snap, CL[0], CL, NOW)
+    assert.equal(same.dayOnly, false)
+    assert.deepEqual(same.status, base.status, '施設の方の判定は前と同じ')
+    // 画面: デイだけの方は日数の判定の代わりに文を出す（カルテ・1人の画面）
+    const karte = read('../src/pages/KartePage.tsx')
+    assert.match(karte, /\{view\.dayOnly \? \([\s\S]{0,400}?\{MSG_STOOL_DAY_ONLY\}/)
+    const person = read('../src/pages/DaycarePersonPage.tsx')
+    assert.match(person, /\{ex\.view\.dayOnly \? \([\s\S]{0,400}?\{MSG_STOOL_DAY_ONLY\}[\s\S]{0,200}?\) : \(\s*<p className="text-ink2">\s*\{ex\.view\.status\.level !== 'ok'/)
+  })
+
+  it('デイだけの方の記録の無い日は「0回」でなく「—」（記録の有る日・施設の方は今までどおり回数）・カルテと1人の画面（親の回答 2026-10-25）', () => {
+    const records = [{ ...old, id: 's2', residentId: 12, datetime: dtOf(NOW - 2 * H1), date: dtOf(NOW - 2 * H1).slice(0, 10) }]
+    const v = X.excretionViewFor(X.parseExcretionPayload({ residents: withDayOnly('{"dayOnly":true}'), records }), CL[1], CL, NOW)
+    const withRec = v.days.find((d) => d.recorded)
+    const noRec = v.days.find((d) => !d.recorded)
+    assert.ok(withRec !== undefined && noRec !== undefined)
+    assert.equal(v.days.filter((d) => d.recorded).length, 1, '記録の有る日だけ recorded')
+    assert.equal(X.excretionDayBlank(true, noRec), true, 'デイだけの方の記録の無い日は —')
+    assert.equal(X.excretionDayBlank(true, withRec), false, '記録の有る日は回数')
+    assert.equal(X.excretionDayBlank(false, noRec), false, '施設の方は記録の無い日も 0回（今までどおり）')
+    const karte = read('../src/pages/KartePage.tsx')
+    assert.match(karte, /const blank = excretionDayBlank\(dayOnly, d\)/)
+    assert.match(karte, /排尿 <span className="tabular">—<\/span>/)
+    assert.match(karte, /<ExcretionDayItem key=\{d\.day\} d=\{d\} dayOnly=\{view\.dayOnly\} \/>/)
+    const person = read('../src/pages/DaycarePersonPage.tsx')
+    assert.match(person, /\) : excretionDayBlank\(ex\.view\.dayOnly, exDay\) \? \(/)
+  })
+
+  it('書き込みの経路は作らない（守ること 2）・読み取りの action は今までどおり', () => {
+    const ex = read('../src/lib/excretionClient.ts')
+    assert.match(ex, /action: 'getAll'/)
+    assert.doesNotMatch(ex, /action: '(saveRes|saveRecord|addRecord|delRecord|saveSched)'/)
   })
 })
 

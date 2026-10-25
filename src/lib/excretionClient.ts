@@ -14,6 +14,10 @@
 //     同じ氏名がどちらかに2人以上・居室が食い違う・見つからない時は結ばない（違う方の記録を出さないことが最優先）。
 //     退居された方（care-log の active=false）は照合の候補から外す。
 //  5. 実名・合言葉・接続先の具体値をコードに書かない。
+//  6. デイだけの方（2026-10-25 代表者の決定 §9.9）: 排泄ケアアプリの入居者の cfg の "dayOnly": true を読む（読むだけ。書かない）。
+//     施設では排泄を記録していない方なので、記録はデイの日だけ。今日の要注意の「排便なし◯日」と、カルテ・デイの1人の画面の
+//     「最後の排便から◯日」の判定は出さず、「デイの日の記録だけ（施設では記録していません）」と出す（記録の一覧は出す）。
+//     印を付けるのは排泄ケアアプリ側。取り込みの順は care-log（印を読んで外す側）が先
 //
 // ── 読み方（getAll の since を「今から16日前」にして送る・理由）──
 //  gas/haiben-api.gs（2026-10-16 時点）の読み取りは3つ:
@@ -111,6 +115,11 @@ export interface HbResident {
   cfg: { stoolWarnD?: number; stoolDangerD?: number }
   /** 入院の履歴（サーバーは持たない＝通常は空。来た時だけ判定の凍結に使う） */
   hospitalizations: Array<{ admissionAt: string; dischargeAt: string | null }>
+  /**
+   * デイだけの方（施設では排泄を記録していない方・2026-10-25 代表者の決定 §9.9）。排泄ケアアプリの入居者の cfg の "dayOnly": true の時だけ true
+   * （無い・true 以外の値は false）。記録はデイの日だけなので、「最後の排便から◯日」の判定と今日の要注意の「排便なし◯日」を出さない
+   */
+  dayOnly: boolean
 }
 
 /** 排便記録の1件（判定と一覧に要る項目だけ。notes・staff は持たない） */
@@ -290,11 +299,14 @@ function parseResident(raw: unknown): HbResident | null {
     }
   }
   const cfg: HbResident['cfg'] = {}
+  let dayOnly = false
   if (c && typeof c === 'object') {
     const w = finiteNum((c as Record<string, unknown>).stoolWarnD)
     const d = finiteNum((c as Record<string, unknown>).stoolDangerD)
     if (w !== undefined) cfg.stoolWarnD = w
     if (d !== undefined) cfg.stoolDangerD = d
+    // デイだけの方の印（§9.9）: 真偽値の true だけ（'true'・1 などの文字・数は印とみなさない＝壊れた値は施設の方と同じ扱い）
+    dayOnly = (c as Record<string, unknown>).dayOnly === true
   }
   const hospitalizations: HbResident['hospitalizations'] = []
   if (Array.isArray(o.hospitalizations)) {
@@ -305,7 +317,7 @@ function parseResident(raw: unknown): HbResident | null {
       hospitalizations.push({ admissionAt: hx.admissionAt, dischargeAt: typeof hx.dischargeAt === 'string' && hx.dischargeAt !== '' ? hx.dischargeAt : null })
     }
   }
-  return { id, key, room: normRoom(roomRaw), roomLabel: roomRaw, active, hidden, cfg, hospitalizations }
+  return { id, key, room: normRoom(roomRaw), roomLabel: roomRaw, active, hidden, cfg, hospitalizations, dayOnly }
 }
 
 /**
@@ -577,6 +589,8 @@ export interface ExcretionDay {
   urine: number
   stools: Array<{ time: string; amount: string; cons: string }>
   laxatives: Array<{ time: string; medicine: string; tablets: string }>
+  /** その日の記録が1件でもあるか（デイだけの方は、記録の無い日を「0回」でなく「—」と出す＝§9.9・親の回答 2026-10-25） */
+  recorded: boolean
 }
 
 /** 直近 EXCRETION_LIST_DAYS 日（今日を含む・新しい日が上）の一覧 */
@@ -585,13 +599,14 @@ export function excretionDays(pool: readonly HbRecord[], now: number, n = EXCRET
   const out: ExcretionDay[] = []
   const byDay = new Map<string, ExcretionDay>()
   for (let i = 0; i < n; i++) {
-    const d: ExcretionDay = { day: addDaysIsoUtc(today, -i), urine: 0, stools: [], laxatives: [] }
+    const d: ExcretionDay = { day: addDaysIsoUtc(today, -i), urine: 0, stools: [], laxatives: [], recorded: false }
     out.push(d)
     byDay.set(d.day, d)
   }
   for (const r of pool) {
     const d = byDay.get(r.date)
     if (!d) continue
+    d.recorded = true
     if (r.type === 'urine' || r.type === 'both') d.urine++
     if (r.type === 'stool' || r.type === 'both') d.stools.push({ time: r.time, amount: r.stoolAmt ?? '', cons: r.cons })
     if (r.type === 'laxative') d.laxatives.push({ time: r.time, medicine: r.medicine, tablets: r.tablets })
@@ -638,6 +653,17 @@ export function hospitalIdsOn(meals: ReadonlyArray<Pick<Meal, 'resident_id' | 'm
 /** 入院中の方の排泄欄に日数の代わりに出す文 */
 export const MSG_STOOL_HOSPITAL = '入院中のため判定しません（食事の記録が入院）'
 
+/** デイだけの方（§9.9）の排泄欄に日数の代わりに出す文（記録はデイの日だけなので、日数の判定は誤る） */
+export const MSG_STOOL_DAY_ONLY = 'デイの日の記録だけ（施設では記録していません）'
+
+/**
+ * その日の回数を「—」で出すか: デイだけの方の、記録が1件も無い日（デイの無い日がほとんど＝「0回」は「出ていない」と読み違える）。
+ * 記録の有る日と、施設の方は今までどおり回数で出す（親の回答 2026-10-25）
+ */
+export function excretionDayBlank(dayOnly: boolean, d: Pick<ExcretionDay, 'recorded'>): boolean {
+  return dayOnly && !d.recorded
+}
+
 /** 今日の要注意の「照合できない方」に数える理由（排便記録に見つからない方は数えない・本人回答 2026-10-17） */
 export function isCountedUnlinked(reason: ExcretionMatchFail): boolean {
   return reason === 'dupCareLog' || reason === 'dupHaiben' || reason === 'roomMismatch'
@@ -645,7 +671,8 @@ export function isCountedUnlinked(reason: ExcretionMatchFail): boolean {
 
 export type ExcretionView =
   | { linked: false; message: string; reason: ExcretionMatchFail }
-  | { linked: true; status: StoolStatus; days: ExcretionDay[]; hospital: boolean }
+  /** dayOnly＝デイだけの方（§9.9）。画面は status（日数の判定）を出さず MSG_STOOL_DAY_ONLY を出す。記録の一覧（days）は出す */
+  | { linked: true; status: StoolStatus; days: ExcretionDay[]; hospital: boolean; dayOnly: boolean }
 
 /** care-log の1人について、照合→判定→一覧までをまとめる */
 export function excretionViewFor(
@@ -658,7 +685,7 @@ export function excretionViewFor(
   const m = matchExcretionResident(target, careLog, snap.residents)
   if (!m.ok) return { linked: false, message: excretionMatchMessage(m), reason: m.reason }
   const pool = snap.recs.get(m.hb.id) ?? []
-  return { linked: true, status: stoolStatusOf(pool, m.hb, snap.cfg, now), days: excretionDays(pool, now), hospital }
+  return { linked: true, status: stoolStatusOf(pool, m.hb, snap.cfg, now), days: excretionDays(pool, now), hospital, dayOnly: m.hb.dayOnly }
 }
 
 /**
@@ -683,6 +710,8 @@ export function stoolAlertReasons(
       continue
     }
     if (hospital.has(t.id)) continue
+    // デイだけの方（§9.9）は記録がデイの日だけなので「排便なし◯日」を出さない（照合できた方なので、照合できない方の人数にも数えない）
+    if (m.hb.dayOnly) continue
     const st = stoolStatusOf(snap.recs.get(m.hb.id) ?? [], m.hb, snap.cfg, now)
     if (st.level === 'ok') continue
     reasons.set(t.id, [
