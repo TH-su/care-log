@@ -104,7 +104,7 @@ import {
   settleQueuedFluid,
   snackLabel,
 } from '../lib/daycarePerson'
-import { excretionFailMessage, excretionViewFor, fetchExcretion, MSG_EXCRETION_UNCONFIGURED, MSG_STOOL_DAY_ONLY } from '../lib/excretionClient'
+import { excretionDayBlank, excretionFailMessage, excretionViewFor, fetchExcretion, MSG_EXCRETION_UNCONFIGURED, MSG_STOOL_DAY_ONLY } from '../lib/excretionClient'
 import type { ExcretionView } from '../lib/excretionClient'
 import type { ResidentTargets } from '../lib/vitalAlerts'
 import { addDays, fmtDayLabel, todayIso } from '../lib/format'
@@ -1450,6 +1450,11 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           <div className="space-y-1 text-base text-ink">
             {exDay === null ? (
               <p>この日の記録は、排泄ケアアプリで見てください（ここに出すのは直近の日だけです）。</p>
+            ) : excretionDayBlank(ex.view.dayOnly, exDay) ? (
+              // デイだけの方（§9.9）の記録の無い日は「0回」と言い切らず「—」
+              <p>
+                この日: 排尿 <span className="font-num font-bold">—</span>・排便 <span className="font-num font-bold">—</span>（この日の記録はありません）
+              </p>
             ) : (
               <p>
                 この日: 排尿 <span className="font-num font-bold">{exDay.urine}</span>回・排便{' '}

@@ -528,6 +528,24 @@ describe('デイだけの方（cfg.dayOnly・2026-10-25 代表者の決定 §9.9
     assert.match(person, /\{ex\.view\.dayOnly \? \([\s\S]{0,400}?\{MSG_STOOL_DAY_ONLY\}[\s\S]{0,200}?\) : \(\s*<p className="text-ink2">\s*\{ex\.view\.status\.level !== 'ok'/)
   })
 
+  it('デイだけの方の記録の無い日は「0回」でなく「—」（記録の有る日・施設の方は今までどおり回数）・カルテと1人の画面（親の回答 2026-10-25）', () => {
+    const records = [{ ...old, id: 's2', residentId: 12, datetime: dtOf(NOW - 2 * H1), date: dtOf(NOW - 2 * H1).slice(0, 10) }]
+    const v = X.excretionViewFor(X.parseExcretionPayload({ residents: withDayOnly('{"dayOnly":true}'), records }), CL[1], CL, NOW)
+    const withRec = v.days.find((d) => d.recorded)
+    const noRec = v.days.find((d) => !d.recorded)
+    assert.ok(withRec !== undefined && noRec !== undefined)
+    assert.equal(v.days.filter((d) => d.recorded).length, 1, '記録の有る日だけ recorded')
+    assert.equal(X.excretionDayBlank(true, noRec), true, 'デイだけの方の記録の無い日は —')
+    assert.equal(X.excretionDayBlank(true, withRec), false, '記録の有る日は回数')
+    assert.equal(X.excretionDayBlank(false, noRec), false, '施設の方は記録の無い日も 0回（今までどおり）')
+    const karte = read('../src/pages/KartePage.tsx')
+    assert.match(karte, /const blank = excretionDayBlank\(dayOnly, d\)/)
+    assert.match(karte, /排尿 <span className="tabular">—<\/span>/)
+    assert.match(karte, /<ExcretionDayItem key=\{d\.day\} d=\{d\} dayOnly=\{view\.dayOnly\} \/>/)
+    const person = read('../src/pages/DaycarePersonPage.tsx')
+    assert.match(person, /\) : excretionDayBlank\(ex\.view\.dayOnly, exDay\) \? \(/)
+  })
+
   it('書き込みの経路は作らない（守ること 2）・読み取りの action は今までどおり', () => {
     const ex = read('../src/lib/excretionClient.ts')
     assert.match(ex, /action: 'getAll'/)

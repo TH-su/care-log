@@ -589,6 +589,8 @@ export interface ExcretionDay {
   urine: number
   stools: Array<{ time: string; amount: string; cons: string }>
   laxatives: Array<{ time: string; medicine: string; tablets: string }>
+  /** その日の記録が1件でもあるか（デイだけの方は、記録の無い日を「0回」でなく「—」と出す＝§9.9・親の回答 2026-10-25） */
+  recorded: boolean
 }
 
 /** 直近 EXCRETION_LIST_DAYS 日（今日を含む・新しい日が上）の一覧 */
@@ -597,13 +599,14 @@ export function excretionDays(pool: readonly HbRecord[], now: number, n = EXCRET
   const out: ExcretionDay[] = []
   const byDay = new Map<string, ExcretionDay>()
   for (let i = 0; i < n; i++) {
-    const d: ExcretionDay = { day: addDaysIsoUtc(today, -i), urine: 0, stools: [], laxatives: [] }
+    const d: ExcretionDay = { day: addDaysIsoUtc(today, -i), urine: 0, stools: [], laxatives: [], recorded: false }
     out.push(d)
     byDay.set(d.day, d)
   }
   for (const r of pool) {
     const d = byDay.get(r.date)
     if (!d) continue
+    d.recorded = true
     if (r.type === 'urine' || r.type === 'both') d.urine++
     if (r.type === 'stool' || r.type === 'both') d.stools.push({ time: r.time, amount: r.stoolAmt ?? '', cons: r.cons })
     if (r.type === 'laxative') d.laxatives.push({ time: r.time, medicine: r.medicine, tablets: r.tablets })
@@ -652,6 +655,14 @@ export const MSG_STOOL_HOSPITAL = '入院中のため判定しません（食事
 
 /** デイだけの方（§9.9）の排泄欄に日数の代わりに出す文（記録はデイの日だけなので、日数の判定は誤る） */
 export const MSG_STOOL_DAY_ONLY = 'デイの日の記録だけ（施設では記録していません）'
+
+/**
+ * その日の回数を「—」で出すか: デイだけの方の、記録が1件も無い日（デイの無い日がほとんど＝「0回」は「出ていない」と読み違える）。
+ * 記録の有る日と、施設の方は今までどおり回数で出す（親の回答 2026-10-25）
+ */
+export function excretionDayBlank(dayOnly: boolean, d: Pick<ExcretionDay, 'recorded'>): boolean {
+  return dayOnly && !d.recorded
+}
 
 /** 今日の要注意の「照合できない方」に数える理由（排便記録に見つからない方は数えない・本人回答 2026-10-17） */
 export function isCountedUnlinked(reason: ExcretionMatchFail): boolean {

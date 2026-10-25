@@ -127,6 +127,7 @@ import {
   MSG_EXCRETION_UNCONFIGURED,
   MSG_STOOL_DAY_ONLY,
   MSG_STOOL_HOSPITAL,
+  excretionDayBlank,
   stoolStatusText,
 } from '../lib/excretionClient'
 import type { ExcretionDay, ExcretionView, HbSnapshot } from '../lib/excretionClient'
@@ -1990,17 +1991,29 @@ function fmtStoolAt(dt: string): string {
 }
 
 /** 一覧の1日「10/16（金） 排尿 6回」＋排便・下剤の行 */
-function ExcretionDayItem({ d }: { d: ExcretionDay }) {
+function ExcretionDayItem({ d, dayOnly = false }: { d: ExcretionDay; dayOnly?: boolean }) {
   const empty = d.stools.length === 0 && d.laxatives.length === 0
+  // デイだけの方（§9.9）の記録の無い日（デイの無い日）は「0回」と言い切らず「—」（記録していない日を「出ていない」と読ませない）
+  const blank = excretionDayBlank(dayOnly, d)
   return (
     <li className="rounded-md border border-border bg-surface p-3">
       <p className="flex flex-wrap items-baseline gap-x-3">
         <span className="tabular text-sm font-bold text-ink">{fmtDayLabel(d.day)}</span>
         <span className="text-sm text-ink2">
-          排尿 <span className="tabular">{d.urine}</span>回
+          {blank ? (
+            <>
+              排尿 <span className="tabular">—</span>
+            </>
+          ) : (
+            <>
+              排尿 <span className="tabular">{d.urine}</span>回
+            </>
+          )}
         </span>
       </p>
-      {empty ? (
+      {blank ? (
+        <p className="mt-1 text-sm text-ink3">排便・下剤 —（この日の記録はありません）</p>
+      ) : empty ? (
         <p className="mt-1 text-sm text-ink3">排便・下剤の記録なし</p>
       ) : (
         <ul className="mt-1 space-y-1">
@@ -2097,7 +2110,7 @@ function ExcretionSection({ state, view, onReload }: ExcretionSectionProps) {
             <h3 className="mt-3 text-sm font-bold text-ink2">直近{EXCRETION_LIST_DAYS}日（新しい日が上）</h3>
             <ul className="mt-2 space-y-2">
               {view.days.map((d) => (
-                <ExcretionDayItem key={d.day} d={d} />
+                <ExcretionDayItem key={d.day} d={d} dayOnly={view.dayOnly} />
               ))}
             </ul>
           </>
