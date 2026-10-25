@@ -125,6 +125,7 @@ import {
   fetchExcretion,
   isHospitalDay,
   MSG_EXCRETION_UNCONFIGURED,
+  MSG_STOOL_DAY_ONLY,
   MSG_STOOL_HOSPITAL,
   stoolStatusText,
 } from '../lib/excretionClient'
@@ -2061,7 +2062,15 @@ function ExcretionSection({ state, view, onReload }: ExcretionSectionProps) {
           </p>
         ) : (
           <>
-            {view.hospital ? (
+            {view.dayOnly ? (
+              // デイだけの方（§9.9）: 記録はデイの日だけなので、日数の判定（最後の排便から◯日・注意・危険）は出さない。記録の一覧は下に出す
+              <div className="rounded-md border border-border-strong bg-surface2 p-3">
+                <p className="text-base font-bold text-ink">
+                  <span aria-hidden="true">ⓘ </span>
+                  {MSG_STOOL_DAY_ONLY}
+                </p>
+              </div>
+            ) : view.hospital ? (
               <div className="rounded-md border border-border-strong bg-surface2 p-3">
                 <p className="text-base font-bold text-ink">
                   <span aria-hidden="true">ⓘ </span>

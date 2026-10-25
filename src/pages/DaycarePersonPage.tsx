@@ -104,7 +104,7 @@ import {
   settleQueuedFluid,
   snackLabel,
 } from '../lib/daycarePerson'
-import { excretionFailMessage, excretionViewFor, fetchExcretion, MSG_EXCRETION_UNCONFIGURED } from '../lib/excretionClient'
+import { excretionFailMessage, excretionViewFor, fetchExcretion, MSG_EXCRETION_UNCONFIGURED, MSG_STOOL_DAY_ONLY } from '../lib/excretionClient'
 import type { ExcretionView } from '../lib/excretionClient'
 import type { ResidentTargets } from '../lib/vitalAlerts'
 import { addDays, fmtDayLabel, todayIso } from '../lib/format'
@@ -1457,10 +1457,18 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
                 {exDay.laxatives.length > 0 ? <>・下剤 {exDay.laxatives.length}回</> : null}
               </p>
             )}
-            <p className="text-ink2">
-              {ex.view.status.level !== 'ok' ? <span aria-hidden="true">{ex.view.status.level === 'danger' ? '▲▲ ' : '▲ '}</span> : null}
-              最後の排便から{ex.view.status.days === null ? '—' : `${ex.view.status.days}${ex.view.status.atLeast ? '日以上' : '日'}`}
-            </p>
+            {ex.view.dayOnly ? (
+              // デイだけの方（§9.9）: 記録はデイの日だけなので「最後の排便から◯日」は出さない（その日の回数は上に出す）
+              <p className="text-ink2">
+                <span aria-hidden="true">ⓘ </span>
+                {MSG_STOOL_DAY_ONLY}
+              </p>
+            ) : (
+              <p className="text-ink2">
+                {ex.view.status.level !== 'ok' ? <span aria-hidden="true">{ex.view.status.level === 'danger' ? '▲▲ ' : '▲ '}</span> : null}
+                最後の排便から{ex.view.status.days === null ? '—' : `${ex.view.status.days}${ex.view.status.atLeast ? '日以上' : '日'}`}
+              </p>
+            )}
           </div>
         )}
         <a
