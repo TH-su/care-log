@@ -340,8 +340,12 @@ describe('静的検査（段階3a の規律）', () => {
     assert.match(sec, /const fresh = s === null && !waiting && data\.sessions !== null \? freshInput\(rid, day, 'done'\) : null/)
     assert.match(sec, /前回: \{prev\}/)
     assert.match(sec, /—（前回の記録なし）/)
-    assert.match(sec, /\{TRAINING_DEFAULT_MIN\}分/)
-    assert.match(sec, /fresh\.instructor_id !== null \? \(\s*<span className="text-base text-ink2">\{staffName\(fresh\.instructor_id\)\}<\/span>/)
+    // 予定の指導員は「予定:」を付けて記録した指導員と分ける（色の濃さだけに頼らない・2026-10-26 反証 軽10）。
+    // 時間は記録なら「開始の時刻〜 分」なので文字の形で分かる（「予定:」を付けると 1180 の幅で結果の列が切れる）
+    assert.match(sec, /<span className="text-base text-ink2">\{TRAINING_DEFAULT_MIN\}分<\/span>/)
+    assert.match(sec, /fresh\.instructor_id !== null \? \(\s*<span className="text-base text-ink2">予定: \{staffName\(fresh\.instructor_id\)\}<\/span>/)
+    // 予定の指導員は描いた時刻の時間帯で決まるので、1分ごとに描き直す（昼をまたいでも〔完了〕で入る方と同じ・反証 軽9）
+    assert.match(p, /setMinuteTick\(\(n\) => n \+ 1\)/)
     assert.match(sec, /—（〔完了〕で選ぶ）/)
     // 結果: 記録がある方は結果の言葉と〔記録を開く〕。無い方は〔完了〕〔一部〕〔中止〕（今と同じ disabled の条件）。送信待ち・止まった時の文は今のまま
     assert.match(sec, /\{TRAINING_RESULT_LABEL\[s\.result\]\}/)

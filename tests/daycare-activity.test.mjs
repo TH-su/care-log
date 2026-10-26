@@ -565,12 +565,31 @@ if (A === null) {
       assert.match(cyc, /const next = nextParticipation\(a\.participation\)\s+if \(next === null\) await remove\(a, nameOf\(rid\)\)\s+else await setParticipation\(a, next\)/)
       const rm = b.slice(b.indexOf('const remove = async'), b.indexOf('const arrivalOk ='))
       // 戻す先（人・日・項目・消す前の度合い）は消す時に固定し、db.ts の取り消し待ちの決まりに任せて入れ直す
-      assert.match(rm, /const before = a\.participation\s+const undo = \(\) => void add\(a\.resident_id, a\.day, a\.label, before, true\)/)
-      assert.match(rm, /if \(r === 'queued'\) \{[\s\S]*?show\(`\$\{name\}さんの活動「\$\{a\.label\}」を取り消しました（送信待ち）`, undo\)/)
-      assert.match(rm, /\} else if \(r === true\) \{\s*dropRow\(a\.day, a\.id\)\s*clearMsg\(key\)\s*show\(`\$\{name\}さんの活動「\$\{a\.label\}」を取り消しました`, undo\)/)
+      // 2026-10-26 反証の直し（固定し直し・意図は同じ）: 戻す先は item に固定し、トーストは offerUndo から出す
+      assert.match(rm, /const item = \{ rid: a\.resident_id, day: a\.day, label: a\.label, before: a\.participation, name \}/)
+      assert.match(rm, /if \(r === 'queued'\) \{[\s\S]*?offerUndo\(\{ \.\.\.item, queued: true \}\)/)
+      assert.match(rm, /\} else if \(r === true\) \{\s*dropRow\(a\.day, a\.id\)\s*clearMsg\(key\)\s*offerUndo\(\{ \.\.\.item, queued: false \}\)/)
+      // 取り消しの送信待ちでは行を落とさない（届くまで列の見出しの一括の相手から外す＝「記録あり」と数える・反証の試験の穴）
+      const queuedBranch = rm.slice(rm.indexOf("if (r === 'queued') {"), rm.indexOf('} else if (r === true) {'))
+      assert.ok(queuedBranch.length > 0)
+      assert.doesNotMatch(queuedBranch, /dropRow\(/, '取り消しの送信待ちの時は dropRow しない')
+      // 〔元に戻す〕は db.ts の取り消し待ちの決まりに任せて、消す前の度合いで入れ直す（fromUndo）
+      const ua = b.slice(b.indexOf('const undoAll = async'), b.indexOf('const offerUndo ='))
+      assert.match(ua, /await add\(it\.rid, it\.day, it\.label, it\.before, true\)/)
+      // 違う日を開いている時・戻せなかった分がある時は、トーストで結果を返す（反証 軽6）
+      assert.match(ua, /const away = items\.some\(\(it\) => it\.day !== dayRef\.current\)/)
+      assert.match(ua, /を戻せませんでした。その日を開いて確かめ、もう一度入れてください。/)
+      // トーストが出ている間に続けて消した分は、1つのトーストでまとめて戻す（2件目を消しても1件目を戻せる＝反証 中1）
+      const ou = b.slice(b.indexOf('const offerUndo ='), b.indexOf('const remove = async'))
+      assert.match(b, /const UNDO_WINDOW_MS = 8000/)
+      assert.match(code('../src/components/ui.tsx'), /const TOAST_UNDO_MS = 8000/, 'トーストの長さと同じ')
+      assert.match(ou, /const items = now - b\.at < UNDO_WINDOW_MS \? \[\.\.\.b\.items\.filter\(/)
+      assert.match(ou, /undoBatch\.current = \{ at: 0, items: \[\] \}\s+void undoAll\(items\)/)
       assert.doesNotMatch(b, /<ConfirmDialog\s+open=\{delTarget/, '消す時は確かめの小窓を出さない')
       // 〔元に戻す〕だけは取り消しの送信待ちでも入れ直す（ふつうに押した時は、届くまで入れない＝2b の反証 中1）
-      assert.match(b, /if \(!fromUndo && cellOf\(rid, label\)\.deleting\) \{\s*say\(key, 'warn', `「\$\{label\}」は取り消しの送信待ちです。取り消しが届いてから入れ直してください。`\)/)
+      assert.match(b, /if \(!fromUndo\) \{\s*const c = cellOf\(rid, label\)\s*if \(c\.deleting\) \{\s*say\(key, 'warn', `「\$\{label\}」は取り消しの送信待ちです。取り消しが届いてから入れ直してください。`\)/)
+      // 〔＋〕で、送信待ち（取り消しと入れ直しの両方を含む）・保存中の項目は入れない（同じ項目の追加を2つ積まない＝反証 軽7）
+      assert.match(b, /if \(c\.locked \|\| busy\.has\(bk\)\) \{\s*say\(key, 'warn', `「\$\{label\}」は送信待ち・保存中です。届いてから押してください。`\)/)
       const merged = b.slice(b.indexOf("if (r.kind === 'merged') {"), b.indexOf('clearMsg(key)\n      return true'))
       assert.ok(merged.length > 0)
       assert.doesNotMatch(merged, /show\(/, '合流した時はトースト（〔元に戻す〕）を出さない')
@@ -596,8 +615,17 @@ if (A === null) {
       // 書けた行（新しい rev）を画面の行に映す（古い rev で次を送らない）
       assert.match(b, /putRow\(a\.day, r\)/)
       assert.match(b, /putRow\(d, r\.row\)/)
+      // 書く前に始まった静かな読み直しは、書けた時に捨てて読み直し直す（返った古い行で新しい rev を上書きしない＝反証 軽11）
+      assert.match(b, /quietGen\.current = quiet \? gen : null/)
+      assert.match(b, /const dropStaleReload = \(\) => \{\s*if \(quietGen\.current !== null && quietGen\.current === genRef\.current\) \{\s*genRef\.current \+= 1\s*quietGen\.current = null\s*scheduleReload\(\)/)
+      assert.match(b, /const putRow = \(d: string, row: DaycareActivity\) => \{\s*dropStaleReload\(\)/)
+      assert.match(b, /const dropRow = \(d: string, id: number\) => \{\s*dropStaleReload\(\)/)
+      // 押せない時は「押すと…」と読み上げない（旗が閉じている・一括の最中も＝反証 軽3）
+      assert.match(b, /: running\s+\? `\$\{head\}まとめて入れている間は押せません`\s+: !canWrite\s+\? `\$\{head\}いまは押せません（画面の上の知らせを見てください）`\s+: `\$\{head\}押すと/)
       // 送信待ちの度合いの変更は重ねて出して押せない・取り消しの送信待ちも押せない・まだ載っていない送信待ちの追加も押せない
       assert.match(b, /return \{ row: a, shown: p\?\.participation \?\? a\.participation, waiting: p !== undefined, deleting, locked: p !== undefined, stopped \}/)
+      // 止まった変更と止まった追加が両方ある時は両方知らせる（1人の画面の活動の欄と同じ＝反証 軽8）
+      assert.match(b, /const stopped = \[\.\.\.\(st === undefined \? \[\] : \[stoppedUpdText\(label, st\)\]\), \.\.\.addNote\]/)
       assert.match(b, /if \(liveAdd !== undefined\) \{\s*return \{ row: null, shown: liveAdd\.participation, waiting: true, deleting: false, locked: true,/)
       assert.match(b, /if \(cell\.locked \|\| busy\.has\(`\$\{d\}:\$\{rid\}:\$\{label\}`\)\) return/)
       // 送信待ちの重ねは、この端末の送信待ちそのもの（pendingActivityOps）から出す
@@ -622,7 +650,10 @@ if (A === null) {
       assert.match(run, /const r = await insertDaycareActivity\(\{ resident_id: rid, day: d, label: l, recorded_by: actorId \}\)/)
       assert.match(run, /setResult\(\{ day: d, tone: bad \? 'warn' : 'info', text: bulkResultText\(l, outcomes\) \}\)/)
       // 一括の相手の「記録あり」は、サーバーの行（取り消しの送信待ちの行も残っている）と送信待ちの追加
-      assert.match(b, /const has = \(rid: number, l: string\) => rowsByKey\.has\(`\$\{rid\}\\t\$\{l\}`\) \|\| overlay\.adds\.some\(\(p\) => p\.residentId === rid && p\.label === l\)/)
+      // 2026-10-26 反証 軽5 で保存中（応答待ち）も足した（応答待ちの方へ一括で2回目を送らない）
+      assert.match(b, /const has = \(rid: number, l: string\) =>\s+rowsByKey\.has\(`\$\{rid\}\\t\$\{l\}`\) \|\| overlay\.adds\.some\(\(p\) => p\.residentId === rid && p\.label === l\) \|\| busy\.has\(`\$\{day\}:\$\{rid\}:\$\{l\}`\)/)
+      // 「その他」の見出しの読み上げは見えている「その他」で始める（label-in-name・反証 軽4）
+      assert.match(b, /aria-label="その他：ほかの活動を、/)
       // 「その他」の見出し・〔＋〕は項目を入れる小窓（40字・そろえた形で検査）
       assert.match(b, /onClick=\{askOther\}/)
       assert.match(b, /const otherErr = otherText === '' \? null : activityLabelError\(otherText\)/)

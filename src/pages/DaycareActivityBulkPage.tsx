@@ -6,7 +6,8 @@
 // ・行: 一括の画面と同じ方（予定の方のうち休み・入院中を除く全員と予定外で来た方＝activityTargets・2026-10-24 §9.4 の4）。並びは五十音のまま
 // ・列: 氏名（左に残す）｜定型の7つ（DAYCARE_ACTIVITY_CHIPS の順）｜その他（自由入力の項目を小さなボタンで並べ、末尾に〔＋〕）
 // ・枠を押すたびに 無し → 参加 → 一部 → 見学 → 不参加 → 消す（nextParticipation）。消した時は確かめを挟まず、トーストの〔元に戻す〕で
-//   消す前の度合いに戻す（取り消しが送信待ちの時も出す。db.ts が取り消しの後に送る＝activityDeletePending）
+//   消す前の度合いに戻す（取り消しが送信待ちの時も出す。db.ts が取り消しの後に送る＝activityDeletePending）。
+//   トーストが出ている間に続けて消した分は、1つのトーストでまとめて戻す（2件目を消しても1件目を戻せる＝反証 中1）
 // ・まだ来ていない方（予定のまま）の枠を押した時は「まだ到着していません。記録しますか」を挟む（その方・その日につき、この画面を開いている間に1回）
 // ・列の見出しを押すと、来た方（在席・帰宅）のうち、その項目の記録の無い方にまとめて「参加」で入れる（columnFillTargets・確かめの小窓つき）。
 //   まだ来ていない方・もう記録がある方は変えない（親の検収 中2 の決まりを引き継ぐ）
@@ -109,9 +110,21 @@ interface Cell {
   deleting: boolean
   /** 押せない（送信待ち・止まった追加だけで行が無い） */
   locked: boolean
-  /** 止まった送信待ちの知らせ（▲。行の下に出す）。無ければ null */
-  stopped: string | null
+  /** 止まった送信待ちの知らせ（▲。行の下に出す）。止まった変更と止まった追加が両方ある時は両方（1人の画面の活動の欄と同じ）。無ければ空 */
+  stopped: string[]
 }
+
+/** 〔元に戻す〕で戻す1件（人・日・項目・消す前の度合いは消した時に固定する） */
+interface UndoItem {
+  rid: number
+  day: string
+  label: string
+  before: ActivityParticipation
+  name: string
+  queued: boolean
+}
+/** 〔元に戻す〕のトーストが出ている長さ（ui.tsx の TOAST_UNDO_MS と同じ）。この間に続けて消した分は1つのトーストでまとめて戻す */
+const UNDO_WINDOW_MS = 8000
 
 const toneCls: Record<Msg['tone'], string> = {
   info: 'border-primary bg-surface',
@@ -151,8 +164,12 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
   const otherInput = useRef<HTMLInputElement>(null)
   /** まだ来ていない方で、この画面を開いている間に記録を確かめた方（`${day}:${rid}`。画面のメモリだけ） */
   const lateOk = useRef<Set<string>>(new Set())
+  /** 〔元に戻す〕のまとまり（トーストが出ている間に続けて消した分。2件目を消しても1件目を戻せるように＝反証 中1） */
+  const undoBatch = useRef<{ at: number; items: UndoItem[] }>({ at: 0, items: [] })
   const { toast, show } = useToast()
   const genRef = useRef(0)
+  /** いま走っている読み直しが静かな読み直し（他の端末の変更・送信待ちの減り）の時、その gen。書けた時に捨てるのに使う */
+  const quietGen = useRef<number | null>(null)
   const dayRef = useRef(day)
   dayRef.current = day
 
@@ -177,6 +194,7 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
 
   const load = useCallback(async (target: string, quiet: boolean) => {
     const gen = ++genRef.current
+    quietGen.current = quiet ? gen : null
     if (!quiet) {
       setLoading(true)
       setError(null)
@@ -214,7 +232,10 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
       if (gen !== genRef.current) return
       if (!quiet) setError(ERR_LOAD)
     } finally {
-      if (gen === genRef.current) setLoading(false)
+      if (gen === genRef.current) {
+        setLoading(false)
+        quietGen.current = null
+      }
     }
   }, [])
 
@@ -342,12 +363,13 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
     const mine = overlay.adds.filter((p) => p.residentId === rid && p.label === label)
     const liveAdd = mine.find((p) => !p.stopped)
     const stoppedAdd = mine.find((p) => p.stopped)
+    const addNote = stoppedAdd === undefined ? [] : [stoppedAddText(label, stoppedAdd)]
     if (a !== null) {
       const p = overlay.upd.get(a.id)
       const st = overlay.stoppedUpd.get(a.id)
       // 止まった度合いの変更・取り消しはサーバーの値で出して行の下で知らせる。止まった追加は、同じ項目の行がサーバーにあっても知らせる
-      // （押した人が食い違いに気づけるように＝1人の画面の活動の欄と同じ）
-      const stopped = st !== undefined ? stoppedUpdText(label, st) : stoppedAdd !== undefined ? stoppedAddText(label, stoppedAdd) : null
+      // （押した人が食い違いに気づけるように）。両方ある時は両方（1人の画面の活動の欄と同じ＝反証 軽8）
+      const stopped = [...(st === undefined ? [] : [stoppedUpdText(label, st)]), ...addNote]
       const deleting = p?.deleted === true
       // 取り消しの送信待ちの後に〔元に戻す〕で入れ直した分は、届いた後の度合いで出す（db.ts が取り消しの後に送る）
       if (deleting && liveAdd !== undefined) return { row: a, shown: liveAdd.participation, waiting: true, deleting: false, locked: true, stopped }
@@ -355,15 +377,17 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
     }
     // 送信待ちの追加は、まだ載っていない項目だけ重ねる
     if (liveAdd !== undefined) {
-      return { row: null, shown: liveAdd.participation, waiting: true, deleting: false, locked: true, stopped: stoppedAdd === undefined ? null : stoppedAddText(label, stoppedAdd) }
+      return { row: null, shown: liveAdd.participation, waiting: true, deleting: false, locked: true, stopped: addNote }
     }
     if (stoppedAdd !== undefined) {
-      return { row: null, shown: stoppedAdd.participation, waiting: false, deleting: false, locked: true, stopped: stoppedAddText(label, stoppedAdd) }
+      return { row: null, shown: stoppedAdd.participation, waiting: false, deleting: false, locked: true, stopped: addNote }
     }
-    return { row: null, shown: null, waiting: false, deleting: false, locked: false, stopped: null }
+    return { row: null, shown: null, waiting: false, deleting: false, locked: false, stopped: [] }
   }
-  /** その項目の記録（送信待ちの追加・取り消しの送信待ちを含む）があるか。列の見出しの一括の相手を選ぶのに使う */
-  const has = (rid: number, l: string) => rowsByKey.has(`${rid}\t${l}`) || overlay.adds.some((p) => p.residentId === rid && p.label === l)
+  /** その項目の記録（送信待ちの追加・取り消しの送信待ち・保存中＝応答待ちを含む）があるか。列の見出しの一括の相手を選ぶのに使う
+   *  （応答待ちの方へ一括で2回目を送らない＝反証 軽5） */
+  const has = (rid: number, l: string) =>
+    rowsByKey.has(`${rid}\t${l}`) || overlay.adds.some((p) => p.residentId === rid && p.label === l) || busy.has(`${day}:${rid}:${l}`)
   /** 「その他」の列に並べる項目（サーバーの行は入れた順 → まだ載っていない送信待ちの追加） */
   const otherLabelsOf = (rid: number): string[] => {
     const labels = otherActivitiesOf(data?.activities ?? [], rid, day).map((a) => a.label)
@@ -411,13 +435,26 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
       else next.delete(k)
       return next
     })
+  /** 書く前に始まった静かな読み直しは、書いた後に返ると書く前の行（古い rev）で上書きするので捨てて、読み直し直す（反証 軽11）。
+   *  捨てるのは静かな読み直しだけ（日の切り替え・〔最新に更新〕の読み込みは捨てない） */
+  const dropStaleReload = () => {
+    if (quietGen.current !== null && quietGen.current === genRef.current) {
+      genRef.current += 1
+      quietGen.current = null
+      scheduleReload()
+    }
+  }
   /** 書けた行を画面の行に映す（次に押した時は、この新しい rev の行の上に送る） */
-  const putRow = (d: string, row: DaycareActivity) =>
+  const putRow = (d: string, row: DaycareActivity) => {
+    dropStaleReload()
     setData((cur) =>
       cur === null || cur.day !== d || cur.activities === null ? cur : { ...cur, activities: [...cur.activities.filter((x) => x.id !== row.id), row] },
     )
-  const dropRow = (d: string, id: number) =>
+  }
+  const dropRow = (d: string, id: number) => {
+    dropStaleReload()
     setData((cur) => (cur === null || cur.day !== d || cur.activities === null ? cur : { ...cur, activities: cur.activities.filter((x) => x.id !== id) }))
+  }
 
   /** 1項目を足す（送り先は押した時の人・日に固定）。fromUndo＝〔元に戻す〕（取り消しの送信待ちでも、消す前の度合いで入れ直す） */
   const add = async (rid: number, d: string, rawLabel: string, participation: ActivityParticipation, fromUndo = false): Promise<boolean> => {
@@ -435,11 +472,19 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
     }
     // 取り消しの送信待ちの項目は、届くまで入れない（入れ直すと先の行に合流し、後から届いた取り消しで入れ直しまで消えるため＝2b の反証 中1）。
     // 〔元に戻す〕だけは入れ直す（db.ts は取り消しの送信待ちの行に合流させず、送信待ちに積んで取り消しの後に送る）
-    if (!fromUndo && cellOf(rid, label).deleting) {
-      say(key, 'warn', `「${label}」は取り消しの送信待ちです。取り消しが届いてから入れ直してください。`)
-      return false
-    }
     const bk = `${d}:${rid}:${label}`
+    if (!fromUndo) {
+      const c = cellOf(rid, label)
+      if (c.deleting) {
+        say(key, 'warn', `「${label}」は取り消しの送信待ちです。取り消しが届いてから入れ直してください。`)
+        return false
+      }
+      // 〔＋〕で、送信待ち（取り消しと〔元に戻す〕の入れ直しの両方を含む）・保存中の項目を入れると、同じ項目の追加が2つ積まれる（反証 軽7）
+      if (c.locked || busy.has(bk)) {
+        say(key, 'warn', `「${label}」は送信待ち・保存中です。届いてから押してください。`)
+        return false
+      }
+    }
     setBusyKey(bk, true)
     try {
       const r = await insertDaycareActivity({ resident_id: rid, day: d, label, participation, recorded_by: actorId })
@@ -498,6 +543,41 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
     }
   }
 
+  /** 〔元に戻す〕: まとめた分を消す前の度合いで入れ直す。違う日を開いている時・戻せなかった分がある時は、トーストで結果を返す
+   *  （行の下の知らせは開いている日にしか見えないため＝反証 軽6） */
+  const undoAll = async (items: UndoItem[]) => {
+    const failed: UndoItem[] = []
+    for (const it of items) {
+      if (!(await add(it.rid, it.day, it.label, it.before, true))) failed.push(it)
+    }
+    const away = items.some((it) => it.day !== dayRef.current)
+    if (failed.length > 0) {
+      const f = failed[0]
+      show(
+        `${f.name}さんの「${f.label}」（${fmtDayLabel(f.day)}）${failed.length > 1 ? `ほか${failed.length - 1}件` : ''}を戻せませんでした。その日を開いて確かめ、もう一度入れてください。`,
+      )
+    } else if (away) {
+      show(items.length === 1 ? `${items[0].name}さんの「${items[0].label}」（${fmtDayLabel(items[0].day)}）を戻しました` : `取り消した活動${items.length}件を戻しました`)
+    }
+  }
+  /** 消した分を〔元に戻す〕のトーストに出す。トーストが出ている間に続けて消した分は、1つのトーストでまとめて戻す（反証 中1） */
+  const offerUndo = (it: UndoItem) => {
+    const now = Date.now()
+    const b = undoBatch.current
+    const items = now - b.at < UNDO_WINDOW_MS ? [...b.items.filter((x) => !(x.rid === it.rid && x.day === it.day && x.label === it.label)), it] : [it]
+    undoBatch.current = { at: now, items }
+    const waiting = items.some((x) => x.queued) ? '（送信待ちを含む）' : ''
+    show(
+      items.length === 1
+        ? `${it.name}さんの活動「${it.label}」を取り消しました${it.queued ? '（送信待ち）' : ''}`
+        : `活動を${items.length}件取り消しました${waiting}（いちばん新しい分: ${it.name}さんの「${it.label}」）。〔元に戻す〕で${items.length}件とも戻します`,
+      () => {
+        undoBatch.current = { at: 0, items: [] }
+        void undoAll(items)
+      },
+    )
+  }
+
   /** 不参加の次＝消す。確かめは挟まず、トーストの〔元に戻す〕で消す前の度合いに戻す（取り消しが送信待ちの時も出す＝親の補足 2026-10-26） */
   const remove = async (a: DaycareActivity, name: string) => {
     const key = `${a.resident_id}:${a.day}`
@@ -507,20 +587,20 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
       return
     }
     // 戻す先（人・日・項目・度合い）は消す時に固定する
-    const before = a.participation
-    const undo = () => void add(a.resident_id, a.day, a.label, before, true)
+    const item = { rid: a.resident_id, day: a.day, label: a.label, before: a.participation, name }
     const bk = `${a.day}:${a.resident_id}:${a.label}`
     setBusyKey(bk, true)
     try {
       const r = await softDeleteDaycareActivity(a, { editedBy: actorId })
       if (r === 'queued') {
+        // 行は落とさない（取り消しが届くまで、列の見出しの一括の相手から外すため＝取り消しの送信待ちは「記録あり」と数える）
         setPending(pendingActivityOps())
         say(key, isQueuePersisted() ? 'info' : 'danger', `「${a.label}」の取り消し：${queuedText()}`, true)
-        show(`${name}さんの活動「${a.label}」を取り消しました（送信待ち）`, undo)
+        offerUndo({ ...item, queued: true })
       } else if (r === true) {
         dropRow(a.day, a.id)
         clearMsg(key)
-        show(`${name}さんの活動「${a.label}」を取り消しました`, undo)
+        offerUndo({ ...item, queued: false })
       } else {
         say(key, 'warn', `「${a.label}」は他の端末が先に直していました。最新の内容に読み直しました。確かめてから、もう一度押してください。`)
         scheduleReload()
@@ -727,16 +807,24 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
     const c = cellOf(rid, label)
     const saving = busy.has(`${day}:${rid}:${label}`)
     const word = !readable ? '？' : c.shown === null ? '—' : ACTIVITY_PARTICIPATION_LABEL[c.shown]
-    const mark = saving || c.waiting || c.deleting ? '↻' : c.stopped !== null ? '▲' : ''
+    const stopped = c.stopped.length > 0
+    const mark = saving || c.waiting || c.deleting ? '↻' : stopped ? '▲' : ''
     const after = nextParticipation(c.row?.participation ?? null)
     const now = !readable ? '読み込めませんでした' : c.shown === null ? '記録なし' : ACTIVITY_PARTICIPATION_LABEL[c.shown]
-    const status = saving ? '保存中' : c.deleting ? '取り消しの送信待ち' : c.waiting ? '送信待ち' : c.stopped !== null ? '送れずに止まっています' : ''
-    const ariaLabel =
-      saving || c.locked || !readable
-        ? `${name}さんの${label}（いま: ${now}${status !== '' ? `・${status}` : ''}）。${readable ? '届くまで押せません' : ''}`
-        : `${name}さんの${label}（いま: ${now}${status !== '' ? `・${status}` : ''}）。押すと${after === null ? '消します（〔元に戻す〕で戻せます）' : ACTIVITY_PARTICIPATION_LABEL[after]}`
+    const status = saving ? '保存中' : c.deleting ? '取り消しの送信待ち' : c.waiting ? '送信待ち' : stopped ? '送れずに止まっています' : ''
+    const head = `${name}さんの${label}（いま: ${now}${status !== '' ? `・${status}` : ''}）。`
+    // 押せない時は「押すと…」と言わない（旗が閉じている・一括の最中も＝反証 軽3）
+    const ariaLabel = !readable
+      ? head
+      : saving || c.locked
+        ? `${head}届くまで押せません`
+        : running
+          ? `${head}まとめて入れている間は押せません`
+          : !canWrite
+            ? `${head}いまは押せません（画面の上の知らせを見てください）`
+            : `${head}押すと${after === null ? '消します（〔元に戻す〕で戻せます）' : ACTIVITY_PARTICIPATION_LABEL[after]}`
     const tone =
-      c.stopped !== null
+      stopped
         ? 'border-2 border-warn bg-warn-bg'
         : c.shown !== null && readable
           ? 'border-2 border-primary bg-accent-bg'
@@ -845,7 +933,7 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                         type="button"
                         disabled={!canWrite || running}
                         onClick={askOther}
-                        aria-label="ほかの活動を、来た方のうち記録の無い方にまとめて「参加」で入れる（項目を入れてから確かめます）"
+                        aria-label="その他：ほかの活動を、来た方のうち記録の無い方にまとめて「参加」で入れる（項目を入れてから確かめます）"
                         className="min-h-tap w-full min-w-tap rounded border border-border-strong bg-surface px-2 text-base font-bold text-ink disabled:text-ink3"
                       >
                         その他
@@ -858,12 +946,7 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                     const name = nameOf(rid)
                     const late = !activityDefaultChecked(rowOf(rid))
                     const others = readable ? otherLabelsOf(rid) : []
-                    const stoppedNotes = readable
-                      ? [...DAYCARE_ACTIVITY_CHIPS, ...others].flatMap((l) => {
-                          const s = cellOf(rid, l).stopped
-                          return s === null ? [] : [s]
-                        })
-                      : []
+                    const stoppedNotes = readable ? [...DAYCARE_ACTIVITY_CHIPS, ...others].flatMap((l) => cellOf(rid, l).stopped) : []
                     const m = msgs.get(`${rid}:${day}`)
                     const detail = stoppedNotes.length > 0 || m !== undefined
                     return (

@@ -168,8 +168,13 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
   const dayRef = useRef(day)
   dayRef.current = day
 
+  // 1分ごとに描き直す（対象者の表の「指導員」の予定は描いた時刻の時間帯で決まるため、昼をまたいでも〔完了〕で入る方と同じに＝2026-10-26 反証 軽9）
+  const [, setMinuteTick] = useState(0)
   useEffect(() => {
-    const t = window.setInterval(() => setToday(todayIso()), 60_000)
+    const t = window.setInterval(() => {
+      setToday(todayIso())
+      setMinuteTick((n) => n + 1)
+    }, 60_000)
     return () => window.clearInterval(t)
   }, [])
 
@@ -944,7 +949,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                             ) : fresh === null ? (
                               <span className="text-base text-ink2">—</span>
                             ) : (
-                              // 〔完了〕で入る既定の時間（薄く）
+                              // 〔完了〕で入る既定の時間（薄く）。記録した時間は「開始の時刻〜 分」なので文字の形で分かる（色だけに頼らない）
                               <span className="text-base text-ink2">{TRAINING_DEFAULT_MIN}分</span>
                             )}
                           </td>
@@ -955,7 +960,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                               ) : fresh === null ? (
                                 <span className="text-base text-ink2">—</span>
                               ) : fresh.instructor_id !== null ? (
-                                <span className="text-base text-ink2">{staffName(fresh.instructor_id)}</span>
+                                <span className="text-base text-ink2">予定: {staffName(fresh.instructor_id)}</span>
                               ) : (
                                 <span className="text-base text-ink2">—（〔完了〕で選ぶ）</span>
                               )}
