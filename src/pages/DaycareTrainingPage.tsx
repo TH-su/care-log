@@ -11,7 +11,7 @@
 // ・入力解禁は機能訓練だけの旗 input_enabled_daycare_training。表が無い DB は「設定待ち」
 // ・端末に業務データを残さない（localStorage を使わない）。送り先（方・日）は押した時に固定する
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   DbError,
@@ -168,8 +168,13 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
   const dayRef = useRef(day)
   dayRef.current = day
 
+  // 1分ごとに描き直す（対象者の表の「指導員」の予定は描いた時刻の時間帯で決まるため、昼をまたいでも〔完了〕で入る方と同じに＝2026-10-26 反証 軽9）
+  const [, setMinuteTick] = useState(0)
   useEffect(() => {
-    const t = window.setInterval(() => setToday(todayIso()), 60_000)
+    const t = window.setInterval(() => {
+      setToday(todayIso())
+      setMinuteTick((n) => n + 1)
+    }, 60_000)
     return () => window.clearInterval(t)
   }, [])
 
@@ -280,6 +285,30 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
       if (reloadTimer.current !== null) window.clearTimeout(reloadTimer.current)
     }
   }, [scheduleReload])
+
+  // ── 対象者の表の横スクロールの枠（2026-10-26 表にした・バイタル一括と同じ）。表が枠より広い（横にスクロールできる）時だけ手がかりを出す ──
+  const [tableBox, setTableBox] = useState<HTMLDivElement | null>(null)
+  const [tableScrolls, setTableScrolls] = useState(false)
+  /** 表の枠の幅（行の下の知らせを、この幅で折り返して左に残すため） */
+  const [tableBoxWidth, setTableBoxWidth] = useState(0)
+  useEffect(() => {
+    const el = tableBox
+    if (!el) return
+    const check = () => {
+      setTableScrolls(el.scrollWidth > el.clientWidth + 1)
+      setTableBoxWidth(el.clientWidth)
+    }
+    check()
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', check)
+      return () => window.removeEventListener('resize', check)
+    }
+    // 枠（画面幅・文字の大きさ）と表（行の増減）の両方の大きさの変化で測り直す
+    const ro = new ResizeObserver(check)
+    ro.observe(el)
+    if (el.firstElementChild) ro.observe(el.firstElementChild)
+    return () => ro.disconnect()
+  }, [tableBox])
 
   const board = useMemo(
     () => (data === null ? null : buildDaycareBoard({ planRows: data.planRows, source: data.planSource, residents, attendance: data.attendance })),
@@ -814,68 +843,183 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
         {targets.length === 0 ? (
           <p className="text-base text-ink2">この日の予定の方がいません（休み・入院中の方は出しません）。予定外で来た方は、今日の画面の〔予定にない方を追加〕で足したカードを押し、〔予定外で到着〕を押すと、ここに出ます。</p>
         ) : (
-          <ul className="divide-y divide-border">
-            {targets.map((rid) => {
-              const s = sessionOf(sessions, rid, day)
-              const prev = previousProgram(data.recent, rid, day)
-              const add = pendingAdd(rid)
-              const waiting = add !== undefined
-              const p = s === null ? undefined : pendingRow('daycare_training_sessions', s.id)
-              const name = nameOf(rid)
-              return (
-                <li key={rid} className="space-y-2 py-2">
-                  <div className="flex flex-wrap items-center justify-between gap-gap">
-                    <div className="min-w-0">
-                      <p className="text-lg font-bold text-ink">{name}</p>
-                      {planTags?.noPlan.has(rid) ? <p className="text-sm text-ink2">{TARGET_NO_PLAN_LABEL[planTags.noPlan.get(rid) ?? 'nocopy']}</p> : null}
-                      <p className="text-base text-ink2">
-                        {s !== null
-                          ? `${sessionText(s)}・指導員 ${staffName(s.instructor_id)}`
-                          : waiting
-                            ? add.stopped
-                              ? '記録（送れずに止まっています）'
-                              : '記録（送信待ち）'
-                            : data.sessions === null
-                              ? missing
-                                ? '（設定待ち）'
-                                : '（読み込めませんでした）'
-                              : `記録なし${prev !== null ? `（前回: ${prev}）` : '（前回の記録なし）'}`}
-                        {p !== undefined ? `（${p.stopped ? '止まっています' : '送信待ち'}）` : ''}
-                      </p>
-                    </div>
-                    <div className="flex flex-wrap gap-gap">
-                      {s !== null ? (
-                        <button type="button" disabled={busy} onClick={() => openRow(s)} className={btn} aria-label={`${name}さんの機能訓練の記録を開く`}>
-                          記録を開く
-                        </button>
-                      ) : (
-                        <>
-                          <button type="button" disabled={!canWrite || busy || waiting} onClick={() => void quickDone(rid)} className={primaryBtn} aria-label={`${name}さんの機能訓練を完了で記録する`}>
-                            完了
-                          </button>
-                          <button type="button" disabled={!canWrite || busy || waiting} onClick={() => openNew(rid, 'partial')} className={btn} aria-label={`${name}さんの機能訓練を一部で記録する`}>
-                            一部
-                          </button>
-                          <button type="button" disabled={!canWrite || busy || waiting} onClick={() => openNew(rid, 'cancelled')} className={btn} aria-label={`${name}さんの機能訓練を中止で記録する`}>
-                            中止
-                          </button>
-                        </>
-                      )}
-                      <Link
-                        to={personPath(rid, day, today)}
-                        aria-label={`${name}さんの1日の記録を開く`}
-                        className="inline-flex min-h-tap items-center rounded border border-primary bg-surface px-4 text-base font-bold text-primary"
-                      >
-                        1日の記録<span aria-hidden="true"> ›</span>
-                      </Link>
-                    </div>
-                  </div>
-                  {add?.stopped === true || p?.stopped === true ? msgBox({ tone: 'warn', text: MSG_STOPPED }) : null}
-                  {rowMsg !== null && rowMsg.rid === rid && rowMsg.day === day ? msgBox(rowMsg.msg) : null}
-                </li>
-              )
-            })}
-          </ul>
+          <>
+            {/* 表が画面より広い時だけ出す手がかり（バイタル一括と同じ） */}
+            {tableScrolls ? (
+              <p className="text-sm text-ink2">
+                <span aria-hidden="true">⇆ </span>
+                表は横にスクロールできます（氏名の列は左に残ります）
+              </p>
+            ) : null}
+            {/* 2026-10-26: 1行1人の表にした（バイタル一括と同じ形）。処理（quickDone・openNew・openRow）と押せる条件は今までのまま。
+                横スクロールはこの枠の中だけ（ページ全体を広げない）。relative は表の中の読み上げ用の文字の基準をこの枠にするため */}
+            <div
+              ref={setTableBox}
+              role="region"
+              aria-label={`${fmtDayLabel(day)}の機能訓練の対象者の表${tableScrolls ? '（横にスクロールできます）' : ''}`}
+              tabIndex={tableScrolls ? 0 : undefined}
+              className="relative overflow-x-auto"
+            >
+              <table className="w-full min-w-max border-collapse text-base">
+                <caption className="sr-only">{fmtDayLabel(day)}の機能訓練の対象者の表</caption>
+                <thead>
+                  <tr className="border-b border-border-strong bg-surface2 text-left">
+                    {/* 氏名の列は横スクロールしても左に残す（sticky）。背景は見出し行と同じ色 */}
+                    <th scope="col" className="sticky left-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
+                      <span className="dc-vital-name block">氏名</span>
+                    </th>
+                    <th scope="col" className="px-2 py-2 text-sm font-bold text-ink2">
+                      内容（前回）
+                    </th>
+                    <th scope="col" className="px-2 py-2 text-sm font-bold text-ink2">
+                      時間
+                    </th>
+                    <th scope="col" className="px-2 py-2 text-sm font-bold text-ink2">
+                      指導員
+                    </th>
+                    <th scope="col" className="px-2 py-2 text-sm font-bold text-ink2">
+                      結果
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {targets.map((rid) => {
+                    const s = sessionOf(sessions, rid, day)
+                    const prev = previousProgram(data.recent, rid, day)
+                    const add = pendingAdd(rid)
+                    const waiting = add !== undefined
+                    const p = s === null ? undefined : pendingRow('daycare_training_sessions', s.id)
+                    const name = nameOf(rid)
+                    // 記録の無い方（送信待ちでも読めない日でもない）には、〔完了〕で入る予定の値を薄く出す
+                    const fresh = s === null && !waiting && data.sessions !== null ? freshInput(rid, day, 'done') : null
+                    // 記録が無い時の文（送信待ち・止まった時・読めない時は今までの文のまま）
+                    const status =
+                      s !== null
+                        ? null
+                        : waiting
+                          ? add.stopped
+                            ? '記録（送れずに止まっています）'
+                            : '記録（送信待ち）'
+                          : data.sessions === null
+                            ? missing
+                              ? '（設定待ち）'
+                              : '（読み込めませんでした）'
+                            : null
+                    const stoppedNote = add?.stopped === true || p?.stopped === true
+                    const m = rowMsg !== null && rowMsg.rid === rid && rowMsg.day === day ? rowMsg.msg : null
+                    const detail = stoppedNote || m !== null
+                    return (
+                      <Fragment key={rid}>
+                        <tr className={`align-middle ${detail ? '' : 'border-b border-border'}`}>
+                          {/* 氏名の列は横スクロールしても左に残す（sticky）。背景はページの地の色（下を流れる欄を透かさない） */}
+                          <th scope="row" className="sticky left-0 z-20 bg-bg px-2 py-1 text-left font-normal">
+                            {/* 氏名の列の幅は dc-vital-name で決める（札が長くても列を広げず、中で折り返す） */}
+                            <div className="dc-vital-name space-y-1">
+                              <span className="block text-base font-bold text-ink">{name}</span>
+                              {planTags?.noPlan.has(rid) ? <span className="block text-sm text-ink2">{TARGET_NO_PLAN_LABEL[planTags.noPlan.get(rid) ?? 'nocopy']}</span> : null}
+                              <Link
+                                to={personPath(rid, day, today)}
+                                aria-label={`${name}さんの1日の記録を開く`}
+                                className="inline-flex min-h-tap items-center rounded border border-primary bg-surface px-2 text-base font-bold text-primary"
+                              >
+                                1日の記録<span aria-hidden="true"> ›</span>
+                              </Link>
+                            </div>
+                          </th>
+                          <td className="px-2 py-1">
+                            {/* 内容と指導員の列は上限の幅で折り返す（ふつうの文字の大きさで、結果のボタンまで横スクロールなしで見えるように） */}
+                            <div className="max-w-36">
+                              {s !== null ? (
+                                <span className="text-base text-ink">{s.program}</span>
+                              ) : fresh === null ? (
+                                <span className="text-base text-ink2">—</span>
+                              ) : prev !== null ? (
+                                <span className="text-base text-ink2">前回: {prev}</span>
+                              ) : (
+                                <span className="text-base text-ink2">—（前回の記録なし）</span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-2 py-1">
+                            {s !== null ? (
+                              <span className="text-base text-ink">
+                                {s.started_at.replace(/^0(\d)/, '$1')}
+                                {s.result === 'cancelled' ? '' : `〜 ${s.duration_min ?? '—'}分`}
+                              </span>
+                            ) : fresh === null ? (
+                              <span className="text-base text-ink2">—</span>
+                            ) : (
+                              // 〔完了〕で入る既定の時間（薄く）。記録した時間は「開始の時刻〜 分」なので文字の形で分かる（色だけに頼らない）
+                              <span className="text-base text-ink2">{TRAINING_DEFAULT_MIN}分</span>
+                            )}
+                          </td>
+                          <td className="px-2 py-1">
+                            <div className="max-w-32">
+                              {s !== null ? (
+                                <span className="text-base text-ink">{staffName(s.instructor_id)}</span>
+                              ) : fresh === null ? (
+                                <span className="text-base text-ink2">—</span>
+                              ) : fresh.instructor_id !== null ? (
+                                <span className="text-base text-ink2">予定: {staffName(fresh.instructor_id)}</span>
+                              ) : (
+                                <span className="text-base text-ink2">—（〔完了〕で選ぶ）</span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="space-y-1 px-2 py-1">
+                            {s !== null ? (
+                              <p className="text-base font-bold text-ink">
+                                {TRAINING_RESULT_LABEL[s.result]}
+                                {s.result === 'cancelled' && s.cancel_reason !== null
+                                  ? `（${TRAINING_CANCEL_REASON_LABEL[s.cancel_reason]}${s.cancel_reason === 'other' && s.cancel_note ? `・${s.cancel_note}` : ''}）`
+                                  : ''}
+                                {p !== undefined ? <span className="font-normal text-ink2">（{p.stopped ? '止まっています' : '送信待ち'}）</span> : null}
+                              </p>
+                            ) : status !== null ? (
+                              <p className="text-base text-ink2">{status}</p>
+                            ) : null}
+                            <div className="flex flex-wrap gap-gap">
+                              {s !== null ? (
+                                <button type="button" disabled={busy} onClick={() => openRow(s)} className={btn} aria-label={`${name}さんの機能訓練の記録を開く`}>
+                                  記録を開く
+                                </button>
+                              ) : (
+                                <>
+                                  <button type="button" disabled={!canWrite || busy || waiting} onClick={() => void quickDone(rid)} className={primaryBtn} aria-label={`${name}さんの機能訓練を完了で記録する`}>
+                                    完了
+                                  </button>
+                                  <button type="button" disabled={!canWrite || busy || waiting} onClick={() => openNew(rid, 'partial')} className={btn} aria-label={`${name}さんの機能訓練を一部で記録する`}>
+                                    一部
+                                  </button>
+                                  <button type="button" disabled={!canWrite || busy || waiting} onClick={() => openNew(rid, 'cancelled')} className={btn} aria-label={`${name}さんの機能訓練を中止で記録する`}>
+                                    中止
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                        {detail ? (
+                          <tr className="border-b border-border">
+                            {/* 知らせの行は表の幅を広げない（バイタル一括と同じ形）。幅0＋最小100% の箱で表の幅の計算から外し、
+                                文は表の枠の幅で折り返して、横スクロールしても左に残す（sticky） */}
+                            <td colSpan={5} className="p-0">
+                              <div className="w-0 min-w-full">
+                                <div className="sticky left-0 space-y-1 px-2 pb-2" style={{ maxWidth: tableBoxWidth > 0 ? tableBoxWidth : undefined }}>
+                                  {stoppedNote ? msgBox({ tone: 'warn', text: MSG_STOPPED }) : null}
+                                  {m !== null ? msgBox(m) : null}
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        ) : null}
+                      </Fragment>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
         {outside.length > 0 ? (
           <div className="space-y-1 border-t border-border pt-2">

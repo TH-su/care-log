@@ -118,6 +118,33 @@ export function activityDefaultChecked(row: Pick<DaycareBoardRow, 'state'> | und
   return row !== undefined && (row.state === 'present' || row.state === 'left')
 }
 
+// ── 活動一括の表（2026-10-26 2回目・§9.3・§9.4。バイタル一括と同じ1行1人の表） ──
+
+/** 表の枠を押した時の次の度合い: 無し → 参加 → 一部 → 見学 → 不参加 → 消す（null） */
+export function nextParticipation(cur: ActivityParticipation | null): ActivityParticipation | null {
+  if (cur === null) return 'full'
+  const i = ACTIVITY_PARTICIPATIONS.indexOf(cur)
+  return i < 0 || i === ACTIVITY_PARTICIPATIONS.length - 1 ? null : ACTIVITY_PARTICIPATIONS[i + 1]
+}
+
+/** 表の「その他」の列に並べる活動（定型のチップでない項目・入れた順） */
+export function otherActivitiesOf(list: readonly DaycareActivity[], residentId: number, day: string): DaycareActivity[] {
+  return list
+    .filter((a) => a.resident_id === residentId && a.day === day && !DAYCARE_ACTIVITY_CHIPS.includes(a.label))
+    .sort((a, b) => a.id - b.id)
+}
+
+/**
+ * 列の見出しを押した時に「参加」を入れる相手: 表に出ている方のうち来た方（在席・帰宅＝activityDefaultChecked）で、
+ * その項目の記録（送信待ちの追加・取り消しの送信待ちを含む）がまだ無い方。もう記録がある方（一部・見学など）は変えない
+ */
+export function columnFillTargets(
+  rows: readonly Pick<DaycareBoardRow, 'residentId' | 'state'>[],
+  hasRecord: (residentId: number) => boolean,
+): number[] {
+  return rows.filter((r) => activityDefaultChecked(r) && !hasRecord(r.residentId)).map((r) => r.residentId)
+}
+
 /** 追加の結果（1人分）。merged＝同じ項目・同じ度合いの行が先にあった（1行に合流）／taken＝違う度合いで先にあった */
 export type ActivityAddOutcome = 'saved' | 'merged' | 'taken' | 'queued' | 'error'
 

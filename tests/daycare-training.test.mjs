@@ -323,6 +323,44 @@ describe('静的検査（段階3a の規律）', () => {
     assert.match(p, /<ConfirmDialog\s+open=\{delSession !== null\}/)
     assert.match(p, /<ConfirmDialog\s+open=\{delStaff !== null\}/)
   })
+  it('今日の対象者の表（2026-10-26）: 列の並び（氏名｜内容（前回）｜時間｜指導員｜結果）・氏名の列は左に残す・知らせの行は表の幅を広げない・押せる条件は今までのまま', () => {
+    const p = code('../src/pages/DaycareTrainingPage.tsx')
+    const sec = p.slice(p.indexOf('aria-labelledby="h-targets"'), p.indexOf('{outside.length > 0 ? ('))
+    const head = sec.slice(sec.indexOf('<thead>'), sec.indexOf('</thead>'))
+    const order = ['<span className="dc-vital-name block">氏名</span>', '内容（前回）', '時間', '指導員', '結果'].map((w) => head.indexOf(w))
+    assert.ok(order.every((i, k) => i > 0 && (k === 0 || i > order[k - 1])), `列の並び ${order}`)
+    assert.match(head, /<th scope="col" className="sticky left-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">/)
+    assert.match(sec, /<th scope="row" className="sticky left-0 z-20 bg-bg px-2 py-1 text-left font-normal">\s*(\{\}\s*)?<div className="dc-vital-name space-y-1">/)
+    assert.match(sec, /role="region"[\s\S]*?className="relative overflow-x-auto"[\s\S]*?<table className="w-full min-w-max border-collapse text-base">\s*<caption className="sr-only">/)
+    assert.doesNotMatch(sec, /<ul className="divide-y divide-border">\s*\{targets\.map/, '1人1行の一覧は表にした')
+    // 氏名の列: 札（planTags のまま）と〔1日の記録 ›〕
+    assert.match(sec, /\{planTags\?\.noPlan\.has\(rid\) \? <span className="block text-sm text-ink2">\{TARGET_NO_PLAN_LABEL\[planTags\.noPlan\.get\(rid\) \?\? 'nocopy'\]\}<\/span> : null\}/)
+    assert.match(sec, /<Link\s+to=\{personPath\(rid, day, today\)\}[\s\S]*?1日の記録<span aria-hidden="true"> ›<\/span>/)
+    // 記録の無い方は〔完了〕で入る値を薄く出す（内容は前回・時間は既定・指導員は〔完了〕で入る予定の方）
+    assert.match(sec, /const fresh = s === null && !waiting && data\.sessions !== null \? freshInput\(rid, day, 'done'\) : null/)
+    assert.match(sec, /前回: \{prev\}/)
+    assert.match(sec, /—（前回の記録なし）/)
+    // 予定の指導員は「予定:」を付けて記録した指導員と分ける（色の濃さだけに頼らない・2026-10-26 反証 軽10）。
+    // 時間は記録なら「開始の時刻〜 分」なので文字の形で分かる（「予定:」を付けると 1180 の幅で結果の列が切れる）
+    assert.match(sec, /<span className="text-base text-ink2">\{TRAINING_DEFAULT_MIN\}分<\/span>/)
+    assert.match(sec, /fresh\.instructor_id !== null \? \(\s*<span className="text-base text-ink2">予定: \{staffName\(fresh\.instructor_id\)\}<\/span>/)
+    // 予定の指導員は描いた時刻の時間帯で決まるので、1分ごとに描き直す（昼をまたいでも〔完了〕で入る方と同じ・反証 軽9）
+    assert.match(p, /setMinuteTick\(\(n\) => n \+ 1\)/)
+    assert.match(sec, /—（〔完了〕で選ぶ）/)
+    // 結果: 記録がある方は結果の言葉と〔記録を開く〕。無い方は〔完了〕〔一部〕〔中止〕（今と同じ disabled の条件）。送信待ち・止まった時の文は今のまま
+    assert.match(sec, /\{TRAINING_RESULT_LABEL\[s\.result\]\}/)
+    assert.match(sec, /disabled=\{!canWrite \|\| busy \|\| waiting\} onClick=\{\(\) => void quickDone\(rid\)\}/)
+    assert.match(sec, /disabled=\{!canWrite \|\| busy \|\| waiting\} onClick=\{\(\) => openNew\(rid, 'partial'\)\}/)
+    assert.match(sec, /disabled=\{!canWrite \|\| busy \|\| waiting\} onClick=\{\(\) => openNew\(rid, 'cancelled'\)\}/)
+    assert.match(sec, /'記録（送れずに止まっています）'/)
+    assert.match(sec, /'記録（送信待ち）'/)
+    assert.match(sec, /（\{p\.stopped \? '止まっています' : '送信待ち'\}）/)
+    // 行の下の知らせ（rowMsg・MSG_STOPPED）はバイタル一括と同じ形（幅0＋最小100% の箱・左に残す）
+    assert.match(sec, /<td colSpan=\{5\} className="p-0">\s*<div className="w-0 min-w-full">\s*<div className="sticky left-0 space-y-1 px-2 pb-2" style=\{\{ maxWidth: tableBoxWidth > 0 \? tableBoxWidth : undefined \}\}>\s*\{stoppedNote \? msgBox\(\{ tone: 'warn', text: MSG_STOPPED \}\) : null\}\s*\{m !== null \? msgBox\(m\) : null\}/)
+    assert.match(sec, /const stoppedNote = add\?\.stopped === true \|\| p\?\.stopped === true/)
+    assert.match(sec, /const m = rowMsg !== null && rowMsg\.rid === rid && rowMsg\.day === day \? rowMsg\.msg : null/)
+    assert.match(p, /const ro = new ResizeObserver\(check\)\s+ro\.observe\(el\)\s+if \(el\.firstElementChild\) ro\.observe\(el\.firstElementChild\)/)
+  })
   it('入口: ルート・画面名・切り替え・1人の画面のカード（読むだけ）', () => {
     const app = code('../src/App.tsx')
     assert.match(app, /<Route path="\/record\/daycare\/training" element=\{<DaycareTrainingPage actorId=\{actorId\} staff=\{staff\} \/>\} \/>/)
