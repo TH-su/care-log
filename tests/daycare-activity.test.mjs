@@ -579,6 +579,14 @@ if (A === null) {
       // 違う日を開いている時・戻せなかった分がある時は、トーストで結果を返す（反証 軽6）
       assert.match(ua, /const away = items\.some\(\(it\) => it\.day !== dayRef\.current\)/)
       assert.match(ua, /を戻せませんでした。その日を開いて確かめ、もう一度入れてください。/)
+      // 戻している間に新しい〔元に戻す〕のトーストが出ていたら、結果のトーストで置き換えない（確認の反証 軽1）
+      assert.match(ua, /if \(undoBatch\.current\.items\.length > 0 && Date\.now\(\) - undoBatch\.current\.at < UNDO_WINDOW_MS\) return\s+if \(failed\.length > 0\)/)
+      // 入れ直しの記録者は押した時の値（ref）から読む（消した時の画面の値を使わない＝確認の反証 軽3）
+      assert.match(b, /recorded_by: actorRef\.current \}\)/)
+      assert.match(b, /if \(actorRef\.current === null\) return MSG_NO_RECORDER/)
+      // 止まった送信待ちには「届いてから」と言わない（確認の反証 軽2）
+      assert.match(b, /送れずに止まっています。設定の「送れていない記録」で確かめてください。/)
+      assert.match(b, /押せません。設定の「送れていない記録」で確かめてください/)
       // トーストが出ている間に続けて消した分は、1つのトーストでまとめて戻す（2件目を消しても1件目を戻せる＝反証 中1）
       const ou = b.slice(b.indexOf('const offerUndo ='), b.indexOf('const remove = async'))
       assert.match(b, /const UNDO_WINDOW_MS = 8000/)
@@ -589,7 +597,7 @@ if (A === null) {
       // 〔元に戻す〕だけは取り消しの送信待ちでも入れ直す（ふつうに押した時は、届くまで入れない＝2b の反証 中1）
       assert.match(b, /if \(!fromUndo\) \{\s*const c = cellOf\(rid, label\)\s*if \(c\.deleting\) \{\s*say\(key, 'warn', `「\$\{label\}」は取り消しの送信待ちです。取り消しが届いてから入れ直してください。`\)/)
       // 〔＋〕で、送信待ち（取り消しと入れ直しの両方を含む）・保存中の項目は入れない（同じ項目の追加を2つ積まない＝反証 軽7）
-      assert.match(b, /if \(c\.locked \|\| busy\.has\(bk\)\) \{\s*say\(key, 'warn', `「\$\{label\}」は送信待ち・保存中です。届いてから押してください。`\)/)
+      assert.match(b, /if \(c\.locked \|\| busy\.has\(bk\)\) \{[\s\S]*?: `「\$\{label\}」は送信待ち・保存中です。届いてから押してください。`,\s*\)\s*return false/)
       const merged = b.slice(b.indexOf("if (r.kind === 'merged') {"), b.indexOf('clearMsg(key)\n      return true'))
       assert.ok(merged.length > 0)
       assert.doesNotMatch(merged, /show\(/, '合流した時はトースト（〔元に戻す〕）を出さない')

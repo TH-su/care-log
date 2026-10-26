@@ -172,6 +172,9 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
   const quietGen = useRef<number | null>(null)
   const dayRef = useRef(day)
   dayRef.current = day
+  /** いまの記録者（〔元に戻す〕は消した時の画面の関数で走るので、記録者は押した時の値を ref から読む＝確認の反証 軽3） */
+  const actorRef = useRef(actorId)
+  actorRef.current = actorId
 
   useEffect(() => {
     const t = window.setInterval(() => setToday(todayIso()), 60_000)
@@ -413,7 +416,7 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
             ? kindBlockedMessage('daycare_activity')
             : MSG_GATE_UNKNOWN
     }
-    if (actorId === null) return MSG_NO_RECORDER
+    if (actorRef.current === null) return MSG_NO_RECORDER
     return null
   }
 
@@ -481,13 +484,20 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
       }
       // 〔＋〕で、送信待ち（取り消しと〔元に戻す〕の入れ直しの両方を含む）・保存中の項目を入れると、同じ項目の追加が2つ積まれる（反証 軽7）
       if (c.locked || busy.has(bk)) {
-        say(key, 'warn', `「${label}」は送信待ち・保存中です。届いてから押してください。`)
+        // 止まった送信待ちは届かないので「届いてから」と言わない（確認の反証 軽2）
+        say(
+          key,
+          'warn',
+          c.stopped.length > 0 && !c.waiting && !busy.has(bk)
+            ? `「${label}」は送れずに止まっています。設定の「送れていない記録」で確かめてください。`
+            : `「${label}」は送信待ち・保存中です。届いてから押してください。`,
+        )
         return false
       }
     }
     setBusyKey(bk, true)
     try {
-      const r = await insertDaycareActivity({ resident_id: rid, day: d, label, participation, recorded_by: actorId })
+      const r = await insertDaycareActivity({ resident_id: rid, day: d, label, participation, recorded_by: actorRef.current })
       if (r.kind === 'queued') {
         setPending(pendingActivityOps())
         say(key, isQueuePersisted() ? 'info' : 'danger', `「${label}」：${queuedText()}`, true)
@@ -551,6 +561,9 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
       if (!(await add(it.rid, it.day, it.label, it.before, true))) failed.push(it)
     }
     const away = items.some((it) => it.day !== dayRef.current)
+    // 戻している間に別の枠を消して、新しい〔元に戻す〕のトーストが出ている時は置き換えない（その〔元に戻す〕を消さない＝確認の反証 軽1）。
+    // 戻せなかった分は add が行の下にも知らせている
+    if (undoBatch.current.items.length > 0 && Date.now() - undoBatch.current.at < UNDO_WINDOW_MS) return
     if (failed.length > 0) {
       const f = failed[0]
       show(
@@ -817,7 +830,9 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
     const ariaLabel = !readable
       ? head
       : saving || c.locked
-        ? `${head}届くまで押せません`
+        ? stopped && !c.waiting && !saving
+          ? `${head}押せません。設定の「送れていない記録」で確かめてください`
+          : `${head}届くまで押せません`
         : running
           ? `${head}まとめて入れている間は押せません`
           : !canWrite
