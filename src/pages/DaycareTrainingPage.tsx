@@ -64,6 +64,7 @@ import {
   TRAINING_PROGRAM_MAX,
   TRAINING_RESULTS,
   TRAINING_RESULT_LABEL,
+  arrivedAtOf,
   defaultStartTime,
   dualRoleWithoutTime,
   instructorFor,
@@ -395,7 +396,9 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
   const freshInput = (rid: number, d: string, result: TrainingResult): TrainingInput => {
     const minutes = TRAINING_DEFAULT_MIN
     // 過去の日は押した時刻を使わない（開始時刻は空にして入れてもらう＝反証 中2）
-    const start = d === todayIso() ? defaultStartTime(nowMinutes(), result === 'cancelled' ? 0 : minutes) : ''
+    // 来所時刻より前にはしない（その日の到着を読めた時だけ・第6弾3）
+    const arrived = data !== null && data.day === d ? arrivedAtOf(data.attendance, rid, d) : null
+    const start = d === todayIso() ? defaultStartTime(nowMinutes(), result === 'cancelled' ? 0 : minutes, arrived) : ''
     return {
       result,
       started_at: start,
