@@ -66,6 +66,7 @@ import {
   TRAINING_RESULT_LABEL,
   arrivedAtOf,
   defaultStartTime,
+  startFloored,
   dualRoleWithoutTime,
   instructorFor,
   previousProgram,
@@ -98,6 +99,7 @@ const MSG_CONFLICT = '他の端末で先に直されていました。読み直�
 const MSG_STOPPED =
   '送れずに止まっている記録があります。設定の「送れていない記録」で、いまの記録とくらべて選ぶか、取り下げてください。'
 const MSG_PAST_START = '過去の日の記録です。開始時刻を実際の時刻で入れてください（押した時刻は使いません）。'
+const MSG_START_FLOORED = '来所から時間が短いため、開始時刻を来所の時刻にしました。時間が合っているか確かめてから保存してください。'
 
 /** 機能訓練の画面のルート（業務日は ?day= で持つ。今日は付けない） */
 export function trainingPath(day: string, today: string): string {
@@ -393,12 +395,13 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
   const queuedMsg = (): Msg => (isQueuePersisted() ? { tone: 'info', text: MSG_QUEUED } : { tone: 'danger', text: MSG_NOT_PERSISTED })
 
   /** 新しい記録の小窓の初めの値 */
-  const freshInput = (rid: number, d: string, result: TrainingResult): TrainingInput => {
+  /** その日のその方の来所時刻（その日の到着を読めた時だけ・第6弾3） */
+  const arrivedFor = (rid: number, d: string) => (data !== null && data.day === d ? arrivedAtOf(data.attendance, rid, d) : null)
+  const freshInput = (rid: number, d: string, result: TrainingResult, nowMin: number = nowMinutes()): TrainingInput => {
     const minutes = TRAINING_DEFAULT_MIN
     // 過去の日は押した時刻を使わない（開始時刻は空にして入れてもらう＝反証 中2）
-    // 来所時刻より前にはしない（その日の到着を読めた時だけ・第6弾3）
-    const arrived = data !== null && data.day === d ? arrivedAtOf(data.attendance, rid, d) : null
-    const start = d === todayIso() ? defaultStartTime(nowMinutes(), result === 'cancelled' ? 0 : minutes, arrived) : ''
+    // 来所時刻より前にはしない（第6弾3）
+    const start = d === todayIso() ? defaultStartTime(nowMin, result === 'cancelled' ? 0 : minutes, arrivedFor(rid, d)) : ''
     return {
       result,
       started_at: start,
@@ -444,10 +447,16 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
       setRowMsg({ rid, day: d, msg: { tone: 'warn', text: why } })
       return
     }
-    const input = freshInput(rid, d, 'done')
+    const now = nowMinutes()
+    const input = freshInput(rid, d, 'done', now)
     // 1タップで保存するのは、今日で・前回の内容があり・指導員が1人に決まる時だけ。ほかは小窓で確かめてもらう
     if (d < todayIso() || input.program === '' || input.instructor_id === null) {
       openNewWith(rid, d, input)
+      return
+    }
+    // 開始時刻を来所時刻へ寄せた時は、時間が押した時刻より先まで延びるので、小窓で時間を確かめてもらう（第6弾3 の反証 中1）
+    if (startFloored(now, TRAINING_DEFAULT_MIN, arrivedFor(rid, d))) {
+      setEditor({ rid, day: d, row: null, input, note: MSG_START_FLOORED })
       return
     }
     await saveNew(rid, d, input, true)

@@ -195,6 +195,11 @@ export function defaultStartTime(nowMin: number, minutes: number = TRAINING_DEFA
   return minToHhmm(Math.max(start, Math.min(arrivedMin, nowMin)))
 }
 
+/** 開始時刻の既定を来所時刻へ寄せたか（寄せた時は 開始＋時間 が押した時刻より後になるので、一押しで保存せず小窓で確かめてもらう） */
+export function startFloored(nowMin: number, minutes: number = TRAINING_DEFAULT_MIN, arrivedAt: string | null = null): boolean {
+  return defaultStartTime(nowMin, minutes, arrivedAt) !== defaultStartTime(nowMin, minutes)
+}
+
 /** その日のその方の来所時刻（'HH:MM'・休みと時刻の無い行は見ない・2行あれば早い方）。無ければ null */
 export function arrivedAtOf(list: readonly Pick<DaycareAttendance, 'resident_id' | 'day' | 'arrived_at' | 'absent'>[], residentId: number, day: string): string | null {
   let best: string | null = null
