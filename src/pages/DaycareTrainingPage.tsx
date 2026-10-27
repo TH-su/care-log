@@ -64,7 +64,9 @@ import {
   TRAINING_PROGRAM_MAX,
   TRAINING_RESULTS,
   TRAINING_RESULT_LABEL,
+  arrivedAtOf,
   defaultStartTime,
+  startFloored,
   dualRoleWithoutTime,
   instructorFor,
   previousProgram,
@@ -97,6 +99,7 @@ const MSG_CONFLICT = '他の端末で先に直されていました。読み直�
 const MSG_STOPPED =
   '送れずに止まっている記録があります。設定の「送れていない記録」で、いまの記録とくらべて選ぶか、取り下げてください。'
 const MSG_PAST_START = '過去の日の記録です。開始時刻を実際の時刻で入れてください（押した時刻は使いません）。'
+const MSG_START_FLOORED = '来所の時刻から間もないため、開始時刻と時間が合っているか確かめてから保存してください。'
 
 /** 機能訓練の画面のルート（業務日は ?day= で持つ。今日は付けない） */
 export function trainingPath(day: string, today: string): string {
@@ -392,10 +395,13 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
   const queuedMsg = (): Msg => (isQueuePersisted() ? { tone: 'info', text: MSG_QUEUED } : { tone: 'danger', text: MSG_NOT_PERSISTED })
 
   /** 新しい記録の小窓の初めの値 */
-  const freshInput = (rid: number, d: string, result: TrainingResult): TrainingInput => {
+  /** その日のその方の来所時刻（その日の到着を読めた時だけ・第6弾3） */
+  const arrivedFor = (rid: number, d: string) => (data !== null && data.day === d ? arrivedAtOf(data.attendance, rid, d) : null)
+  const freshInput = (rid: number, d: string, result: TrainingResult, nowMin: number = nowMinutes()): TrainingInput => {
     const minutes = TRAINING_DEFAULT_MIN
     // 過去の日は押した時刻を使わない（開始時刻は空にして入れてもらう＝反証 中2）
-    const start = d === todayIso() ? defaultStartTime(nowMinutes(), result === 'cancelled' ? 0 : minutes) : ''
+    // 来所時刻より前にはしない（第6弾3）
+    const start = d === todayIso() ? defaultStartTime(nowMin, result === 'cancelled' ? 0 : minutes, arrivedFor(rid, d)) : ''
     return {
       result,
       started_at: start,
@@ -427,11 +433,15 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
       setRowMsg({ rid, day, msg: { tone: 'warn', text: why } })
       return
     }
-    openNewWith(rid, day, freshInput(rid, day, result))
+    const now = nowMinutes()
+    openNewWith(rid, day, freshInput(rid, day, result, now), flooredAt(rid, day, result, now))
   }
   const openRow = (row: DaycareTrainingSession, note?: string) => setEditor({ rid: row.resident_id, day: row.day, row, input: inputOf(row), note })
-  const openNewWith = (rid: number, d: string, input: TrainingInput) =>
-    setEditor({ rid, day: d, row: null, input, note: d < todayIso() ? MSG_PAST_START : undefined })
+  /** 開始時刻の既定を来所の時刻へ寄せたか（今日の・中止でない記録だけ・freshInput と同じ押した時刻で見る） */
+  const flooredAt = (rid: number, d: string, result: TrainingResult, now: number) =>
+    d === todayIso() && result !== 'cancelled' && startFloored(now, TRAINING_DEFAULT_MIN, arrivedFor(rid, d))
+  const openNewWith = (rid: number, d: string, input: TrainingInput, floored = false) =>
+    setEditor({ rid, day: d, row: null, input, note: d < todayIso() ? MSG_PAST_START : floored ? MSG_START_FLOORED : undefined })
 
   /** 〔完了〕1タップ。前回の内容と配置の指導員がそろっている時だけ小窓を出さずに保存する */
   const quickDone = async (rid: number) => {
@@ -441,10 +451,13 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
       setRowMsg({ rid, day: d, msg: { tone: 'warn', text: why } })
       return
     }
-    const input = freshInput(rid, d, 'done')
-    // 1タップで保存するのは、今日で・前回の内容があり・指導員が1人に決まる時だけ。ほかは小窓で確かめてもらう
-    if (d < todayIso() || input.program === '' || input.instructor_id === null) {
-      openNewWith(rid, d, input)
+    const now = nowMinutes()
+    const input = freshInput(rid, d, 'done', now)
+    const floored = flooredAt(rid, d, 'done', now)
+    // 1タップで保存するのは、今日で・前回の内容があり・指導員が1人に決まり・開始時刻を来所の時刻へ寄せていない時だけ。
+    // ほかは小窓で確かめてもらう（寄せた時は時間が押した時刻より先まで延びるため＝第6弾3 の反証 中1）
+    if (d < todayIso() || input.program === '' || input.instructor_id === null || floored) {
+      openNewWith(rid, d, input, floored)
       return
     }
     await saveNew(rid, d, input, true)

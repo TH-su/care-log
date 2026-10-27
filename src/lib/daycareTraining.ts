@@ -3,11 +3,12 @@
 //
 // ・表は daycare_training_sessions（1人1日1件）と daycare_staffing（移行 0046）。2026-10-23 代表者承認・段階3の計画 v1 の 1章・3章・8章
 // ・完了・一部は 開始時刻・内容・時間・指導員・結果 が必須。中止は時間を持たず、理由が必須（その他は一言も）
-// ・〔完了〕の既定: 内容＝その方の前回（中止を除く）・時間＝20分・指導員＝その日の配置の機能訓練指導員・開始時刻＝押した時刻−時間
+// ・〔完了〕の既定: 内容＝その方の前回（中止を除く）・時間＝20分・指導員＝その日の配置の機能訓練指導員・開始時刻＝押した時刻−時間（来所時刻より前にはしない）
 // ・前回コピーは内容だけ（DESIGN v1 の決まり。時間・結果はコピーしない）
 // 個人情報は扱わない（内容・時刻・数値・職員ID だけ。氏名は画面が持つ）。
 import { daycareBulkRows } from './daycare.ts'
 import type { DaycareBoardRow } from './daycare.ts'
+import type { DaycareAttendance } from './types.ts'
 
 export type TrainingResult = 'done' | 'partial' | 'cancelled'
 export const TRAINING_RESULTS: readonly TrainingResult[] = ['done', 'partial', 'cancelled']
@@ -181,9 +182,33 @@ export function minToHhmm(min: number): string {
   return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`
 }
 
-/** 開始時刻の既定: 押した時刻から時間を引いた時刻（〔完了〕は訓練の後に押すため・段階3の計画の質問6）。0 時より前にはしない */
-export function defaultStartTime(nowMin: number, minutes: number = TRAINING_DEFAULT_MIN): string {
-  return minToHhmm(nowMin - minutes)
+/**
+ * 開始時刻の既定: 押した時刻から時間を引いた時刻（〔完了〕は訓練の後に押すため・段階3の計画の質問6）。0 時より前にはしない。
+ * 来所時刻（'HH:MM'）が分かる時は、来所より前にしない（来所直後に押すと来所前の時刻になるため・第6弾3）。
+ * 来所時刻が押した時刻より後（端末の時計のずれ・入れ間違い）の時は、押した時刻より後にもしない
+ */
+export function defaultStartTime(nowMin: number, minutes: number = TRAINING_DEFAULT_MIN, arrivedAt: string | null = null): string {
+  const start = nowMin - minutes
+  const a = hhmm(arrivedAt)
+  if (a === null) return minToHhmm(start)
+  const arrivedMin = Number(a.slice(0, 2)) * 60 + Number(a.slice(3, 5))
+  return minToHhmm(Math.max(start, Math.min(arrivedMin, nowMin)))
+}
+
+/** 開始時刻の既定を来所時刻へ寄せたか（寄せた時は 開始＋時間 が押した時刻より後になるので、一押しで保存せず小窓で確かめてもらう） */
+export function startFloored(nowMin: number, minutes: number = TRAINING_DEFAULT_MIN, arrivedAt: string | null = null): boolean {
+  return defaultStartTime(nowMin, minutes, arrivedAt) !== defaultStartTime(nowMin, minutes)
+}
+
+/** その日のその方の来所時刻（'HH:MM'・休みと時刻の無い行は見ない・2行あれば早い方）。無ければ null */
+export function arrivedAtOf(list: readonly Pick<DaycareAttendance, 'resident_id' | 'day' | 'arrived_at' | 'absent'>[], residentId: number, day: string): string | null {
+  let best: string | null = null
+  for (const r of list) {
+    if (r.resident_id !== residentId || r.day !== day || r.absent) continue
+    const a = hhmm(r.arrived_at)
+    if (a !== null && (best === null || a < best)) best = a
+  }
+  return best
 }
 
 /** その方の前回の内容（day より前の日の、中止でない記録のうち、いちばん新しい日の内容）。無ければ null */

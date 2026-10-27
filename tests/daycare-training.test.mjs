@@ -119,6 +119,32 @@ if (T === null) {
       assert.equal(T.defaultStartTime(5, 20), '00:00')
       assert.equal(T.TRAINING_DEFAULT_MIN, 20, 'DESIGN v1 と同じ20分')
     })
+    it('〔完了〕の開始時刻の既定は、来所時刻より前にしない（来所直後に押した時・第6弾3）', () => {
+      assert.equal(T.defaultStartTime(10 * 60 + 5, 20, '09:55'), '09:55', '来所10分後に押すと来所時刻')
+      assert.equal(T.defaultStartTime(10 * 60 + 30, 20, '09:30'), '10:10', '来所から時間が経っていれば今まで通り')
+      assert.equal(T.defaultStartTime(10 * 60 + 15, 20, '09:55:00'), '09:55', '秒つきの時刻も読む')
+      assert.equal(T.defaultStartTime(10 * 60, 20, '10:30'), '10:00', '来所が押した時刻より後なら押した時刻より後にしない')
+      assert.equal(T.defaultStartTime(10 * 60, 0, '09:00'), '10:00', '中止（時間0）は押した時刻')
+      assert.equal(T.defaultStartTime(10 * 60 + 5, 20, null), '09:45', '来所時刻が無い時は今まで通り')
+      assert.equal(T.defaultStartTime(10 * 60 + 5, 20, 'xx'), '09:45', '読めない時刻は見ない')
+    })
+    it('来所時刻へ寄せたかの判定（寄せた時は一押しで保存しない・第6弾3 の反証 中1）', () => {
+      assert.equal(T.startFloored(10 * 60 + 5, 20, '09:55'), true)
+      assert.equal(T.startFloored(10 * 60 + 30, 20, '09:30'), false, '寄せていない')
+      assert.equal(T.startFloored(10 * 60 + 15, 20, '09:55'), false, 'ちょうど20分前に来所')
+      assert.equal(T.startFloored(10 * 60, 20, '10:30'), true, '来所が押した時刻より後（開始は押した時刻・時間は先まで延びるので確かめてもらう）')
+      assert.equal(T.startFloored(10 * 60, 20, null), false, '来所時刻なし')
+    })
+    it('来所時刻: その日のその方の到着だけ・休みと時刻なしは見ない・2行あれば早い方', () => {
+      const a = (o) => ({ resident_id: 1, day: '2026-10-27', arrived_at: '09:50', absent: false, ...o })
+      assert.equal(T.arrivedAtOf([a({})], 1, '2026-10-27'), '09:50')
+      assert.equal(T.arrivedAtOf([a({ resident_id: 2 })], 1, '2026-10-27'), null, '他の方')
+      assert.equal(T.arrivedAtOf([a({ day: '2026-10-26' })], 1, '2026-10-27'), null, '他の日')
+      assert.equal(T.arrivedAtOf([a({ absent: true })], 1, '2026-10-27'), null, '休み')
+      assert.equal(T.arrivedAtOf([a({ arrived_at: null })], 1, '2026-10-27'), null, '時刻なし')
+      assert.equal(T.arrivedAtOf([a({ arrived_at: '10:05:00' }), a({ arrived_at: '09:40' })], 1, '2026-10-27'), '09:40')
+      assert.equal(T.arrivedAtOf([], 1, '2026-10-27'), null)
+    })
     it('前回の内容: その日より前の、中止でない、いちばん新しい日の内容。その日・他の方・中止は見ない', () => {
       const list = [
         session({ id: 1, day: '2026-10-15', program: '歩行' }),
@@ -307,9 +333,17 @@ describe('静的検査（段階3a の規律）', () => {
     // 足りない項目は押した時に出す（開いた直後から赤い文字を出さない）
     assert.match(p, /setEditor\(\{ \.\.\.ed, showErr: true \}\)/)
     // 1タップで保存するのは、今日で・前回の内容があり・指導員が1人に決まる時だけ（反証 中1・中2）
-    assert.match(p, /if \(d < todayIso\(\) \|\| input\.program === '' \|\| input\.instructor_id === null\) \{\s*openNewWith\(rid, d, input\)\s*return/)
+    assert.match(p, /if \(d < todayIso\(\) \|\| input\.program === '' \|\| input\.instructor_id === null \|\| floored\) \{\s*openNewWith\(rid, d, input, floored\)\s*return/)
     // 過去の日は押した時刻を使わない・指導員は開始時刻の時間帯で選ぶ
-    assert.match(p, /const start = d === todayIso\(\) \? defaultStartTime\(nowMinutes\(\), result === 'cancelled' \? 0 : minutes\) : ''/)
+    assert.match(p, /const arrivedFor = \(rid: number, d: string\) => \(data !== null && data\.day === d \? arrivedAtOf\(data\.attendance, rid, d\) : null\)/)
+    assert.match(p, /const start = d === todayIso\(\) \? defaultStartTime\(nowMin, result === 'cancelled' \? 0 : minutes, arrivedFor\(rid, d\)\) : ''/)
+    // 寄せた時は一押しで保存せず、注意文つきの小窓を開く。押した時刻は1回だけ取り、開始時刻と判定に同じ時刻を使う（第6弾3 の反証 中1・軽2・軽3）
+    const qd = p.slice(p.indexOf('const quickDone = async'), p.indexOf('/** 〔元に戻す〕'))
+    assert.match(qd, /const now = nowMinutes\(\)\s*const input = freshInput\(rid, d, 'done', now\)\s*const floored = flooredAt\(rid, d, 'done', now\)/)
+    assert.match(qd, /\|\| input\.instructor_id === null \|\| floored\) \{\s*openNewWith\(rid, d, input, floored\)\s*return\s*\}\s*await saveNew\(rid, d, input, true\)/, '寄せた時は saveNew の前で止まる')
+    assert.match(p, /const flooredAt = \(rid: number, d: string, result: TrainingResult, now: number\) =>\s*d === todayIso\(\) && result !== 'cancelled' && startFloored\(now, TRAINING_DEFAULT_MIN, arrivedFor\(rid, d\)\)/)
+    assert.match(p, /note: d < todayIso\(\) \? MSG_PAST_START : floored \? MSG_START_FLOORED : undefined/)
+    assert.match(p, /const now = nowMinutes\(\)\s*openNewWith\(rid, day, freshInput\(rid, day, result, now\), flooredAt\(rid, day, result, now\)\)/, '〔一部〕の小窓にも注意文')
     assert.match(p, /instructor_id: instructorFor\(staffing, d, start\)/)
     // 送信待ちの配置も指導員として数える（反証 軽4）・対象者でない方の記録にも直す入口を残す（反証 中4）
     assert.match(p, /const staffingShown = \[\.\.\.\(data\?\.staffing \?\? \[\]\), \.\.\.pendingStaffing\]/)
