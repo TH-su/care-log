@@ -86,6 +86,54 @@ export function fluidAmountError(text: string, unit: 'ml' | 'cc' = 'ml'): string
   return null
 }
 
+/** 水分の欄の数を取り出した結果（send＝送る量・error＝誤りの文・ignored＝足した直後の、続けて届いた改行キー） */
+export type FluidTake = { kind: 'send'; ml: number; text: string } | { kind: 'error'; message: string } | { kind: 'ignored' }
+
+/**
+ * 水分の欄に入れている数（人ごと）の控え。描画を待たずに読み書きできるので、送る前に欄を空にして、
+ * 続けて届いた改行キー（押しっぱなし・2回押し）で同じ量を2回送らない（2026-10-29 親の検収）。
+ * 空にした直後の空の改行キーは誤りの文を出さずに無視する（足せた直後に「量を入れてください」と出さない）。
+ * 送れなかった時は restore で入れた数を欄に戻す（その間に欄へ入れ直していたら戻さない）。端末には残さない
+ */
+export function createFluidInputs(unit: 'ml' | 'cc' = 'ml') {
+  let texts: Record<number, string> = {}
+  const took = new Set<number>()
+  return {
+    /** 描画に使う今の値 */
+    all: (): Record<number, string> => texts,
+    /** 欄に入力した */
+    set(residentId: number, text: string) {
+      texts = { ...texts, [residentId]: text }
+      took.delete(residentId)
+    },
+    /** 日を切り替えた・〔最新に更新〕 */
+    clearAll() {
+      texts = {}
+      took.clear()
+    },
+    /** 改行キー・〔＋〕: 送る量を取り出し、欄を空にする */
+    take(residentId: number): FluidTake {
+      const text = texts[residentId] ?? ''
+      if (text.trim() === '' && took.has(residentId)) return { kind: 'ignored' }
+      const err = fluidAmountError(text, unit)
+      if (err !== null) {
+        const t = text.trim()
+        return { kind: 'error', message: t === '' ? err : `「${t}」は足せません。${err}` }
+      }
+      texts = { ...texts, [residentId]: '' }
+      took.add(residentId)
+      return { kind: 'send', ml: Number(text.normalize('NFKC').trim()), text }
+    },
+    /** 送れなかった: 欄が空のままなら、入れた数を戻す。戻したら true */
+    restore(residentId: number, text: string): boolean {
+      if ((texts[residentId] ?? '') !== '') return false
+      texts = { ...texts, [residentId]: text }
+      took.delete(residentId)
+      return true
+    },
+  }
+}
+
 /** 排泄ケアアプリの ?masterId= が受け付ける形（体重管理アプリと同じ・haiben-record.html の hbReadMasterIdParam） */
 const MASTER_ID_RE = /^[0-9A-Za-z_-]{1,32}$/
 /** 排泄ケアアプリ（care-log と同じサイトの haiben-record 配下＝th-su.github.io/haiben-record/。care-tools には無い。氏名は URL に載せない） */

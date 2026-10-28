@@ -53,7 +53,7 @@ import { buildDaycareBoard, fmtPlanTimes, nowHm } from '../lib/daycare'
 import type { DaycareBoardRow } from '../lib/daycare'
 import {
   LUNCH_SELECT_OPTIONS,
-  fluidAmountError,
+  createFluidInputs,
   fluidTotalOf,
   lunchSelectPatch,
   lunchSelectValue,
@@ -158,8 +158,10 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
   /** 人・日・枠ごとの順番待ちの末尾 */
   const chainRef = useRef(new Map<string, Promise<void>>())
   const [queueTick, setQueueTick] = useState(0)
-  /** 水分の欄に入れている数（人ごと。日を切り替えたら空にする。端末には残さない） */
+  /** 水分の欄に入れている数（人ごと。日を切り替えたら空にする。端末には残さない）。読み書きは控え（fluidInputs）で行い、描画にはこの写しを使う */
   const [fluidText, setFluidText] = useState<Record<number, string>>({})
+  /** 水分の欄の控え（描画を待たずに読み書きする。送る前に空にして、続けて届いた改行キーで同じ量を2回送らない＝2026-10-29 親の検収） */
+  const [fluidInputs] = useState(() => createFluidInputs('cc'))
   /** 水分の知らせ（人・日ごと） */
   const [fluidNote, setFluidNote] = useState<Record<string, FluidNote>>({})
   /**
@@ -274,7 +276,8 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
       return next
     })
     // 水分の欄に入れかけた数と、その場限りの知らせも外す（取り消しの送信待ちの知らせは残す）
-    setFluidText({})
+    fluidInputs.clearAll()
+    setFluidText(fluidInputs.all())
     setFluidNote((prev) => {
       const next: Record<string, FluidNote> = {}
       for (const [k, v] of Object.entries(prev)) if (v.queued !== undefined) next[k] = v
@@ -732,17 +735,18 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
     const d = day
     const key = personKeyOf(rid, d)
     if (fluidBusyRef.current.has(key)) return
-    const text = fluidText[rid] ?? ''
-    const err = fluidAmountError(text, 'cc')
-    if (err !== null) {
-      const t = text.trim()
-      noteFluid(key, { tone: 'danger', text: t === '' ? err : `「${t}」は足せません。${err}`, input: true })
+    // 送る前に欄を空にする（描き直しを待たずに控えも空にする。書き込みの後、欄が空になる描き直しの前に続けて届いた改行キーで、
+    // 同じ量をもう1回送らない＝2026-10-29 親の検収）
+    const t = fluidInputs.take(rid)
+    if (t.kind === 'ignored') return
+    if (t.kind === 'error') {
+      noteFluid(key, { tone: 'danger', text: t.message, input: true })
       return
     }
-    const ml = Number(text.normalize('NFKC').trim())
-    void addFluid(rid, ml).then((ok) => {
-      // 足せたら欄を空にする（日を移った後・入れ直した後は触らない）
-      if (ok && dayRef.current === d) setFluidText((prev) => (prev[rid] === text ? { ...prev, [rid]: '' } : prev))
+    setFluidText(fluidInputs.all())
+    void addFluid(rid, t.ml).then((ok) => {
+      // 足せなかった時は入れた数を欄に戻す（日を移った後・その間に欄へ入れ直した時は戻さない）
+      if (!ok && dayRef.current === d && fluidInputs.restore(rid, t.text)) setFluidText(fluidInputs.all())
     })
   }
 
@@ -996,8 +1000,8 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
                                 autoComplete="off"
                                 value={fluidText[rid] ?? ''}
                                 onChange={(e) => {
-                                  const text = e.target.value
-                                  setFluidText((prev) => ({ ...prev, [rid]: text }))
+                                  fluidInputs.set(rid, e.target.value)
+                                  setFluidText(fluidInputs.all())
                                   if (fn?.input === true) noteFluid(fkey, null)
                                 }}
                                 readOnly={busy}

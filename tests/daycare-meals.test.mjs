@@ -336,13 +336,47 @@ if (DP === null) {
       assert.doesNotMatch(form, /onClick=/)
     })
     it('水分: 検査は fluidAmountError（cc の文）・誤りは行の下に（何が違うか＋どうすればよいか）・足せたら欄を空にする', () => {
+      // 2026-10-29 親の検収（固定し直し・意図は同じ）: 検査と取り出しは控え（createFluidInputs の take＝cc の文）で行い、送る前に欄を空にする。
+      // 送れなかった時は入れた数を欄に戻す（日を移った後・入れ直した時は戻さない）。振る舞いは下の「水分の欄の控え」の試験で確かめる
       const f = page.slice(page.indexOf('const submitFluid = '), page.indexOf('const goDay = '))
-      assert.match(f, /const err = fluidAmountError\(text, 'cc'\)/)
-      assert.match(f, /noteFluid\(key, \{ tone: 'danger', text: t === '' \? err : `「\$\{t\}」は足せません。\$\{err\}`, input: true \}\)/)
-      assert.match(f, /const ml = Number\(text\.normalize\('NFKC'\)\.trim\(\)\)/)
-      assert.match(f, /if \(ok && dayRef\.current === d\) setFluidText\(\(prev\) => \(prev\[rid\] === text \? \{ \.\.\.prev, \[rid\]: '' \} : prev\)\)/)
+      assert.match(page, /const \[fluidInputs\] = useState\(\(\) => createFluidInputs\('cc'\)\)/)
+      assert.match(f, /const t = fluidInputs\.take\(rid\)\s+if \(t\.kind === 'ignored'\) return\s+if \(t\.kind === 'error'\) \{\s*noteFluid\(key, \{ tone: 'danger', text: t\.message, input: true \}\)\s*return\s*\}\s*setFluidText\(fluidInputs\.all\(\)\)\s*void addFluid\(rid, t\.ml\)/)
+      assert.match(f, /if \(!ok && dayRef\.current === d && fluidInputs\.restore\(rid, t\.text\)\) setFluidText\(fluidInputs\.all\(\)\)/)
+      assert.doesNotMatch(page, /setFluidText\(\(prev\)/, '欄の値は控えを通して書く（描画の前の古い値で送らない）')
       // 数を直したら誤りの知らせを外す
       assert.match(body, /if \(fn\?\.input === true\) noteFluid\(fkey, null\)/)
+    })
+    it('水分の欄の控え（2026-10-29 親の検収）: 同じ値で続けて2回押しても1回しか送らない・送れなかったら欄に戻す・入れ直した値は上書きしない', () => {
+      assert.ok(DP !== null, String(loadError))
+      const f = DP.createFluidInputs('cc')
+      f.set(1, '150')
+      // 改行キーが続けて2回届いた（1回目の書き込みの後、欄が空になる描き直しの前）: 送るのは1回だけ・2回目は誤りの文も出さない
+      const sends = [f.take(1), f.take(1)].filter((t) => t.kind === 'send')
+      assert.equal(sends.length, 1)
+      assert.deepEqual(sends[0], { kind: 'send', ml: 150, text: '150' })
+      assert.deepEqual(f.take(1), { kind: 'ignored' })
+      assert.equal(f.all()[1], '', '送る前に欄を空にする')
+      // 送れなかった: 欄が空のままなら戻す → もう一度押すと送れる
+      assert.equal(f.restore(1, '150'), true)
+      assert.equal(f.all()[1], '150')
+      assert.equal(f.take(1).kind, 'send')
+      // 送っている間に欄へ入れ直していたら、戻さない（入れ直した値を消さない）
+      f.set(1, '80')
+      assert.equal(f.restore(1, '150'), false)
+      assert.equal(f.all()[1], '80')
+      // 入れ直した後の空の改行キーは、ふつうの誤り（量を入れてください）
+      f.set(1, '')
+      assert.deepEqual(f.take(1), { kind: 'error', message: '量を入れてください。' })
+      // 誤り・全角・人ごと・日の切り替え
+      f.set(2, '2500')
+      assert.deepEqual(f.take(2), { kind: 'error', message: '「2500」は足せません。量は 1〜2000 cc で入れてください。' })
+      assert.equal(f.all()[2], '2500', '誤りの時は欄を残す')
+      f.set(3, '８０')
+      assert.deepEqual(f.take(3), { kind: 'send', ml: 80, text: '８０' })
+      f.set(4, '50')
+      f.clearAll()
+      assert.deepEqual(f.all(), {})
+      assert.deepEqual(f.take(4), { kind: 'error', message: '量を入れてください。' })
     })
     it('水分: insertFluid の送る値は1人の画面と同じ（taken_at は今日だけいまの時刻・過去の日は null・kind null・記録者）・送り先は押した時に固定', () => {
       const a = page.slice(page.indexOf('const addFluid = '), page.indexOf('const undoFluid = '))
