@@ -86,6 +86,29 @@
   min-width: 100%;
   overflow-wrap: anywhere;
 }
+/* デイの一括の表の枠（2026-10-28 代表者の依頼）: 高さの上限（画面の高さ − 上に貼り付くアプリの見出し − 下に貼り付く下部タブ・テンキー）を
+   付け、枠の中で縦にも送る。見出しの行（sticky top-0）が枠の上に、氏名の列（sticky left-0）が左に残り、下の行だけが送られる。上と下の
+   高さは useTableFit（src/lib/useTableFit.ts）が実測して書き戻す（ここの値は実測が入るまでの暫定）。
+   max-height は単位ごとに分けて書く（dvh が使えない端末で計算が無効になった時に、前の宣言へ戻すため）。
+   scroll-padding は、欄へ送る時（フォーカス・scrollIntoView）に上の見出しと左の氏名の列の下に隠さないための逃げ */
+.dc-table-fit {
+  --dc-fit-top: 4rem;
+  --dc-fit-below: 4.5rem;
+  max-height: max(10rem, calc(100vh - var(--dc-fit-top) - var(--dc-fit-below)));
+  scroll-padding-top: 3.5rem;
+  scroll-padding-left: calc(min(7rem, 35vw) + 1rem);
+}
+@supports (height: 100dvh) {
+  .dc-table-fit {
+    max-height: max(10rem, calc(100dvh - var(--dc-fit-top) - var(--dc-fit-below)));
+  }
+}
+@media print {
+  .dc-table-fit {
+    max-height: none;
+    overflow: visible;
+  }
+}
 /* デイのバイタル一括のテンキー（2026-10-24）: 文字を大きくしても画面の上へはみ出さない（収まらない分はテンキーの中でスクロール）。
    下の帯（3.5rem＝bottom-14）の上に出す。広い画面（lg＝1024px 以上）は帯が無いので画面の高さまで */
 .dc-keypad {

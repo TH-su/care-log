@@ -543,9 +543,13 @@ if (A === null) {
       const iChips = head.indexOf('{DAYCARE_ACTIVITY_CHIPS.map((c) => (')
       const iOther = head.indexOf('その他')
       assert.ok(iName > 0 && iName < iChips && iChips < iOther, '氏名 → 定型の7つ（DAYCARE_ACTIVITY_CHIPS の順） → その他')
-      assert.match(head, /<th scope="col" className="sticky left-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">/)
-      assert.match(b, /<th scope="row" className="sticky left-0 z-20 bg-bg px-2 py-1 text-left font-normal">\s*(\{\}\s*)?<div className="dc-vital-name space-y-1">/)
-      assert.match(b, /role="region"\s+aria-label=\{`\$\{fmtDayLabel\(day\)\}の活動一括の表\$\{tableScrolls \? '（横にスクロールできます）' : ''\}`\}\s+tabIndex=\{tableScrolls \? 0 : undefined\}\s+className="relative overflow-x-auto"/)
+      // 2026-10-28 見出しの行を上に残す（固定し直し・意図は同じ）: 枠に高さの上限（.dc-table-fit・useTableFit）を付けて枠の中で縦にも送る。
+      // 見出しの行は sticky top-0（角の氏名は z-30・ほかの見出しは z-20）、氏名の列は z-10。枠は isolate でアプリの見出しの上に重ならない
+      assert.match(head, /<th scope="col" className="sticky left-0 top-0 z-30 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">/)
+      assert.equal((head.match(/className="sticky top-0 z-20 bg-surface2 px-1 py-1"/g) ?? []).length, 2, '列の見出し（定型の7つ・その他）は上に残す')
+      assert.match(b, /<th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">\s*(\{\}\s*)?<div className="dc-vital-name space-y-1">/)
+      assert.match(b, /role="region"\s+aria-label=\{`\$\{fmtDayLabel\(day\)\}の活動一括の表\$\{tableScrolls \? '（横にスクロールできます）' : ''\}`\}\s+tabIndex=\{tableScrolls \|\| tableScrollsY \? 0 : undefined\}\s+className="dc-table-fit relative isolate overflow-auto"/)
+      assert.match(b, /useTableFit\(tableBox\)/)
       assert.match(b, /<table className="w-full min-w-max border-collapse text-base">\s*<caption className="sr-only">/)
       // 行の列は見出しと同じ並び（定型の7つの枠 → その他の枠）
       const body = b.slice(b.indexOf('<tbody>'), b.indexOf('</tbody>'))

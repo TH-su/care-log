@@ -46,6 +46,7 @@ import type { CellConflict, CellEditInput, VitalCellField, VitalTarget } from '.
 import { RecorderBar } from '../components/RecorderBar'
 import { ConfirmDialog, ErrorBlock, LoadingBlock } from '../components/ui'
 import { registerUnsaved } from '../lib/leaveGuard'
+import { useTableFit } from '../lib/useTableFit'
 import { DaycareNav } from './DaycarePage'
 import {
   DAYCARE_VITAL_FIELDS,
@@ -826,6 +827,8 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   // ── 表の横スクロールの枠（今日の画面の改善 2回目・定時バイタルと同じ）。表が枠より広い（横にスクロールできる）時だけ手がかりを出す ──
   const [tableBox, setTableBox] = useState<HTMLDivElement | null>(null)
   const [tableScrolls, setTableScrolls] = useState(false)
+  /** 表の枠の中で縦に送れるか（2026-10-28: 枠に高さの上限を付けた。送れる時は枠をキーボードで選べるようにする） */
+  const [tableScrollsY, setTableScrollsY] = useState(false)
   /** 表の枠の幅（行の下の詳しい文を、この幅で折り返して左に残すため） */
   const [tableBoxWidth, setTableBoxWidth] = useState(0)
   useEffect(() => {
@@ -833,6 +836,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     if (!el) return
     const check = () => {
       setTableScrolls(el.scrollWidth > el.clientWidth + 1)
+      setTableScrollsY(el.scrollHeight > el.clientHeight + 1)
       setTableBoxWidth(el.clientWidth)
     }
     check()
@@ -866,6 +870,20 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     ro.observe(el)
     return () => ro.disconnect()
   }, [kpBox])
+  // 枠の高さの上限（画面の高さ − アプリの見出し − 下部タブ − テンキー）を実測して書き戻す（見出しの行を枠の上に残す・2026-10-28）
+  useTableFit(tableBox, active !== null ? kpHeight : 0)
+  // 入れている欄を見せる（2026-10-28: 枠に高さの上限を付け、テンキーが開くと枠が縮むので、押した欄・〔次へ〕で移った欄がテンキーの下や
+  // 枠の下に隠れないように）。先に枠の下端がテンキーの上に来るまでページを送り、次に枠の中で欄へ送る
+  // （上の見出しと左の氏名の列の分は .dc-table-fit の scroll-padding で避ける）
+  useEffect(() => {
+    if (active === null || tableBox === null) return
+    const cell = tableBox.querySelector<HTMLElement>('[data-dc-active]')
+    if (cell === null) return
+    // テンキーの上端（狭い画面では下部タブの上に出る）より下に枠の下端があれば、その分だけページを送る
+    const over = tableBox.getBoundingClientRect().bottom - (kpBox !== null ? kpBox.getBoundingClientRect().top : window.innerHeight)
+    if (over > 0) window.scrollBy(0, over)
+    cell.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }, [active, tableBox, kpBox, kpHeight])
 
   // ── 描画 ──
   const header = (
@@ -1113,27 +1131,27 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
               ref={setTableBox}
               role="region"
               aria-label={`${fmtDayLabel(day)}のデイのバイタル入力表${tableScrolls ? '（横にスクロールできます）' : ''}`}
-              tabIndex={tableScrolls ? 0 : undefined}
-              className="relative overflow-x-auto"
+              tabIndex={tableScrolls || tableScrollsY ? 0 : undefined}
+              className="dc-table-fit relative isolate overflow-auto"
             >
               <table className="w-full min-w-max border-collapse text-base">
                 <caption className="sr-only">{fmtDayLabel(day)}のデイのバイタル入力表</caption>
                 <thead>
                   <tr className="border-b border-border-strong bg-surface2 text-left">
                     {/* 氏名の列は横スクロールしても左に残す（sticky）。背景は見出し行と同じ色 */}
-                    <th scope="col" className="sticky left-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
+                    <th scope="col" className="sticky left-0 top-0 z-30 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
                       <span className="dc-vital-name block">氏名</span>
                     </th>
                     {DAYCARE_VITAL_FIELDS.map((f) => (
-                      <th key={f} scope="col" className="w-24 px-2 py-2 text-sm font-bold text-ink2">
+                      <th key={f} scope="col" className="sticky top-0 z-20 w-24 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
                         <span aria-hidden="true">{DAYCARE_VITAL_HEAD[f]}</span>
                         <span className="sr-only">{DAYCARE_VITAL_LABEL[f]}</span>
                       </th>
                     ))}
-                    <th scope="col" className="w-28 px-2 py-2 text-sm font-bold text-ink2">
+                    <th scope="col" className="sticky top-0 z-20 w-28 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
                       再測定
                     </th>
-                    <th scope="col" className="w-28 px-2 py-2 text-sm font-bold text-ink2">
+                    <th scope="col" className="sticky top-0 z-20 w-28 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
                       状態
                     </th>
                   </tr>
@@ -1173,7 +1191,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                         <Fragment key={slot.key}>
                           <tr className={`align-middle ${detail || !isLast ? '' : 'border-b border-border'}`}>
                             {/* 氏名の列は横スクロールしても左に残す（sticky）。背景はページの地の色（下を流れる欄を透かさない） */}
-                            <th scope="row" className="sticky left-0 z-20 bg-bg px-2 py-1 text-left font-normal">
+                            <th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">
                               {/* 氏名の列の幅は dc-vital-name で決める（札が長くても列を広げず、中で折り返す＝確認の反証 重） */}
                               <div className="dc-vital-name">
                                 {si === 0 ? (
@@ -1206,6 +1224,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                                     type="button"
                                     onClick={() => openCell(slot, f)}
                                     disabled={!canWrite}
+                                    data-dc-active={isActive ? '' : undefined}
                                     aria-label={`${nameOf(row.residentId)} ${DAYCARE_VITAL_LABEL[f]} ${v === null ? '未入力' : fmtVal(f, v)}${word ? ` ${word}` : ''}${pv ? `、前回 ${fmtVal(f, pv.value)}` : ''}${local ? '、未送信' : ''}`}
                                     className={`flex min-h-14 w-full flex-col items-center justify-center rounded px-1 text-center ${
                                       isActive ? 'border-2 border-primary bg-accent-bg' : levelTone(lv)

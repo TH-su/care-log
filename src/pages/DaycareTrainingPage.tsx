@@ -83,6 +83,7 @@ import type { DaycareStaffing, DaycareTrainingSession, StaffingRole, TrainingInp
 import { personPath, readPersonDay } from '../lib/daycarePerson'
 import { addDays, fmtDayLabel, todayIso } from '../lib/format'
 import type { DaycareAttendance, DaycareDay, DaycarePlanRow, DaycarePlanSource, Resident, Staff } from '../lib/types'
+import { useTableFit } from '../lib/useTableFit'
 import { DaycareNav } from './DaycarePage'
 
 const ERR_LOAD = 'デイの記録を読み込めませんでした。通信状態を確認して、再試行してください。'
@@ -292,6 +293,8 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
   // ── 対象者の表の横スクロールの枠（2026-10-26 表にした・バイタル一括と同じ）。表が枠より広い（横にスクロールできる）時だけ手がかりを出す ──
   const [tableBox, setTableBox] = useState<HTMLDivElement | null>(null)
   const [tableScrolls, setTableScrolls] = useState(false)
+  /** 表の枠の中で縦に送れるか（2026-10-28: 枠に高さの上限を付けた。送れる時は枠をキーボードで選べるようにする） */
+  const [tableScrollsY, setTableScrollsY] = useState(false)
   /** 表の枠の幅（行の下の知らせを、この幅で折り返して左に残すため） */
   const [tableBoxWidth, setTableBoxWidth] = useState(0)
   useEffect(() => {
@@ -299,6 +302,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
     if (!el) return
     const check = () => {
       setTableScrolls(el.scrollWidth > el.clientWidth + 1)
+      setTableScrollsY(el.scrollHeight > el.clientHeight + 1)
       setTableBoxWidth(el.clientWidth)
     }
     check()
@@ -312,6 +316,8 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
     if (el.firstElementChild) ro.observe(el.firstElementChild)
     return () => ro.disconnect()
   }, [tableBox])
+  // 枠の高さの上限（画面の高さ − 上と下の部品）を実測して書き戻す（見出しの行を枠の上に残す・2026-10-28）
+  useTableFit(tableBox)
 
   const board = useMemo(
     () => (data === null ? null : buildDaycareBoard({ planRows: data.planRows, source: data.planSource, residents, attendance: data.attendance })),
@@ -870,27 +876,27 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
               ref={setTableBox}
               role="region"
               aria-label={`${fmtDayLabel(day)}の機能訓練の対象者の表${tableScrolls ? '（横にスクロールできます）' : ''}`}
-              tabIndex={tableScrolls ? 0 : undefined}
-              className="relative overflow-x-auto"
+              tabIndex={tableScrolls || tableScrollsY ? 0 : undefined}
+              className="dc-table-fit relative isolate overflow-auto"
             >
               <table className="w-full min-w-max border-collapse text-base">
                 <caption className="sr-only">{fmtDayLabel(day)}の機能訓練の対象者の表</caption>
                 <thead>
                   <tr className="border-b border-border-strong bg-surface2 text-left">
                     {/* 氏名の列は横スクロールしても左に残す（sticky）。背景は見出し行と同じ色 */}
-                    <th scope="col" className="sticky left-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
+                    <th scope="col" className="sticky left-0 top-0 z-30 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
                       <span className="dc-vital-name block">氏名</span>
                     </th>
-                    <th scope="col" className="px-2 py-2 text-sm font-bold text-ink2">
+                    <th scope="col" className="sticky top-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
                       内容（前回）
                     </th>
-                    <th scope="col" className="px-2 py-2 text-sm font-bold text-ink2">
+                    <th scope="col" className="sticky top-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
                       時間
                     </th>
-                    <th scope="col" className="px-2 py-2 text-sm font-bold text-ink2">
+                    <th scope="col" className="sticky top-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
                       指導員
                     </th>
-                    <th scope="col" className="px-2 py-2 text-sm font-bold text-ink2">
+                    <th scope="col" className="sticky top-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
                       結果
                     </th>
                   </tr>
@@ -925,7 +931,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                       <Fragment key={rid}>
                         <tr className={`align-middle ${detail ? '' : 'border-b border-border'}`}>
                           {/* 氏名の列は横スクロールしても左に残す（sticky）。背景はページの地の色（下を流れる欄を透かさない） */}
-                          <th scope="row" className="sticky left-0 z-20 bg-bg px-2 py-1 text-left font-normal">
+                          <th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">
                             {/* 氏名の列の幅は dc-vital-name で決める（札が長くても列を広げず、中で折り返す） */}
                             <div className="dc-vital-name space-y-1">
                               <span className="block text-base font-bold text-ink">{name}</span>

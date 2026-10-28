@@ -363,9 +363,12 @@ describe('静的検査（段階3a の規律）', () => {
     const head = sec.slice(sec.indexOf('<thead>'), sec.indexOf('</thead>'))
     const order = ['<span className="dc-vital-name block">氏名</span>', '内容（前回）', '時間', '指導員', '結果'].map((w) => head.indexOf(w))
     assert.ok(order.every((i, k) => i > 0 && (k === 0 || i > order[k - 1])), `列の並び ${order}`)
-    assert.match(head, /<th scope="col" className="sticky left-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">/)
-    assert.match(sec, /<th scope="row" className="sticky left-0 z-20 bg-bg px-2 py-1 text-left font-normal">\s*(\{\}\s*)?<div className="dc-vital-name space-y-1">/)
-    assert.match(sec, /role="region"[\s\S]*?className="relative overflow-x-auto"[\s\S]*?<table className="w-full min-w-max border-collapse text-base">\s*<caption className="sr-only">/)
+    // 2026-10-28 見出しの行を上に残す（固定し直し・意図は同じ）: 枠に高さの上限（.dc-table-fit・useTableFit）を付けて枠の中で縦にも送る。
+    // 見出しの行は sticky top-0（角の氏名は z-30・ほかの見出しは z-20）、氏名の列は z-10。枠は isolate でアプリの見出しの上に重ならない
+    assert.match(head, /<th scope="col" className="sticky left-0 top-0 z-30 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">/)
+    assert.equal((head.match(/<th scope="col" className="sticky top-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">/g) ?? []).length, 4, '内容・時間・指導員・結果の見出しも上に残す')
+    assert.match(sec, /<th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">\s*(\{\}\s*)?<div className="dc-vital-name space-y-1">/)
+    assert.match(sec, /role="region"[\s\S]*?className="dc-table-fit relative isolate overflow-auto"[\s\S]*?<table className="w-full min-w-max border-collapse text-base">\s*<caption className="sr-only">/)
     assert.doesNotMatch(sec, /<ul className="divide-y divide-border">\s*\{targets\.map/, '1人1行の一覧は表にした')
     // 氏名の列: 札（planTags のまま）と〔1日の記録 ›〕
     assert.match(sec, /\{planTags\?\.noPlan\.has\(rid\) \? <span className="block text-sm text-ink2">\{TARGET_NO_PLAN_LABEL\[planTags\.noPlan\.get\(rid\) \?\? 'nocopy'\]\}<\/span> : null\}/)
