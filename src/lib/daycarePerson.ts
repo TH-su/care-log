@@ -86,18 +86,23 @@ export function fluidAmountError(text: string, unit: 'ml' | 'cc' = 'ml'): string
   return null
 }
 
+/** 足せた後、空の改行キー（押しっぱなしの続き）を無視する長さ（ms） */
+export const FLUID_REPEAT_IGNORE_MS = 1000
+
 /** 水分の欄の数を取り出した結果（send＝送る量・error＝誤りの文・ignored＝足した直後の、続けて届いた改行キー） */
 export type FluidTake = { kind: 'send'; ml: number; text: string } | { kind: 'error'; message: string } | { kind: 'ignored' }
 
 /**
  * 水分の欄に入れている数（人ごと）の控え。描画を待たずに読み書きできるので、送る前に欄を空にして、
  * 続けて届いた改行キー（押しっぱなし・2回押し）で同じ量を2回送らない（2026-10-29 親の検収）。
- * 空にした直後の空の改行キーは誤りの文を出さずに無視する（足せた直後に「量を入れてください」と出さない）。
+ * 空にした直後の空の改行キーは誤りの文を出さずに無視する（足せた直後に「量を入れてください」と出さない）。無視するのは、送っている間と
+ * 書き込みが終わってから FLUID_REPEAT_IGNORE_MS の間だけ（その後に空のまま押したのは本当の打ち忘れなので知らせる＝確認の反証 軽1）。
  * 送れなかった時は restore で入れた数を欄に戻す（その間に欄へ入れ直していたら戻さない）。端末には残さない
  */
 export function createFluidInputs(unit: 'ml' | 'cc' = 'ml') {
   let texts: Record<number, string> = {}
-  const took = new Set<number>()
+  /** 取り出した人 → 書き込みが終わった時刻（送っている間は Infinity） */
+  const took = new Map<number, number>()
   return {
     /** 描画に使う今の値 */
     all: (): Record<number, string> => texts,
@@ -112,17 +117,23 @@ export function createFluidInputs(unit: 'ml' | 'cc' = 'ml') {
       took.clear()
     },
     /** 改行キー・〔＋〕: 送る量を取り出し、欄を空にする */
-    take(residentId: number): FluidTake {
+    take(residentId: number, now: number = Date.now()): FluidTake {
       const text = texts[residentId] ?? ''
-      if (text.trim() === '' && took.has(residentId)) return { kind: 'ignored' }
+      const doneAt = took.get(residentId)
+      if (text.trim() === '' && doneAt !== undefined && (doneAt === Infinity || now - doneAt < FLUID_REPEAT_IGNORE_MS)) return { kind: 'ignored' }
+      took.delete(residentId)
       const err = fluidAmountError(text, unit)
       if (err !== null) {
         const t = text.trim()
         return { kind: 'error', message: t === '' ? err : `「${t}」は足せません。${err}` }
       }
       texts = { ...texts, [residentId]: '' }
-      took.add(residentId)
+      took.set(residentId, Infinity)
       return { kind: 'send', ml: Number(text.normalize('NFKC').trim()), text }
+    },
+    /** 書き込みが終わった（足せた）: ここから FLUID_REPEAT_IGNORE_MS の間だけ、空の改行キーを無視する */
+    done(residentId: number, at: number = Date.now()) {
+      if (took.has(residentId)) took.set(residentId, at)
     },
     /** 送れなかった: 欄が空のままなら、入れた数を戻す。戻したら true */
     restore(residentId: number, text: string): boolean {

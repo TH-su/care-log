@@ -745,8 +745,10 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
     }
     setFluidText(fluidInputs.all())
     void addFluid(rid, t.ml).then((ok) => {
+      // 足せた: ここから少しの間だけ、空の改行キー（押しっぱなしの続き）を無視する（確認の反証 軽1）
+      if (ok) fluidInputs.done(rid)
       // 足せなかった時は入れた数を欄に戻す（日を移った後・その間に欄へ入れ直した時は戻さない）
-      if (!ok && dayRef.current === d && fluidInputs.restore(rid, t.text)) setFluidText(fluidInputs.all())
+      else if (dayRef.current === d && fluidInputs.restore(rid, t.text)) setFluidText(fluidInputs.all())
     })
   }
 

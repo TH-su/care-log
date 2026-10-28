@@ -341,7 +341,7 @@ if (DP === null) {
       const f = page.slice(page.indexOf('const submitFluid = '), page.indexOf('const goDay = '))
       assert.match(page, /const \[fluidInputs\] = useState\(\(\) => createFluidInputs\('cc'\)\)/)
       assert.match(f, /const t = fluidInputs\.take\(rid\)\s+if \(t\.kind === 'ignored'\) return\s+if \(t\.kind === 'error'\) \{\s*noteFluid\(key, \{ tone: 'danger', text: t\.message, input: true \}\)\s*return\s*\}\s*setFluidText\(fluidInputs\.all\(\)\)\s*void addFluid\(rid, t\.ml\)/)
-      assert.match(f, /if \(!ok && dayRef\.current === d && fluidInputs\.restore\(rid, t\.text\)\) setFluidText\(fluidInputs\.all\(\)\)/)
+      assert.match(f, /if \(ok\) fluidInputs\.done\(rid\)\s+else if \(dayRef\.current === d && fluidInputs\.restore\(rid, t\.text\)\) setFluidText\(fluidInputs\.all\(\)\)/)
       assert.doesNotMatch(page, /setFluidText\(\(prev\)/, '欄の値は控えを通して書く（描画の前の古い値で送らない）')
       // 数を直したら誤りの知らせを外す
       assert.match(body, /if \(fn\?\.input === true\) noteFluid\(fkey, null\)/)
@@ -367,6 +367,14 @@ if (DP === null) {
       // 入れ直した後の空の改行キーは、ふつうの誤り（量を入れてください）
       f.set(1, '')
       assert.deepEqual(f.take(1), { kind: 'error', message: '量を入れてください。' })
+      // 空の改行キーを無視するのは、送っている間と、書き込みが終わってから少しの間だけ（後で空のまま押したのは知らせる＝確認の反証 軽1）
+      f.set(5, '120')
+      assert.equal(f.take(5, 1000).kind, 'send')
+      assert.deepEqual(f.take(5, 5000), { kind: 'ignored' }, '送っている間はいつまでも無視')
+      f.done(5, 6000)
+      assert.deepEqual(f.take(5, 6000 + DP.FLUID_REPEAT_IGNORE_MS - 1), { kind: 'ignored' })
+      assert.deepEqual(f.take(5, 6000 + DP.FLUID_REPEAT_IGNORE_MS), { kind: 'error', message: '量を入れてください。' })
+      assert.deepEqual(f.take(5, 6000 + DP.FLUID_REPEAT_IGNORE_MS + 1), { kind: 'error', message: '量を入れてください。' }, '一度知らせたら、その後も知らせる')
       // 誤り・全角・人ごと・日の切り替え
       f.set(2, '2500')
       assert.deepEqual(f.take(2), { kind: 'error', message: '「2500」は足せません。量は 1〜2000 cc で入れてください。' })
