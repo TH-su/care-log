@@ -76,8 +76,11 @@ if (DC === null) {
       assert.match(page, /if \(active === null \|\| tableBox === null \|\| kpHeight === 0\) return\s+const cell = tableBox\.querySelector<HTMLElement>\('\[data-dc-active\]'\)/)
       // 枠の後ろがすぐページの終わりなら、後ろの余白も引く（一番下まで送っても見出しの行がアプリの見出しの下に入らない＝反証 重1）
       const fit = code('../src/lib/useTableFit.ts')
-      assert.match(fit, /const want = Math\.max\(fixed, flowAfter\(el\) \+ FIT_GAP\)/)
-      assert.match(fit, /write\('--dc-fit-below', extraBelow > 0 \|\| window\.innerHeight - top - want >= minFrame \? want : fixed\)/)
+      assert.match(fit, /write\('--dc-fit-below', Math\.max\(bottomCover\(\) \+ extraBelow, flowAfter\(el\)\) \+ FIT_GAP\)/)
+      // 後ろの中身のある区画は数えない（区画の件数で枠の高さを変えない＝確認の反証 軽1）。数えるのは余白と中身の無い空きだけ
+      assert.match(fit, /if \(s\.getAttribute\('aria-hidden'\) !== 'true' \|\| s\.childElementCount > 0\) continue/)
+      // テンキーの分の空きは中身の無い aria-hidden の div（flowAfter が数える形）
+      assert.match(page, /\{active !== null \? <div aria-hidden="true" style=\{\{ height: kpHeight \}\} \/> : null\}/)
       assert.match(page, /const over = tableBox\.getBoundingClientRect\(\)\.bottom - \(kpBox !== null \? kpBox\.getBoundingClientRect\(\)\.top : window\.innerHeight\)\s+if \(over > 0\) window\.scrollBy\(0, over\)\s+cell\.scrollIntoView\(\{ block: 'nearest', inline: 'nearest' \}\)/)
       assert.match(page, /<th scope="col" className="sticky left-0 top-0 z-30 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">\s*<span className="dc-vital-name block">氏名<\/span>\s*<\/th>/)
       // 氏名の列の幅は札の長さで広げない（7rem と画面幅の35% の小さい方・中で折り返す＝#45 の確認の反証 重）

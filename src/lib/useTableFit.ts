@@ -12,8 +12,6 @@ import { useLayoutEffect } from 'react'
 
 /** 枠の下と画面の下端の間に空ける余白（px） */
 const FIT_GAP = 8
-/** 枠の高さの下限（rem・index.css の .dc-table-fit の max(10rem, …) と同じ） */
-const FIT_MIN_REM = 10
 
 /** 上に貼り付く部品（sticky・fixed の header）の高さ */
 function topCover(): number {
@@ -27,8 +25,10 @@ function topCover(): number {
 }
 
 /**
- * 枠より後ろの流れの高さ（px）。「枠の後ろに続く兄弟の高さ」＋「祖先の下余白・下罫線」を body まで足し上げる
- * （sheet.tsx の spaceBelow と同じ考え・枠自身の高さに左右されない）。バイタルのテンキーの分の空きの div もここに入る
+ * 枠より後ろの余白の高さ（px）。「祖先の下余白・下罫線」と「後ろに続く中身の無い空き（aria-hidden の空の div＝バイタルのテンキーの分）」を
+ * body まで足し上げる（sheet.tsx の spaceBelow の考えから、中身のある区画を除いたもの・枠自身の高さに左右されない）。
+ * 中身のある区画（機能訓練の「対象者でない方の記録」・訪問など）は数えない: 区画を見る時に表が上へ送られるのは普通のページ送りで、
+ * 数えると区画の件数で枠の高さが変わる（2026-10-28 確認の反証 軽1）
  */
 function flowAfter(el: HTMLElement): number {
   const num = (v: string): number => Number.parseFloat(v) || 0
@@ -40,6 +40,7 @@ function flowAfter(el: HTMLElement): number {
       if (!(s instanceof HTMLElement)) continue
       const cs = window.getComputedStyle(s)
       if (cs.display === 'none' || cs.position === 'fixed' || cs.position === 'absolute') continue
+      if (s.getAttribute('aria-hidden') !== 'true' || s.childElementCount > 0) continue
       total += s.getBoundingClientRect().height + num(cs.marginTop) + num(cs.marginBottom)
     }
     const parent = node.parentElement
@@ -78,16 +79,10 @@ export function useTableFit(el: HTMLElement | null, extraBelow = 0): void {
     }
     const measure = () => {
       raf = 0
-      // 枠の後ろの流れ（外枠・main の下の余白・テンキーの分の空き・後ろの区画）も引く。引かないと、ページを一番下まで送った時に
-      // 枠の上端がアプリの見出しの下に入り、見出しの行が隠れる（2026-10-28 反証 重1）。ただし引くと枠が下限より小さくなる時
-      // （後ろに大きな区画が続く画面）は引かない（その区画を見る時に表が上へ送られるのは普通のページ送り）。テンキーが開いている間
-      // （extraBelow > 0）は枠が小さくなるのは避けられないので、いつも引く（下限は CSS の max(10rem, …) が守る）
-      const top = topCover()
-      const fixed = bottomCover() + extraBelow + FIT_GAP
-      const want = Math.max(fixed, flowAfter(el) + FIT_GAP)
-      const minFrame = FIT_MIN_REM * (Number.parseFloat(window.getComputedStyle(document.documentElement).fontSize) || 16)
-      write('--dc-fit-top', top)
-      write('--dc-fit-below', extraBelow > 0 || window.innerHeight - top - want >= minFrame ? want : fixed)
+      // 枠の後ろの余白（外枠・main の下の余白・テンキーの分の空き）も引く。引かないと、ページを一番下まで送った時に枠の上端が
+      // アプリの見出しの下に入り、見出しの行が隠れる（2026-10-28 反証 重1）。下限は CSS の max(10rem, …) が守る
+      write('--dc-fit-top', topCover())
+      write('--dc-fit-below', Math.max(bottomCover() + extraBelow, flowAfter(el)) + FIT_GAP)
     }
     const schedule = () => {
       if (raf === 0) raf = window.requestAnimationFrame(measure)
