@@ -17,7 +17,9 @@
 // - 受け手の記録者（actorId）と同じ職員の別の端末は「あなたの別の端末」と出す（F26）
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { fetchStaff, joinPresence } from '../lib/db'
+import { joinPresence } from '../lib/db'
+// 名簿は控え（cachedReads）を通す＝App・先読みが読んだ名簿と相乗りする
+import { fetchStaff } from '../lib/cachedReads'
 import {
   cellBusyText,
   createActivityGate,

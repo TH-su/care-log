@@ -4282,8 +4282,20 @@ const TRUE_WORDS = new Set(['true', '1', 'on', 'yes', 'enabled'])
  * （2026-09-05 実測。入力画面の出入りごとに app_settings が2要求）。
  * **古い値を配るのではなく、走っている1回の結果を共有する**だけなので、
  * 「前提情報は参照するその時点で実測する」規範はそのまま守られる。
+ * 1回目が終わった直後の呼び出しは、これに加えて下の短い窓（GATE_REUSE_MS）で観測値を使う。
  */
 let gateInFlight: Promise<boolean | null> | null = null
+
+/**
+ * 起動直後の重なりを1本にする短い再利用の窓（ms・GATE_TTL_MS とは別物）。
+ * ホームを開くと App の起動と画面がこのフラグを数十ms ずらして順に取りに行き、走っている1回（gateInFlight）が
+ * 終わった後の2本目が同じ値をもう一度引いていた（2026-10-28 実測・CPU4倍で2要求）。
+ * サーバーから実際に観測できた直後のこの窓の内だけ、その観測値を返す（失敗・許可リスト外は窓に入れない）。
+ * 窓は先読みの控えの使い回し（dataCache の REUSE_MS）と同じ長さ（2秒の窓は仮置き・入れるかは本人の判断待ち 2026-10-28）
+ */
+const GATE_REUSE_MS = 2_000
+/** refreshGate がサーバーから値を観測した時刻（0＝窓なし。試験の差し替え・取得の失敗では更新しない） */
+let gateObservedAt = 0
 
 /**
  * この起動中に「このアカウントは許可リストに無い（RLS で業務表が見えない）」と確かめたか（F61・2026-10-10）。
@@ -4382,6 +4394,7 @@ async function buildGateForGate(): Promise<boolean> {
 
 async function refreshGate(): Promise<boolean | null> {
   if (gateInFlight !== null) return gateInFlight
+  if (gateValue !== null && !memberDenied && gateObservedAt > 0 && Date.now() - gateObservedAt < GATE_REUSE_MS) return gateValue
   const run = (async (): Promise<boolean | null> => {
     try {
       const raw = await getAppSetting('native_input_enabled')
@@ -4391,6 +4404,7 @@ async function refreshGate(): Promise<boolean | null> {
       const v = raw !== null && TRUE_WORDS.has(raw.trim().toLowerCase())
       gateValue = v
       gateFetchedAt = Date.now()
+      gateObservedAt = gateFetchedAt
       return v
     } catch {
       return null // 直近の観測値（gateValue）は消さない
@@ -5310,8 +5324,24 @@ export async function fetchNoteReaders(noteId: number): Promise<Staff[]> {
   return out
 }
 
+/**
+ * 走っている app_settings の取得（キーごと）。同じキーを同じ瞬間に呼んだ分は1本の結果を共有する。
+ * 終わったら（失敗も）外す＝時間の控えではなく、次の呼び出しは改めて問い合わせる
+ */
+const appSettingInFlight = new Map<string, Promise<string | null>>()
+
 /** app_settings（key/value・1行）の値。未登録は null */
 export async function getAppSetting(key: string): Promise<string | null> {
+  const running = appSettingInFlight.get(key)
+  if (running !== undefined) return running
+  const run = readAppSetting(key).finally(() => {
+    appSettingInFlight.delete(key)
+  })
+  appSettingInFlight.set(key, run)
+  return run
+}
+
+async function readAppSetting(key: string): Promise<string | null> {
   const sb = await getClient()
   const res = (await sb
     .from('app_settings')
@@ -12565,6 +12595,8 @@ export const __testHooks = import.meta.env?.PROD === true ? undefined : {
     const native = sb === null ? null : opts?.native === undefined ? true : opts.native
     gateValue = native
     gateFetchedAt = native === null ? 0 : Date.now()
+    gateObservedAt = 0
+    appSettingInFlight.clear()
     kindGates = newKindGates()
     if (sb !== null) {
       for (const k of Object.keys(kindGates) as InputKind[]) {
