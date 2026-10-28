@@ -4282,6 +4282,7 @@ const TRUE_WORDS = new Set(['true', '1', 'on', 'yes', 'enabled'])
  * （2026-09-05 実測。入力画面の出入りごとに app_settings が2要求）。
  * **古い値を配るのではなく、走っている1回の結果を共有する**だけなので、
  * 「前提情報は参照するその時点で実測する」規範はそのまま守られる。
+ * 1回目が終わった直後の呼び出しは、これに加えて下の短い窓（GATE_REUSE_MS）で観測値を使う。
  */
 let gateInFlight: Promise<boolean | null> | null = null
 
