@@ -876,7 +876,8 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   // 枠の下に隠れないように）。先に枠の下端がテンキーの上に来るまでページを送り、次に枠の中で欄へ送る
   // （上の見出しと左の氏名の列の分は .dc-table-fit の scroll-padding で避ける）
   useEffect(() => {
-    if (active === null || tableBox === null) return
+    // テンキーの高さが測れるまでは送らない（測る前の高さで送ると、縮む前の枠で計算してページの一番下まで送ってしまう＝反証 重1）
+    if (active === null || tableBox === null || kpHeight === 0) return
     const cell = tableBox.querySelector<HTMLElement>('[data-dc-active]')
     if (cell === null) return
     // テンキーの上端（狭い画面では下部タブの上に出る）より下に枠の下端があれば、その分だけページを送る

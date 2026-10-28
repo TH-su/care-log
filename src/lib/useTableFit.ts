@@ -12,6 +12,8 @@ import { useLayoutEffect } from 'react'
 
 /** 枠の下と画面の下端の間に空ける余白（px） */
 const FIT_GAP = 8
+/** 枠の高さの下限（rem・index.css の .dc-table-fit の max(10rem, …) と同じ） */
+const FIT_MIN_REM = 10
 
 /** 上に貼り付く部品（sticky・fixed の header）の高さ */
 function topCover(): number {
@@ -22,6 +24,31 @@ function topCover(): number {
     h = Math.max(h, el.getBoundingClientRect().height)
   }
   return h
+}
+
+/**
+ * 枠より後ろの流れの高さ（px）。「枠の後ろに続く兄弟の高さ」＋「祖先の下余白・下罫線」を body まで足し上げる
+ * （sheet.tsx の spaceBelow と同じ考え・枠自身の高さに左右されない）。バイタルのテンキーの分の空きの div もここに入る
+ */
+function flowAfter(el: HTMLElement): number {
+  const num = (v: string): number => Number.parseFloat(v) || 0
+  let total = 0
+  let node: HTMLElement = el
+  while (node.parentElement !== null) {
+    total += num(window.getComputedStyle(node).marginBottom)
+    for (let s = node.nextElementSibling; s !== null; s = s.nextElementSibling) {
+      if (!(s instanceof HTMLElement)) continue
+      const cs = window.getComputedStyle(s)
+      if (cs.display === 'none' || cs.position === 'fixed' || cs.position === 'absolute') continue
+      total += s.getBoundingClientRect().height + num(cs.marginTop) + num(cs.marginBottom)
+    }
+    const parent = node.parentElement
+    const pcs = window.getComputedStyle(parent)
+    total += num(pcs.paddingBottom) + num(pcs.borderBottomWidth)
+    if (parent === document.body) break
+    node = parent
+  }
+  return total
 }
 
 /** 下に貼り付く部品（画面の下端に付いた fixed の nav＝狭い画面の下部タブ）の高さ */
@@ -51,8 +78,16 @@ export function useTableFit(el: HTMLElement | null, extraBelow = 0): void {
     }
     const measure = () => {
       raf = 0
-      write('--dc-fit-top', topCover())
-      write('--dc-fit-below', bottomCover() + extraBelow + FIT_GAP)
+      // 枠の後ろの流れ（外枠・main の下の余白・テンキーの分の空き・後ろの区画）も引く。引かないと、ページを一番下まで送った時に
+      // 枠の上端がアプリの見出しの下に入り、見出しの行が隠れる（2026-10-28 反証 重1）。ただし引くと枠が下限より小さくなる時
+      // （後ろに大きな区画が続く画面）は引かない（その区画を見る時に表が上へ送られるのは普通のページ送り）。テンキーが開いている間
+      // （extraBelow > 0）は枠が小さくなるのは避けられないので、いつも引く（下限は CSS の max(10rem, …) が守る）
+      const top = topCover()
+      const fixed = bottomCover() + extraBelow + FIT_GAP
+      const want = Math.max(fixed, flowAfter(el) + FIT_GAP)
+      const minFrame = FIT_MIN_REM * (Number.parseFloat(window.getComputedStyle(document.documentElement).fontSize) || 16)
+      write('--dc-fit-top', top)
+      write('--dc-fit-below', extraBelow > 0 || window.innerHeight - top - want >= minFrame ? want : fixed)
     }
     const schedule = () => {
       if (raf === 0) raf = window.requestAnimationFrame(measure)

@@ -73,7 +73,11 @@ if (DC === null) {
       assert.equal((page.match(/<th scope="col" className="sticky top-0 z-20 w-28 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">/g) ?? []).length, 2, '再測定・状態の見出しも上に残す')
       // 入れている欄は枠の中に見せる（テンキーで枠が縮んでも隠れない）
       assert.match(page, /data-dc-active=\{isActive \? '' : undefined\}/)
-      assert.match(page, /const cell = tableBox\.querySelector<HTMLElement>\('\[data-dc-active\]'\)/)
+      assert.match(page, /if \(active === null \|\| tableBox === null \|\| kpHeight === 0\) return\s+const cell = tableBox\.querySelector<HTMLElement>\('\[data-dc-active\]'\)/)
+      // 枠の後ろがすぐページの終わりなら、後ろの余白も引く（一番下まで送っても見出しの行がアプリの見出しの下に入らない＝反証 重1）
+      const fit = code('../src/lib/useTableFit.ts')
+      assert.match(fit, /const want = Math\.max\(fixed, flowAfter\(el\) \+ FIT_GAP\)/)
+      assert.match(fit, /write\('--dc-fit-below', extraBelow > 0 \|\| window\.innerHeight - top - want >= minFrame \? want : fixed\)/)
       assert.match(page, /const over = tableBox\.getBoundingClientRect\(\)\.bottom - \(kpBox !== null \? kpBox\.getBoundingClientRect\(\)\.top : window\.innerHeight\)\s+if \(over > 0\) window\.scrollBy\(0, over\)\s+cell\.scrollIntoView\(\{ block: 'nearest', inline: 'nearest' \}\)/)
       assert.match(page, /<th scope="col" className="sticky left-0 top-0 z-30 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">\s*<span className="dc-vital-name block">氏名<\/span>\s*<\/th>/)
       // 氏名の列の幅は札の長さで広げない（7rem と画面幅の35% の小さい方・中で折り返す＝#45 の確認の反証 重）
