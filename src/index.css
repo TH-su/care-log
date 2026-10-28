@@ -71,12 +71,6 @@
     border-color: var(--c-primary);
   }
 }
-/* デイの食事一括（2026-10-24 今日の画面の改善 2回目）: 1人1帯。狭い画面は氏名の下にボタン、広い画面（60em 以上）は
-   左に氏名の列・右にボタン。切り替えの幅は em で決める（文字を大きくした時も氏名の列がつぶれない＝今日の画面と同じ） */
-.dc-meal-row {
-  display: grid;
-  gap: var(--tap-gap);
-}
 /* デイのバイタル一括の氏名の列（2026-10-24 確認の反証 重）: 表は自動の幅（min-w-max）なので、基準の札（個別: SpO2 …・個人の基準）の
    1行の幅がそのまま列の幅になり、文字を大きくした時・狭い画面で sticky の列が枠を覆って欄が押せなくなった。
    列の幅を「7rem と画面幅の35% の小さい方」に決め、長い札・氏名は列の中で折り返す（文字の大きさと画面の幅のどちらでも欄の帯が残る） */
@@ -85,6 +79,29 @@
   /* 表に余りの幅がある広い画面では、列の幅いっぱいに広げる（％の最小幅は列の幅の計算には効かないので、上の上限はそのまま） */
   min-width: 100%;
   overflow-wrap: anywhere;
+}
+/* デイの一括の表の枠（2026-10-28 代表者の依頼）: 高さの上限（画面の高さ − 上に貼り付くアプリの見出し − 下に貼り付く下部タブ・テンキー）を
+   付け、枠の中で縦にも送る。見出しの行（sticky top-0）が枠の上に、氏名の列（sticky left-0）が左に残り、下の行だけが送られる。上と下の
+   高さは useTableFit（src/lib/useTableFit.ts）が実測して書き戻す（ここの値は実測が入るまでの暫定）。
+   max-height は単位ごとに分けて書く（dvh が使えない端末で計算が無効になった時に、前の宣言へ戻すため）。
+   scroll-padding は、欄へ送る時（フォーカス・scrollIntoView）に上の見出しと左の氏名の列の下に隠さないための逃げ */
+.dc-table-fit {
+  --dc-fit-top: 4rem;
+  --dc-fit-below: 4.5rem;
+  max-height: max(10rem, calc(100vh - var(--dc-fit-top) - var(--dc-fit-below)));
+  scroll-padding-top: 3.5rem;
+  scroll-padding-left: calc(min(7rem, 35vw) + 1rem);
+}
+@supports (height: 100dvh) {
+  .dc-table-fit {
+    max-height: max(10rem, calc(100dvh - var(--dc-fit-top) - var(--dc-fit-below)));
+  }
+}
+@media print {
+  .dc-table-fit {
+    max-height: none;
+    overflow: visible;
+  }
 }
 /* デイのバイタル一括のテンキー（2026-10-24）: 文字を大きくしても画面の上へはみ出さない（収まらない分はテンキーの中でスクロール）。
    下の帯（3.5rem＝bottom-14）の上に出す。広い画面（lg＝1024px 以上）は帯が無いので画面の高さまで */
@@ -95,11 +112,5 @@
 @media (min-width: 1024px) {
   .dc-keypad {
     max-height: 100dvh;
-  }
-}
-@media (min-width: 60em) {
-  .dc-meal-row {
-    grid-template-columns: 11rem minmax(0, 1fr);
-    align-items: start;
   }
 }

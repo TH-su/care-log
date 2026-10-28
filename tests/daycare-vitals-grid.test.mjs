@@ -64,17 +64,34 @@ if (DC === null) {
     const page = code('../src/pages/DaycareVitalsPage.tsx')
     it('1行1人の表（横スクロールは枠の中だけ・氏名の列は左に残す・列は 氏名｜KT｜上｜下｜P｜SpO2｜再測定｜状態）', () => {
       assert.match(page, /<table className="w-full min-w-max border-collapse text-base">/)
-      assert.match(page, /className="relative overflow-x-auto"/)
-      assert.match(page, /<th scope="col" className="sticky left-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">\s*<span className="dc-vital-name block">氏名<\/span>\s*<\/th>/)
+      // 2026-10-28 見出しの行を上に残す（固定し直し・意図は同じ）: 枠に高さの上限（.dc-table-fit・useTableFit）を付けて枠の中で縦にも送る。
+      // 見出しの行は sticky top-0（角の氏名は z-30・ほかの見出しは z-20）、氏名の列は z-10。枠は isolate でアプリの見出しの上に重ならない
+      assert.match(page, /tabIndex=\{tableScrolls \|\| tableScrollsY \? 0 : undefined\}\s+className="dc-table-fit relative isolate overflow-auto"/)
+      // テンキーが開いている間は、その高さも下に貼り付く部品として引く
+      assert.match(page, /useTableFit\(tableBox, active !== null \? kpHeight : 0\)/)
+      assert.match(page, /<th key=\{f\} scope="col" className="sticky top-0 z-20 w-24 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">/)
+      assert.equal((page.match(/<th scope="col" className="sticky top-0 z-20 w-28 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">/g) ?? []).length, 2, '再測定・状態の見出しも上に残す')
+      // 入れている欄は枠の中に見せる（テンキーで枠が縮んでも隠れない）
+      assert.match(page, /data-dc-active=\{isActive \? '' : undefined\}/)
+      assert.match(page, /if \(active === null \|\| tableBox === null \|\| kpHeight === 0\) return\s+const cell = tableBox\.querySelector<HTMLElement>\('\[data-dc-active\]'\)/)
+      // 枠の後ろがすぐページの終わりなら、後ろの余白も引く（一番下まで送っても見出しの行がアプリの見出しの下に入らない＝反証 重1）
+      const fit = code('../src/lib/useTableFit.ts')
+      assert.match(fit, /write\('--dc-fit-below', Math\.max\(bottomCover\(\) \+ extraBelow, flowAfter\(el\)\) \+ FIT_GAP\)/)
+      // 後ろの中身のある区画は数えない（区画の件数で枠の高さを変えない＝確認の反証 軽1）。数えるのは余白と中身の無い空きだけ
+      assert.match(fit, /if \(s\.getAttribute\('aria-hidden'\) !== 'true' \|\| s\.childElementCount > 0\) continue/)
+      // テンキーの分の空きは中身の無い aria-hidden の div（flowAfter が数える形）
+      assert.match(page, /\{active !== null \? <div aria-hidden="true" style=\{\{ height: kpHeight \}\} \/> : null\}/)
+      assert.match(page, /const over = tableBox\.getBoundingClientRect\(\)\.bottom - \(kpBox !== null \? kpBox\.getBoundingClientRect\(\)\.top : window\.innerHeight\)\s+if \(over > 0\) window\.scrollBy\(0, over\)\s+cell\.scrollIntoView\(\{ block: 'nearest', inline: 'nearest' \}\)/)
+      assert.match(page, /<th scope="col" className="sticky left-0 top-0 z-30 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">\s*<span className="dc-vital-name block">氏名<\/span>\s*<\/th>/)
       // 氏名の列の幅は札の長さで広げない（7rem と画面幅の35% の小さい方・中で折り返す＝#45 の確認の反証 重）
       assert.match(page, /<div className="dc-vital-name">/)
       assert.match(read('../src/index.css'), /\.dc-vital-name \{\s*width: min\(7rem, 35vw\);\s*(\/\*[\s\S]*?\*\/\s*)?min-width: 100%;\s*overflow-wrap: anywhere;/)
-      assert.match(page, /<th scope="row" className="sticky left-0 z-20 bg-bg px-2 py-1 text-left font-normal">/)
+      assert.match(page, /<th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">/)
       assert.match(page, /\{DAYCARE_VITAL_FIELDS\.map\(\(f\) => \(\s*<th key=\{f\} scope="col"/)
       const head = page.slice(page.indexOf('<thead>'), page.indexOf('</thead>'))
       assert.ok(head.indexOf('氏名') < head.indexOf('DAYCARE_VITAL_FIELDS') && head.indexOf('DAYCARE_VITAL_FIELDS') < head.indexOf('再測定') && head.indexOf('再測定') < head.indexOf('状態'))
       // 表が枠より広い時だけ手がかりを出す（定時バイタルと同じ）
-      assert.match(page, /const check = \(\) => \{\s*setTableScrolls\(el\.scrollWidth > el\.clientWidth \+ 1\)\s*setTableBoxWidth\(el\.clientWidth\)/)
+      assert.match(page, /const check = \(\) => \{\s*setTableScrolls\(el\.scrollWidth > el\.clientWidth \+ 1\)\s*setTableScrollsY\(el\.scrollHeight > el\.clientHeight \+ 1\)\s*setTableBoxWidth\(el\.clientWidth\)/)
       assert.match(page, /表は横にスクロールできます（氏名の列は左に残ります）/)
       // カードの一覧（1人1枚・5欄の格子）は無い
       assert.doesNotMatch(page, /grid grid-cols-5|aria-label="バイタルの一覧"/)

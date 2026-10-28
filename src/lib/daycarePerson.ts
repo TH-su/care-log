@@ -7,7 +7,7 @@
 // 個人情報は扱わない（数値と記号だけ。氏名は画面が持つ）。
 
 import { daycareBulkRows } from './daycare.ts'
-import type { DaycareBoardRow } from './daycare.ts'
+import type { AttendanceState, DaycareBoardRow } from './daycare.ts'
 import type { FluidIntake, Meal } from './types.ts'
 
 /** 昼食の主食・副食の割合（既存の食事一括と同じ 0〜10 の11段階） */
@@ -73,14 +73,76 @@ export function fluidTotalOf(fluids: readonly Pick<FluidIntake, 'resident_id' | 
   return sum
 }
 
-/** ほかの量（テンキー）の検査。全角・前後の空白は受け付ける。範囲外・小数・空は理由の文 */
-export function fluidAmountError(text: string): string | null {
+/**
+ * ほかの量（テンキー）の検査。全角・前後の空白は受け付ける。範囲外・小数・空は理由の文。
+ * unit は文に出す単位（食事一括は「cc」で出す＝2026-10-28。記録は ml の列のまま・1cc＝1ml で換算しない）
+ */
+export function fluidAmountError(text: string, unit: 'ml' | 'cc' = 'ml'): string | null {
   const t = text.normalize('NFKC').trim()
   if (t === '') return '量を入れてください。'
-  if (!/^\d+$/.test(t)) return '量は整数の ml で入れてください。'
+  if (!/^\d+$/.test(t)) return `量は整数の ${unit} で入れてください。`
   const n = Number(t)
-  if (n < 1 || n > DAYCARE_FLUID_MAX_ML) return `量は 1〜${DAYCARE_FLUID_MAX_ML} ml で入れてください。`
+  if (n < 1 || n > DAYCARE_FLUID_MAX_ML) return `量は 1〜${DAYCARE_FLUID_MAX_ML} ${unit} で入れてください。`
   return null
+}
+
+/** 足せた後、空の改行キー（押しっぱなしの続き）を無視する長さ（ms） */
+export const FLUID_REPEAT_IGNORE_MS = 1000
+
+/** 水分の欄の数を取り出した結果（send＝送る量・error＝誤りの文・ignored＝足した直後の、続けて届いた改行キー） */
+export type FluidTake = { kind: 'send'; ml: number; text: string } | { kind: 'error'; message: string } | { kind: 'ignored' }
+
+/**
+ * 水分の欄に入れている数（人ごと）の控え。描画を待たずに読み書きできるので、送る前に欄を空にして、
+ * 続けて届いた改行キー（押しっぱなし・2回押し）で同じ量を2回送らない（2026-10-29 親の検収）。
+ * 空にした直後の空の改行キーは誤りの文を出さずに無視する（足せた直後に「量を入れてください」と出さない）。無視するのは、送っている間と
+ * 書き込みが終わってから FLUID_REPEAT_IGNORE_MS の間だけ（その後に空のまま押したのは本当の打ち忘れなので知らせる＝確認の反証 軽1）。
+ * 送れなかった時は restore で入れた数を欄に戻す（その間に欄へ入れ直していたら戻さない）。端末には残さない
+ */
+export function createFluidInputs(unit: 'ml' | 'cc' = 'ml') {
+  let texts: Record<number, string> = {}
+  /** 取り出した人 → 書き込みが終わった時刻（送っている間は Infinity） */
+  const took = new Map<number, number>()
+  return {
+    /** 描画に使う今の値 */
+    all: (): Record<number, string> => texts,
+    /** 欄に入力した */
+    set(residentId: number, text: string) {
+      texts = { ...texts, [residentId]: text }
+      took.delete(residentId)
+    },
+    /** 日を切り替えた・〔最新に更新〕 */
+    clearAll() {
+      texts = {}
+      took.clear()
+    },
+    /** 改行キー・〔＋〕: 送る量を取り出し、欄を空にする */
+    take(residentId: number, now: number = Date.now()): FluidTake {
+      const text = texts[residentId] ?? ''
+      const doneAt = took.get(residentId)
+      if (text.trim() === '' && doneAt !== undefined && (doneAt === Infinity || now - doneAt < FLUID_REPEAT_IGNORE_MS)) return { kind: 'ignored' }
+      took.delete(residentId)
+      const err = fluidAmountError(text, unit)
+      if (err !== null) {
+        const t = text.trim()
+        return { kind: 'error', message: t === '' ? err : `「${t}」は足せません。${err}` }
+      }
+      texts = { ...texts, [residentId]: '' }
+      took.set(residentId, Infinity)
+      return { kind: 'send', ml: Number(text.normalize('NFKC').trim()), text }
+    },
+    /** 書き込みが終わった（足せた）: ここから FLUID_REPEAT_IGNORE_MS の間だけ、空の改行キーを無視する */
+    done(residentId: number, at: number = Date.now()) {
+      if (took.has(residentId)) took.set(residentId, at)
+    },
+    /** 送れなかった: 欄が空のままなら、入れた数を戻す。戻したら true */
+    restore(residentId: number, text: string): boolean {
+      if ((texts[residentId] ?? '') !== '') return false
+      texts = { ...texts, [residentId]: text }
+      took.delete(residentId)
+      return true
+    },
+  }
 }
 
 /** 排泄ケアアプリの ?masterId= が受け付ける形（体重管理アプリと同じ・haiben-record.html の hbReadMasterIdParam） */
@@ -162,4 +224,67 @@ export function mealBandMark(kinds: readonly (MealSaveKind | undefined)[]): { ma
   if (has('queued')) return { mark: '⚠', text: '未送信', tone: 'warn' }
   if (has('saved')) return { mark: '✓', text: '保存済み', tone: 'ok' }
   return null
+}
+
+// ── 2026-10-28 食事一括を「昼食だけの1行1人の表」にした（代表者の依頼・親の回答 A1〜A9） ──
+
+/** 昼食の主食・副食の欄（食事一括の表の列） */
+export type LunchAmountField = 'main_amount' | 'side_amount'
+
+/** 主食・副食の選択肢（端末の選択肢）の並び。value は ''＝未入力・'0'〜'10'＝割合・'refused'＝拒食 */
+export const LUNCH_SELECT_OPTIONS: readonly { value: string; label: string }[] = [
+  { value: '', label: '—（未入力）' },
+  ...DAYCARE_MEAL_AMOUNTS.map((n) => ({ value: String(n), label: String(n) })),
+  { value: 'refused', label: '拒食' },
+]
+
+/** 主食・副食の選択肢のいまの値: 拒食なら主食・副食の両方の欄が 'refused'。そうでなければその欄の値（null は ''） */
+export function lunchSelectValue(meal: Pick<Meal, 'main_amount' | 'side_amount' | 'status'> | null | undefined, f: LunchAmountField): string {
+  if (meal === null || meal === undefined) return ''
+  if (meal.status === 'refused') return 'refused'
+  const v = meal[f]
+  return v === null || v === undefined ? '' : String(v)
+}
+
+/**
+ * 主食・副食の選択肢で選んだ値から、送る値を作る（1人の画面の昼食と同じ決まり）。
+ * ・「拒食」: { status: 'refused' }（主食・副食の値は変えない＝それまでの〔拒食〕ボタンと同じ）
+ * ・数字: その欄の値。拒食など「食べた」以外なら「食べた」に戻して送る（withEaten と同じ）
+ * ・「—」: その欄を未入力（null）に戻す。拒食だった時は「食べた」に戻す
+ * 選択肢に無い値は null（送らない）
+ */
+export function lunchSelectPatch(
+  f: LunchAmountField,
+  value: string,
+  status: string | null | undefined,
+): Partial<Record<LunchAmountField | 'status', number | string | null>> | null {
+  if (value === 'refused') return { status: 'refused' }
+  let v: number | null
+  if (value === '') v = null
+  else if (LUNCH_SELECT_OPTIONS.some((o) => o.value === value && /^\d+$/.test(o.value))) v = Number(value)
+  else return null
+  const patch: Partial<Record<LunchAmountField | 'status', number | string | null>> = { [f]: v }
+  return status === null || status === undefined || status === 'eaten' ? patch : { ...patch, status: 'eaten' }
+}
+
+/**
+ * 食事一括の表の上の「未入力 ○名」（2026-10-28 親の回答 A8・A9）。
+ * 数えるのは在席・帰宅の方（state が present・left）のうち、昼食が拒食でなく、主食か副食が未入力（null）の方（拒食は入力済み・
+ * 水分は数えない）。昼食の値は画面に出している値（送信待ち・順番待ちを重ねた値）を渡す。在席・帰宅でない方（未到着）は数えず、別に数を返す
+ */
+export function lunchUnfilledCount(
+  rows: readonly { state: AttendanceState; lunch: Pick<Meal, 'main_amount' | 'side_amount' | 'status'> | null | undefined }[],
+): { unfilled: number; notArrived: number } {
+  let unfilled = 0
+  let notArrived = 0
+  for (const r of rows) {
+    if (r.state !== 'present' && r.state !== 'left') {
+      notArrived += 1
+      continue
+    }
+    const m = r.lunch
+    if (m !== null && m !== undefined && m.status === 'refused') continue
+    if (m === null || m === undefined || m.main_amount === null || m.side_amount === null) unfilled += 1
+  }
+  return { unfilled, notArrived }
 }

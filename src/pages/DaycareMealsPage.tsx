@@ -1,21 +1,26 @@
-// デイ せせらぎ 今日の画面の改善 2回目: 昼食・おやつをまとめて入れる画面（/record/daycare/meals・業務日は ?day=）。
-// 2026-10-24 代表承認（決定 6・親の回答 1〜2）。
+// デイ せせらぎ 今日の画面の改善 2回目: 昼食をまとめて入れる画面（/record/daycare/meals・業務日は ?day=）。
+// 2026-10-24 代表承認（決定 6・親の回答 1〜2）。2026-10-28（代表者の依頼・親の回答 A1〜A9）に「昼食だけの1行1人の表」にした。
 //
 // ・並べるのは、一括の画面と同じ方（予定の方のうち休み・入院中を除く全員と、予定外で来た方＝mealBulkRows）。到着の前でも入れられる
-//   （2026-10-24 代表者の決定 §9.4 の4。それまでは在席・帰宅だけ）。今日の一覧の並び（五十音）のまま1人1帯
-// ・帯の中に、昼食の主食 0〜10・副食 0〜10・〔拒食〕・おやつ（全部・半分・食べない）のボタンを常に出す。押すとすぐ保存し、
-//   帯の端に保存の印（✓ 保存済み・⚠ 未送信・▲ 要確認）を出す（care-log の食事一括と同じ操作感。MealsGridPage そのものは変えない）
-// ・決まりはデイの1人の画面（DaycarePersonPage）の昼食・おやつと同じ:
-//   - 保存は既存の saveMealEdits（meals の lunch・snack＝care-log の昼食と同じ行）。基準は読んだ時のサーバーの値。
+//   （2026-10-24 代表者の決定 §9.4 の4。それまでは在席・帰宅だけ）。今日の一覧の並び（五十音）のまま1人1行
+// ・表はバイタル一括・活動一括と同じ作り（列は 氏名｜主食｜副食｜水分（cc）。枠の中で縦横に送り、見出しの行は上・氏名の列は左に残す）。
+//   主食・副食は端末の選択肢（—・0〜10・拒食）で、選ぶとすぐ保存する。氏名の列に保存の印（✓ 保存済み・⚠ 未送信・▲ 要確認）を出す
+//   （care-log の食事一括と同じ操作感。MealsGridPage そのものは変えない）。表の上に「未入力 ○名」（在席・帰宅の方だけ数える）
+// ・おやつ（meals の snack）は2026-10-28にこの画面から外した（記録・1人の画面・care-log のおやつはそのまま）
+// ・決まりはデイの1人の画面（DaycarePersonPage）の昼食と同じ:
+//   - 保存は既存の saveMealEdits（meals の lunch＝care-log の昼食と同じ行）。基準は読んだ時のサーバーの値。
 //     送り先は押した時の人・日・枠で固定する（応答の前に日を切り替えても、次の日へ書かない）
-//   - 状態は「食べた」「拒食」だけ（外出・入院はデイにいる方の記録なので出さない）。割合・おやつのボタンは、拒食なら「食べた」に戻して送る
-//   - 送信待ちの値は欄に重ねて出す。止まった値（食い違い）・拒まれた値は重ねず、サーバーの値を出して帯の下で知らせる
+//   - 状態は「食べた」「拒食」だけ（外出・入院はデイにいる方の記録なので出さない）。割合を選ぶと、拒食なら「食べた」に戻して送る
+//   - 送信待ちの値は欄に重ねて出す。止まった値（食い違い）・拒まれた値は重ねず、サーバーの値を出して行の下で知らせる
 //   - 〔元に戻す〕はオンラインで実際に書けた時だけ（送信待ちの時は出さない）
 //   - 入力解禁は input_enabled_daycare（saveMealEdits の入口で native_input_enabled も効く）。過去の日は書ける・未来の日は書けない
-// ・取り込みとの関係は既存のまま（画面で入れた行は edited_by が付き、取り込みが上書きしない）。取り込みの印は帯に小さく出す
+// ・水分（2026-10-28）: その方・その日の fluid_intake の合計（1人の画面の分も含む）と、数を入れて足す欄。足すのは既存の insertFluid、
+//   〔元に戻す〕は softDeleteFluid（1人の画面の水分と同じ記録・同じ決まり）。表示の単位はこの画面だけ「cc」（記録は ml の列・換算しない）。
+//   消す・直すは1人の画面の一覧で行う（この画面には一覧を出さない）
+// ・取り込みとの関係は既存のまま（画面で入れた行は edited_by が付き、取り込みが上書きしない）。取り込みの印は氏名の列に小さく出す
 // ・端末に業務データを残さない（localStorage を使わない。日付は URL の ?day= で、再読み込みでも同じ日に戻る）
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   DbError,
@@ -28,6 +33,7 @@ import {
   fetchDaycareIntake,
   fetchDaycarePlan,
   getKindInputGate,
+  insertFluid,
   isQueuePersisted,
   isSelfWrite,
   kindBlockedMessage,
@@ -35,6 +41,7 @@ import {
   queuePending,
   queueSubscribe,
   saveMealEdits,
+  softDeleteFluid,
   subscribeChanges,
   subscribeDaycareChanges,
 } from '../lib/db'
@@ -42,23 +49,27 @@ import type { CellConflict, CellEditInput, DaycareMealRow, MealCellField, MealTa
 import { RecorderBar } from '../components/RecorderBar'
 import { ErrorBlock, LoadingBlock, useToast } from '../components/ui'
 import { writeDaycareHandoffFor } from '../lib/daycareHandoff'
-import { buildDaycareBoard, fmtPlanTimes } from '../lib/daycare'
+import { buildDaycareBoard, fmtPlanTimes, nowHm } from '../lib/daycare'
 import type { DaycareBoardRow } from '../lib/daycare'
 import {
-  DAYCARE_MEAL_AMOUNTS,
-  DAYCARE_SNACK_CHOICES,
-  lunchLabel,
+  LUNCH_SELECT_OPTIONS,
+  createFluidInputs,
+  fluidTotalOf,
+  lunchSelectPatch,
+  lunchSelectValue,
+  lunchUnfilledCount,
   mealBandMark,
   mealBulkPath,
   mealBulkRows,
   mealSourceLabel,
   personPath,
   readPersonDay,
-  snackLabel,
+  settleQueuedFluid,
 } from '../lib/daycarePerson'
-import type { MealSaveKind } from '../lib/daycarePerson'
+import type { LunchAmountField, MealSaveKind } from '../lib/daycarePerson'
 import { addDays, fmtDayLabel, todayIso } from '../lib/format'
-import type { DaycareAttendance, DaycareDay, DaycarePlanRow, DaycarePlanSource, Meal, Resident, Staff } from '../lib/types'
+import { useTableFit } from '../lib/useTableFit'
+import type { DaycareAttendance, DaycareDay, DaycarePlanRow, DaycarePlanSource, FluidIntake, Meal, Resident, Staff } from '../lib/types'
 import { DaycareNav } from './DaycarePage'
 
 const ERR_LOAD = 'デイの記録を読み込めませんでした。通信状態を確認して、再試行してください。'
@@ -77,14 +88,14 @@ interface MealsData {
   missing: boolean
   attendance: DaycareAttendance[]
   meals: DaycareMealRow[]
+  /** その日の水分の記録（全員分・1人の画面の分も含む）。合計に使う */
+  fluids: FluidIntake[]
 }
 
-type MealSlot2 = 'lunch' | 'snack'
 type MealField = 'main_amount' | 'side_amount' | 'status'
-const SLOTS2: readonly MealSlot2[] = ['lunch', 'snack']
 
 /**
- * 昼食・おやつの保存の状態。人・日・枠ごとに持つ（保存の途中で日を切り替えても、前の日の結果を次の日の帯に出さない）。
+ * 昼食の保存の状態。人・日・枠ごとに持つ（保存の途中で日を切り替えても、前の日の結果を次の日の行に出さない）。
  * 食い違い・止まり・拒否は、その送り先（target）を持ち、解く操作はその送り先へ送る（1人の画面と同じ）
  */
 type SaveState =
@@ -96,10 +107,20 @@ type SaveState =
   | { kind: 'rejected'; target: MealTarget; reason?: string }
   | { kind: 'error'; text: string }
 
+/**
+ * 水分の知らせ（人・日ごと。行の下に出す）。queued: 〔元に戻す〕の取り消しを送信待ちにした（その行がサーバーから消えたら外す）。
+ * input: 欄に入れた数の誤り（数を直したら外す）。足した分の送信待ちは queuedFluids から出す（届いたら外れる）
+ */
+type FluidNote = { tone: 'warn' | 'danger' | 'info'; text: string; queued?: { delId: number }; input?: true }
+
 const mealKeyOf = (t: MealTarget) => `${t.residentId}:${t.day}:${t.slot}`
+const personKeyOf = (residentId: number, day: string) => `${residentId}:${day}`
+/** 水分の表示（この画面だけ cc。記録は ml の列のまま・1cc＝1ml で換算しない） */
+const fmtCc = (n: number) => `${n.toLocaleString('ja-JP')}cc`
+const AMOUNT_WORD: Record<LunchAmountField, string> = { main_amount: '主食', side_amount: '副食' }
 
 /**
- * 帯の氏名の下の一言（在席 9:35／帰宅 15:30／未到着（予定 9:30〜15:30））。2026-10-24（§9.4 の4）に到着の前の方も並ぶように
+ * 氏名の下の一言（在席 9:35／帰宅 15:30／未到着（予定 9:30〜15:30））。2026-10-24（§9.4 の4）に到着の前の方も並ぶように
  * なったので、到着の記録が無い方は「在席」と出さず「未到着」と出す（反証 中1）
  */
 function cameText(row: Pick<DaycareBoardRow, 'state' | 'attendance' | 'plans' | 'planned' | 'dup'>): string {
@@ -137,6 +158,22 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
   /** 人・日・枠ごとの順番待ちの末尾 */
   const chainRef = useRef(new Map<string, Promise<void>>())
   const [queueTick, setQueueTick] = useState(0)
+  /** 水分の欄に入れている数（人ごと。日を切り替えたら空にする。端末には残さない）。読み書きは控え（fluidInputs）で行い、描画にはこの写しを使う */
+  const [fluidText, setFluidText] = useState<Record<number, string>>({})
+  /** 水分の欄の控え（描画を待たずに読み書きする。送る前に空にして、続けて届いた改行キーで同じ量を2回送らない＝2026-10-29 親の検収） */
+  const [fluidInputs] = useState(() => createFluidInputs('cc'))
+  /** 水分の知らせ（人・日ごと） */
+  const [fluidNote, setFluidNote] = useState<Record<string, FluidNote>>({})
+  /**
+   * 送信待ちの水分（人・日ごと）。base＝退避した時のサーバーの合計、ml＝まだ載っていない量、lost＝端末に控えを残せなかった。
+   * 合計に重ねて出し、取り直した合計で載った分だけ減らす（1人の画面の queuedFluids と同じ消し込み＝settleQueuedFluid）
+   */
+  const [queuedFluids, setQueuedFluids] = useState<Record<string, { base: number; ml: number; lost: boolean }>>({})
+  /** 取り消し（〔元に戻す〕）を送信待ちにした水分の行（id → その行の日。その日の読み込みでサーバーから消えるまで合計から外す） */
+  const [hiddenFluidIds, setHiddenFluidIds] = useState<Map<number, string>>(new Map())
+  /** 書き込み中の水分（人・日ごと）。その方の欄と〔＋〕を押せなくする（二重に足さない）。ref は描画を待たずに止めるため */
+  const [fluidBusy, setFluidBusy] = useState<ReadonlySet<string>>(new Set())
+  const fluidBusyRef = useRef(new Set<string>())
   const { toast, show } = useToast()
   const genRef = useRef(0)
   const dayRef = useRef(day)
@@ -148,6 +185,9 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
   const dataRef = useRef<MealsData | null>(null)
   /** 自分の保存の応答の時刻（行の id ごと）。その後に始まった読み込みには載っている */
   const savedAtRef = useRef(new Map<number, number>())
+  /** 自分が足した水分・取り消した水分の応答の時刻（行の id ごと。読み込みの取り違えを防ぐのは昼食と同じ考え） */
+  const fluidAddedAtRef = useRef(new Map<number, number>())
+  const fluidGoneAtRef = useRef(new Map<number, number>())
   const commitData = useCallback((next: MealsData) => {
     dataRef.current = next
     setData(next)
@@ -204,6 +244,11 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
       if (prev !== null && prev.day === target)
         for (const mine of prev.meals)
           if ((savedAtRef.current.get(mine.meal.id) ?? 0) > startedAt && !meals.some((m) => m.meal.id === mine.meal.id)) meals.push(mine)
+      // 水分も同じ: 読み込みを始めた後に自分が取り消した行は外し、自分が足した行は残す（合計が一時的に増減して見えない）
+      const fluids = intake.fluids.filter((f) => (fluidGoneAtRef.current.get(f.id) ?? 0) <= startedAt)
+      if (prev !== null && prev.day === target)
+        for (const mine of prev.fluids)
+          if ((fluidAddedAtRef.current.get(mine.id) ?? 0) > startedAt && !fluids.some((f) => f.id === mine.id)) fluids.push(mine)
       commitData({
         day: target,
         planRows: usable && snapshot !== null ? snapshot.plan_rows : (plan?.rows ?? []),
@@ -211,6 +256,7 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
         missing: missing || plan?.missing === true,
         attendance,
         meals,
+        fluids,
       })
       setError(null)
     } catch {
@@ -227,6 +273,14 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
     setMealState((prev) => {
       const next: Record<string, SaveState> = {}
       for (const [k, v] of Object.entries(prev)) if (v.kind !== 'saved' && v.kind !== 'error') next[k] = v
+      return next
+    })
+    // 水分の欄に入れかけた数と、その場限りの知らせも外す（取り消しの送信待ちの知らせは残す）
+    fluidInputs.clearAll()
+    setFluidText(fluidInputs.all())
+    setFluidNote((prev) => {
+      const next: Record<string, FluidNote> = {}
+      for (const [k, v] of Object.entries(prev)) if (v.queued !== undefined) next[k] = v
       return next
     })
     void load(day, false)
@@ -247,8 +301,9 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
       scheduleReload()
     }
     const offA = subscribeDaycareChanges(onChange)
+    // 水分の合計は1人の画面・他の端末で足した分も含むので、水分の変更でも読み直す（2026-10-28）
     const offB = subscribeChanges((table, info) => {
-      if (table === 'meals') onChange(table, info)
+      if (table === 'meals' || table === 'fluid_intake') onChange(table, info)
     })
     let last = queuePending()
     const offQ = queueSubscribe((n) => {
@@ -264,6 +319,35 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
     }
   }, [scheduleReload])
 
+  // ── 表の枠（バイタル一括・活動一括と同じ）。表が枠より広い（横にスクロールできる）時だけ手がかりを出す ──
+  const [tableBox, setTableBox] = useState<HTMLDivElement | null>(null)
+  const [tableScrolls, setTableScrolls] = useState(false)
+  /** 表の枠の中で縦に送れるか（送れる時は枠をキーボードで選べるようにする） */
+  const [tableScrollsY, setTableScrollsY] = useState(false)
+  /** 表の枠の幅（行の下の知らせを、この幅で折り返して左に残すため） */
+  const [tableBoxWidth, setTableBoxWidth] = useState(0)
+  useEffect(() => {
+    const el = tableBox
+    if (!el) return
+    const check = () => {
+      setTableScrolls(el.scrollWidth > el.clientWidth + 1)
+      setTableScrollsY(el.scrollHeight > el.clientHeight + 1)
+      setTableBoxWidth(el.clientWidth)
+    }
+    check()
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', check)
+      return () => window.removeEventListener('resize', check)
+    }
+    // 枠（画面幅・文字の大きさ）と表（行の増減）の両方の大きさの変化で測り直す
+    const ro = new ResizeObserver(check)
+    ro.observe(el)
+    if (el.firstElementChild) ro.observe(el.firstElementChild)
+    return () => ro.disconnect()
+  }, [tableBox])
+  // 枠の高さの上限（画面の高さ − 上と下の部品）を実測して書き戻す（見出しの行を枠の上に残す・2026-10-28）
+  useTableFit(tableBox)
+
   const board = useMemo(
     () => (data === null ? null : buildDaycareBoard({ planRows: data.planRows, source: data.planSource, residents, attendance: data.attendance })),
     [data, residents],
@@ -273,16 +357,18 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
   const nameOf = (id: number) => residents.find((r) => r.id === id)?.name ?? `利用者ID ${id}`
   const missing = data?.missing ?? false
   const canWrite = gate !== null && gate.observed && gate.value === true && !missing && day <= today
+  /** 合計に入れる水分の記録（取り消しを送信待ちにした行を除く） */
+  const visibleFluids = useMemo(() => (data === null ? [] : data.fluids.filter((f) => !hiddenFluidIds.has(f.id))), [data, hiddenFluidIds])
 
-  // ── 昼食・おやつ（1人の画面と同じ決まり） ──
-  const targetOf = (residentId: number, slot: MealSlot2): MealTarget => ({ residentId, day, slot })
+  // ── 昼食（1人の画面と同じ決まり） ──
+  const targetOf = (residentId: number): MealTarget => ({ residentId, day, slot: 'lunch' })
   const mealRowFor = (t: MealTarget): DaycareMealRow | null => {
     const d = dataRef.current
     return d === null || d.day !== t.day ? null : (d.meals.find((m) => m.meal.resident_id === t.residentId && m.meal.meal_slot === t.slot) ?? null)
   }
   /**
    * 画面に出す値: 送信待ち（まだ送っていない・送っている途中）の値だけ重ねる。止まった値（食い違い）・拒まれた値は重ねず、
-   * サーバーの値を出して帯の下で知らせる（1人の画面・既存の食事一括と同じ）
+   * サーバーの値を出して行の下で知らせる（1人の画面・既存の食事一括と同じ）
    */
   const mealShownFor = (t: MealTarget): Pick<Meal, 'main_amount' | 'side_amount' | 'status'> | null => {
     const cur = mealRowFor(t)?.meal ?? null
@@ -316,7 +402,7 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
   }
 
   /**
-   * 昼食・おやつの欄を保存する（既存の saveMealEdits。rebase は〔あなたの値で直す〕・〔元に戻す〕）。
+   * 昼食の欄を保存する（既存の saveMealEdits。rebase は〔あなたの値で直す〕・〔元に戻す〕）。
    * 送り先（t）は押した時の人・日・枠で固定する（応答の前に日を切り替えても、次の日へ書かない）。
    * 同じ人・日・枠は順番待ちにして、前の保存の応答を待ってから次を送る（基準をいちばん新しいサーバーの値にする。
    * 続けて押した時に値が古い値へ戻って見える・自分の書き込みを「他の端末が先に記録しました」と出す、を防ぐ＝
@@ -407,10 +493,9 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
       setMealFor(t, { kind: 'saved' })
       // 〔元に戻す〕はオンラインで実際に書けた時だけ。日を移った後は出さない
       if (opts.undoable !== false && r.applied.length > 0 && here()) {
-        const word = t.slot === 'lunch' ? '昼食' : 'おやつ'
         const undoPatch: Partial<Record<MealField, number | string | null>> = {}
         for (const f of Object.keys(patch) as MealField[]) undoPatch[f] = before?.[f] ?? null
-        show(`${nameOf(t.residentId)}さんの${word}を記録しました`, () => {
+        show(`${nameOf(t.residentId)}さんの昼食を記録しました`, () => {
           const base: Record<string, unknown> = {}
           for (const f of Object.keys(patch)) base[f] = patch[f as MealField] ?? null
           void saveMeal(t, undoPatch, { rebase: base, undoable: false })
@@ -443,55 +528,231 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
     await saveMeal(t, patch, { rebase: base, undoable: false })
   }
 
-  // 読み込みの後と、送信待ちが動いた時（背景の再送で止まった・拒まれた・届いた）: 帯の下の知らせを、送信待ちの今の状態に合わせて出し直す
+  // 読み込みの後と、送信待ちが動いた時（背景の再送で止まった・拒まれた・届いた）: 行の下の知らせを、送信待ちの今の状態に合わせて出し直す
   // （止まった値を保存済みのように見せない。画面を開いたまま背景で止まった時も切り替える＝1人の画面と同じ）
   useEffect(() => {
     if (data === null) return
     const ids = cameKey === '' ? [] : cameKey.split(',').map(Number)
     setMealState((prev) => {
       let next = prev
-      for (const residentId of ids)
-        for (const slot of SLOTS2) {
-          const t: MealTarget = { residentId, day: data.day, slot }
-          const k = mealKeyOf(t)
-          const cur = prev[k]
-          if (cur !== undefined && cur.kind === 'saving') continue
-          const p = pendingRow('meals', t)
-          let st: SaveState | undefined = cur
-          if (p !== null && p.state !== 'pending') {
-            if (p.state === 'rejected') st = cur !== undefined && cur.kind === 'rejected' ? cur : { kind: 'rejected', target: t }
-            else if (p.conflicts.length > 0)
-              st =
-                cur !== undefined && cur.kind === 'conflict' && JSON.stringify(cur.conflicts) === JSON.stringify(p.conflicts)
-                  ? cur
-                  : { kind: 'conflict', conflicts: p.conflicts, target: t }
-            else st = cur !== undefined && cur.kind === 'held' ? cur : { kind: 'held', target: t }
-          } else if (p !== null && p.state === 'pending' && (cur === undefined || cur.kind === 'saved')) {
-            // まだ届いていない値（開き直した時・別のタブや1人の画面で入れた分・送り直しの待ち）: 値だけ押された状態に見せず、
-            // 帯の端と下に「未送信」を出す（care-log の食事一括と同じ＝#45 の反証 中2）
-            st = { kind: 'queued', persisted: isQueuePersisted() }
-          } else if (cur !== undefined && (cur.kind === 'conflict' || cur.kind === 'held' || cur.kind === 'rejected' || (cur.kind === 'queued' && p === null))) {
-            // 届いた（送信待ちから消えた）・別のタブで解かれた: 送信待ち・食い違い・拒否の知らせを外す
-            st = undefined
-          }
-          if (st === cur) continue
-          if (next === prev) next = { ...prev }
-          if (st === undefined) delete next[k]
-          else next[k] = st
+      for (const residentId of ids) {
+        const t: MealTarget = { residentId, day: data.day, slot: 'lunch' }
+        const k = mealKeyOf(t)
+        const cur = prev[k]
+        if (cur !== undefined && cur.kind === 'saving') continue
+        const p = pendingRow('meals', t)
+        let st: SaveState | undefined = cur
+        if (p !== null && p.state !== 'pending') {
+          if (p.state === 'rejected') st = cur !== undefined && cur.kind === 'rejected' ? cur : { kind: 'rejected', target: t }
+          else if (p.conflicts.length > 0)
+            st =
+              cur !== undefined && cur.kind === 'conflict' && JSON.stringify(cur.conflicts) === JSON.stringify(p.conflicts)
+                ? cur
+                : { kind: 'conflict', conflicts: p.conflicts, target: t }
+          else st = cur !== undefined && cur.kind === 'held' ? cur : { kind: 'held', target: t }
+        } else if (p !== null && p.state === 'pending' && (cur === undefined || cur.kind === 'saved')) {
+          // まだ届いていない値（開き直した時・別のタブや1人の画面で入れた分・送り直しの待ち）: 値だけ押された状態に見せず、
+          // 氏名の列と行の下に「未送信」を出す（care-log の食事一括と同じ＝#45 の反証 中2）
+          st = { kind: 'queued', persisted: isQueuePersisted() }
+        } else if (cur !== undefined && (cur.kind === 'conflict' || cur.kind === 'held' || cur.kind === 'rejected' || (cur.kind === 'queued' && p === null))) {
+          // 届いた（送信待ちから消えた）・別のタブで解かれた: 送信待ち・食い違い・拒否の知らせを外す
+          st = undefined
         }
+        if (st === cur) continue
+        if (next === prev) next = { ...prev }
+        if (st === undefined) delete next[k]
+        else next[k] = st
+      }
       return next
     })
   }, [data, cameKey, queueTick])
 
-  /** 割合・おやつのボタン: 状態が「食べた」以外（拒食など）なら「食べた」に戻して送る（1人の画面と同じ） */
-  const withEaten = (status: string | null | undefined, patch: Partial<Record<MealField, number | string | null>>) =>
-    status === null || status === undefined || status === 'eaten' ? patch : { ...patch, status: 'eaten' }
+  // ── 水分（1人の画面の addFluid・removeFluid・queuedFluids と同じ決まり） ──
+  // 読み込みの後: 送信待ちの水分は、取り直した合計（取り消しを送信待ちにして外した行を除く）で載った分だけ減らす（観測ベース）。
+  // 未送信が1件も無ければ、送信待ちの水分も残さない（届いた後に読み直している＝消し込みの取りこぼしの安全網）。
+  // 取り消しを送った行は、その行の日の読み込みでサーバーから消えたら外す（別の日を読んだだけでは外さない）
+  useEffect(() => {
+    if (data === null) return
+    const nothingQueued = queuePending() === 0
+    setQueuedFluids((prev) => {
+      let next = prev
+      for (const [k, held] of Object.entries(prev)) {
+        const [ridText, d] = k.split(':')
+        if (d !== data.day && !nothingQueued) continue
+        const r = nothingQueued ? null : settleQueuedFluid(held, fluidTotalOf(visibleFluids, Number(ridText), d))
+        if (r !== null && r.base === held.base && r.ml === held.ml) continue
+        if (next === prev) next = { ...prev }
+        if (r === null) delete next[k]
+        else next[k] = { ...held, ...r }
+      }
+      return next
+    })
+    setHiddenFluidIds((prev) => {
+      const gone = [...prev].filter(([id, d]) => d === data.day && !data.fluids.some((f) => f.id === id))
+      if (gone.length === 0) return prev
+      const still = new Map(prev)
+      for (const [id] of gone) still.delete(id)
+      return still
+    })
+  }, [data, visibleFluids])
+  // 取り消しを送信待ちにした旨の一言は、その行がサーバーから消えたと観測できたら外す
+  useEffect(() => {
+    if (data === null) return
+    setFluidNote((prev) => {
+      let next = prev
+      for (const [k, n] of Object.entries(prev)) {
+        if (n.queued === undefined || !k.endsWith(`:${data.day}`)) continue
+        const delId = n.queued.delId
+        if (data.fluids.some((f) => f.id === delId)) continue
+        if (next === prev) next = { ...prev }
+        delete next[k]
+      }
+      return next
+    })
+  }, [data])
+
+  const noteFluid = (key: string, n: FluidNote | null) =>
+    setFluidNote((prev) => {
+      if (n === null && prev[key] === undefined) return prev
+      const next = { ...prev }
+      if (n === null) delete next[key]
+      else next[key] = n
+      return next
+    })
+  /** その場限りの知らせ（失敗・確かめ・数の誤り）を外す。取り消しの送信待ちの知らせは、サーバーから消えるまで残す */
+  const clearPlainNote = (key: string) =>
+    setFluidNote((prev) => {
+      const cur = prev[key]
+      if (cur === undefined || cur.queued !== undefined) return prev
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
+  const setBusyFor = (key: string, on: boolean) => {
+    if (on) fluidBusyRef.current.add(key)
+    else fluidBusyRef.current.delete(key)
+    setFluidBusy(new Set(fluidBusyRef.current))
+  }
+
+  /**
+   * 水分を足す（既存の insertFluid＝1人の画面の addFluid と同じ値）。送り先（人・日）は押した時に固定する。
+   * 足せた（送信待ちにできた）時は true（欄を空にする）
+   */
+  const addFluid = async (rid: number, ml: number): Promise<boolean> => {
+    const d = day
+    const key = personKeyOf(rid, d)
+    const why = precheck()
+    if (why !== null) {
+      noteFluid(key, { tone: 'warn', text: why })
+      return false
+    }
+    if (fluidBusyRef.current.has(key)) return false
+    setBusyFor(key, true)
+    try {
+      const r = await insertFluid({
+        resident_id: rid,
+        taken_on: d,
+        // 今日だけいまの時刻（過去の日にいまの時刻を入れない＝1人の画面と同じ）
+        taken_at: d === todayIso() ? nowHm() : null,
+        amount_ml: ml,
+        kind: null,
+        recorded_by: actorId,
+      })
+      if (r === 'queued') {
+        const persisted = isQueuePersisted()
+        setQueuedFluids((prev) => {
+          const held = prev[key]
+          const cur = dataRef.current
+          // base は最初に退避した時点のサーバーの合計を保つ（重ねて退避しても基準をずらさない）
+          const base =
+            held !== undefined
+              ? held.base
+              : cur === null || cur.day !== d
+                ? 0
+                : fluidTotalOf(
+                    cur.fluids.filter((x) => !hiddenFluidIds.has(x.id)),
+                    rid,
+                    d,
+                  )
+          return { ...prev, [key]: { base, ml: (held?.ml ?? 0) + ml, lost: (held?.lost ?? false) || !persisted } }
+        })
+        clearPlainNote(key)
+        return true
+      }
+      const saved = r
+      const prev = dataRef.current
+      // 日を移った後の応答は前の日の表に入れない
+      if (prev !== null && prev.day === saved.taken_on) {
+        fluidAddedAtRef.current.set(saved.id, Date.now())
+        commitData({ ...prev, fluids: [...prev.fluids, saved] })
+        // 送信待ちの水分がある時は、その基準もいま足した分だけ上げる（自分がいま足した分を「送信待ちが載った」と見て減らさない）
+        setQueuedFluids((q) => {
+          const held = q[key]
+          return held === undefined ? q : { ...q, [key]: { ...held, base: held.base + saved.amount_ml } }
+        })
+      }
+      clearPlainNote(key)
+      if (dayRef.current === d) {
+        show(`${nameOf(rid)}さんの水分 ＋${fmtCc(ml)} を記録しました`, () => void undoFluid(saved))
+      }
+      return true
+    } catch (e) {
+      noteFluid(key, { tone: 'danger', text: e instanceof DbError ? e.message : '保存できませんでした。通信状態を確認して、もう一度押してください。' })
+      return false
+    } finally {
+      setBusyFor(key, false)
+    }
+  }
+  /** 〔元に戻す〕: 足した水分を取り消す（既存の softDeleteFluid＝1人の画面の removeFluid(fromUndo) と同じ扱い。取り消せた時のトーストは出さない） */
+  const undoFluid = async (f: FluidIntake) => {
+    const key = personKeyOf(f.resident_id, f.taken_on)
+    const why = precheck()
+    if (why !== null) {
+      noteFluid(key, { tone: 'warn', text: why })
+      return
+    }
+    try {
+      const r = await softDeleteFluid(f.id, f.rev, { editedBy: actorId })
+      if (r === 'queued') {
+        // 取り消しを送信待ちにした: 合計からは先に外す（同じ行の取り消しを二重に積まない）。控えを残せたかで文言を分ける
+        setHiddenFluidIds((prev) => new Map([...prev, [f.id, f.taken_on]]))
+        const persisted = isQueuePersisted()
+        noteFluid(key, { tone: persisted ? 'info' : 'danger', text: `${fmtCc(f.amount_ml)} の取り消し：${persisted ? MSG_QUEUED : MSG_NOT_PERSISTED}`, queued: { delId: f.id } })
+      } else if (r === true) {
+        fluidGoneAtRef.current.set(f.id, Date.now())
+        const prev = dataRef.current
+        if (prev !== null) commitData({ ...prev, fluids: prev.fluids.filter((x) => x.id !== f.id) })
+      } else {
+        noteFluid(key, { tone: 'warn', text: '他の端末が先にこの記録を直していました。最新の内容に読み直しました。確かめてから、もう一度押してください。' })
+        scheduleReload()
+      }
+    } catch (e) {
+      noteFluid(key, { tone: 'danger', text: e instanceof DbError ? e.message : '取り消せませんでした。通信状態を確認して、もう一度押してください。' })
+    }
+  }
+  /** 水分の欄の数を足す（改行キー＝form の submit・〔＋〕のどちらでも）。検査は fluidAmountError（1〜2000） */
+  const submitFluid = (rid: number) => {
+    const d = day
+    const key = personKeyOf(rid, d)
+    if (fluidBusyRef.current.has(key)) return
+    // 送る前に欄を空にする（描き直しを待たずに控えも空にする。書き込みの後、欄が空になる描き直しの前に続けて届いた改行キーで、
+    // 同じ量をもう1回送らない＝2026-10-29 親の検収）
+    const t = fluidInputs.take(rid)
+    if (t.kind === 'ignored') return
+    if (t.kind === 'error') {
+      noteFluid(key, { tone: 'danger', text: t.message, input: true })
+      return
+    }
+    setFluidText(fluidInputs.all())
+    void addFluid(rid, t.ml).then((ok) => {
+      // 足せた: ここから少しの間だけ、空の改行キー（押しっぱなしの続き）を無視する（確認の反証 軽1）
+      if (ok) fluidInputs.done(rid)
+      // 足せなかった時は入れた数を欄に戻す（日を移った後・その間に欄へ入れ直した時は戻さない）
+      else if (dayRef.current === d && fluidInputs.restore(rid, t.text)) setFluidText(fluidInputs.all())
+    })
+  }
 
   const goDay = (d: string) => navigate(mealBulkPath(d, today), { replace: true })
-  const chipCls = (on: boolean) =>
-    on
-      ? 'min-h-tap min-w-tap rounded border-2 border-primary bg-primary px-2 text-lg font-bold text-primary-ink'
-      : 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-2 text-lg text-ink disabled:text-ink3'
 
   const header = (
     <div className="space-y-3">
@@ -558,7 +819,7 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
     return (
       <div className="mx-auto w-full max-w-5xl space-y-4 p-4">
         {header}
-        <LoadingBlock label="その日の昼食・おやつを読み込んでいます…" />
+        <LoadingBlock label="その日の昼食を読み込んでいます…" />
       </div>
     )
   }
@@ -572,130 +833,239 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
   }
   if (data === null) return null
 
+  // 未入力の数は画面に出している値（送信待ち・順番待ちを重ねた値）で数える。在席・帰宅でない方は別に数える
+  const counts = lunchUnfilledCount(came.map((row) => ({ state: row.state, lunch: mealShownFor(targetOf(row.residentId)) })))
+  const selectCls = 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-2 text-lg text-ink disabled:text-ink3'
+
   return (
     <div className="mx-auto w-full max-w-5xl space-y-4 p-4">
       {header}
 
-      <section aria-labelledby="h-meals" className="space-y-3">
+      <section aria-labelledby="h-meals" className="min-w-0 space-y-3">
         <div className="flex flex-wrap items-baseline justify-between gap-gap">
           <h2 id="h-meals" className="text-xl font-bold text-ink">
-            昼食・おやつ
+            昼食
           </h2>
           <p className="text-base text-ink2">
             予定の方 <span className="font-num font-bold text-ink">{came.length}</span>人
           </p>
         </div>
-        <p className="text-base text-ink2">押すとすぐ保存します。昼食は care-log の食事の昼食と同じ記録です。</p>
+        <p className="text-base text-ink2">
+          選ぶとすぐ保存します。昼食は care-log の食事の昼食と同じ記録です。水分は数を入れて改行キー（または〔＋〕）で足します（1人の画面の水分と同じ記録）。
+        </p>
 
         {came.length === 0 ? (
           <p className="rounded-lg border border-border bg-surface p-3 text-base text-ink2">
             この日の予定の方がいません（休み・入院中の方は出しません）。予定外で来た方は、今日の画面の〔予定にない方を追加〕で足したカードを押し、〔予定外で到着〕を押すと、ここに出ます。
           </p>
         ) : (
-          <ul className="divide-y divide-border rounded-lg border border-border bg-surface">
-            {came.map((row) => {
-              const rid = row.residentId
-              const name = nameOf(rid)
-              const lt = targetOf(rid, 'lunch')
-              const stg = targetOf(rid, 'snack')
-              const lunch = mealShownFor(lt)
-              const snack = mealShownFor(stg)
-              const lunchEaten = (lunch?.status ?? 'eaten') === 'eaten'
-              const snackEaten = (snack?.status ?? 'eaten') === 'eaten'
-              const source = mealSourceLabel(mealRowFor(lt))
-              const stL = mealState[mealKeyOf(lt)]
-              const stS = mealState[mealKeyOf(stg)]
-              // 順番待ちが残っている枠は「送信中」（前の応答の「保存済み」を出したままにしない）
-              const kindOf = (t: MealTarget, st: SaveState | undefined): MealSaveKind | undefined =>
-                (waiting[mealKeyOf(t)]?.length ?? 0) > 0 ? 'saving' : (st?.kind as MealSaveKind | undefined)
-              const mark = mealBandMark([kindOf(lt, stL), kindOf(stg, stS)])
-              return (
-                <li key={rid} className="dc-meal-row p-3">
-                  <div className="min-w-0 space-y-1">
-                    <Link
-                      to={personPath(rid, day, today)}
-                      className="inline-flex min-h-tap items-center text-lg font-bold text-link underline-offset-2 hover:underline"
-                    >
-                      {name}
-                      <span className="sr-only">さんの1日の記録を開く</span>
-                    </Link>
-                    <p className="text-sm text-ink2">{cameText(row)}</p>
-                    <p className="text-sm text-ink">
-                      昼食 <span className="font-bold">{lunchLabel(lunch)}</span>
-                      <br />
-                      おやつ <span className="font-bold">{snackLabel(snack)}</span>
-                    </p>
-                    {source !== null && source !== '画面で入力' ? <p className="text-sm text-ink2">{source}</p> : null}
-                    {mark !== null ? (
-                      <p role="status" className={`text-sm font-bold ${mark.tone === 'ok' ? 'text-ok' : mark.tone === 'warn' ? 'text-warn' : 'text-ink2'}`}>
-                        <span aria-hidden="true">{mark.mark} </span>
-                        {mark.text}
-                      </p>
-                    ) : null}
-                  </div>
-                  <div className="min-w-0 space-y-2">
-                    {(['main_amount', 'side_amount'] as const).map((f) => (
-                      <div key={f} role="group" aria-label={`${name}さんの昼食 ${f === 'main_amount' ? '主食' : '副食'}の割合`} className="flex flex-wrap items-center gap-2">
-                        <span className="w-10 shrink-0 text-sm text-ink2" aria-hidden="true">
-                          {f === 'main_amount' ? '主食' : '副食'}
-                        </span>
-                        {DAYCARE_MEAL_AMOUNTS.map((n) => {
-                          const on = lunch?.[f] === n && lunchEaten
-                          return (
-                            <button
-                              key={n}
-                              type="button"
-                              aria-pressed={on}
-                              aria-label={`${f === 'main_amount' ? '主食' : '副食'} ${n}割`}
-                              disabled={!canWrite}
-                              onClick={() => void saveMeal(lt, withEaten(lunch?.status, { [f]: n }))}
-                              className={chipCls(on)}
+          <>
+            {/* 未入力の数（在席・帰宅の方だけ数える・拒食は入力済み・水分は数えない）。色だけに頼らず記号と文字を併記 */}
+            <p className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-base">
+              {counts.unfilled > 0 ? (
+                <span className="font-bold text-danger">
+                  <span aria-hidden="true">▲ </span>未入力 <span className="font-num">{counts.unfilled}</span>名
+                </span>
+              ) : (
+                <span className="font-bold text-ok">
+                  <span aria-hidden="true">✓ </span>未入力なし
+                </span>
+              )}
+              {counts.notArrived > 0 ? (
+                <span className="text-ink2">
+                  未到着 <span className="font-num">{counts.notArrived}</span>名（数えていません）
+                </span>
+              ) : null}
+            </p>
+            {/* 表が画面より広い時だけ出す手がかり（バイタル一括・活動一括と同じ） */}
+            {tableScrolls ? (
+              <p className="text-sm text-ink2">
+                <span aria-hidden="true">⇆ </span>
+                表は横にスクロールできます（氏名の列は左に残ります）
+              </p>
+            ) : null}
+            {/* 2026-10-28: バイタル一括・活動一括と同じ1行1人の表。横・縦のスクロールはこの枠の中だけ（ページ全体を広げない）。
+                relative は表の中の読み上げ用の文字の基準をこの枠にするため */}
+            <div
+              ref={setTableBox}
+              role="region"
+              aria-label={`${fmtDayLabel(day)}の昼食の表${tableScrolls ? '（横にスクロールできます）' : ''}`}
+              tabIndex={tableScrolls || tableScrollsY ? 0 : undefined}
+              className="dc-table-fit relative isolate overflow-auto"
+            >
+              <table className="w-full min-w-max border-collapse text-base">
+                <caption className="sr-only">{fmtDayLabel(day)}の昼食の表（主食・副食は選ぶとすぐ保存・水分は数を入れて足す）</caption>
+                <thead>
+                  <tr className="border-b border-border-strong bg-surface2 text-left">
+                    {/* 氏名の列は横スクロールしても左に残す（sticky）。背景は見出し行と同じ色 */}
+                    <th scope="col" className="sticky left-0 top-0 z-30 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
+                      <span className="dc-vital-name block">氏名</span>
+                    </th>
+                    <th scope="col" className="sticky top-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
+                      主食
+                    </th>
+                    <th scope="col" className="sticky top-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
+                      副食
+                    </th>
+                    <th scope="col" className="sticky top-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
+                      水分（cc）
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {came.map((row) => {
+                    const rid = row.residentId
+                    const name = nameOf(rid)
+                    const lt = targetOf(rid)
+                    const lunch = mealShownFor(lt)
+                    const source = mealSourceLabel(mealRowFor(lt))
+                    const stL = mealState[mealKeyOf(lt)]
+                    // 順番待ちが残っている枠は「送信中」（前の応答の「保存済み」を出したままにしない）
+                    const kindOf = (t: MealTarget, st: SaveState | undefined): MealSaveKind | undefined =>
+                      (waiting[mealKeyOf(t)]?.length ?? 0) > 0 ? 'saving' : (st?.kind as MealSaveKind | undefined)
+                    const mark = mealBandMark([kindOf(lt, stL)])
+                    // 外出・入院（care-log の食事の画面で入れた状態）は選択肢に無いので、氏名の列に文字で出す（選ぶと「食べた」に戻して送る）
+                    const otherStatus = lunch?.status === 'out' ? '外出' : lunch?.status === 'hospital' ? '入院' : null
+                    const fkey = personKeyOf(rid, day)
+                    const busy = fluidBusy.has(fkey)
+                    const held = queuedFluids[fkey]
+                    const fn = fluidNote[fkey]
+                    const fluidSum = fluidTotalOf(visibleFluids, rid, data.day)
+                    const lunchNote = stL !== undefined && stL.kind !== 'saving' && stL.kind !== 'saved'
+                    const detail = lunchNote || held !== undefined || fn !== undefined
+                    return (
+                      <Fragment key={rid}>
+                        <tr className={`align-middle ${detail ? '' : 'border-b border-border'}`}>
+                          {/* 氏名の列は横スクロールしても左に残す（sticky）。背景はページの地の色（下を流れる欄を透かさない） */}
+                          <th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">
+                            {/* 氏名の列の幅は dc-vital-name で決める（札が長くても列を広げず、中で折り返す） */}
+                            <div className="dc-vital-name">
+                              <Link
+                                to={personPath(rid, day, today)}
+                                className="inline-flex min-h-tap items-center text-lg font-bold text-link underline-offset-2 hover:underline"
+                              >
+                                {name}
+                                <span className="sr-only">さんの1日の記録を開く</span>
+                              </Link>
+                              <span className="block text-sm text-ink2">{cameText(row)}</span>
+                              {otherStatus !== null ? <span className="block text-sm text-ink2">昼食の記録: {otherStatus}</span> : null}
+                              {source !== null && source !== '画面で入力' ? <span className="block text-sm text-ink2">{source}</span> : null}
+                              {mark !== null ? (
+                                <span role="status" className={`block text-sm font-bold ${mark.tone === 'ok' ? 'text-ok' : mark.tone === 'warn' ? 'text-warn' : 'text-ink2'}`}>
+                                  <span aria-hidden="true">{mark.mark} </span>
+                                  {mark.text}
+                                </span>
+                              ) : null}
+                            </div>
+                          </th>
+                          {(['main_amount', 'side_amount'] as const).map((f) => {
+                            const v = lunchSelectValue(lunch, f)
+                            const now = v === '' ? '未入力' : v === 'refused' ? '拒食' : v
+                            return (
+                              <td key={f} className="px-2 py-1">
+                                <select
+                                  value={v}
+                                  disabled={!canWrite}
+                                  aria-label={`${AMOUNT_WORD[f]}：${name}さん（いま: ${now}）`}
+                                  onChange={(e) => {
+                                    const patch = lunchSelectPatch(f, e.target.value, lunch?.status)
+                                    if (patch !== null) void saveMeal(lt, patch)
+                                  }}
+                                  className={selectCls}
+                                >
+                                  {LUNCH_SELECT_OPTIONS.map((o) => (
+                                    <option key={o.value} value={o.value}>
+                                      {o.label}
+                                    </option>
+                                  ))}
+                                </select>
+                              </td>
+                            )
+                          })}
+                          <td className="px-2 py-1">
+                            <p className="text-base text-ink">
+                              計 <span className="font-num font-bold">{fluidSum > 0 ? fmtCc(fluidSum) : '—'}</span>
+                              {held !== undefined ? <span className="text-sm text-ink2">（＋{fmtCc(held.ml)} 送信待ち）</span> : null}
+                            </p>
+                            {/* 数を入れて改行キー（form の submit）か〔＋〕で足す。書き込み中は欄を書き換えられず〔＋〕も押せない（二重に足さない）。
+                                欄は disabled にせず readOnly にする（改行キーの後も欄に留まり、続けて入れられる） */}
+                            <form
+                              onSubmit={(e) => {
+                                e.preventDefault()
+                                submitFluid(rid)
+                              }}
+                              className="mt-1 flex items-center gap-2"
                             >
-                              {n}
-                            </button>
-                          )
-                        })}
-                      </div>
-                    ))}
-                    <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-                      <button
-                        type="button"
-                        aria-pressed={lunch?.status === 'refused'}
-                        aria-label={lunch?.status === 'refused' ? `${name}さんの昼食の拒食を取り消す` : `${name}さんの昼食を拒食にする`}
-                        disabled={!canWrite}
-                        onClick={() => void saveMeal(lt, { status: lunch?.status === 'refused' ? 'eaten' : 'refused' })}
-                        className={chipCls(lunch?.status === 'refused')}
-                      >
-                        {lunch?.status === 'refused' ? '拒食を取り消す' : '拒食'}
-                      </button>
-                      <div role="group" aria-label={`${name}さんのおやつ`} className="flex flex-wrap items-center gap-2">
-                        <span className="text-sm text-ink2" aria-hidden="true">
-                          おやつ
-                        </span>
-                        {DAYCARE_SNACK_CHOICES.map((c) => {
-                          const on = snack?.main_amount === c.value && snackEaten
-                          return (
-                            <button
-                              key={c.value}
-                              type="button"
-                              aria-pressed={on}
-                              disabled={!canWrite}
-                              onClick={() => void saveMeal(stg, withEaten(snack?.status, { main_amount: c.value }))}
-                              className={chipCls(on)}
-                            >
-                              {c.label}
-                            </button>
-                          )
-                        })}
-                      </div>
-                    </div>
-                    <MealNote word="昼食" st={stL} onTake={(t, fields) => void resolveTake(t, fields)} onMine={(t, cs) => void resolveMine(t, cs)} />
-                    <MealNote word="おやつ" st={stS} onTake={(t, fields) => void resolveTake(t, fields)} onMine={(t, cs) => void resolveMine(t, cs)} />
-                  </div>
-                </li>
-              )
-            })}
-          </ul>
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                autoComplete="off"
+                                value={fluidText[rid] ?? ''}
+                                onChange={(e) => {
+                                  fluidInputs.set(rid, e.target.value)
+                                  setFluidText(fluidInputs.all())
+                                  if (fn?.input === true) noteFluid(fkey, null)
+                                }}
+                                readOnly={busy}
+                                disabled={!canWrite}
+                                aria-label={`水分（cc）：${name}さんに足す量`}
+                                aria-invalid={fn?.input === true ? true : undefined}
+                                aria-describedby={fn !== undefined ? `dc-fluid-note-${rid}` : undefined}
+                                className="block min-h-tap w-20 rounded border border-border-strong bg-surface px-2 text-lg text-ink disabled:text-ink3"
+                              />
+                              <button
+                                type="submit"
+                                disabled={!canWrite || busy}
+                                aria-label={`水分を足す（${name}さん）`}
+                                className="min-h-tap min-w-tap rounded border border-primary bg-surface px-2 text-lg font-bold text-primary disabled:border-border disabled:text-ink3"
+                              >
+                                ＋
+                              </button>
+                            </form>
+                          </td>
+                        </tr>
+                        {detail ? (
+                          <tr className="border-b border-border">
+                            {/* 知らせの行は表の幅を広げない（バイタル一括・活動一括と同じ形）。幅0＋最小100% の箱で表の幅の計算から外し、
+                                文は表の枠の幅で折り返して、横スクロールしても左に残す（sticky） */}
+                            <td colSpan={4} className="p-0">
+                              <div className="w-0 min-w-full">
+                                <div className="sticky left-0 space-y-1 px-2 pb-2" style={{ maxWidth: tableBoxWidth > 0 ? tableBoxWidth : undefined }}>
+                                  <MealNote
+                                    word="昼食"
+                                    name={name}
+                                    st={stL}
+                                    onTake={(t, fields) => void resolveTake(t, fields)}
+                                    onMine={(t, cs) => void resolveMine(t, cs)}
+                                  />
+                                  {held !== undefined ? (
+                                    <p role="status" className={`text-sm ${held.lost ? 'text-danger' : 'text-ink2'}`}>
+                                      <span aria-hidden="true">⚠ </span>
+                                      <span className="sr-only">{name}さん：</span>水分 ＋{fmtCc(held.ml)}: {held.lost ? MSG_NOT_PERSISTED : MSG_QUEUED}
+                                    </p>
+                                  ) : null}
+                                  {fn !== undefined ? (
+                                    <p
+                                      id={`dc-fluid-note-${rid}`}
+                                      role={fn.tone === 'danger' ? 'alert' : 'status'}
+                                      className={`text-sm ${fn.tone === 'danger' ? 'text-danger' : fn.tone === 'warn' ? 'text-warn' : 'text-ink2'}`}
+                                    >
+                                      <span aria-hidden="true">{fn.tone === 'info' ? '⚠ ' : '▲ '}</span>
+                                      <span className="sr-only">{name}さん：</span>水分: {fn.text}
+                                    </p>
+                                  ) : null}
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        ) : null}
+                      </Fragment>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </section>
       {toast}
@@ -704,25 +1074,29 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
 }
 
 /**
- * 帯の下の知らせ（送信待ち・失敗・止まり・拒否・食い違い）。送信中・保存できた時は帯の端の印だけで、ここには出さない。
- * 文と解き方は1人の画面の昼食・おやつと同じ
+ * 行の下の昼食の知らせ（送信待ち・失敗・止まり・拒否・食い違い）。送信中・保存できた時は氏名の列の印だけで、ここには出さない。
+ * 文と解き方は1人の画面の昼食と同じ
  */
 function MealNote({
   word,
+  name,
   st,
   onTake,
   onMine,
 }: {
   word: string
+  name: string
   st: SaveState | undefined
   onTake: (t: MealTarget, fields?: readonly string[]) => void
   onMine: (t: MealTarget, cs: CellConflict[]) => void
 }) {
   if (st === undefined || st.kind === 'saving' || st.kind === 'saved') return null
+  const who = <span className="sr-only">{name}さん：</span>
   if (st.kind === 'queued')
     return (
       <p className="text-sm text-ink2">
         <span aria-hidden="true">⚠ </span>
+        {who}
         {word}: {st.persisted ? MSG_QUEUED : MSG_NOT_PERSISTED}
       </p>
     )
@@ -730,6 +1104,7 @@ function MealNote({
     return (
       <p className="text-sm text-danger" role="alert">
         <span aria-hidden="true">▲ </span>
+        {who}
         {word}: {st.text}
       </p>
     )
@@ -738,18 +1113,19 @@ function MealNote({
       <div role="alert" className="space-y-2 rounded border border-warn bg-warn-bg p-2 text-sm text-ink">
         <p>
           <span aria-hidden="true">▲ </span>
+          {who}
           {word}:{' '}
           {st.kind === 'held'
-            ? '他の端末の記録と食い違って止まっている値があります（送っていません）。氏名の下の値はサーバーの値です。'
-            : `${st.reason === undefined ? '' : `${st.reason} `}サーバーに受け付けられなかった値があります（送っていません）。氏名の下の値はサーバーの値です。`}
-          〔取り下げる〕で送信待ちから外し、必要なら押し直してください。
+            ? '他の端末の記録と食い違って止まっている値があります（送っていません）。表の主食・副食はサーバーの値です。'
+            : `${st.reason === undefined ? '' : `${st.reason} `}サーバーに受け付けられなかった値があります（送っていません）。表の主食・副食はサーバーの値です。`}
+          〔取り下げる〕で送信待ちから外し、必要なら選び直してください。
         </p>
         <button type="button" onClick={() => onTake(st.target)} className="min-h-tap rounded border border-border-strong bg-surface px-3 text-base text-ink">
           取り下げる
         </button>
       </div>
     )
-  const words: Record<string, string> = { main_amount: word === 'おやつ' ? 'おやつ' : '主食', side_amount: '副食', status: '状態' }
+  const words: Record<string, string> = { main_amount: '主食', side_amount: '副食', status: '状態' }
   const val = (v: unknown) =>
     v === null || v === undefined
       ? '—'
@@ -766,7 +1142,8 @@ function MealNote({
     <div role="alert" className="space-y-2 rounded border border-warn bg-warn-bg p-2 text-sm text-ink">
       <p>
         <span aria-hidden="true">▲ </span>
-        {word}: 他の端末が先に記録しました（氏名の下の値はサーバーの値です）。
+        {who}
+        {word}: 他の端末が先に記録しました（表の主食・副食はサーバーの値です）。
         {st.conflicts.map((c) => `${words[c.field] ?? c.field}: いまの値 ${val(c.server)}（あなた ${val(c.mine)}）`).join('・')}
       </p>
       <div className="flex flex-wrap gap-gap">
