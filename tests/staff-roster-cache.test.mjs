@@ -53,20 +53,23 @@ try {
 if (R === null) registerLoadFailure('名簿の控え（cachedReads）', loadError, UNSUPPORTED, { hooks: true })
 
 /** 偽の Supabase（読むだけ・呼ばれた表を数える）。tests/prefetch.test.mjs の fakeSb と同じ形の最小版 */
-function fakeSb({ delay = 0 } = {}) {
+function fakeSb({ delay = 0, staff = [{ id: 1, name: '職員01', active: true }] } = {}) {
   const calls = []
-  const tables = { staff: [{ id: 1, name: '職員01', active: true }] }
+  const tables = { staff }
   const run = (q) => {
     calls.push(q)
     if (q.rpc) return { data: [], error: null, status: 200 }
-    const rows = tables[q.table] ?? []
+    const rows = (tables[q.table] ?? []).filter((r) => (q.eq ?? []).every(([c, v]) => r[c] === v))
     return { data: q.single ? (rows[0] ?? null) : rows.map((r) => ({ ...r })), error: null, status: 200 }
   }
   const builder = (q) => {
     const exec = () => new Promise((res) => setTimeout(() => res(run(q)), delay))
     const b = {
       select: () => b,
-      eq: () => b,
+      eq: (c, v) => {
+        q.eq = [...(q.eq ?? []), [c, v]]
+        return b
+      },
       neq: () => b,
       is: () => b,
       in: () => b,
@@ -104,12 +107,12 @@ function fakeSb({ delay = 0 } = {}) {
 }
 
 describe('★起動時の職員名簿は控えを通して読む（配線の見張り）', () => {
-  it('App の起動の名簿は cachedReads の fetchStaff を通す（db を直接読むのは部品を読めない時だけ）', () => {
+  it('App の起動の名簿は cachedReads の fetchStartupStaff を通す（db を直接読むのは部品を読めない時だけ）', () => {
     const a = code('src/App.tsx')
     assert.doesNotMatch(a, /const list = await db\.fetchStaff\(\)/, 'App が起動時に db から名簿を直接読んでいる')
     assert.match(
       a,
-      /const list = await import\('\.\/lib\/cachedReads'\)\.then\(\s*\(m\) => m\.fetchStaff\(\),\s*\(\) => db\.fetchStaff\(\),?\s*\)/,
+      /const list = await import\('\.\/lib\/cachedReads'\)\.then\(\s*\(m\) => m\.fetchStartupStaff\(\),\s*\(\) => db\.fetchStaff\(\),?\s*\)/,
     )
     // 静的 import にしない（最初に読む部品に db・控えを抱き込まない）
     assert.doesNotMatch(a, /^import [^\n]*from '\.\/lib\/cachedReads'/m)
@@ -158,6 +161,69 @@ describe('★起動経路の staff の通信は1回（偽の Supabase で数え�
     const [a, b] = await Promise.all([R.fetchStaff(), R.fetchStaff()])
     assert.equal(a, b)
     await runStaffPrefetch()
+    assert.equal(staffCalls(calls), 1)
+  })
+
+  const runPrefetch = async (name) => {
+    const task = R.prefetchPlan({ actorId: 1 }).find((t) => t.name === name)
+    assert.ok(task, `先読みの順番に ${name} がある`)
+    return task.run()
+  }
+  // 在籍2名・退職1名（並びは db の order どおりに偽の表へ置く）
+  const roster = () => [
+    { id: 1, name: '職員01', active: true },
+    { id: 2, name: '職員02', active: false },
+    { id: 3, name: '職員03', active: true },
+  ]
+
+  it('起動の名簿（全員を1回取り在籍で絞る）→ ホームの全員の名簿・在席表示・先読みの staff/allStaff は通信しない＝staff の通信は1回', async () => {
+    const { sb, calls } = fakeSb({ staff: roster() })
+    DB.__testHooks.setClient(sb)
+    const list = await R.fetchStartupStaff()
+    assert.deepEqual(
+      list.map((s) => s.id),
+      [1, 3],
+    ) // 在籍だけ・並びはそのまま
+    const all = await R.fetchAllStaff() // ホーム（日報）の名前を引く表
+    assert.deepEqual(
+      all.map((s) => s.id),
+      [1, 2, 3],
+    )
+    const presence = await R.fetchStaff() // 在席表示の名前の引き当て
+    assert.equal(presence, list)
+    assert.equal(await runPrefetch('staff'), false)
+    assert.equal(await runPrefetch('allStaff'), false)
+    assert.equal(staffCalls(calls), 1)
+    assert.equal(R.peekStaff(), list)
+  })
+
+  it('ホームの全員の名簿と起動の名簿が重なっても1本にまとまる', async () => {
+    const { sb, calls } = fakeSb({ delay: 5, staff: roster() })
+    DB.__testHooks.setClient(sb)
+    const [list, all] = await Promise.all([R.fetchStartupStaff(), R.fetchAllStaff()])
+    assert.deepEqual(
+      list.map((s) => s.id),
+      [1, 3],
+    )
+    assert.equal(all.length, 3)
+    assert.equal(staffCalls(calls), 1)
+  })
+
+  it('起動の名簿の取得が失敗したら例外を返し（App は名簿エラーを出す）、控えに残さない＝再試行で取り直す', async () => {
+    const { sb, calls } = fakeSb({ staff: roster() })
+    let fail = true
+    const from = sb.from
+    sb.from = (t) => {
+      if (fail) throw new Error('つながらない')
+      return from(t)
+    }
+    DB.__testHooks.setClient(sb)
+    await assert.rejects(R.fetchStartupStaff())
+    assert.equal(R.peekStaff(), undefined)
+    assert.equal(R.peekAllStaff(), undefined)
+    fail = false
+    const list = await R.fetchStartupStaff()
+    assert.equal(list.length, 2)
     assert.equal(staffCalls(calls), 1)
   })
 

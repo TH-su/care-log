@@ -1134,10 +1134,11 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
     setStaffError(false)
     void (async () => {
       try {
-        // 控えの部品（cachedReads）を通して取る＝先読みの名簿（staff）が同じ控えを使い、起動直後に同じ名簿を二度読まない。
+        // 控えの部品（cachedReads）を通して取る＝全員の名簿を1回取って在籍で絞り、ホームの画面の全員の名簿・在席表示・
+        // 先読みの名簿が同じ控えを使う（起動直後に staff 表を二度読まない）。
         // 部品を読めない時だけ今までどおり db から直接取る（取得の失敗は部品の有無と分けて下の catch へ）
         const list = await import('./lib/cachedReads').then(
-          (m) => m.fetchStaff(),
+          (m) => m.fetchStartupStaff(),
           () => db.fetchStaff(),
         )
         if (!alive) return

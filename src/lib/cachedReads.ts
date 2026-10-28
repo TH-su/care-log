@@ -99,6 +99,22 @@ export const peekAllStaff = () => dataCache.peek<Awaited<ReturnType<typeof db.fe
 export const fetchAllStaff = () =>
   dataCache.fetch(cacheKeys.allStaff, db.fetchAllStaff, { meta: ROSTER_STAFF, storeEmpty: true })
 
+/**
+ * 起動時の在籍の職員名簿（App の操作者ゲート用・2026-10-28 W1）。退職者も含む全員の名簿（allStaff）を先読みと同じ扱いで
+ * 1回だけ取り、在籍（active）で絞って返す。在籍の名簿の控え（staff）も同じ1回の結果で埋める＝直後にホームの画面が読む
+ * 全員の名簿・在席表示の在籍の名簿・先読みの staff/allStaff が、起動直後に staff 表をもう一度読まない。
+ * 全員と在籍の名簿は同じ列・同じ並び（db.fetchStaff と db.fetchAllStaff の order が同じ）なので、絞っても並びは変わらない。
+ * 取っている間に古くなって控えに入らなかった時は、今までどおり在籍の名簿を取る
+ */
+export async function fetchStartupStaff(): Promise<Awaited<ReturnType<typeof db.fetchStaff>>> {
+  await dataCache.ensure(cacheKeys.allStaff, db.fetchAllStaff, { meta: ROSTER_STAFF, storeEmpty: true })
+  const all = peekAllStaff()
+  if (all === undefined) return fetchStaff()
+  const active = all.filter((s) => s.active)
+  await dataCache.ensure(cacheKeys.staff, () => Promise.resolve(active), { meta: ROSTER_STAFF, storeEmpty: true })
+  return active
+}
+
 export const peekResidentTargets = () =>
   dataCache.peek<Awaited<ReturnType<typeof db.fetchResidentTargets>>>(cacheKeys.targets)
 /** 個別の目標（表が無い DB・ログインの控えが無い時の空は控えない） */
