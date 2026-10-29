@@ -146,6 +146,11 @@ const KartePage = lazy(() => loadKartePage().then((m) => ({ default: m.KartePage
 // 今日の要注意（A5・2026-10-16 追加）。下部タブ「その他」と左レールから入る
 const loadAlertsPage = () => import('./pages/AlertsPage')
 const AlertsPage = lazy(() => loadAlertsPage().then((m) => ({ default: m.AlertsPage })))
+// ひと目ボード（1人分）・見守りボード（全員）（2026-10-29 追加）。カルテの見出しと「その他」から入る
+const loadGlancePage = () => import('./pages/GlancePage')
+const GlancePage = lazy(() => loadGlancePage().then((m) => ({ default: m.GlancePage })))
+const loadGlanceBoardPage = () => import('./pages/GlanceBoardPage')
+const GlanceBoardPage = lazy(() => loadGlanceBoardPage().then((m) => ({ default: m.GlanceBoardPage })))
 const loadSearchPage = () => import('./pages/SearchPage')
 const SearchPage = lazy(() => loadSearchPage().then((m) => ({ default: m.SearchPage })))
 const loadSettingsPage = () => import('./pages/SettingsPage')
@@ -286,6 +291,7 @@ const VIEWS = [
   'incident',
   'incidentSummary',
   'alerts',
+  'glance',
 ] as const
 type View = (typeof VIEWS)[number]
 const DEFAULT_VIEW: View = 'daily'
@@ -305,6 +311,7 @@ const VIEW_PATH: Record<View, string> = {
   incident: '/incident',
   incidentSummary: '/incident/summary',
   alerts: '/alerts',
+  glance: '/glance',
 }
 
 function readView(): View | null {
@@ -342,6 +349,7 @@ function viewOf(pathname: string): View | null {
   if (pathname === '/incident/summary') return 'incidentSummary'
   if (pathname === '/incident' || pathname.startsWith('/incident/')) return 'incident'
   if (pathname === '/alerts') return 'alerts'
+  if (pathname === '/glance' || pathname.startsWith('/glance/')) return 'glance'
   return null
 }
 
@@ -455,6 +463,7 @@ const MORE_VIEWS: View[] = [
   'incident',
   'incidentSummary',
   'alerts',
+  'glance',
 ]
 
 const ICON_PATHS: Record<IconName, ReactNode> = {
@@ -556,6 +565,12 @@ const ICON_PATHS: Record<IconName, ReactNode> = {
       <path d="M6 4h11l-2.5 4L17 12H6" />
     </>
   ),
+  // 4つの枠（ひと目ボード・見守りボード。「その他」と同じ形）
+  glance: (
+    <>
+      <path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z" />
+    </>
+  ),
 }
 
 /** タブのアイコン（文字ラベルと必ず併記する。単独では意味を持たせない） */
@@ -610,6 +625,8 @@ function screenTitle(pathname: string): string {
   if (pathname === '/incident/summary') return '事故・ヒヤリ 月次集計'
   if (pathname.startsWith('/incident/')) return '事故・ヒヤリハットの記録'
   if (pathname === '/alerts') return '今日の要注意'
+  if (pathname === '/glance') return '見守りボード'
+  if (pathname.startsWith('/glance/')) return 'ひと目ボード'
   if (pathname === '/karte' || pathname.startsWith('/karte/')) return 'カルテ'
   if (pathname === '/search') return '検索'
   if (pathname === '/settings') return '設定'
@@ -621,6 +638,7 @@ function screenTitle(pathname: string): string {
 function backTarget(pathname: string): string | null {
   if (pathname.startsWith('/record/')) return '/record'
   if (pathname.startsWith('/karte/')) return '/karte'
+  if (pathname.startsWith('/glance/')) return '/glance'
   // 事故・ヒヤリハットの入力・編集から一覧へ（月次集計は「その他」から入る画面なので戻り先を持たない）
   if (pathname.startsWith('/incident/') && pathname !== '/incident/summary') return '/incident'
   return null
@@ -1692,6 +1710,9 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
             <Route path="/karte" element={<KartePage staff={staff} />} />
             <Route path="/karte/:id" element={<KartePage staff={staff} />} />
             <Route path="/alerts" element={<AlertsPage actorId={actorId} />} />
+            {/* ひと目ボード・見守りボード（2026-10-29 追加・読み取りだけ） */}
+            <Route path="/glance" element={<GlanceBoardPage />} />
+            <Route path="/glance/:id" element={<GlancePage />} />
             <Route path="/search" element={<SearchPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/login" element={<Navigate to="/" replace />} />

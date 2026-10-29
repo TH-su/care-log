@@ -13,7 +13,7 @@ import { Link } from 'react-router-dom'
 import type { BoardColumn, BoardRow } from '../../lib/glance'
 import { AWAY_LABEL, BOARD_COLUMNS, BOARD_COLUMN_LABEL, SEVERITY_LABEL, SEVERITY_SYMBOL } from '../../lib/glance'
 import { Chip } from '../ui'
-import { BoardCell } from './BoardCell'
+import { BoardCell } from './boardCell'
 
 export interface BoardTableProps {
   rows: readonly BoardRow[]

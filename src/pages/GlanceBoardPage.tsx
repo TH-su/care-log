@@ -40,8 +40,8 @@ import {
   sortBoardRows,
 } from '../lib/glance'
 import type { BoardColumn, GlanceSort } from '../lib/glance'
-import { BoardTable } from '../components/glance/BoardTable'
-import { BoardSortToggle } from '../components/glance/BoardSortToggle'
+import { BoardTable } from '../components/glance/boardTable'
+import { BoardSortToggle } from '../components/glance/boardSortToggle'
 
 const ERR_LOAD = '見守りボードの記録を読み込めませんでした。通信状況を確認して、「再試行する」を押してください。'
 const NOTE_TARGETS = '個別の目標を読み込めなかったため、水分の目標と SpO2 の下限は施設の基準で判定しています。'

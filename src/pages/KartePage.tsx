@@ -519,6 +519,7 @@ function ResidentList({ state }: ResidentListProps) {
   return (
     <div className="mx-auto w-full max-w-2xl p-4">
       <h1 className="text-xl font-heavy text-ink">カルテ（利用者一覧）</h1>
+      <Link to="/glance" className="inline-flex min-h-tap items-center text-base text-link print:hidden">見守りボード（全員の直近の様子）<span aria-hidden="true"> ›</span></Link>
       <p className="mt-1 text-sm text-ink2">
         利用者を選ぶと、その方のバイタル・食事水分・申し送りをまとめて表示します。
       </p>
@@ -3376,6 +3377,7 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
           {/* 氏名は削らない（取り違え防止）。幅が足りない時（文字を大きくした端末など）はボタンを次の行へ回す */}
           <div className="flex flex-wrap items-center gap-x-2">
             <h1 className="min-w-0 max-w-full break-words text-xl font-heavy text-ink">{resident.name}</h1>
+            <Link to={`/glance/${resident.id}`} className="inline-flex min-h-tap shrink-0 items-center whitespace-nowrap text-sm text-link print:hidden">ひと目ボード<span aria-hidden="true"> ›</span></Link>
             <nav aria-label="カルテの欄へ移動" className="min-w-0 flex-1 basis-32 overflow-x-auto print:hidden sm:overflow-visible">
               {/* スマホは横にスワイプ（バーを低く保つ）。PC 幅では折り返して全部見せる（マウスで横スクロールしにくいため）。
                   p-1.5 はフォーカス枠（外側に 5px）が横スクロールの枠で切れないための余白 */}

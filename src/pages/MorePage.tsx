@@ -73,6 +73,7 @@ type MoreKey =
   | 'incident'
   | 'incidentSummary'
   | 'alerts'
+  | 'glance'
 
 /**
  * 2×2 の並び順（左上→右上→左下→右下）。ルートは sheet-contracts.md §2 のとおり。
@@ -136,6 +137,14 @@ const ITEMS: { key: MoreKey; to: string; label: string; desc: string; needsInput
     to: '/alerts',
     label: '今日の要注意',
     desc: '基準外のバイタル・摂取低下・水分不足・最重要の申し送り・与薬の「未」を階ごとに見る',
+    needsInput: false,
+  },
+  // 見守りボード（2026-10-29 追加。既存の項目の並びは変えず末尾に足す）
+  {
+    key: 'glance',
+    to: '/glance',
+    label: '見守りボード',
+    desc: '全員の直近7日の様子を1行ずつ見る。行を押すとその方のひと目ボード',
     needsInput: false,
   },
 ]
@@ -217,6 +226,12 @@ const ICON_PATHS: Record<MoreKey, ReactNode> = {
     <>
       <path d="M6 21V4" />
       <path d="M6 4h11l-2.5 4L17 12H6" />
+    </>
+  ),
+  // 4つの枠（見守りボード。App.tsx と同じ形）
+  glance: (
+    <>
+      <path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z" />
     </>
   ),
 }

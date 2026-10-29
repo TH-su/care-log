@@ -435,6 +435,6 @@ describe('今日の要注意の画面と入口（App.tsx・MorePage）', () => {
     const s = code('../src/pages/MorePage.tsx')
     assert.match(s, /to: '\/alerts'/)
     const keys = [...s.slice(s.indexOf('const ITEMS'), s.indexOf('const ICON_PATHS')).matchAll(/key: '([a-zA-Z]+)'/g)].map((m) => m[1])
-    assert.deepEqual(keys, ['search', 'timeline', 'record', 'settings', 'bathMonth', 'medSlots', 'medMonth', 'incident', 'incidentSummary', 'alerts'])
+    assert.deepEqual(keys, ['search', 'timeline', 'record', 'settings', 'bathMonth', 'medSlots', 'medMonth', 'incident', 'incidentSummary', 'alerts', 'glance'])
   })
 })
