@@ -1,6 +1,7 @@
 // ひと目ボード・見守りボードの開発用の見本（glance-preview.html から開く。npx vite で開いて見るだけ・公開物に入らない）。
 //
-// ・架空データだけ（人名・病名・薬剤名は「架空」を名乗る）。db.ts・supabase・gasClient を import しない。端末に何も保存しない
+// ・架空データだけ（人名・病名・薬剤名は「架空」を名乗る）。db.ts・supabase・gasClient を import しない
+// ・端末に置くのは本物の画面と同じ UI 状態の2つだけ（期間＝GLANCE_RANGE_KEY・並び＝GLANCE_SORT_KEY の既知値）。氏名・id・医療の値は置かない
 // ・本物の画面と同じ部品（GlanceView・boardTable・boardSortToggle）と同じ計算（glance.ts）に、架空データを props で流す
 // ・架空1名（架空太郎）に45日分のバイタル・食事・水分・排便・体重・与薬・申し送り・事故を置き、「平熱+1.0℃以上」
 //   「水分8割未満」「体重1か月3%以上減」の3件を仕込む。見守りボードは架空16名（うち数名に兆し・1名は入院中）
@@ -21,10 +22,14 @@ import {
   buildBoardRows,
   classifyMedicalState,
   computeGlance,
+  GLANCE_RANGE_KEY,
   GLANCE_RULES,
+  GLANCE_SORT_KEY,
   MEDICAL_STATE_MESSAGE,
   medicalStaleText,
   normalizeMedicalRow,
+  parseGlanceRange,
+  parseGlanceSort,
   rangeDays,
   sortBoardRows,
 } from '../lib/glance'
@@ -383,13 +388,42 @@ declare global {
 
 const wait = () => new Promise<void>((r) => setTimeout(r, 30))
 const q = (sel: string) => Array.from(document.querySelectorAll<HTMLElement>(sel))
+/** 画面を移った後、その画面の目印が描かれるまで待つ（最大2秒。移る処理が後回しにされても先へ進まない） */
+const waitFor = async (sel: string) => {
+  for (let i = 0; i < 60 && q(sel).length === 0; i++) await wait()
+}
+
+/** 期間・並びを端末から読む（本物の GlancePage・GlanceBoardPage と同じ既知値照合。未知・読めない時は既定） */
+function readStored(): Pick<Controls, 'range' | 'sort'> {
+  try {
+    return { range: parseGlanceRange(localStorage.getItem(GLANCE_RANGE_KEY)), sort: parseGlanceSort(localStorage.getItem(GLANCE_SORT_KEY)) }
+  } catch {
+    return { range: parseGlanceRange(null), sort: parseGlanceSort(null) }
+  }
+}
+
+/** 期間・並びだけを端末に置く（既知値だけ。ほかの切り替え＝役割・医療の欄の状態は置かない） */
+function storeControls(p: Partial<Controls>) {
+  try {
+    if (p.range !== undefined && parseGlanceRange(p.range) === p.range) localStorage.setItem(GLANCE_RANGE_KEY, p.range)
+    if (p.sort !== undefined && parseGlanceSort(p.sort) === p.sort) localStorage.setItem(GLANCE_SORT_KEY, p.sort)
+  } catch {
+    // 置けなくても画面はそのまま動く（既定に戻るだけ）
+  }
+}
 
 function App() {
-  const [c, setC] = useState<Controls>({ role: 'field', medical: 'ok', range: '7', sort: 'room' })
+  const [c, setC] = useState<Controls>(() => ({ role: 'field', medical: 'ok', ...readStored() }))
   const [steps, setSteps] = useState<CheckStep[] | null>(null)
   const navRef = useRef<((to: string) => void) | null>(null)
-  const set = useCallback((p: Partial<Controls>) => setC((prev) => ({ ...prev, ...p })), [])
-  const apply = (p: Partial<Controls>) => flushSync(() => setC((prev) => ({ ...prev, ...p })))
+  const set = useCallback((p: Partial<Controls>) => {
+    storeControls(p)
+    setC((prev) => ({ ...prev, ...p }))
+  }, [])
+  const apply = (p: Partial<Controls>) => {
+    storeControls(p)
+    flushSync(() => setC((prev) => ({ ...prev, ...p })))
+  }
   const go = (to: string) => flushSync(() => navRef.current?.(to))
 
   const runCheck = useCallback(async () => {
@@ -397,6 +431,7 @@ function App() {
     const push = (title: string, ok: boolean, detail: string) => out.push({ n: out.length + 1, title, ok, detail })
     go('/glance/1')
     apply({ role: 'field', medical: 'ok', range: '7' })
+    await waitFor('[data-glance-layout]')
     await wait()
     const keys = q('[data-sign-key]').map((e) => e.dataset.signKey ?? '')
     const tempLabel = q('[data-sign-key="temp"]')[0]?.textContent ?? ''
@@ -440,6 +475,7 @@ function App() {
     // 見守りボード
     go('/glance')
     apply({ sort: 'room' })
+    await waitFor('[data-preview-board] tbody tr')
     await wait()
     const trs = q('[data-preview-board] tbody tr')
     const roomsOf = () => q('[data-preview-board] tbody tr th > span > span:first-child').map((e) => e.textContent ?? '')
@@ -458,6 +494,7 @@ function App() {
     )
     // 1366×768 で縦に動かない（ひと目ボード）
     go('/glance/1')
+    await waitFor('[data-glance-layout]')
     await wait()
     const se = document.scrollingElement ?? document.documentElement
     const fits = window.innerWidth < 1024 || se.scrollHeight <= window.innerHeight + 1
@@ -472,8 +509,15 @@ function App() {
   const autoRan = useRef(false)
   useEffect(() => {
     if (autoRan.current) return
-    autoRan.current = true
-    if (new URLSearchParams(window.location.search).get('check') === '1') void runCheck()
+    if (new URLSearchParams(window.location.search).get('check') !== '1') return
+    // 描画の途中（effect の中）で flushSync を呼ばないよう、次の順番に回してから走らせる。
+    // 開発時の二重実行で片付けられた方は走らないので、走った時に印を付ける
+    const t = setTimeout(() => {
+      if (autoRan.current) return
+      autoRan.current = true
+      void runCheck()
+    }, 0)
+    return () => clearTimeout(t)
   }, [runCheck])
 
   const checkLine = (

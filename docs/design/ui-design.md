@@ -255,7 +255,9 @@
 ### 10.9 開発用の見本
 
 - `glance-preview.html`（ルート）＋`src/dev/glancePreview.tsx`。`npx vite` で開いて見るだけ（`vite build` の入口は index.html だけ＝公開物に入らない）
-- 架空データだけ（人名・病名・薬剤名は「架空」を名乗る）。db・supabase・gasClient を import しない。端末に何も保存しない
+- 架空データだけ（人名・病名・薬剤名は「架空」を名乗る）。db・supabase・gasClient を import しない
+- 端末に置くのは本物の画面と同じ `cl_glanceRange`（期間）・`cl_glanceSort`（並び）の2つだけ（§10.8 と同じ既知値照合。読み込み直しても期間・並びが残る）。役割・医療の欄の状態の切り替えは置かない
+- 見本は favicon を取りに行かない（`<link rel="icon" href="data:,">`＝404 の console エラーを出さない）。`?check=1` の自動の確かめは描画の後に回して走らせる（effect の中で flushSync を呼ばない）
 - 役割（field／office／admin）と医療の欄の状態（ok／no_function／no_shadow／not_linked）を切り替えて見る。`#board` で見守りボード、行を押すと見本の中のひと目ボード
 - 確かめの段（runCheck）は画面の中と `window.__glanceCheck` に結果を出す（console に出さない）
 - runCheck の8段（2026-10-29 の仮の合格ライン。`glance-preview.html?check=1` をヘッドレス Chrome で開くと自動で走り、`data-check-all="ok"` になる）:

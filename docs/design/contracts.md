@@ -370,7 +370,7 @@ fetchResidentPinnedNotes(residentId: number): Promise<Note[]>   // 任意・足�
 - 2画面とも読み取りだけで書かない。端末に残すのは UI 状態の `cl_glanceRange`・`cl_glanceSort` だけ（ui-design.md §10）
 
 集計の純関数（副作用なし・db を import しない）は `src/lib/glance.ts`、試験は `tests/glance.test.mjs`。
-開発用の見本は `glance-preview.html`＋`src/dev/glancePreview.tsx`（架空データだけ・db／supabase／gasClient を import しない・vite build の入口に入れない＝`npx vite` で開いて見るだけ）
+開発用の見本は `glance-preview.html`＋`src/dev/glancePreview.tsx`（架空データだけ・db／supabase／gasClient を import しない・vite build の入口に入れない＝`npx vite` で開いて見るだけ。端末に置くのは `cl_glanceRange`・`cl_glanceSort` だけ）
 
 ## src/lib/actor.ts
 
