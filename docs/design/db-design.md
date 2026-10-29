@@ -197,7 +197,7 @@ incidents ( id bigint identity PK, kind text not null check (kind in ('accident'
 - 各業務表: `(note_on desc, id desc)` / `(measured_on desc, id desc)` / `(meal_on desc, id desc)` / `(taken_on desc, id desc)` / outings `(start_on desc, id desc)` — タイムライン用
 - 各業務表: `(resident_id, 日付列 desc)` — 個人カルテ用。**notes にも `(resident_id, note_on desc)` を追加**（監査#12受諾。関連申し送り・記入者絞込の全域スキャン防止）
 - notes: `gin (body gin_trgm_ops)` — 検索用
-- `idx_notes_ongoing_open`（0002）: notes `(note_on desc, id desc) where deleted_at is null and ongoing and ended_at is null`。timeline_chunk の pinned が「終了していない継続」を遡り上限（60日）なしで拾うための専用索引
+- `idx_notes_ongoing_open`（0002）: notes `(note_on desc, id desc) where deleted_at is null and ongoing and ended_at is null`。timeline_chunk の pinned が「終了していない継続」を拾うための専用索引（0050 から、開始日が期間終了日−60日以降か最重要のものだけを拾う。60日より前に始まった分はタイムラインの帯の件数〔notes を直接数える〕でも同じ索引に乗る）
 - `idx_vitals_day_kind`（0003）: vitals `(measured_on desc, kind) where deleted_at is null` ／ `idx_notes_day_after16`（0003）: notes `(note_on desc, after16) where deleted_at is null` — スプシ模倣UI（日報・バイタル一覧）が1日分をまとめて引くための索引
 - `idx_attendance_day`（0003）: attendance `(day desc)`
 - client_key の二重登録の防止策（**deleted_at で絞らない全体unique**。削除済み行も同じキーを押さえたままにし、退避していた再送を23505で「もう届いている」と判定するため）: `uq_notes_client_key`（0001）／`uq_fluid_client_key`（0001）／`uq_outings_client_key`（0001）／`uq_vitals_client_key`（0004・kind='routine' には付けない）

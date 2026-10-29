@@ -76,6 +76,23 @@ describe('要注意の7日の切り出し（sliceTimelineChunk）', { skip: AM =
     assert.deepEqual(c.outings.map((o) => o.id), [41, 43, 44])
   })
 
+  it('終わっていない継続は、始まりが to−60日以降か最重要だけ（0050・境目は帯と同じ）', () => {
+    const ten = TEN()
+    ten.pinned = [
+      note(201, '2026-08-30', { ongoing: true, importance: 'normal' }), // to−60日＝08-30（入る）
+      note(202, '2026-08-29', { ongoing: true, importance: 'normal' }), // 1日前（入らない）
+      note(203, '2026-08-29', { ongoing: true, importance: 'important' }), // 重要でも入らない
+      note(204, '2026-08-29', { ongoing: true, importance: 'critical' }), // 最重要は入る
+      note(205, '2025-01-01', { ongoing: true, importance: 'critical' }), // 遠い過去の最重要も入る
+    ]
+    const c = AM.sliceTimelineChunk(ten, '2026-10-23', '2026-10-29')
+    assert.deepEqual(c.pinned.map((n) => n.id), [201, 204, 205])
+  })
+
+  it('終わり（to）が元の終わりと違う時は null（元の結果に無い継続があり得る・0050）', () => {
+    assert.equal(AM.sliceTimelineChunk(TEN(), '2026-10-22', '2026-10-28'), null)
+  })
+
   it('元の期間に収まらない範囲は null（呼ぶ側が取りに行く）。同じ範囲なら同じ中身', () => {
     assert.equal(AM.sliceTimelineChunk(TEN(), '2026-10-19', '2026-10-29'), null)
     assert.equal(AM.sliceTimelineChunk(TEN(), '2026-10-23', '2026-10-30'), null)

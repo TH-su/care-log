@@ -6,6 +6,7 @@
 //
 // 前提（vital-limits-pg.mjs と同じ）: tests/pg-run-all.mjs が用意する DB（Supabase の真似と移行 0001〜最新を当てたもの）。
 // 境界の行を置く: 7日の外で10日の中の日・終わった日（日本時間）が7日の始まりの前後の継続・60日の遡りの境目の継続と外出・
+//   終わっていない継続の遡りの境目（0050・今日−60日の当日と前日を重要と最重要で）・
 //   帰着未定の外出・記録者の既読（10日は my_read が true・7日は false）。
 // 1回のトランザクションの中で動き、最後に必ず rollback する（表に何も残さない）。
 // 個人情報は置かない（利用者は架空の「見本」姓・職員は合成の名前と数値IDのみ）。
@@ -50,6 +51,12 @@ const SEED = [
      (9105, '2026-08-24', 'day', 1, '継続E', 'critical', true, '2026-10-25T03:00:00Z'),
      (9106, '2026-08-23', 'day', 1, '継続F', 'critical', true, '2026-10-25T03:00:00Z'),
      (9107, '2026-10-30', 'day', 1, '継続G', 'critical', true, null)`,
+  // 終わっていない継続の遡りの境目（0050・今日−60日＝08-30）: 境目の日と前日を重要と最重要で（最重要は境目より前でも入る）
+  `insert into notes (id, note_on, shift, resident_id, body, importance, ongoing, ended_at) overriding system value values
+     (9111, '2026-08-30', 'day', 2, '継続H', 'important', true, null),
+     (9112, '2026-08-29', 'day', 2, '継続I', 'important', true, null),
+     (9113, '2026-08-30', 'day', 1, '継続J', 'critical', true, null),
+     (9114, '2026-08-29', 'day', 1, '継続K', 'critical', true, null)`,
   // 既読（記録者1が読んだもの・ほかの職員が読んだもの）
   `insert into note_reads (note_id, staff_id) values (9004, 1), (9005, 1), (9005, 2), (9101, 1), (9003, 2)`,
   `insert into vitals (resident_id, measured_on, kind, measured_at, temp) values
@@ -112,6 +119,12 @@ try {
     const a = JSON.stringify(cut?.[k])
     const b = JSON.stringify(seven[k])
     check(`切り出した ${k} が7日・記録者なしで取った結果と同じ（${seven[k].length}件・並びも）`, a === b, `切り出し ${a}\n   7日     ${b}`)
+  }
+  // 終わっていない継続の境目（0050）を本物が踏んでいる: 08-30 の重要は入り 08-29 の重要は入らない・最重要は境目の前でも入る
+  for (const [name, c] of [['10日', ten], ['7日', seven]]) {
+    const ids = new Set(c.pinned.map((n) => n.id))
+    check(`${name}: 終わっていない継続は 今日−60日以降か最重要だけ（9111・9113・9114・9101 が入り 9112 が入らない）`,
+      ids.has(9111) && !ids.has(9112) && ids.has(9113) && ids.has(9114) && ids.has(9101), JSON.stringify([...ids]))
   }
   check('期間の外（10日に収まらない）を頼むと null', sliceTimelineChunk(ten, '2026-10-19', DAY) === null && sliceTimelineChunk(ten, FROM7, '2026-10-30') === null)
 } catch (e) {
