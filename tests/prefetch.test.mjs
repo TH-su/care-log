@@ -733,18 +733,15 @@ describe('★先読み 配線（静的）', () => {
     assert.match(code('src/hooks/useTimeline.ts'), /const cached = peekTimelineChunk\(from, to, staffId\)/)
   })
 
-  it('要注意の7日は10日の控え（記録者つき・タイムラインと同じキー）から切り出し、7日を別に取らない（2026-10-29）', () => {
+  it('要注意: 先に描く控えが無ければ10日の控え（記録者つき・タイムラインと同じキー）から切り出す。取り直しは今までどおり毎回7日（記録者なし）（2026-10-29）', () => {
     const src = code('src/pages/AlertsPage.tsx')
-    assert.match(src, /const chunkFrom = addDaysIso\(day, -\(CHUNK_DAYS - 1\)\)/)
     assert.match(src, /const CHUNK_DAYS = 10/)
-    assert.match(src, /peekTimelineChunk\(chunkFrom, day, actorId\)/)
-    assert.match(src, /fetchTimelineChunk\(chunkFrom, day, actorId\)/)
-    assert.match(src, /sliceTimelineChunk\(c, from, day\)/)
-    // 7日を取るのは、切り出せなかった時（キーの作り方から起きない）の守りだけ
-    assert.equal(src.match(/fetchTimelineChunk\(from, day, null\)/g)?.length, 1)
-    assert.doesNotMatch(src, /peekTimelineChunk\(from, day, null\)/)
-    // 〔最新を読み込む〕（tick）は必ず取りに行く
-    assert.match(src, /tick === 0 && cChunk !== undefined/)
+    assert.match(src, /const chunkFrom = addDaysIso\(day, -\(CHUNK_DAYS - 1\)\)/)
+    assert.match(src, /const c10 = peekTimelineChunk\(chunkFrom, day, actorId\)/)
+    assert.match(src, /peekTimelineChunk\(from, day, null\) \?\? \(c10 === undefined \? undefined : \(sliceTimelineChunk\(c10, from, day\) \?\? undefined\)\)/)
+    // 取り直しは7日・記録者なしの1か所だけ（10日を取りに行かない＝開いた時・〔最新〕の通信は直す前と同じ）
+    assert.equal(src.match(/fetchTimelineChunk\(/g)?.length, 1)
+    assert.match(src, /const coreP = Promise\.all\(\[residentsP, fetchTimelineChunk\(from, day, null\)\]\)/)
     assert.match(code('src/App.tsx'), /<Route path="\/alerts" element=\{<AlertsPage actorId=\{actorId\} \/>\} \/>/)
   })
 
