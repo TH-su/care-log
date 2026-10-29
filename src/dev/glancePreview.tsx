@@ -7,6 +7,7 @@
 // ・役割（field／office／admin）と医療の欄の状態（ok／no_function／no_shadow／not_linked）を切り替えて見る
 // ・#board で見守りボードから始まる。行を押すと見本の中のひと目ボードへ
 // ・確かめ（runCheck）の8段は画面の中と window.__glanceCheck に結果を出す（console に出さない）。?check=1 で開くと自動で走る
+// ・?mode=dark で暗い配色を見る
 
 import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -514,6 +515,10 @@ function NavBridge({ navRef }: { navRef: { current: ((to: string) => void) | nul
   navRef.current = (to: string) => navigate(to)
   return null
 }
+
+// ?mode=dark／?mode=light で配色を切り替えて見る（html の data-mode。端末には保存しない）
+const modeParam = new URLSearchParams(window.location.search).get('mode')
+if (modeParam === 'dark' || modeParam === 'light') document.documentElement.dataset.mode = modeParam
 
 const rootEl = document.getElementById('root')
 if (rootEl) {
