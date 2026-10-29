@@ -123,44 +123,47 @@ export function TempBoard({ board, today, highlight = false, id }: TempBoardProp
       <h2 id={`${id}-h`} className="px-1 text-base font-bold text-ink lg:text-sm">
         温度板<span className="ml-2 text-sm font-normal text-ink2 lg:text-2xs">直近14日（食事は10段階・水分は目標比）</span>
       </h2>
-      <TempLine board={board} />
       {/* relative: 表の中の読み上げ用 sr-only（absolute）の基準をこの横に動く枠にし、枠の外（画面全体）を横に広げないように */}
       <div ref={scrollerRef} className="relative overflow-x-auto" data-temp-scroller="">
-        <table className="w-full border-collapse text-xs lg:text-2xs">
-          <caption className="sr-only">温度板（直近14日の日ごとの記録）</caption>
-          <thead>
-            <tr className="border-b border-border text-ink2">
-              <th scope="col" className="sticky left-0 z-10 bg-surface px-1 py-0.5 text-left font-bold lg:py-0">
-                日
-              </th>
-              {board.map((d, i) => (
-                <th key={d.day} scope="col" className={`tabular px-0.5 py-0.5 text-center font-normal lg:py-0 ${d.day === today ? 'font-bold text-ink' : ''}`}>
-                  <span className="block lg:hidden">{md(d.day)}</span>
-                  <span className="hidden lg:block">{i === 0 || d.day.endsWith('-01') ? md(d.day) : dom(d.day)}</span>
-                  <span className="block">{wd(d.day)}</span>
-                  {d.away === 'hospital' ? <span className="block text-info">入院</span> : d.away === 'overnight' ? <span className="block text-info">外泊</span> : d.outing ? <span className="block text-info">外出</span> : null}
+        {/* 体温の線と表を同じ幅の箱に入れ、横に動かす時も線の右端（今日）が表の今日の列の上に来るようにする */}
+        <div className="w-max min-w-full">
+          <TempLine board={board} />
+          <table className="w-full border-collapse text-xs lg:text-2xs">
+            <caption className="sr-only">温度板（直近14日の日ごとの記録）</caption>
+            <thead>
+              <tr className="border-b border-border text-ink2">
+                <th scope="col" className="sticky left-0 z-10 bg-surface px-1 py-0.5 text-left font-bold lg:py-0">
+                  日
                 </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {ROWS.map((r) => (
-              <tr key={r.label} className="border-b border-border">
-                <th scope="row" className="sticky left-0 z-10 whitespace-nowrap bg-surface px-1 py-0.5 text-left font-bold text-ink2">
-                  {r.label}
-                </th>
-                {board.map((d) => {
-                  const v = r.cell(d)
-                  return (
-                    <td key={d.day} className="tabular whitespace-nowrap px-0.5 py-0.5 text-center text-ink">
-                      {v === null || v === '' ? <Empty /> : v}
-                    </td>
-                  )
-                })}
+                {board.map((d, i) => (
+                  <th key={d.day} scope="col" className={`tabular px-0.5 py-0.5 text-center font-normal lg:py-0 ${d.day === today ? 'font-bold text-ink' : ''}`}>
+                    <span className="block lg:hidden">{md(d.day)}</span>
+                    <span className="hidden lg:block">{i === 0 || d.day.endsWith('-01') ? md(d.day) : dom(d.day)}</span>
+                    <span className="block">{wd(d.day)}</span>
+                    {d.away === 'hospital' ? <span className="block text-info">入院</span> : d.away === 'overnight' ? <span className="block text-info">外泊</span> : d.outing ? <span className="block text-info">外出</span> : null}
+                  </th>
+                ))}
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {ROWS.map((r) => (
+                <tr key={r.label} className="border-b border-border">
+                  <th scope="row" className="sticky left-0 z-10 whitespace-nowrap bg-surface px-1 py-0.5 text-left font-bold text-ink2">
+                    {r.label}
+                  </th>
+                  {board.map((d) => {
+                    const v = r.cell(d)
+                    return (
+                      <td key={d.day} className="tabular whitespace-nowrap px-0.5 py-0.5 text-center text-ink">
+                        {v === null || v === '' ? <Empty /> : v}
+                      </td>
+                    )
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </section>
   )
