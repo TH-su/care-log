@@ -35,6 +35,11 @@ L0承認済み。詳細設計の正本: `docs/PLAN.md`・`docs/design/db-design.
 `/record/daycare/vitals`=デイのバイタル一括（同じ画面の上の切り替え）。`cl_view` は 'record' の配下。`cl_recordTab` の許可リスト（ui-design.md §9）は変えない
 （ベースURLから開いた時は記録ハブへ戻る・再読み込みは URL で戻る）
 
+追加（2026-10-29・ひと目ボード／見守りボード）: `/glance`=見守りボード（全員を居室の順に1行ずつ・画面は `src/pages/GlanceBoardPage.tsx`）・
+`/glance/:id`=ひと目ボード（1人分を1画面で・画面は `src/pages/GlancePage.tsx`。`:id` は residents.id）。karte・alerts の近くに置く。
+入口は利用者一覧の見出しの近く（見守りボード）と個人カルテの見出しの近く（ひと目ボード）のリンク各1つ・「その他」の 'glance'。
+`cl_view` の既知値に要るかは App.tsx の readView に合わせる。画面と規則は ui-design.md §10
+
 リロード復元: HashRouter のURLが第一。ベースURL直開き時のみ `LS.view` の既知値照合で復元。
 
 ## src/lib/db.ts が export するAPI（他ビルダーはこれを import する）
@@ -333,6 +338,39 @@ subscribeDaycareChanges(cb): () => void                        // daycare_attend
 - `queuePending()` / `queueSubscribe` は localStorage 上の qid 付き未送信 op とメモリキューの和集合を数える（他タブ由来も含む）
 - 全読取に `.is('deleted_at', null)` と limit（既定上限2000）。日付レンジ or resident_id の無いクエリを書かない
 - `fetchKarte` の outings は「start_on ≤ to かつ（end_on is null または end_on ≥ from）」＝期間に重なる行を採る
+
+### 2026-10-29 追加: ひと目ボード・見守りボードの読み込み（db.ts）
+
+既存の関数は変えない。`types.ts` にも足さない（型は `src/lib/glance.ts` から `import type`）。名前と戻り型は W2 の実装と照合して確定する
+（この節と db.ts の export が食い違ったら db.ts が正で、この節を直す）。
+
+```ts
+// 病歴・内服薬（医療の欄）。res_glance_get を1人分だけ呼ぶ唯一の口
+fetchResGlance(sourceId: string): Promise<ResGlanceResult>
+  // RPC res_glance_get に { p_id } を渡す。引数は1人分の source_id だけ（全員分を一度に取る形は作らない）
+  // 関数の無い DB（PGRST202 / 42883・db.ts の既存の見分けと同じ）→ { kind: 'no_function' }
+  // 行が無い・synced_at が null → { kind: 'no_shadow' }
+  // 42501（権限なし）・その他の失敗 → { kind: 'error' }（投げずに畳む）
+  // console に出さない・結果を端末（localStorage・控え）に保存しない
+// 見守りボード用。全員分を日付で区切って一括で読む（1人ずつ往復しない）
+fetchGlanceBoardRange(fromIso: string, toIso: string): Promise<…>   // 戻り型の名前は db.ts の export が正
+  // バイタル・食事・水分・外出外泊・申し送り（継続中 pinned を含む）は fetchTimelineChunk を7日刻みで並列に読み結合する。
+  // 1回の読み込みは 2,000行・500KB 以下（assertLoadedAll で上限に当たったら刻みを半分にして読み直す）。必要な列だけ
+  // 与薬は fetchMedDay を直近7日分、事故は fetchIncidents を直近14日で読む
+  // 排便は fetchExcretion、体重は fetchWeights（全員分一括）を画面が使う（ここには足さない）
+// 個人分の継続中の申し送り（fetchKarte に含まれないため。既存に同じ働きの関数が無い時だけ足す）
+fetchResidentPinnedNotes(residentId: number): Promise<Note[]>   // 任意・足したかは db.ts の export で確かめる
+```
+
+呼ぶ回数の縛り:
+- `fetchResGlance` はひと目ボードを開いた時に1回だけ。期間の切り替え（7日／14日）で呼び直さない。source_id が空、または照合が needs_review の時は呼ばない（「マスタとの照合が済んでいません」）
+- 見守りボード（`GlanceBoardPage.tsx`・`src/components/glance/board*`）は `fetchResGlance`・`res_glance_get` を import も呼び出しもしない（医療の欄を出さない）
+- `res_get`（入居者マスタ全体の読み）はこの2画面から呼ばない
+- `rpc('res_glance_get'` が現れるのは `src/lib/db.ts` の1か所だけ
+- 2画面とも読み取りだけで書かない。端末に残すのは UI 状態の `cl_glanceRange`・`cl_glanceSort` だけ（ui-design.md §10）
+
+集計の純関数（副作用なし・db を import しない）は `src/lib/glance.ts`、試験は `tests/glance.test.mjs`。
+開発用の見本は `glance-preview.html`＋`src/dev/glancePreview.tsx`（架空データだけ・db／supabase／gasClient を import しない・vite build の入口に入れない＝`npx vite` で開いて見るだけ）
 
 ## src/lib/actor.ts
 
