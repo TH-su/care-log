@@ -458,7 +458,7 @@ if (G === null) {
         diseases: [{ name: '架空病A', onset: '2020年', hospital: '架空医院' }, { name: '' }, '架空病B', { onset: '2019年' }, null, 7],
         currentDiseases: '架空病C\r\n架空病D',
         medsRegular: '架空薬B錠 1錠 朝\n\n架空薬C錠 2錠 夕\n',
-        medsPrn: ['架空薬D錠', ['入れ子は捨てる']],
+        medsPrn: ['架空薬D錠', ['架空薬F錠（入れ子は捨てる）']],
         highRiskMeds: undefined,
         doctor: '架空医師',
         visitDay: '架空曜日',
