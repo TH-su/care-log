@@ -2243,7 +2243,16 @@ export function DailySheetPage({
   /** サーバーに欄ごとの保存の仕組み（0011）がまだ無い＝サーバー側の更新待ち（バイタルの入力だけを止める） */
   const [cellsMissing, setCellsMissing] = useState(false)
   const [notesMissing, setNotesMissing] = useState(false)
-  const [stale, setStale] = useState(false)
+  const [stale, setStaleState] = useState(false)
+  /**
+   * 「最新に更新」の帯を出した回数（起動の早取り・2026-10-29）。帯を出す（true）たびにその場で進める（描画の後に写す ref では、
+   * 通知→マスタの応答の間に描画が挟まらず取りこぼす）。マスタの読み込みが、起動中に帯が出たかを見分けるのに使う
+   */
+  const staleMarkRef = useRef(0)
+  const setStale = useCallback((v: boolean) => {
+    if (v) staleMarkRef.current += 1
+    setStaleState(v)
+  }, [])
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
   /**
    * 一度でもマスタを読めたか。読めた後は、取り直しに失敗しても画面を差し替えない
@@ -2342,6 +2351,13 @@ export function DailySheetPage({
         setNotesMissing(gate.notes === 'missing')
         const mgrId = Number(mgr)
         setManagerStaffId(Number.isInteger(mgrId) && mgrId > 0 ? mgrId : null)
+        // 起動の早取り（下の bootBlockRef）で日報を先に取りに行った後、マスタがそろうまでに表示中の日への変更通知・
+        // 画面復帰・電波の復帰で帯が出ていたら、先に読んだ日報（届いていない分も）を捨てて、各日の枠に取り直させる。
+        // 早取りの前は、帯をここで消しても日報はこの後に取りに行くので新しい内容が出ていた（その動きのまま＝帯は出さない）
+        if (bootBlockRef.current === 'started') {
+          if (staleMarkRef.current !== bootStaleMarkRef.current) dropAllCachedRef.current()
+          bootBlockRef.current = 'done'
+        }
         setStale(false)
         setPhase('ready')
         setEverReady(true)
@@ -2723,6 +2739,31 @@ export function DailySheetPage({
   useLayoutEffect(() => {
     visibleDaysRef.current = visibleDays
   }, [visibleDays])
+
+  /**
+   * 起動の早取り（2026-10-29 本人指示）。開いた時だけ、表示する区切りの日報を、上のマスタ（利用者・職員・入力解禁・施設長）の
+   * 読み込みと並べて取りに行く。日報の取得が使うのは表示する日（今日と表示単位）と記録者だけで、マスタの値は使わない
+   * （以前はマスタがそろってから各日の枠が取りに行き、通信を1往復ぶん余計に待っていた）。
+   * 各日の枠は今までどおり loadDay → loadBlock で取りに行き、同じ区切りの取得が走っていればそれに相乗りし、済んでいれば
+   * 取り置きから出す（要求は増えない。読み込みの段階・世代・エラーの表示は各日の枠の流れのまま）。
+   * 読み込みの控えに全部の日がある時は始めない（控えで先に出す流れと裏の取り直しは、今までどおり各日の枠が始める）。
+   * 始めてからマスタがそろうまで（'started' の間・マスタの読み込みの失敗と再試行をまたぐ）に帯が出たら、マスタの読み込みが
+   * 先に読んだ分を捨てる（bootStaleMarkRef は始めた時の帯の回数）
+   */
+  const bootBlockRef = useRef<'idle' | 'started' | 'done'>('idle')
+  const bootStaleMarkRef = useRef(0)
+  const dropAllCachedRef = useRef(dropAllCached)
+  dropAllCachedRef.current = dropAllCached
+  useEffect(() => {
+    if (bootBlockRef.current !== 'idle') return
+    bootBlockRef.current = 'done'
+    const days = visibleDaysRef.current
+    if (days.every((d) => cacheRef.current.has(d) || peekDailyReport(actorId, d) !== undefined)) return
+    bootBlockRef.current = 'started'
+    bootStaleMarkRef.current = staleMarkRef.current
+    // 失敗は各日の枠が今までどおり受け持つ（同じ区切りをもう一度まとめて取り、だめなら1日ずつ）
+    void loadBlock(days).catch(() => undefined)
+  }, [actorId, loadBlock])
 
   /** 表示中の各日の枠に出している外出・外泊の id（F16。他の端末がその行を直したら、日付に関係なく案内する） */
   const outingIdsRef = useRef(new Map<string, number[]>())
