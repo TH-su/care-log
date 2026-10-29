@@ -226,7 +226,8 @@ describe('タイムライン（TimelinePage）', () => {
     assert.match(src, /fetchAllStaff\(\)/)
     assert.doesNotMatch(src, /\bfetchStaff\(/, '在籍者だけの名簿で記入者名を引いている')
     assert.match(src, /fetchAllResidents\(\)/)
-    assert.match(src, /fetchResidents\(\)/, '全員表の行（在籍者）の取得が無くなった')
+    // 全員表の行（在籍者）は全員の名簿から切り出す（同じ取得に相乗り・2026-10-29）
+    assert.match(src, /fetchResidentsFromAll\(\)/, '全員表の行（在籍者）の取得が無くなった')
     const map = between(src, 'const residentById = useMemo(', '}, [residents, allResidents])')
     assert.match(map, /for \(const r of allResidents \?\? NO_RESIDENTS\) m\.set/)
     const staffMap = between(src, 'const staffById = useMemo(', '}, [staffProp, loadedStaff])')

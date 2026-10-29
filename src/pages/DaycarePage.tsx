@@ -26,7 +26,6 @@ import {
   DbError,
   FORBIDDEN_REASON,
   OUTDATED_REASON,
-  fetchAllResidents,
   cachedMyRole,
   fetchDaycareActivities,
   fetchBathDay,
@@ -37,7 +36,6 @@ import {
   fetchDaycareVitals,
   fetchMyRole,
   fetchResidentTargets,
-  fetchResidents,
   getAppSetting,
   getKindInputGate,
   hasPendingDaycareAttendance,
@@ -53,6 +51,8 @@ import {
   subscribeMyRole,
 } from '../lib/db'
 import type { DaycareMealRow, MyRole } from '../lib/db'
+// 名簿は読み込みの控えを通し、在籍者は全員の名簿から切り出す（同じ取得に相乗り＝residents 表を1回だけ読む・2026-10-29）
+import { fetchAllResidents, fetchResidentsFromAll } from '../lib/cachedReads'
 import { lunchShortLabel, personPath } from '../lib/daycarePerson'
 import type { DaycareActivity } from '../lib/daycareActivity'
 import { RecorderBar } from '../components/RecorderBar'
@@ -330,7 +330,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   // ── 名簿・個別の目標・休業日（1回） ──
   useEffect(() => {
     let alive = true
-    Promise.all([fetchAllResidents(), fetchResidents(), fetchResidentTargets().catch(() => new Map<number, ResidentTargets>()), getAppSetting('daycare_closed_dates').catch(() => null)])
+    Promise.all([fetchAllResidents(), fetchResidentsFromAll(), fetchResidentTargets().catch(() => new Map<number, ResidentTargets>()), getAppSetting('daycare_closed_dates').catch(() => null)])
       .then(([all, act, tg, closed]) => {
         if (!alive) return
         setResidents(all)

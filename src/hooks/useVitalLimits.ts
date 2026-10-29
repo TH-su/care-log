@@ -6,12 +6,14 @@
 //   limits.refresh()                … 取り直す（〔読み直す〕・日報の読み込み）。戻り値は判定に使う行
 //
 // 行は読み込みの控え（cachedReads）を通す。reloadKey が変わるたびに取り直す（〔最新を読み込む〕・カードで足した後）。
+// ただし取ってから少しの間（REUSE_MS・2秒）の古くなっていない行は使い回す（日報は部品を描いた時と1日目の読み込みで
+// 続けて取り直しており、同じ表を二度読んでいた・2026-10-29。カードで足した後・変更通知では古いの印が付くので必ず取る）。
 // 画面が前に戻った時と、前に出ている間は10分ごとにも取り直す（開いたままの画面に事務所で足した基準を届ける・2026-10-23）。
 // 取り直しに失敗しても、前に読めた行があればそれで判定を続ける（施設の基準へ戻すより正しい）。
 // 施設の基準（vitalThresholds()）は app_settings を読んだ後に差し替わるので、lookup は引くたびにいまの基準を見て、
 // 変わっていれば組み直す（反証 軽8: 描いた時の古い基準で判定し続けない＝2d-2 の前と同じく、いまの基準で判定する）。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { fetchResidentVitalLimits, peekResidentVitalLimits } from '../lib/cachedReads'
+import { fetchResidentVitalLimits, peekResidentVitalLimits, recentResidentVitalLimits } from '../lib/cachedReads'
 import { thresholdsLookup } from '../lib/vitalLimits'
 import type { ResidentVitalLimit } from '../lib/vitalLimits'
 import { vitalThresholds } from '../lib/vitalThresholds'
@@ -50,7 +52,7 @@ export function useVitalLimits(reloadKey: unknown = 0): VitalLimitsState {
   const refresh = useCallback(async (): Promise<readonly ResidentVitalLimit[] | null> => {
     const my = ++seqRef.current
     try {
-      const r = await fetchResidentVitalLimits()
+      const r = recentResidentVitalLimits() ?? (await fetchResidentVitalLimits())
       // 後から頼んだ取り直しが先に返っていれば、古い応答で上書きしない
       if (aliveRef.current && my === seqRef.current) {
         rowsRef.current = r.rows

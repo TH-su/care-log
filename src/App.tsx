@@ -1691,7 +1691,7 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
             <Route path="/incident/:id" element={<IncidentFormPage actorId={actorId} staff={staff} />} />
             <Route path="/karte" element={<KartePage staff={staff} />} />
             <Route path="/karte/:id" element={<KartePage staff={staff} />} />
-            <Route path="/alerts" element={<AlertsPage />} />
+            <Route path="/alerts" element={<AlertsPage actorId={actorId} />} />
             <Route path="/search" element={<SearchPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/login" element={<Navigate to="/" replace />} />

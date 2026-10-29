@@ -5,8 +5,12 @@
 //   最重要の申し送り（その日の分と続いている継続）・与薬の「未」。理由を押すとカルテのその欄へ移る（/karte/:id?sec=…）。
 //
 // 読み方（画面を開くたび・〔最新を読み込む〕・日付が変わった時に取り直す＝前提は毎回実測）:
-//   ・名簿 fetchResidents と記録 fetchTimelineChunk（今日を含む7日＝摂取低下の連続日数を数えるため。継続の申し送り pinned も来る）。
+//   ・名簿 fetchResidents と記録（今日を含む7日＝摂取低下の連続日数を数えるため。継続の申し送り pinned も来る）。
 //     この2つが読めない時だけ画面をエラーにする
+//   ・記録の7日は、タイムラインの最初の10日（今日まで・記録者つき＝先読みとタイムラインの画面と同じキー）の控えから
+//     切り出す（alertsModel の sliceTimelineChunk・SQL と同じ条件。2026-10-29 本人指示「7日を別に取らない」）。
+//     控えが新しければ取りに行かず、無い・古い時と〔最新を読み込む〕を押した時は10日を取りに行く（7日を別に取らない）。
+//     控えは変更通知・自分の書込・つながり直しで古くなる（cachedReads の startCacheSync）
 //   ・基準値 loadVitalThresholds・平熱 fetchUsualTemps（失敗しても例外は来ない＝平熱なし）・個別の目標 fetchResidentTargets
 //     （読めない時は施設の既定）・与薬（fetchMedDay＋fetchMedSlots＋fetchMedFirstDay＋getKindInputGate。読めない時は与薬を出さない）
 //     は読めなくても画面を止めない（何を出していないかを一行で知らせる）
@@ -45,7 +49,7 @@ import type { HbSnapshot } from '../lib/excretionClient'
 import type { AlertReason, ResidentTargets } from '../lib/vitalAlerts'
 import { vitalThresholds } from '../lib/vitalThresholds'
 import { fmtDayLabel } from '../lib/format'
-import type { FluidIntake, Meal, MedAdmin, MedSlot, MedSlotsSetting, Note, Resident, Vital } from '../lib/types'
+import type { FluidIntake, Meal, MedAdmin, MedSlot, MedSlotsSetting, Note, Resident, TimelineChunk, Vital } from '../lib/types'
 import { EmptyBlock, ErrorBlock, LoadingBlock, SegmentPicker } from '../components/ui'
 import {
   addDaysIso,
@@ -58,10 +62,13 @@ import {
   jstClock,
   mergeNotes,
   readAlertsFloor,
+  sliceTimelineChunk,
 } from './alertsModel'
 
 /** 摂取低下の連続日数を数えるために読む日数（今日を含む） */
 const MEAL_DAYS = 7
+/** 切り出す元の期間（タイムラインの最初の10日＝useTimeline の CHUNK_DAYS・先読みと同じ） */
+const CHUNK_DAYS = 10
 /** 時刻を進める間隔（ms） */
 const CLOCK_MS = 60_000
 
@@ -123,7 +130,12 @@ type StoolState =
 
 const hm = (min: number) => `${Math.floor(min / 60)}:${String(min % 60).padStart(2, '0')}`
 
-export function AlertsPage() {
+interface Props {
+  /** 記録者（タイムラインの10日の控えのキー。App が持つ値＝先読みと同じ） */
+  actorId?: number | null
+}
+
+export function AlertsPage({ actorId = null }: Props) {
   const [clock, setClock] = useState(nowClock)
   const [floor, setFloorState] = useState<string>(readFloor)
   const [state, setState] = useState<LoadState>({ status: 'loading' })
@@ -153,6 +165,9 @@ export function AlertsPage() {
     let freshShown = false
     setState((cur) => (cur.status === 'ready' && cur.data.day === day ? cur : { status: 'loading' }))
     const from = addDaysIso(day, -(MEAL_DAYS - 1))
+    const chunkFrom = addDaysIso(day, -(CHUNK_DAYS - 1))
+    /** 10日の結果から7日を切り出す（収まらない時だけ7日を取る。キーの作り方から収まらないことは無い） */
+    const cut = (c: TimelineChunk) => sliceTimelineChunk(c, from, day)
     const toLoaded = (
       residents: Resident[],
       chunk: { vitals: Vital[]; meals: Meal[]; fluids: FluidIntake[]; notes: Note[]; pinned: Note[] },
@@ -173,7 +188,8 @@ export function AlertsPage() {
     // 控え（裏での先読み）が全部そろっていれば、取り直しを待たずに先に描く。与薬の入力解禁の旗（「未」を出すか）は
     // 控えずに取り直す（1往復だけ待つ）。そろっていない時は今までどおり取り直しを待つ
     const cRes = peekResidents()
-    const cChunk = peekTimelineChunk(from, day, null)
+    const c10 = peekTimelineChunk(chunkFrom, day, actorId)
+    const cChunk = c10 === undefined ? undefined : (cut(c10) ?? undefined)
     const cTargets = peekResidentTargets()
     const cMed = peekMedDay(day)
     const cSlots = cRes === undefined ? undefined : peekMedSlots(cRes)
@@ -193,7 +209,12 @@ export function AlertsPage() {
         .catch(() => undefined) // 先に描けないだけ（下の取り直しが描く）
     }
     const residentsP = fetchResidents()
-    const coreP = Promise.all([residentsP, fetchTimelineChunk(from, day, null)])
+    // 新しい控えがあれば取りに行かない（〔最新を読み込む〕＝tick が進んだ時は必ず取る）。取る時は10日（先読み・タイムラインと相乗り）
+    const chunkP =
+      tick === 0 && cChunk !== undefined
+        ? Promise.resolve(cChunk)
+        : fetchTimelineChunk(chunkFrom, day, actorId).then((c) => cut(c) ?? fetchTimelineChunk(from, day, null))
+    const coreP = Promise.all([residentsP, chunkP])
     const loadMed = async (): Promise<MedRaw> => {
       const rs = await residentsP
       const [records, slots, firstDay, gate] = await Promise.all([
@@ -230,7 +251,7 @@ export function AlertsPage() {
     return () => {
       cancelled = true
     }
-  }, [day, tick])
+  }, [day, tick, actorId])
 
   // 排便記録（開いた時・日付が変わった時はメモリの控え〔5分〕があれば使う。〔最新を読み込む〕＝tick が進んだ時は取り直す）
   useEffect(() => {

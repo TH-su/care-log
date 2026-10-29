@@ -40,7 +40,7 @@ import type { CellSaveResult, NoteMeta, PendingNoteRow, Queued } from '../lib/db
 import {
   fetchAllResidents,
   fetchAllStaff,
-  fetchResidents,
+  fetchResidentsFromAll,
   fetchResidentTargets,
   peekAllResidents,
   peekAllStaff,
@@ -334,7 +334,8 @@ export function TimelinePage({
     if (residentsProp !== undefined) return
     let alive = true
     setResidentsError(false)
-    fetchResidents()
+    // 在籍者は全員の名簿から切り出す（下の名前の引き当て用の全員の名簿と同じ取得に相乗り＝residents 表を1回だけ読む・2026-10-29）
+    fetchResidentsFromAll()
       .then((rows) => {
         if (alive) setLoadedResidents(Array.isArray(rows) ? rows : [])
       })

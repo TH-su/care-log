@@ -123,7 +123,8 @@ import {
   fetchAllResidents,
   fetchAllStaff,
   fetchDailyReports,
-  fetchResidents,
+  fetchResidentsFromAll,
+  fetchResidentTargets,
   fetchStaff,
   markDailyStale,
   peekDailyReport,
@@ -208,7 +209,8 @@ import type { NoteGroupRow, NoteSection } from '../lib/noteGroup'
 import { matchSearch, noteSearchText, parseSearchQuery } from '../lib/noteSearch'
 import { normalizeCategories, scheduleColorPatch } from '../lib/noteCategory'
 // 発熱者・他症状者のバイタル欄の印（A1 平熱との差・A9 SpO2 の個別の下限）。平熱と目標は画面を開いた時に1回読んで控える
-import { fetchResidentTargets, fetchUsualTemps, loadVitalThresholds } from '../lib/db'
+// （個別の目標は読み込みの控えを通す＝先読みがもう一度読まない・2026-10-29）
+import { fetchUsualTemps, loadVitalThresholds } from '../lib/db'
 import { judgeTemp, spo2LevelFor } from '../lib/vitalAlerts'
 import { dailyFeverObservations, moveRowStatuses, rekeyHeld } from '../lib/daycare'
 import { diaBpLevelBy, pulseLevelBy, sysBpLevelBy, vitalThresholds } from '../lib/vitalThresholds'
@@ -2319,7 +2321,8 @@ export function DailySheetPage({
       try {
         const given = propStaffRef.current
         const [rs, st, gate, mgr] = await Promise.all([
-          propResidents ? Promise.resolve(propResidents) : fetchResidents(),
+          // 在籍者は全員の名簿から切り出す（下の loadNameLists の全員の名簿と同じ取得に相乗り＝residents 表を1回だけ読む・2026-10-29）
+          propResidents ? Promise.resolve(propResidents) : fetchResidentsFromAll(),
           given ? Promise.resolve(given) : fetchStaff(),
           // 入力解禁フラグは「観測できた値」と「観測できなかった」を区別するため、
           // 親から既知値をもらっていても必ず自分で取り直す（前提情報は毎回取り直す規範）。
