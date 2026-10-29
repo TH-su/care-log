@@ -24,9 +24,9 @@ export function GlanceLayout({ header, signs, left, center, right, notes }: Glan
       {notes}
       {signs}
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 lg:grid-cols-12 lg:grid-rows-1">
-        <div className="relative flex min-h-0 flex-col gap-2 lg:col-span-4 lg:overflow-y-auto">{left}</div>
-        <div className="relative flex min-h-0 flex-col gap-2 lg:col-span-4 lg:overflow-y-auto">{center}</div>
-        <div className="relative flex min-h-0 flex-col gap-2 lg:col-span-4 lg:overflow-y-auto">{right}</div>
+        <div className="relative flex min-h-0 min-w-0 flex-col gap-2 lg:col-span-4 lg:overflow-y-auto">{left}</div>
+        <div className="relative flex min-h-0 min-w-0 flex-col gap-2 lg:col-span-4 lg:overflow-y-auto">{center}</div>
+        <div className="relative flex min-h-0 min-w-0 flex-col gap-2 lg:col-span-4 lg:overflow-y-auto">{right}</div>
       </div>
     </div>
   )
