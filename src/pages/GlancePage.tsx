@@ -16,7 +16,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { fetchMyRole, fetchResGlance, fetchResidentPinnedNotes, fetchUsualTempDetails, getKindInputGate, loadVitalThresholds } from '../lib/db'
 import type { MyRole } from '../lib/db'
-import { fetchKarte, fetchMedFirstDay, fetchMedSlots, fetchResidents, fetchResidentTargets } from '../lib/cachedReads'
+import { fetchIncidents, fetchKarte, fetchMedDay, fetchMedFirstDay, fetchMedSlots, fetchResidents, fetchResidentTargets } from '../lib/cachedReads'
 import { useVitalLimits } from '../hooks/useVitalLimits'
 import { VitalLimitsFailedNote } from '../components/VitalLimitsFailedNote'
 import { buildMedDayRows, medMissingAllowed } from '../lib/med'
@@ -37,6 +37,7 @@ import {
   GLANCE_RULES,
   glanceWindows,
   medicalLinkable,
+  BOARD_UNAVAILABLE_TEXT,
   medicalStaleText,
   normalizeMedicalRow,
   parseGlanceRange,
@@ -49,6 +50,8 @@ import type { GlanceSourceState } from '../components/glance/VitalCards'
 const ERR_LOAD = 'ひと目ボードの記録を読み込めませんでした。通信状況を確認して、「再試行する」を押してください。'
 const NOTE_TARGETS = '個別の目標を読み込めなかったため、水分の目標と SpO2 の下限は施設の基準で判定しています。'
 const NOTE_MED_ROWS = '服薬の時間帯を読み込めなかったため、与薬は「拒否」だけを数えています（「未」は数えていません）。'
+const NOTE_MEDS = `与薬の記録を読み込めなかったため、与薬の欄は「${BOARD_UNAVAILABLE_TEXT}」です。`
+const NOTE_INCIDENTS = `事故・ヒヤリハットの記録を読み込めなかったため、事故の欄は「${BOARD_UNAVAILABLE_TEXT}」です。`
 
 /** 保存した期間を読む（既知値だけ。読めない環境・未知値は既定の直近7日） */
 function readRange(): GlanceRange {
@@ -91,6 +94,9 @@ interface Loaded {
   target: ResidentTargets | null
   targetsFailed: boolean
   medTable: MedTable | null
+  /** 与薬・事故の表が読めたか。fetchKarte は表が無い DB で空の配列を返すため、別に確かめる（読めない時は「なし」と出さない） */
+  medsRead: boolean
+  incidentsRead: boolean
 }
 
 type LoadState = { status: 'loading' } | { status: 'error' } | { status: 'missing' } | { status: 'ready'; data: Loaded }
@@ -166,8 +172,17 @@ function GlanceDetail({ residentId }: { residentId: number }) {
       fetchUsualTempDetails(day),
       fetchResidentTargets().catch(() => null),
       loadMedTable().catch(() => null),
+      // 表が読めるかだけを確かめる（どんな失敗も「読めない」側に倒す）
+      fetchMedDay(day).then(
+        () => true,
+        () => false,
+      ),
+      fetchIncidents({ fromIso: day, toIso: day, residentId }).then(
+        () => true,
+        () => false,
+      ),
     ])
-      .then(([residents, karte, pinned, , details, targets, medTable]) => {
+      .then(([residents, karte, pinned, , details, targets, medTable, medsRead, incidentsRead]) => {
         if (cancelled || !aliveRef.current) return
         const resident = residents.find((r) => r.id === residentId) ?? null
         if (resident === null) {
@@ -187,6 +202,8 @@ function GlanceDetail({ residentId }: { residentId: number }) {
             target: targets === null ? null : (targets.get(residentId) ?? null),
             targetsFailed: targets === null,
             medTable,
+            medsRead,
+            incidentsRead,
           },
         })
       })
@@ -268,7 +285,7 @@ function GlanceDetail({ residentId }: { residentId: number }) {
 
   // 与薬の日ごとの表（直近 medDays 日・この方の分）。読めない時は undefined（「拒否」だけを数える）
   const medRows = useMemo<Array<{ day: string; row: MedDayRow }> | undefined>(() => {
-    if (!data || data.medTable === null) return undefined
+    if (!data || data.medTable === null || !data.medsRead) return undefined
     const slotsByResident = new Map<number, MedSlot[]>()
     for (const s of data.medTable.slots) if (s.resident_id === residentId) slotsByResident.set(s.resident_id, s.slots)
     const out: Array<{ day: string; row: MedDayRow }> = []
@@ -300,10 +317,10 @@ function GlanceDetail({ residentId }: { residentId: number }) {
       fluids: data.karte.fluids,
       outings: data.karte.outings,
       notes: data.karte.notes,
-      meds: data.karte.meds,
+      meds: data.medsRead ? data.karte.meds : null,
       medRows,
       baths: data.karte.baths,
-      incidents: data.karte.incidents,
+      incidents: data.incidentsRead ? data.karte.incidents : null,
       usualTemp: data.usual,
       target: data.target,
       weights: weight.status === 'ready' ? (weight.byResident.get(residentId) ?? []) : null,
@@ -348,7 +365,8 @@ function GlanceDetail({ residentId }: { residentId: number }) {
     <>
       {data.targetsFailed ? <PartialNote text={NOTE_TARGETS} /> : null}
       {limits.failed ? <VitalLimitsFailedNote onRetry={() => void limits.refresh()} /> : null}
-      {data.medTable === null ? <PartialNote text={NOTE_MED_ROWS} /> : null}
+      {!data.medsRead ? <PartialNote text={NOTE_MEDS} /> : data.medTable === null ? <PartialNote text={NOTE_MED_ROWS} /> : null}
+      {!data.incidentsRead ? <PartialNote text={NOTE_INCIDENTS} /> : null}
     </>
   )
 

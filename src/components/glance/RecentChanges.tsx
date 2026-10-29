@@ -5,7 +5,7 @@
 
 import type { ReactNode } from 'react'
 import type { GlanceRecentChanges } from '../../lib/glance'
-import { GLANCE_RULES } from '../../lib/glance'
+import { BOARD_UNAVAILABLE_TEXT, GLANCE_RULES } from '../../lib/glance'
 import { BATH_CANCEL_REASON_LABEL, IMPORTANCE_LABEL, INCIDENT_KIND_LABEL, MED_SLOT_LABEL } from '../../lib/types'
 import { typesText } from '../../lib/incident'
 
@@ -17,11 +17,12 @@ export interface RecentChangesProps {
 
 const md = (iso: string) => `${Number(iso.slice(5, 7))}/${Number(iso.slice(8, 10))}`
 
-function Group({ title, empty, children }: { title: string; empty: boolean; children: ReactNode }) {
+// unavailable: 記録の表が読めなかった時は「なし」と出さず「—（カルテで確認）」にする
+function Group({ title, empty, unavailable = false, children }: { title: string; empty: boolean; unavailable?: boolean; children: ReactNode }) {
   return (
     <div className="mt-1">
       <h3 className="text-sm font-bold text-ink2">{title}</h3>
-      {empty ? <p className="text-sm text-ink3">なし</p> : <ul className="text-sm text-ink">{children}</ul>}
+      {unavailable ? <p className="text-sm text-ink3">{BOARD_UNAVAILABLE_TEXT}</p> : empty ? <p className="text-sm text-ink3">なし</p> : <ul className="text-sm text-ink">{children}</ul>}
     </div>
   )
 }
@@ -44,7 +45,7 @@ export function RecentChanges({ changes, highlight = false, id }: RecentChangesP
             </li>
           ))}
         </Group>
-        <Group title={`事故・ヒヤリハット（${R.recentIncidentDays}日）`} empty={changes.incidents.length === 0}>
+        <Group title={`事故・ヒヤリハット（${R.recentIncidentDays}日）`} empty={changes.incidents.length === 0} unavailable={changes.incidentsUnavailable}>
           {changes.incidents.map((i) => (
             <li key={i.id}>
               <span className="tabular text-ink2">{md(i.occurred_on)} </span>
@@ -56,7 +57,7 @@ export function RecentChanges({ changes, highlight = false, id }: RecentChangesP
             </li>
           ))}
         </Group>
-        <Group title={`与薬の未・拒否（${R.recentMedDays}日）`} empty={changes.medIssues.length === 0}>
+        <Group title={`与薬の未・拒否（${R.recentMedDays}日）`} empty={changes.medIssues.length === 0} unavailable={changes.medsUnavailable}>
           {changes.medIssues.map((x, k) => (
             <li key={`${x.day}-${x.slot}-${k}`} className="tabular">
               {md(x.day)} {MED_SLOT_LABEL[x.slot]} {x.kind === 'missing' ? '未' : '拒否'}

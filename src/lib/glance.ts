@@ -661,11 +661,13 @@ export interface GlanceInput {
   outings: readonly Outing[]
   /** その期間の申し送りと継続中（pinned）を重ねずにまとめたもの */
   notes: readonly Note[]
-  meds: readonly MedAdmin[]
+  /** 与薬の記録。null＝表が無い・読めなかった（「なし」と出さず「—（カルテで確認）」にする。medRows も使わない） */
+  meds: readonly MedAdmin[] | null
   /** 与薬の日ごとの表（med.ts の buildMedDayRows のその方の行）。「未」はここから数える。省くと「拒否」だけを数える */
   medRows?: ReadonlyArray<{ day: string; row: MedDayRow }>
   baths: readonly BathRecord[]
-  incidents: readonly Incident[]
+  /** 事故・ヒヤリハット。null＝表が無い・読めなかった（「なし」と出さず「—（カルテで確認）」にする） */
+  incidents: readonly Incident[] | null
   /** 平熱（vital_usual_temps。5回未満は null） */
   usualTemp: number | null
   target: ResidentTargets | null
@@ -781,6 +783,10 @@ export interface GlanceRecentChanges {
   medIssues: Array<{ day: string; slot: MedSlot; kind: 'missing' | 'refused' }>
   /** 直近14日の入浴の中止（新しい順） */
   bathCancels: BathRecord[]
+  /** 与薬の記録が読めなかった（入力の meds が null）。「なし」と出さない */
+  medsUnavailable: boolean
+  /** 事故・ヒヤリハットの記録が読めなかった（入力の incidents が null）。「なし」と出さない */
+  incidentsUnavailable: boolean
 }
 
 export interface GlanceModel {
@@ -1125,7 +1131,7 @@ export function computeGlance(p: GlanceInput): GlanceModel {
 
   // ── 与薬・入浴・事故・申し送り ──
   const medFrom = addDaysIsoUtc(today, -(GLANCE_RULES.medDays - 1))
-  const medAll = medIssuesOf(p.meds, p.medRows, rid, addDaysIsoUtc(today, -(Math.max(GLANCE_RULES.medDays, GLANCE_RULES.recentMedDays, GLANCE_RULES.boardDays) - 1)), today)
+  const medAll = p.meds === null ? [] : medIssuesOf(p.meds, p.medRows, rid, addDaysIsoUtc(today, -(Math.max(GLANCE_RULES.medDays, GLANCE_RULES.recentMedDays, GLANCE_RULES.boardDays) - 1)), today)
   const recentMedFrom = addDaysIsoUtc(today, -(GLANCE_RULES.recentMedDays - 1))
   const incFrom = addDaysIsoUtc(today, -(GLANCE_RULES.incidentDays - 1))
   const recentIncFrom = addDaysIsoUtc(today, -(GLANCE_RULES.recentIncidentDays - 1))
@@ -1193,6 +1199,8 @@ export function computeGlance(p: GlanceInput): GlanceModel {
       .filter((b) => b.result === 'cancel' && b.bath_on >= recentBathFrom && b.bath_on <= today)
       .slice()
       .sort((a, b) => (a.bath_on < b.bath_on ? 1 : a.bath_on > b.bath_on ? -1 : b.id - a.id)),
+    medsUnavailable: p.meds === null,
+    incidentsUnavailable: p.incidents === null,
   }
 
   // ── 変化の兆し ──
@@ -1503,10 +1511,10 @@ export function buildBoardRows(p: BoardInput): BoardRow[] {
       fluids: byF.get(r.id) ?? [],
       outings: byO.get(r.id) ?? [],
       notes: byN.get(r.id) ?? [],
-      meds: byMed.get(r.id) ?? [],
+      meds: p.meds === null ? null : (byMed.get(r.id) ?? []),
       medRows: rowsByRes.get(r.id) ?? [],
       baths: [],
-      incidents: byI.get(r.id) ?? [],
+      incidents: p.incidents === null ? null : (byI.get(r.id) ?? []),
       usualTemp: p.usualTemps.get(r.id) ?? null,
       target: p.targets.get(r.id) ?? null,
       weights: p.weights === null ? null : (wl ?? []),

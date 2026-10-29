@@ -86,7 +86,8 @@ export function BoardTable({ rows, tempDomain, pendingColumns = [], onOpen }: Bo
     onOpen(id)
   }
   return (
-    <div className="overflow-x-auto rounded-lg border border-border-strong bg-surface">
+    // relative: マスの中の読み上げ用 sr-only（absolute）の基準をこの横に動く枠にし、枠の外（画面全体）を横に広げないように
+    <div className="relative overflow-x-auto rounded-lg border border-border-strong bg-surface">
       <table className="w-full border-collapse text-sm">
         <caption className="sr-only">見守りボード（全員の直近の様子。行を押すとその方のひと目ボードへ移ります）</caption>
         <thead>

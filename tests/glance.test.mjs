@@ -659,6 +659,29 @@ if (G === null) {
       assert.deepEqual(G.BOARD_COLUMNS.length, 12)
     })
 
+    it('recent-unavailable-tables（与薬・事故の表が読めない時、ひと目ボードの最新の体調変化を「なし」にしない）', () => {
+      // 読めた（空の配列）→ 読めない扱いにしない
+      const ok = G.computeGlance(input({ vitals: dailyVitals() }))
+      assert.equal(ok.recentChanges.medsUnavailable, false)
+      assert.equal(ok.recentChanges.incidentsUnavailable, false)
+      // 読めない（null）→ 欄は「—（カルテで確認）」側。件数は0で、与薬・事故の兆しも出さない
+      const na = G.computeGlance(
+        input({
+          vitals: dailyVitals(),
+          meds: null,
+          incidents: null,
+          // 時間帯の表があっても、記録が読めない時は「未」を数えない（空の記録から「未」を作らない）
+          medRows: [{ day: TODAY, row: { residentId: 1, cells: { morning: { kind: 'missing' }, noon: { kind: 'missing' } } } }],
+        }),
+      )
+      assert.equal(na.recentChanges.medsUnavailable, true)
+      assert.equal(na.recentChanges.incidentsUnavailable, true)
+      assert.equal(na.recentChanges.medIssues.length, 0)
+      assert.equal(na.recentChanges.incidents.length, 0)
+      assert.ok(!keys(na).includes('med'))
+      assert.ok(!na.allSigns.some((x) => x.column === 'med' || x.column === 'incident'))
+    })
+
     it('stool-window-14d（排便の間隔と最後の排便から◯日）', () => {
       const rec = (date, amt = '中等量') => ({
         id: `r${nextId()}`,
