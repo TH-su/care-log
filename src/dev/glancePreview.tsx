@@ -501,11 +501,30 @@ function App() {
   return (
     <MemoryRouter initialEntries={[initial]}>
       <NavBridge navRef={navRef} />
-      <Routes>
-        <Route path="/glance" element={<PreviewBoard c={c} set={set} checkLine={checkLine} />} />
-        <Route path="/glance/:id" element={<PreviewGlance c={c} set={set} checkLine={checkLine} />} />
-      </Routes>
+      <PreviewShell>
+        <Routes>
+          <Route path="/glance" element={<PreviewBoard c={c} set={set} checkLine={checkLine} />} />
+          <Route path="/glance/:id" element={<PreviewGlance c={c} set={set} checkLine={checkLine} />} />
+        </Routes>
+      </PreviewShell>
     </MemoryRouter>
+  )
+}
+
+/** 本番の App の殻（src/App.tsx の sticky の header と main の余白）を同じ class で模した囲い。
+ *  8段目「画面全体が縦に動かない」を本番と同じ上下の余白の中で測るため */
+function PreviewShell({ children }: { children: ReactNode }) {
+  return (
+    <div className="min-h-screen bg-bg text-ink lg:pl-24">
+      <header className="sticky top-0 z-20 border-b border-border bg-surface">
+        <div className="flex min-h-tap flex-wrap items-center gap-gap px-4 py-2">
+          <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-2">
+            <h1 className="min-w-tap truncate text-lg font-bold">見本（App の殻を模した見出し）</h1>
+          </div>
+        </div>
+      </header>
+      <main className="px-4 pb-24 pt-4 lg:pb-8">{children}</main>
+    </div>
   )
 }
 
