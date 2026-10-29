@@ -347,9 +347,11 @@ export const MIGRATION_PG_CASES = [
     finding: 'F09',
     name: 'timeline_chunk の notes・pinned に color が入る',
     async run(h) {
+      // 最重要にしてある: 0050 から、終わっていない最重要でない継続は「日本時間の今日−60日」より前に始まると pinned に出ない。
+      // DAY は固定の日付なので、日が経っても pinned に出続ける最重要で色を確かめる（確かめるのは色だけ）
       await h.pg(
         `insert into notes (id, note_on, shift, resident_id, body, importance, ongoing, color) overriding system value
-           values (802, '${DAY}', 'day', 1, '本文P', 'normal', true, 'pink')`,
+           values (802, '${DAY}', 'day', 1, '本文P', 'critical', true, 'pink')`,
       )
       const r = await h.as({}, (q) => q(`select public.timeline_chunk('${DAY}', '${DAY}', null) as t`))
       const t = Array.isArray(r) ? r[0].t : null

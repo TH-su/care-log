@@ -6,13 +6,29 @@
 //
 // 前提（vital-limits-pg.mjs と同じ）: tests/pg-run-all.mjs が用意する DB（Supabase の真似と移行 0001〜最新を当てたもの）。
 // 境界の行を置く: 7日の外で10日の中の日・終わった日（日本時間）が7日の始まりの前後の継続・60日の遡りの境目の継続と外出・
-//   終わっていない継続の遡りの境目（0050・今日−60日の当日と前日を重要と最重要で）・
+//   終わっていない継続の遡りの境目（0050・サーバーの今日−60日。日付は同じトランザクションの now() から作る）・
 //   帰着未定の外出・記録者の既読（10日は my_read が true・7日は false）。
 // 1回のトランザクションの中で動き、最後に必ず rollback する（表に何も残さない）。
 // 個人情報は置かない（利用者は架空の「見本」姓・職員は合成の名前と数値IDのみ）。
 
 import pg from 'pg'
-import { sliceTimelineChunk } from '../src/pages/alertsModel.ts'
+import { registerHooks } from 'node:module'
+
+// staleOngoing.ts は拡張子の無い相対 import を使うので '.ts' を補う解決フックを入れてから読む（tests/*.test.mjs と同じ）
+registerHooks({
+  resolve(specifier, context, next) {
+    if (/^\.{1,2}\//.test(specifier) && !/\.[a-zA-Z0-9]+$/.test(specifier)) {
+      try {
+        return next(`${specifier}.ts`, context)
+      } catch {
+        // .ts が無いものは元の指定へ戻す
+      }
+    }
+    return next(specifier, context)
+  },
+})
+const { addDaysIso, sliceTimelineChunk } = await import('../src/pages/alertsModel.ts')
+const { staleOngoingBefore } = await import('../src/lib/staleOngoing.ts')
 
 const url = process.env.CARELOG_PG_URL
 if (!url || !/^postgres(ql)?:\/\/[^@]*@(127\.0\.0\.1|localhost)[:/]/.test(url)) {
@@ -51,12 +67,6 @@ const SEED = [
      (9105, '2026-08-24', 'day', 1, '継続E', 'critical', true, '2026-10-25T03:00:00Z'),
      (9106, '2026-08-23', 'day', 1, '継続F', 'critical', true, '2026-10-25T03:00:00Z'),
      (9107, '2026-10-30', 'day', 1, '継続G', 'critical', true, null)`,
-  // 終わっていない継続の遡りの境目（0050・今日−60日＝08-30）: 境目の日と前日を重要と最重要で（最重要は境目より前でも入る）
-  `insert into notes (id, note_on, shift, resident_id, body, importance, ongoing, ended_at) overriding system value values
-     (9111, '2026-08-30', 'day', 2, '継続H', 'important', true, null),
-     (9112, '2026-08-29', 'day', 2, '継続I', 'important', true, null),
-     (9113, '2026-08-30', 'day', 1, '継続J', 'critical', true, null),
-     (9114, '2026-08-29', 'day', 1, '継続K', 'critical', true, null)`,
   // 既読（記録者1が読んだもの・ほかの職員が読んだもの）
   `insert into note_reads (note_id, staff_id) values (9004, 1), (9005, 1), (9005, 2), (9101, 1), (9003, 2)`,
   `insert into vitals (resident_id, measured_on, kind, measured_at, temp) values
@@ -109,9 +119,23 @@ const check = (name, ok, detail = '') => {
 await client.query('begin')
 try {
   for (const s of SEED) await client.query(s)
+  // サーバーの今日（日本時間）と、同じトランザクションの now() の時刻（ms）。timeline_chunk の now() もこれと同じ値になる
+  // （素の Postgres では now() を差し替えられないため、今日を固定する代わりに同じ瞬間を端末の部品へ渡して比べる）
+  const nowRow = (await client.query(`select ((now() at time zone 'Asia/Tokyo')::date)::text as today, (extract(epoch from now()) * 1000)::float8 as ms`)).rows[0]
+  const TODAY = nowRow.today
+  const NOW_MS = Number(nowRow.ms)
+  const rel = (k) => addDaysIso(TODAY, k)
+  // 終わっていない継続の遡りの境目（0050・今日−60日）: 境目の日と前日・さらに古い今日−65日を、重要と最重要で
+  await client.query(`insert into notes (id, note_on, shift, resident_id, body, importance, ongoing, ended_at) overriding system value values
+     (9111, '${rel(-60)}', 'day', 2, '継続H', 'important', true, null),
+     (9112, '${rel(-61)}', 'day', 2, '継続I', 'important', true, null),
+     (9113, '${rel(-60)}', 'day', 1, '継続J', 'critical', true, null),
+     (9114, '${rel(-61)}', 'day', 1, '継続K', 'critical', true, null),
+     (9115, '${rel(-65)}', 'day', 2, '継続L', 'normal', true, null),
+     (9116, '${rel(-65)}', 'day', 1, '継続M', 'critical', true, null)`)
   const ten = asChunk(await call(FROM10, DAY, 1), FROM10, DAY)
   const seven = asChunk(await call(FROM7, DAY, null), FROM7, DAY)
-  const cut = sliceTimelineChunk(ten, FROM7, DAY)
+  const cut = sliceTimelineChunk(ten, FROM7, DAY, NOW_MS)
   // 試験が境界を踏んでいる（10日と7日で中身が違う）ことを先に確かめる
   check('10日の方が多い（7日の外の申し送り・継続・外出が入っている）', ten.notes.length > seven.notes.length && ten.pinned.length > seven.pinned.length && ten.outings.length > seven.outings.length)
   check('10日は記録者の既読が true の申し送りがある（7日は無い）', ten.notes.some((n) => n.my_read === true) && !seven.notes.some((n) => n.my_read === true))
@@ -120,12 +144,31 @@ try {
     const b = JSON.stringify(seven[k])
     check(`切り出した ${k} が7日・記録者なしで取った結果と同じ（${seven[k].length}件・並びも）`, a === b, `切り出し ${a}\n   7日     ${b}`)
   }
-  // 終わっていない継続の境目（0050）を本物が踏んでいる: 08-30 の重要は入り 08-29 の重要は入らない・最重要は境目の前でも入る
-  for (const [name, c] of [['10日', ten], ['7日', seven]]) {
-    const ids = new Set(c.pinned.map((n) => n.id))
-    check(`${name}: 終わっていない継続は 今日−60日以降か最重要だけ（9111・9113・9114・9101 が入り 9112 が入らない）`,
-      ids.has(9111) && !ids.has(9112) && ids.has(9113) && ids.has(9114) && ids.has(9101), JSON.stringify([...ids]))
+  // 終わっていない継続の境目（0050）は区切りに関係なくサーバーの今日−60日: 最新の10日・7日・古い10日（今日−30〜−21）・
+  // さらに古い10日（今日−59〜−50）のどれでも、今日−60日の重要は入り、今日−61日・−65日の重要・普通は入らない。最重要は全部入る
+  const latest = (await call(rel(-9), TODAY, 1)).pinned
+  const old1 = (await call(rel(-30), rel(-21), 1)).pinned
+  const old2 = (await call(rel(-59), rel(-50), 1)).pinned
+  const ALL = [9111, 9112, 9113, 9114, 9115, 9116]
+  const WANT = [9111, 9113, 9114, 9116]
+  for (const [name, pinned] of [['最新の10日', latest], ['古い10日（今日−30〜−21）', old1], ['古い10日（今日−59〜−50）', old2]]) {
+    const got = pinned.map((n) => n.id).filter((id) => ALL.includes(id)).sort()
+    check(`${name}: 終わっていない継続は 今日−60日以降か最重要だけ（${WANT.join('・')}）`, JSON.stringify(got) === JSON.stringify(WANT), JSON.stringify(got))
   }
+  // 帯の境目（端末の staleOngoingBefore・日本時間）が SQL の境目と同じ日で、帯に数える継続（db.ts の countStaleOngoingNotes と
+  // 同じ条件）と最新の10日のピン留めに出る終わっていない継続が、重ならず・漏れない（今日までに始まった全部を分け合う）
+  const before = staleOngoingBefore(NOW_MS)
+  check('帯の境目は SQL の境目（サーバーの今日−60日）と同じ日', before === rel(-60), `${before} / ${rel(-60)}`)
+  const banner = (await client.query(
+    `select id from notes where ongoing and ended_at is null and deleted_at is null and importance <> 'critical' and note_on < $1::date`, [before])).rows.map((r) => Number(r.id))
+  const open = (await client.query(
+    `select id from notes where ongoing and ended_at is null and deleted_at is null and note_on <= $1::date`, [TODAY])).rows.map((r) => Number(r.id))
+  const pinOpen = latest.filter((n) => n.ended_at === null).map((n) => n.id)
+  const overlap = banner.filter((id) => pinOpen.includes(id))
+  const missing = open.filter((id) => !banner.includes(id) && !pinOpen.includes(id))
+  check('帯の継続と最新の10日のピン留めの継続は重ならず、漏れもない（最重要はピン留めだけ）',
+    overlap.length === 0 && missing.length === 0 && banner.includes(9112) && banner.includes(9115) && !banner.includes(9114) && !banner.includes(9116),
+    `重なり ${JSON.stringify(overlap)} 漏れ ${JSON.stringify(missing)} 帯 ${JSON.stringify(banner)}`)
   check('期間の外（10日に収まらない）を頼むと null', sliceTimelineChunk(ten, '2026-10-19', DAY) === null && sliceTimelineChunk(ten, FROM7, '2026-10-30') === null)
 } catch (e) {
   failed += 1

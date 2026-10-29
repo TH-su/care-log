@@ -11319,6 +11319,7 @@ const STALE_ONGOING_ROWS = 200
 
 /**
  * before（'YYYY-MM-DD'）より前に始まり、まだ終わっていない継続の申し送りの件数（代表者の決定 2026-10-29 案A）。
+ * 最重要（critical）は数えない（timeline_chunk が上限を掛けずにピン留めに出し続ける＝隠れていない・0050）。
  * 行は読まず件数だけを返す（head の問い合わせ）。timeline_chunk の遡りの上限に関係なく notes を直接数える。
  * 読めない時は投げる（呼ぶ側が帯を出さない側に倒す）
  */
@@ -11331,6 +11332,7 @@ export async function countStaleOngoingNotes(before: string): Promise<number> {
     .eq('ongoing', true)
     .is('ended_at', null)
     .is('deleted_at', null)
+    .neq('importance', 'critical')
     .lt('note_on', before)) as unknown as Res<unknown> & { count?: number | null }
   if (res.error !== null) throw readError(res)
   const n = res.count
@@ -11348,6 +11350,7 @@ export async function fetchStaleOngoingNotes(before: string): Promise<Note[]> {
     .eq('ongoing', true)
     .is('ended_at', null)
     .is('deleted_at', null)
+    .neq('importance', 'critical')
     .lt('note_on', before)
     .order('note_on', { ascending: true })
     .order('id', { ascending: true })

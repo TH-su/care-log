@@ -259,6 +259,10 @@ if (DB === null || ST === null) {
             q.filters.push(['is', k, v])
             return self
           },
+          neq(k, v) {
+            q.filters.push(['neq', k, v])
+            return self
+          },
           lt(k, v) {
             q.filters.push(['lt', k, v])
             return self
@@ -283,10 +287,12 @@ if (DB === null || ST === null) {
       ['eq', 'ongoing', true],
       ['is', 'ended_at', null],
       ['is', 'deleted_at', null],
+      // 最重要は数えない（0050 でピン留めに出し続ける＝隠れていない）
+      ['neq', 'importance', 'critical'],
       ['lt', 'note_on', '2026-08-30'],
     ]
 
-    it('件数は notes の head の件数だけ（行を読まない）', async () => {
+    it('件数は notes の head の件数だけ（行を読まない）・最重要は数えない', async () => {
       const f = fake({ data: null, error: null, status: 200, count: 7 })
       DB.__testHooks.setClient(f.client)
       try {

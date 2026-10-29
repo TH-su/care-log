@@ -3,14 +3,15 @@
 --       （c_lookback_days＝60日）を掛ける（代表者の決定 2026-10-29 案A）
 --
 -- 0001〜0049 を当てたあとに実行する。冪等。テーブル・列・データには触れない。
--- 0031 と同じ名前・引数・返り値で create or replace（本文は 0031 の pinned の条件1か所と定数のコメントだけを変えた。
+-- 0031 と同じ名前・引数・返り値で create or replace（本文は 0031 の pinned の条件1か所・境目の定数1つ・定数のコメントだけを変えた。
 -- ほかの欄・返す形・並び・権限は 0031 のまま）。
 --
 -- なぜ: 終了し忘れた継続が何年分でも毎回の読み込みに入り、どの日のピン留めにも並び続けていた。
--- 何を: 終了していない継続は「開始日が期間終了日（p_to）−60日以降」か「最重要（critical）」の分だけ返す。
---   - 境目はタイムラインの帯（60日より前に始まった継続が N件・日本時間の今日−60日より前を数える）と同じにそろえる
---     （最新の期間は p_to＝今日なので、帯に数える継続とピン留めに出る継続が重ならず、漏れもしない）
---   - 最重要は入居者の安全のため今までどおり毎回返す（今日の要注意の「最重要の申し送り（継続）」が使う）
+-- 何を: 終了していない継続は「開始日が日本時間の今日−60日以降」か「最重要（critical）」の分だけ返す。
+--   - 境目は期間（p_from・p_to）に関係なく、サーバーの今日（日本時間）で決める。タイムラインの帯（最重要を除き、
+--     日本時間の今日−60日より前に始まった終了していない継続を数える）と同じ日にそろえ、どの10日の区切りでも
+--     帯に数える継続とピン留めに出る継続が重ならず、漏れもしない。端末の地元の日付には左右されない
+--   - 最重要は入居者の安全のため今までどおり毎回返す（今日の要注意の「最重要の申し送り（継続）」が使う。帯には数えない）
 --   - 終了済みの継続の条件は 0031 のまま
 --   端末の今日の要注意の切り出し（src/pages/alertsModel.ts の sliceTimelineChunk）も同じ条件にそろえてある。
 -- ★ 配る順: アプリ（タイムラインの帯）を取り込み→公開→この SQL。逆順だと 60日より前に始まった継続が帯なしに
@@ -35,8 +36,10 @@ as $fn$
 declare
   c_max_span_days constant int := 100;  -- 1回で取得できる最大日数（通常運用は10日チャンク）
   c_lookback_days constant int := 60;   -- 継続・外出を遡って拾う上限（ui-design §3 の保持上限と同値）。
-                                        -- 終了済みの継続・外出は期間開始日から、終了していない継続は期間終了日から数える（0050）。
+                                        -- 終了済みの継続・外出は期間開始日から、終了していない継続は日本時間の今日から数える（0050）。
                                         -- 終了していない最重要の継続には掛けない
+  -- 終了していない継続の境目（0050）。now() は stable（同じ文・同じトランザクションの中では同じ値）なので、この関数の stable は崩れない
+  c_open_from constant date := (now() at time zone 'Asia/Tokyo')::date - c_lookback_days;
 begin
   -- 引数検証。エラー文は「何が起きたか＋次にどうすればよいか」（個人情報は含めない）
   if p_from is null or p_to is null then
@@ -104,11 +107,12 @@ begin
           and n.ongoing
           and n.note_on <= p_to
           and (
-            -- まだ終了していない継続は、開始日が期間終了日から遡り上限内の分だけ（0050・代表者の決定 2026-10-29 案A）。
-            -- 境目はタイムラインの帯〔60日より前に始まった継続が N件〕と同じ（最新の期間なら今日−60日）。上限より古い分は帯で案内する。
-            -- 最重要（critical）は入居者の安全のため上限を掛けない（今日の要注意が「最重要の申し送り（継続）」に使う）
+            -- まだ終了していない継続は、開始日が「日本時間の今日−遡り上限」以降の分だけ（0050・代表者の決定 2026-10-29 案A）。
+            -- 境目は期間に関係なく今日で決める＝タイムラインの帯〔60日より前に始まった継続が N件〕と同じ日（どの10日の区切りでも
+            -- 帯に数える継続をピン留めに出さない）。上限より古い分は帯で案内する。
+            -- 最重要（critical）は入居者の安全のため上限を掛けない（今日の要注意が「最重要の申し送り（継続）」に使う。帯にも数えない）
             (n.ended_at is null
-             and (n.note_on >= p_to - c_lookback_days
+             and (n.note_on >= c_open_from
                   or n.importance = 'critical'))
             -- 終了済みは、期間開始日以降に終了した分だけ（開始日は遡り上限内に限る）
             or ((n.ended_at at time zone 'Asia/Tokyo')::date >= p_from
@@ -201,7 +205,7 @@ end;
 $fn$;
 
 comment on function public.timeline_chunk(date, date, bigint) is
-  'タイムライン10日チャンクを1往復で返す（notes は既読を read_count/my_read に畳み込み。notes・pinned に ended_by＝0030。notes・pinned・vitals・fluids に created_at＝0031。pinned の終了していない継続は開始日が期間終了日−60日以降か最重要のものだけ＝0050）。security invoker・authenticated 限定。';
+  'タイムライン10日チャンクを1往復で返す（notes は既読を read_count/my_read に畳み込み。notes・pinned に ended_by＝0030。notes・pinned・vitals・fluids に created_at＝0031。pinned の終了していない継続は開始日が日本時間の今日−60日以降か最重要のものだけ＝0050）。security invoker・authenticated 限定。';
 
 -- 実行権限（0002 と同じ。create or replace は権限を保つが、単独で流しても同じ状態になるよう明示する）
 revoke all on function public.timeline_chunk(date, date, bigint) from public;
@@ -211,7 +215,7 @@ grant execute on function public.timeline_chunk(date, date, bigint) to authentic
 notify pgrst, 'reload schema';
 
 -- 適用後の確認（終了していない継続の開始日の最小が 今日−60日 以降か、最重要だけになる）:
---   select min((p ->> 'note_on')::date), bool_and((p ->> 'note_on')::date >= current_date - 60 or p ->> 'importance' = 'critical')
+--   select min((p ->> 'note_on')::date), bool_and((p ->> 'note_on')::date >= (now() at time zone 'Asia/Tokyo')::date - 60 or p ->> 'importance' = 'critical')
 --   from jsonb_array_elements(public.timeline_chunk(current_date - 9, current_date, null) -> 'pinned') p where p ->> 'ended_at' is null;
 -- 戻す時: 0031 の timeline_chunk の部分（create or replace function public.timeline_chunk から comment on function まで）と
 --   権限の3行を流し直す（業務データには影響しない）
