@@ -138,7 +138,9 @@ describe('静的検査', () => {
   })
   it('今日の画面と1人の画面がサーバーから読めた一覧を控える。食事・水分が読めたかも控える（読めない空の一覧を「読めた」にしない＝確認の反証 中1）', () => {
     assert.match(today, /rememberDaycareDay\(\{\s*day: data\.day,/)
-    assert.match(today, /fetchDaycareIntake\(target\)\.catch\(\(\) => null\)/)
+    // 2026-10-29: 1日の読み込みの段取りは daycareDayLoad へ移した（食事と水分は読めない時に null のまま）
+    assert.match(today, /intake: fetchDaycareIntake,/)
+    assert.match(code('../src/lib/daycareDayLoad.ts'), /const pIntake = r\.intake\(target\)\.catch\(\(\) => null\)/)
     assert.match(today, /intakeOk: intake !== null,/)
     assert.match(today, /intakeOk: data\.intakeOk,\s*residents,\s*savedAt: data\.readAt,/)
     // 親の反証 中1: 1人の画面は「今回サーバーから読めた」時だけ控えに入れる（前の値・控えの値を書き戻さない）

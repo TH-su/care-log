@@ -674,7 +674,9 @@ if (A === null) {
     })
     it('デイの一覧: 活動を読めない時は印を出さない（「記録なし」に見せない）・切り替えに〔活動一括〕・ルート', () => {
       const d = code('../src/pages/DaycarePage.tsx')
-      assert.match(d, /const activities = await fetchDaycareActivities\(target\)\.catch\(\(\) => null\)/)
+      // 2026-10-29: 1日の読み込みの段取りは daycareDayLoad へ移した（活動は写しと同時に出す・読めない時は null のまま）
+      assert.match(d, /activities: fetchDaycareActivities,/)
+      assert.match(code('../src/lib/daycareDayLoad.ts'), /const pActivities = r\.activities\(target\)\.catch\(\(\) => null\)/)
       // 今日の画面の改善 1回目（代表者の回答 A3・2026-10-23）で、活動・水分の札は一覧から外し、1人の記録の画面で見る（固定し直し）。
       // 一覧に活動の件数を出さない＝読めない時に「記録なし」に見せる筋も無い
       assert.doesNotMatch(d, /activityCountOf|activityChipText|fluidOf\(/)

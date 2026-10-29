@@ -570,6 +570,8 @@ async function onAuthEvent(event: string): Promise<void> {
   // ログインし直した・抜けた・二段階認証を済ませた: 控えた役割を捨てる（次の fetchMyRole で取り直す。2026-10-15）
   if (event === 'SIGNED_IN' || event === 'SIGNED_OUT' || event === 'USER_UPDATED' || event === 'MFA_CHALLENGE_VERIFIED') {
     forgetMyRole()
+    // 走っている「許可リスト外か」の確かめは前のアカウントのもの。後の呼び出しを相乗りさせない（2026-10-29 反証レビュー）
+    deniedProbeInFlight = null
   }
   if (event !== 'SIGNED_IN' && event !== 'TOKEN_REFRESHED') return
   // ログインし直した: 拒否で止まった退避 op を1回だけ送り直す（F37。権限が直った後なら届く。TOKEN_REFRESHED では解かない）。
@@ -4310,6 +4312,20 @@ let memberDenied = false
  * 名簿が見える・確かめられない（通信エラー・ログインの控えが無い）時は false＝従来どおり「未登録」として扱う
  */
 async function deniedWhenSettingMissing(): Promise<boolean> {
+  // 同じ瞬間に呼ばれた分（入力解禁の旗を同時に取った画面と App）は1本の結果を共有する（2026-10-29 本人指示）。
+  // 終わったら（失敗も）外す＝時間の控えではなく、次の呼び出しは改めて問い合わせる
+  if (deniedProbeInFlight !== null) return deniedProbeInFlight
+  const run: Promise<boolean> = probeDenied().finally(() => {
+    if (deniedProbeInFlight === run) deniedProbeInFlight = null // ログインし直した後に出た新しい確かめは外さない
+  })
+  deniedProbeInFlight = run
+  return run
+}
+
+/** 走っている「許可リスト外か」の確かめ（deniedWhenSettingMissing の相乗り） */
+let deniedProbeInFlight: Promise<boolean> | null = null
+
+async function probeDenied(): Promise<boolean> {
   try {
     const sb = await getClient()
     const res = await bounded(sb.from('staff').select('id').limit(1))
@@ -9370,7 +9386,27 @@ export async function fetchDaycareVitals(dayIso: string): Promise<{ live: KeyedV
 }
 
 /**
- * 前回値の材料: 方々の、期間（from〜to）の測定（種類を問わない・削除済みを除く・client_key つき）。新しい順に上限まで
+ * その日のデイの測定（生きている行だけ・client_key つき）。fetchDaycareVitals の live と同じ問い合わせで、キーの全部は読まない。
+ * 今日の画面（DaycarePage）はキー（次の回を決める材料）を使わないので、vitals を2回読まない（2026-10-29 本人指示）。
+ * 問い合わせを変える時は fetchDaycareVitals の live と一緒に変える（試験 daycare-day-load が同じ形かを確かめる）
+ */
+export async function fetchDaycareVitalsLive(dayIso: string): Promise<KeyedVital[]> {
+  assertDay(dayIso)
+  const sb = await getClient()
+  const res = (await sb
+    .from('vitals')
+    .select(`${VITAL_COLS},client_key`)
+    .eq('measured_on', dayIso)
+    .like('client_key', 'dc:%')
+    .is('deleted_at', null)
+    .order('id', { ascending: true })
+    .limit(DAYCARE_DAY_ROWS)) as Res<unknown>
+  if (res.error !== null) throw readError(res)
+  return list(res.data, normalizeKeyedVital, DAYCARE_DAY_ROWS).filter((v) => isDaycareVitalKey(v.client_key))
+}
+
+/**
+ * 前回値の材料:方々の、期間（from〜to）の測定（種類を問わない・削除済みを除く・client_key つき）。新しい順に上限まで
  * （上限を超えた分は古い側が落ちる＝前回値の表示だけに使う）
  */
 export async function fetchRecentVitals(residentIds: readonly number[], fromIso: string, toIso: string): Promise<KeyedVital[]> {
