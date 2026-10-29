@@ -47,7 +47,7 @@ import { excretionFailMessage, fetchExcretion, hospitalIdsOn, MSG_EXCRETION_UNCO
 import type { HbSnapshot } from '../lib/excretionClient'
 import type { AlertReason, ResidentTargets } from '../lib/vitalAlerts'
 import { vitalThresholds } from '../lib/vitalThresholds'
-import { fmtDayLabel } from '../lib/format'
+import { fmtDayLabel, todayIso } from '../lib/format'
 import type { FluidIntake, Meal, MedAdmin, MedSlot, MedSlotsSetting, Note, Resident, Vital } from '../lib/types'
 import { EmptyBlock, ErrorBlock, LoadingBlock, SegmentPicker } from '../components/ui'
 import {
@@ -143,6 +143,9 @@ export function AlertsPage({ actorId = null }: Props) {
   // 個人の閾値（段階2d-2）。読めない時は施設の基準で判定し、その旨を出す
   const limits = useVitalLimits(tick)
   const aliveRef = useRef(true)
+  // 先に描く控えを覗く時だけ使う（取り直しは記録者に関係しない＝記録者を替えても取り直さない・2026-10-29 反証レビュー）
+  const actorIdRef = useRef(actorId)
+  actorIdRef.current = actorId
   const day = clock.day
 
   useEffect(() => {
@@ -186,7 +189,13 @@ export function AlertsPage({ actorId = null }: Props) {
     // 控えずに取り直す（1往復だけ待つ）。そろっていない時は今までどおり取り直しを待つ
     const cRes = peekResidents()
     // 先に描くだけ（下で毎回7日を取り直して置き換える）。7日の控えが無ければ10日の控えから切り出す
-    const c10 = peekTimelineChunk(chunkFrom, day, actorId)
+    // 先読みの10日は端末の地元の日付で取る（cachedReads の startPrefetch）。日本時間と地元の日付が食い違う端末では、
+    // 地元の日付の10日が7日を丸ごと含む時だけそちらを使う（含まない時は先に描かない＝足りない表示を出さない）
+    const localTo = todayIso()
+    const localFrom = addDaysIso(localTo, -(CHUNK_DAYS - 1))
+    const c10 =
+      peekTimelineChunk(chunkFrom, day, actorIdRef.current) ??
+      (localTo !== day && localFrom <= from && localTo >= day ? peekTimelineChunk(localFrom, localTo, actorIdRef.current) : undefined)
     const cChunk = peekTimelineChunk(from, day, null) ?? (c10 === undefined ? undefined : (sliceTimelineChunk(c10, from, day) ?? undefined))
     const cTargets = peekResidentTargets()
     const cMed = peekMedDay(day)
@@ -244,7 +253,7 @@ export function AlertsPage({ actorId = null }: Props) {
     return () => {
       cancelled = true
     }
-  }, [day, tick, actorId])
+  }, [day, tick])
 
   // 排便記録（開いた時・日付が変わった時はメモリの控え〔5分〕があれば使う。〔最新を読み込む〕＝tick が進んだ時は取り直す）
   useEffect(() => {

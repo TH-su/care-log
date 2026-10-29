@@ -737,7 +737,12 @@ describe('★先読み 配線（静的）', () => {
     const src = code('src/pages/AlertsPage.tsx')
     assert.match(src, /const CHUNK_DAYS = 10/)
     assert.match(src, /const chunkFrom = addDaysIso\(day, -\(CHUNK_DAYS - 1\)\)/)
-    assert.match(src, /const c10 = peekTimelineChunk\(chunkFrom, day, actorId\)/)
+    assert.match(src, /peekTimelineChunk\(chunkFrom, day, actorIdRef\.current\) \?\?/)
+    // 日本時間と地元の日付が食い違う端末: 地元の10日が7日を丸ごと含む時だけ使う（2026-10-29 反証レビュー）
+    assert.match(src, /localTo !== day && localFrom <= from && localTo >= day \? peekTimelineChunk\(localFrom, localTo, actorIdRef\.current\) : undefined/)
+    // 記録者を替えても取り直さない（記録者は先に描く控えを覗くだけに使う）
+    assert.match(src, /\}, \[day, tick\]\)/)
+    assert.doesNotMatch(src, /\[day, tick, actorId\]/)
     assert.match(src, /peekTimelineChunk\(from, day, null\) \?\? \(c10 === undefined \? undefined : \(sliceTimelineChunk\(c10, from, day\) \?\? undefined\)\)/)
     // 取り直しは7日・記録者なしの1か所だけ（10日を取りに行かない＝開いた時・〔最新〕の通信は直す前と同じ）
     assert.equal(src.match(/fetchTimelineChunk\(/g)?.length, 1)
