@@ -8,6 +8,7 @@
 // 個人情報は扱わない（数値ID・日付・時刻だけ）。
 
 import type { AlertReason, AlertSection, ResidentAlerts } from '../lib/vitalAlerts'
+import type { Note, TimelineChunk } from '../lib/types'
 
 /** 階の UI 状態の保存先（今日の要注意の画面だけが使う） */
 export const ALERTS_FLOOR_KEY = 'cl_alertsFloor'
@@ -71,6 +72,51 @@ export function alertHref(residentId: number, section: AlertSection): string {
 /** カルテの ?sec= の値を許可リスト（欄の id）と照合する。無い・知らない値は null（移らない） */
 export function karteSecOf(raw: string | null | undefined, allowed: readonly string[]): string | null {
   return typeof raw === 'string' && allowed.includes(raw) ? raw : null
+}
+
+/** 終了済みの継続を遡って拾う上限（timeline_chunk の c_lookback_days と同じ値） */
+export const CHUNK_LOOKBACK_DAYS = 60
+
+/**
+ * timeline_chunk の長い期間の結果（タイムラインの10日・記録者つき）から、短い期間 [from, to]・記録者なし（p_staff_id null）で
+ * 取った時と同じ中身を切り出す（2026-10-29 本人指示「要注意の7日を10日の控えから切り出す」）。
+ * SQL（0031 の timeline_chunk）の各欄の条件をそのまま当てる＝並びは元の並びのまま（filter で崩れない）:
+ *   notes・vitals・meals・fluids・import_days は日付の範囲。outings は「始まりが to 以前・from−60日以降・帰着が未定か from 以降」。
+ *   pinned は「継続・始まりが to 以前・終わっていないか、終わった日（日本時間）が from 以降で始まりが from−60日以降」。
+ *   my_read は記録者なしで取ると全部 false になるので false に揃える（read_count は記録者に関係しない）。
+ * 上限（limit）は SQL に無いので、長い期間の中の短い期間が欠けることは無い。
+ * [from, to] が元の期間に収まらない時は null（呼ぶ側が取りに行く）
+ */
+export function sliceTimelineChunk(chunk: TimelineChunk, from: string, to: string): TimelineChunk | null {
+  if (!(chunk.from <= from && to <= chunk.to && from <= to)) return null
+  const inRange = (d: string | null | undefined): boolean => typeof d === 'string' && d >= from && d <= to
+  const lookFrom = addDaysIso(from, -CHUNK_LOOKBACK_DAYS)
+  const noMyRead = (n: Note): Note => (n.my_read === true ? { ...n, my_read: false } : n)
+  const endedDay = (at: string): string | null => {
+    const ms = Date.parse(at)
+    return Number.isFinite(ms) ? (jstClock(ms)?.day ?? null) : null
+  }
+  return {
+    from,
+    to,
+    notes: chunk.notes.filter((n) => inRange(n.note_on)).map(noMyRead),
+    vitals: chunk.vitals.filter((v) => inRange(v.measured_on)),
+    meals: chunk.meals.filter((m) => inRange(m.meal_on)),
+    fluids: chunk.fluids.filter((f) => inRange(f.taken_on)),
+    outings: chunk.outings.filter(
+      (o) => o.start_on <= to && o.start_on >= lookFrom && (o.end_on === null || o.end_on >= from),
+    ),
+    importDays: chunk.importDays.filter((d) => inRange(d.day)),
+    pinned: chunk.pinned
+      .filter((n) => {
+        if (n.note_on > to) return false
+        if (n.ended_at === null) return true
+        const ended = endedDay(n.ended_at)
+        // 読めない終了時刻は SQL の判定を再現できない。終了済みの継続は要注意の判定に使わない（ended_at が null の分だけ）ので残す
+        return (ended === null || ended >= from) && n.note_on >= lookFrom
+      })
+      .map(noMyRead),
+  }
 }
 
 /** 申し送り（その日の分）と継続（pinned）を id で重ねずにまとめる（先に来た方を残す） */

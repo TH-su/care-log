@@ -5,8 +5,11 @@
 //   最重要の申し送り（その日の分と続いている継続）・与薬の「未」。理由を押すとカルテのその欄へ移る（/karte/:id?sec=…）。
 //
 // 読み方（画面を開くたび・〔最新を読み込む〕・日付が変わった時に取り直す＝前提は毎回実測）:
-//   ・名簿 fetchResidents と記録 fetchTimelineChunk（今日を含む7日＝摂取低下の連続日数を数えるため。継続の申し送り pinned も来る）。
+//   ・名簿 fetchResidents と記録（今日を含む7日＝摂取低下の連続日数を数えるため。継続の申し送り pinned も来る）。
 //     この2つが読めない時だけ画面をエラーにする
+//   ・先読みは要注意の7日を別に取らない（2026-10-29 本人指示）。先に描く控えは、この画面の7日の控えが無ければ
+//     タイムラインの最初の10日（今日まで・記録者つき＝先読みとタイムラインの画面と同じキー）の控えから切り出す
+//     （alertsModel の sliceTimelineChunk・SQL と同じ条件）。取り直しは今までどおり毎回7日（記録者なし）を取って置き換える
 //   ・基準値 loadVitalThresholds・平熱 fetchUsualTemps（失敗しても例外は来ない＝平熱なし）・個別の目標 fetchResidentTargets
 //     （読めない時は施設の既定）・与薬（fetchMedDay＋fetchMedSlots＋fetchMedFirstDay＋getKindInputGate。読めない時は与薬を出さない）
 //     は読めなくても画面を止めない（何を出していないかを一行で知らせる）
@@ -44,7 +47,7 @@ import { excretionFailMessage, fetchExcretion, hospitalIdsOn, MSG_EXCRETION_UNCO
 import type { HbSnapshot } from '../lib/excretionClient'
 import type { AlertReason, ResidentTargets } from '../lib/vitalAlerts'
 import { vitalThresholds } from '../lib/vitalThresholds'
-import { fmtDayLabel } from '../lib/format'
+import { fmtDayLabel, todayIso } from '../lib/format'
 import type { FluidIntake, Meal, MedAdmin, MedSlot, MedSlotsSetting, Note, Resident, Vital } from '../lib/types'
 import { EmptyBlock, ErrorBlock, LoadingBlock, SegmentPicker } from '../components/ui'
 import {
@@ -58,10 +61,13 @@ import {
   jstClock,
   mergeNotes,
   readAlertsFloor,
+  sliceTimelineChunk,
 } from './alertsModel'
 
 /** 摂取低下の連続日数を数えるために読む日数（今日を含む） */
 const MEAL_DAYS = 7
+/** 切り出す元の期間（タイムラインの最初の10日＝useTimeline の CHUNK_DAYS・先読みと同じ） */
+const CHUNK_DAYS = 10
 /** 時刻を進める間隔（ms） */
 const CLOCK_MS = 60_000
 
@@ -123,7 +129,12 @@ type StoolState =
 
 const hm = (min: number) => `${Math.floor(min / 60)}:${String(min % 60).padStart(2, '0')}`
 
-export function AlertsPage() {
+interface Props {
+  /** 記録者（タイムラインの10日の控えのキー。App が持つ値＝先読みと同じ） */
+  actorId?: number | null
+}
+
+export function AlertsPage({ actorId = null }: Props) {
   const [clock, setClock] = useState(nowClock)
   const [floor, setFloorState] = useState<string>(readFloor)
   const [state, setState] = useState<LoadState>({ status: 'loading' })
@@ -132,6 +143,9 @@ export function AlertsPage() {
   // 個人の閾値（段階2d-2）。読めない時は施設の基準で判定し、その旨を出す
   const limits = useVitalLimits(tick)
   const aliveRef = useRef(true)
+  // 先に描く控えを覗く時だけ使う（取り直しは記録者に関係しない＝記録者を替えても取り直さない・2026-10-29 反証レビュー）
+  const actorIdRef = useRef(actorId)
+  actorIdRef.current = actorId
   const day = clock.day
 
   useEffect(() => {
@@ -153,6 +167,7 @@ export function AlertsPage() {
     let freshShown = false
     setState((cur) => (cur.status === 'ready' && cur.data.day === day ? cur : { status: 'loading' }))
     const from = addDaysIso(day, -(MEAL_DAYS - 1))
+    const chunkFrom = addDaysIso(day, -(CHUNK_DAYS - 1))
     const toLoaded = (
       residents: Resident[],
       chunk: { vitals: Vital[]; meals: Meal[]; fluids: FluidIntake[]; notes: Note[]; pinned: Note[] },
@@ -173,7 +188,15 @@ export function AlertsPage() {
     // 控え（裏での先読み）が全部そろっていれば、取り直しを待たずに先に描く。与薬の入力解禁の旗（「未」を出すか）は
     // 控えずに取り直す（1往復だけ待つ）。そろっていない時は今までどおり取り直しを待つ
     const cRes = peekResidents()
-    const cChunk = peekTimelineChunk(from, day, null)
+    // 先に描くだけ（下で毎回7日を取り直して置き換える）。7日の控えが無ければ10日の控えから切り出す
+    // 先読みの10日は端末の地元の日付で取る（cachedReads の startPrefetch）。日本時間と地元の日付が食い違う端末では、
+    // 地元の日付の10日が7日を丸ごと含む時だけそちらを使う（含まない時は先に描かない＝足りない表示を出さない）
+    const localTo = todayIso()
+    const localFrom = addDaysIso(localTo, -(CHUNK_DAYS - 1))
+    const c10 =
+      peekTimelineChunk(chunkFrom, day, actorIdRef.current) ??
+      (localTo !== day && localFrom <= from && localTo >= day ? peekTimelineChunk(localFrom, localTo, actorIdRef.current) : undefined)
+    const cChunk = peekTimelineChunk(from, day, null) ?? (c10 === undefined ? undefined : (sliceTimelineChunk(c10, from, day) ?? undefined))
     const cTargets = peekResidentTargets()
     const cMed = peekMedDay(day)
     const cSlots = cRes === undefined ? undefined : peekMedSlots(cRes)

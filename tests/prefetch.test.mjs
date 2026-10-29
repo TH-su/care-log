@@ -487,6 +487,41 @@ describe('★先読み db につなぐ層（cachedReads）', { skip: R === null 
     assert.equal(again, a)
   })
 
+  it('在籍者を全員の名簿から切り出す（2026-10-29）: 同時に読む全員の名簿と相乗りして residents 表は1回。並びはそのまま・在籍の控えにも入る', async () => {
+    const t = TODAY_ROWS()
+    t.residents.splice(1, 0, { id: 9, source_id: 's09', name: '利用者09', kana: null, room: '101', gender: null, care_level: null, active: false, needs_review: false, note_alias: null })
+    const { sb, calls } = fakeSb({ tables: t, delay: 5 })
+    DB.__testHooks.setClient(sb)
+    const [act, all] = await Promise.all([R.fetchResidentsFromAll(), R.fetchAllResidents()])
+    assert.equal(calls.filter((q) => q.table === 'residents').length, 1)
+    assert.deepEqual(all.map((r) => r.id), [1, 9, 2])
+    assert.deepEqual(act.map((r) => r.id), [1, 2])
+    assert.equal(R.peekResidents(), act)
+    assert.equal(R.peekAllResidents(), all)
+    // 取り直しは毎回する（全員の名簿を1回）。中身が同じなら在籍の控えと同じ参照
+    const again = await R.fetchResidentsFromAll()
+    assert.equal(calls.filter((q) => q.table === 'residents').length, 2)
+    assert.equal(again, act)
+  })
+
+  it('在籍者の切り出し: 全員の名簿が上限（2000人）に届いた時は切り出さず、今までどおり在籍の名簿を取る', async () => {
+    const many = Array.from({ length: 2000 }, (_, i) => ({ id: i + 1, source_id: `s${i + 1}`, name: `利用者${i + 1}`, kana: null, room: null, gender: null, care_level: null, active: i % 2 === 0, needs_review: false, note_alias: null }))
+    const { sb, calls } = fakeSb({ tables: { ...TODAY_ROWS(), residents: many } })
+    DB.__testHooks.setClient(sb)
+    await R.fetchResidentsFromAll()
+    assert.equal(calls.filter((q) => q.table === 'residents').length, 2)
+  })
+
+  it('個人のバイタルの閾値: 取ってから REUSE_MS 以内の古くない控えだけ使い回す（書いた後・変更通知で古くなったら使わない）', async () => {
+    const { sb } = fakeSb({ tables: { ...TODAY_ROWS(), resident_vital_limits: [] } })
+    DB.__testHooks.setClient(sb)
+    assert.equal(R.recentResidentVitalLimits(), undefined)
+    const r = await R.fetchResidentVitalLimits()
+    assert.equal(R.recentResidentVitalLimits(), r)
+    R.applyChange('resident_vital_limits', { event: 'LOCAL', row: null })
+    assert.equal(R.recentResidentVitalLimits(), undefined)
+  })
+
   it('ログインの控えが無い（anon で読んだ）0人は控えない（F58）', async () => {
     const { sb } = fakeSb({ session: false })
     DB.__testHooks.setClient(sb)
@@ -610,19 +645,22 @@ describe('★先読み db につなぐ層（cachedReads）', { skip: R === null 
     assert.equal(R.peekStaff(), undefined)
   })
 
-  it('先読みの順番: 名簿 → 要注意の材料 → 日報 → 一覧 → タイムライン・与薬・入浴・事故 → 外部 GAS の順に並ぶ', () => {
+  it('先読みの順番: 名簿 → 要注意の材料（タイムラインの10日を兼ねる）→ 日報 → 一覧 → 与薬・入浴・事故 → 外部 GAS の順に並ぶ', () => {
     const names = R.prefetchPlan({ actorId: 1 }).map((t) => t.name)
     const at = (n) => {
       const i = names.indexOf(n)
       assert.ok(i >= 0, `${n} が無い`)
       return i
     }
-    assert.ok(at('residents') < at('alertsChunk'))
-    assert.ok(at('targets') < at('alertsChunk'))
-    assert.ok(at('alertsChunk') < at('daily'))
+    assert.ok(at('residents') < at('timeline'))
+    assert.ok(at('targets') < at('timeline'))
+    assert.ok(at('timeline') < at('daily'))
     assert.ok(at('daily') < at('vitalsSheet'))
-    assert.ok(at('mealsPrior') < at('timeline'))
+    assert.ok(at('mealsPrior') < at('bathDay'))
     assert.ok(at('incidents') < at('excretion'))
+    // 要注意の7日は10日の控えから切り出す＝7日の timeline_chunk を別に取らない（2026-10-29）
+    assert.equal(names.includes('alertsChunk'), false)
+    assert.equal(names.filter((n) => n === 'timeline').length, 1)
     assert.equal(names[names.length - 1], 'weights')
     assert.equal(names[names.length - 2], 'excretion')
   })
@@ -683,7 +721,7 @@ describe('★先読み 配線（静的）', () => {
       ['src/pages/MedRecordPage.tsx', ['fetchMedDay', 'fetchMedSlots', 'fetchMedFirstDay', 'fetchAllResidents', 'peekMedDay']],
       ['src/pages/BathRecordPage.tsx', ['fetchBathDay', 'fetchBathPlan', 'fetchAllResidents', 'peekBathDay']],
       ['src/pages/DailySheetPage.tsx', ['fetchDailyReports', 'peekDailyReport', 'markDailyStale']],
-      ['src/pages/TimelinePage.tsx', ['fetchResidents', 'fetchAllResidents', 'fetchAllStaff']],
+      ['src/pages/TimelinePage.tsx', ['fetchResidentsFromAll', 'fetchAllResidents', 'fetchAllStaff']],
     ]
     for (const [file, names] of cases) {
       const src = read(file)
@@ -693,6 +731,37 @@ describe('★先読み 配線（静的）', () => {
     const tl = read('src/hooks/useTimeline.ts')
     assert.match(tl, /import \{ fetchTimelineChunk, peekTimelineChunk \} from '\.\.\/lib\/cachedReads'/)
     assert.match(code('src/hooks/useTimeline.ts'), /const cached = peekTimelineChunk\(from, to, staffId\)/)
+  })
+
+  it('要注意: 先に描く控えが無ければ10日の控え（記録者つき・タイムラインと同じキー）から切り出す。取り直しは今までどおり毎回7日（記録者なし）（2026-10-29）', () => {
+    const src = code('src/pages/AlertsPage.tsx')
+    assert.match(src, /const CHUNK_DAYS = 10/)
+    assert.match(src, /const chunkFrom = addDaysIso\(day, -\(CHUNK_DAYS - 1\)\)/)
+    assert.match(src, /peekTimelineChunk\(chunkFrom, day, actorIdRef\.current\) \?\?/)
+    // 日本時間と地元の日付が食い違う端末: 地元の10日が7日を丸ごと含む時だけ使う（2026-10-29 反証レビュー）
+    assert.match(src, /localTo !== day && localFrom <= from && localTo >= day \? peekTimelineChunk\(localFrom, localTo, actorIdRef\.current\) : undefined/)
+    // 記録者を替えても取り直さない（記録者は先に描く控えを覗くだけに使う）
+    assert.match(src, /\}, \[day, tick\]\)/)
+    assert.doesNotMatch(src, /\[day, tick, actorId\]/)
+    assert.match(src, /peekTimelineChunk\(from, day, null\) \?\? \(c10 === undefined \? undefined : \(sliceTimelineChunk\(c10, from, day\) \?\? undefined\)\)/)
+    // 取り直しは7日・記録者なしの1か所だけ（10日を取りに行かない＝開いた時・〔最新〕の通信は直す前と同じ）
+    assert.equal(src.match(/fetchTimelineChunk\(/g)?.length, 1)
+    assert.match(src, /const coreP = Promise\.all\(\[residentsP, fetchTimelineChunk\(from, day, null\)\]\)/)
+    assert.match(code('src/App.tsx'), /<Route path="\/alerts" element=\{<AlertsPage actorId=\{actorId\} \/>\} \/>/)
+  })
+
+  it('名簿・個別の目標の二重取りをしない（2026-10-29）: 記録者の表示は控えを通す・日報の目標は控えを通す・在籍者は全員から切り出す', () => {
+    const bar = read('src/components/RecorderBar.tsx')
+    assert.match(bar, /import \{ fetchStaff \} from '\.\.\/lib\/cachedReads'/)
+    notFromDb(bar, ['fetchStaff'])
+    const daily = read('src/pages/DailySheetPage.tsx')
+    fromCached(daily, ['fetchResidentTargets', 'fetchResidentsFromAll', 'fetchAllResidents'])
+    notFromDb(daily, ['fetchResidentTargets', 'fetchResidents'])
+    const day = read('src/pages/DaycarePage.tsx')
+    assert.match(day, /import \{ fetchAllResidents, fetchResidentsFromAll \} from '\.\.\/lib\/cachedReads'/)
+    notFromDb(day, ['fetchAllResidents', 'fetchResidents'])
+    assert.match(code('src/pages/DaycarePage.tsx'), /Promise\.all\(\[fetchAllResidents\(\), fetchResidentsFromAll\(\), /)
+    assert.match(code('src/hooks/useVitalLimits.ts'), /const r = recentResidentVitalLimits\(\) \?\? \(await fetchResidentVitalLimits\(\)\)/)
   })
 
   it('日報: 控えで先に出した区切りは裏で取り直し、違えば既存の帯（他の端末で記録が更新されました）で知らせる（表は差し替えない）', () => {

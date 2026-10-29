@@ -14,8 +14,8 @@
 //   ・この端末の書込（db.subscribeLocalWrites＝版が確定した・送信待ちに積んだ）でも当たるキーを古いに
 //   ・体温の変更・取り直しの合図では平熱の控え（db.forgetUsualTemps）も捨てる（今までは起動中ずっと古いままだった）
 //
-// 先読み（startPrefetch）: 最初の画面が描けて落ち着いてから、名簿 → 今日の要注意 → 日報の今の区切り → バイタル・食事の
-//   一覧の既定 → タイムラインの最初の10日・与薬・入浴・事故 → 外部の GAS（排泄・体重）の順に、同時に2本まで。
+// 先読み（startPrefetch）: 最初の画面が描けて落ち着いてから、名簿 → 今日の要注意（タイムラインの最初の10日を兼ねる）→
+//   日報の今の区切り → バイタル・食事の一覧の既定 → 与薬・入浴・事故 → 外部の GAS（排泄・体重）の順に、同時に2本まで。
 //   止める条件は dataCache.prefetchAllowed（画面が隠れている・オフライン・データ節約・送信待ちを送っている・ログインしていない・
 //   人が画面を触っている〔userActivity・触るのをやめて少し経ったら再開〕）。
 //   古いの印が付いたら、少し待ってから同じ順で取り直す（印の無い控えは通信しない）。
@@ -35,7 +35,7 @@ import {
   subscribeMedChanges,
 } from './db'
 import type { ChangeInfo, DailyReport, IncidentQuery } from './db'
-import { changedRowDay, createPrefetchQueue, dataCache, prefetchAllowed } from './dataCache'
+import { changedRowDay, createPrefetchQueue, dataCache, prefetchAllowed, REUSE_MS } from './dataCache'
 import type { CacheMeta, PrefetchTask } from './dataCache'
 import { clearExcretionCache, fetchExcretion } from './excretionClient'
 import { clearWeightCache, fetchWeights } from './weightClient'
@@ -44,7 +44,7 @@ import { installUserActivity, isUserBusy, onUserQuiet } from './userActivity'
 import { defaultIncidentRange } from './incident'
 import { LS, SHEET_DAYS } from './types'
 // 今日の要注意と同じ日の数え方（日本時間の今日・UTC で数える日の足し引き）。純粋な部品
-import { addDaysIso, jstClock } from '../pages/alertsModel'
+import { jstClock } from '../pages/alertsModel'
 import type { Resident } from './types'
 import { clearDaycareDayMemo } from './daycareDayMemo'
 
@@ -92,6 +92,25 @@ export const peekAllResidents = (): Resident[] | undefined => dataCache.peek(cac
 export const fetchAllResidents = () =>
   dataCache.fetch(cacheKeys.allResidents, db.fetchAllResidents, { meta: ROSTER_RES, storeEmpty: true })
 
+/** 名簿の上限（db.ts の MAX_ROWS と同じ。全員の名簿がこれに届いた時は在籍者を切り出さない＝欠けるかもしれない） */
+const ROSTER_MAX_ROWS = 2000
+
+/**
+ * 在籍の利用者を、退居された方も含む全員の名簿から切り出して返す（2026-10-29 本人指示「名簿の取得を1回に」）。
+ * 在籍者と全員の両方を読む画面（日報・タイムライン・デイの今日）用。全員の名簿は fetchAllResidents と同じキーで取る＝
+ * 同じ画面が同時に読む全員の名簿の取得に相乗りし、residents 表を1回だけ読む。毎回取りに行くのは fetchResidents と同じ。
+ * 在籍と全員の名簿は同じ列・同じ並び（db.fetchResidents と db.fetchAllResidents の order が同じ・active は not null）なので、
+ * active で絞っても並びは変わらない。切り出した結果は在籍の名簿の控えにも入れる。
+ * 全員の名簿が上限に届いた・取っている間に古くなって控えに入らなかった時は、今までどおり在籍の名簿を取る
+ */
+export async function fetchResidentsFromAll(): Promise<Resident[]> {
+  const all = await fetchAllResidents()
+  if (all.length >= ROSTER_MAX_ROWS || peekAllResidents() !== all) return fetchResidents()
+  const active = all.filter((r) => r.active === true)
+  // 通信はしない（切り出した値を控えに入れるだけ。中身が控えと同じなら控えの参照が返る＝画面の effect が読み直しを重ねない）
+  return dataCache.fetch(cacheKeys.residents, () => Promise.resolve(active), { meta: ROSTER_RES, storeEmpty: true, reuseMs: 0 })
+}
+
 export const peekStaff = () => dataCache.peek<Awaited<ReturnType<typeof db.fetchStaff>>>(cacheKeys.staff)
 export const fetchStaff = () => dataCache.fetch(cacheKeys.staff, db.fetchStaff, { meta: ROSTER_STAFF, storeEmpty: true })
 
@@ -126,6 +145,18 @@ export const peekResidentVitalLimits = () =>
 /** 個人のバイタルの閾値（段階2d・0045。表が無い DB は missing＝全員が施設の基準。書いた後は notifyLocalWrite で古いにする） */
 export const fetchResidentVitalLimits = () =>
   dataCache.fetch(cacheKeys.vitalLimits, db.fetchResidentVitalLimits, { meta: { tables: ['resident_vital_limits'] } })
+/**
+ * 個人のバイタルの閾値の控えのうち、取ってから REUSE_MS 以内で古くなっていないもの（無ければ undefined）。
+ * 同じ画面が開いた直後に続けて取り直す時（日報の、部品を描いた時の取り直しと1日目の読み込みの取り直し）に、
+ * 読んだばかりの行を使い回して resident_vital_limits を二度読まない（2026-10-29 本人指示）。
+ * 書いた後・変更通知では古いの印が付くので使い回さない
+ */
+export function recentResidentVitalLimits(): Awaited<ReturnType<typeof db.fetchResidentVitalLimits>> | undefined {
+  const e = dataCache.entry<Awaited<ReturnType<typeof db.fetchResidentVitalLimits>>>(cacheKeys.vitalLimits)
+  if (e === undefined || e.stale) return undefined
+  const age = Date.now() - e.at
+  return age >= 0 && age < REUSE_MS ? e.value : undefined
+}
 
 // ── 記録 ─────────────────────────────────────────────────────────────────
 
@@ -360,9 +391,10 @@ export function prefetchPlan(ctx: PrefetchContext): PrefetchTask[] {
   add('usual', () => db.fetchUsualTemps(jToday))
   if (jToday !== today) add('usualLocal', () => db.fetchUsualTemps(today))
 
-  // 2. 今日の要注意の材料（7日の timeline_chunk・与薬の今日・時間帯・初日）
-  const aFrom = addDaysIso(jToday, -6) // AlertsPage の MEAL_DAYS（7日）と同じ
-  add('alertsChunk', ensure(cacheKeys.timeline(aFrom, jToday, null), () => db.fetchTimelineChunk(aFrom, jToday, null), timelineOpts(aFrom, jToday)))
+  // 2. 今日の要注意の材料（タイムラインの最初の10日・与薬の今日・時間帯・初日）。要注意は7日を10日の控えから切り出す
+  //    （alertsModel の sliceTimelineChunk。7日を別に取らない・2026-10-29）。キーはタイムラインの画面と同じ（記録者つき）
+  const tFrom = addDays(today, -9)
+  add('timeline', ensure(cacheKeys.timeline(tFrom, today, ctx.actorId), () => db.fetchTimelineChunk(tFrom, today, ctx.actorId), timelineOpts(tFrom, today)))
   add('medDay', ensure(cacheKeys.medDay(jToday), () => db.fetchMedDay(jToday), {
     meta: { tables: ['med_admin'], from: jToday, to: jToday },
     storeEmpty: true,
@@ -400,9 +432,7 @@ export function prefetchPlan(ctx: PrefetchContext): PrefetchTask[] {
   const pTo = addDays(mFrom, -1)
   add('mealsPrior', ensure(cacheKeys.mealsSheet(pFrom, pTo), () => db.fetchMealsSheet(pFrom, pTo), mealsOpts(pFrom, pTo)))
 
-  // 5. タイムラインの最初の10日・与薬の今日・入浴の今日と予定・事故の一覧（既定の期間）
-  const tFrom = addDays(today, -9)
-  add('timeline', ensure(cacheKeys.timeline(tFrom, today, ctx.actorId), () => db.fetchTimelineChunk(tFrom, today, ctx.actorId), timelineOpts(tFrom, today)))
+  // 5. 与薬の今日・入浴の今日と予定・事故の一覧（既定の期間）。タイムラインの最初の10日は 2 で取っている
   if (today !== jToday) {
     add('medDayLocal', ensure(cacheKeys.medDay(today), () => db.fetchMedDay(today), {
       meta: { tables: ['med_admin'], from: today, to: today },

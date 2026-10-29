@@ -12,7 +12,9 @@
 // 規律: トークン由来クラスのみ・色だけで意味を伝えない（文字で「記録者」と出す）・押す所は min-h-tap
 
 import { useEffect, useState } from 'react'
-import { fetchStaff } from '../lib/db'
+// 名簿は読み込みの控え（cachedReads）を通す＝同じ画面で部品が続けて描かれても、同じ取得に相乗りして staff 表を1回だけ読む
+// （2026-10-29 本人指示。前はバイタル一覧を開くと3回読んでいた）。取りに行くのは今までどおり画面にいる間に1回
+import { fetchStaff } from '../lib/cachedReads'
 import { setActorId } from '../lib/actor'
 import type { Staff } from '../lib/types'
 import { StaffPickerModal } from './ui'
