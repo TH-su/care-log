@@ -46,8 +46,8 @@ import { BoardSortToggle } from '../components/glance/boardSortToggle'
 const ERR_LOAD = '見守りボードの記録を読み込めませんでした。通信状況を確認して、「再試行する」を押してください。'
 const NOTE_TARGETS = '個別の目標を読み込めなかったため、水分の目標と SpO2 の下限は施設の基準で判定しています。'
 const NOTE_MED_ROWS = '服薬の時間帯を読み込めなかったため、与薬は「拒否」だけを数えています（「未」は数えていません）。'
-const NOTE_MEDS = '与薬の記録がまだ使えないため、与薬の列は出していません。'
-const NOTE_INCIDENTS = '事故・ヒヤリハットの記録がまだ使えないため、事故の列は出していません。'
+const NOTE_MEDS = `与薬の記録がまだ使えないため、与薬の列は「${BOARD_UNAVAILABLE_TEXT}」です。`
+const NOTE_INCIDENTS = `事故・ヒヤリハットの記録がまだ使えないため、事故の列は「${BOARD_UNAVAILABLE_TEXT}」です。`
 
 function readSort(): GlanceSort {
   try {
@@ -239,9 +239,10 @@ export function GlanceBoardPage() {
       fluids: data.range.fluids,
       outings: data.range.outings,
       notes: mergeNotes(data.range.notes, data.range.pinned),
-      meds: data.range.meds ?? [],
+      // 表が無い・読めない時は null のまま渡す（そのマスは「—（カルテで確認）」。空の配列にして「なし」と見せない）
+      meds: data.range.meds,
       medRowsByDay,
-      incidents: data.range.incidents ?? [],
+      incidents: data.range.incidents,
       usualTemps: data.usual,
       targets: data.targets ?? new Map(),
       weights: weight.status === 'ready' ? weight.byResident : null,
