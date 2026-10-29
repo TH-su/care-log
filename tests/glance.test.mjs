@@ -625,6 +625,34 @@ if (G === null) {
         G.sortBoardRows(built, 'changes').map((r) => r.residentId),
         [2, 3, 1],
       )
+      // 与薬・事故の表が読めた時、何も無ければ空欄（読めない扱いにしない）
+      assert.equal(built[0].cells.med.text, '')
+      assert.equal(built[0].cells.med.unavailable, false)
+      assert.equal(built[0].cells.incident.unavailable, false)
+      // 与薬・事故の表が無い（meds=null / incidents=null）→ マスは「—（カルテで確認）」で「なし」と見せない
+      const noTables = G.buildBoardRows({
+        residents: [RES],
+        today: TODAY,
+        nowMs: NOW,
+        vitals: dailyVitals(1),
+        meals: [],
+        fluids: [],
+        outings: [],
+        notes: [],
+        meds: null,
+        incidents: null,
+        usualTemps: new Map(),
+        targets: new Map(),
+        weights: null,
+        excretion: null,
+        thresholds: TH.DEFAULT_VITAL_THRESHOLDS,
+      })[0]
+      assert.equal(noTables.cells.med.text, G.BOARD_UNAVAILABLE_TEXT)
+      assert.equal(noTables.cells.med.unavailable, true)
+      assert.equal(noTables.cells.med.symbol, '')
+      assert.equal(noTables.cells.incident.text, G.BOARD_UNAVAILABLE_TEXT)
+      assert.equal(noTables.cells.incident.unavailable, true)
+      assert.equal(noTables.signCount, 0)
       // 体温の線の縦軸は全員同じ（カルテの体温の軸）
       const [lo, hi] = G.boardTempDomain(built)
       assert.ok(lo <= 36.5 && hi >= 38.4)

@@ -1394,10 +1394,12 @@ export interface BoardInput {
   fluids: readonly FluidIntake[]
   outings: readonly Outing[]
   notes: readonly Note[]
-  meds: readonly MedAdmin[]
+  /** 与薬の記録。null＝表が無い・読めなかった（与薬の列を「—（カルテで確認）」にする） */
+  meds: readonly MedAdmin[] | null
   /** 与薬の日ごとの表（day → buildMedDayRows の全員分の行）。省くと「拒否」だけを数える */
   medRowsByDay?: ReadonlyMap<string, readonly MedDayRow[]>
-  incidents: readonly Incident[]
+  /** 事故・ヒヤリ。null＝表が無い・読めなかった（事故の列を「—（カルテで確認）」にする） */
+  incidents: readonly Incident[] | null
   usualTemps: ReadonlyMap<number, number | null>
   targets: ReadonlyMap<number, ResidentTargets>
   /** 体重（利用者ID → 列）。null＝未接続・読めなかった */
@@ -1425,7 +1427,7 @@ const fmt1 = (n: number | null | undefined): string => (typeof n === 'number' &&
 const fmt0 = (n: number | null | undefined): string => (typeof n === 'number' && Number.isFinite(n) ? String(Math.round(n)) : '')
 
 /** 兆しの無いマスに出す短い値 */
-function plainCell(col: BoardColumn, m: GlanceModel, weightLinked: boolean): BoardCell {
+function plainCell(col: BoardColumn, m: GlanceModel, weightLinked: boolean, medsRead: boolean, incidentsRead: boolean): BoardCell {
   const plain = (text: string, unavailable = false): BoardCell => ({ severity: null, symbol: '', text, unavailable })
   switch (col) {
     case 'temp':
@@ -1452,9 +1454,12 @@ function plainCell(col: BoardColumn, m: GlanceModel, weightLinked: boolean): Boa
     case 'weight':
       if (!weightLinked || !m.weight || !m.weight.latest) return plain(BOARD_UNAVAILABLE_TEXT, true)
       return plain(`${fmt1(m.weight.latest.weight)}kg`)
-    // 与薬・事故・申し送り・記録の欠けは、兆しが無ければ空欄（数える物が無い）
+    // 与薬・事故は表が読めなかった時だけ「—（カルテで確認）」（「なし」と見せない）
     case 'med':
+      return medsRead ? plain('') : plain(BOARD_UNAVAILABLE_TEXT, true)
     case 'incident':
+      return incidentsRead ? plain('') : plain(BOARD_UNAVAILABLE_TEXT, true)
+    // 申し送り・記録の欠けは、兆しが無ければ空欄（数える物が無い）
     case 'note':
     case 'gap':
       return plain('')
@@ -1513,7 +1518,7 @@ export function buildBoardRows(p: BoardInput): BoardRow[] {
     for (const col of BOARD_COLUMNS) {
       // 8件で切った後でなく全件から取る（切られた列が「なし」と出ないように）
       const s = m.allSigns.find((x) => x.column === col)
-      cells[col] = s ? { severity: s.severity, symbol: s.symbol, text: s.short, unavailable: false } : plainCell(col, m, wl !== null && wl.length > 0)
+      cells[col] = s ? { severity: s.severity, symbol: s.symbol, text: s.short, unavailable: false } : plainCell(col, m, wl !== null && wl.length > 0, p.meds !== null, p.incidents !== null)
     }
     const days = daysBetween(sparkFrom, p.today)
     const tempSpark = m.vitals.temp.spark.slice(m.vitals.temp.spark.length - days.length)
