@@ -720,12 +720,16 @@ export interface TempBoardDay {
   stools: number | null
   medMissing: number
   medRefused: number
+  /** 与薬の表が読めなかった（温度板の与薬の行を「なし」にせず「—」にする） */
+  medsUnavailable: boolean
   bath: BathRecord['result'] | null
   bathCancelled: boolean
   notesCritical: number
   /** 体調の分類の申し送り */
   notesHealth: number
   incidents: number
+  /** 事故の表が読めなかった（温度板の事故の行を「なし」にせず「—」にする） */
+  incidentsUnavailable: boolean
 }
 
 export interface IntakePair {
@@ -1178,11 +1182,13 @@ export function computeGlance(p: GlanceInput): GlanceModel {
       stools: stoolDay === null ? null : (stoolDay.get(day) ?? 0),
       medMissing: issues.filter((x) => x.kind === 'missing').length,
       medRefused: issues.filter((x) => x.kind === 'refused').length,
+      medsUnavailable: p.meds === null,
       bath: bath ? bath.result : null,
       bathCancelled: bath ? bath.result === 'cancel' : false,
       notesCritical: dn.filter((n) => n.importance === 'critical').length,
       notesHealth: dn.filter((n) => Array.isArray(n.categories) && n.categories.includes('体調')).length,
       incidents: incidents.filter((i) => i.occurred_on === day).length,
+      incidentsUnavailable: p.incidents === null,
     }
   })
 

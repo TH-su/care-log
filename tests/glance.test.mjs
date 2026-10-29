@@ -680,6 +680,10 @@ if (G === null) {
       assert.equal(na.recentChanges.incidents.length, 0)
       assert.ok(!keys(na).includes('med'))
       assert.ok(!na.allSigns.some((x) => x.column === 'med' || x.column === 'incident'))
+      // 温度板の側でも、読めない日を「なし」（0件）と見せない印が全日に付く。読めた時は付かない
+      assert.ok(na.board.length > 0)
+      assert.ok(na.board.every((d) => d.medsUnavailable === true && d.incidentsUnavailable === true))
+      assert.ok(ok.board.every((d) => d.medsUnavailable === false && d.incidentsUnavailable === false))
     })
 
     it('stool-window-14d（排便の間隔と最後の排便から◯日）', () => {

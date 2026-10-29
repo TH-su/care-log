@@ -98,11 +98,11 @@ const ROWS: RowDef[] = [
   { label: '排便', cell: (d) => (d.stools === null ? '—' : d.stools === 0 ? null : String(d.stools)) },
   {
     label: '与薬',
-    cell: (d) => (d.medMissing + d.medRefused === 0 ? null : [d.medMissing > 0 ? `未${d.medMissing}` : '', d.medRefused > 0 ? `拒${d.medRefused}` : ''].filter((s) => s !== '').join(' ')),
+    cell: (d) => (d.medsUnavailable ? '—' : d.medMissing + d.medRefused === 0 ? null : [d.medMissing > 0 ? `未${d.medMissing}` : '', d.medRefused > 0 ? `拒${d.medRefused}` : ''].filter((s) => s !== '').join(' ')),
   },
   { label: '入浴', cell: (d) => (d.bathCancelled ? '中止' : d.bath ? BATH_RESULT_MARK[d.bath] : null) },
   { label: '申送', cell: (d) => (d.notesCritical > 0 ? `最重${d.notesCritical}` : d.notesHealth > 0 ? `体調${d.notesHealth}` : null) },
-  { label: '事故', cell: (d) => (d.incidents > 0 ? String(d.incidents) : null) },
+  { label: '事故', cell: (d) => (d.incidentsUnavailable ? '—' : d.incidents > 0 ? String(d.incidents) : null) },
 ]
 
 export function TempBoard({ board, today, highlight = false, id }: TempBoardProps) {
