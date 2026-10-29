@@ -12,6 +12,7 @@ import type { MouseEvent } from 'react'
 import { Link } from 'react-router-dom'
 import type { BoardColumn, BoardRow } from '../../lib/glance'
 import { AWAY_LABEL, BOARD_COLUMNS, BOARD_COLUMN_LABEL, SEVERITY_LABEL, SEVERITY_SYMBOL } from '../../lib/glance'
+import { Chip } from '../ui'
 import { BoardCell } from './BoardCell'
 
 export interface BoardTableProps {
@@ -121,10 +122,10 @@ export function BoardTable({ rows, tempDomain, pendingColumns = [], onOpen }: Bo
                     <span aria-hidden="true"> ›</span>
                   </Link>
                   {r.away !== null ? (
-                    <span className="inline-flex items-center whitespace-nowrap rounded-full border border-info bg-info-bg px-2 text-sm text-info">
-                      <span aria-hidden="true">ⓘ </span>
+                    <Chip tone="info" className="whitespace-nowrap">
+                      <span aria-hidden="true">ⓘ</span>
                       {AWAY_LABEL[r.away]}
-                    </span>
+                    </Chip>
                   ) : null}
                 </span>
               </th>

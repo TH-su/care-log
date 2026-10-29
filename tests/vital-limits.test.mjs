@@ -285,7 +285,7 @@ if (L === null) {
     })
     it('2d-2: 記録の画面はその方のその日の基準で判定する（読むのは useVitalLimits の lookup だけ・施設の基準だけの判定の入口を使わない・読めない時は1行の知らせ）', () => {
       // 2d-1 の「どの画面の判定も変えない」を、2d-2 で差し替えた後の形に固定し直す（個人の値の引き方を1か所＝hook に集める）
-      const SCREENS = ['KartePage', 'VitalsGridPage', 'VitalsSheetPage', 'DailySheetPage', 'TimelinePage', 'AlertsPage', 'DaycarePage', 'DaycareVitalsPage', 'DaycarePersonPage']
+      const SCREENS = ['KartePage', 'VitalsGridPage', 'VitalsSheetPage', 'DailySheetPage', 'TimelinePage', 'AlertsPage', 'DaycarePage', 'DaycareVitalsPage', 'DaycarePersonPage', 'GlanceBoardPage']
       for (const f of SCREENS) {
         const s = code(`../src/pages/${f}.tsx`)
         assert.match(s, /useVitalLimits\(/, f)
