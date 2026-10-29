@@ -76,6 +76,27 @@ describe('要注意の7日の切り出し（sliceTimelineChunk）', { skip: AM =
     assert.deepEqual(c.outings.map((o) => o.id), [41, 43, 44])
   })
 
+  // 日本時間 2026-10-29 9:00（境目は 今日−60日＝08-30）
+  const NOW = Date.parse('2026-10-29T00:00:00Z')
+  it('終わっていない継続は、始まりが日本時間の今日−60日以降か最重要だけ（0050・境目は帯と同じ）', () => {
+    const ten = TEN()
+    ten.pinned = [
+      note(201, '2026-08-30', { ongoing: true, importance: 'normal' }), // 今日−60日＝08-30（入る）
+      note(202, '2026-08-29', { ongoing: true, importance: 'normal' }), // 1日前（入らない）
+      note(203, '2026-08-29', { ongoing: true, importance: 'important' }), // 重要でも入らない
+      note(204, '2026-08-29', { ongoing: true, importance: 'critical' }), // 最重要は入る
+      note(205, '2025-01-01', { ongoing: true, importance: 'critical' }), // 遠い過去の最重要も入る
+    ]
+    const c = AM.sliceTimelineChunk(ten, '2026-10-23', '2026-10-29', NOW)
+    assert.deepEqual(c.pinned.map((n) => n.id), [201, 204, 205])
+    // 終わり（to）が元より前でも境目は今日で決まる（to に依存しない・端末の地元の日付の控えの道）
+    const early = AM.sliceTimelineChunk(ten, '2026-10-22', '2026-10-28', NOW)
+    assert.deepEqual(early.pinned.map((n) => n.id), [201, 204, 205])
+    // 日本時間で日付が変わると境目も進む（UTC 10-29 15:00＝日本時間 10-30 0:00 → 境目 08-31）
+    const next = AM.sliceTimelineChunk(ten, '2026-10-23', '2026-10-29', Date.parse('2026-10-29T15:00:00Z'))
+    assert.deepEqual(next.pinned.map((n) => n.id), [204, 205])
+  })
+
   it('元の期間に収まらない範囲は null（呼ぶ側が取りに行く）。同じ範囲なら同じ中身', () => {
     assert.equal(AM.sliceTimelineChunk(TEN(), '2026-10-19', '2026-10-29'), null)
     assert.equal(AM.sliceTimelineChunk(TEN(), '2026-10-23', '2026-10-30'), null)

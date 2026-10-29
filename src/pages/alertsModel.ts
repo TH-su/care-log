@@ -74,7 +74,7 @@ export function karteSecOf(raw: string | null | undefined, allowed: readonly str
   return typeof raw === 'string' && allowed.includes(raw) ? raw : null
 }
 
-/** 終了済みの継続を遡って拾う上限（timeline_chunk の c_lookback_days と同じ値） */
+/** 継続・外出を遡って拾う上限（timeline_chunk の c_lookback_days と同じ値） */
 export const CHUNK_LOOKBACK_DAYS = 60
 
 /**
@@ -82,15 +82,25 @@ export const CHUNK_LOOKBACK_DAYS = 60
  * 取った時と同じ中身を切り出す（2026-10-29 本人指示「要注意の7日を10日の控えから切り出す」）。
  * SQL（0031 の timeline_chunk）の各欄の条件をそのまま当てる＝並びは元の並びのまま（filter で崩れない）:
  *   notes・vitals・meals・fluids・import_days は日付の範囲。outings は「始まりが to 以前・from−60日以降・帰着が未定か from 以降」。
- *   pinned は「継続・始まりが to 以前・終わっていないか、終わった日（日本時間）が from 以降で始まりが from−60日以降」。
+ *   pinned は「継続・始まりが to 以前」で、「終わっていない・始まりが日本時間の今日−60日以降か最重要（0050）」か
+ *   「終わった日（日本時間）が from 以降で始まりが from−60日以降」。
  *   my_read は記録者なしで取ると全部 false になるので false に揃える（read_count は記録者に関係しない）。
  * 上限（limit）は SQL に無いので、長い期間の中の短い期間が欠けることは無い。
- * [from, to] が元の期間に収まらない時は null（呼ぶ側が取りに行く）
+ * [from, to] が元の期間に収まらない時は null（呼ぶ側が取りに行く）。
+ * 今日（nowMs・日本時間）は SQL の now() と同じ日になるよう jstClock で数える。元の結果を取った後に日付が変わっていると
+ * 境目が1日ずれる（取り直しが毎回置き換えるので、先に描く間だけ）
  */
-export function sliceTimelineChunk(chunk: TimelineChunk, from: string, to: string): TimelineChunk | null {
+export function sliceTimelineChunk(
+  chunk: TimelineChunk,
+  from: string,
+  to: string,
+  nowMs: number = Date.now(),
+): TimelineChunk | null {
   if (!(chunk.from <= from && to <= chunk.to && from <= to)) return null
   const inRange = (d: string | null | undefined): boolean => typeof d === 'string' && d >= from && d <= to
   const lookFrom = addDaysIso(from, -CHUNK_LOOKBACK_DAYS)
+  // 終わっていない継続の境目は日本時間の今日−60日（0050。期間に依存しない）。今日が読めない時は to で代える
+  const openLookFrom = addDaysIso(jstClock(nowMs)?.day ?? to, -CHUNK_LOOKBACK_DAYS)
   const noMyRead = (n: Note): Note => (n.my_read === true ? { ...n, my_read: false } : n)
   const endedDay = (at: string): string | null => {
     const ms = Date.parse(at)
@@ -110,7 +120,8 @@ export function sliceTimelineChunk(chunk: TimelineChunk, from: string, to: strin
     pinned: chunk.pinned
       .filter((n) => {
         if (n.note_on > to) return false
-        if (n.ended_at === null) return true
+        // 終わっていない継続は、始まりが日本時間の今日−60日以降か最重要（0050・最重要は入居者の安全のため上限を掛けない）
+        if (n.ended_at === null) return n.note_on >= openLookFrom || n.importance === 'critical'
         const ended = endedDay(n.ended_at)
         // 読めない終了時刻は SQL の判定を再現できない。終了済みの継続は要注意の判定に使わない（ended_at が null の分だけ）ので残す
         return (ended === null || ended >= from) && n.note_on >= lookFrom
