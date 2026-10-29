@@ -699,7 +699,7 @@ if (D === null) {
   })
 
 
-  describe('★F66 日報の既読: 記録者の既定が無い端末でも人数を数え、10日まとめ取りでも全件に付け、取得上限に届いた分は断定しない', () => {
+  describe('★F66 日報は既読（note_reads）を読まない（2026-10-15 本人回答で日報に既読を出さなくなった・2026-10-29）', () => {
     afterEach(reset)
 
     const DAYS = Array.from({ length: 10 }, (_, i) => `2026-11-${String(i + 1).padStart(2, '0')}`)
@@ -714,38 +714,26 @@ if (D === null) {
       }
     }
 
-    it('記録者の既定が無い（staffId=null）端末: 人数は数える（自分が読んだかは付けない）', async () => {
-      const srv = server()
-      seed(srv, [1, 2, 3, 4, 5])
-      D.__testHooks.setClient(srv.client)
-      const map = await D.fetchDailyReports(DAYS, null)
-      const notes = [...map.values()].flatMap((r) => r.notes)
-      assert.equal(notes.length, 340)
-      assert.equal(notes.filter((n) => n.read_count !== 5).length, 0, '既読の人数を数えずに「既読 0人」の元を作った')
-      assert.ok(notes.every((n) => n.my_read === undefined), '記録者が分からないのに「自分は既読/未読」を断定した')
-    })
+    for (const staffId of [null, 3]) {
+      it(`10日まとめ取り（記録者 ${staffId}）: 申し送りは全件そろい、既読は1本も読まない・人数も自分の既読も付けない`, async () => {
+        const srv = server()
+        seed(srv, [1, 2, 3, 4, 5])
+        D.__testHooks.setClient(srv.client)
+        const map = await D.fetchDailyReports(DAYS, staffId)
+        const notes = [...map.values()].flatMap((r) => r.notes)
+        assert.equal(notes.length, 340)
+        assert.equal(srv.calls.filter((q) => q.table === 'note_reads').length, 0, '日報が既読を読んだ')
+        assert.ok(notes.every((n) => n.read_count === undefined && n.my_read === undefined), '観測していない既読の値を付けた')
+      })
+    }
 
-    it('10日まとめ取り（340件）: 新しい方まで全件に人数と自分の既読を付ける', async () => {
+    it('1日の日報（fetchDailyReport）も既読を読まない', async () => {
       const srv = server()
-      seed(srv, [1, 2, 3, 4, 5])
+      seed(srv, [1, 2])
       D.__testHooks.setClient(srv.client)
-      const map = await D.fetchDailyReports(DAYS, 3)
-      const notes = [...map.values()].flatMap((r) => r.notes)
-      const missing = notes.filter((n) => n.read_count !== 5 || n.my_read !== true)
-      assert.equal(missing.length, 0, `${missing.length} 件に既読が付いていない`)
-      const reads = srv.calls.filter((q) => q.table === 'note_reads')
-      assert.ok(reads.every((q) => q.filters.find((f) => f[0] === 'in')[2].length <= 200), 'URL 長の上限（200件）を超えて引いた')
-    })
-
-    it('既読の行が取得上限（2000行）に届いた時は、分けて引き直して正しい人数を出す（切れたまま少ない人数を出さない）', async () => {
-      const srv = server()
-      seed(srv, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]) // 200件×11人＝2200行
-      D.__testHooks.setClient(srv.client)
-      const map = await D.fetchDailyReports(DAYS, 3)
-      const notes = [...map.values()].flatMap((r) => r.notes)
-      const wrong = notes.filter((n) => n.read_count !== undefined && n.read_count !== 11)
-      assert.equal(wrong.length, 0, `実際と違う人数を出した: ${wrong.length} 件`)
-      assert.equal(notes.filter((n) => n.read_count === 11).length, 340)
+      const r = await D.fetchDailyReport(DAYS[0], 3)
+      assert.equal(r.notes.length, 34)
+      assert.equal(srv.calls.filter((q) => q.table === 'note_reads').length, 0)
     })
   })
 

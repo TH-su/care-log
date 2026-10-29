@@ -11264,7 +11264,7 @@ export async function fetchNotesForTargetDay(
 
 export async function fetchDailyReports(
   days: readonly string[],
-  staffId: number | null,
+  _staffId: number | null, // 既読を読まなくなった（2026-10-29）。呼び出し側（控えのキー）の形は変えない
 ): Promise<Map<string, DailyReport>> {
   const list0 = [...new Set(days)].sort()
   const out = new Map<string, DailyReport>()
@@ -11337,8 +11337,8 @@ export async function fetchDailyReports(
   // anon で読んだ0件を「記録なし」の日報として出さない（F58）
   await assertSessionIfEmpty(sb, notes.length + vitals.length + attendance.length)
 
-  // 既読は範囲ぶんまとめて1回（1日ずつだと申し送りのある日の数だけ往復していた）
-  await attachReadState(sb, notes, staffId)
+  // 既読（note_reads）は読まない（2026-10-29）。日報は 2026-10-15 の本人回答で既読の人数・〔既読にする〕を出さなくなり、
+  // 読んだ既読はどこにも使われていなかった（架空40名・既読20人で 362KB・8本）。既読はタイムライン・検索・カルテが自分で読む
 
   for (const day of list0) {
     const dayVitals = vitals.filter((v) => v.measured_on === day)
@@ -11358,7 +11358,7 @@ export async function fetchDailyReports(
   return out
 }
 
-export async function fetchDailyReport(dayIso: string, staffId: number | null): Promise<DailyReport> {
+export async function fetchDailyReport(dayIso: string, _staffId: number | null): Promise<DailyReport> {
   assertDay(dayIso)
   const sb = await getClient()
 
@@ -11416,8 +11416,7 @@ export async function fetchDailyReport(dayIso: string, staffId: number | null): 
   const importDays = list(importRes.data, normalizeImportDay, IMPORT_DAY_ROWS)
   // anon で読んだ0件を「記録なし」の日報として出さない（F58）
   await assertSessionIfEmpty(sb, notes.length + vitals.length + (Array.isArray(attendanceRes.data) ? attendanceRes.data.length : 0))
-
-  await attachReadState(sb, notes, staffId)
+  // 既読（note_reads）は読まない（2026-10-29・fetchDailyReports と同じ理由）
 
   return {
     day: dayIso,
@@ -11431,60 +11430,6 @@ export async function fetchDailyReport(dayIso: string, staffId: number | null): 
     symptoms: vitals.filter((v) => v.kind === 'symptom'),
     attendance: list(attendanceRes.data, normalizeAttendance, DAY_ROWS),
     importDay: importDays[0] ?? null,
-  }
-}
-
-/**
- * 申し送りに既読の表示情報（既読人数・自分が読んだか）を付ける。
- * 失敗しても日報本体は出す（既読は補助表示なので、これで1日分の記録を隠さない）。
- * 取れなかった時は read_count / my_read を未設定のまま残す＝画面は「0人」ではなく何も出さない
- * （観測できていない値を断定しない）。
- */
-async function attachReadState(sb: SupabaseClient, notes: Note[], staffId: number | null): Promise<void> {
-  // 記録者の既定が無い端末（共用端末の通常の状態）でも人数は数える。自分が読んだか（my_read）だけは分からない（F66）
-  if (notes.length === 0) return
-  // URL 長対策で READ_LOOKUP_ROWS 件ずつに分けて引く（10日まとめ取りでは1回で引ける件数を超え、新しい方の約140件が
-  // 「既読 0人」になっていた・F66）
-  const chunks: Note[][] = []
-  for (let i = 0; i < notes.length; i += READ_LOOKUP_ROWS) chunks.push(notes.slice(i, i + READ_LOOKUP_ROWS))
-  await Promise.all(chunks.map((c) => attachReadChunk(sb, c, staffId)))
-}
-
-/**
- * attachReadState の1回分（ids は READ_LOOKUP_ROWS 件以内）。既読の行が取得上限（MAX_ROWS）に届いた＝読み切れていない
- * （どの行が切れたかは決まらない）時は、半分に分けて引き直す。1件でも届くなら、その申し送りの人数は付けない（断定しない）
- */
-async function attachReadChunk(sb: SupabaseClient, notes: Note[], staffId: number | null): Promise<void> {
-  const ids = notes.map((n) => n.id)
-  let res: Res<unknown>
-  try {
-    res = (await sb
-      .from('note_reads')
-      .select('note_id,staff_id')
-      .in('note_id', ids)
-      .limit(MAX_ROWS)) as Res<unknown>
-  } catch {
-    return // 通信できない。既読の印は出さない（本体の表示は続ける）
-  }
-  if (res.error !== null || !Array.isArray(res.data)) return
-  if (res.data.length >= MAX_ROWS) {
-    if (notes.length <= 1) return
-    const half = Math.ceil(notes.length / 2)
-    await Promise.all([attachReadChunk(sb, notes.slice(0, half), staffId), attachReadChunk(sb, notes.slice(half), staffId)])
-    return
-  }
-  const counts = new Map<number, number>()
-  const mine = new Set<number>()
-  for (const row of res.data) {
-    const r = asRecord(row)
-    const noteId = idNum(r?.note_id)
-    if (noteId === null) continue
-    counts.set(noteId, (counts.get(noteId) ?? 0) + 1)
-    if (staffId !== null && idNum(r?.staff_id) === staffId) mine.add(noteId)
-  }
-  for (const n of notes) {
-    n.read_count = counts.get(n.id) ?? 0
-    if (staffId !== null) n.my_read = mine.has(n.id)
   }
 }
 
