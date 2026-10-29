@@ -2,6 +2,7 @@
 // ・年齢は医療の欄の写し（res_glance_get の row.age）だけから出す。取れなければ「—」（生年月日から計算しない）
 // ・期間の保存（cl_glanceRange）は画面（GlancePage）が行う。ここは選ばれた値を返すだけ（既知値に寄せる）
 // ・入院中／外泊中は札（記号ⓘ＋文字）で出す。色だけに頼らない
+// ・幅 1024 以上（lg）は氏名と居室などの行・期間の見出しと切り替えを横に並べて1段に詰める（1366×768 で下の区画を画面に収めるため）
 
 import { Chip, SegmentPicker } from '../ui'
 import { AWAY_LABEL, parseGlanceRange } from '../../lib/glance'
@@ -27,8 +28,8 @@ const RANGE_OPTIONS: { value: GlanceRange; label: string }[] = [
 
 export function GlanceHeaderBand({ name, room, careLevel, age, away, asOf, range, onRange }: GlanceHeaderBandProps) {
   return (
-    <header className="flex flex-wrap items-end gap-x-4 gap-y-2 rounded-lg border border-border-strong bg-surface px-4 py-2">
-      <div className="min-w-0 flex-1">
+    <header className="flex flex-wrap items-end gap-x-4 gap-y-2 rounded-lg border border-border-strong bg-surface px-4 py-2 lg:items-center lg:py-1">
+      <div className="min-w-0 flex-1 lg:flex lg:flex-wrap lg:items-baseline lg:gap-x-4">
         <h1 className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <span className="min-w-0 break-words text-xl font-heavy text-ink">{name}</span>
           <span className="text-sm font-normal text-ink2">ひと目ボード</span>
@@ -39,13 +40,13 @@ export function GlanceHeaderBand({ name, room, careLevel, age, away, asOf, range
             </Chip>
           ) : null}
         </h1>
-        <p className="tabular mt-1 text-sm text-ink2">
+        <p className="tabular mt-1 text-sm text-ink2 lg:mt-0">
           居室 {room ?? '—'}・年齢 {age === null ? '—' : `${age}歳`}・介護度 {careLevel ?? '—'}・{asOf}
         </p>
       </div>
-      <div className="w-full sm:w-auto">
+      <div className="w-full sm:w-auto lg:flex lg:items-center lg:gap-2">
         <p className="text-sm text-ink2">期間（その前の28日とくらべる）</p>
-        <div className="mt-1">
+        <div className="mt-1 whitespace-nowrap lg:mt-0">
           <SegmentPicker options={RANGE_OPTIONS} value={range} onChange={(v) => onRange(parseGlanceRange(v))} ariaLabel="期間" />
         </div>
       </div>

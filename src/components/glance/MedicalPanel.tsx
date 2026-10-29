@@ -118,7 +118,7 @@ export function MedicalPanel({ state, view, staleText, role, onRetry, id }: Medi
     )
   }
   return (
-    <section id={id} tabIndex={-1} aria-labelledby={`${id}-h`} data-medical-state={state} data-role={role ?? ''} className="min-w-0 rounded-lg border border-border bg-surface p-2">
+    <section id={id} tabIndex={-1} aria-labelledby={`${id}-h`} data-medical-state={state} data-role={role ?? ''} className="relative min-w-0 rounded-lg border border-border bg-surface p-2 lg:min-h-0 lg:flex-auto lg:overflow-y-auto">
       <h2 id={`${id}-h`} className="px-1 text-base font-bold text-ink">
         病歴・内服薬<span className="ml-2 text-sm font-normal text-ink2">入居者マスタの写し（読むだけ）</span>
       </h2>

@@ -296,13 +296,14 @@ function PreviewGlance({ c, set, checkLine }: { c: Controls; set: (p: Partial<Co
       role={c.role}
       highlight={highlight}
       onJump={onJump}
-      notes={checkLine}
       toolbar={
-        <div className="flex flex-wrap items-end gap-gap">
+        // 確かめの行も同じ段に置く（別の段にすると 1366×768 で下の区画が画面の外へ押し出される）
+        <div className="flex flex-wrap items-end gap-gap lg:whitespace-nowrap">
           <button type="button" onClick={() => navigate('/glance')} className="inline-flex min-h-tap items-center text-base text-link">
             <span aria-hidden="true">‹ </span>見守りボード（見本）
           </button>
           <PreviewControls c={c} set={set} />
+          {checkLine}
         </div>
       }
     />
@@ -497,9 +498,22 @@ function App() {
     await waitFor('[data-glance-layout]')
     await wait()
     const se = document.scrollingElement ?? document.documentElement
-    const fits = window.innerWidth < 1024 || se.scrollHeight <= window.innerHeight + 1
+    // 画面全体が縦に動かず、どの区画も見出しまで画面の中に出ている（列の外へ押し出された区画が無い）
+    const sectionIds = ['glance-signs-h', 'glance-vitals', 'glance-board', 'glance-intake', 'glance-medical', 'glance-changes']
+    const shown = sectionIds.map((sid) => {
+      const el = document.getElementById(sid)
+      const h = el?.querySelector('h2') ?? el
+      const r = h?.getBoundingClientRect()
+      return { sid, ok: !!r && r.top >= 0 && r.bottom <= window.innerHeight }
+    })
+    const fits = window.innerWidth < 1024 || (se.scrollHeight <= window.innerHeight + 1 && shown.every((x) => x.ok))
     const layoutH = q('[data-glance-layout]')[0]?.offsetHeight ?? 0
-    push('ひと目ボードは画面全体が縦に動かない（幅1024以上）', fits, `${window.innerWidth}×${window.innerHeight}・全体の高さ ${se.scrollHeight}・ボード ${layoutH}`)
+    const hidden = shown.filter((x) => !x.ok).map((x) => x.sid)
+    push(
+      'ひと目ボードは画面全体が縦に動かず、どの区画も見出しが画面の中に出る（幅1024以上）',
+      fits,
+      `${window.innerWidth}×${window.innerHeight}・全体の高さ ${se.scrollHeight}・ボード ${layoutH}・画面の外 ${hidden.length === 0 ? 'なし' : hidden.join('・')}`,
+    )
     const all = out.every((s) => s.ok)
     window.__glanceCheck = { done: true, ok: all, steps: out }
     setSteps(out)

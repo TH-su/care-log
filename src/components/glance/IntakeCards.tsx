@@ -83,7 +83,7 @@ export function IntakeCards({ intake, recentDays, excretionSource, highlight = f
   const m = intake.meal
   const fl = intake.fluid
   return (
-    <section id={id} tabIndex={-1} aria-labelledby={`${id}-h`} className={`rounded-lg border bg-surface2 p-2 ${highlight ? 'border-focus ring-2 ring-focus' : 'border-border'}`}>
+    <section id={id} tabIndex={-1} aria-labelledby={`${id}-h`} className={`relative rounded-lg border bg-surface2 p-2 lg:min-h-0 lg:flex-auto lg:overflow-y-auto ${highlight ? 'border-focus ring-2 ring-focus' : 'border-border'}`}>
       <h2 id={`${id}-h`} className="px-1 text-base font-bold text-ink">
         食事・水分・排便
       </h2>

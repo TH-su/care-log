@@ -30,7 +30,7 @@ function Group({ title, empty, unavailable = false, children }: { title: string;
 export function RecentChanges({ changes, highlight = false, id }: RecentChangesProps) {
   const R = GLANCE_RULES
   return (
-    <section id={id} tabIndex={-1} aria-labelledby={`${id}-h`} className={`min-w-0 rounded-lg border bg-surface p-2 ${highlight ? 'border-focus ring-2 ring-focus' : 'border-border'}`}>
+    <section id={id} tabIndex={-1} aria-labelledby={`${id}-h`} className={`relative min-w-0 rounded-lg border bg-surface p-2 lg:min-h-0 lg:flex-auto lg:overflow-y-auto ${highlight ? 'border-focus ring-2 ring-focus' : 'border-border'}`}>
       <h2 id={`${id}-h`} className="px-1 text-base font-bold text-ink">
         最新の体調変化
       </h2>
