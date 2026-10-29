@@ -297,12 +297,18 @@ function PreviewGlance({ c, set, checkLine }: { c: Controls; set: (p: Partial<Co
       highlight={highlight}
       onJump={onJump}
       toolbar={
-        // 確かめの行も同じ段に置く（別の段にすると 1366×768 で下の区画が画面の外へ押し出される）
-        <div className="flex flex-wrap items-end gap-gap lg:whitespace-nowrap">
+        // 確かめの行も同じ段に置き、役割・医療の欄の切り替えは開け閉めする小窓に入れる
+        // （段を増やすと 1366×768 で下の区画の中身が画面の外へ押し出される）
+        <div className="flex flex-wrap items-center gap-gap lg:whitespace-nowrap">
           <button type="button" onClick={() => navigate('/glance')} className="inline-flex min-h-tap items-center text-base text-link">
             <span aria-hidden="true">‹ </span>見守りボード（見本）
           </button>
-          <PreviewControls c={c} set={set} />
+          <details className="relative">
+            <summary className="inline-flex min-h-tap cursor-pointer items-center rounded border border-border-strong bg-surface px-3 text-sm text-ink">見本の切り替え</summary>
+            <div className="absolute left-0 top-full z-30 mt-1 flex flex-col gap-2 rounded-lg border border-border-strong bg-surface p-2">
+              <PreviewControls c={c} set={set} />
+            </div>
+          </details>
           {checkLine}
         </div>
       }
@@ -493,26 +499,45 @@ function App() {
       trs.length === RESIDENTS.length && !!awayRow && (awayRow.textContent ?? '').includes('数えない') && unavailable >= 1 && changedOrder.join() !== roomOrder.join(),
       `${trs.length}行・未接続 ${unavailable}行・変化の多い順の先頭 ${changedOrder.slice(0, 3).join('・')}`,
     )
-    // 1366×768 で縦に動かない（ひと目ボード）
+    // 1366×768 で縦に動かず、どの区画も中身まで全部見える（ひと目ボード）
     go('/glance/1')
     await waitFor('[data-glance-layout]')
     await wait()
     const se = document.scrollingElement ?? document.documentElement
-    // 画面全体が縦に動かず、どの区画も見出しまで画面の中に出ている（列の外へ押し出された区画が無い）
-    const sectionIds = ['glance-signs-h', 'glance-vitals', 'glance-board', 'glance-intake', 'glance-medical', 'glance-changes']
-    const shown = sectionIds.map((sid) => {
+    const inWindow = (r: DOMRect) => r.top >= 0 && r.bottom <= window.innerHeight + 1 && r.left >= 0 && r.right <= window.innerWidth + 1
+    // (1) 区画ごとに、中身が区画の中で縦に動かずに収まっている（scrollHeight <= clientHeight）
+    const sectionIds = ['glance-vitals', 'glance-board', 'glance-intake', 'glance-medical', 'glance-changes']
+    const clipped = sectionIds.filter((sid) => {
       const el = document.getElementById(sid)
-      const h = el?.querySelector('h2') ?? el
-      const r = h?.getBoundingClientRect()
-      return { sid, ok: !!r && r.top >= 0 && r.bottom <= window.innerHeight }
+      return !el || el.scrollHeight > el.clientHeight + 1 || !inWindow(el.getBoundingClientRect())
     })
-    const fits = window.innerWidth < 1024 || (se.scrollHeight <= window.innerHeight + 1 && shown.every((x) => x.ok))
+    // (2) 温度板の表が枠に収まっているか、右端（今日）まで寄せてある
+    const scroller = document.querySelector<HTMLElement>('#glance-board [data-temp-scroller]')
+    const tempAtEnd = !!scroller && (scroller.scrollWidth <= scroller.clientWidth + 1 || scroller.scrollLeft >= scroller.scrollWidth - scroller.clientWidth - 1)
+    // (3) 名指しの行が、画面の中かつその区画の枠の中に出ている（区画の中で切れていない）
+    const named: [string, string][] = [
+      ['glance-vitals', '体重減少の目安'],
+      ['glance-intake', '排便'],
+      ['glance-changes', '事故・ヒヤリハット'],
+      ['glance-changes', '与薬の未'],
+      ['glance-medical', 'アレルギー'],
+    ]
+    const unseen = named
+      .filter(([sid, text]) => {
+        const sec = document.getElementById(sid)
+        const el = sec ? Array.from(sec.querySelectorAll<HTMLElement>('h3, dt')).find((e) => (e.textContent ?? '').startsWith(text)) : undefined
+        if (!sec || !el) return true
+        const r = el.getBoundingClientRect()
+        const b = sec.getBoundingClientRect()
+        return !inWindow(r) || r.top < b.top || r.bottom > b.bottom + 1
+      })
+      .map(([, text]) => text)
+    const fits = window.innerWidth < 1024 || (se.scrollHeight <= window.innerHeight + 1 && clipped.length === 0 && tempAtEnd && unseen.length === 0)
     const layoutH = q('[data-glance-layout]')[0]?.offsetHeight ?? 0
-    const hidden = shown.filter((x) => !x.ok).map((x) => x.sid)
     push(
-      'ひと目ボードは画面全体が縦に動かず、どの区画も見出しが画面の中に出る（幅1024以上）',
+      'ひと目ボードは画面全体が縦に動かず、どの区画も中身まで全部見え、温度板は今日まで見える（幅1024以上）',
       fits,
-      `${window.innerWidth}×${window.innerHeight}・全体の高さ ${se.scrollHeight}・ボード ${layoutH}・画面の外 ${hidden.length === 0 ? 'なし' : hidden.join('・')}`,
+      `${window.innerWidth}×${window.innerHeight}・全体の高さ ${se.scrollHeight}・ボード ${layoutH}・中で切れる区画 ${clipped.length === 0 ? 'なし' : clipped.join('・')}・温度板 ${tempAtEnd ? '今日まで見える' : '今日が枠の外'}・見えない行 ${unseen.length === 0 ? 'なし' : unseen.join('・')}`,
     )
     const all = out.every((s) => s.ok)
     window.__glanceCheck = { done: true, ok: all, steps: out }
@@ -540,17 +565,22 @@ function App() {
         確かめる（8段）
       </button>
       {steps === null ? null : (
-        <ol className="flex flex-wrap gap-x-3" aria-label="確かめの結果">
-          {steps.map((s) => (
-            <li key={s.n} data-check-step={s.n} data-check-ok={s.ok ? 'ok' : 'ng'} title={`${s.title}（${s.detail}）`} className={s.ok ? 'text-ok' : 'font-bold text-danger'}>
-              {s.n}
-              {s.ok ? '✓' : '✗'}
-              <span className="sr-only">
-                {s.title} {s.detail}
-              </span>
-            </li>
-          ))}
-        </ol>
+        // 結果の一覧は開け閉めする小窓に入れる（見出しの帯の左は幅が狭く、並べると帯が2段になって下の区画を押し出す）
+        <details className="relative">
+          <summary className={`inline-flex min-h-tap cursor-pointer items-center ${steps.every((s) => s.ok) ? 'text-ok' : 'font-bold text-danger'}`}>
+            {steps.filter((s) => s.ok).length}/{steps.length}
+            {steps.every((s) => s.ok) ? '✓' : '✗'}
+          </summary>
+          <ol className="absolute left-0 top-full z-30 mt-1 flex flex-col gap-1 whitespace-normal rounded-lg border border-border-strong bg-surface p-2 text-ink" aria-label="確かめの結果">
+            {steps.map((s) => (
+              <li key={s.n} data-check-step={s.n} data-check-ok={s.ok ? 'ok' : 'ng'} title={`${s.title}（${s.detail}）`} className={s.ok ? 'text-ok' : 'font-bold text-danger'}>
+                {s.n}
+                {s.ok ? '✓' : '✗'} {s.title}
+                <span className="sr-only"> {s.detail}</span>
+              </li>
+            ))}
+          </ol>
+        </details>
       )}
     </div>
   )
@@ -570,7 +600,7 @@ function App() {
 }
 
 /** 本番の App の殻（src/App.tsx の sticky の header と main の余白）を同じ class で模した囲い。
- *  8段目「画面全体が縦に動かない」を本番と同じ上下の余白の中で測るため */
+ *  8段目「画面全体が縦に動かず、区画の中身まで全部見える」を本番と同じ上下の余白の中で測るため */
 function PreviewShell({ children }: { children: ReactNode }) {
   return (
     <div className="min-h-screen bg-bg text-ink lg:pl-24">

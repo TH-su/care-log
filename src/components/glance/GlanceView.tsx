@@ -61,19 +61,16 @@ export function GlanceView(p: GlanceViewProps) {
       notes={p.notes}
       signs={<GlanceSigns signs={m.signs} total={m.signTotal} away={m.away} onJump={p.onJump} />}
       left={
-        <VitalCards
-          id={GLANCE_ANCHORS.vitals}
-          vitals={m.vitals}
-          usualTemp={p.usualTemp}
-          recentDays={p.recentDays}
-          weight={m.weight}
-          weightSource={p.weightSource}
-          highlight={p.highlight === GLANCE_ANCHORS.vitals}
-        />
-      }
-      center={
         <>
-          <TempBoard id={GLANCE_ANCHORS.board} board={m.board} today={m.today} highlight={p.highlight === GLANCE_ANCHORS.board} />
+          <VitalCards
+            id={GLANCE_ANCHORS.vitals}
+            vitals={m.vitals}
+            usualTemp={p.usualTemp}
+            recentDays={p.recentDays}
+            weight={m.weight}
+            weightSource={p.weightSource}
+            highlight={p.highlight === GLANCE_ANCHORS.vitals}
+          />
           <IntakeCards
             id={GLANCE_ANCHORS.intake}
             intake={m.intake}
@@ -83,6 +80,7 @@ export function GlanceView(p: GlanceViewProps) {
           />
         </>
       }
+      center={<TempBoard id={GLANCE_ANCHORS.board} board={m.board} today={m.today} highlight={p.highlight === GLANCE_ANCHORS.board} />}
       right={
         <>
           <MedicalPanel id="glance-medical" state={p.medicalState} view={p.medicalView} staleText={p.staleText} role={p.role} onRetry={p.onMedicalRetry} />

@@ -1,5 +1,5 @@
 // ひと目ボードの並べ方（区画の置き場所だけ。中身は持たない・props だけ）。
-// ・幅 1024px 以上（lg）: 上に見出しの帯と変化の兆し、下を3列（左＝バイタルの札・中＝温度板と食事水分排便・右＝医療の欄と最新の体調変化）。
+// ・幅 1024px 以上（lg）: 上の段の左に操作の行と見出しの帯、右に変化の兆し、下を3列（左＝バイタルの札と食事水分排便・中＝温度板・右＝医療の欄と最新の体調変化）。
 //   各列は列の中だけで縦に動かす（画面全体は 1366×768 で縦に動かさない＝ひと目で見渡す）。
 //   列の中の区画（バイタル・温度板・食事水分排便・医療の欄・最新の体調変化）は lg で中身の量に応じて列の高さを分け合い、
 //   区画の中だけで縦に動く（どの区画も見出しが画面の中に出る。区画の側の lg:flex-auto・lg:min-h-0・lg:overflow-y-auto）
@@ -68,9 +68,14 @@ export function GlanceLayout({ header, signs, left, center, right, notes }: Glan
   }, [])
   return (
     <div ref={rootRef} className="relative mx-auto flex w-full max-w-screen-2xl flex-col gap-2 p-2 lg:h-screen lg:overflow-hidden" data-glance-layout="">
-      {header}
-      {notes}
-      {signs}
+      {/* lg は左に操作の行と見出しの帯（と注記）、右に変化の兆しを並べて上の段を詰める（1366×768 で下の区画の中身を画面に収めるため） */}
+      <div className="flex min-w-0 flex-col gap-2 lg:grid lg:grid-cols-12">
+        <div className="flex min-w-0 flex-col gap-2 lg:col-span-5">
+          {header}
+          {notes}
+        </div>
+        <div className="min-w-0 lg:col-span-7">{signs}</div>
+      </div>
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 lg:grid-cols-12 lg:grid-rows-1">
         <div className="relative flex min-h-0 min-w-0 flex-col gap-2 lg:col-span-4 lg:overflow-y-auto">{left}</div>
         <div className="relative flex min-h-0 min-w-0 flex-col gap-2 lg:col-span-4 lg:overflow-y-auto">{center}</div>

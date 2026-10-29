@@ -4,6 +4,7 @@
 // ・現場（field）・事務所（office）・管理者（admin）のどの役割にも同じ中身を出す（ui-design.md §10.1）。役割は画面の確かめのために
 //   data 属性へ写すだけで、出し分けはしない
 // ・受け取った値はメモリだけ（保存しない）。空の項目は「—」
+// ・幅 1024 以上（lg）は項目を2段組みに流し、項目名と中身を1行に続けて書く（中身は「・」でつなぐ）。1366×768 で区画の中身を縦に動かさずに見せるため
 
 import type { ReactNode } from 'react'
 import type { MedicalState, MedicalView } from '../../lib/glance'
@@ -25,9 +26,14 @@ export interface MedicalPanelProps {
 function Lines({ lines }: { lines: readonly string[] }) {
   if (lines.length === 0) return <span className="text-ink3">—</span>
   return (
-    <ul className="list-none">
+    <ul className="list-none lg:inline">
       {lines.map((l, i) => (
-        <li key={i} className="break-words">
+        <li key={i} className="break-words lg:inline">
+          {i > 0 ? (
+            <span aria-hidden="true" className="hidden lg:inline">
+              ・
+            </span>
+          ) : null}
           {l}
         </li>
       ))}
@@ -37,9 +43,9 @@ function Lines({ lines }: { lines: readonly string[] }) {
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="grid grid-cols-4 gap-2 border-b border-border py-1">
-      <dt className="col-span-1 text-sm font-bold text-ink2">{label}</dt>
-      <dd className="col-span-3 min-w-0 text-sm text-ink">{children}</dd>
+    <div className="grid grid-cols-4 gap-2 border-b border-border py-1 lg:block lg:break-inside-avoid lg:py-0">
+      <dt className="col-span-1 text-sm font-bold text-ink2 lg:mr-1 lg:inline lg:text-2xs">{label}</dt>
+      <dd className="col-span-3 min-w-0 text-sm text-ink lg:inline lg:text-xs">{children}</dd>
     </div>
   )
 }
@@ -76,7 +82,7 @@ export function MedicalPanel({ state, view, staleText, role, onRetry, id }: Medi
             {staleText}
           </p>
         ) : null}
-        <dl>
+        <dl className="lg:columns-2 lg:gap-x-3">
           <Row label="病名">
             <Lines lines={[...view.diseases, ...view.currentDiseases.filter((l) => !view.diseases.includes(l))]} />
           </Row>
@@ -118,9 +124,9 @@ export function MedicalPanel({ state, view, staleText, role, onRetry, id }: Medi
     )
   }
   return (
-    <section id={id} tabIndex={-1} aria-labelledby={`${id}-h`} data-medical-state={state} data-role={role ?? ''} className="relative min-w-0 rounded-lg border border-border bg-surface p-2 lg:min-h-0 lg:flex-auto lg:overflow-y-auto">
-      <h2 id={`${id}-h`} className="px-1 text-base font-bold text-ink">
-        病歴・内服薬<span className="ml-2 text-sm font-normal text-ink2">入居者マスタの写し（読むだけ）</span>
+    <section id={id} tabIndex={-1} aria-labelledby={`${id}-h`} data-medical-state={state} data-role={role ?? ''} className="relative min-w-0 rounded-lg border border-border bg-surface p-2 lg:min-h-0 lg:flex-auto lg:overflow-y-auto lg:p-1.5">
+      <h2 id={`${id}-h`} className="px-1 text-base font-bold text-ink lg:text-sm">
+        病歴・内服薬<span className="ml-2 text-sm font-normal text-ink2 lg:text-2xs">入居者マスタの写し（読むだけ）</span>
       </h2>
       <div className="px-1">{body}</div>
     </section>

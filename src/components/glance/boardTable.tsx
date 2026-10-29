@@ -7,6 +7,8 @@
 // ・行を押すとその方のひと目ボード（/glance/:id）へ。氏名はリンク（キーボード・読み上げで届く・44px）
 // ・年齢・医療の欄は出さない
 // 色はトークンのクラスだけ。個人情報は持たない（受け取った値を描くだけ）。
+// 幅 1366 で12列が横に動かさずに収まるよう、居室と氏名は1行に並べ（入院中などの札だけ次の行）、マスの左右の余白を詰め、
+// 「—（カルテで確認）」のマスだけ折り返す
 
 import type { MouseEvent } from 'react'
 import { Link } from 'react-router-dom'
@@ -92,14 +94,14 @@ export function BoardTable({ rows, tempDomain, pendingColumns = [], onOpen }: Bo
         <caption className="sr-only">見守りボード（全員の直近の様子。行を押すとその方のひと目ボードへ移ります）</caption>
         <thead>
           <tr className="border-b border-border-strong bg-surface2 text-left text-ink2">
-            <th scope="col" className="sticky left-0 z-10 bg-surface2 px-2 py-2 font-bold">
+            <th scope="col" className="sticky left-0 z-10 bg-surface2 px-1.5 py-2 font-bold">
               居室・氏名
             </th>
-            <th scope="col" className="px-2 py-2 font-bold">
+            <th scope="col" className="px-1 py-2 font-bold">
               印
             </th>
             {BOARD_COLUMNS.map((c) => (
-              <th key={c} scope="col" className="whitespace-nowrap px-2 py-2 font-bold">
+              <th key={c} scope="col" className="whitespace-nowrap px-1 py-2 font-bold">
                 {BOARD_COLUMN_LABEL[c]}
               </th>
             ))}
@@ -112,8 +114,8 @@ export function BoardTable({ rows, tempDomain, pendingColumns = [], onOpen }: Bo
               onClick={(e) => onRowClick(e, r.residentId)}
               className="cursor-pointer border-b border-border align-middle hover:bg-surface2"
             >
-              <th scope="row" className="sticky left-0 z-10 bg-surface px-2 py-1 text-left font-normal">
-                <span className="flex flex-wrap items-center gap-x-2">
+              <th scope="row" className="sticky left-0 z-10 bg-surface px-1.5 py-0.5 text-left font-normal">
+                <span className="flex flex-wrap items-center gap-x-1.5">
                   <span className="tabular text-sm text-ink3">{r.room ?? '—'}</span>
                   <Link
                     to={`/glance/${r.residentId}`}
@@ -123,14 +125,14 @@ export function BoardTable({ rows, tempDomain, pendingColumns = [], onOpen }: Bo
                     <span aria-hidden="true"> ›</span>
                   </Link>
                   {r.away !== null ? (
-                    <Chip tone="info" className="whitespace-nowrap">
+                    <Chip tone="info" className="basis-full whitespace-nowrap">
                       <span aria-hidden="true">ⓘ</span>
                       {AWAY_LABEL[r.away]}
                     </Chip>
                   ) : null}
                 </span>
               </th>
-              <td className="whitespace-nowrap px-2 py-1">
+              <td className="whitespace-nowrap px-1 py-0.5">
                 {r.away !== null ? (
                   <span className="text-sm text-ink3">数えない</span>
                 ) : r.signCount > 0 && r.topSeverity !== null ? (
@@ -147,9 +149,9 @@ export function BoardTable({ rows, tempDomain, pendingColumns = [], onOpen }: Bo
                 )}
               </td>
               {BOARD_COLUMNS.map((c) => (
-                <td key={c} className="whitespace-nowrap px-2 py-1">
+                <td key={c} className={`px-1 py-0.5 ${r.cells[c].unavailable ? '' : 'whitespace-nowrap'}`}>
                   {c === 'temp' ? (
-                    <span className="flex items-center gap-2">
+                    <span className="flex items-center gap-1">
                       <TempSpark values={r.tempSpark} domain={tempDomain} />
                       <BoardCell cell={r.cells.temp} label={BOARD_COLUMN_LABEL.temp} />
                     </span>

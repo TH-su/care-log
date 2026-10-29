@@ -2,7 +2,7 @@
 // ・1件ずつボタン。押すと根拠の区画（sign.anchor の id）へ移って強調する（移すのは画面＝onJump）
 // ・記号（!! 要注意・! 注意）と文字を必ず併記する（色だけに頼らない）・44px
 // ・入院中／外泊中の日は兆しを数えない（今日がそうなら兆しは空で、その旨を出す）
-// ・幅 1024 以上（lg）は見出しと兆しを横に並べて段を詰める（1366×768 で下の区画を画面に収めるため）
+// ・幅 1024 以上（lg）は見出しの帯の右に置かれる。見出しを1行にし、兆しの文字と間を1段詰める（1366×768 で兆しを2段に収め、下の区画を画面に収めるため）
 
 import type { AwayKind, GlanceAnchor, GlanceSign } from '../../lib/glance'
 import { AWAY_LABEL, GLANCE_RULES, SEVERITY_LABEL } from '../../lib/glance'
@@ -22,25 +22,25 @@ const TONE = {
 
 export function GlanceSigns({ signs, total, away, onJump }: GlanceSignsProps) {
   return (
-    <section aria-labelledby="glance-signs-h" className="rounded-lg border border-border bg-surface px-4 py-2 lg:flex lg:items-start lg:gap-3 lg:py-1">
-      <h2 id="glance-signs-h" className="text-base font-bold text-ink lg:flex lg:min-h-tap lg:max-w-xs lg:shrink-0 lg:flex-col lg:justify-center">
+    <section aria-labelledby="glance-signs-h" className="rounded-lg border border-border bg-surface px-4 py-2 lg:h-full lg:px-2 lg:py-1">
+      <h2 id="glance-signs-h" className="text-base font-bold text-ink lg:text-sm">
         変化の兆し
-        <span className="ml-2 text-sm font-normal text-ink2 lg:ml-0">
+        <span className="ml-2 text-sm font-normal text-ink2 lg:text-2xs">
           重い順・最大{GLANCE_RULES.signsMax}件{total > signs.length ? `（ほか${total - signs.length}件）` : ''}。押すと根拠の欄へ移ります
         </span>
       </h2>
       {away !== null ? (
-        <p className="mt-1 text-sm text-ink2 lg:mt-0 lg:self-center">
+        <p className="mt-1 text-sm text-ink2">
           <span aria-hidden="true">ⓘ </span>
           {AWAY_LABEL[away]}のため、兆しは数えていません。
         </p>
       ) : signs.length === 0 ? (
-        <p className="mt-1 text-sm text-ink2 lg:mt-0 lg:self-center">
+        <p className="mt-1 text-sm text-ink2">
           <span aria-hidden="true">· </span>
           いま拾える兆しはありません（記録のある範囲で判定しています）。
         </p>
       ) : (
-        <ul className="mt-1 flex flex-wrap gap-gap lg:mt-0 lg:min-w-0 lg:flex-1" data-glance-signs="">
+        <ul className="mt-1 flex flex-wrap gap-gap lg:gap-1" data-glance-signs="">
           {signs.map((s, i) => (
             <li key={`${s.key}-${i}`}>
               <button
@@ -48,7 +48,7 @@ export function GlanceSigns({ signs, total, away, onJump }: GlanceSignsProps) {
                 onClick={() => onJump(s.anchor)}
                 data-sign-key={s.key}
                 data-sign-severity={s.severity}
-                className={`inline-flex min-h-tap items-center gap-1 rounded border px-2 text-sm font-bold ${TONE[s.severity]}`}
+                className={`inline-flex min-h-tap items-center gap-1 rounded border px-2 text-sm font-bold lg:px-1.5 lg:text-xs ${TONE[s.severity]}`}
               >
                 <span aria-hidden="true">{s.symbol}</span>
                 <span className="sr-only">{SEVERITY_LABEL[s.severity]}: </span>
