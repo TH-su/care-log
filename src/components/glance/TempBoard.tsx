@@ -106,7 +106,8 @@ export function TempBoard({ board, today, highlight = false, id }: TempBoardProp
         温度板<span className="ml-2 text-sm font-normal text-ink2">直近14日（食事は10段階・水分は目標比）</span>
       </h2>
       <TempLine board={board} />
-      <div className="overflow-x-auto">
+      {/* relative: 表の中の読み上げ用 sr-only（absolute）の基準をこの横に動く枠にし、枠の外（画面全体）を横に広げないように */}
+      <div className="relative overflow-x-auto">
         <table className="w-full border-collapse text-xs">
           <caption className="sr-only">温度板（直近14日の日ごとの記録）</caption>
           <thead>
