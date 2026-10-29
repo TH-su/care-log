@@ -4310,6 +4310,20 @@ let memberDenied = false
  * 名簿が見える・確かめられない（通信エラー・ログインの控えが無い）時は false＝従来どおり「未登録」として扱う
  */
 async function deniedWhenSettingMissing(): Promise<boolean> {
+  // 同じ瞬間に呼ばれた分（入力解禁の旗を同時に取った画面と App）は1本の結果を共有する（2026-10-29 本人指示）。
+  // 終わったら（失敗も）外す＝時間の控えではなく、次の呼び出しは改めて問い合わせる
+  if (deniedProbeInFlight !== null) return deniedProbeInFlight
+  const run = probeDenied().finally(() => {
+    deniedProbeInFlight = null
+  })
+  deniedProbeInFlight = run
+  return run
+}
+
+/** 走っている「許可リスト外か」の確かめ（deniedWhenSettingMissing の相乗り） */
+let deniedProbeInFlight: Promise<boolean> | null = null
+
+async function probeDenied(): Promise<boolean> {
   try {
     const sb = await getClient()
     const res = await bounded(sb.from('staff').select('id').limit(1))
@@ -9370,7 +9384,27 @@ export async function fetchDaycareVitals(dayIso: string): Promise<{ live: KeyedV
 }
 
 /**
- * 前回値の材料: 方々の、期間（from〜to）の測定（種類を問わない・削除済みを除く・client_key つき）。新しい順に上限まで
+ * その日のデイの測定（生きている行だけ・client_key つき）。fetchDaycareVitals の live と同じ問い合わせで、キーの全部は読まない。
+ * 今日の画面（DaycarePage）はキー（次の回を決める材料）を使わないので、vitals を2回読まない（2026-10-29 本人指示）。
+ * 問い合わせを変える時は fetchDaycareVitals の live と一緒に変える（試験 daycare-day-load が同じ形かを確かめる）
+ */
+export async function fetchDaycareVitalsLive(dayIso: string): Promise<KeyedVital[]> {
+  assertDay(dayIso)
+  const sb = await getClient()
+  const res = (await sb
+    .from('vitals')
+    .select(`${VITAL_COLS},client_key`)
+    .eq('measured_on', dayIso)
+    .like('client_key', 'dc:%')
+    .is('deleted_at', null)
+    .order('id', { ascending: true })
+    .limit(DAYCARE_DAY_ROWS)) as Res<unknown>
+  if (res.error !== null) throw readError(res)
+  return list(res.data, normalizeKeyedVital, DAYCARE_DAY_ROWS).filter((v) => isDaycareVitalKey(v.client_key))
+}
+
+/**
+ * 前回値の材料:方々の、期間（from〜to）の測定（種類を問わない・削除済みを除く・client_key つき）。新しい順に上限まで
  * （上限を超えた分は古い側が落ちる＝前回値の表示だけに使う）
  */
 export async function fetchRecentVitals(residentIds: readonly number[], fromIso: string, toIso: string): Promise<KeyedVital[]> {

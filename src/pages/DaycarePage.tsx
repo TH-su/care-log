@@ -33,7 +33,7 @@ import {
   fetchDaycareDay,
   fetchDaycareIntake,
   fetchDaycarePlan,
-  fetchDaycareVitals,
+  fetchDaycareVitalsLive,
   fetchMyRole,
   fetchResidentTargets,
   getAppSetting,
@@ -55,6 +55,8 @@ import type { DaycareMealRow, MyRole } from '../lib/db'
 import { fetchAllResidents, fetchResidentsFromAll } from '../lib/cachedReads'
 import { lunchShortLabel, personPath } from '../lib/daycarePerson'
 import type { DaycareActivity } from '../lib/daycareActivity'
+import { loadDaycareDayParts } from '../lib/daycareDayLoad'
+import type { DaycareDayReaders } from '../lib/daycareDayLoad'
 import { RecorderBar } from '../components/RecorderBar'
 import { ErrorBlock, LoadingBlock, ResidentPickerModal, useToast } from '../components/ui'
 import { hasTimes, hmShort, useDaycareAttendanceOps } from '../components/DaycareAttendanceOps'
@@ -117,6 +119,18 @@ interface DayData {
   memoAt: number | null
   /** この一覧をサーバーから読めた時刻（控えに入れる「読んだ時点」＝親の反証 軽4） */
   readAt: number
+}
+
+/** 1日の読み込みに使う読み取り（db.ts の関数。バイタルは生きている行だけ＝次の回のキーはこの画面では使わない） */
+const DAY_READERS: DaycareDayReaders = {
+  day: fetchDaycareDay,
+  plan: fetchDaycarePlan,
+  attendance: fetchDaycareAttendance,
+  baths: fetchBathDay,
+  vitals: fetchDaycareVitalsLive,
+  intake: fetchDaycareIntake,
+  activities: fetchDaycareActivities,
+  isServerMissing: (e) => e instanceof DbError && e.kind === 'server',
 }
 
 /** カードの〔取消〕（押せる範囲 44px・角は 6px） */
@@ -354,24 +368,10 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       setError(null)
     }
     try {
-      let snapshot: DaycareDay | null = null
-      let missing = false
-      try {
-        snapshot = await fetchDaycareDay(target)
-      } catch (e) {
-        if (e instanceof DbError && e.kind === 'server') missing = true
-        else throw e
-      }
+      // 写し・出欠・入浴・バイタル・食事と水分・活動を同時に出し、予定だけを写しの後に出す（daycareDayLoad・2026-10-29 本人指示）。
       // 写しが「読めなかった」（unknown）の日は、いまの週間計画も読む（読めれば表示に使い、次のタップで写し直す＝反証レビュー中2）
+      const { snapshot, missing, plan, attendance, baths, vitals, intake, activities } = await loadDaycareDayParts(target, DAY_READERS)
       const usable = snapshot !== null && snapshot.plan_source !== 'unknown'
-      const [plan, attendance, baths, dv, intake] = await Promise.all([
-        usable ? Promise.resolve(null) : fetchDaycarePlan(target),
-        missing ? Promise.resolve([] as DaycareAttendance[]) : fetchDaycareAttendance(target),
-        fetchBathDay(target).catch(() => [] as BathRecord[]),
-        fetchDaycareVitals(target).catch(() => ({ live: [] as KeyedVital[], keys: [] as string[] })),
-        fetchDaycareIntake(target).catch(() => null),
-      ])
-      const activities = await fetchDaycareActivities(target).catch(() => null)
       if (gen !== genRef.current || target !== dayRef.current) return
       const next: DayData = {
         day: target,
@@ -381,7 +381,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         missing: missing || plan?.missing === true,
         attendance,
         baths,
-        vitals: dv.live,
+        vitals,
         meals: intake?.meals ?? [],
         fluids: intake?.fluids ?? [],
         activities,
