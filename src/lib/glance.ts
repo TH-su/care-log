@@ -800,6 +800,8 @@ export interface GlanceModel {
   signs: GlanceSign[]
   /** 並べる前の兆しの件数（最大件数で切る前） */
   signTotal: number
+  /** 兆しの全件（重い順・最大件数で切らない）。見守りボードのマスはこちらから作る */
+  allSigns: GlanceSign[]
   recentChanges: GlanceRecentChanges
 }
 
@@ -1236,6 +1238,7 @@ export function computeGlance(p: GlanceInput): GlanceModel {
     intake,
     signs: orderSigns(raw),
     signTotal: raw.length,
+    allSigns: orderSigns(raw, raw.length),
     recentChanges,
   }
 }
@@ -1508,7 +1511,8 @@ export function buildBoardRows(p: BoardInput): BoardRow[] {
     })
     const cells = {} as Record<BoardColumn, BoardCell>
     for (const col of BOARD_COLUMNS) {
-      const s = m.signs.find((x) => x.column === col)
+      // 8件で切った後でなく全件から取る（切られた列が「なし」と出ないように）
+      const s = m.allSigns.find((x) => x.column === col)
       cells[col] = s ? { severity: s.severity, symbol: s.symbol, text: s.short, unavailable: false } : plainCell(col, m, wl !== null && wl.length > 0)
     }
     const days = daysBetween(sparkFrom, p.today)

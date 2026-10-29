@@ -383,6 +383,30 @@ if (G === null) {
       assert.equal(m.signs[0].key, 'temp')
       assert.equal(m.signs[0].symbol, '!!')
       assert.equal(m.signs[0].anchor, G.GLANCE_ANCHORS.vitals)
+      // 見守りボードのマスは 8件で切る前の全件から作る（切られた列が「なし」にならない）
+      assert.equal(m.allSigns.length, m.signTotal)
+      const big = input({
+        vitals: [vital(TODAY, { temp: 38.5, sys: 160, dia: 80, pulse: 110, spo2: 88 })],
+        fluids: days3.map((d) => fluid(d, 300)),
+        meals: days3.flatMap((d) => [meal(d, 'breakfast', 2, 2), meal(d, 'lunch', 2, 2), meal(d, 'dinner', 2, 2)]),
+        meds: [medAdmin('2026-10-27', 'noon', 'refused'), medAdmin('2026-10-28', 'noon', 'refused')],
+        incidents: [incident('2026-10-20', 'accident')],
+        notes: [note('2026-10-20', { importance: 'critical', ongoing: true })],
+      })
+      const brow = G.buildBoardRows({
+        ...big,
+        residents: [RES],
+        usualTemps: new Map(),
+        targets: new Map(),
+        weights: new Map([[RES.id, [
+          { date: '2026-09-20', weight: 50, mode: 'normal' },
+          { date: '2026-10-28', weight: 45, mode: 'normal' },
+        ]]]),
+      })[0]
+      assert.ok(brow.signCount > 8, `signCount=${brow.signCount}`)
+      for (const s of m.allSigns) {
+        assert.ok(brow.cells[s.column].symbol !== '', `${s.column} の印が落ちている`)
+      }
       // 0件の時は空
       const none = G.computeGlance(input({ vitals: dailyVitals() }))
       assert.deepEqual(none.signs, [])
