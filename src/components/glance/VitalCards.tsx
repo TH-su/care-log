@@ -33,7 +33,9 @@ function fmt(n: number | null | undefined, digits: number): string {
 function signed(n: number | null, digits: number): string {
   if (n === null || !Number.isFinite(n)) return '—'
   const s = Math.abs(n).toFixed(digits)
-  return n > 0 ? `+${s}` : n < 0 ? `−${s}` : `±${s}`
+  // 丸めて0になる差は向きの記号を付けない（「−0」と出さない）
+  if (Number(s) === 0) return `±${s}`
+  return n > 0 ? `+${s}` : `−${s}`
 }
 
 const md = (iso: string) => `${Number(iso.slice(5, 7))}/${Number(iso.slice(8, 10))}`

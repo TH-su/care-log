@@ -30,7 +30,7 @@ function Trend({ diff, dir, digits, unit = '' }: { diff: number | null; dir: Dir
     <span className="tabular text-ink">
       <span aria-hidden="true">{DIRECTION_MARK[dir]} </span>
       <span className="sr-only">{DIR_TEXT[dir]} </span>
-      {diff > 0 ? `+${s}` : diff < 0 ? `−${s}` : `±${s}`}
+      {Number(s) === 0 ? `±${s}` : diff > 0 ? `+${s}` : `−${s}`}
       {unit}
     </span>
   )

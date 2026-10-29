@@ -258,6 +258,11 @@
 - 架空データだけ（人名・病名・薬剤名は「架空」を名乗る）。db・supabase・gasClient を import しない。端末に何も保存しない
 - 役割（field／office／admin）と医療の欄の状態（ok／no_function／no_shadow／not_linked）を切り替えて見る。`#board` で見守りボード、行を押すと見本の中のひと目ボード
 - 確かめの段（runCheck）は画面の中と `window.__glanceCheck` に結果を出す（console に出さない）
+- runCheck の8段（2026-10-29 の仮の合格ライン。`glance-preview.html?check=1` をヘッドレス Chrome で開くと自動で走り、`data-check-all="ok"` になる）:
+  1. 兆しに「平熱+1.0℃以上」がある 2. 兆しに「水分8割未満」がある 3. 兆しに「体重1か月3%以上減」がある 4. 兆しが重い順・最大8件
+  5. 医療の欄がどの役割（field／office／admin）にも出て、no_function／no_shadow／not_linked の文言が §10.7 どおり 6. 期間を切り替えても医療の欄を読み直さない
+  7. 見守りボードが16名・入院中の行は数えない・未接続のマスは「—（カルテで確認）」・「変化の多い順」で並びが変わる 8. 幅1024以上でひと目ボードの画面全体が縦に動かない
+- 表示の部品は `src/components/glance/`（ひと目ボード＝`Glance*`・`VitalCards`・`TempBoard`・`IntakeCards`・`MedicalPanel`・`RecentChanges`。束ね役 `GlanceView` を画面と見本が共有）。見守りボードの部品は `board*`（`boardTable`・`boardCell`・`boardSortToggle`）
 
 ---
 
