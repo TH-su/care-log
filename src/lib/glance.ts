@@ -208,13 +208,17 @@ export function windowAverage(byDay: ReadonlyMap<string, number>, from: string, 
   return { avg: meanOf(vals), days: vals.length }
 }
 
-/** 差（recent − base）と向き。どちらかが無ければ null。|差| が flatBelow 未満は flat */
+/**
+ * 差（recent − base）と向き。どちらかが無ければ null。
+ * |差| を flatBelow の単位で丸めて 0 なら flat（flatBelow は画面に出す差の桁と同じ＝体温 0.1・血圧 1 など。
+ * 丸める前の差で決めると、同じ「+0.1」が ↑ にも → にもなり読み違える＝反証レビューの指摘 2026-10-30）
+ */
 export function compareAverages(recent: number | null, base: number | null, flatBelow: number): { diff: number | null; dir: Direction | null } {
   if (recent === null || base === null || !Number.isFinite(recent) || !Number.isFinite(base)) return { diff: null, dir: null }
   const diff = recent - base
-  // 浮動小数の誤差（0.1 が 0.0999…）で境目が外れないよう、幅の 1/1000 単位の整数で比べる
-  const scaled = Math.round((Math.abs(diff) / flatBelow) * 1000)
-  if (scaled < 1000) return { diff, dir: 'flat' }
+  // 浮動小数の誤差（0.1 が 0.0999…）で境目が外れないよう、幅の単位へ直した値を小数6桁でそろえてから丸める
+  const units = Math.round(Number((Math.abs(diff) / flatBelow).toFixed(6)))
+  if (units < 1) return { diff, dir: 'flat' }
   return { diff, dir: diff > 0 ? 'up' : 'down' }
 }
 

@@ -122,7 +122,10 @@ function buildFixture(): Fixture {
       if (rid === 5 && k === 0) temp = 38.2
       // 7番: 直近7日の SpO2 が下がった
       if (rid === 7 && k < 7) spo2 = 92
-      f.vitals.push({ id: id++, resident_id: rid, measured_on: day, kind: 'routine', measured_at: '09:00', temp: Math.round(temp * 10) / 10, sys_bp: 128 + Math.round(wobble(rid, k, 6)), dia_bp: 74 + Math.round(wobble(rid, k + 3, 4)), pulse: 72 + Math.round(wobble(rid, k + 5, 5)), spo2, note: null, symptom: null, recorded_by: null, rev: 1 })
+      // 1番: 8〜14日前は体温が低め・血圧と脈が高め・SpO2 が低め（期間を「14日」に変えるとバイタルの平均も動くことを確かめるため）
+      const wk2 = rid === 1 && k >= 7 && k < 14
+      if (wk2) { temp -= 0.4; spo2 -= 2 }
+      f.vitals.push({ id: id++, resident_id: rid, measured_on: day, kind: 'routine', measured_at: '09:00', temp: Math.round(temp * 10) / 10, sys_bp: 128 + (wk2 ? 12 : 0) + Math.round(wobble(rid, k, 6)), dia_bp: 74 + (wk2 ? 6 : 0) + Math.round(wobble(rid, k + 3, 4)), pulse: 72 + (wk2 ? 10 : 0) + Math.round(wobble(rid, k + 5, 5)), spo2, note: null, symptom: null, recorded_by: null, rev: 1 })
       for (const slot of ['breakfast', 'lunch', 'dinner'] as const) {
         // 3番: 今日と昨日は入院中
         const hospital = rid === 3 && k < 2
@@ -473,12 +476,15 @@ function App() {
     apply({ medical: 'ok', range: '7' })
     await wait()
     const before = medicalCalls.n
+    const vitals7 = document.getElementById('glance-vitals')?.textContent ?? ''
     apply({ range: '14' })
     await wait()
-    const head14 = (document.getElementById('glance-vitals')?.textContent ?? '').includes('直近14日')
+    const vitals14 = document.getElementById('glance-vitals')?.textContent ?? ''
+    const head14 = vitals14.includes('直近14日')
     apply({ range: '7' })
     await wait()
     push('期間の切り替えで医療の欄を読み直さない', medicalCalls.n === before && head14, `読んだ回数 ${before}→${medicalCalls.n}`)
+    push('期間を「14日」にするとバイタルの平均の数字が変わる', vitals7 !== '' && vitals7.replace('直近7日', '') !== vitals14.replace('直近14日', ''), '7日と14日のバイタルの札の文字を比べた')
     // 見守りボード
     go('/glance')
     apply({ sort: 'room' })

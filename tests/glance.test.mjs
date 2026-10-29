@@ -192,12 +192,15 @@ if (G === null) {
     it('direction', () => {
       assert.equal(G.compareAverages(36.5, 36.4, 0.1).dir, 'up') // ちょうど幅（0.1）は動いた
       assert.equal(G.compareAverages(36.3, 36.4, 0.1).dir, 'down')
-      assert.equal(G.compareAverages(36.45, 36.4, 0.1).dir, 'flat') // 幅未満は →
+      assert.equal(G.compareAverages(36.44, 36.4, 0.1).dir, 'flat') // 丸めて幅に届かない差は →（画面は ±0.0）
+      assert.equal(G.compareAverages(36.46, 36.4, 0.1).dir, 'up') // 丸めて +0.1 と出る差は ↑（表示と向きを食い違わせない）
+      assert.equal(G.compareAverages(36.34, 36.4, 0.1).dir, 'down')
       assert.equal(G.compareAverages(36.4, 36.4, 0.1).dir, 'flat')
       assert.deepEqual(G.compareAverages(null, 36.4, 0.1), { diff: null, dir: null })
       assert.deepEqual(G.compareAverages(36.4, null, 0.1), { diff: null, dir: null })
       assert.equal(G.compareAverages(121, 120, 1).dir, 'up')
-      assert.equal(G.compareAverages(120.5, 120, 1).dir, 'flat')
+      assert.equal(G.compareAverages(120.4, 120, 1).dir, 'flat') // 画面は ±0
+      assert.equal(G.compareAverages(120.5, 120, 1).dir, 'up') // 画面は +1（表示の丸めと同じ）
       assert.equal(G.DIRECTION_MARK.up, '↑')
       assert.equal(G.DIRECTION_MARK.down, '↓')
       assert.equal(G.DIRECTION_MARK.flat, '→')

@@ -11,7 +11,7 @@ L0承認済み。詳細設計の正本: `docs/PLAN.md`・`docs/design/db-design.
 ## 共通規律
 
 - Tailwind はトークン由来クラスのみ。arbitrary value（`text-[14px]`・`bg-[#…]`）と色・px直書き禁止
-- supabase の `from` / `rpc` の直呼びは `src/lib/db.ts` と `src/lib/gasClient.ts` のみ。他は db.ts の関数を使う
+- `supabase.from()` / `supabase.rpc()` の直呼びは `src/lib/db.ts` と `src/lib/gasClient.ts` のみ。他は db.ts の関数を使う
 - 個人情報（氏名・本文・応答データ）を console に出さない。コード・コメント・placeholder に実名を書かない（例示は「山田」等の汎用サンプル可・実在データ由来は不可）
 - 全画面にローディング／エラー／空の3状態。エラー文は「何が起きたか＋次にどうすればよいか」
 - タップ要素は min-height/width 44px（`min-h-tap`）＋隣接 gap 8px（`gap-gap` 等）
