@@ -10594,6 +10594,7 @@ function watchChannel(
   tables: readonly string[],
   cb: (table: string, info?: ChangeInfo) => void,
   live: () => boolean,
+  onJoined?: () => void,
 ): () => void {
   let joined = false
   let lost = false
@@ -10608,8 +10609,17 @@ function watchChannel(
     if (!live()) return
     if (status === 'SUBSCRIBED') {
       if (joined && lost) emit('reconnect')
+      const first = !joined
       joined = true
       lost = false
+      // 最初に参加できた時だけ知らせる（この後に書かれた行は通知で届く＝画面が日報を先に取りに行ってよい合図・2026-10-29）
+      if (first && onJoined !== undefined) {
+        try {
+          onJoined()
+        } catch {
+          // 知らせ先の失敗で購読を止めない
+        }
+      }
     } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
       if (joined) lost = true
     }
@@ -10625,8 +10635,12 @@ function watchChannel(
  * 表示ウィンドウ内かの判断は呼び出し側（info.row が無い時は「分からない」＝取り直す側に倒すこと）。
  * 第2引数は任意なので、従来どおり第1引数だけを使う購読はそのまま動く。
  * 接続できない場合は購読しないだけで、画面は手動更新で成立する。
+ * opts.onJoined は、このチャンネルが最初に参加できた（SUBSCRIBED）時に1回だけ呼ぶ（つながらない時は呼ばない。日報の起動の早取り）
  */
-export function subscribeChanges(cb: (table: string, info?: ChangeInfo) => void): () => void {
+export function subscribeChanges(
+  cb: (table: string, info?: ChangeInfo) => void,
+  opts?: { onJoined?: () => void },
+): () => void {
   let cancelled = false
   let client: SupabaseClient | null = null
   let channel: ReturnType<SupabaseClient['channel']> | null = null
@@ -10647,7 +10661,9 @@ export function subscribeChanges(cb: (table: string, info?: ChangeInfo) => void)
       }
       channel = ch
       // 状態の移り変わりを受け取り、つながり直した時に表ごとの RESYNC を流す（F14）
-      unwatch = watchChannel(ch, REALTIME_TABLES, cb, () => !cancelled)
+      unwatch = watchChannel(ch, REALTIME_TABLES, cb, () => !cancelled, () => {
+        if (!cancelled) opts?.onJoined?.()
+      })
     } catch {
       // 接続先未設定・通信不可。購読なしで動く
     }

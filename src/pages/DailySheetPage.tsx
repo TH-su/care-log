@@ -201,6 +201,8 @@ import {
 import type { DraftFile, DraftOrigin, DraftRow } from '../lib/noteDrafts'
 import { getActorId, touchActivity } from '../lib/actor'
 import { addDays, fmtTimeHM, normalizeVitalInput, todayIso, toHalfWidth } from '../lib/format'
+import { createBootBlock } from '../lib/bootBlock'
+import type { BootBlock } from '../lib/bootBlock'
 import { noteIsNextMorning, noteTimeFor, recordTimeFor, timeSortKey } from '../lib/nextMorning'
 // 日報の4機能（2026-10-15 本人回答）: ロックの判定・同じ方の統合・検索・分類（純関数は lib、画面の部品は noteCategory.tsx）
 import { lockState, msUntilNextLock } from '../lib/noteLock'
@@ -2351,13 +2353,10 @@ export function DailySheetPage({
         setNotesMissing(gate.notes === 'missing')
         const mgrId = Number(mgr)
         setManagerStaffId(Number.isInteger(mgrId) && mgrId > 0 ? mgrId : null)
-        // 起動の早取り（下の bootBlockRef）で日報を先に取りに行った後、マスタがそろうまでに表示中の日への変更通知・
+        // 起動の早取り（下の bootRef）で日報を先に取りに行った後、マスタがそろうまでに表示中の日への変更通知・
         // 画面復帰・電波の復帰で帯が出ていたら、先に読んだ日報（届いていない分も）を捨てて、各日の枠に取り直させる。
         // 早取りの前は、帯をここで消しても日報はこの後に取りに行くので新しい内容が出ていた（その動きのまま＝帯は出さない）
-        if (bootBlockRef.current === 'started') {
-          if (staleMarkRef.current !== bootStaleMarkRef.current) dropAllCachedRef.current()
-          bootBlockRef.current = 'done'
-        }
+        bootRef.current?.masterReady()
         setStale(false)
         setPhase('ready')
         setEverReady(true)
@@ -2744,26 +2743,43 @@ export function DailySheetPage({
    * 起動の早取り（2026-10-29 本人指示）。開いた時だけ、表示する区切りの日報を、上のマスタ（利用者・職員・入力解禁・施設長）の
    * 読み込みと並べて取りに行く。日報の取得が使うのは表示する日（今日と表示単位）と記録者だけで、マスタの値は使わない
    * （以前はマスタがそろってから各日の枠が取りに行き、通信を1往復ぶん余計に待っていた）。
+   * 取りに行くのは、下の変更通知のチャンネルが参加した時（参加の前に読むと、読まれた時点から参加までに他の端末が書いた行を
+   * 見落とすため）。参加より先にマスタがそろった・待ち時間が過ぎた時は早取りをせず、今までどおり各日の枠が取りに行く
+   * （順番の決まりは lib/bootBlock）。
    * 各日の枠は今までどおり loadDay → loadBlock で取りに行き、同じ区切りの取得が走っていればそれに相乗りし、済んでいれば
    * 取り置きから出す（要求は増えない。読み込みの段階・世代・エラーの表示は各日の枠の流れのまま）。
    * 読み込みの控えに全部の日がある時は始めない（控えで先に出す流れと裏の取り直しは、今までどおり各日の枠が始める）。
-   * 始めてからマスタがそろうまで（'started' の間・マスタの読み込みの失敗と再試行をまたぐ）に帯が出たら、マスタの読み込みが
-   * 先に読んだ分を捨てる（bootStaleMarkRef は始めた時の帯の回数）
+   * 始めてからマスタがそろうまで（マスタの読み込みの失敗と再試行をまたぐ）に帯が出たら、マスタの読み込みが先に読んだ分を捨てる
    */
-  const bootBlockRef = useRef<'idle' | 'started' | 'done'>('idle')
-  const bootStaleMarkRef = useRef(0)
+  const bootRef = useRef<BootBlock | null>(null)
+  /** この画面の変更通知のチャンネルが参加したか（下の購読が付ける） */
+  const changesJoinedRef = useRef(false)
   const dropAllCachedRef = useRef(dropAllCached)
   dropAllCachedRef.current = dropAllCached
+  const loadBlockRef = useRef(loadBlock)
+  loadBlockRef.current = loadBlock
+  const bootActorRef = useRef(actorId)
+  bootActorRef.current = actorId
   useEffect(() => {
-    if (bootBlockRef.current !== 'idle') return
-    bootBlockRef.current = 'done'
-    const days = visibleDaysRef.current
-    if (days.every((d) => cacheRef.current.has(d) || peekDailyReport(actorId, d) !== undefined)) return
-    bootBlockRef.current = 'started'
-    bootStaleMarkRef.current = staleMarkRef.current
-    // 失敗は各日の枠が今までどおり受け持つ（同じ区切りをもう一度まとめて取り、だめなら1日ずつ）
-    void loadBlock(days).catch(() => undefined)
-  }, [actorId, loadBlock])
+    const boot = createBootBlock({
+      start: () => {
+        const days = visibleDaysRef.current
+        const who = bootActorRef.current
+        if (days.every((d) => cacheRef.current.has(d) || peekDailyReport(who, d) !== undefined)) return false
+        // 失敗は各日の枠が今までどおり受け持つ（同じ区切りをもう一度まとめて取り、だめなら1日ずつ）
+        void loadBlockRef.current(days).catch(() => undefined)
+        return true
+      },
+      staleMark: () => staleMarkRef.current,
+      drop: () => dropAllCachedRef.current(),
+    })
+    bootRef.current = boot
+    if (changesJoinedRef.current) boot.joined()
+    return () => {
+      boot.stop()
+      if (bootRef.current === boot) bootRef.current = null
+    }
+  }, [])
 
   /** 表示中の各日の枠に出している外出・外泊の id（F16。他の端末がその行を直したら、日付に関係なく案内する） */
   const outingIdsRef = useRef(new Map<string, number[]>())
@@ -2790,6 +2806,7 @@ export function DailySheetPage({
   useEffect(() => {
     let unsub: (() => void) | null = null
     try {
+      changesJoinedRef.current = false
       unsub = subscribeChanges((table, info?: ChangeInfo) => {
         if (!aliveRef.current) return
         // この画面が描画する表の変更だけを合図にする（食事・水分・既読の記録では出さない）
@@ -2816,6 +2833,13 @@ export function DailySheetPage({
         // 画面に出していない日の変更では案内を出さない（判定できない時は出す＝安全側）
         if (!touchesVisibleDay(table, info, visibleDaysRef.current)) return
         setStale(true)
+      }, {
+        // 参加できた＝この後に書かれた行は通知で届く。起動の早取りはここから始める（参加の前には取りに行かない）
+        onJoined: () => {
+          if (!aliveRef.current) return
+          changesJoinedRef.current = true
+          bootRef.current?.joined()
+        },
       })
     } catch {
       unsub = null

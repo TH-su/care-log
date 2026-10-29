@@ -337,6 +337,39 @@ if (D === null) {
       assert.deepEqual(got, [])
       stop()
     })
+
+    it('日報の購読の参加の知らせ（onJoined・2026-10-29 起動の早取り）: 最初の SUBSCRIBED で1回だけ・参加の前と、つながり直し・閉じた後は呼ばない', async () => {
+      let joined = 0
+      const { ch, got, stop } = await open((cb) => D.subscribeChanges(cb, { onJoined: () => (joined += 1) }))
+      assert.equal(joined, 0, '参加の前に知らせた')
+      ch.status('CHANNEL_ERROR')
+      assert.equal(joined, 0)
+      ch.status('SUBSCRIBED')
+      assert.equal(joined, 1)
+      assert.deepEqual(got, [], '最初の参加で RESYNC を流した')
+      ch.status('CLOSED')
+      ch.status('SUBSCRIBED')
+      assert.equal(joined, 1, 'つながり直しでも知らせた（早取りをやり直す）')
+      assert.equal(got.length, 7)
+      stop()
+      await settle()
+      ch.status('SUBSCRIBED')
+      assert.equal(joined, 1)
+      // 知らせ先が例外を出しても購読は止めない（つながり直しの RESYNC は流れる）
+      await reset()
+      const b = await open((cb) => D.subscribeChanges(cb, { onJoined: () => { throw new Error('x') } }))
+      b.ch.status('SUBSCRIBED')
+      b.ch.status('CLOSED')
+      b.ch.status('SUBSCRIBED')
+      assert.equal(b.got.length, 7)
+      b.stop()
+      // 第2引数なしの購読は今までどおり
+      await reset()
+      const c = await open(D.subscribeChanges)
+      c.ch.status('SUBSCRIBED')
+      assert.deepEqual(c.got, [])
+      c.stop()
+    })
   })
 
   describe('★F58 トークン更新に失敗してログインの控えが無い間（anon キーで出る）の0行・空を、競合・空の名簿・未解禁と断定しない', () => {
