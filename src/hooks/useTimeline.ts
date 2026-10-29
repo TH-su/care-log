@@ -413,6 +413,11 @@ export interface UseTimelineResult {
   /** DOM上限60日で新しい側を外している状態（先頭に「新しい日を再読み込み」バーを出す合図） */
   trimmed: boolean
   resetToLatest(): void
+  /**
+   * 窓全体を取り直して確定した回数（最初の読み込み・refresh・継続の申し送りの変更通知・取り直しの合図で増える）。
+   * 60日より前に始まった継続の帯（useStaleOngoing）が、件数を取り直す合図に使う（代表者の決定 2026-10-29 案A）
+   */
+  windowRev: number
 }
 
 export function useTimeline(staffId: number | null): UseTimelineResult {
@@ -421,6 +426,7 @@ export function useTimeline(staffId: number | null): UseTimelineResult {
   const [error, setError] = useState<string | null>(null)
   const [hasMore, setHasMore] = useState(true)
   const [trimmed, setTrimmed] = useState(false)
+  const [windowRev, setWindowRev] = useState(0)
 
   const aliveRef = useRef(true)
   const genRef = useRef(0) // 取得世代。古い応答は破棄する
@@ -471,6 +477,7 @@ export function useTimeline(staffId: number | null): UseTimelineResult {
         winRef.current = { from, to }
         // チャンクをまたいで重複した外出を、窓全体で1か所へ置き直してから確定する
         commitDays(placeOutings(built))
+        setWindowRev((n) => n + 1)
         setError(null)
       } catch {
         if (gen !== genRef.current || !aliveRef.current) return
@@ -697,5 +704,5 @@ export function useTimeline(staffId: number | null): UseTimelineResult {
     }
   }, [loadWindow, loadDays, windowTo])
 
-  return { days, loading, error, loadMore, hasMore, refresh, trimmed, resetToLatest }
+  return { days, loading, error, loadMore, hasMore, refresh, trimmed, resetToLatest, windowRev }
 }

@@ -21,6 +21,9 @@ import {
   useToast,
 } from '../components/ui'
 import { useTimeline } from '../hooks/useTimeline'
+import { useStaleOngoing } from '../hooks/useStaleOngoing'
+import type { UseStaleOngoingResult } from '../hooks/useStaleOngoing'
+import { staleOngoingBannerText } from '../lib/staleOngoing'
 import {
   DbError,
   deleteNote,
@@ -322,8 +325,10 @@ export function TimelinePage({
     [actorIdProp],
   )
 
-  const { days, loading, error, loadMore, hasMore, refresh, trimmed, resetToLatest } =
+  const { days, loading, error, loadMore, hasMore, refresh, trimmed, resetToLatest, windowRev } =
     useTimeline(actorId)
+  // 60日より前に始まって終わっていない継続の帯（代表者の決定 2026-10-29 案A）。窓全体の取り直しのたびに件数を取り直す
+  const staleOngoing = useStaleOngoing(windowRev)
 
   // 利用者マスタ（氏名・居室の表示用。バイタル・食事の全員表の行は在籍者だけ）
   const [loadedResidents, setLoadedResidents] = useState<Resident[] | null>(() => peekResidents() ?? null)
@@ -757,6 +762,15 @@ export function TimelinePage({
           message="表示できる記録がありません。まだ取り込みが行われていないか、この期間に記録が無い可能性があります。"
           actionLabel="再読み込み"
           onAction={refresh}
+        />
+      )}
+
+      {days.length > 0 && (
+        <StaleOngoingBanner
+          stale={staleOngoing}
+          residentById={residentById}
+          inputEnabled={inputEnabled}
+          onEndOngoing={handleEndOngoing}
         />
       )}
 
@@ -1252,6 +1266,89 @@ function EndOngoingButton({ note, inputEnabled, residentLabel, onEndOngoing }: E
         onCancel={() => setAsking(false)}
       />
     </>
+  )
+}
+
+// ── 60日より前に始まった継続の帯（代表者の決定 2026-10-29 案A）─────────────
+// 件数は notes を直接数える（timeline_chunk の遡りの上限に関係なく動く）。0件・読めない時は何も出さない。
+// 一覧は押した時だけ読む。行の見た目と終了の操作はピン留めの行と同じ（終了できない端末では押せない理由を出す）。画面だけ（印刷しない）
+
+const STALE_LIST_ID = 'cl-stale-ongoing-list'
+
+interface StaleOngoingBannerProps {
+  stale: UseStaleOngoingResult
+  residentById: Map<number, Resident>
+  inputEnabled: boolean
+  onEndOngoing: (note: Note) => Promise<NoteActionResult>
+}
+
+function StaleOngoingBanner({ stale, residentById, inputEnabled, onEndOngoing }: StaleOngoingBannerProps) {
+  const text = staleOngoingBannerText(stale.count)
+  if (text === null) return null
+  const label = (n: Note) =>
+    n.resident_id == null ? 'スタッフへ' : noteTargetName(residentById.get(n.resident_id), n.resident_id)
+  return (
+    <div className="mt-3 rounded-md border-l-4 border-warn bg-warn-bg px-3 py-2 print:hidden">
+      <div className="flex flex-wrap items-center gap-gap">
+        <p role="status" className="min-w-0 grow text-base text-ink">
+          <span aria-hidden="true">▲ </span>
+          {text}
+        </p>
+        <button
+          type="button"
+          className="min-h-tap shrink-0 rounded-md border border-border-strong bg-surface px-3 text-base text-link"
+          onClick={stale.open ? stale.closeList : stale.openList}
+          aria-expanded={stale.open}
+          aria-controls={STALE_LIST_ID}
+          aria-label={stale.open ? '60日より前に始まった継続の一覧を閉じる' : '60日より前に始まった継続の一覧を開く'}
+        >
+          {stale.open ? '一覧を閉じる' : '一覧を開く'}
+        </button>
+      </div>
+      {stale.open && (
+        <div id={STALE_LIST_ID} className="mt-1">
+          {stale.rows === null && stale.listLoading && <p className="py-1 text-sm text-ink2">読み込んでいます…</p>}
+          {stale.listError && (
+            <div className="py-1">
+              <p role="alert" className="text-sm text-ink">
+                <span aria-hidden="true">▲ </span>
+                一覧を読み込めませんでした（通信エラー）。電波状態を確認して、再試行してください。
+              </p>
+              <button
+                type="button"
+                className="mt-1 min-h-tap rounded-md border border-border-strong bg-surface px-3 text-base text-ink"
+                onClick={stale.retryList}
+              >
+                一覧を再読み込み
+              </button>
+            </div>
+          )}
+          {stale.rows !== null && stale.count !== null && stale.rows.length < stale.count && (
+            <p className="py-1 text-sm text-ink2">{`古い順に ${stale.rows.length}件まで出しています。終了すると続きが出ます`}</p>
+          )}
+          {stale.rows !== null && (
+            <ul aria-label="60日より前に始まった継続（古い順）">
+              {stale.rows.map((n) => (
+                <li key={n.id} className="flex flex-wrap items-center gap-gap py-1">
+                  <span className="text-base font-bold text-danger" aria-label="最重要または継続">
+                    ‼
+                  </span>
+                  <span className="text-base font-bold text-ink">{label(n)}</span>
+                  <span className="min-w-0 grow truncate text-base text-ink">{n.body}</span>
+                  <span className="text-sm text-ink2 tabular">{`${n.note_on.slice(0, 4)}年${fmtDayLabel(n.note_on)}から継続中`}</span>
+                  <EndOngoingButton
+                    note={n}
+                    inputEnabled={inputEnabled}
+                    residentLabel={label(n)}
+                    onEndOngoing={onEndOngoing}
+                  />
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
   )
 }
 
