@@ -138,6 +138,8 @@ import type { ResidentTargets, ResidentTargetsInput } from './vitalAlerts'
 // 個人のバイタルの閾値（段階2d・0045）
 import { VITAL_LIMIT_FIELDS } from './vitalLimits'
 import type { ResidentVitalLimit } from './vitalLimits'
+// ひと目ボードの医療の欄の読み込み結果（型は集計の純関数側が持つ）
+import type { ResGlanceResult } from './glance'
 
 // ── 契約で定義された戻り値 ───────────────────────────────────────────────────
 export type Conflict = 'conflict'
@@ -11357,6 +11359,158 @@ export async function fetchStaleOngoingNotes(before: string): Promise<Note[]> {
     .limit(STALE_ONGOING_ROWS)) as Res<unknown>
   if (res.error !== null) throw readError(res)
   return list(res.data, normalizeNote, STALE_ONGOING_ROWS)
+}
+
+// ── ひと目ボード・見守りボードの読み込み（読むだけ。書かない・端末に保存しない） ────────────
+
+/**
+ * 1人分の病歴・内服薬の写しを読む（共通 DB の関数 res_glance_get・0037）。ひと目ボードで医療の欄を開いた時に1回だけ呼ぶ。
+ * 見守りボード（全員の画面）からは呼ばない。サーバーは返すたびに開いた記録を1件残すので、やり直し・先読みはしない。
+ * 結果はメモリで返すだけ（dataCache にも端末にも置かない）。例外は投げず、状態に畳んで返す:
+ *   関数が無い（PGRST202 / 42883）→ no_function、写しが無い（row が空・synced_at が空）→ no_shadow、
+ *   拒否（42501）・通信できない・形が違う → error
+ */
+export async function fetchResGlance(sourceId: string): Promise<ResGlanceResult> {
+  const p_id = typeof sourceId === 'string' ? sourceId.trim() : ''
+  if (p_id === '' || p_id.length > 40) return { kind: 'error' }
+  try {
+    const sb = await getClient()
+    const res = (await sb.rpc('res_glance_get', { p_id })) as Res<unknown>
+    if (res.error !== null) return isMissingRpc(res) ? { kind: 'no_function' } : { kind: 'error' }
+    const raw = asRecord(res.data)
+    if (raw === null || raw.ok !== true) return { kind: 'error' }
+    const row = asRecord(raw.row)
+    const syncedAt = typeof raw.synced_at === 'string' && raw.synced_at !== '' ? raw.synced_at : null
+    if (row === null || syncedAt === null) return { kind: 'no_shadow' }
+    return { kind: 'ok', row, syncedAt }
+  } catch {
+    return { kind: 'error' }
+  }
+}
+
+/** ひと目ボードの継続中（終わっていない継続）の申し送りの取得上限 */
+const GLANCE_PINNED_ROWS = 200
+
+/**
+ * その方の終わっていない継続の申し送り（削除済みを除く・重い順→始まりの新しい順）。
+ * fetchKarte は期間内に始まった申し送りしか読まないため、期間より前に始まった継続はこちらで読む
+ * （期間内に始まった分は fetchKarte の notes と重なる。id での重ね合わせは呼ぶ側で行う）
+ */
+export async function fetchResidentPinnedNotes(residentId: number): Promise<Note[]> {
+  const rid = idNum(residentId)
+  if (rid === null) return []
+  const sb = await getClient()
+  const res = (await sb
+    .from('notes')
+    .select(NOTE_COLS)
+    .eq('resident_id', rid)
+    .eq('ongoing', true)
+    .is('ended_at', null)
+    .is('deleted_at', null)
+    .order('importance', { ascending: true }) // 'critical' < 'important' < 'normal'
+    .order('note_on', { ascending: false })
+    .order('id', { ascending: false })
+    .limit(GLANCE_PINNED_ROWS)) as Res<unknown>
+  if (res.error !== null) throw readError(res)
+  return list(res.data, normalizeNote, GLANCE_PINNED_ROWS)
+}
+
+/** 見守りボードの1回分の読み込み（全員分・日付で区切る） */
+export interface GlanceBoardRange {
+  from: string
+  to: string
+  notes: Note[]
+  vitals: Vital[]
+  meals: Meal[]
+  fluids: FluidIntake[]
+  /** 期間に重なる外出・外泊（id で重ね合わせ済み） */
+  outings: Outing[]
+  /** 継続中の申し送り（各区切りの分を id で重ね合わせ済み） */
+  pinned: Note[]
+  /** 与薬の記録（to までの直近 GLANCE_MED_DAYS 日）。表が無い DB（0013 未適用）は null */
+  meds: MedAdmin[] | null
+  /** 事故・ヒヤリハット（to までの直近 GLANCE_INCIDENT_DAYS 日）。表が無い DB（0014 未適用）は null */
+  incidents: Incident[] | null
+}
+
+/** タイムラインを区切る既定の日数（区切りごとに並列で読む） */
+const GLANCE_SPAN_DAYS = 7
+/** 1区切りの上限（qa-verification「1リクエスト ≤2,000行・500KB」）。超えたら区切りを半分にして読み直す */
+const GLANCE_SPAN_ROWS = MAX_ROWS
+const GLANCE_SPAN_BYTES = 500 * 1024
+const GLANCE_MED_DAYS = 7
+const GLANCE_INCIDENT_DAYS = 14
+
+/** 1区切りが上限に掛かったか（どれかの系列が上限の行数に届いた・応答の大きさが上限を超えた） */
+function glanceChunkTooBig(c: TimelineChunk): boolean {
+  const series = [c.notes, c.vitals, c.meals, c.fluids, c.outings, c.pinned]
+  if (series.some((s) => s.length >= GLANCE_SPAN_ROWS)) return true
+  return new TextEncoder().encode(JSON.stringify(c)).length > GLANCE_SPAN_BYTES
+}
+
+/** 区切り [a, b] を読む。上限に掛かったら半分に分けて読み直す（1日でも掛かる時は黙って切らずに例外） */
+async function fetchGlanceSpan(a: string, b: string): Promise<TimelineChunk[]> {
+  const chunk = await fetchTimelineChunk(a, b, null)
+  if (!glanceChunkTooBig(chunk)) return [chunk]
+  if (a === b) throw new DbError('server', SHEET_MSG.tooManyDays)
+  let n = 1
+  while (addDaysIso(a, n) <= b) n++
+  const mid = addDaysIso(a, Math.floor(n / 2) - 1)
+  const [left, right] = await Promise.all([fetchGlanceSpan(a, mid), fetchGlanceSpan(addDaysIso(mid, 1), b)])
+  return [...left, ...right]
+}
+
+/** id で重ね合わせる（先に出た方を残す） */
+function uniqueById<T extends { id: number }>(rows: T[]): T[] {
+  const seen = new Set<number>()
+  return rows.filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
+}
+
+/**
+ * 見守りボード用に全員分を日付 [fromIso, toIso] で読む。バイタル・食事・水分・外出外泊・申し送り（継続中を含む）は
+ * fetchTimelineChunk を GLANCE_SPAN_DAYS 日ずつに区切って並列に読み、結合する。与薬は to までの直近7日を fetchMedDay で、
+ * 事故・ヒヤリハットは to までの直近14日を fetchIncidents で読む（どちらも表が無い DB では null）。
+ * 1人ずつの往復はしない。病歴・内服薬（res_glance_get）は読まない。読めない時は投げる
+ */
+export async function fetchGlanceBoardRange(fromIso: string, toIso: string): Promise<GlanceBoardRange> {
+  assertDay(fromIso)
+  assertDay(toIso)
+  if (fromIso > toIso) throw new DbError('server', INCIDENT_MSG.badRange)
+  const spans: [string, string][] = []
+  for (let a = fromIso; a <= toIso; a = addDaysIso(a, GLANCE_SPAN_DAYS)) {
+    const b = addDaysIso(a, GLANCE_SPAN_DAYS - 1)
+    spans.push([a, b < toIso ? b : toIso])
+  }
+  const medDays = Array.from({ length: GLANCE_MED_DAYS }, (_, i) => addDaysIso(toIso, -i))
+  const tableOrNull = async <T>(run: () => Promise<T>, missingMsg: string): Promise<T | null> => {
+    try {
+      return await run()
+    } catch (e) {
+      if (e instanceof DbError && e.message === missingMsg) return null // 表がまだ無い（未適用）だけなら「無し」
+      throw e
+    }
+  }
+  const [chunkLists, medLists, incidents] = await Promise.all([
+    Promise.all(spans.map(([a, b]) => fetchGlanceSpan(a, b))),
+    tableOrNull(() => Promise.all(medDays.map((d) => fetchMedDay(d))), MED_MSG.missing),
+    tableOrNull(
+      () => fetchIncidents({ fromIso: addDaysIso(toIso, -(GLANCE_INCIDENT_DAYS - 1)), toIso }),
+      INCIDENT_MSG.missing,
+    ),
+  ])
+  const chunks = chunkLists.flat()
+  return {
+    from: fromIso,
+    to: toIso,
+    notes: uniqueById(chunks.flatMap((c) => c.notes)),
+    vitals: uniqueById(chunks.flatMap((c) => c.vitals)),
+    meals: uniqueById(chunks.flatMap((c) => c.meals)),
+    fluids: uniqueById(chunks.flatMap((c) => c.fluids)),
+    outings: uniqueById(chunks.flatMap((c) => c.outings)),
+    pinned: uniqueById(chunks.flatMap((c) => c.pinned)),
+    meds: medLists === null ? null : uniqueById(medLists.flat()),
+    incidents,
+  }
 }
 
 export async function fetchDailyReports(
