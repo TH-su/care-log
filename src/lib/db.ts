@@ -570,6 +570,8 @@ async function onAuthEvent(event: string): Promise<void> {
   // ログインし直した・抜けた・二段階認証を済ませた: 控えた役割を捨てる（次の fetchMyRole で取り直す。2026-10-15）
   if (event === 'SIGNED_IN' || event === 'SIGNED_OUT' || event === 'USER_UPDATED' || event === 'MFA_CHALLENGE_VERIFIED') {
     forgetMyRole()
+    // 走っている「許可リスト外か」の確かめは前のアカウントのもの。後の呼び出しを相乗りさせない（2026-10-29 反証レビュー）
+    deniedProbeInFlight = null
   }
   if (event !== 'SIGNED_IN' && event !== 'TOKEN_REFRESHED') return
   // ログインし直した: 拒否で止まった退避 op を1回だけ送り直す（F37。権限が直った後なら届く。TOKEN_REFRESHED では解かない）。
@@ -4313,8 +4315,8 @@ async function deniedWhenSettingMissing(): Promise<boolean> {
   // 同じ瞬間に呼ばれた分（入力解禁の旗を同時に取った画面と App）は1本の結果を共有する（2026-10-29 本人指示）。
   // 終わったら（失敗も）外す＝時間の控えではなく、次の呼び出しは改めて問い合わせる
   if (deniedProbeInFlight !== null) return deniedProbeInFlight
-  const run = probeDenied().finally(() => {
-    deniedProbeInFlight = null
+  const run: Promise<boolean> = probeDenied().finally(() => {
+    if (deniedProbeInFlight === run) deniedProbeInFlight = null // ログインし直した後に出た新しい確かめは外さない
   })
   deniedProbeInFlight = run
   return run
