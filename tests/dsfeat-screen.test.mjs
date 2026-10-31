@@ -77,9 +77,11 @@ const jst = (hm, day = DAY) => Date.parse(`${day}T${hm}:00+09:00`)
 describe('1. 検索（表題行の右端の検索欄・端末内の絞り込み）', () => {
   it('検索欄と〔分類で抽出〕は表題行（App のヘッダ）の右端・置けない時は日付バーの右端（畳んでも隠さない）・画面だけ', () => {
     const app = read('App.tsx')
-    assert.match(app, /\{location\.pathname === '\/' && \(\s*<div id="cl-daily-header-slot" className="flex min-w-0 basis-full items-center sm:basis-auto print:hidden" \/>\s*\)\}/)
+    // 2026-10-31（日報の見やすさ・案C）: 置き場は 640px 以上で見出しの右に置き、日付バーも同じ行へ（幅は日付バーの1行ぶん＋余り）
+    assert.match(app, /\{location\.pathname === '\/' && \(\s*<div id="cl-daily-header-slot" className="min-w-0 flex-1 basis-full sm:basis-auto print:hidden" \/>\s*\)\}/)
     assert.match(daily, /setHeaderSlot\(document\.getElementById\('cl-daily-header-slot'\)\)/)
-    assert.match(daily, /\{headerSlot !== null \? createPortal\(searchBar, headerSlot\) : null\}/)
+    assert.match(daily, /\{headerSlot !== null\s*\? createPortal\(<DailyHeaderBar day=\{day\} unit=\{unit\} onGo=\{goDay\} onUnit=\{goUnit\} search=\{searchBar\} \/>, headerSlot\)\s*: null\}/)
+    assert.match(fnSrc(daily, 'DailyHeaderBar'), /persistent=\{search\}/)
     assert.match(daily, /search=\{headerSlot === null \? searchBar : null\}/)
     assert.match(daily, /persistent=\{search \?\? undefined\}/)
     assert.match(daily, /<NoteSearchBar\s+value=\{searchText\}/)

@@ -1457,7 +1457,11 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
     <div className="min-h-screen bg-bg text-ink lg:pl-24">
       <header className="sticky top-0 z-20 border-b border-border bg-surface">
         {/* 文字サイズ200%・狭幅でも画面名が消えないよう、収まらない要素は次の行へ折り返す */}
-        <div className="flex min-h-tap flex-wrap items-center gap-gap px-4 py-2">
+        {/* 日報（'/'）では 640px 以上で折り返さない（見出しと日付バーを1行に・2026-10-31 本人裁定・案C。足りない分は見出しの施設名が
+            先に縮み、それでも足りない時は日付バーの畳む器が中で折り返す・畳む） */}
+        <div
+          className={`flex min-h-tap flex-wrap items-center gap-gap px-4 py-2${location.pathname === '/' ? ' cl-daily-header-row' : ''}`}
+        >
           {back && (
             <button
               type="button"
@@ -1471,22 +1475,34 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
           {/* 施設名は日報の見出しの右に出す（2026-08-31 指示）。
               以前は日報の各日の左上に毎日繰り返し出ていたが、その位置は日付に譲った。
               日報以外の画面では出さない（見出しの横幅を取るだけになるため） */}
-          <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-2">
+          {/* 日報（'/'）の見出しは cl-daily-title（sheet.css）: 640px 以上では伸ばさず、幅が足りない時は日付バーより先に縮む
+              （施設名が「…」で切れる。「日報」の文字は残す）。640px 未満は今までどおり（2026-10-31 本人裁定・案C） */}
+          <div
+            className={
+              location.pathname === '/'
+                ? 'cl-daily-title flex items-baseline gap-2'
+                : 'flex min-w-0 flex-1 flex-wrap items-baseline gap-2'
+            }
+          >
             <h1 className="min-w-tap truncate text-lg font-bold">{screenTitle(location.pathname)}</h1>
             {location.pathname === '/' && facility !== null && (
               <span className="truncate text-sm text-ink2">{facility}</span>
             )}
           </div>
-          {/* 日報の検索欄と〔分類で抽出〕の置き場（2026-10-15 本人回答「表題行の右端に検索欄」）。中身は日報の画面が
-              ここへ描く（DailySheetPage の createPortal）。日報以外の画面では置かない。紙には出さない */}
-          {/* 狭い画面（640px 未満）では1行を取る（見出しの横に詰めると、見出しが縮んで検索欄と重なった・2026-10-15 実測） */}
+          {/* 日報の日付バー（前後日・日付・表示単位・倍率）と検索欄・〔分類で抽出〕の置き場（2026-10-15 本人回答「表題行の右端に
+              検索欄」→ 2026-10-31 本人裁定・案C で日付バーも同じ行へ）。中身は日報の画面がここへ描く（DailySheetPage の
+              createPortal）。日報以外の画面では置かない。紙には出さない（紙の日付バーは日報の画面の中に従来どおり出る） */}
+          {/* 640px 以上は見出しの右に置き、日付バーを1行に並べた幅を取る（余った幅も取る＝検索欄は右端）。行は折り返さない
+              （上の cl-daily-header-row・画面だけ）ので、足りない分は見出しの施設名が先に縮み、それでも足りない時は中の畳む器（CollapsibleBar）が
+              折り返す・畳む。狭い画面（640px 未満）では1行を取る（見出しの横に詰めると、見出しが縮んで検索欄と重なった・2026-10-15 実測） */}
           {location.pathname === '/' && (
-            <div id="cl-daily-header-slot" className="flex min-w-0 basis-full items-center sm:basis-auto print:hidden" />
+            <div id="cl-daily-header-slot" className="min-w-0 flex-1 basis-full sm:basis-auto print:hidden" />
           )}
-          {/* 表示倍率（100/125/150%）は各シート画面の操作バー側に1つだけ置く
-              （契約 §5〜§7）。ヘッダにも出すと ZoomBar が同一画面に2つ並び、
-              片方で切り替えても他方は選択表示が変わらず「現在の倍率」が食い違うため */}
-          <span role="status">
+          {/* 表示倍率は各シート画面の操作バー側に1つだけ置く（契約 §5〜§7。日報は 2026-10-31 から上の置き場の
+              「文字 100% ▾」）。この行に別に置くと倍率の操作が同一画面に2つ並ぶため置かない
+              （値は lib/zoom.ts の1か所なので食い違いはしないが、操作の場所は1つにする） */}
+          {/* 日報（'/'）では表題行を折り返さないので、未送信の札は縮めず1行のまま（cl-daily-status・sheet.css・画面だけ。2026-10-31） */}
+          <span role="status" className={location.pathname === '/' ? 'cl-daily-status' : undefined}>
             {/* 端末に残せていない時（保存領域が一杯・F01）は、閉じる・再読み込みで消えることを件数に添える */}
             {pending > 0 &&
               (unpersisted ? (

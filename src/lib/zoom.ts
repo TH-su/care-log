@@ -3,6 +3,7 @@
 // - 端末ごとの UI 状態として LS.zoom に保存する（原則11。業務データは持たない）
 // - 小さな store（getZoom / subscribeZoom / setZoom）。ZoomBar は useSyncExternalStore で追従する
 //   （ピンチで変わった値もボタンの選択表示に出る）
+// - 2026-10-31: 日報の文字を 16px 基準にした時に、保存済みの倍率を一度だけ 100% に戻す（resetZoomOnce・印 LS.zoomReset）
 // - この部品は DOM の --sheet-zoom を書くだけ。React の再描画は起こさない（表の中身・打ちかけの入力を描き直さない）
 import { LS, ZOOM_STEPS } from './types'
 
@@ -27,8 +28,28 @@ export function snapZoom(raw: number): number {
   return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(clamped / ZOOM_STEP) * ZOOM_STEP))
 }
 
+/**
+ * 倍率を一度だけ 100% に戻す（2026-10-31 本人裁定）。日報の画面の文字を 13px→16px 基準にしたので、
+ * 小さい文字を補うために 125% 等へ上げていた端末は、そのままだと大きくなりすぎる。
+ * 先に印（LS.zoomReset）を書き、書けたと読み返せた時だけ倍率を 100 に書き直す
+ * ＝印が付いた端末では二度と戻さない（印が書けない端末では毎回戻さない＝倍率は今のまま）。
+ * 倍率は日報・バイタル一覧・食事一覧で共通なので、3画面とも 100% に戻る
+ */
+function resetZoomOnce(): void {
+  try {
+    const ls = window.localStorage
+    if (ls.getItem(LS.zoomReset) !== null) return
+    ls.setItem(LS.zoomReset, '1')
+    if (ls.getItem(LS.zoomReset) !== '1') return
+    ls.setItem(LS.zoom, String(DEFAULT_ZOOM))
+  } catch {
+    // 参照・保存できない端末では何もしない（倍率の読み出しは下で安全側へ落ちる）
+  }
+}
+
 /** 保存済みの倍率を照合して読む（範囲外・5 の倍数でない値・壊れた値・参照不能は 100% へ） */
 export function readZoom(): number {
+  resetZoomOnce()
   try {
     const raw = window.localStorage.getItem(LS.zoom)
     if (raw === null || raw.trim() === '') return DEFAULT_ZOOM

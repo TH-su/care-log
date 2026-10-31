@@ -37,8 +37,15 @@ describe('画面上部の操作を畳む', () => {
   it('畳めるのは狭い画面（480px 以下）か、操作が1行に収まらない時だけ・開閉のボタンは 44px 以上', () => {
     const src = bar()
     assert.match(src, /'\(max-width: 480px\)'/)
-    assert.match(src, /const collapsible = !printing && \(narrow \|\| wraps\)/, '印刷で畳んだ形が紙に出る')
-    assert.match(src, /stored === null \? !narrow : stored/, '広い画面の既定が「畳む」になっている（今の見た目が変わる）')
+    // 2026-10-31: 日報の表題行だけ、置ける幅が narrowWidth より狭い時も「狭い」と同じ扱い（narrowAll）。渡さない画面は narrow だけ
+    assert.match(src, /const narrowAll = narrow \|\| boxNarrow/)
+    assert.match(src, /setBoxNarrow\(narrowWidth !== undefined && box\.clientWidth > 0 && box\.clientWidth < narrowWidth\)/)
+    assert.match(src, /const collapsible = !printing && \(narrowAll \|\| wraps\)/, '印刷で畳んだ形が紙に出る')
+    assert.match(src, /stored === null \? !narrowAll : stored/, '広い画面の既定が「畳む」になっている（今の見た目が変わる）')
+    // narrowWidth を渡すのは日報の表題行だけ（バイタル一覧・食事一覧・紙用の日付バーは今までどおり）
+    assert.doesNotMatch(read('pages/VitalsSheetPage.tsx'), /narrowWidth/)
+    assert.doesNotMatch(read('pages/MealsSheetPage.tsx'), /narrowWidth/)
+    assert.equal((read('pages/DailySheetPage.tsx').match(/narrowWidth=/g) ?? []).length, 1)
     assert.match(src, /collapse-bar-toggle [^`"]*min-h-tap min-w-tap/)
   })
 

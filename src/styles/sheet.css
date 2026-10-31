@@ -54,6 +54,9 @@
          .dsheet-day（1日ごとの太線枠）/ .dsheet-head（ブロック見出しの太線）/
          .dsheet-title-note・-care・-night（申し送りのタイトル帯の配色）/
          .dsheet-date（日付セル＝押すとカレンダー）/ .sheet-dense-btn（行内ボタンの高さ）
+       ・日報の見やすさ（2026-10-31 本人裁定・案C・すべて画面だけ）:
+         .dsheet-legible（日報の枠の文字・列幅の差し替え）/ .dsheet-hscroll・-in（発熱者・他症状者の器）/
+         .dsheet-fold（0件の付帯ブロックを隠す）/ .cl-daily-title・.cl-daily-header-row（表題行の1段化・App.tsx）
      それ以外の class 規則（.sheet-frame / .sheet-cell / .sheet-row-* / .sheet-fix-* /
      .sheet-table-meals / .sheet-swatch 等）は
      **参照用の見本であって適用されていない**。寸法・色を変えるときはページ側の Tailwind を直す。
@@ -131,9 +134,13 @@
 
    :root と .sheet-frame の両方で算出する。カスタムプロパティの var() は
    宣言された要素で解決されるため、両方に書かないと
-   「フレームに --sheet-zoom を直接指定した場合」に再計算されない。 */
+   「フレームに --sheet-zoom を直接指定した場合」に再計算されない。
+   .dsheet-legible（日報の枠・2026-10-31）も同じ理屈でここに並べる：日報の画面だけ素の値（--*-base）を
+   差し替えるので、その要素で契約名を算出し直さないと :root で計算済みの 13px 基準の値が継がれてしまう。
+   印刷では差し替えが無い（@media screen だけ）ので、ここで算出し直しても :root と同じ値になる */
 :root,
-.sheet-frame {
+.sheet-frame,
+.dsheet-legible {
   --sheet-font: calc(var(--sheet-font-base) * var(--sheet-zoom, 1));
   --sheet-row-h: calc(var(--sheet-row-h-base) * var(--sheet-zoom, 1));
   --sheet-row-h-note: calc(var(--sheet-row-h-note-base) * var(--sheet-zoom, 1));
@@ -895,6 +902,14 @@
      ＝「日が変わった」と「同じ日の別の欄」を余白の広さだけで見分けられるようにする */
   margin-top: var(--sp-6); /* 32px */
 }
+/* 画面では日と日の間を 16px に詰める（2026-10-31 本人裁定・案C。表の見える行を増やす）。
+   同日内のブロック間（12px）より広いまま＝余白の序列「日の切れ目 ＞ 同日内の欄の切れ目」は保つ。
+   印刷は 32px のまま（原則2） */
+@media screen {
+  .dsheet-day + .dsheet-day {
+    margin-top: var(--sp-4); /* 16px */
+  }
+}
 
 /* 同じ日の中で、前後のブロックから離して置く欄（デイサービス）。
    日が変わる余白（32px）より狭い 12px にする＝余白の広さの序列を
@@ -1147,6 +1162,156 @@ main:has(.dsheet-frame) {
 @media print {
   body:has(section.dsheet-day) nav[aria-label='メインナビゲーション'] {
     display: none;
+  }
+}
+
+/* ── 日報の画面の文字と列幅（2026-10-31 本人裁定・案C「日報の見やすさ」）──────────────
+   日報の枠（SheetFrame に付ける .dsheet-legible）の中だけ、画面に限って素の値（--*-base）を差し替える。
+   シートの文字 13→16px・行 23→26px・見出し 24→26px。列幅は本人裁定の目安（対象 150・分類 92・記入者 64・ブロック名 96・
+   氏名 118・日付セル 170・出勤者見出し 56・出勤者枠 68）を基に、16px の文字で見出しが「…」で切れる列だけ実測で広げた（下の各行）。
+   契約名（--sheet-font・--w-* 等）は冒頭の「:root, .sheet-frame, .dsheet-legible」で同じ要素に算出し直すので、
+   倍率（--sheet-zoom）はこれまでどおり掛かる。バイタル一覧・食事一覧はこの class を持たない＝変わらない。
+   印刷はこの指定が効かない（@media screen）＝紙は :root の 13px 基準のまま（原則2・1px も変えない） */
+@media screen {
+  .dsheet-legible {
+    --sheet-font-base: 1rem; /* 16px */
+    --sheet-row-h-base: 1.625rem; /* 26px（SheetCell の入力欄の高さ。日報の行と同じにそろえる） */
+    --sheet-row-h-note-base: 1.625rem; /* 26px */
+    --sheet-head-h-base: 1.625rem; /* 26px */
+
+    /* 198px 対象（2026-10-31 検収の指摘で目安 150px から広げた）。「スタッフへ（全体）」144px ＋余白8 ＋「✕」44px ＋罫線1 が
+       切れない幅＝取り違え防止の情報を「…」にしない（「氏名5字＋様」139px も入る）。外出者の「付添」も同じ幅。
+       空いた分は内容の列（残りの幅）から出す */
+    --w-target-base: 12.375rem;
+    --w-category-base: 5.75rem; /* 92px  分類の札「支援調整」1枚 */
+    --w-reporter-base: 4rem; /* 64px  記入者 */
+    /* 122px ブロック名「他症状者」64px ＋間隔4 ＋〔＋行〕44px ＋余白8 ＋罫線1（目安 96px では「外…」に切れた・2026-10-31 実測） */
+    --w-block-base: 7.625rem;
+    /* 156px 氏名（同じ検収の指摘で目安 118px から広げた）。外出者・外泊者の行は氏名と「✕」が同じ欄にあるので、
+       全角6字＋空白の太字 101px ＋余白8 ＋「✕」44px ＋罫線1 が切れない幅（2026-10-31 実測）。発熱者・他症状者の氏名も同じ幅 */
+    --w-name-base: 9.75rem;
+    /* 176px 日付セル「26年10月31日(土)」18px の太字 163.5px ＋余白8 ＋罫線1（目安 170px では2行に折り返した・同日実測） */
+    --w-facility-base: 11rem;
+    /* 58px 「施設長」「出勤者」16px の太字 48px ＋余白8 ＋罫線1（目安 56px では「施…」に切れた・同日実測） */
+    --w-attend-label-base: 3.625rem;
+    --w-attend-base: 4.25rem; /* 68px  出勤者1枠 */
+    /* 25px 出発〜到着の間の「〜」16px ＋余白8 ＋罫線1（20px のままでは「〜」が欠けた・2026-10-31 実測） */
+    --w-tilde-base: 1.5625rem;
+
+    /* 数値の列（2026-10-31 実測・Hiragino＋記号は --font-num・しきい値の太字で測った値 ＋ 余白8 ＋ 罫線1）。
+       「38.4↑↑」54.3px → 64px／「151↑↑」「101↑↑」「100↓↓」50.0px → 60px（時刻「10:00」47.1px もこの幅） */
+    --w-temp-base: 4rem; /* 64px */
+    --w-spo2-base: 3.75rem; /* 60px */
+    --w-pulse-base: 3.75rem; /* 60px */
+    /* 時刻の列（TSX の W_TIME）。見出し「1回目 時」が 16px の太字で切れない幅（同日実測）。印刷はこの変数が無い＝脈と同じ幅 */
+    --dsheet-w-time: calc(4.75rem * var(--sheet-zoom, 1)); /* 76px 「1回目 時」64.7px ＋余白8 ＋罫線1 */
+    /* 外出者・外泊者の「登録」の列（TSX の W_REG）。「✓ 登録済」69.3px ＋余白8 ＋罫線1 が1行に収まる幅（同日実測。
+       64px では2行に折れて行の高さが倍になった）。申し送りの記入者の列（--w-reporter）は変えない。印刷はこの変数が無い */
+    --dsheet-w-reg: calc(5rem * var(--sheet-zoom, 1));
+
+    /* 表の最小幅（画面だけ）。発熱者・他症状者は自分の器の中で横にずらす（.dsheet-hscroll）ので、
+       表全体の最小幅は外出者の行の固定列（ブロック名・氏名・出発・〜・到着・付添・登録）＋外出先の最小（氏名と同じ幅）で決める。
+       100% で 975px＝iPad 横（表の幅 1,052px）では横スクロールなし（125% では 1,219px で横スクロールあり）。
+       iPad 縦・iPhone は今と同じく横スクロールあり。
+       印刷はこの変数が無い＝従来の SHEET_MIN_W（発熱者の固定列の合計）のまま */
+    --dsheet-sheet-min-w: calc(
+      var(--w-block) + var(--w-name) * 2 + var(--w-datelink) * 2 + var(--w-tilde) + var(--w-target) + var(--dsheet-w-reg) +
+        var(--sheet-rule-bold) * 2
+    );
+  }
+  /* 血圧の列（日報だけの --dsheet-w-bp。TSX の SHEET_BP_W_CLASS＝84px を画面だけ上書きする。印刷側の print: の指定はそのまま）。
+     「300/200↑↑」92.5px ＋ 余白8 ＋ 罫線1 → 102px（倍率に追従） */
+  .dsheet-legible .sheet-dense {
+    --dsheet-w-bp: calc(6.375rem * var(--sheet-zoom, 1));
+  }
+}
+
+/* 表題行と1日目の枠の間を詰める（2026-10-31 検収の指摘。画面だけ）。日付バーを表題行へ移した後、main の上の余白（16px）と
+   隠した紙用の日付バーの次に付く間隔（8px）が残っていた。main の上の余白を 8px に、紙用の日付バーのすぐ後に来た時の
+   間隔を 0 にする（間に案内の帯がある時は今までどおり空ける）。他の端末の入力中の一言の1行（PresenceSummary）は
+   「出ても表を押し下げない」ための予約なので残す。紙は従来の余白のまま */
+@media screen {
+  main:has(.dsheet-frame) {
+    padding-top: var(--sp-2);
+  }
+  .space-y-4 > .dsheet-printbar + .dsheet-stack {
+    margin-top: 0 !important;
+  }
+  /* 表題行の検索欄は 11rem（日付バーと施設名を1行に収めるため。日付バーの右端に置く時は今のまま） */
+  #cl-daily-header-slot .dsheet-search-input {
+    width: 11rem;
+  }
+}
+
+/* 発熱者・他症状者の器（2026-10-31 本人裁定(1)）。16px では発熱者の3回分が iPad 横の表の幅に入らないので、
+   この2つの表だけを器の中で横にずらす（申し送りは横スクロールなし）。器の中の箱（.dsheet-hscroll-in）の最小幅は
+   発熱者の固定列の合計（TSX が --dsheet-fever-min-w に渡す）。画面だけ：印刷では器も箱も何もしない＝紙は従来どおり。
+   縦は切らない（overflow-y: hidden は 0.5px の丸めで縦のスクロールバーが出るのを防ぐだけ。中に縦へ出る物は無い）。
+   中の sticky（行の下の一言の NARROW_STICKY＝left: 0）はこの器を基準に左へ留まる */
+@media screen {
+  .dsheet-hscroll {
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+    /* 表が枠より広い端末（iPhone・iPad 縦）で外側の枠を横にずらしても、器は枠の左に留まり、幅は枠の内幅まで
+       （--dsheet-view-w は DailySheetPage が枠を測って書く）。器の中の行の下の一言（NARROW_STICKY）が器ごと画面の外へ
+       流れないようにする（2026-10-31 検収の指摘）。表が枠に収まる端末では何も変わらない */
+    position: sticky;
+    left: 0;
+    max-width: var(--dsheet-view-w, 100%);
+  }
+  /* 器の端のセルのフォーカスの枠が overflow で欠けないよう、器の中だけ枠を内側に描く（.sheet-cell-edit と同じ作法） */
+  .dsheet-hscroll :focus-visible {
+    outline: 2px solid var(--c-focus);
+    outline-offset: -2px;
+    box-shadow: none;
+  }
+  .dsheet-hscroll-in {
+    min-width: var(--dsheet-fever-min-w, 0px);
+  }
+}
+
+/* 0件の付帯ブロック（外出者・外泊者・発熱者・他症状者で、保存済みの行も書きかけ・未送信の行も無いもの）は、
+   画面ではブロックごと隠して「外泊者 0名〔＋行〕｜他症状者 0名〔＋行〕」の1行にまとめる（2026-10-31 本人裁定）。
+   ブロックの中身（見出し・空行1本）は DOM に残したまま隠すだけ＝印刷は今のとおり全ブロック＋空行を出す */
+@media screen {
+  .dsheet-fold {
+    display: none;
+  }
+}
+
+/* 日報の表題行の見出し（App.tsx・'/' の時だけ。2026-10-31 本人裁定・案C「上部を1段に」）。
+   640px 未満は今までどおり（伸びて残りを取る・施設名は折り返す）。640px 以上は見出しを中身の幅に留め、行の幅が足りない時は
+   右の日付バー（#cl-daily-header-slot）より先にこちらが縮む（縮む割合を桁違いに大きくする。1000 程度では日付バーにも
+   0.2px ほど縮みが配られ、ちょうど収まる幅の時に日付バーが2行目へ折り返した＝2026-10-31 実測）＝施設名が「…」で切れ、
+   「日報」の文字（44px）は残る。施設名の全文は広い画面で見える。
+   紙（印刷）は 640px 未満と同じ指定＝以前の flex-1・折り返し・min-w-0 と同じ（表題行の紙の見た目を変えない） */
+.cl-daily-title {
+  flex: 1 1 0%;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+@media screen and (min-width: 640px) {
+  /* 表題行そのものも折り返さない（App.tsx が '/' の時だけ付ける。Tailwind の flex-wrap より強くするため header を前に付ける） */
+  header .cl-daily-header-row {
+    flex-wrap: nowrap;
+  }
+  .cl-daily-title {
+    flex: 0 1000000 auto;
+    flex-wrap: nowrap;
+    /* 「日報」（--fs-lg の2文字）が端末の文字の大きさ（rem）に付いて大きくなっても切れない幅。44px より狭くはしない */
+    min-width: max(var(--tap-min), 2.5rem);
+  }
+  /* 縮むのは施設名だけ（「日報」の文字は縮めない） */
+  .cl-daily-title > h1 {
+    flex-shrink: 0;
+  }
+  /* 未送信の札（「▲ 未送信 n件・端末に残せていません」）は縮めず1行のまま（折り返さない行の中で縦に割れていた・
+     2026-10-31 反証レビュー）。足りない幅は施設名 → 日付バー（畳む器が折り返す・畳む）の順に譲る */
+  header .cl-daily-status {
+    flex-shrink: 0;
+    white-space: nowrap;
   }
 }
 
