@@ -1179,10 +1179,11 @@ main:has(.dsheet-frame) {
     --sheet-row-h-note-base: 1.625rem; /* 26px */
     --sheet-head-h-base: 1.625rem; /* 26px */
 
-    /* 198px 対象（2026-10-31 検収の指摘で目安 150px から広げた）。「スタッフへ（全体）」144px ＋余白8 ＋「✕」44px ＋罫線1 が
-       切れない幅＝取り違え防止の情報を「…」にしない（「氏名5字＋様」139px も入る）。外出者の「付添」も同じ幅。
-       空いた分は内容の列（残りの幅）から出す */
-    --w-target-base: 12.375rem;
+    /* 144px 対象（2026-11-01 本人指示「対象の枠は氏名の長さと同じ程度に」で 198px から詰めた）。
+       全角6字＋空白の氏名（約90px）＋余白8 ＋「✕」（押せる幅 44px）＋罫線1 が1行に入る幅（128px では6字が2行に折れた・同日実測）。
+       それより長い表示（「スタッフへ（全体）」・長い氏名）は「…」にせず画面だけ2行に折り返す（.dsheet-pick-wrap）。
+       外出者の「付添」も同じ幅。空いた分は内容の列（残りの幅）へ戻る */
+    --w-target-base: 9rem;
     --w-category-base: 5.75rem; /* 92px  分類の札「支援調整」1枚 */
     --w-reporter-base: 4rem; /* 64px  記入者 */
     /* 122px ブロック名「他症状者」64px ＋間隔4 ＋〔＋行〕44px ＋余白8 ＋罫線1（目安 96px では「外…」に切れた・2026-10-31 実測） */
@@ -1260,6 +1261,13 @@ main:has(.dsheet-frame) {
     position: sticky;
     left: 0;
     max-width: var(--dsheet-view-w, 100%);
+  }
+  /* 対象の欄に入らない名前は「…」にせず折り返す（PickerCell の wrap・2026-11-01）。紙はこの規則が当たらず従来の1行のまま */
+  .dsheet-legible .dsheet-pick-wrap {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
   }
   /* 器の端のセルのフォーカスの枠が overflow で欠けないよう、器の中だけ枠を内側に描く（.sheet-cell-edit と同じ作法） */
   .dsheet-hscroll :focus-visible {
