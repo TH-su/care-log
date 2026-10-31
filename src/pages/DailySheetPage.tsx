@@ -25,6 +25,17 @@
 //  16) 1行おきに薄いグレーの縞（.sheet-alt）。しきい値の色・行の色（NoteColor）・土日の色を
 //      持つセルはセル側が上に来る＝縞に負けない（縞は行の器、意味色はセル）
 //
+// 2026-10-31 の見やすさの改善（本人裁定・案C。sheet-contracts.md §0-2 の表の最後の行。すべて画面だけ＝紙は1pxも変えない）:
+//  17) 日報の枠（.dsheet-legible）の中だけ、シートの文字 13→16px・行 23→26px・見出し 24→26px と列幅を差し替える（sheet.css）。
+//      バイタル一覧・食事一覧は変えない
+//  18) 上部を1段に: アプリの見出し（日報＋施設名）の右に日付バーと検索欄を並べる（表題行の置き場へ DailyHeaderBar を portal）。
+//      倍率はここだけ「文字 100% ▾」の選択欄1つ（ZoomSelect）。紙には従来の日付バー（DailyTopBar）を出す
+//  19) 日と日の間 32→16px（sheet.css。同日内のブロック間 12px より広い序列は保つ）
+//  20) 0件の付帯ブロックは「外泊者 0名〔＋行〕｜他症状者 0名〔＋行〕」の1行にまとめる（SideFoldSummary・空行は隠すだけ＝紙は今のとおり）。
+//      指示9（常時表示）は紙にだけ残る
+//  21) 発熱者・他症状者の表だけ、器（.dsheet-hscroll）の中で横にずらす。表全体の最小幅は外出者の行の固定列で決める（SHEET_VIEW_MIN_W）
+//  22) 倍率の保存値を一度だけ 100% に戻す（lib/zoom.ts の resetZoomOnce）
+//
 // 10日表示の取得（管理者指示「全件ロードしない」）:
 //   fetchDailyReport は1日単位なので、日ごとに取りに行く。
 //   ・同時に走らせるのは MAX_PARALLEL_LOADS 件まで（回線の細い現場で一斉に叩かない）
@@ -74,6 +85,7 @@ import {
   SheetFrame,
   writeSheetPref,
   ZoomBar,
+  ZoomSelect,
 } from '../components/sheet'
 import {
   DbError,
@@ -550,8 +562,19 @@ const FEVER_SETS = 3
  */
 const W_BP = 'var(--dsheet-w-bp, calc(var(--w-sys) + var(--w-dia)))'
 
-/** 発熱者の1セット（時 KT SpO2 BP P）の幅。時と脈は同じ --w-pulse を使う */
-const W_FEVER_SET = `calc(var(--w-pulse) * 2 + var(--w-temp) + var(--w-spo2) + ${W_BP})`
+/**
+ * 時刻の列の幅。印刷とこれまでの画面は脈と同じ --w-pulse。日報の画面だけ、見出し「1回目 時」が 16px で切れないよう
+ * sheet.css の .dsheet-legible が --dsheet-w-time を持つ（2026-10-31）
+ */
+const W_TIME = 'var(--dsheet-w-time, var(--w-pulse))'
+/**
+ * 外出者・外泊者の「登録」の列の幅。印刷とこれまでの画面は記入者と同じ --w-reporter。日報の画面だけ「✓ 登録済」が
+ * 16px で1行に収まるよう .dsheet-legible が --dsheet-w-reg を持つ（2026-10-31。申し送りの記入者の列は変えない）
+ */
+const W_REG = 'var(--dsheet-w-reg, var(--w-reporter))'
+
+/** 発熱者の1セット（時 KT SpO2 BP P）の幅。時は W_TIME（印刷では脈と同じ --w-pulse） */
+const W_FEVER_SET = `calc(${W_TIME} + var(--w-pulse) + var(--w-temp) + var(--w-spo2) + ${W_BP})`
 /**
  * シート（器）の最小幅。いちばん列の多い発熱者ブロック（ブロック名＋氏名＋3セット）の固定列の合計に、
  * 1日ぶんの太線枠（--sheet-rule-bold × 2）を足した値。
@@ -560,6 +583,17 @@ const W_FEVER_SET = `calc(var(--w-pulse) * 2 + var(--w-temp) + var(--w-spo2) + $
  * （sheet-contracts.md §5「長文は行が伸びる（clamp しない）」）。
  */
 const SHEET_MIN_W = `calc(var(--w-block) + var(--w-name) + ${W_FEVER_SET} * ${FEVER_SETS} + var(--sheet-rule-bold) * 2 + var(--dsheet-del-cols, 0px))`
+/**
+ * 器に当てる最小幅（2026-10-31 本人裁定・案C）。画面では日報の枠（.dsheet-legible）が --dsheet-sheet-min-w を持ち、
+ * 発熱者・他症状者を除いた表の固定列で決まる（その2つは自分の器 .dsheet-hscroll の中で横にずらす＝sheet.css）。
+ * 印刷ではその変数が無いので従来の SHEET_MIN_W のまま（紙の幅・改ページを変えない）
+ */
+const SHEET_VIEW_MIN_W = `var(--dsheet-sheet-min-w, ${SHEET_MIN_W})`
+/**
+ * 発熱者・他症状者の器の中の箱の最小幅（画面だけ・sheet.css の .dsheet-hscroll-in）。発熱者の固定列（ブロック名＋氏名＋3回分＋「✕」の列）の合計。
+ * 他症状者も同じ箱に入れて、発熱者の1回目と列と線をそろえたまま一緒に横へずれる
+ */
+const FEVER_MIN_W = `calc(var(--w-block) + var(--w-name) + ${W_FEVER_SET} * ${FEVER_SETS} + var(--dsheet-del-cols, 0px))`
 /**
  * 発熱者の各回の後ろに足した「✕」の列（DelColCell・2026-10-09）の幅の合計。画面だけ器の最小幅に足す
  * （足さないと、いちばん広い発熱者の行が器からはみ出し、.dsheet-body の content-visibility で切れて
@@ -584,6 +618,75 @@ const SHEET_BP_W_CLASS = '[--dsheet-w-bp:calc(5.25rem*var(--sheet-zoom,1))] prin
  * 空行は値が入るまで保存しない（空データを作らない）ので、記録は増えない。
  */
 const MIN_ROWS = { outing: 1, overnight: 1, fever: 1, symptom: 1, note: 1 } as const
+
+/** 付帯ブロックの種類（0件の時に画面で1行にまとめる単位・2026-10-31） */
+type SideKind = 'outing' | 'overnight' | 'fever' | 'symptom'
+/** まとめた1行に並べる順と名前（表の上から下の順） */
+const SIDE_FOLD_ORDER: readonly { kind: SideKind; title: string }[] = [
+  { kind: 'outing', title: '外出者' },
+  { kind: 'overnight', title: '外泊者' },
+  { kind: 'fever', title: '発熱者' },
+  { kind: 'symptom', title: '他症状者' },
+]
+/** 付帯ブロックの section の id（〔＋行〕で開いた後に、その空行へフォーカスを移すため） */
+function foldSectionId(day: string, kind: SideKind): string {
+  return `cl-side-${day}-${kind}`
+}
+
+/**
+ * 0件の付帯ブロックを画面で畳むか（2026-10-31 本人裁定・純関数）。畳むのは次の全部がそろうブロックだけ:
+ *   ・この日の表示の間に一度も画面に出ていない（shown に無い）。一度出たブロック（保存済みの行があった・〔＋行〕で開いた）は、
+ *     その後に0件へ戻っても畳まない＝セルの中で打ちかけの文字（SheetCell の内部の下書き）がある間に、他の端末の削除などで
+ *     ブロックごと隠れることが無い（2026-10-31 反証レビュー）。中のセルにフォーカスが入るのは出ている時だけなので、これに含まれる
+ *   ・保存済みの行が0件
+ *   ・その種類の書きかけの行が全部空（送信待ち locked・行の一言 status・値のどれも無い）
+ *   ・発熱者・他症状者は、その種類の止まっている入力（競合・他の端末で取り消された入力の控え）が無い
+ */
+function foldedSides(x: {
+  shown: ReadonlySet<SideKind>
+  counts: Readonly<Record<SideKind, number>>
+  outingDrafts: readonly OutingDraft[]
+  vitalDrafts: readonly VitalDraft[]
+  /** 止まっている入力の種類（HeldVital.base.kind） */
+  heldKinds: readonly string[]
+  status: Readonly<Record<string, unknown>>
+}): Record<SideKind, boolean> {
+  const outingClean = (d: OutingDraft) =>
+    !d.locked &&
+    x.status[d.key] === undefined &&
+    d.residentId == null &&
+    d.place.trim() === '' &&
+    d.startAt === '' &&
+    d.endText === '' &&
+    d.companion.trim() === ''
+  const vitalClean = (d: VitalDraft) =>
+    !d.locked &&
+    x.status[d.key] === undefined &&
+    d.residentId == null &&
+    d.symptom.trim() === '' &&
+    !d.sets.some((v) => v.at || v.temp || v.spo2 || v.bp || v.pulse)
+  const heldOf = (symptom: boolean) => x.heldKinds.some((k) => (k === 'symptom') === symptom)
+  return {
+    outing:
+      !x.shown.has('outing') &&
+      x.counts.outing === 0 &&
+      x.outingDrafts.every((d) => d.kind !== 'outing' || outingClean(d)),
+    overnight:
+      !x.shown.has('overnight') &&
+      x.counts.overnight === 0 &&
+      x.outingDrafts.every((d) => d.kind !== 'overnight' || outingClean(d)),
+    fever:
+      !x.shown.has('fever') &&
+      x.counts.fever === 0 &&
+      !heldOf(false) &&
+      x.vitalDrafts.every((d) => d.kind !== 'observation' || vitalClean(d)),
+    symptom:
+      !x.shown.has('symptom') &&
+      x.counts.symptom === 0 &&
+      !heldOf(true) &&
+      x.vitalDrafts.every((d) => d.kind !== 'symptom' || vitalClean(d)),
+  }
+}
 
 /** 10日表示の区切り（1〜10 / 11〜20 / 21〜月末。月末が31日なら 21〜31） */
 const BLOCK_STARTS = [1, 11, 21] as const
@@ -1951,12 +2054,15 @@ function LeadCell({ text }: { text: string }) {
  * 付帯ブロックの枠（外出者・外泊者・発熱者・他症状者）。
  * 2026-08-28 の指示9で「常時表示・折りたたみなし」になったため CollapsibleBlock は使わない
  * （0件でも枠と空行を出す＝実物のスプシと同じ）。
+ * 2026-10-31（本人裁定）から、画面では0件のブロックを隠して1行（SideFoldSummary）にまとめる（folded）。紙は従来どおり出す。
  * 見出し行は［ブロック名＋＋行］＋列見出しで、下罫線を太線にする（指示「見出しは黒枠・太線」）。
  */
 function SheetBlock({
   title,
   head,
   onAdd,
+  sectionId,
+  folded = false,
   children,
 }: {
   title: string
@@ -1964,10 +2070,14 @@ function SheetBlock({
   head: ReactNode
   /** 省略＝行を足せない（入力封鎖中） */
   onAdd?: () => void
+  /** section の id（まとめた1行の〔＋行〕で開いた後のフォーカスの行き先を探す・foldSectionId） */
+  sectionId?: string
+  /** 0件のため画面では隠す（まとめた1行に出る・2026-10-31）。印刷では出す（sheet.css の .dsheet-fold は @media screen だけ） */
+  folded?: boolean
   children: ReactNode
 }) {
   return (
-    <section aria-label={title}>
+    <section id={sectionId} aria-label={title} className={folded ? 'dsheet-fold' : undefined}>
       <HeadRow className="dsheet-head">
         <Cell width="var(--w-block)" className="flex items-center gap-1">
           <span className="truncate">{title}</span>
@@ -1977,6 +2087,39 @@ function SheetBlock({
       </HeadRow>
       {children}
     </section>
+  )
+}
+
+/**
+ * 0件の付帯ブロックをまとめた1行（2026-10-31 本人裁定）。「外泊者 0名〔＋行〕｜他症状者 0名〔＋行〕」。
+ * 〔＋行〕はそのブロックを空行1本つきで開く（onOpen 省略＝入力封鎖中は出さない）。画面だけ（紙は全ブロックを出す）。
+ * 1つも無い時は何も描かない（行の高さも取らない）
+ */
+function SideFoldSummary({
+  items,
+}: {
+  items: readonly { kind: SideKind; title: string; onOpen?: () => void }[]
+}) {
+  if (items.length === 0) return null
+  return (
+    <div
+      className="flex flex-wrap items-center gap-x-2 border-b border-border-strong bg-surface2 px-1 font-bold text-ink2 print:hidden"
+      style={{ minHeight: 'var(--sheet-head-h)' }}
+    >
+      {items.map((x, i) => (
+        <span key={x.kind} className="inline-flex items-center gap-1">
+          {i > 0 ? (
+            <span aria-hidden="true" className="text-ink3">
+              ｜
+            </span>
+          ) : null}
+          <span>
+            {x.title} <span className="tabular text-ink">0名</span>
+          </span>
+          {x.onOpen ? <AddRowButton label={`${x.title}に1行追加`} onClick={x.onOpen} /> : null}
+        </span>
+      ))}
+    </div>
   )
 }
 
@@ -3237,18 +3380,25 @@ export function DailySheetPage({
   return (
     <VitalMarksContext.Provider value={vitalMarks}>
     <div className="space-y-4">
-      {/* 日付バー（前後日・カレンダー・表示単位・表示倍率）。狭い画面・1行に収まらない時は畳める（2026-09-29） */}
-      <DailyTopBar
-        day={day}
-        unit={unit}
-        onGo={goDay}
-        onUnit={goUnit}
-        // 表題行に置けない時だけ、日付バーの右端に置く（畳んでも隠さない＝狭い画面でも検索に辿り着ける）
-        search={headerSlot === null ? searchBar : null}
-      />
-      {/* 検索欄と〔分類で抽出〕は表題行（App のヘッダ）の右端（2026-10-15 仕様 §1）。ヘッダは上に残るので、
-          スクロールしても検索できる */}
-      {headerSlot !== null ? createPortal(searchBar, headerSlot) : null}
+      {/* 日付バー（前後日・カレンダー・表示単位・表示倍率）。狭い画面・1行に収まらない時は畳める（2026-09-29）。
+          表題行に置ける時（App の中）は、画面では表題行の1段（下の DailyHeaderBar）を使い、ここは紙に出すだけにする
+          （2026-10-31 本人裁定・案C。表題行は紙に出ないので、紙の見た目は従来の日付バーのまま＝原則2）。
+          hidden は class で付ける（hidden 属性にすると space-y の間隔の数え方が変わり、紙の余白が動く） */}
+      <div className={headerSlot === null ? undefined : 'dsheet-printbar hidden print:block'}>
+        <DailyTopBar
+          day={day}
+          unit={unit}
+          onGo={goDay}
+          onUnit={goUnit}
+          // 表題行に置けない時だけ、日付バーの右端に置く（畳んでも隠さない＝狭い画面でも検索に辿り着ける）
+          search={headerSlot === null ? searchBar : null}
+        />
+      </div>
+      {/* 表題行（App のヘッダ）に、日付バーと検索欄・〔分類で抽出〕を1段で置く（2026-10-31 本人裁定・案C。検索欄の場所は
+          2026-10-15 仕様 §1 のとおり右端）。ヘッダは上に残るので、スクロールしても日を移せる・検索できる */}
+      {headerSlot !== null
+        ? createPortal(<DailyHeaderBar day={day} unit={unit} onGo={goDay} onUnit={goUnit} search={searchBar} />, headerSlot)
+        : null}
 
       {limits.failed ? <VitalLimitsFailedNote className="" onRetry={retryLimits} /> : null}
 
@@ -3347,7 +3497,7 @@ export function DailySheetPage({
 
       {/* 要約の行と表の枠は間を詰めて1つにまとめる（B1 の余白・2026-09-29。上の操作の行との間も半分に）。
           表の見える高さを増やすため。要約の行は無い時も1行の高さを取る（出ても表を押し下げない＝従来どおり） */}
-      <div className="!mt-2 space-y-1">
+      <div className="dsheet-stack !mt-2 space-y-1">
         {/* 他の端末が入力中のバイタルの欄の要約（誰が・どこを）。無い時も1行の高さを取る＝出ても表を押し下げない */}
         <PresenceSummary
           text={presence.summary((p) => {
@@ -3366,15 +3516,16 @@ export function DailySheetPage({
             枠が縦のスクロールの器になるので、日付の行は CSS の sticky（top: 0）で枠の上に残る＝スクロールのたびに
             位置を計算し直す処理が要らない（iPhone で縦のスクロールが重かった原因）。印刷では高さの上限だけを外し、
             従来どおり全部の行を紙へ流す（横の扱いは従来の枠のまま＝紙の見た目・改ページを変えない） */}
-        <SheetFrame className="dsheet-frame sheet-frame-fit print:!max-h-none">
-          {/* 器の幅は「画面幅」か「固定列の合計（SHEET_MIN_W）」の広い方で決める。
+        {/* dsheet-legible: 日報の画面だけ文字 16px・行 26px と列幅を差し替える（2026-10-31 本人裁定・sheet.css。印刷は従来のまま） */}
+        <SheetFrame className="dsheet-frame dsheet-legible sheet-frame-fit print:!max-h-none">
+          {/* 器の幅は「画面幅」か「固定列の合計（SHEET_MIN_W・画面では SHEET_VIEW_MIN_W＝2026-10-31）」の広い方で決める。
               w-max（＝width: max-content）にすると器の幅が中身の最大コンテンツ幅になり、
               申し送りの長文1件でシート全体が横に伸びて本文が1行のまま折り返さなくなる
               （sheet-contracts.md §5「長文は行が伸びる（clamp しない）」が成立しない）。
               狭い画面では固定列の合計まで SheetFrame 側が横スクロールする。
               sheet-dense＝「行が縦に連続する場所」の印。sheet.css がこの中の
               当たり判定の拡張量（--sheet-hit-pad）を 0 にする＝隣接行の誤タップを防ぐ */}
-          <div className={`sheet-dense ${SHEET_DEL_COLS_CLASS} ${SHEET_BP_W_CLASS}`} ref={measureSheetView} style={{ minWidth: SHEET_MIN_W }}>
+          <div className={`sheet-dense ${SHEET_DEL_COLS_CLASS} ${SHEET_BP_W_CLASS}`} ref={measureSheetView} style={{ minWidth: SHEET_VIEW_MIN_W }}>
             {visibleDays.map((d) => (
               <section
                 key={d}
@@ -3525,6 +3676,12 @@ function DaySheet({
   const [outingDrafts, setOutingDrafts] = useState<OutingDraft[]>([])
 
   const [status, setStatus] = useState<Record<string, RowStatus>>({})
+  /**
+   * この日の表示の間に一度でも画面に出た付帯ブロック（保存済みの行があった・まとめた1行の〔＋行〕で開いた・2026-10-31）。
+   * 出たブロックは畳み直さない（foldedSides）＝入力中に隠れない。この日の枠の中だけの表示の状態
+   * （端末には残さない＝日・業務データに紐づくため原則11の対象外）
+   */
+  const [shownSides, setShownSides] = useState<ReadonlySet<SideKind>>(() => new Set())
   /**
    * 読み込みで基準値の待ちを打ち切った後に、違う基準値が届いた（発熱者は前の基準で選んだまま）。自動では読み直さず、
    * 日の見出しに〔最新に更新〕で選び直す旨を出す（自動の読み直しは失敗の繰り返し・入力中の行のずれを起こすため＝反証レビュー6巡目 中1・軽2）
@@ -5890,6 +6047,45 @@ function DaySheet({
   const outRows = useMemo(() => outings.filter((o) => o.kind === 'outing'), [outings])
   const stayRows = useMemo(() => outings.filter((o) => o.kind === 'overnight'), [outings])
 
+  // ── 0件の付帯ブロックを画面で1行にまとめる（2026-10-31 本人裁定）──────────
+  // 条件は foldedSides（純関数）。空行（MIN_ROWS）は作ったまま CSS で隠す（.dsheet-fold・画面だけ）＝紙は今のとおり全ブロック＋空行。
+  // 空行は値が入るまで保存しない・書きかけにも数えないので、記録・書きかけの判定・切り替え前の確認（leaveGuard）は変わらない
+  const folded = useMemo(
+    (): Record<SideKind, boolean> =>
+      foldedSides({
+        shown: shownSides,
+        counts: { outing: outRows.length, overnight: stayRows.length, fever: feverRows.length, symptom: symptomRows.length },
+        outingDrafts,
+        vitalDrafts,
+        heldKinds: Object.values(vitalConflicts).map((c) => c.base.kind),
+        status,
+      }),
+    [shownSides, outRows.length, stayRows.length, feverRows.length, symptomRows.length, outingDrafts, vitalDrafts, vitalConflicts, status],
+  )
+  // 画面に出たブロックを控える（次の描画からは0件に戻っても畳まない＝入力中のセルごと隠れない・2026-10-31 反証レビュー）
+  useEffect(() => {
+    if (phase !== 'ready') return
+    const add = SIDE_FOLD_ORDER.map((x) => x.kind).filter((k) => !folded[k] && !shownSides.has(k))
+    if (add.length === 0) return
+    setShownSides((cur) => {
+      const next = new Set(cur)
+      for (const k of add) next.add(k)
+      return next
+    })
+  }, [phase, folded, shownSides])
+  /** まとめた1行の〔＋行〕: そのブロックを開き（空行1本はもう作ってある）、その空行の氏名の欄へフォーカスを移す */
+  const unfold = useCallback(
+    (kind: SideKind) => {
+      setShownSides((cur) => new Set(cur).add(kind))
+      window.requestAnimationFrame(() => {
+        const sec = document.getElementById(foldSectionId(day, kind))
+        const btn = sec?.querySelector<HTMLButtonElement>('button[aria-label="対象の利用者を選ぶ"]:not(:disabled)')
+        btn?.focus()
+      })
+    },
+    [day],
+  )
+
   const manager = attendance.find((a) => a.role === 'manager') ?? null
   const workers = attendance.filter((a) => a.role !== 'manager')
 
@@ -6092,6 +6288,7 @@ function DaySheet({
             <OutingBlock
               ctx={ctx}
               kind="outing"
+              folded={folded.outing}
               rows={outRows}
               drafts={outingDrafts.filter((d) => d.kind === 'outing')}
               onAdd={() => addOutingDraft('outing')}
@@ -6105,6 +6302,7 @@ function DaySheet({
             <OutingBlock
               ctx={ctx}
               kind="overnight"
+              folded={folded.overnight}
               rows={stayRows}
               drafts={outingDrafts.filter((d) => d.kind === 'overnight')}
               onAdd={() => addOutingDraft('overnight')}
@@ -6115,28 +6313,50 @@ function DaySheet({
               onCommitEnd={commitOutingEnd}
             />
 
-            <FeverBlock
-              ctx={vitalCtx}
-              rows={feverRows}
-              drafts={vitalDrafts.filter((d) => d.kind === 'observation')}
-              onAdd={() => addVitalDraft('observation')}
-              onPatchDraft={patchVitalDraft}
-              onRemoveDraft={removeVitalDraft}
-              onInsert={insertVitalRow}
-              onUpdate={updateVitalCell}
-              onDeleteSaved={deleteSavedVital}
-            />
+            {/* 発熱者・他症状者の器（2026-10-31 本人裁定(1)）。16px では発熱者の3回分が iPad 横の表の幅に入らないので、
+                この2つの表だけを器の中で横にずらす（申し送りは横スクロールなし）。器と箱の働きは画面だけ（sheet.css
+                の .dsheet-hscroll・.dsheet-hscroll-in）＝印刷では何もしない入れ物で、紙は従来どおり */}
+            <div className="dsheet-hscroll">
+              {/* 2つとも畳んでいる日は箱に幅を持たせない（中身が無いのに横のスクロールバーが出ていた・2026-10-31 反証レビュー） */}
+              <div
+                className="dsheet-hscroll-in"
+                style={folded.fever && folded.symptom ? undefined : ({ '--dsheet-fever-min-w': FEVER_MIN_W } as CSSProperties)}
+              >
+                <FeverBlock
+                  ctx={vitalCtx}
+                  folded={folded.fever}
+                  rows={feverRows}
+                  drafts={vitalDrafts.filter((d) => d.kind === 'observation')}
+                  onAdd={() => addVitalDraft('observation')}
+                  onPatchDraft={patchVitalDraft}
+                  onRemoveDraft={removeVitalDraft}
+                  onInsert={insertVitalRow}
+                  onUpdate={updateVitalCell}
+                  onDeleteSaved={deleteSavedVital}
+                />
 
-            <SymptomBlock
-              ctx={vitalCtx}
-              rows={symptomRows}
-              drafts={vitalDrafts.filter((d) => d.kind === 'symptom')}
-              onAdd={() => addVitalDraft('symptom')}
-              onPatchDraft={patchVitalDraft}
-              onRemoveDraft={removeVitalDraft}
-              onInsert={insertVitalRow}
-              onUpdate={updateVitalCell}
-              onDeleteSaved={deleteSavedVital}
+                <SymptomBlock
+                  ctx={vitalCtx}
+                  folded={folded.symptom}
+                  rows={symptomRows}
+                  drafts={vitalDrafts.filter((d) => d.kind === 'symptom')}
+                  onAdd={() => addVitalDraft('symptom')}
+                  onPatchDraft={patchVitalDraft}
+                  onRemoveDraft={removeVitalDraft}
+                  onInsert={insertVitalRow}
+                  onUpdate={updateVitalCell}
+                  onDeleteSaved={deleteSavedVital}
+                />
+              </div>
+            </div>
+
+            {/* 0件の付帯ブロックをまとめた1行（画面だけ・2026-10-31 本人裁定）。入力封鎖中は〔＋行〕を出さない */}
+            <SideFoldSummary
+              items={SIDE_FOLD_ORDER.filter((x) => folded[x.kind]).map((x) => ({
+                ...x,
+                onOpen:
+                  (x.kind === 'fever' || x.kind === 'symptom' ? vitalCtx : ctx).disabled ? undefined : () => unfold(x.kind),
+              }))}
             />
 
             <NoteBlock
@@ -6503,6 +6723,122 @@ function DailyTopBar({
       openLabel="表示と倍率の操作を開く"
       closeLabel="表示と倍率の操作を畳む"
     />
+  )
+}
+
+/** 表題行の日付バーを「狭い」と扱う置ける幅（px）。CollapsibleBar の狭い画面の境目（480px）と同じ */
+const HEADER_BAR_NARROW_PX = 480
+
+/**
+ * 表題行（App のヘッダ）に置く日付バー（2026-10-31 本人裁定・案C「上部を1段に」）。アプリの見出し（日報＋施設名）の右に
+ * 〔‹〕〔日付（押すとカレンダー）〕〔›〕〔今日へ〕〔10日〕〔1日〕〔文字 100% ▾〕…〔検索〕〔分類で抽出〕を1行に並べる。
+ * 畳む仕組みは日付バー（DailyTopBar）と同じ器・同じ開閉の保存（LS.dailyBarOpen）：表題行の残りの幅に1行で収まらない時は、
+ * 器が中で折り返し（2行目へ送る）、開閉のボタンを出す。狭い画面（480px 以下）は畳んで始める。
+ * 倍率はここだけ選択欄1つ（ZoomSelect）。値・ピンチ・保存は ZoomBar と同じ（バイタル一覧・食事一覧は4ボタンのまま）。
+ * 表題行は紙に出ない（print:hidden）ので、紙には従来の日付バー（DailyTopBar）を出す（DailySheetPage の本体）
+ */
+function DailyHeaderBar({
+  day,
+  unit,
+  onGo,
+  onUnit,
+  search,
+}: {
+  day: string
+  unit: SheetUnit
+  onGo: (iso: string) => void
+  onUnit: (unit: SheetUnit) => void
+  /** 右端の検索欄と〔分類で抽出〕（畳んでも隠さない＝persistent） */
+  search: ReactNode
+}) {
+  return (
+    <CollapsibleBar
+      storageKey={LS.dailyBarOpen}
+      full={(extra) => <HeaderDateBar day={day} unit={unit} onGo={onGo} onUnit={onUnit} extra={extra} />}
+      persistent={search}
+      collapsed={(compact) => <CollapsedDateBar day={day} onGo={onGo} compact={compact} />}
+      openLabel="表示と倍率の操作を開く"
+      closeLabel="表示と倍率の操作を畳む"
+      // 表題行に未送信の札などが並んで置ける幅が 480px より狭くなった時も、狭い画面と同じく畳んで始める（2026-10-31 反証レビュー）
+      narrowWidth={HEADER_BAR_NARROW_PX}
+    />
+  )
+}
+
+/**
+ * 表題行の日付バーの中身（1行）。並びは日付バー（DateBar）と同じ順で、場所を取る見出しの文字（「日付」「表示」「倍率」）を外し、
+ * 日付は短い形（「10/31(金)」・押すとカレンダー＝DayPicker）、倍率は選択欄1つにした。読み上げ名は日付バーと同じ
+ */
+function HeaderDateBar({
+  day,
+  unit,
+  onGo,
+  onUnit,
+  extra = null,
+}: {
+  day: string
+  unit: SheetUnit
+  onGo: (iso: string) => void
+  onUnit: (unit: SheetUnit) => void
+  /** 行の右端に置く表示（検索欄と〔分類で抽出〕） */
+  extra?: ReactNode
+}) {
+  const today = todayIso()
+  const arrow = 'min-h-tap min-w-tap shrink-0 rounded-md border border-border-strong px-3 text-base text-ink'
+  return (
+    // sheet-bar-fit: まとまりが1行より広い時だけ中で折り返す・狭い画面ではボタンを詰める（sheet.css）
+    <div className="sheet-bar-fit flex flex-wrap items-center gap-gap">
+      <button type="button" onClick={() => onGo(addDays(day, -1))} aria-label="前の日を見る" className={arrow}>
+        <span aria-hidden="true">‹</span>
+      </button>
+      <DayPicker day={day} onPick={onGo} text={fmtSheetDayShort(day)} />
+      <button type="button" onClick={() => onGo(addDays(day, 1))} aria-label="次の日を見る" className={arrow}>
+        <span aria-hidden="true">›</span>
+      </button>
+      {day !== today && (
+        <button
+          type="button"
+          onClick={() => onGo(today)}
+          className="min-h-tap shrink-0 rounded-md border border-primary px-3 text-base font-bold text-primary"
+        >
+          今日へ
+        </button>
+      )}
+
+      {/* 表示単位（既定は10日）。選択中は 枠色＋太字＋「✓」で示す（色だけに頼らない・日付バーと同じ） */}
+      <div role="group" aria-label="表示単位" className="flex items-center gap-gap">
+        {(
+          [
+            { value: '10' as SheetUnit, label: '10日', hint: '10日ごとに表示' },
+            { value: '1' as SheetUnit, label: '1日', hint: '1日だけ表示' },
+          ] as const
+        ).map((o) => {
+          const selected = o.value === unit
+          return (
+            <button
+              key={o.value}
+              type="button"
+              aria-pressed={selected}
+              aria-label={o.hint}
+              onClick={() => onUnit(o.value)}
+              className={
+                selected
+                  ? 'min-h-tap min-w-tap rounded border border-primary bg-primary px-2 text-sm font-bold text-primary-ink'
+                  : 'min-h-tap min-w-tap rounded border border-border bg-surface px-2 text-sm text-ink'
+              }
+            >
+              <span aria-hidden="true" className={selected ? '' : 'invisible'}>
+                ✓
+              </span>
+              {o.label}
+            </button>
+          )
+        })}
+      </div>
+
+      <ZoomSelect />
+      {extra === null ? null : <div className="ml-auto min-w-0">{extra}</div>}
+    </div>
   )
 }
 
@@ -6944,6 +7280,7 @@ function DayHeader({
 function OutingBlock({
   ctx,
   kind,
+  folded = false,
   rows,
   drafts,
   onAdd,
@@ -6955,6 +7292,8 @@ function OutingBlock({
 }: {
   ctx: SheetCtx
   kind: OutingKind
+  /** 0件のため画面では隠す（まとめた1行に出る・2026-10-31） */
+  folded?: boolean
   rows: Outing[]
   drafts: OutingDraft[]
   onAdd: () => void
@@ -6977,6 +7316,8 @@ function OutingBlock({
     <SheetBlock
       title={title}
       onAdd={onAdd}
+      sectionId={foldSectionId(ctx.day, kind)}
+      folded={folded}
       head={
         <>
           <HeadCell width="var(--w-name)">氏名</HeadCell>
@@ -6988,7 +7329,7 @@ function OutingBlock({
           </HeadCell>
           <HeadCell width="var(--w-datelink)">{endLabel}</HeadCell>
           <HeadCell width="var(--w-target)">付添</HeadCell>
-          <HeadCell width="var(--w-reporter)">登録</HeadCell>
+          <HeadCell width={W_REG}>登録</HeadCell>
         </>
       }
     >
@@ -7040,7 +7381,7 @@ function OutingBlock({
               <Cell width="var(--w-target)" className="flex items-center">
                 <span className="truncate">{o.companion ?? ''}</span>
               </Cell>
-              <Cell width="var(--w-reporter)" className="flex items-center">
+              <Cell width={W_REG} className="flex items-center">
                 <span className="text-ok">
                   <span aria-hidden="true">✓ </span>登録済
                 </span>
@@ -7143,7 +7484,7 @@ function OutingBlock({
                 />
               </Cell>
               {/* 余白はボタン（px-1）だけが持つ */}
-              <Cell width="var(--w-reporter)" pad={false} className="flex items-center">
+              <Cell width={W_REG} pad={false} className="flex items-center">
                 <button
                   type="button"
                   onClick={() => void onSaveDraft(d)}
@@ -7399,7 +7740,7 @@ function VitalSetCells({
 
   return (
     <>
-      {cell('at', 'var(--w-pulse)', '時刻', null)}
+      {cell('at', W_TIME, '時刻', null)}
       {cell('temp', 'var(--w-temp)', VITAL_FIELD_LABEL.temp, tj ? tj.level : null, tempUsual)}
       {cell('spo2', 'var(--w-spo2)', VITAL_FIELD_LABEL.spo2, vital ? spo2LevelFor(vital.spo2, marks.targets.get(vital.resident_id), th) : null)}
       {cell('bp', W_BP, '血圧', vital ? bpLevel(vital.sys_bp, vital.dia_bp, th) : null)}
@@ -7467,6 +7808,7 @@ function symptomWhat(name: string, v: Vital): string {
 
 function FeverBlock({
   ctx,
+  folded = false,
   rows,
   drafts,
   onAdd,
@@ -7477,6 +7819,8 @@ function FeverBlock({
   onDeleteSaved,
 }: {
   ctx: SheetCtx
+  /** 0件のため画面では隠す（まとめた1行に出る・2026-10-31） */
+  folded?: boolean
   rows: FeverRow[]
   drafts: VitalDraft[]
   onAdd: () => void
@@ -7493,12 +7837,14 @@ function FeverBlock({
     <SheetBlock
       title="発熱者"
       onAdd={onAdd}
+      sectionId={foldSectionId(ctx.day, 'fever')}
+      folded={folded}
       head={
         <>
           <HeadCell width="var(--w-name)">氏名</HeadCell>
           {Array.from({ length: FEVER_SETS }, (_, i) => (
             <SetBox key={i} top last={i === FEVER_SETS - 1}>
-              <HeadCell width="var(--w-pulse)">{`${i + 1}回目 時`}</HeadCell>
+              <HeadCell width={W_TIME}>{`${i + 1}回目 時`}</HeadCell>
               <HeadCell width="var(--w-temp)">体温</HeadCell>
               <HeadCell width="var(--w-spo2)">SpO2</HeadCell>
               <HeadCell width={W_BP}>血圧</HeadCell>
@@ -7661,6 +8007,7 @@ function FeverBlock({
 
 function SymptomBlock({
   ctx,
+  folded = false,
   rows,
   drafts,
   onAdd,
@@ -7671,6 +8018,8 @@ function SymptomBlock({
   onDeleteSaved,
 }: {
   ctx: SheetCtx
+  /** 0件のため画面では隠す（まとめた1行に出る・2026-10-31） */
+  folded?: boolean
   rows: Vital[]
   drafts: VitalDraft[]
   onAdd: () => void
@@ -7687,12 +8036,14 @@ function SymptomBlock({
     <SheetBlock
       title="他症状者"
       onAdd={onAdd}
+      sectionId={foldSectionId(ctx.day, 'symptom')}
+      folded={folded}
       head={
         <>
           <HeadCell width="var(--w-name)">氏名</HeadCell>
           {/* 発熱者の各回と同じ形の囲み（1組だけでも、上の発熱者の1回目と列と線がそろう） */}
           <SetBox top last>
-            <HeadCell width="var(--w-pulse)">時</HeadCell>
+            <HeadCell width={W_TIME}>時</HeadCell>
             <HeadCell width="var(--w-temp)">体温</HeadCell>
             <HeadCell width="var(--w-spo2)">SpO2</HeadCell>
             <HeadCell width={W_BP}>血圧</HeadCell>

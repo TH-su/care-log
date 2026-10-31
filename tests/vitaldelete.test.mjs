@@ -99,7 +99,9 @@ describe('日報の発熱者・他症状者の「✕」（1回分ずつ）', () 
     const src = read('pages/DailySheetPage.tsx')
     assert.match(src, /const SHEET_MIN_W = `calc\([^`]*\+ var\(--dsheet-del-cols, 0px\)\)`/)
     assert.match(src, /const SHEET_DEL_COLS_CLASS = '\[--dsheet-del-cols:calc\(1\.5rem\*var\(--sheet-zoom,1\)\*3\)\] print:\[--dsheet-del-cols:0px\]'/)
-    assert.match(src, /<div className=\{`sheet-dense \$\{SHEET_DEL_COLS_CLASS\} \$\{SHEET_BP_W_CLASS\}`\} ref=\{measureSheetView\} style=\{\{ minWidth: SHEET_MIN_W \}\}>/)
+    // 2026-10-31（日報の見やすさ）: 画面では日報の枠の --dsheet-sheet-min-w を使い、印刷ではこれまでの SHEET_MIN_W に落ちる
+    assert.match(src, /const SHEET_VIEW_MIN_W = `var\(--dsheet-sheet-min-w, \$\{SHEET_MIN_W\}\)`/)
+    assert.match(src, /<div className=\{`sheet-dense \$\{SHEET_DEL_COLS_CLASS\} \$\{SHEET_BP_W_CLASS\}`\} ref=\{measureSheetView\} style=\{\{ minWidth: SHEET_VIEW_MIN_W \}\}>/)
   })
 
   it('血圧の列は日報の画面だけ 84px（倍率に追従）・印刷は従来の幅・バイタル一覧と共有の変数は変えない（2026-10-09 本人裁定）', () => {
@@ -107,7 +109,9 @@ describe('日報の発熱者・他症状者の「✕」（1回分ずつ）', () 
     assert.match(src, /const W_BP = 'var\(--dsheet-w-bp, calc\(var\(--w-sys\) \+ var\(--w-dia\)\)\)'/)
     assert.match(src, /const SHEET_BP_W_CLASS = '\[--dsheet-w-bp:calc\(5\.25rem\*var\(--sheet-zoom,1\)\)\] print:\[--dsheet-w-bp:calc\(var\(--w-sys\)\+var\(--w-dia\)\)\]'/)
     // 発熱者の1セットの幅（器の最小幅の式）も同じ W_BP を使う＝画面だけ最小幅が縮む
-    assert.match(src, /const W_FEVER_SET = `calc\(var\(--w-pulse\) \* 2 \+ var\(--w-temp\) \+ var\(--w-spo2\) \+ \$\{W_BP\}\)`/)
+    // 2026-10-31（日報の見やすさ）: 時刻の列は W_TIME（画面だけ --dsheet-w-time・印刷は従来どおり --w-pulse）
+    assert.match(src, /const W_TIME = 'var\(--dsheet-w-time, var\(--w-pulse\)\)'/)
+    assert.match(src, /const W_FEVER_SET = `calc\(\$\{W_TIME\} \+ var\(--w-pulse\) \+ var\(--w-temp\) \+ var\(--w-spo2\) \+ \$\{W_BP\}\)`/)
     const css = readFileSync(new URL('../src/styles/sheet.css', import.meta.url), 'utf8')
     assert.match(css, /--w-sys-base: 3\.125rem;/, 'バイタル一覧と共有の変数を変えている')
     assert.match(css, /--w-dia-base: 3\.125rem;/, 'バイタル一覧と共有の変数を変えている')

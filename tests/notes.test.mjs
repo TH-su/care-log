@@ -1119,7 +1119,7 @@ if (DB === null) {
       assert.doesNotMatch(src, /addEventListener\('(wheel|touchmove)'/, 'C: wheel・touchmove の受け手が残っている')
       assert.match(src, /addEventListener\('scroll', onScroll, \{ passive: true, capture: true \}\)/)
       assert.doesNotMatch(src, /useDayBarPin|--day-bar-y/, 'B1: スクロールのたびに位置を計算する日付行の固定が残っている')
-      assert.match(src, /<SheetFrame className="(dsheet-frame )?sheet-frame-fit print:!max-h-none">/)
+      assert.match(src, /<SheetFrame className="(dsheet-frame )?(dsheet-legible )?sheet-frame-fit print:!max-h-none">/)
       assert.match(src, /data-day-bar=""\n\s+className="(?:dsheet-frame-row )?sticky top-0 /)
       const css = read('styles/sheet.css')
       assert.match(css, /\.sheet-dense \.sheet-hit::before \{\n\s+content: none;/, 'D')
@@ -1128,7 +1128,7 @@ if (DB === null) {
 
     it('B1 の余白・E（案2）: 枠は画面下のナビの上まで・画面外の日の表の中身だけ描画を省き、窓・日付の行は入れ物の外（行の中の窓が開いている間は省略を外す）', () => {
       const src = read('pages/DailySheetPage.tsx')
-      assert.match(src, /<SheetFrame className="dsheet-frame sheet-frame-fit print:!max-h-none">/)
+      assert.match(src, /<SheetFrame className="dsheet-frame (dsheet-legible )?sheet-frame-fit print:!max-h-none">/)
       assert.match(src, /root\.style\.setProperty\('--dsheet-below', next\)/)
       const day = src.slice(src.indexOf('<div className="dsheet-body">'), src.indexOf('<ResidentPickerModal'))
       assert.ok(day.length > 0, '日の表の中身の入れ物が無い')

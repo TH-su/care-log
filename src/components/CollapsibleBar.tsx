@@ -48,9 +48,15 @@ export interface CollapsibleBarProps {
   /** 開閉のボタンの読み上げ（例「表示と倍率の操作を開く」「…を畳む」） */
   openLabel: string
   closeLabel: string
+  /**
+   * 置ける幅（この器の幅）がこの px より狭い時も「狭い画面」と同じに扱う（畳んで始める）。省略＝画面の幅（480px 以下）だけで決める。
+   * 日報の表題行（DailyHeaderBar）だけが渡す：表題行に未送信の札などが並ぶと、広い画面でも日付バーの置ける幅が狭くなり、
+   * 開いた形のままだと5段に積まれて表題行が 269px になった（2026-10-31 反証レビュー・iPad 縦の実測）
+   */
+  narrowWidth?: number
 }
 
-export function CollapsibleBar({ storageKey, full, collapsed, persistent, openLabel, closeLabel }: CollapsibleBarProps) {
+export function CollapsibleBar({ storageKey, full, collapsed, persistent, openLabel, closeLabel, narrowWidth }: CollapsibleBarProps) {
   const uid = useId()
   const fullId = `${uid}-bar`
   const boxRef = useRef<HTMLDivElement>(null)
@@ -61,6 +67,8 @@ export function CollapsibleBar({ storageKey, full, collapsed, persistent, openLa
     typeof window !== 'undefined' && typeof window.matchMedia === 'function' ? window.matchMedia(NARROW_QUERY).matches : false,
   )
   const [wraps, setWraps] = useState(false)
+  /** 器の幅が narrowWidth より狭い（narrowWidth を渡した時だけ。渡さない画面は常に false＝今までどおり） */
+  const [boxNarrow, setBoxNarrow] = useState(false)
   const [compact, setCompact] = useState(false)
   const [stored, setStored] = useState<boolean | null>(() => readBarOpen(storageKey))
   /** 印刷中（印刷では畳まない＝今までと同じ紙にする） */
@@ -101,6 +109,7 @@ export function CollapsibleBar({ storageKey, full, collapsed, persistent, openLa
     let lastMeasure = -1
     const measure = () => {
       setWraps(m.scrollWidth > box.clientWidth + 1)
+      setBoxNarrow(narrowWidth !== undefined && box.clientWidth > 0 && box.clientWidth < narrowWidth)
       if (box.clientWidth !== lastBox || m.scrollWidth !== lastMeasure) {
         lastBox = box.clientWidth
         lastMeasure = m.scrollWidth
@@ -112,12 +121,14 @@ export function CollapsibleBar({ storageKey, full, collapsed, persistent, openLa
     ro?.observe(box)
     ro?.observe(m)
     return () => ro?.disconnect()
-  }, [])
+  }, [narrowWidth])
 
-  const collapsible = !printing && (narrow || wraps)
+  // 狭い画面か、器が narrowWidth より狭い時（日報の表題行だけ）は「狭い」と同じ扱い
+  const narrowAll = narrow || boxNarrow
+  const collapsible = !printing && (narrowAll || wraps)
   // 既定（利用者がまだ開閉していない時）は、狭い画面だけ畳んで始める。広い画面は操作が折り返していても開いて始める
   // （MacBook などで今の見た目を変えない・2026-09-29 チーフ裁定）。開閉した後は保存した状態を優先する
-  const open = !collapsible ? true : stored === null ? !narrow : stored
+  const open = !collapsible ? true : stored === null ? !narrowAll : stored
 
   // 畳んだ形が1行に収まらない（開閉のボタンが次の行へ回った）時は、短い形にする
   useLayoutEffect(() => {

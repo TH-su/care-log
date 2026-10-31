@@ -465,6 +465,40 @@ export function ZoomBar({ compact = false }: { compact?: boolean } = {}) {
   )
 }
 
+/**
+ * 表示倍率を1つの選択欄で選ぶ形（日報の表題行だけ・2026-10-31 本人裁定「文字 100% ▾」）。
+ * 値・保存・ピンチの扱いは ZoomBar と同じ store（lib/zoom.ts）。バイタル一覧・食事一覧は ZoomBar の4ボタンのまま。
+ * 選べる値は ZOOM_STEPS。ピンチでボタン以外の倍率（135% 等）になっている時は、その値も選択肢に足して選択中にする
+ * （表示が今の倍率と食い違わないように）。高さ・幅は 44px 以上（OS の選択の一覧で選ぶ＝指で押し分けやすい）。
+ * 選択肢の文字は「文字 125%」だけにそろえる（選択欄の幅はいちばん長い選択肢で決まるため、注記を足すと表題行が詰まる）
+ */
+export function ZoomSelect() {
+  const zoom = useSyncExternalStore(subscribeZoom, getZoom, () => DEFAULT_ZOOM)
+
+  useEffect(() => {
+    applyZoom(zoom)
+  }, [zoom])
+
+  const steps: number[] = [...ZOOM_STEPS]
+  if (!steps.includes(zoom)) steps.push(zoom)
+  steps.sort((a, b) => a - b)
+
+  return (
+    <select
+      value={zoom}
+      onChange={(e) => setZoom(Number(e.target.value))}
+      aria-label="文字の大きさ（表示倍率）"
+      className="tabular min-h-tap min-w-tap shrink-0 rounded-md border border-border-strong bg-surface px-2 text-base text-ink"
+    >
+      {steps.map((z) => (
+        <option key={z} value={z}>
+          {`文字 ${z}%`}
+        </option>
+      ))}
+    </select>
+  )
+}
+
 // ══════════════════════════════════════════════════════════════
 // SheetCell
 // ══════════════════════════════════════════════════════════════
