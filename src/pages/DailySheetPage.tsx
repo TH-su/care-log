@@ -1940,6 +1940,7 @@ function PickerCell({
   onDelete,
   deleteLabel,
   deleteScreenOnly = false,
+  wrap = false,
 }: {
   width?: string
   grow?: boolean
@@ -1960,6 +1961,12 @@ function PickerCell({
    * 申し送りの対象欄の「✕」は従来どおり（印刷の見た目を変えないため省略＝false）
    */
   deleteScreenOnly?: boolean
+  /**
+   * 欄の幅に入らない名前を「…」にせず折り返す（画面だけ・2026-11-01 本人指示「対象の枠は氏名の長さ程度に」）。
+   * 欄を氏名の長さまで詰めたので、「スタッフへ（全体）」や長い氏名は2行になる（取り違え防止の情報は切らない）。
+   * 紙は従来どおり1行で「…」（.dsheet-pick-wrap の規則は @media screen の中だけ）
+   */
+  wrap?: boolean
 }) {
   return (
     // 余白はこの中のボタン（px-1）だけが持つ。入れ物にも取ると中身が 8px ずれて
@@ -1977,7 +1984,7 @@ function PickerCell({
       >
         {/* truncate（overflow:hidden）はボタン自身に付けない。付けると当たり判定を広げる
             ::before が切り取られて拡張が死ぬため、内側の span に持たせる */}
-        <span className="block truncate">
+        <span className={wrap ? 'dsheet-pick-wrap block truncate' : 'block truncate'}>
           {text === '' ? <span aria-hidden="true">—</span> : text}
         </span>
       </button>
@@ -8557,6 +8564,7 @@ function NoteRow({
           // まとめた行は記録ごとに内容欄の「✕」で消す（どの記録を消すかを取り違えない）
           onDelete={multi ? undefined : () => onDelete(rowKey)}
           deleteLabel={targetText === '' ? 'この行を削除' : `${targetText}のこの申し送りを削除`}
+          wrap
         />
         {/* 分類（2026-10-15）。押すと手前に分類の窓（分類・重要度・変更の記録）。ロック中でも開ける（中で押せなくなる） */}
         <Cell width="var(--w-category)" pad={false} className="flex items-stretch">

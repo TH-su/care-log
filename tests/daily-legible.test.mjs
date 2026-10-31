@@ -71,7 +71,7 @@ describe('1. 日報の枠の中だけ、画面の文字と列幅を差し替え�
       ['category', '5.75'], ['reporter', '4'], ['attend', '4.25'],
       // 16px の見出し・取り違え防止の情報が切れたので実測で広げた: ブロック名 96→122・日付セル 170→176・出勤者見出し 56→58・
       // 対象 150→198（「スタッフへ（全体）」＋✕）・氏名 118→156（全角6字＋空白＋✕）・〜 20→25
-      ['block', '7.625'], ['facility', '11'], ['attend-label', '3.625'], ['target', '12.375'], ['name', '9.75'], ['tilde', '1.5625'],
+      ['block', '7.625'], ['facility', '11'], ['attend-label', '3.625'], ['target', '9'], ['name', '9.75'], ['tilde', '1.5625'],
     ]) {
       assert.match(legible, new RegExp(`--w-${name}-base: ${rem.replace('.', '\\.')}rem;`), `--w-${name} が決めた幅でない`)
     }
@@ -416,5 +416,17 @@ describe('9. 表題行の未送信の札', () => {
     const scr = mediaBlocks(css, 'screen and (min-width: 640px)')
     assert.equal(scr.length, 1)
     assert.match(scr[0], /header \.cl-daily-status \{\s*flex-shrink: 0;\s*white-space: nowrap;/)
+  })
+})
+
+describe('10. 対象の欄は氏名の長さ程度に詰め、入らない名前は画面だけ折り返す（2026-11-01）', () => {
+  it('申し送りの対象の PickerCell だけが wrap を渡し、折り返しの規則は @media screen の中だけ', () => {
+    assert.match(daily, /deleteLabel=\{targetText === '' \? 'この行を削除' : `\$\{targetText\}のこの申し送りを削除`\}\s*wrap\s*\/>/)
+    assert.equal((daily.match(/^\s+wrap\s*$/gm) ?? []).length, 1)
+    assert.match(daily, /className=\{wrap \? 'dsheet-pick-wrap block truncate' : 'block truncate'\}/)
+    const scr = mediaBlocks(css, 'screen').join('\n')
+    assert.match(scr, /\.dsheet-legible \.dsheet-pick-wrap \{\s*white-space: normal;\s*overflow: visible;\s*text-overflow: clip;\s*overflow-wrap: anywhere;/)
+    const outside = css.replace(/@media[^{]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}/g, '')
+    assert.doesNotMatch(outside, /dsheet-pick-wrap/)
   })
 })
