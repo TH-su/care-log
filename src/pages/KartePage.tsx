@@ -26,6 +26,10 @@
 // - 排泄（2026-10-16 追加）は excretionClient.ts の fetchExcretion で排便記録アプリの GAS から読むだけ。
 //   接続設定（hbcr_api_*）は excretionClient が読むだけで、この画面は localStorage に触れない。記録は画面のメモリだけ。
 //   照合（氏名＋居室）・「最後の排便から◯日」の数え方（排便記録アプリの写し）は excretionClient.ts。照合できない時は理由を出す
+// - 見やすさ（2026-11-01 本人裁定・案C）: 画面だけ（印刷は変えない）。規則は styles/karte.css（カルテ専用の class の中だけ）。
+//   ・補助テキスト（text-sm）を 15→16px（氏名と移動ボタンの帯は今の大きさのまま）
+//   ・幅 1024px 以上: 文字の欄も画面の幅まで広げ、期間の切替を1行に、個別の目標｜個人の閾値と、排泄・申し送り｜入浴・与薬・事故を2列に
+//   ・幅 1024px 以上で期間が2週・1か月の時は、バイタルと食事・水分のグラフも2列（chartCols。3か月以上・印刷は1列）
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
@@ -50,6 +54,7 @@ import type { MyRole, RecordHistoryEntry } from '../lib/db'
 // 先読みし、開いた方のカルテは控えに残す（次に開いた時は控えを先に出し、裏で取り直す）
 import { fetchKarte, fetchResidents, peekKarte, peekResidents, prefetchKarte } from '../lib/cachedReads'
 import { useVitalLimits } from '../hooks/useVitalLimits'
+import '../styles/karte.css'
 import { VitalLimitsFailedNote } from '../components/VitalLimitsFailedNote'
 import {
   clampLines,
@@ -219,7 +224,7 @@ const MARK_PROBE_TEXT = '↑↑'
 /** 印刷の直前にグラフの幅を測り直させる合図（グラフの欄を今までの幅へ戻した後に出す） */
 const KARTE_REMEASURE_EVENT = 'cl-karte-remeasure'
 /** 文字の欄の幅（今までのカルテと同じ） */
-const LANE = 'mx-auto w-full max-w-2xl px-4'
+const LANE = 'cl-karte-lane mx-auto w-full max-w-2xl px-4'
 /** グラフの欄の幅（広い画面では画面幅まで広げる・最大 1152px。印刷は今までの幅） */
 const LANE_WIDE = 'mx-auto w-full max-w-6xl px-4 print:max-w-2xl'
 /** 広い画面（下のナビが消え、左の縦ナビになる幅）。グラフを1画面に2枚収める */
@@ -752,6 +757,25 @@ function useChartBox() {
   return { ref, probeRef, box }
 }
 
+/**
+ * 広い画面（1024px 以上）の画面表示だけ、グラフを2列に並べる（印刷・狭い画面は今までどおり1列・2026-11-01）。
+ * 1枚の幅は外側の枠を測った幅（useChartBox）から列の間（gap-x-4＝16px）を引いて半分。
+ * 3か月以上の期間は1列のまま（半分の幅では1日あたり1px ほどになり、日ごとの点が読めなくなるため）。
+ * 半分の幅で隣の日との間が MARK_MIN_GAP に届かない時も1列のまま（届かないと ↑↓ の印が消える。反証 高2・
+ * 1024〜1137px の画面で「1か月」を見た時）。左の余白は VitalChart の padL と同じ式で見積もる
+ */
+const CHART_COL_GAP = 16
+const CHART_COLS_MAX_DAYS = 62
+function chartCols(box: ChartBox, printing: boolean, dayCount: number): { box: ChartBox; className: string | undefined } {
+  const wide = typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia(WIDE_QUERY).matches
+  if (printing || !wide || dayCount > CHART_COLS_MAX_DAYS) return { box, className: undefined }
+  const colW = Math.max(CHART_MIN_W, Math.floor((box.width - CHART_COL_GAP) / 2))
+  const padL = Math.max(PAD_L_MIN, box.labelW + AXIS_LABEL_GAP + 2)
+  const gap = dayCount <= 1 ? Infinity : (colW - padL - PAD_R) / (dayCount - 1)
+  if (gap < MARK_MIN_GAP) return { box, className: undefined }
+  return { box: { ...box, width: colW }, className: 'grid grid-cols-2 items-start gap-x-4' }
+}
+
 /** 軸の文字の大きさ・幅を測る見本（見えない・読み上げない・押せない）。並びは useChartBox の partW の番号と対応 */
 function AxisProbe({ probeRef }: { probeRef: RefObject<HTMLSpanElement> }) {
   return (
@@ -1279,6 +1303,7 @@ interface VitalsSectionProps {
 function VitalsSection({ vitals, days, weightPanel, printing, usual, usualAbsent = false, usualSamples = null, target, limits }: VitalsSectionProps) {
   const { ref, probeRef, box } = useChartBox()
   const chartH = printing ? CHART_H_PRINT : box.h
+  const cols = chartCols(box, printing, days.length)
 
   const panels = useMemo<PanelSpec[]>(() => {
     const sorted = vitals.slice().sort(cmpVitalAsc)
@@ -1455,10 +1480,12 @@ function VitalsSection({ vitals, days, weightPanel, printing, usual, usualAbsent
           <div className="mt-3">
             <EmptyBlock message="この期間のバイタル記録はありません。期間を広げてお試しください。" />
           </div>
-        ) : (
-          panels.map((p) => <VitalPanel key={p.key} panel={p} days={days} box={box} height={chartH} />)
-        )}
-        {weightPanel ? <VitalPanel panel={weightPanel} days={days} box={box} height={chartH} /> : null}
+        ) : null}
+        {/* 体重のグラフはバイタルが0件の期間でも出す（今までどおり。反証 高1） */}
+        <div className={cols.className}>
+          {hasAny ? panels.map((p) => <VitalPanel key={p.key} panel={p} days={days} box={cols.box} height={chartH} />) : null}
+          {weightPanel ? <VitalPanel panel={weightPanel} days={days} box={cols.box} height={chartH} /> : null}
+        </div>
       </div>
     </SectionCard>
   )
@@ -1721,6 +1748,7 @@ function shadeStyle(stage: number): { color: string } {
 function MealsSection({ meals, fluids, outings, days, printing, target }: MealsSectionProps) {
   const { ref, probeRef, box } = useChartBox()
   const chartH = printing ? CHART_H_PRINT : box.h
+  const cols = chartCols(box, printing, days.length)
   // 日ごとの食事（同じ枠に複数行がある場合は id の大きい＝後から入った行）と水分の合計。表とグラフで同じ集計を使う
   const byDay = useMemo(() => mealDays(meals, fluids), [meals, fluids])
   const rows = useMemo(() => {
@@ -1818,9 +1846,11 @@ function MealsSection({ meals, fluids, outings, days, printing, target }: MealsS
         <>
           <div ref={ref} className="relative">
             <AxisProbe probeRef={probeRef} />
-            {panels.map((p) => (
-              <VitalPanel key={p.key} panel={p} days={days} box={box} height={chartH} />
-            ))}
+            <div className={cols.className}>
+              {panels.map((p) => (
+                <VitalPanel key={p.key} panel={p} days={days} box={cols.box} height={chartH} />
+              ))}
+            </div>
           </div>
           {/* 表は今までの幅のまま（広い画面で列が間延びして行を追いにくくならないように） */}
           <h3 className="mt-4 border-t border-border pt-3 text-lg font-bold text-ink">日ごとの記録</h3>
@@ -3356,7 +3386,7 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
   // 欄ごとに幅を決める（2026-10-08）: 文字の欄は今までの幅（LANE）、グラフの欄（バイタル・体重のグラフ・食事）だけ
   // 広い画面で画面幅まで広げる（LANE_WIDE）。氏名バーは外側の枠いっぱいを親にして、ページの最後まで上部に残す
   return (
-    <div className="w-full py-4">
+    <div className="cl-karte-legible w-full py-4">
       {/* グラフの高さを決めるための画面の高さの物差し（100svh・見えない・読み上げない・押せない） */}
       <div aria-hidden="true" data-karte-vh="" className="pointer-events-none invisible fixed left-0 top-0 h-svh w-0" />
       <div className={LANE}>
@@ -3373,7 +3403,7 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
         className="sticky z-10 mt-2 bg-bg print:static"
         style={{ top: barTop }}
       >
-        <div className="mx-auto max-w-2xl border-b border-border bg-bg px-4 py-1">
+        <div className="cl-karte-lane mx-auto max-w-2xl border-b border-border bg-bg px-4 py-1">
           {/* 氏名は削らない（取り違え防止）。幅が足りない時（文字を大きくした端末など）はボタンを次の行へ回す */}
           <div className="flex flex-wrap items-center gap-x-2">
             <h1 className="min-w-0 max-w-full break-words text-xl font-heavy text-ink">{resident.name}</h1>
@@ -3414,7 +3444,7 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
           ) : null}
         </header>
 
-        <div className="mt-3">
+        <div className="cl-karte-period mt-3">
           <h2 className="text-sm text-ink2">表示する期間</h2>
           <div className="mt-1">
             <SegmentPicker
@@ -3463,6 +3493,8 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
           ) : null}
         </div>
 
+        {/* 広い画面は2列（karte.css）。狭い画面・印刷は今までどおり縦に並ぶ */}
+        <div className="cl-karte-pair mt-4">
         <TargetsCard
           residentId={residentId}
           target={target}
@@ -3477,6 +3509,7 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
 
         {/* 個人の閾値（段階2d・0045）。事務・管理者だけ足せる。足した・取り消した後は記録の印を取り直す（段階2d-2） */}
         <VitalLimitsCard residentId={residentId} role={role} onChanged={() => setLimitsTick((n) => n + 1)} />
+        </div>
 
         {loading ? (
           <div className="mt-3">
@@ -3524,12 +3557,16 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
               target={target}
             />
           </div>
-          <div className={LANE}>
-            <ExcretionSection state={excretion} view={excretionView} onReload={() => setExcretionTick((n) => n + 1)} />
-            <NotesSection notes={data.notes} staffById={staffById} />
-            <BathSection baths={data.baths} staffById={staffById} />
-            <MedSection meds={data.meds} />
-            <IncidentSection incidents={data.incidents} />
+          <div className={`${LANE} cl-karte-pair`}>
+            <div>
+              <ExcretionSection state={excretion} view={excretionView} onReload={() => setExcretionTick((n) => n + 1)} />
+              <NotesSection notes={data.notes} staffById={staffById} />
+            </div>
+            <div>
+              <BathSection baths={data.baths} staffById={staffById} />
+              <MedSection meds={data.meds} />
+              <IncidentSection incidents={data.incidents} />
+            </div>
           </div>
         </>
       )}
