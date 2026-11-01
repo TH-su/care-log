@@ -136,8 +136,8 @@ describe('4. 上部の操作を表題行へ', () => {
     assert.match(app, /\{sheetHeaderSlot && \(\s*<div id="cl-sheet-header-slot" className="min-w-0 flex-1 basis-full sm:basis-auto print:hidden" \/>/)
   })
   it('表題行の器は同じ開閉の保存・狭い時は畳む・フロアと日数は選択欄・倍率は ZoomSelect', () => {
-    assert.match(meals, /setHeaderSlot\(document\.getElementById\('cl-sheet-header-slot'\)\)/)
-    const portal = meals.slice(meals.indexOf('{headerSlot\n        ? createPortal('), meals.indexOf('headerSlot,\n          )'))
+    assert.match(app, /<MealsSheetPage actorId=\{actorId\} inputEnabled=\{inputEnabled\} headerSlotId="cl-sheet-header-slot" \/>/)
+    const portal = meals.slice(meals.indexOf('<HeaderSlotPortal id={headerSlotId}'), meals.indexOf('</HeaderSlotPortal>'))
     assert.ok(portal.length > 0, '表題行への portal が無い')
     assert.match(portal, /storageKey=\{LS\.mealsBarOpen\}/)
     assert.match(portal, /narrowWidth=\{HEADER_BAR_NARROW_PX\}/)
@@ -145,6 +145,13 @@ describe('4. 上部の操作を表題行へ', () => {
     assert.match(portal, /options=\{DAYS_OPTIONS\}/)
     assert.match(portal, /<ZoomSelect \/>/)
     assert.match(portal, /persistent=\{<RecorderBar actorId=\{actorId \?\? null\} \/>\}/)
+  })
+  it('開く時に表全体を2回描かない: 置き場を探すのは小さな器（HeaderSlotPortal）で、画面全体の state に置き場の要素を持たない（2026-11-01 iPhone で重い）', () => {
+    assert.doesNotMatch(meals, /setHeaderSlot/)
+    const portal = meals.slice(meals.indexOf('function HeaderSlotPortal('), meals.indexOf('function PrefSelect('))
+    assert.match(portal, /const found = document\.getElementById\(id\)\s*if \(found\) setEl\(found\)\s*else onMissing\(\)/)
+    // 置き場が見つからない時は画面の中の操作バーへ戻す（操作が消えない）
+    assert.match(meals, /const headerSlot = headerSlotId !== undefined && !slotMissing/)
   })
   it('紙用の操作バー（4ボタンの倍率）は残し、表題行がある時は画面でだけ隠す', () => {
     assert.match(meals, /<SectionCard className=\{headerSlot \? 'hidden print:block' : ''\}>/)

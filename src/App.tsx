@@ -1704,7 +1704,7 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
             />
             <Route
               path="/sheet/meals"
-              element={<MealsSheetPage actorId={actorId} inputEnabled={inputEnabled} />}
+              element={<MealsSheetPage actorId={actorId} inputEnabled={inputEnabled} headerSlotId="cl-sheet-header-slot" />}
             />
             <Route path="/more" element={<MorePage inputEnabled={inputEnabled} />} />
             {/* 既存タイムライン（中身は変更なし・パスのみ移設） */}
