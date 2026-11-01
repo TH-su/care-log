@@ -88,7 +88,7 @@ describe('1. 日報の枠の中だけ、画面の文字と列幅を差し替え�
   })
 
   it('契約名（倍率適用済み）を日報の枠でも算出し直す（:root で計算済みの 13px 基準を継がない）', () => {
-    assert.match(stripComments(css), /:root,\s*\.sheet-frame,\s*\.dsheet-legible \{\s*--sheet-font: calc\(var\(--sheet-font-base\) \* var\(--sheet-zoom, 1\)\);/)
+    assert.match(stripComments(css), /:root,\s*\.sheet-frame,\s*\.dsheet-legible,\s*\.vsheet-legible \{\s*--sheet-font: calc\(var\(--sheet-font-base\) \* var\(--sheet-zoom, 1\)\);/)
   })
 
   it('class を付けるのは日報の枠だけ（バイタル一覧・食事一覧には付けない）', () => {
@@ -128,10 +128,12 @@ describe('2. 印刷の規則に手を入れていない', () => {
       assert.ok(all > 0, `${sel} が無い`)
       assert.equal(inScreen, all, `${sel} が @media screen の外にある`)
     }
-    // .dsheet-legible が @media screen の外に出るのは、契約名を算出し直す1か所（:root, .sheet-frame, .dsheet-legible）だけ
+    // .dsheet-legible が @media screen の外に出るのは、契約名を算出し直す1か所（:root, .sheet-frame, .dsheet-legible, .vsheet-legible）だけ
+    // （2026-11-01 にバイタル一覧の .vsheet-legible を同じ並びへ足したので、単独の「.dsheet-legible {」は画面の外に0か所）
     const outside = plain.split(/\.dsheet-legible \{/).length - 1 - (screen.split(/\.dsheet-legible \{/).length - 1)
-    assert.equal(outside, 1, '.dsheet-legible の規則が @media screen の外に増えている')
-    assert.match(plain, /:root,\s*\.sheet-frame,\s*\.dsheet-legible \{/)
+    assert.equal(outside, 0, '.dsheet-legible の規則が @media screen の外に増えている')
+    assert.equal(plain.split(/\.dsheet-legible,/).length - 1, 1, '契約名の算出以外で .dsheet-legible を並べている')
+    assert.match(plain, /:root,\s*\.sheet-frame,\s*\.dsheet-legible,\s*\.vsheet-legible \{/)
   })
 
   it('紙に出す日付バーは従来のまま（倍率の4ボタン）・表題行の1段とまとめた1行は紙に出さない', () => {
@@ -348,16 +350,15 @@ describe('6. 上部を1段に（表題行へ）', () => {
     assert.match(daily, /createPortal\(<DailyHeaderBar /)
   })
 
-  it('倍率は日報の表題行だけ選択欄1つ（ZoomSelect）・バイタル一覧は4ボタン（ZoomBar）のまま', () => {
+  it('倍率は日報の表題行とバイタル一覧（2026-11-01 本人裁定）が画面で選択欄1つ（ZoomSelect）・食事一覧は4ボタン（ZoomBar）のまま', () => {
     assert.match(fnSrc(daily, 'HeaderDateBar'), /<ZoomSelect \/>/)
     assert.doesNotMatch(fnSrc(daily, 'HeaderDateBar'), /<ZoomBar/)
-    const vitals = read('pages/VitalsSheetPage.tsx')
-    assert.doesNotMatch(vitals, /ZoomSelect/, 'バイタル一覧が選択欄になっている')
-    assert.match(vitals, /<ZoomBar/, 'バイタル一覧の4ボタンが無い')
-    // 食事一覧は 2026-11-01 本人裁定（案C）で表題行に選択欄・紙用の操作バーは4ボタンのまま（tests/meals-legible.test.mjs）
     const meals = read('pages/MealsSheetPage.tsx')
-    assert.match(meals, /<ZoomSelect \/>/)
-    assert.match(meals, /<ZoomBar compact \/>/, '食事一覧の紙用の4ボタンが無い')
+    assert.doesNotMatch(meals, /ZoomSelect/, '食事一覧が選択欄になっている')
+    assert.match(meals, /<ZoomBar/, '食事一覧の4ボタンが無い')
+    // バイタル一覧: 画面は選択欄・紙は今までどおり4ボタン
+    const vitals = read('pages/VitalsSheetPage.tsx')
+    assert.match(vitals, /<ZoomBar compact \/>\s*\) : \(\s*<>\s*<div className="print:hidden">\s*<ZoomSelect \/>\s*<\/div>\s*<div className="hidden print:block">\s*<ZoomBar compact \/>\s*<\/div>/)
   })
 
   it('選択欄は ZoomBar と同じ store（ピンチに追従）・値は ZOOM_STEPS・今の倍率がボタンの値でない時も選択肢に出す・44px', () => {
@@ -374,11 +375,8 @@ describe('6. 上部を1段に（表題行へ）', () => {
 
   it('表題行（日報の時だけ）: 640px 以上は折り返さず、見出しが日付バーより先に縮む（施設名が「…」）・画面だけ（紙の表題行は以前と同じ指定）', () => {
     const app = read('App.tsx')
-    // 2026-11-01: 食事一覧（SHEET_HEADER_SLOT_PATHS）も表題行を1行に並べる（oneRowHeader）。見出しの縮み方（cl-daily-title）は日報だけ
-    assert.match(app, /const oneRowHeader = location\.pathname === '\/' \|\| sheetHeaderSlot/)
-    assert.match(app, /\$\{oneRowHeader \? ' cl-daily-header-row' : ''\}/)
-    // 日報以外は紙の表題行が以前と同じ指定（flex-1）。食事一覧は画面の 640px 以上だけ cl-sheet-title で縮めない
-    assert.match(app, /location\.pathname === '\/'\s*\? 'cl-daily-title flex items-baseline gap-2'\s*: [\s\S]*?`flex min-w-0 flex-1 flex-wrap items-baseline gap-2\$\{sheetHeaderSlot \? ' cl-sheet-title' : ''\}`/)
+    assert.match(app, /\$\{location\.pathname === '\/' \? ' cl-daily-header-row' : ''\}/)
+    assert.match(app, /location\.pathname === '\/'\s*\? 'cl-daily-title flex items-baseline gap-2'\s*: location\.pathname === '\/sheet\/vitals'[\s\S]*?'flex min-w-0 flex-auto flex-wrap items-baseline gap-2'\s*: 'flex min-w-0 flex-1 flex-wrap items-baseline gap-2'/)
     assert.match(app, /<div id="cl-daily-header-slot" className="min-w-0 flex-1 basis-full sm:basis-auto print:hidden" \/>/)
     const plain = stripComments(css)
     // 640px 未満と紙: 以前の flex-1・折り返し・min-w-0 と同じ

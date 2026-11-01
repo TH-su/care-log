@@ -690,7 +690,7 @@ export function TimelinePage({
 
   return (
     <VitalJudgeContext.Provider value={vitalJudge}>
-    <div className="mx-auto w-full max-w-3xl px-3 pb-8">
+    <div className="tl-legible mx-auto w-full max-w-3xl px-3 pb-8">
       {limits.failed ? <VitalLimitsFailedNote onRetry={() => void limits.refresh()} /> : null}
       {/* 入力封鎖中の理由（隠さずに理由を出す。閲覧・検索・カルテは全機能有効） */}
       {!inputEnabled && (
@@ -1442,10 +1442,10 @@ function NoteCard({
 
   return (
     <article
-      className={`rounded-md bg-surface px-3 py-2 ${unread ? 'border-l-4 border-accent' : ''}`}
+      className={`tl-card rounded-md bg-surface px-3 py-2 ${unread ? 'border-l-4 border-accent' : ''}`}
     >
       {/* 1行目: 時刻・対象・職種タグ・重要度 */}
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="tl-card-head flex flex-wrap items-center gap-2">
         <span className="text-sm text-ink2 tabular">{fmtRecordTime(note.occurred_at, noteIsNextMorning(note)) || '—'}</span>
         {note.resident_id == null ? (
           <span className="text-base text-info">
@@ -1454,7 +1454,7 @@ function NoteCard({
         ) : (
           <button
             type="button"
-            className={`${NAME_HIT} rounded-md px-2 text-base font-bold text-link`}
+            className={`${NAME_HIT} tl-name rounded-md px-2 text-base font-bold text-link`}
             onClick={() => onOpenKarte(note.resident_id as number)}
             aria-label={`${noteTargetName(resident, note.resident_id)}のカルテを開く`}
           >
@@ -1477,12 +1477,12 @@ function NoteCard({
           （位置指定要素どうしは後に書いたこちらが上になる＝本文タップが氏名リンクに吸われない） */}
       <button
         type="button"
-        className="relative mt-1 block w-full text-left"
+        className="tl-card-body relative mt-1 block w-full text-left"
         onClick={() => onToggleExpand(note)}
         aria-expanded={expanded}
         aria-controls={bodyId}
       >
-        <span id={bodyId} className={`block text-lg text-ink ${expanded ? '' : 'clamp-2'}`}>
+        <span id={bodyId} className={`tl-card-text block text-lg text-ink ${expanded ? '' : 'clamp-2'}`}>
           {shown.body}
         </span>
         <span className="mt-1 block text-sm text-link">
@@ -1490,8 +1490,8 @@ function NoteCard({
         </span>
       </button>
 
-      {/* 3行目: 記入者・既読 */}
-      <div className="mt-1 flex flex-wrap items-center gap-gap">
+      {/* 3行目: 記入者・既読（画面の幅が 768px 以上では1行目の右へ寄せる＝index.css の .tl-card） */}
+      <div className="tl-card-meta mt-1 flex flex-wrap items-center gap-gap">
         <span className="text-sm text-ink2">
           記入者{' '}
           {note.reporter_id == null

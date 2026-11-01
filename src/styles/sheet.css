@@ -57,8 +57,8 @@
        ・日報の見やすさ（2026-10-31 本人裁定・案C・すべて画面だけ）:
          .dsheet-legible（日報の枠の文字・列幅の差し替え）/ .dsheet-hscroll・-in（発熱者・他症状者の器）/
          .dsheet-fold（0件の付帯ブロックを隠す）/ .cl-daily-title・.cl-daily-header-row（表題行の1段化・App.tsx）
-       ・食事一覧の見やすさ（2026-11-01 本人裁定・案C・すべて画面だけ）:
-         .msheet-legible（食事の枠の文字・列幅の差し替え・印をマスの角へ）/ .msheet-name（長い氏名の折り返し）
+       ・バイタル一覧の見やすさ（2026-11-01 本人裁定・案C・すべて画面だけ）:
+         .vsheet-legible（バイタル一覧の枠の文字・列幅の差し替え）/ .vsheet-name（氏名を「…」で切らず折り返す）
      それ以外の class 規則（.sheet-frame / .sheet-cell / .sheet-row-* / .sheet-fix-* /
      .sheet-table-meals / .sheet-swatch 等）は
      **参照用の見本であって適用されていない**。寸法・色を変えるときはページ側の Tailwind を直す。
@@ -139,10 +139,12 @@
    「フレームに --sheet-zoom を直接指定した場合」に再計算されない。
    .dsheet-legible（日報の枠・2026-10-31）も同じ理屈でここに並べる：日報の画面だけ素の値（--*-base）を
    差し替えるので、その要素で契約名を算出し直さないと :root で計算済みの 13px 基準の値が継がれてしまう。
-   印刷では差し替えが無い（@media screen だけ）ので、ここで算出し直しても :root と同じ値になる */
+   印刷では差し替えが無い（@media screen だけ）ので、ここで算出し直しても :root と同じ値になる。
+   .vsheet-legible（バイタル一覧の枠・2026-11-01）も同じ理由で並べる */
 :root,
 .sheet-frame,
-.dsheet-legible {
+.dsheet-legible,
+.vsheet-legible {
   --sheet-font: calc(var(--sheet-font-base) * var(--sheet-zoom, 1));
   --sheet-row-h: calc(var(--sheet-row-h-base) * var(--sheet-zoom, 1));
   --sheet-row-h-note: calc(var(--sheet-row-h-note-base) * var(--sheet-zoom, 1));
@@ -1330,6 +1332,39 @@ main:has(.dsheet-frame) {
   }
 }
 
+/* ── バイタル一覧の画面の文字と列幅（2026-11-01 本人裁定・案C「日数を保つ」）──────────────
+   バイタル一覧の枠（SheetFrame に付ける .vsheet-legible）の中だけ、画面に限って素の値（--*-base）を差し替える。
+   シートの文字 13→14px・行 22→23px（見出しは 24px のまま）。iPad 横（表の幅 1,052px）で今と同じ3日が欠けずに見え、
+   PC（1,312px）で4日が横はみ出しなしに入る幅にした（16px では iPad 横が2日に減る＝2026-11-01 の比較で本人が 14px を選んだ）。
+   列幅は 14px の文字で実測した値（セルの左右の余白8px込み）＋罫線1px：
+     体温「38.4↑↑」56.5px → 58px／血圧・脈・SpO2「151↑↑」「101↑↑」52.8px → 54px／
+     居室「101」＋直近7日の線（28px）→ 62px／氏名「全角5字＋空白」74.7px ＋間隔4 ＋「再検」38px ＋余白8 ＋罫線1 ＋1字の余裕 → 140px（今と同じ）。
+   それより長い氏名は「…」にせず画面だけ2行に折り返す（.vsheet-name）。
+   契約名（--sheet-font・--w-* 等）は冒頭の「:root, .sheet-frame, .dsheet-legible, .vsheet-legible」で同じ要素に算出し直すので、
+   倍率（--sheet-zoom）はこれまでどおり掛かる。食事一覧はこの class を持たない＝変わらない。
+   印刷はこの指定が効かない（@media screen）＝紙は :root の 13px 基準のまま（原則2・1px も変えない） */
+@media screen {
+  .vsheet-legible {
+    --sheet-font-base: 0.875rem; /* 14px */
+    --sheet-row-h-base: 1.4375rem; /* 23px */
+    --w-room-base: 3.875rem; /* 62px */
+    --w-name-base: 8.75rem; /* 140px */
+    --w-temp-base: 3.625rem; /* 58px */
+    --w-sys-base: 3.375rem; /* 54px */
+    --w-dia-base: 3.375rem; /* 54px */
+    --w-pulse-base: 3.375rem; /* 54px */
+    --w-spo2-base: 3.375rem; /* 54px */
+  }
+  /* 氏名は取り違え防止の最優先情報なので「…」で切らない（入らない時は2行に折り返す・日報の .dsheet-pick-wrap と同じ）。
+     紙はこの規則が当たらず従来の1行のまま */
+  .vsheet-legible .vsheet-name {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+}
+
 /* ── フロアの切れ目（食事一覧・2026-08-29 指示）────────────────
    「全」表示のとき、1階と2階がひと続きに見えて取り違えのもとになる。
    階が変わる最初の行の**上**に太線を引いて、階ごとの塊を目で分けられるようにする。
@@ -1430,6 +1465,8 @@ main:has(.dsheet-frame) {
 
 @media (max-width: 480px) {
   .sheet-pickbar button,
+  /* バイタル一覧の倍率の選択欄（2026-11-01）もボタンと同じ高さにそろえる（iPhone では上部を小さく＝2026-09-24 本人指示） */
+  .sheet-pickbar select,
   .sheet-bar-fit button,
   .sheet-bar-fit input,
   .bar-compact button {
