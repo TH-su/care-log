@@ -114,3 +114,55 @@
     max-height: 100dvh;
   }
 }
+/* タイムライン（src/pages/TimelinePage.tsx・2026-11-01 本人選択の案C）: 文字を大きく、1画面に入る件数を多く。
+   画面だけ（@media screen）。印刷と共通の文字の大きさ（tokens.css の --fs-*）は変えず、この枠の中で一段上のトークンを当てる。
+   列 744px（max-w-3xl）→ 最大 72rem（iPad横で約1028px）／本文 18→22px／氏名 16→18px／記入者・時刻など 15→16px／
+   勤務帯・ピン留めの見出し 15→16px／各日の表の見出し 14→15px・居室 15→16px。氏名は「…」で切らない（切る指定は元から無い。入らない時は折り返す） */
+@media screen {
+  div.tl-legible {
+    max-width: 72rem;
+  }
+  .tl-legible .tl-card .text-sm,
+  .tl-legible .day-section h3,
+  .tl-legible .day-section td.text-sm {
+    font-size: var(--fs-base);
+  }
+  .tl-legible .tl-card .tl-name {
+    font-size: var(--fs-lg);
+  }
+  .tl-legible .tl-card .tl-card-text {
+    font-size: var(--fs-xl);
+  }
+  .tl-legible .day-section th {
+    font-size: var(--fs-sm);
+  }
+}
+/* 幅 768px 以上（iPad縦・iPad横・PC）は「記入者・既読」をカードの1行目（時刻・氏名の右）へ寄せ、本文を1行ぶん上げる。
+   並び順（読み上げ・Tab の順）は DOM のまま：時刻・氏名 → 本文 → 記入者・既読。iPhone は従来の3段のまま */
+@media screen and (min-width: 768px) {
+  .tl-legible .tl-card {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: var(--tap-gap);
+    align-items: center;
+  }
+  .tl-legible .tl-card > * {
+    grid-column: 1 / -1;
+  }
+  .tl-legible .tl-card > .tl-card-head {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .tl-legible .tl-card > .tl-card-meta {
+    grid-column: 2;
+    grid-row: 1;
+    margin-top: 0;
+    justify-content: flex-end;
+  }
+  /* 本文を記入者・既読より上に重ねる（既読ボタンの縦の当たり拡張 READ_HIT が本文の上端のタップを奪わない。
+     氏名の NAME_HIT は元から DOM の順で本文が上） */
+  .tl-legible .tl-card > .tl-card-body {
+    grid-row: 2;
+    z-index: 1;
+  }
+}
