@@ -57,6 +57,8 @@
        ・日報の見やすさ（2026-10-31 本人裁定・案C・すべて画面だけ）:
          .dsheet-legible（日報の枠の文字・列幅の差し替え）/ .dsheet-hscroll・-in（発熱者・他症状者の器）/
          .dsheet-fold（0件の付帯ブロックを隠す）/ .cl-daily-title・.cl-daily-header-row（表題行の1段化・App.tsx）
+       ・食事一覧の見やすさ（2026-11-01 本人裁定・案C・すべて画面だけ）:
+         .msheet-legible（食事の枠の文字・列幅の差し替え・印をマスの角へ）/ .msheet-name（長い氏名の折り返し）
        ・バイタル一覧の見やすさ（2026-11-01 本人裁定・案C・すべて画面だけ）:
          .vsheet-legible（バイタル一覧の枠の文字・列幅の差し替え）/ .vsheet-name（氏名を「…」で切らず折り返す）
      それ以外の class 規則（.sheet-frame / .sheet-cell / .sheet-row-* / .sheet-fix-* /
@@ -1319,6 +1321,11 @@ main:has(.dsheet-frame) {
   .cl-daily-title > h1 {
     flex-shrink: 0;
   }
+  /* 一覧の画面（食事一覧）の見出しは施設名を出さないので縮めず文字の幅のまま（App.tsx の cl-sheet-title・2026-11-01）。
+     紙と 640px 未満は以前の flex-1 のまま */
+  header .cl-sheet-title {
+    flex: 0 0 auto;
+  }
   /* 未送信の札（「▲ 未送信 n件・端末に残せていません」）は縮めず1行のまま（折り返さない行の中で縦に割れていた・
      2026-10-31 反証レビュー）。足りない幅は施設名 → 日付バー（畳む器が折り返す・畳む）の順に譲る */
   header .cl-daily-status {
@@ -1727,5 +1734,84 @@ main:has(.dsheet-frame) {
 @media print {
   .sheet-extra-mark {
     display: none;
+  }
+}
+
+/* ── 食事一覧の画面の文字と列幅（2026-11-01 本人裁定・案C「食事一覧の見やすさ」）──────────────
+   食事一覧の枠（SheetFrame に付ける .msheet-legible）の中だけ、画面に限って素の値（--*-base）を差し替える。
+   シートの文字 13→16px・行 22→26px・見出し 24→26px。主食・副食の列は 30px のまま（16px の太字「10」は 23.8px）、
+   水分 60→50px（「1000」43.1px ＋余白＋罫線）、居室 68→44px（「218」32.3px）、氏名 118→128px（全角5字＋空白と「▼11」）。
+   数字の横に並べていた印（低摂取「▲」・デイ「デ」・水分の「▼」・未送信「⚠」）は、画面ではマスの角に小さく出す（下の規則）。
+   契約名（--sheet-font・--w-* 等）と別名（--sheet-fs 等）・当たり判定の拡張量（--sheet-hit-pad）は、冒頭の共有の規則
+   （:root, .sheet-frame, .dsheet-legible）の列に足さず、この要素で算出し直す（バイタル一覧の改善と同じ1行を書き換えないため）。
+   倍率（--sheet-zoom）はこれまでどおり掛かる（200% で行 52px＝指で押せる 44px 以上）。当たり判定は下方向だけのまま。
+   印刷はこの指定が効かない（@media screen）＝紙は :root の 13px 基準のまま（原則2・1px も変えない） */
+@media screen {
+  .msheet-legible {
+    --sheet-font-base: 1rem; /* 16px */
+    --sheet-row-h-base: 1.625rem; /* 26px */
+    --sheet-head-h-base: 1.625rem; /* 26px */
+    --w-room-m-base: 2.75rem; /* 44px */
+    --w-name-m-base: 8rem; /* 128px */
+    /* 主食・副食 30px は据え置き（--w-meal-base は差し替えない） */
+    /* 水分の列（TSX の W_FLUID。印刷はこの変数が無い＝1食分の幅 60px のまま） */
+    --msheet-w-fluid: calc(3.125rem * var(--sheet-zoom, 1)); /* 50px */
+
+    --sheet-font: calc(var(--sheet-font-base) * var(--sheet-zoom, 1));
+    --sheet-row-h: calc(var(--sheet-row-h-base) * var(--sheet-zoom, 1));
+    --sheet-head-h: calc(var(--sheet-head-h-base) * var(--sheet-zoom, 1));
+    --sheet-cell-pad: calc(var(--sheet-cell-pad-base) * var(--sheet-zoom, 1));
+    --w-room-m: calc(var(--w-room-m-base) * var(--sheet-zoom, 1));
+    --w-name-m: calc(var(--w-name-m-base) * var(--sheet-zoom, 1));
+    --w-meal: calc(var(--w-meal-base) * var(--sheet-zoom, 1));
+    --sheet-fs: var(--sheet-font);
+    --sheet-row: var(--sheet-row-h);
+    --sheet-head: var(--sheet-head-h);
+    --sheet-pad: var(--sheet-cell-pad);
+    --sheet-w-room-m: var(--w-room-m);
+    --sheet-w-name-m: var(--w-name-m);
+    --sheet-w-meal: var(--w-meal);
+    --sheet-hit-pad: max(0px, calc(var(--tap-min) - var(--sheet-row)));
+  }
+  /* 長い氏名は「…」で切らずに折り返す（取り違え防止。その行だけ高さが伸びる）。紙は従来の1行のまま */
+  .msheet-legible td.msheet-name,
+  .msheet-legible td.msheet-name .truncate {
+    white-space: normal;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+  /* 印はマスの角に小さく（0.62em＝16px で約10px）。数字の幅を取らないので列を広げずに済む。
+     デイ「デ」・水分の「▼」＝左下／未送信「⚠」・要再読込と未保存の「▲」＝右上／低摂取「▲」＝右下。
+     どれも読み上げは各マスの aria-label が持つ（印は aria-hidden）。低摂取は地の濃淡と斜線でも分かる */
+  /* 位置の基準は印を持つボタンだけ（全部のマスに付けると重ねて描く単位が増え、iPhone の指の動きが重くなる・2026-10-18 の対策と同じ考え） */
+  .msheet-legible tbody td button:has(> .cl-dc-mark, > .msheet-lowday, > .msheet-mark-phase, > .msheet-mark-low) {
+    position: relative;
+  }
+  .msheet-legible tbody td button > .cl-dc-mark,
+  .msheet-legible tbody td button > .msheet-lowday,
+  .msheet-legible tbody td button > .msheet-mark-phase,
+  .msheet-legible tbody td button > .msheet-mark-low {
+    position: absolute;
+    font-size: 0.62em;
+    line-height: 1;
+    pointer-events: none;
+  }
+  /* 左上は他の端末の入力中の「✎」（BusyMark）が来るので、デイ「デ」・水分の「▼」は左下（水分の横棒 3px の上） */
+  .msheet-legible tbody td button > .cl-dc-mark,
+  .msheet-legible tbody td button > .msheet-lowday {
+    bottom: 4px;
+    left: 2px;
+  }
+  .msheet-legible tbody td button > .msheet-mark-phase {
+    top: 1px;
+    right: 2px;
+  }
+  .msheet-legible tbody td button > .msheet-mark-low {
+    bottom: 1px;
+    right: 2px;
+  }
+  /* 「デ」を角へ出したので、数字の字の間は詰めない */
+  .msheet-legible .cl-dc-amount {
+    letter-spacing: inherit;
   }
 }

@@ -42,9 +42,9 @@ describe('画面上部の操作を畳む', () => {
     assert.match(src, /setBoxNarrow\(narrowWidth !== undefined && box\.clientWidth > 0 && box\.clientWidth < narrowWidth\)/)
     assert.match(src, /const collapsible = !printing && \(narrowAll \|\| wraps\)/, '印刷で畳んだ形が紙に出る')
     assert.match(src, /stored === null \? !narrowAll : stored/, '広い画面の既定が「畳む」になっている（今の見た目が変わる）')
-    // narrowWidth を渡すのは日報の表題行だけ（バイタル一覧・食事一覧・紙用の日付バーは今までどおり）
+    // narrowWidth を渡すのは表題行に置く器だけ（日報・2026-11-01 から食事一覧も。バイタル一覧・紙用の日付バーは今までどおり）
     assert.doesNotMatch(read('pages/VitalsSheetPage.tsx'), /narrowWidth/)
-    assert.doesNotMatch(read('pages/MealsSheetPage.tsx'), /narrowWidth/)
+    assert.equal((read('pages/MealsSheetPage.tsx').match(/narrowWidth=/g) ?? []).length, 1)
     assert.equal((read('pages/DailySheetPage.tsx').match(/narrowWidth=/g) ?? []).length, 1)
     assert.match(src, /collapse-bar-toggle [^`"]*min-h-tap min-w-tap/)
   })

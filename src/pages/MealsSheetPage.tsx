@@ -26,6 +26,7 @@ import {
   useRef,
   useState,
 } from 'react'
+import { createPortal } from 'react-dom'
 import type {
   CSSProperties,
   FocusEvent as ReactFocusEvent,
@@ -70,7 +71,7 @@ import {
   SegmentPicker,
   useToast,
 } from '../components/ui'
-import { readSheetPref, SheetFrame, writeSheetPref, ZoomBar } from '../components/sheet'
+import { readSheetPref, SheetFrame, writeSheetPref, ZoomBar, ZoomSelect } from '../components/sheet'
 import { discardPendingRow, fetchLatestMeal, pendingRow, saveMealEdits } from '../lib/db'
 import type { PendingCellRow } from '../lib/db'
 // 摂取低下（A2）・濃淡（A6）・水分の目標（A3）。基準値は app_settings の上書きを起動中に1回読む（A8）
@@ -173,12 +174,14 @@ const WATCHED_DAY_COL: Record<string, string | undefined> = {
 /**
  * シートの寸法は sheet.css の CSS 変数を参照する（倍率 --sheet-zoom は変数側で解決済み）。
  * 水分列は現行スプシに無い新設列のため専用変数が無く、1食分（主＋副）と同じ幅で持つ。
+ * 画面だけは食事の枠（.msheet-legible）が --msheet-w-fluid（50px×倍率）を持つ（2026-11-01 本人裁定・案C）。
+ * 紙はこの変数が無い＝従来の 1食分の幅のまま
  */
 const W_ROOM = 'var(--w-room-m)'
 const W_NAME = 'var(--w-name-m)'
 const W_MEAL = 'var(--w-meal)'
 const W_MEAL2 = 'calc(var(--w-meal) * 2)'
-const W_FLUID = 'calc(var(--w-meal) * 2)'
+const W_FLUID = 'var(--msheet-w-fluid, calc(var(--w-meal) * 2))'
 const ROW_H = 'var(--sheet-row-h)'
 const HEAD_H = 'var(--sheet-head-h)'
 const SHEET_FONT = 'var(--sheet-font)'
@@ -547,6 +550,26 @@ function writeLs(key: string, value: string): void {
   writeSheetPref(key, 'meals', value)
 }
 
+/**
+ * 表の下の記号の説明を画面で開いているか（2026-11-01 本人裁定「畳む」）。'1'＝開く・それ以外（未設定・壊れた値）＝畳む。
+ * UI 状態だけを持つ（業務データは持たない）。読めない環境では畳んだ形で始める
+ */
+function readLegendOpen(): boolean {
+  try {
+    return window.localStorage.getItem(LS.mealsLegendOpen) === '1'
+  } catch {
+    return false
+  }
+}
+
+function writeLegendOpen(open: boolean): void {
+  try {
+    window.localStorage.setItem(LS.mealsLegendOpen, open ? '1' : '0')
+  } catch {
+    // 保存できなくても今の表示は切り替える（安全側フォールバック）
+  }
+}
+
 // ── 吹き出し（セルに紐づく小さなパネル） ──────────────────────
 
 /** パネルの幅。見た目は Tailwind の w-64（16rem）で与え、この数値は画面端の丸め計算にだけ使う */
@@ -752,17 +775,53 @@ function AmountHalf({
         </span>
       ) : null}
       {phaseMark ? (
-        <span className={`sheet-mark ${phaseMark.cls}`} aria-hidden="true">
+        <span className={`sheet-mark msheet-mark-phase ${phaseMark.cls}`} aria-hidden="true">
           {phaseMark.mark}
         </span>
       ) : null}
       {value == null ? '' : value}
       {lowMark ? (
-        <span className="sheet-mark text-warn" aria-hidden="true">
+        <span className="sheet-mark msheet-mark-low text-warn" aria-hidden="true">
           ▲
         </span>
       ) : null}
     </button>
+  )
+}
+
+// ── 表題行の操作の部品 ───────────────────────────────────────
+
+/** 表題行の操作を「狭い」と扱う置ける幅（px）。CollapsibleBar の狭い画面の境目（480px）・日報の表題行と同じ */
+const HEADER_BAR_NARROW_PX = 480
+
+/**
+ * 表題行に置くフロア・日数の選択欄（2026-11-01 本人裁定・案C）。値と保存は操作バーのボタン（SegmentPicker）と同じで、
+ * 幅を取らない選択欄にしただけ。高さ・幅は 44px 以上（OS の選択の一覧で選ぶ＝指で押し分けやすい・ZoomSelect と同じ見た目）
+ */
+function PrefSelect({
+  options,
+  value,
+  onChange,
+  ariaLabel,
+}: {
+  options: readonly { value: string; label: string }[]
+  value: string
+  onChange: (value: string) => void
+  ariaLabel: string
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      aria-label={ariaLabel}
+      className="min-h-tap min-w-tap shrink-0 rounded-md border border-border-strong bg-surface px-2 text-base text-ink"
+    >
+      {options.map((o) => (
+        <option key={o.value} value={o.value}>
+          {o.label}
+        </option>
+      ))}
+    </select>
   )
 }
 
@@ -798,6 +857,16 @@ export function MealsSheetPage({
   const [floor, setFloor] = useState<string>(() => readFloor())
   /** 表示期間の右端＝いちばん新しい日。日付は業務データに紐づくため保存しない（既定は当日） */
   const [endIso, setEndIso] = useState<string>(() => todayIso())
+  /**
+   * 上部の操作の置き場（App の表題行・id は App.tsx と同じ 'cl-sheet-header-slot'。2026-11-01 本人裁定・案C「上部を1段に」）。
+   * 見つからない時（この画面だけを開いた時）は従来どおり画面の中の操作バーを使う
+   */
+  const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null)
+  useLayoutEffect(() => {
+    setHeaderSlot(document.getElementById('cl-sheet-header-slot'))
+  }, [])
+  /** 表の下の記号の説明を画面で開いているか（紙は常に全文） */
+  const [legendOpen, setLegendOpen] = useState<boolean>(() => readLegendOpen())
 
   const [residents, setResidents] = useState<Resident[]>(() => asArray<Resident>(residentsProp))
   const [meals, setMeals] = useState<Record<string, Meal>>({})
@@ -2394,6 +2463,8 @@ export function MealsSheetPage({
   const md = (iso: string): string => `${Number(iso.slice(5, 7))}/${Number(iso.slice(8, 10))}`
   // 1行に収まらない時は、期間の終わりの日だけ（「〜9/29」）にする（期間の始まりは表の見出しに出ている）
   const periodLabelShort = fromIso === toIso ? md(toIso) : `〜${md(toIso)}`
+  // 表題行に置く時の期間（曜日を外した「10/22〜11/1」。表題行の幅に1行で並べるため）
+  const periodLabelMid = fromIso === toIso ? md(toIso) : `${md(fromIso)}〜${md(toIso)}`
   /** 期間送り（‹ 期間 ›）。開いた形と畳んだ形で同じもの */
   const periodNav = (label: string, compact = false) => (
     <>
@@ -2423,7 +2494,60 @@ export function MealsSheetPage({
   return (
     // 外側の余白は詰める（2026-08-29 指示）。表に回る高さを増やすため p-4 → px-3 py-2
     <div className="flex flex-col gap-2 px-3 py-2">
-      <SectionCard>
+      {/* 表題行の操作（2026-11-01 本人裁定・案C「上部を1段に」）。「食事一覧」の見出しの右に
+          〔フロア ▾〕〔日数 ▾〕〔‹ 期間 ›〕〔文字 100% ▾〕〔最新〕と記録者を1行に並べる（日報の表題行と同じ作り）。
+          フロアと日数は選択欄（幅を取らないため。値・保存は下の操作バーと同じ）。畳む器と開閉の保存（LS.mealsBarOpen）は従来と同じで、
+          表題行の残りの幅に1行で収まらない時は器が中で折り返し、開閉のボタンを出す。表題行は紙に出ない（print:hidden）ので、
+          紙には従来の操作バー（下の SectionCard）を今のまま出す */}
+      {headerSlot
+        ? createPortal(
+            <CollapsibleBar
+              storageKey={LS.mealsBarOpen}
+              openLabel="フロア・日数・倍率の操作を開く"
+              closeLabel="フロア・日数・倍率の操作を畳む"
+              collapsed={(compact) => periodNav(compact ? periodLabelShort : periodLabelMid, compact)}
+              persistent={<RecorderBar actorId={actorId ?? null} />}
+              // 表題行に並べて置ける幅が 480px より狭い時は畳んで始める（日報の表題行と同じ境目）
+              narrowWidth={HEADER_BAR_NARROW_PX}
+              full={(extra) => (
+                <div className="sheet-bar-fit flex flex-wrap items-center gap-gap">
+                  <PrefSelect options={floorOptions} value={floor} onChange={onChangeFloor} ariaLabel="フロアを選ぶ" />
+                  <PrefSelect
+                    options={DAYS_OPTIONS}
+                    value={String(days)}
+                    onChange={onChangeDays}
+                    ariaLabel="横に並べる日数を選ぶ"
+                  />
+                  {periodNav(periodLabelMid)}
+                  <ZoomSelect />
+                  <button
+                    type="button"
+                    onClick={onReload}
+                    className="min-h-tap shrink-0 rounded border border-border-strong px-3 text-base text-ink"
+                  >
+                    最新
+                  </button>
+                  {extra === null ? null : <div className="ml-auto min-w-0">{extra}</div>}
+                </div>
+              )}
+            />,
+            headerSlot,
+          )
+        : null}
+      {/* 表題行に操作がある時の読み込み中の一言（画面だけ。紙用の操作バーの中の同じ一言と読み上げは画面では隠れるので、
+          読み上げの知らせもここに置く＝常に置いて中身だけ変える） */}
+      {headerSlot ? (
+        <p role="status" aria-live="polite" className="sr-only print:hidden">
+          {loading ? '読み込み中です' : ''}
+        </p>
+      ) : null}
+      {headerSlot && loading ? (
+        <p className="text-base text-ink2 print:hidden">
+          ↻ 読み込み中です。表示がそろうまでお待ちください（この間は入力できません）
+        </p>
+      ) : null}
+      {/* 表題行に操作がある時は、画面では隠して紙にだけ出す（紙は今のまま） */}
+      <SectionCard className={headerSlot ? 'hidden print:block' : ''}>
         {/* 操作は全部1行に畳む（2026-08-29 指示）。上に積む高さが減ったぶん、
             表の高さ上限（.sheet-frame-fit）が自動で広がり、縦スクロールが減る。
             ボタンの高さ 44px は変えない＝手袋・片手でも押せる大きさは保つ。
@@ -2625,7 +2749,8 @@ export function MealsSheetPage({
           // 枠の高さ上限は sheet.css の .sheet-frame-fit（画面の高さ − 上に積まれた UI）。
           // 100vh のままだと枠が画面より下へはみ出し、ページを送ると上固定の見出しごと
           // 画面外へ出てしまう（見出しは「枠の上端」に貼り付くため）
-          className="sheet-frame-fit"
+          // msheet-legible: 画面だけ文字 16px・行 26px・列幅を差し替える（sheet.css の末尾・2026-11-01 本人裁定・案C。紙は不変）
+          className="sheet-frame-fit msheet-legible"
         >
           {/* sheet-table: 列幅を値で動かさない（table-layout: fixed）＋
               sticky セルの罫線が消えない（border-collapse: separate）＋
@@ -2781,7 +2906,8 @@ export function MealsSheetPage({
                   </th>
                   <td
                     style={{ width: W_NAME, minWidth: W_NAME, maxWidth: W_NAME, left: W_ROOM }}
-                    className={`${CELL_BASE} sheet-fix-end sticky z-10 truncate ${altClass(rowIndex) || 'bg-surface'} px-1 text-ink`}
+                    // msheet-name: 画面では長い氏名を「…」で切らずに折り返す（取り違え防止・sheet.css。紙は従来の1行のまま）
+                    className={`${CELL_BASE} sheet-fix-end sticky z-10 msheet-name truncate ${altClass(rowIndex) || 'bg-surface'} px-1 text-ink`}
                   >
                     {(() => {
                       // A2: いちばん新しい日（表の左端の日）の摂取低下の続いている日数を氏名の右に「▼14」（紙にも出す）。
@@ -3003,7 +3129,7 @@ export function MealsSheetPage({
                             className="block h-full w-full bg-transparent text-center text-ink"
                           >
                             {queuedMl > 0 ? (
-                              <span className="text-warn" aria-hidden="true">
+                              <span className="msheet-mark-phase text-warn" aria-hidden="true">
                                 ⚠
                               </span>
                             ) : null}
@@ -3108,8 +3234,22 @@ export function MealsSheetPage({
         </SheetFrame>
       )}
 
-      {/* 凡例（色だけで意味を伝えないための文字説明） */}
-      <p className="text-sm text-ink2">
+      {/* 凡例（色だけで意味を伝えないための文字説明）。画面では〔記号の説明 ▸〕の1行に畳み、押すと全文を開く
+          （2026-11-01 本人裁定「畳む」。表に回る高さを増やすため。開閉は LS.mealsLegendOpen に持つ）。紙は常に全文 */}
+      <button
+        type="button"
+        aria-expanded={legendOpen}
+        aria-controls="msheet-legend"
+        onClick={() => {
+          const next = !legendOpen
+          setLegendOpen(next)
+          writeLegendOpen(next)
+        }}
+        className="min-h-tap self-start rounded px-2 text-sm text-link print:hidden"
+      >
+        記号の説明 <span aria-hidden="true">{legendOpen ? '▾' : '▸'}</span>
+      </button>
+      <p id="msheet-legend" className={`text-sm text-ink2 ${legendOpen ? '' : 'hidden print:block'}`}>
         朝は赤系・昼は緑系・夕は通常色の文字です。<span aria-hidden="true">▲</span>
         は低摂取、<span aria-hidden="true">⚠</span>は未送信を表します。文字を大きくするときは上の倍率で切り替えてください。
         {/* A6・A2 の凡例（紙にも出す） */}

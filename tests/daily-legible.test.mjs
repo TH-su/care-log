@@ -350,12 +350,13 @@ describe('6. 上部を1段に（表題行へ）', () => {
     assert.match(daily, /createPortal\(<DailyHeaderBar /)
   })
 
-  it('倍率は日報の表題行とバイタル一覧（2026-11-01 本人裁定）が画面で選択欄1つ（ZoomSelect）・食事一覧は4ボタン（ZoomBar）のまま', () => {
+  it('倍率は日報の表題行・バイタル一覧・食事一覧（2026-11-01 本人裁定）が画面で選択欄1つ（ZoomSelect）・紙は4ボタン（ZoomBar）のまま', () => {
     assert.match(fnSrc(daily, 'HeaderDateBar'), /<ZoomSelect \/>/)
     assert.doesNotMatch(fnSrc(daily, 'HeaderDateBar'), /<ZoomBar/)
+    // 食事一覧は 2026-11-01 本人裁定（案C）で表題行に選択欄・紙用の操作バーは4ボタンのまま（tests/meals-legible.test.mjs）
     const meals = read('pages/MealsSheetPage.tsx')
-    assert.doesNotMatch(meals, /ZoomSelect/, '食事一覧が選択欄になっている')
-    assert.match(meals, /<ZoomBar/, '食事一覧の4ボタンが無い')
+    assert.match(meals, /<ZoomSelect \/>/)
+    assert.match(meals, /<ZoomBar compact \/>/, '食事一覧の紙用の4ボタンが無い')
     // バイタル一覧: 画面は選択欄・紙は今までどおり4ボタン
     const vitals = read('pages/VitalsSheetPage.tsx')
     assert.match(vitals, /<ZoomBar compact \/>\s*\) : \(\s*<>\s*<div className="print:hidden">\s*<ZoomSelect \/>\s*<\/div>\s*<div className="hidden print:block">\s*<ZoomBar compact \/>\s*<\/div>/)
@@ -375,8 +376,11 @@ describe('6. 上部を1段に（表題行へ）', () => {
 
   it('表題行（日報の時だけ）: 640px 以上は折り返さず、見出しが日付バーより先に縮む（施設名が「…」）・画面だけ（紙の表題行は以前と同じ指定）', () => {
     const app = read('App.tsx')
-    assert.match(app, /\$\{location\.pathname === '\/' \? ' cl-daily-header-row' : ''\}/)
-    assert.match(app, /location\.pathname === '\/'\s*\? 'cl-daily-title flex items-baseline gap-2'\s*: location\.pathname === '\/sheet\/vitals'[\s\S]*?'flex min-w-0 flex-auto flex-wrap items-baseline gap-2'\s*: 'flex min-w-0 flex-1 flex-wrap items-baseline gap-2'/)
+    // 2026-11-01: 食事一覧（SHEET_HEADER_SLOT_PATHS）も表題行を1行に並べる（oneRowHeader）。見出しの縮み方（cl-daily-title）は日報だけ
+    assert.match(app, /const oneRowHeader = location\.pathname === '\/' \|\| sheetHeaderSlot/)
+    assert.match(app, /\$\{oneRowHeader \? ' cl-daily-header-row' : ''\}/)
+    // 日報以外は紙の表題行が以前と同じ指定（flex-1）。バイタル一覧は flex-auto・食事一覧は画面の 640px 以上だけ cl-sheet-title で縮めない
+    assert.match(app, /location\.pathname === '\/'\s*\? 'cl-daily-title flex items-baseline gap-2'\s*: location\.pathname === '\/sheet\/vitals'[\s\S]*?'flex min-w-0 flex-auto flex-wrap items-baseline gap-2'\s*: [\s\S]*?`flex min-w-0 flex-1 flex-wrap items-baseline gap-2\$\{sheetHeaderSlot \? ' cl-sheet-title' : ''\}`/)
     assert.match(app, /<div id="cl-daily-header-slot" className="min-w-0 flex-1 basis-full sm:basis-auto print:hidden" \/>/)
     const plain = stripComments(css)
     // 640px 未満と紙: 以前の flex-1・折り返し・min-w-0 と同じ
@@ -415,7 +419,7 @@ describe('8. 表題行と1日目の枠の間（画面だけ詰める）', () => 
 // ══════════════════════════════════════════════════════════════════════
 describe('9. 表題行の未送信の札', () => {
   it('日報の表題行では未送信の札を縮めず1行のまま（画面・640px 以上だけ）', () => {
-    assert.match(read('App.tsx'), /<span role="status" className=\{location\.pathname === '\/' \? 'cl-daily-status' : undefined\}>/)
+    assert.match(read('App.tsx'), /<span role="status" className=\{oneRowHeader \? 'cl-daily-status' : undefined\}>/)
     const scr = mediaBlocks(css, 'screen and (min-width: 640px)')
     assert.equal(scr.length, 1)
     assert.match(scr[0], /header \.cl-daily-status \{\s*flex-shrink: 0;\s*white-space: nowrap;/)
