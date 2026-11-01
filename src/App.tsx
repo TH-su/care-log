@@ -1481,7 +1481,11 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
             className={
               location.pathname === '/'
                 ? 'cl-daily-title flex items-baseline gap-2'
-                : 'flex min-w-0 flex-1 flex-wrap items-baseline gap-2'
+                : location.pathname === '/sheet/vitals'
+                  ? // バイタル一覧は右に保存状況と記録者が並ぶ（下の cl-vitals-header-slot）。見出しの幅を元の大きさに取り（flex-auto）、
+                    // 1行に入らない時は見出しを縮めずに保存状況の方を次の行へ回す（flex-1 のままだと iPhone で見出しが潰れた・2026-11-01 実測）
+                    'flex min-w-0 flex-auto flex-wrap items-baseline gap-2'
+                  : 'flex min-w-0 flex-1 flex-wrap items-baseline gap-2'
             }
           >
             <h1 className="min-w-tap truncate text-lg font-bold">{screenTitle(location.pathname)}</h1>
@@ -1497,6 +1501,12 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
               折り返す・畳む。狭い画面（640px 未満）では1行を取る（見出しの横に詰めると、見出しが縮んで検索欄と重なった・2026-10-15 実測） */}
           {location.pathname === '/' && (
             <div id="cl-daily-header-slot" className="min-w-0 flex-1 basis-full sm:basis-auto print:hidden" />
+          )}
+          {/* バイタル一覧の保存状況と記録者の置き場（2026-11-01 本人裁定「表題行へも移して」）。中身はバイタル一覧の画面がここへ描く
+              （VitalsSheetPage の createPortal）。見出しの右に並べ、幅が足りない時は次の行へ回る（表題行は今までどおり折り返す）。
+              紙には出さない（紙の保存状況は操作バーの中に従来どおり出る） */}
+          {location.pathname === '/sheet/vitals' && (
+            <div id="cl-vitals-header-slot" className="flex min-w-0 flex-wrap items-center gap-gap print:hidden" />
           )}
           {/* 表示倍率は各シート画面の操作バー側に1つだけ置く（契約 §5〜§7。日報は 2026-10-31 から上の置き場の
               「文字 100% ▾」）。この行に別に置くと倍率の操作が同一画面に2つ並ぶため置かない

@@ -56,7 +56,9 @@ describe('画面上部の操作を畳む', () => {
     const vitals = read('pages/VitalsSheetPage.tsx')
     assert.match(vitals, /storageKey=\{LS\.vitalsBarOpen\}/)
     assert.match(vitals, /collapsed=\{\(compact\) => periodNav\(/)
-    assert.match(vitals, /persistent=\{statusLine\}/, '保存状況を畳むと隠れる')
+    // 2026-11-01: 表題行へ移した時は、操作バーには紙の分だけ残す（画面の保存状況は表題行＝畳んでも隠れない）
+    assert.match(vitals, /persistent=\{toHeader \? <div className="hidden print:contents">\{statusLine\}<\/div> : statusLine\}/, '保存状況を畳むと隠れる')
+    assert.match(vitals, /createPortal\(statusLine, headerSlot\)/)
     const meals = read('pages/MealsSheetPage.tsx')
     assert.match(meals, /storageKey=\{LS\.mealsBarOpen\}/)
     assert.match(meals, /collapsed=\{\(compact\) => periodNav\(/)
