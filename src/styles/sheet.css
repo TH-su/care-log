@@ -57,6 +57,8 @@
        ・日報の見やすさ（2026-10-31 本人裁定・案C・すべて画面だけ）:
          .dsheet-legible（日報の枠の文字・列幅の差し替え）/ .dsheet-hscroll・-in（発熱者・他症状者の器）/
          .dsheet-fold（0件の付帯ブロックを隠す）/ .cl-daily-title・.cl-daily-header-row（表題行の1段化・App.tsx）
+       ・食事一覧の見やすさ（2026-11-01 本人裁定・案C・すべて画面だけ）:
+         .msheet-legible（食事の枠の文字・列幅の差し替え・印をマスの角へ）/ .msheet-name（長い氏名の折り返し）
        ・バイタル一覧の見やすさ（2026-11-01 本人裁定・案C・すべて画面だけ）:
          .vsheet-legible（バイタル一覧の枠の文字・列幅の差し替え）/ .vsheet-name（氏名を「…」で切らず折り返す）
      それ以外の class 規則（.sheet-frame / .sheet-cell / .sheet-row-* / .sheet-fix-* /

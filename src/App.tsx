@@ -1494,7 +1494,9 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
                   ? // バイタル一覧は右に保存状況と記録者が並ぶ（下の cl-vitals-header-slot）。見出しの幅を元の大きさに取り（flex-auto）、
                     // 1行に入らない時は見出しを縮めずに保存状況の方を次の行へ回す（flex-1 のままだと iPhone で見出しが潰れた・2026-11-01 実測）
                     'flex min-w-0 flex-auto flex-wrap items-baseline gap-2'
-                  : 'flex min-w-0 flex-1 flex-wrap items-baseline gap-2'
+                  : // 一覧の画面で表題行に操作を置く時は cl-sheet-title（sheet.css・画面の 640px 以上だけ見出しを縮めない。
+                    // 縮めると「食事一覧」が操作に重なった・2026-11-01 実測）。紙の表題行は以前と同じ指定のまま
+                    `flex min-w-0 flex-1 flex-wrap items-baseline gap-2${sheetHeaderSlot ? ' cl-sheet-title' : ''}`
             }
           >
             <h1 className="min-w-tap truncate text-lg font-bold">{screenTitle(location.pathname)}</h1>
@@ -1516,6 +1518,11 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
               紙には出さない（紙の保存状況は操作バーの中に従来どおり出る） */}
           {location.pathname === '/sheet/vitals' && (
             <div id="cl-vitals-header-slot" className="flex min-w-0 flex-wrap items-center gap-gap print:hidden" />
+          )}
+          {/* 一覧の画面（食事一覧）の操作の置き場（2026-11-01 本人裁定・案C「上部を1段に」）。中身は各画面がここへ描く
+              （MealsSheetPage の createPortal）。並べ方と紙に出さないことは日報の置き場と同じ */}
+          {sheetHeaderSlot && (
+            <div id="cl-sheet-header-slot" className="min-w-0 flex-1 basis-full sm:basis-auto print:hidden" />
           )}
           {/* 表示倍率は各シート画面の操作バー側に1つだけ置く（契約 §5〜§7。日報は 2026-10-31 から上の置き場の
               「文字 100% ▾」）。この行に別に置くと倍率の操作が同一画面に2つ並ぶため置かない

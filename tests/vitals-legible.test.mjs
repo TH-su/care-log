@@ -100,6 +100,6 @@ describe('3. 上部を詰める（倍率は選択欄・保存状況と記録者�
   })
 
   it('表題行の見出しはバイタル一覧だけ flex-auto（入らない時は見出しを潰さず保存状況を次の行へ）・他の画面は従来どおり', () => {
-    assert.match(app, /: location\.pathname === '\/sheet\/vitals'[\s\S]*?'flex min-w-0 flex-auto flex-wrap items-baseline gap-2'\s*: 'flex min-w-0 flex-1 flex-wrap items-baseline gap-2'/)
+    assert.match(app, /: location\.pathname === '\/sheet\/vitals'[\s\S]*?'flex min-w-0 flex-auto flex-wrap items-baseline gap-2'\s*: [\s\S]*?`flex min-w-0 flex-1 flex-wrap items-baseline gap-2\$\{sheetHeaderSlot \? ' cl-sheet-title' : ''\}`/)
   })
 })
