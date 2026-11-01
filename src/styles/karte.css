@@ -1,0 +1,40 @@
+/* カルテ（KartePage）の画面だけの見やすさ（2026-11-01）。印刷には効かせない（@media screen の中だけ）。
+   補助テキスト（text-sm＝--fs-sm 15px）を本文の大きさ（--fs-base 16px）にそろえる。新しい px は作らず既存のトークンを指すだけ。
+   氏名と移動ボタンの帯（data-karte-bar）は今の大きさのまま（ボタンが折り返して帯が高くなると、毎画面の表示範囲が減るため） */
+@media screen {
+  .cl-karte-legible > :not([data-karte-bar]) {
+    --fs-sm: var(--fs-base);
+  }
+}
+
+/* 広い画面（1024px 以上＝iPad 横・PC）だけ、文字の欄も画面の幅まで広げ（max-w-6xl と同じ 72rem）、
+   短い欄は2列に並べる。狭い画面・印刷は今までどおり1列 */
+@media screen and (min-width: 1024px) {
+  .cl-karte-lane {
+    max-width: 72rem;
+  }
+  .cl-karte-period {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    column-gap: 0.75rem;
+  }
+  .cl-karte-period > * {
+    flex: none;
+    margin-top: 0;
+  }
+  /* 期間の切替（SegmentPicker の flex-1）が横並びで縮んで「1か／月」と折れないようにする */
+  .cl-karte-period [role='group'] > button {
+    white-space: nowrap;
+  }
+  .cl-karte-pair {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    column-gap: 1rem;
+    align-items: start;
+  }
+  /* 並べた欄の上の余白は、外側の枠（mt-4）か列の中の欄（mt-4）で取る。左右の欄の上端をそろえる（片方だけ mt-3 でずれないように） */
+  .cl-karte-pair > * {
+    margin-top: 0;
+  }
+}
