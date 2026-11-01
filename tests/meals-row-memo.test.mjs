@@ -38,3 +38,32 @@ describe('食事一覧: 行は memo した部品で、開閉の state は全行�
     assert.doesNotMatch(tbody, /commitAmount=\{commitAmountNow\}/)
   })
 })
+
+describe('食事一覧: 行へ渡すものが描くたびに作り直されない（2026-11-01 反証レビュー）', () => {
+  const rowUse = tbody.slice(tbody.indexOf('<MealsRow'), tbody.indexOf('/>', tbody.indexOf('<MealsRow')))
+  it('行の props にその場で作る関数・オブジェクト・配列を渡さない（渡すと全行の memo が外れる）', () => {
+    assert.ok(rowUse.length > 0)
+    assert.doesNotMatch(rowUse, /=\{\s*\(/, 'その場で作る関数を渡している')
+    assert.doesNotMatch(rowUse, /=\{\s*(?:async\s+)?\w+\s*=>/, 'その場で作る関数を渡している')
+    assert.doesNotMatch(rowUse, /=\{\{/, 'その場で作るオブジェクトを渡している')
+    assert.doesNotMatch(rowUse, /=\{\[/, 'その場で作る配列を渡している')
+  })
+  it('行へ渡すコールバックは useCallback で、依存に開閉の state（edit・editText・editInvalid・fluidTarget）を含まない', () => {
+    const names = [...rowUse.matchAll(/\n\s+(\w+)=\{(\w+)\}/g)].filter(([, k, v]) => k === v && /^(on[A-Z]|open|close|add|undo|save|commit|btnRefFor)/.test(k)).map(([, k]) => k)
+      // state の値（undoFluids など）は関数ではないので除く
+      .filter((k) => !new RegExp(`const \\[${k},`).test(src))
+    assert.ok(names.length >= 10, `コールバックの数が足りない: ${names}`)
+    for (const n of names) {
+      const i = src.indexOf(`const ${n} = useCallback(`)
+      assert.ok(i >= 0, `${n} が useCallback ではない`)
+      // useCallback 自身の依存（複数行の形「\n    [..],\n  )」か1行の形「}, [..])」の最初のもの）
+      const m = src.slice(i).match(/\n    \[([^\[\]]*)\],?\n  \)|\}, \[([^\[\]]*)\]\)/)
+      assert.ok(m, `${n} の依存が読めない`)
+      const deps = m[1] ?? m[2]
+      for (const bad of ['edit', 'editText', 'editInvalid', 'fluidTarget']) {
+        assert.ok(!deps.split(',').map((x) => x.trim()).includes(bad), `${n} の依存に ${bad} がある（開閉のたびに全行を描き直す）`)
+      }
+    }
+  })
+})
+
