@@ -734,20 +734,17 @@ function AmountHalf({
   const box = `${divider ? 'border-r border-border' : ''} h-full text-center`
   if (editing) {
     return (
-      <input
-        ref={inputRef}
-        type="text"
-        inputMode="numeric"
-        autoComplete="off"
-        value={editText}
-        aria-label={ariaLabel}
-        aria-describedby={describedBy}
-        aria-invalid={editInvalid}
-        onChange={(e) => onText(e.target.value)}
+      <AmountInput
+        initialText={editText}
+        editInvalid={editInvalid}
+        inputRef={inputRef}
+        width={width}
+        className={`${box} tabular bg-surface text-ink`}
+        ariaLabel={ariaLabel}
+        describedBy={describedBy}
+        onText={onText}
         onKeyDown={onKeyDown}
         onBlur={onBlur}
-        style={{ width, minWidth: width }}
-        className={`${box} tabular bg-surface text-ink`}
       />
     )
   }
@@ -786,6 +783,57 @@ function AmountHalf({
         </span>
       ) : null}
     </button>
+  )
+}
+
+/**
+ * 主食・副食の入力欄（開いている1マスだけ）。打った文字はこの部品の中に持ち、画面へは onText で控え（ref）として渡すだけにする
+ * （2026-11-01。以前は画面全体の state に持っていたため、1文字打つたびに表全体＝約2700ボタンを描き直し、iPhone で入力がカクついた）。
+ * 初めの文字（initialText）は開いた時の値。開いている間に外から書き換えることはない
+ */
+function AmountInput({
+  initialText,
+  editInvalid,
+  inputRef,
+  width,
+  className,
+  ariaLabel,
+  describedBy,
+  onText,
+  onKeyDown,
+  onBlur,
+}: {
+  initialText: string
+  editInvalid: boolean
+  inputRef: RefObject<HTMLInputElement>
+  width: string
+  className: string
+  ariaLabel: string
+  describedBy?: string
+  onText: (v: string) => void
+  onKeyDown: (e: ReactKeyboardEvent<HTMLInputElement>) => void
+  onBlur: (e: ReactFocusEvent<HTMLInputElement>) => void
+}) {
+  const [text, setText] = useState(initialText)
+  return (
+    <input
+      ref={inputRef}
+      type="text"
+      inputMode="numeric"
+      autoComplete="off"
+      value={text}
+      aria-label={ariaLabel}
+      aria-describedby={describedBy}
+      aria-invalid={editInvalid}
+      onChange={(e) => {
+        setText(e.target.value)
+        onText(e.target.value)
+      }}
+      onKeyDown={onKeyDown}
+      onBlur={onBlur}
+      style={{ width, minWidth: width }}
+      className={className}
+    />
   )
 }
 
@@ -920,7 +968,13 @@ export function MealsSheetPage({
   const [thresholdsVer, setThresholdsVer] = useState(0)
 
   const [edit, setEdit] = useState<EditTarget | null>(null)
+  /** 開いた時の入力欄の値（表を描き直すのは開く・閉じる時だけ） */
   const [editText, setEditText] = useState('')
+  /** 入力中の文字の控え（打つたびは state にしない＝表全体を描き直さない。確定はここを読む） */
+  const editTextRef = useRef('')
+  const onEditText = useCallback((v: string) => {
+    editTextRef.current = v
+  }, [])
   const [editInvalid, setEditInvalid] = useState(false)
   const [fluidTarget, setFluidTarget] = useState<FluidTarget | null>(null)
   /** くらべて選ぶ画面に渡す内容（開いた時点で固定する） */
@@ -1987,6 +2041,7 @@ export function MealsSheetPage({
     setEdit(null)
     setEditInvalid(false)
     setEditText('')
+    editTextRef.current = ''
   }, [])
 
   /** 水分の吹き出しを閉じる（同じくフォーカスをセルへ戻す） */
@@ -2374,6 +2429,7 @@ export function MealsSheetPage({
       setFluidTarget(null)
       setEditInvalid(false)
       setEditText(value == null ? '' : String(value))
+      editTextRef.current = value == null ? '' : String(value)
       // 吹き出しを開いた時に画面に出ている値を、この食事の基準として控える（構造規約 R-E）
       const key = mealKey(t.residentId, t.day, t.slot)
       editStartRef.current = {
@@ -2396,7 +2452,7 @@ export function MealsSheetPage({
   /** 入力中の数値を確定する。解釈できない値はセルを開いたまま案内する（入力を捨てない） */
   const commitAmount = useCallback((): boolean => {
     if (!edit) return true
-    const parsed = parseAmount(editText)
+    const parsed = parseAmount(editTextRef.current)
     if (parsed === 'invalid') {
       setEditInvalid(true)
       showRef.current(ERR_AMOUNT)
@@ -2411,7 +2467,7 @@ export function MealsSheetPage({
       editStartRef.current?.key === edit.key ? editStartRef.current.cells : undefined,
     )
     return true
-  }, [edit, editText, saveMeal])
+  }, [edit, saveMeal])
 
   /** 確定してから閉じる（枠外タップ・フォーカス移動の共通処理） */
   const commitAndClose = useCallback(
@@ -3065,7 +3121,7 @@ export function MealsSheetPage({
                                     ariaLabel={`${r.name} ${dayLabel} ${slotLabel} 主食 ${eff.main_amount ?? '未入力'}${low ? '。低摂取' : ''}${halfWord}${dcWord}`}
                                     describedBy={busyId}
                                     onOpen={() => openAmount(target, 'main_amount', eff.main_amount)}
-                                    onText={setEditText}
+                                    onText={onEditText}
                                     onKeyDown={onEditKeyDown}
                                     onBlur={onEditBlur}
                                   />
@@ -3084,7 +3140,7 @@ export function MealsSheetPage({
                                     ariaLabel={`${r.name} ${dayLabel} ${slotLabel} 副食 ${eff.side_amount ?? '未入力'}${low ? '。低摂取' : ''}${mark ? `。${mark.label}` : ''}${dcWord}`}
                                     describedBy={busyId}
                                     onOpen={() => openAmount(target, 'side_amount', eff.side_amount)}
-                                    onText={setEditText}
+                                    onText={onEditText}
                                     onKeyDown={onEditKeyDown}
                                     onBlur={onEditBlur}
                                   />
