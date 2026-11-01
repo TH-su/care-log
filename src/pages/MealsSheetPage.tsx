@@ -19,6 +19,7 @@
 
 import {
   Fragment,
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -31,6 +32,7 @@ import type {
   CSSProperties,
   FocusEvent as ReactFocusEvent,
   KeyboardEvent as ReactKeyboardEvent,
+  MutableRefObject,
   ReactNode,
   RefObject,
 } from 'react'
@@ -81,6 +83,7 @@ import { useDaycareArrivals } from '../hooks/useDaycareArrivals'
 import { fluidProgress, mealLowLabel, mealLowStreaks, mealShade } from '../lib/vitalAlerts'
 import type { ResidentTargets } from '../lib/vitalAlerts'
 import { focusOf, useCellPresence } from '../hooks/useCellPresence'
+import type { CellPresence } from '../hooks/useCellPresence'
 import { cellKey } from '../lib/presence'
 import type { CellTarget } from '../lib/presence'
 import { BUSY_RING, BusyMark, PresenceSummary, RowBusyMark } from '../components/presence'
@@ -887,6 +890,448 @@ function PrefSelect({
     </select>
   )
 }
+
+// ── 表の1行（1名分） ─────────────────────────────────────────
+
+interface MealsRowProps {
+  r: Resident
+  rowIndex: number
+  floorStartIds: Set<number>
+  dayList: string[]
+  today: string
+  fromIso: string
+  toIso: string
+  lowReadFrom: string
+  canInput: boolean
+  meals: Record<string, Meal>
+  pending: Record<string, MealPatch>
+  phases: Record<string, RowPhase>
+  fluidMap: Map<string, { ml: number; rows: FluidIntake[] }>
+  queuedFluids: Record<string, { base: number; ml: number }>
+  undoFluids: Record<string, { id: number; rev: number; ml: number }>
+  lowStreaks: ReturnType<typeof mealLowStreaks>
+  targets: Map<number, ResidentTargets>
+  dcArrivals: ReadonlySet<string>
+  presence: CellPresence
+  /** この行で開いている入力欄（他の行は常に null＝開閉で他の行の props が変わらない） */
+  edit: EditTarget | null
+  /** 開いた時の入力欄の値（この行で開いている時だけ。他の行は ''） */
+  editText: string
+  /** 入力欄の値が解釈できない（この行で開いている時だけ。他の行は false） */
+  editInvalid: boolean
+  /** この行で開いている水分の吹き出し（他の行は常に null） */
+  fluidTarget: FluidTarget | null
+  editInputRef: RefObject<HTMLInputElement>
+  editStartRef: MutableRefObject<{ key: string; cells: MealCells } | null>
+  // 以下のコールバックは画面が参照を変えずに渡す（変わると全行の memo が外れる）
+  btnRefFor: (key: string) => (el: HTMLButtonElement | null) => void
+  onEditText: (v: string) => void
+  onEditKeyDown: (e: ReactKeyboardEvent<HTMLInputElement>) => void
+  onEditBlur: (e: ReactFocusEvent<HTMLInputElement>) => void
+  openAmount: (t: SaveTarget, field: AmountField, value: number | null) => void
+  commitAmount: () => boolean
+  commitAndClose: (refocus?: boolean) => void
+  saveMeal: (t: SaveTarget, rawPatch: MealPatch, isUndo?: boolean, baseCells?: MealCells) => void
+  closeEdit: (refocus?: boolean) => void
+  openFluid: (residentId: number, day: string) => void
+  closeFluid: (refocus?: boolean) => void
+  addFluid: (residentId: number, day: string, ml: number) => void
+  undoFluid: (residentId: number, day: string) => void
+}
+
+/**
+ * 表の1行（1名分の食事・水分）。memo して、props が変わった行だけ描き直す（2026-11-01 iPhone で、マスを押して入力欄を
+ * 開く・閉じるたびに表全体＝約2700ボタンを描き直していた）。比較は既定の浅い比較のまま（比べ漏れで古い表示を残さない）。
+ * 食事・控え・状態・水分などの値は画面の state をそのまま受ける（変われば全行が描き直る＝今までと同じ）。
+ * この部品は state・フックを持たない（描く中身は表の本体にインラインで書いていたものと同じ）
+ */
+const MealsRow = memo(function MealsRow({
+  r,
+  rowIndex,
+  floorStartIds,
+  dayList,
+  today,
+  fromIso,
+  toIso,
+  lowReadFrom,
+  canInput,
+  meals,
+  pending,
+  phases,
+  fluidMap,
+  queuedFluids,
+  undoFluids,
+  lowStreaks,
+  targets,
+  dcArrivals,
+  presence,
+  edit,
+  editText,
+  editInvalid,
+  fluidTarget,
+  editInputRef,
+  editStartRef,
+  btnRefFor,
+  onEditText,
+  onEditKeyDown,
+  onEditBlur,
+  openAmount,
+  commitAmount,
+  commitAndClose,
+  saveMeal,
+  closeEdit,
+  openFluid,
+  closeFluid,
+  addFluid,
+  undoFluid,
+}: MealsRowProps) {
+  return (
+      <tr
+        key={r.id}
+        style={{ height: ROW_H }}
+        // 階が変わる行の上に太線（sheet.css の .msheet-floor-start）
+        className={`${altClass(rowIndex)} ${floorStartIds.has(r.id) ? 'msheet-floor-start' : ''}`}
+      >
+        <th
+          scope="row"
+          style={{ width: W_ROOM, minWidth: W_ROOM, left: 0 }}
+          className={`${CELL_BASE} sticky z-10 ${altClass(rowIndex) || 'bg-surface'} text-center font-normal text-ink2`}
+        >
+          {/* 階の切れ目は太線で示すが、線は読み上げに乗らないので
+              変わり目の行だけ「○階のはじまり」を文字で添える（色・線だけに頼らない） */}
+          {floorStartIds.has(r.id) ? (
+            <span className="sr-only">
+              ここから{floorOf(r.room) === FLOOR_OTHER ? '居室未設定' : `${floorOf(r.room)}階`}
+            </span>
+          ) : null}
+          {r.room ?? '—'}
+        </th>
+        <td
+          style={{ width: W_NAME, minWidth: W_NAME, maxWidth: W_NAME, left: W_ROOM }}
+          // msheet-name: 画面では長い氏名を「…」で切らずに折り返す（取り違え防止・sheet.css。紙は従来の1行のまま）
+          className={`${CELL_BASE} sheet-fix-end sticky z-10 msheet-name truncate ${altClass(rowIndex) || 'bg-surface'} px-1 text-ink`}
+        >
+          {(() => {
+            // A2: いちばん新しい日（表の左端の日）の摂取低下の続いている日数を氏名の右に「▼14」（紙にも出す）。
+            // 日ごとの印は各日の水分の欄の「▼」。全文は読み上げ（sr-only）と水分の欄の吹き出し
+            const nameLow = lowStreaks.get(r.id)?.get(toIso)?.streak ?? 0
+            const capped = nameLow > 0 && nameLow >= dayCount(lowReadFrom || fromIso, toIso)
+            return (
+              <span className="flex min-w-0 items-center gap-1">
+                <span className="min-w-0 truncate">
+                  {r.name}
+                  {/* 他の端末がこの方の食事を入力中（「✎」・読み上げは「入力中: 職員B」）。欄が画面外でも気づけるように */}
+                  {(() => {
+                    const text = presence.rowBusy('meals', dayList, r.id)
+                    return text === null ? null : <RowBusyMark text={text} />
+                  })()}
+                </span>
+                {nameLow > 0 ? (
+                  <span className="sheet-mark msheet-lowday shrink-0">
+                    <span aria-hidden="true">
+                      ▼{nameLow > 1 ? nameLow : ''}
+                      {capped ? '+' : ''}
+                    </span>
+                    <span className="sr-only">
+                      {`（${fmtDayLabel(toIso)} ${lowStreakText(nameLow, toIso, lowReadFrom || fromIso)}）`}
+                    </span>
+                  </span>
+                ) : null}
+              </span>
+            )
+          })()}
+        </td>
+
+        {dayList.map((d) => {
+          const dayLabel = fmtDayLabel(d)
+          const fkey = fluidKey(r.id, d)
+          const fl = fluidMap.get(fkey)
+          const queuedMl = queuedFluids[fkey]?.ml ?? 0
+          const totalMl = (fl?.ml ?? 0) + queuedMl
+          const fluidOpen = fluidTarget != null && fluidTarget.key === fkey
+          // A2: 1日に2食以上が半分以下の日（続いている日数。0＝低下でない）
+          const lowStreak = lowStreaks.get(r.id)?.get(d)?.streak ?? 0
+          // A3: 水分の目標に対する割合（先の日は出さない。画面だけ＝紙は今のまま）
+          const fluidProg = d <= today ? fluidProgress(totalMl, targets.get(r.id)) : null
+
+          return (
+            <Fragment key={d}>
+              {SLOTS.map((slot) => {
+                const key = mealKey(r.id, d, slot)
+                const base = meals[key] ?? null
+                const patch = pending[key] ?? {}
+                const eff = effectiveMeal(base, patch, r.id, d, slot)
+                const mark = PHASE_MARK[phases[key] ?? 'idle']
+                const low = isLowIntake(eff)
+                // 低摂取は記号「▲」と文字色（SheetCell の tone='low' と同じ見た目）
+                const toneClass = low ? 'text-warn font-bold' : SLOT_TEXT[slot]
+                // A6: 主食＋副食の量に応じた地の濃淡（少ないほど濃い）＋半分以下は斜線。外出・入院・未記入は塗らない。
+                // 低摂取（▲）のマスも地はこの濃淡に置き換える（▲ と文字色はそのまま。低摂取は必ず半分以下＝斜線が付く）
+                const shade = mealShade(eff)
+                const shadeClass = shade
+                  ? `cl-shade-bg-${shade.stage}${shade.hatched ? ' cl-shade-hatch' : ''}`
+                  : low
+                    ? 'bg-warn-bg'
+                    : ''
+                const halfWord = shade?.hatched ? '。主食と副食の合計が半分以下' : ''
+                // その日にデイへ到着した方の昼食（枠と「デ」・画面だけ）
+                const dc = slot === 'lunch' && dcArrivals.has(daycareArrivalKey(r.id, d))
+                const dcWord = dc ? '。デイに来所' : ''
+                const absentStatus =
+                  eff.status != null && eff.status !== 'eaten' ? eff.status : null
+                const slotLabel = MEAL_SLOT_LABEL[slot]
+                const target: SaveTarget = { residentId: r.id, day: d, slot }
+                const editing = edit != null && edit.key === key ? edit : null
+                // 他の端末がこの食事（主食・副食・状態のどれか）を入力中（Presence）
+                const busy = presence.cellBusy(
+                  (['main_amount', 'side_amount', 'status', 'note'] as const).map((field) => ({
+                    table: 'meals' as const,
+                    day: d,
+                    residentId: r.id,
+                    field,
+                    slot,
+                  })),
+                )
+                const busyId = busy ? `ms-busy-${key}` : undefined
+
+                return (
+                  <td
+                    key={slot}
+                    colSpan={2}
+                    style={{ width: W_MEAL2, minWidth: W_MEAL2, height: ROW_H }}
+                    // 位置の基準（relative）は「✎」を置く時だけ付ける（2026-10-18 iPhone のカクつき対策）。全部のマスに付けると
+                    // 11日×38人で約1,250個の重ねて描く単位ができ、指で動かすたびの描き直しが重くなる。吹き出しは fixed なので要らない
+                    // デイの枠は、他の端末が入力中の間は出さない（入力中の点線と同じ線になって取り違えるため・#46 の反証 中2）
+                    className={`${CELL_BASE} ${shadeClass} ${busy ? `relative ${BUSY_RING}` : ''}${dc && !busy ? ' cl-dc-frame' : ''}`}
+                  >
+                    {busy && busyId ? <BusyMark busy={busy} id={busyId} /> : null}
+                    {absentStatus ? (
+                      // 欠食は主食・副食の2セルにまたがって状態を表示する（スプシと同じ見せ方）
+                      <button
+                        ref={btnRefFor(`${key}|main_amount`)}
+                        type="button"
+                        disabled={!canInput}
+                        aria-label={`${r.name} ${dayLabel} ${slotLabel} ${MEAL_STATUS_LABEL[absentStatus]}${halfWord}${dcWord}。食事の状態を変える`}
+                        aria-describedby={busyId}
+                        onClick={() => openAmount(target, 'main_amount', eff.main_amount)}
+                        // tokens.css の 44px 下限を打ち消す（22px 行の密度を保つ）
+                        style={{ minHeight: ROW_H }}
+                        className="block h-full w-full bg-transparent text-center text-ink2 disabled:opacity-60"
+                      >
+                        {dc ? (
+                          <span className="sheet-mark cl-dc-mark" aria-hidden="true">
+                            デ
+                          </span>
+                        ) : null}
+                        {mark ? (
+                          <span className={mark.cls} aria-hidden="true">
+                            {mark.mark}
+                          </span>
+                        ) : null}
+                        {MEAL_STATUS_LABEL[absentStatus]}
+                      </button>
+                    ) : (
+                      <div className="flex h-full w-full">
+                        <AmountHalf
+                          width={W_MEAL}
+                          divider
+                          value={eff.main_amount}
+                          disabled={!canInput}
+                          toneClass={toneClass}
+                          editing={editing?.field === 'main_amount'}
+                          editText={editText}
+                          editInvalid={editInvalid}
+                          inputRef={editInputRef}
+                          buttonRef={btnRefFor(`${key}|main_amount`)}
+                          dcMark={dc}
+                          ariaLabel={`${r.name} ${dayLabel} ${slotLabel} 主食 ${eff.main_amount ?? '未入力'}${low ? '。低摂取' : ''}${halfWord}${dcWord}`}
+                          describedBy={busyId}
+                          onOpen={() => openAmount(target, 'main_amount', eff.main_amount)}
+                          onText={onEditText}
+                          onKeyDown={onEditKeyDown}
+                          onBlur={onEditBlur}
+                        />
+                        <AmountHalf
+                          width={W_MEAL}
+                          value={eff.side_amount}
+                          disabled={!canInput}
+                          toneClass={toneClass}
+                          editing={editing?.field === 'side_amount'}
+                          editText={editText}
+                          editInvalid={editInvalid}
+                          inputRef={editInputRef}
+                          buttonRef={btnRefFor(`${key}|side_amount`)}
+                          lowMark={low}
+                          phaseMark={mark}
+                          ariaLabel={`${r.name} ${dayLabel} ${slotLabel} 副食 ${eff.side_amount ?? '未入力'}${low ? '。低摂取' : ''}${mark ? `。${mark.label}` : ''}${dcWord}`}
+                          describedBy={busyId}
+                          onOpen={() => openAmount(target, 'side_amount', eff.side_amount)}
+                          onText={onEditText}
+                          onKeyDown={onEditKeyDown}
+                          onBlur={onEditBlur}
+                        />
+                      </div>
+                    )}
+
+                    {editing ? (
+                      <CellPopover
+                        label={`${r.name} ${dayLabel} ${slotLabel} の入力`}
+                        onClose={() => commitAndClose(true)}
+                      >
+                        <p className="text-base font-bold text-ink">{`${dayLabel} ${slotLabel}`}</p>
+                        <p className="mt-1 text-sm text-ink2">
+                          {`主食・副食はセルに 0〜${AMOUNT_MAX} の数字を入れます（Enter で確定・Esc で取り消し）。`}
+                        </p>
+                        <p className="mt-3 text-sm text-ink2">食事の状態</p>
+                        <div className="mt-1">
+                          <SegmentPicker
+                            options={STATUS_OPTIONS}
+                            value={eff.status ?? ''}
+                            onChange={(v) => {
+                              // 入力途中の数値を先に確定してから状態を書く。
+                              // 順を逆にすると、打った数値が保存も警告もされずに消える
+                              // （吹き出しは onMouseDown を止めていて onBlur が走らないため）。
+                              // 解釈できない値のときは閉じずに ERR_AMOUNT を出す
+                              if (!commitAmount()) return
+                              saveMeal(
+                                target,
+                                { status: v as MealStatus },
+                                false,
+                                editStartRef.current?.key === key ? editStartRef.current.cells : undefined,
+                              )
+                              closeEdit(true)
+                            }}
+                            ariaLabel="食事の状態を選ぶ"
+                          />
+                        </div>
+                        <p className="mt-1 text-sm text-ink2">
+                          外出・入院・拒食を選ぶと、主食・副食の欄にその状態を表示します（入力済みの数値は消しません）。
+                        </p>
+                      </CellPopover>
+                    ) : null}
+                  </td>
+                )
+              })}
+
+              <td
+                // 水分は各日の最後の列。ここの右罫線で日の切れ目を示す
+                style={{ width: W_FLUID, minWidth: W_FLUID, height: ROW_H }}
+                className={`${CELL_BASE} ${DAY_END} relative`}
+              >
+                <button
+                  ref={btnRefFor(`f|${fkey}`)}
+                  type="button"
+                  aria-label={`${r.name} ${dayLabel} 水分 合計${totalMl}ml${queuedMl > 0 ? '。未送信を含む' : ''}${
+                    fluidProg ? `。目標に対して ${fluidProg.label}` : ''
+                  }${lowStreak > 0 ? `。${lowStreakText(lowStreak, d, lowReadFrom || fromIso)}` : ''}。内訳と追加を開く`}
+                  aria-expanded={fluidOpen}
+                  onClick={() => openFluid(r.id, d)}
+                  // tokens.css の 44px 下限を打ち消す（22px 行の密度を保つ）
+                  style={{ minHeight: ROW_H }}
+                  className="block h-full w-full bg-transparent text-center text-ink"
+                >
+                  {queuedMl > 0 ? (
+                    <span className="msheet-mark-phase text-warn" aria-hidden="true">
+                      ⚠
+                    </span>
+                  ) : null}
+                  {/* A2 の日ごとの印「▼」（紙にも出す）。続いている日数は氏名の右（いちばん新しい日の分）と、
+                      読み上げ・吹き出しの全文「▼摂取低下（2日目）」が持つ（数字を並べると水分の合計と続いて読めた＝実測） */}
+                  {lowStreak > 0 ? (
+                    <span className="sheet-mark msheet-lowday" aria-hidden="true">
+                      ▼
+                    </span>
+                  ) : null}
+                  {totalMl > 0 ? totalMl : ''}
+                  {/* A3 の横棒（欄の下端に細く・画面だけ） */}
+                  {fluidProg ? (
+                    <span className="cl-fluid-bar cl-fluid-bar-cell" aria-hidden="true">
+                      <span style={{ width: `${Math.round(fluidProg.bar * 100)}%` }} />
+                    </span>
+                  ) : null}
+                </button>
+
+                {fluidOpen && fluidTarget ? (
+                  <CellPopover
+                    label={`${r.name} ${dayLabel} の水分`}
+                    onClose={() => closeFluid(true)}
+                  >
+                    <p className="text-base font-bold text-ink">{`${dayLabel} 水分 合計 ${totalMl}ml`}</p>
+                    {fluidProg ? (
+                      // A3: 目標に対する割合（「800／1,200ml（67%）」と横棒）
+                      <div className="mt-1">
+                        <p className="tabular text-sm text-ink2">
+                          {`目標 ${fluidProg.label}`}
+                          {fluidProg.individual ? '（個別の目標）' : ''}
+                        </p>
+                        <span className="cl-fluid-bar mt-1" aria-hidden="true">
+                          <span style={{ width: `${Math.round(fluidProg.bar * 100)}%` }} />
+                        </span>
+                      </div>
+                    ) : null}
+                    {lowStreak > 0 ? (
+                      <p className="mt-1 text-sm font-bold text-warn">{lowStreakText(lowStreak, d, lowReadFrom || fromIso)}</p>
+                    ) : null}
+                    {queuedMl > 0 ? (
+                      <p className="mt-1 text-sm text-warn">
+                        <span aria-hidden="true">⚠ </span>
+                        {`未送信 ${queuedMl}ml を含みます`}
+                      </p>
+                    ) : null}
+
+                    <p className="mt-3 text-sm text-ink2">内訳</p>
+                    {fl && fl.rows.length > 0 ? (
+                      <ul className="mt-1 flex flex-col">
+                        {fl.rows.map((f) => (
+                          <li key={f.id} className="tabular text-base text-ink">
+                            {f.taken_at ? fmtRecordTime(f.taken_at, fluidIsNextMorning(f)) : '時刻なし'}
+                            {'　'}
+                            {f.amount_ml}ml
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="mt-1 text-base text-ink2">
+                        この日の水分はまだ記録されていません。
+                      </p>
+                    )}
+
+                    <p className="mt-3 text-sm text-ink2">追加する</p>
+                    <div className="mt-1 flex flex-wrap gap-gap">
+                      {FLUID_STEPS.map((ml) => (
+                        <button
+                          key={ml}
+                          type="button"
+                          disabled={!canInput}
+                          aria-label={`水分 ${ml}ml を追加`}
+                          onClick={() => addFluid(r.id, d, ml)}
+                          className="tabular min-h-tap rounded border border-border bg-surface px-3 text-base text-ink disabled:opacity-60"
+                        >
+                          ＋{ml}ml
+                        </button>
+                      ))}
+                    </div>
+                    {undoFluids[fkey] ? (
+                      <div className="mt-2">
+                        <button
+                          type="button"
+                          disabled={!canInput}
+                          onClick={() => undoFluid(r.id, d)}
+                          className="min-h-tap rounded border border-danger px-3 text-base font-bold text-danger disabled:opacity-60"
+                        >
+                          直前の追加を取り消す
+                        </button>
+                      </div>
+                    ) : null}
+                  </CellPopover>
+                ) : null}
+              </td>
+            </Fragment>
+          )
+        })}
+      </tr>
+  )
+})
 
 // ── 画面本体 ─────────────────────────────────────────────────
 
@@ -2450,7 +2895,7 @@ export function MealsSheetPage({
   )
 
   /** 入力中の数値を確定する。解釈できない値はセルを開いたまま案内する（入力を捨てない） */
-  const commitAmount = useCallback((): boolean => {
+  const commitAmountNow = useCallback((): boolean => {
     if (!edit) return true
     const parsed = parseAmount(editTextRef.current)
     if (parsed === 'invalid') {
@@ -2468,6 +2913,16 @@ export function MealsSheetPage({
     )
     return true
   }, [edit, saveMeal])
+  /**
+   * 行の部品（MealsRow）へ渡す確定は参照を変えない（2026-11-01）。commitAmountNow は開く・閉じるたびに作り直され、
+   * そのまま渡すと commitAndClose・onEditKeyDown・onEditBlur も作り直されて全行の memo が外れる＝表全体を描き直す。
+   * 中身は直前に描いた時の commitAmountNow（描いた直後・操作より前の useLayoutEffect で入れ替える＝古い edit を読まない）
+   */
+  const commitAmountRef = useRef(commitAmountNow)
+  useLayoutEffect(() => {
+    commitAmountRef.current = commitAmountNow
+  }, [commitAmountNow])
+  const commitAmount = useCallback((): boolean => commitAmountRef.current(), [])
 
   /** 確定してから閉じる（枠外タップ・フォーカス移動の共通処理） */
   const commitAndClose = useCallback(
@@ -2960,350 +3415,49 @@ export function MealsSheetPage({
             </thead>
             <tbody>
               {visible.map((r, rowIndex) => (
-                <tr
+                // 1名分の行は memo した部品（入力欄・水分の吹き出しの開閉で描き直すのは、開いた行と閉じた行だけ）。
+                // 開閉の state（edit・editText・editInvalid・fluidTarget）はその行の分だけ渡し、他の行には null／空で渡す
+                <MealsRow
                   key={r.id}
-                  style={{ height: ROW_H }}
-                  // 階が変わる行の上に太線（sheet.css の .msheet-floor-start）
-                  className={`${altClass(rowIndex)} ${floorStartIds.has(r.id) ? 'msheet-floor-start' : ''}`}
-                >
-                  <th
-                    scope="row"
-                    style={{ width: W_ROOM, minWidth: W_ROOM, left: 0 }}
-                    className={`${CELL_BASE} sticky z-10 ${altClass(rowIndex) || 'bg-surface'} text-center font-normal text-ink2`}
-                  >
-                    {/* 階の切れ目は太線で示すが、線は読み上げに乗らないので
-                        変わり目の行だけ「○階のはじまり」を文字で添える（色・線だけに頼らない） */}
-                    {floorStartIds.has(r.id) ? (
-                      <span className="sr-only">
-                        ここから{floorOf(r.room) === FLOOR_OTHER ? '居室未設定' : `${floorOf(r.room)}階`}
-                      </span>
-                    ) : null}
-                    {r.room ?? '—'}
-                  </th>
-                  <td
-                    style={{ width: W_NAME, minWidth: W_NAME, maxWidth: W_NAME, left: W_ROOM }}
-                    // msheet-name: 画面では長い氏名を「…」で切らずに折り返す（取り違え防止・sheet.css。紙は従来の1行のまま）
-                    className={`${CELL_BASE} sheet-fix-end sticky z-10 msheet-name truncate ${altClass(rowIndex) || 'bg-surface'} px-1 text-ink`}
-                  >
-                    {(() => {
-                      // A2: いちばん新しい日（表の左端の日）の摂取低下の続いている日数を氏名の右に「▼14」（紙にも出す）。
-                      // 日ごとの印は各日の水分の欄の「▼」。全文は読み上げ（sr-only）と水分の欄の吹き出し
-                      const nameLow = lowStreaks.get(r.id)?.get(toIso)?.streak ?? 0
-                      const capped = nameLow > 0 && nameLow >= dayCount(lowReadFrom || fromIso, toIso)
-                      return (
-                        <span className="flex min-w-0 items-center gap-1">
-                          <span className="min-w-0 truncate">
-                            {r.name}
-                            {/* 他の端末がこの方の食事を入力中（「✎」・読み上げは「入力中: 職員B」）。欄が画面外でも気づけるように */}
-                            {(() => {
-                              const text = presence.rowBusy('meals', dayList, r.id)
-                              return text === null ? null : <RowBusyMark text={text} />
-                            })()}
-                          </span>
-                          {nameLow > 0 ? (
-                            <span className="sheet-mark msheet-lowday shrink-0">
-                              <span aria-hidden="true">
-                                ▼{nameLow > 1 ? nameLow : ''}
-                                {capped ? '+' : ''}
-                              </span>
-                              <span className="sr-only">
-                                {`（${fmtDayLabel(toIso)} ${lowStreakText(nameLow, toIso, lowReadFrom || fromIso)}）`}
-                              </span>
-                            </span>
-                          ) : null}
-                        </span>
-                      )
-                    })()}
-                  </td>
-
-                  {dayList.map((d) => {
-                    const dayLabel = fmtDayLabel(d)
-                    const fkey = fluidKey(r.id, d)
-                    const fl = fluidMap.get(fkey)
-                    const queuedMl = queuedFluids[fkey]?.ml ?? 0
-                    const totalMl = (fl?.ml ?? 0) + queuedMl
-                    const fluidOpen = fluidTarget != null && fluidTarget.key === fkey
-                    // A2: 1日に2食以上が半分以下の日（続いている日数。0＝低下でない）
-                    const lowStreak = lowStreaks.get(r.id)?.get(d)?.streak ?? 0
-                    // A3: 水分の目標に対する割合（先の日は出さない。画面だけ＝紙は今のまま）
-                    const fluidProg = d <= today ? fluidProgress(totalMl, targets.get(r.id)) : null
-
-                    return (
-                      <Fragment key={d}>
-                        {SLOTS.map((slot) => {
-                          const key = mealKey(r.id, d, slot)
-                          const base = meals[key] ?? null
-                          const patch = pending[key] ?? {}
-                          const eff = effectiveMeal(base, patch, r.id, d, slot)
-                          const mark = PHASE_MARK[phases[key] ?? 'idle']
-                          const low = isLowIntake(eff)
-                          // 低摂取は記号「▲」と文字色（SheetCell の tone='low' と同じ見た目）
-                          const toneClass = low ? 'text-warn font-bold' : SLOT_TEXT[slot]
-                          // A6: 主食＋副食の量に応じた地の濃淡（少ないほど濃い）＋半分以下は斜線。外出・入院・未記入は塗らない。
-                          // 低摂取（▲）のマスも地はこの濃淡に置き換える（▲ と文字色はそのまま。低摂取は必ず半分以下＝斜線が付く）
-                          const shade = mealShade(eff)
-                          const shadeClass = shade
-                            ? `cl-shade-bg-${shade.stage}${shade.hatched ? ' cl-shade-hatch' : ''}`
-                            : low
-                              ? 'bg-warn-bg'
-                              : ''
-                          const halfWord = shade?.hatched ? '。主食と副食の合計が半分以下' : ''
-                          // その日にデイへ到着した方の昼食（枠と「デ」・画面だけ）
-                          const dc = slot === 'lunch' && dcArrivals.has(daycareArrivalKey(r.id, d))
-                          const dcWord = dc ? '。デイに来所' : ''
-                          const absentStatus =
-                            eff.status != null && eff.status !== 'eaten' ? eff.status : null
-                          const slotLabel = MEAL_SLOT_LABEL[slot]
-                          const target: SaveTarget = { residentId: r.id, day: d, slot }
-                          const editing = edit != null && edit.key === key ? edit : null
-                          // 他の端末がこの食事（主食・副食・状態のどれか）を入力中（Presence）
-                          const busy = presence.cellBusy(
-                            (['main_amount', 'side_amount', 'status', 'note'] as const).map((field) => ({
-                              table: 'meals' as const,
-                              day: d,
-                              residentId: r.id,
-                              field,
-                              slot,
-                            })),
-                          )
-                          const busyId = busy ? `ms-busy-${key}` : undefined
-
-                          return (
-                            <td
-                              key={slot}
-                              colSpan={2}
-                              style={{ width: W_MEAL2, minWidth: W_MEAL2, height: ROW_H }}
-                              // 位置の基準（relative）は「✎」を置く時だけ付ける（2026-10-18 iPhone のカクつき対策）。全部のマスに付けると
-                              // 11日×38人で約1,250個の重ねて描く単位ができ、指で動かすたびの描き直しが重くなる。吹き出しは fixed なので要らない
-                              // デイの枠は、他の端末が入力中の間は出さない（入力中の点線と同じ線になって取り違えるため・#46 の反証 中2）
-                              className={`${CELL_BASE} ${shadeClass} ${busy ? `relative ${BUSY_RING}` : ''}${dc && !busy ? ' cl-dc-frame' : ''}`}
-                            >
-                              {busy && busyId ? <BusyMark busy={busy} id={busyId} /> : null}
-                              {absentStatus ? (
-                                // 欠食は主食・副食の2セルにまたがって状態を表示する（スプシと同じ見せ方）
-                                <button
-                                  ref={btnRefFor(`${key}|main_amount`)}
-                                  type="button"
-                                  disabled={!canInput}
-                                  aria-label={`${r.name} ${dayLabel} ${slotLabel} ${MEAL_STATUS_LABEL[absentStatus]}${halfWord}${dcWord}。食事の状態を変える`}
-                                  aria-describedby={busyId}
-                                  onClick={() => openAmount(target, 'main_amount', eff.main_amount)}
-                                  // tokens.css の 44px 下限を打ち消す（22px 行の密度を保つ）
-                                  style={{ minHeight: ROW_H }}
-                                  className="block h-full w-full bg-transparent text-center text-ink2 disabled:opacity-60"
-                                >
-                                  {dc ? (
-                                    <span className="sheet-mark cl-dc-mark" aria-hidden="true">
-                                      デ
-                                    </span>
-                                  ) : null}
-                                  {mark ? (
-                                    <span className={mark.cls} aria-hidden="true">
-                                      {mark.mark}
-                                    </span>
-                                  ) : null}
-                                  {MEAL_STATUS_LABEL[absentStatus]}
-                                </button>
-                              ) : (
-                                <div className="flex h-full w-full">
-                                  <AmountHalf
-                                    width={W_MEAL}
-                                    divider
-                                    value={eff.main_amount}
-                                    disabled={!canInput}
-                                    toneClass={toneClass}
-                                    editing={editing?.field === 'main_amount'}
-                                    editText={editText}
-                                    editInvalid={editInvalid}
-                                    inputRef={editInputRef}
-                                    buttonRef={btnRefFor(`${key}|main_amount`)}
-                                    dcMark={dc}
-                                    ariaLabel={`${r.name} ${dayLabel} ${slotLabel} 主食 ${eff.main_amount ?? '未入力'}${low ? '。低摂取' : ''}${halfWord}${dcWord}`}
-                                    describedBy={busyId}
-                                    onOpen={() => openAmount(target, 'main_amount', eff.main_amount)}
-                                    onText={onEditText}
-                                    onKeyDown={onEditKeyDown}
-                                    onBlur={onEditBlur}
-                                  />
-                                  <AmountHalf
-                                    width={W_MEAL}
-                                    value={eff.side_amount}
-                                    disabled={!canInput}
-                                    toneClass={toneClass}
-                                    editing={editing?.field === 'side_amount'}
-                                    editText={editText}
-                                    editInvalid={editInvalid}
-                                    inputRef={editInputRef}
-                                    buttonRef={btnRefFor(`${key}|side_amount`)}
-                                    lowMark={low}
-                                    phaseMark={mark}
-                                    ariaLabel={`${r.name} ${dayLabel} ${slotLabel} 副食 ${eff.side_amount ?? '未入力'}${low ? '。低摂取' : ''}${mark ? `。${mark.label}` : ''}${dcWord}`}
-                                    describedBy={busyId}
-                                    onOpen={() => openAmount(target, 'side_amount', eff.side_amount)}
-                                    onText={onEditText}
-                                    onKeyDown={onEditKeyDown}
-                                    onBlur={onEditBlur}
-                                  />
-                                </div>
-                              )}
-
-                              {editing ? (
-                                <CellPopover
-                                  label={`${r.name} ${dayLabel} ${slotLabel} の入力`}
-                                  onClose={() => commitAndClose(true)}
-                                >
-                                  <p className="text-base font-bold text-ink">{`${dayLabel} ${slotLabel}`}</p>
-                                  <p className="mt-1 text-sm text-ink2">
-                                    {`主食・副食はセルに 0〜${AMOUNT_MAX} の数字を入れます（Enter で確定・Esc で取り消し）。`}
-                                  </p>
-                                  <p className="mt-3 text-sm text-ink2">食事の状態</p>
-                                  <div className="mt-1">
-                                    <SegmentPicker
-                                      options={STATUS_OPTIONS}
-                                      value={eff.status ?? ''}
-                                      onChange={(v) => {
-                                        // 入力途中の数値を先に確定してから状態を書く。
-                                        // 順を逆にすると、打った数値が保存も警告もされずに消える
-                                        // （吹き出しは onMouseDown を止めていて onBlur が走らないため）。
-                                        // 解釈できない値のときは閉じずに ERR_AMOUNT を出す
-                                        if (!commitAmount()) return
-                                        saveMeal(
-                                          target,
-                                          { status: v as MealStatus },
-                                          false,
-                                          editStartRef.current?.key === key ? editStartRef.current.cells : undefined,
-                                        )
-                                        closeEdit(true)
-                                      }}
-                                      ariaLabel="食事の状態を選ぶ"
-                                    />
-                                  </div>
-                                  <p className="mt-1 text-sm text-ink2">
-                                    外出・入院・拒食を選ぶと、主食・副食の欄にその状態を表示します（入力済みの数値は消しません）。
-                                  </p>
-                                </CellPopover>
-                              ) : null}
-                            </td>
-                          )
-                        })}
-
-                        <td
-                          // 水分は各日の最後の列。ここの右罫線で日の切れ目を示す
-                          style={{ width: W_FLUID, minWidth: W_FLUID, height: ROW_H }}
-                          className={`${CELL_BASE} ${DAY_END} relative`}
-                        >
-                          <button
-                            ref={btnRefFor(`f|${fkey}`)}
-                            type="button"
-                            aria-label={`${r.name} ${dayLabel} 水分 合計${totalMl}ml${queuedMl > 0 ? '。未送信を含む' : ''}${
-                              fluidProg ? `。目標に対して ${fluidProg.label}` : ''
-                            }${lowStreak > 0 ? `。${lowStreakText(lowStreak, d, lowReadFrom || fromIso)}` : ''}。内訳と追加を開く`}
-                            aria-expanded={fluidOpen}
-                            onClick={() => openFluid(r.id, d)}
-                            // tokens.css の 44px 下限を打ち消す（22px 行の密度を保つ）
-                            style={{ minHeight: ROW_H }}
-                            className="block h-full w-full bg-transparent text-center text-ink"
-                          >
-                            {queuedMl > 0 ? (
-                              <span className="msheet-mark-phase text-warn" aria-hidden="true">
-                                ⚠
-                              </span>
-                            ) : null}
-                            {/* A2 の日ごとの印「▼」（紙にも出す）。続いている日数は氏名の右（いちばん新しい日の分）と、
-                                読み上げ・吹き出しの全文「▼摂取低下（2日目）」が持つ（数字を並べると水分の合計と続いて読めた＝実測） */}
-                            {lowStreak > 0 ? (
-                              <span className="sheet-mark msheet-lowday" aria-hidden="true">
-                                ▼
-                              </span>
-                            ) : null}
-                            {totalMl > 0 ? totalMl : ''}
-                            {/* A3 の横棒（欄の下端に細く・画面だけ） */}
-                            {fluidProg ? (
-                              <span className="cl-fluid-bar cl-fluid-bar-cell" aria-hidden="true">
-                                <span style={{ width: `${Math.round(fluidProg.bar * 100)}%` }} />
-                              </span>
-                            ) : null}
-                          </button>
-
-                          {fluidOpen && fluidTarget ? (
-                            <CellPopover
-                              label={`${r.name} ${dayLabel} の水分`}
-                              onClose={() => closeFluid(true)}
-                            >
-                              <p className="text-base font-bold text-ink">{`${dayLabel} 水分 合計 ${totalMl}ml`}</p>
-                              {fluidProg ? (
-                                // A3: 目標に対する割合（「800／1,200ml（67%）」と横棒）
-                                <div className="mt-1">
-                                  <p className="tabular text-sm text-ink2">
-                                    {`目標 ${fluidProg.label}`}
-                                    {fluidProg.individual ? '（個別の目標）' : ''}
-                                  </p>
-                                  <span className="cl-fluid-bar mt-1" aria-hidden="true">
-                                    <span style={{ width: `${Math.round(fluidProg.bar * 100)}%` }} />
-                                  </span>
-                                </div>
-                              ) : null}
-                              {lowStreak > 0 ? (
-                                <p className="mt-1 text-sm font-bold text-warn">{lowStreakText(lowStreak, d, lowReadFrom || fromIso)}</p>
-                              ) : null}
-                              {queuedMl > 0 ? (
-                                <p className="mt-1 text-sm text-warn">
-                                  <span aria-hidden="true">⚠ </span>
-                                  {`未送信 ${queuedMl}ml を含みます`}
-                                </p>
-                              ) : null}
-
-                              <p className="mt-3 text-sm text-ink2">内訳</p>
-                              {fl && fl.rows.length > 0 ? (
-                                <ul className="mt-1 flex flex-col">
-                                  {fl.rows.map((f) => (
-                                    <li key={f.id} className="tabular text-base text-ink">
-                                      {f.taken_at ? fmtRecordTime(f.taken_at, fluidIsNextMorning(f)) : '時刻なし'}
-                                      {'　'}
-                                      {f.amount_ml}ml
-                                    </li>
-                                  ))}
-                                </ul>
-                              ) : (
-                                <p className="mt-1 text-base text-ink2">
-                                  この日の水分はまだ記録されていません。
-                                </p>
-                              )}
-
-                              <p className="mt-3 text-sm text-ink2">追加する</p>
-                              <div className="mt-1 flex flex-wrap gap-gap">
-                                {FLUID_STEPS.map((ml) => (
-                                  <button
-                                    key={ml}
-                                    type="button"
-                                    disabled={!canInput}
-                                    aria-label={`水分 ${ml}ml を追加`}
-                                    onClick={() => addFluid(r.id, d, ml)}
-                                    className="tabular min-h-tap rounded border border-border bg-surface px-3 text-base text-ink disabled:opacity-60"
-                                  >
-                                    ＋{ml}ml
-                                  </button>
-                                ))}
-                              </div>
-                              {undoFluids[fkey] ? (
-                                <div className="mt-2">
-                                  <button
-                                    type="button"
-                                    disabled={!canInput}
-                                    onClick={() => undoFluid(r.id, d)}
-                                    className="min-h-tap rounded border border-danger px-3 text-base font-bold text-danger disabled:opacity-60"
-                                  >
-                                    直前の追加を取り消す
-                                  </button>
-                                </div>
-                              ) : null}
-                            </CellPopover>
-                          ) : null}
-                        </td>
-                      </Fragment>
-                    )
-                  })}
-                </tr>
+                  r={r}
+                  rowIndex={rowIndex}
+                  floorStartIds={floorStartIds}
+                  dayList={dayList}
+                  today={today}
+                  fromIso={fromIso}
+                  toIso={toIso}
+                  lowReadFrom={lowReadFrom}
+                  canInput={canInput}
+                  meals={meals}
+                  pending={pending}
+                  phases={phases}
+                  fluidMap={fluidMap}
+                  queuedFluids={queuedFluids}
+                  undoFluids={undoFluids}
+                  lowStreaks={lowStreaks}
+                  targets={targets}
+                  dcArrivals={dcArrivals}
+                  presence={presence}
+                  edit={edit != null && edit.residentId === r.id ? edit : null}
+                  editText={edit != null && edit.residentId === r.id ? editText : ''}
+                  editInvalid={edit != null && edit.residentId === r.id ? editInvalid : false}
+                  fluidTarget={fluidTarget != null && fluidTarget.residentId === r.id ? fluidTarget : null}
+                  editInputRef={editInputRef}
+                  editStartRef={editStartRef}
+                  btnRefFor={btnRefFor}
+                  onEditText={onEditText}
+                  onEditKeyDown={onEditKeyDown}
+                  onEditBlur={onEditBlur}
+                  openAmount={openAmount}
+                  commitAmount={commitAmount}
+                  commitAndClose={commitAndClose}
+                  saveMeal={saveMeal}
+                  closeEdit={closeEdit}
+                  openFluid={openFluid}
+                  closeFluid={closeFluid}
+                  addFluid={addFluid}
+                  undoFluid={undoFluid}
+                />
               ))}
             </tbody>
           </table>
