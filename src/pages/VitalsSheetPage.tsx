@@ -2007,6 +2007,37 @@ export function VitalsSheetPage({
 
   // ── 描画 ───────────────────────────────────────────────────
 
+  // 下の2つ（表題行の置き場・印刷中）はフックなので、読み込み中・失敗の早期 return より前に置く（後ろに置くと、読み込み中の描画と
+  // 読み終えた後の描画でフックの数が変わり「この画面で問題が起きました」になる・2026-11-01 本番で発生）
+  /**
+   * 保存状況と記録者の置き場（App の表題行の右・id は App.tsx と同じ 'cl-vitals-header-slot'。2026-11-01 本人裁定「表題行へも移して」）。
+   * 表題行の空いた幅へ移すと、iPad 横でも操作バーが1段に収まり、表が上がる。見つからない時（この画面だけを開いた時）は今までどおり
+   * 操作の行の末尾に置く。表題行は紙に出ない（print:hidden）ので、紙には今までどおり操作バーの中に出す
+   */
+  const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null)
+  useLayoutEffect(() => {
+    setHeaderSlot(document.getElementById('cl-vitals-header-slot'))
+  }, [])
+  /**
+   * 印刷中は、画面の並びも以前の形（保存状況は操作バーの中・倍率は4ボタン）へ戻す（2026-11-01 反証レビュー）。
+   * 紙の表の高さは、印刷の直前に画面の並びで測った枠の上端（--sheet-frame-top・sheet.tsx）で決まるので、
+   * 上を詰めた並びのまま測ると紙の枠が約32px伸び、紙が変わる。戻した形を同期で描いてから測り直しの合図を出す
+   * （CollapsibleBar と同じ作法。どちらの合図が後でも、最後の測り直しは戻した形で行われる）。印刷の後は詰めた形へ戻す
+   */
+  const [printing, setPrinting] = useState(false)
+  useEffect(() => {
+    const before = () => {
+      flushSync(() => setPrinting(true))
+      window.dispatchEvent(new Event(SHEET_REMEASURE_EVENT))
+    }
+    const after = () => setPrinting(false)
+    window.addEventListener('beforeprint', before)
+    window.addEventListener('afterprint', after)
+    return () => {
+      window.removeEventListener('beforeprint', before)
+      window.removeEventListener('afterprint', after)
+    }
+  }, [])
   if (loading && recs.size === 0 && residents.length === 0) {
     return <LoadingBlock label="バイタル一覧を読み込んでいます…" />
   }
@@ -2052,35 +2083,6 @@ export function VitalsSheetPage({
       </button>
     </>
   )
-  /**
-   * 保存状況と記録者の置き場（App の表題行の右・id は App.tsx と同じ 'cl-vitals-header-slot'。2026-11-01 本人裁定「表題行へも移して」）。
-   * 表題行の空いた幅へ移すと、iPad 横でも操作バーが1段に収まり、表が上がる。見つからない時（この画面だけを開いた時）は今までどおり
-   * 操作の行の末尾に置く。表題行は紙に出ない（print:hidden）ので、紙には今までどおり操作バーの中に出す
-   */
-  const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null)
-  useLayoutEffect(() => {
-    setHeaderSlot(document.getElementById('cl-vitals-header-slot'))
-  }, [])
-  /**
-   * 印刷中は、画面の並びも以前の形（保存状況は操作バーの中・倍率は4ボタン）へ戻す（2026-11-01 反証レビュー）。
-   * 紙の表の高さは、印刷の直前に画面の並びで測った枠の上端（--sheet-frame-top・sheet.tsx）で決まるので、
-   * 上を詰めた並びのまま測ると紙の枠が約32px伸び、紙が変わる。戻した形を同期で描いてから測り直しの合図を出す
-   * （CollapsibleBar と同じ作法。どちらの合図が後でも、最後の測り直しは戻した形で行われる）。印刷の後は詰めた形へ戻す
-   */
-  const [printing, setPrinting] = useState(false)
-  useEffect(() => {
-    const before = () => {
-      flushSync(() => setPrinting(true))
-      window.dispatchEvent(new Event(SHEET_REMEASURE_EVENT))
-    }
-    const after = () => setPrinting(false)
-    window.addEventListener('beforeprint', before)
-    window.addEventListener('afterprint', after)
-    return () => {
-      window.removeEventListener('beforeprint', before)
-      window.removeEventListener('afterprint', after)
-    }
-  }, [])
   /** 保存状況と記録者を表題行へ移すか（置き場があり、印刷中でない時） */
   const toHeader = headerSlot !== null && !printing
   /** 保存状況（未送信・保存中・保存済み）。畳んでも隠さない（畳めない時は今と同じく操作の行の末尾） */
