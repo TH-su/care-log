@@ -83,14 +83,20 @@ describe('2. 氏名を「…」で切らない（画面だけ）', () => {
 
 describe('3. 上部を詰める（倍率は選択欄・保存状況と記録者は表題行へ）', () => {
   it('倍率: 画面は選択欄1つ・紙は従来の4ボタン', () => {
-    assert.match(vitals, /<div className="print:hidden">\s*<ZoomSelect \/>\s*<\/div>\s*<div className="hidden print:block">\s*<ZoomBar compact \/>\s*<\/div>/)
+    assert.match(vitals, /\{printing \? \(\s*<ZoomBar compact \/>\s*\) : \(\s*<>\s*<div className="print:hidden">\s*<ZoomSelect \/>\s*<\/div>\s*<div className="hidden print:block">\s*<ZoomBar compact \/>\s*<\/div>/)
+    assert.match(css, /@media \(max-width: 480px\) \{\s*\.sheet-pickbar button,[^{]*\.sheet-pickbar select,/)
+  })
+
+  it('印刷の直前は以前の並びへ同期で戻してから測り直す（紙の枠の高さ＝--sheet-frame-top を以前と同じにする）', () => {
+    assert.match(vitals, /const before = \(\) => \{\s*flushSync\(\(\) => setPrinting\(true\)\)\s*window\.dispatchEvent\(new Event\(SHEET_REMEASURE_EVENT\)\)/)
+    assert.match(vitals, /const toHeader = headerSlot !== null && !printing/)
   })
 
   it('保存状況と記録者: 表題行の置き場があればそこへ（画面だけ）・紙の分は操作バーに残す・置き場が無ければ従来どおり', () => {
     assert.match(app, /\{location\.pathname === '\/sheet\/vitals' && \(\s*<div id="cl-vitals-header-slot" className="flex min-w-0 flex-wrap items-center gap-gap print:hidden" \/>\s*\)\}/)
     assert.match(vitals, /setHeaderSlot\(document\.getElementById\('cl-vitals-header-slot'\)\)/)
-    assert.match(vitals, /\{headerSlot !== null \? createPortal\(statusLine, headerSlot\) : null\}/)
-    assert.match(vitals, /persistent=\{headerSlot === null \? statusLine : <div className="hidden print:contents">\{statusLine\}<\/div>\}/)
+    assert.match(vitals, /\{toHeader && headerSlot !== null \? createPortal\(statusLine, headerSlot\) : null\}/)
+    assert.match(vitals, /persistent=\{toHeader \? <div className="hidden print:contents">\{statusLine\}<\/div> : statusLine\}/)
   })
 
   it('表題行の見出しはバイタル一覧だけ flex-auto（入らない時は見出しを潰さず保存状況を次の行へ）・他の画面は従来どおり', () => {

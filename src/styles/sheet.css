@@ -1460,6 +1460,8 @@ main:has(.dsheet-frame) {
 
 @media (max-width: 480px) {
   .sheet-pickbar button,
+  /* バイタル一覧の倍率の選択欄（2026-11-01）もボタンと同じ高さにそろえる（iPhone では上部を小さく＝2026-09-24 本人指示） */
+  .sheet-pickbar select,
   .sheet-bar-fit button,
   .sheet-bar-fit input,
   .bar-compact button {

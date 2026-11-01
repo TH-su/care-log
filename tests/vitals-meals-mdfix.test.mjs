@@ -485,7 +485,7 @@ if (VG === null) {
       const vs = code('pages/VitalsSheetPage.tsx')
       assert.match(vs, /const statusLine = \(\s*<>[\s\S]*?<RecorderBar actorId=\{actorId \?\? null\} \/>\s*<\/>\s*\)/)
       // 2026-11-01: 画面では表題行（畳まない所）へ移す。置き場が無い時は今までどおり persistent
-      assert.match(vs, /persistent=\{headerSlot === null \? statusLine : <div className="hidden print:contents">\{statusLine\}<\/div>\}/)
+      assert.match(vs, /persistent=\{toHeader \? <div className="hidden print:contents">\{statusLine\}<\/div> : statusLine\}/)
       assert.match(vs, /createPortal\(statusLine, headerSlot\)/)
       const ms = code('pages/MealsSheetPage.tsx')
       assert.match(ms, /persistent=\{<RecorderBar actorId=\{actorId \?\? null\} \/>\}/)

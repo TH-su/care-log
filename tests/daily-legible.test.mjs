@@ -358,7 +358,7 @@ describe('6. 上部を1段に（表題行へ）', () => {
     assert.match(meals, /<ZoomBar/, '食事一覧の4ボタンが無い')
     // バイタル一覧: 画面は選択欄・紙は今までどおり4ボタン
     const vitals = read('pages/VitalsSheetPage.tsx')
-    assert.match(vitals, /<div className="print:hidden">\s*<ZoomSelect \/>\s*<\/div>\s*<div className="hidden print:block">\s*<ZoomBar compact \/>\s*<\/div>/)
+    assert.match(vitals, /<ZoomBar compact \/>\s*\) : \(\s*<>\s*<div className="print:hidden">\s*<ZoomSelect \/>\s*<\/div>\s*<div className="hidden print:block">\s*<ZoomBar compact \/>\s*<\/div>/)
   })
 
   it('選択欄は ZoomBar と同じ store（ピンチに追従）・値は ZOOM_STEPS・今の倍率がボタンの値でない時も選択肢に出す・44px', () => {

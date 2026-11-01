@@ -40,7 +40,7 @@
 //   保存状況と記録者は App の表題行（#cl-vitals-header-slot）へ移す。紙は従来どおり（13px・4ボタン・保存状況は操作バーの中）
 
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
+import { createPortal, flushSync } from 'react-dom'
 import {
   FORBIDDEN_REASON,
   DbError,
@@ -84,7 +84,7 @@ import {
   LoadingBlock,
   SegmentPicker,
 } from '../components/ui'
-import { readSheetPref, SheetCell, SheetFrame, writeSheetPref, ZoomBar, ZoomSelect } from '../components/sheet'
+import { readSheetPref, SHEET_REMEASURE_EVENT, SheetCell, SheetFrame, writeSheetPref, ZoomBar, ZoomSelect } from '../components/sheet'
 import { ConflictResolver, focusAfterResolve } from '../components/ConflictResolver'
 import type { ConflictResolution, ConflictTarget } from '../components/ConflictResolver'
 import {
@@ -2061,6 +2061,28 @@ export function VitalsSheetPage({
   useLayoutEffect(() => {
     setHeaderSlot(document.getElementById('cl-vitals-header-slot'))
   }, [])
+  /**
+   * 印刷中は、画面の並びも以前の形（保存状況は操作バーの中・倍率は4ボタン）へ戻す（2026-11-01 反証レビュー）。
+   * 紙の表の高さは、印刷の直前に画面の並びで測った枠の上端（--sheet-frame-top・sheet.tsx）で決まるので、
+   * 上を詰めた並びのまま測ると紙の枠が約32px伸び、紙が変わる。戻した形を同期で描いてから測り直しの合図を出す
+   * （CollapsibleBar と同じ作法。どちらの合図が後でも、最後の測り直しは戻した形で行われる）。印刷の後は詰めた形へ戻す
+   */
+  const [printing, setPrinting] = useState(false)
+  useEffect(() => {
+    const before = () => {
+      flushSync(() => setPrinting(true))
+      window.dispatchEvent(new Event(SHEET_REMEASURE_EVENT))
+    }
+    const after = () => setPrinting(false)
+    window.addEventListener('beforeprint', before)
+    window.addEventListener('afterprint', after)
+    return () => {
+      window.removeEventListener('beforeprint', before)
+      window.removeEventListener('afterprint', after)
+    }
+  }, [])
+  /** 保存状況と記録者を表題行へ移すか（置き場があり、印刷中でない時） */
+  const toHeader = headerSlot !== null && !printing
   /** 保存状況（未送信・保存中・保存済み）。畳んでも隠さない（畳めない時は今と同じく操作の行の末尾） */
   // 同じ行の末尾に置く＝行を増やさない。画面が狭い時は折り返して2行目に来る（消さない＝保存できたかは必ず見せる）。
   // 並べて、いまの記録者（新しい行の記入者・変更の記録に付く）を常に出し、その場で切り替えられるようにする（F38。
@@ -2107,7 +2129,7 @@ export function VitalsSheetPage({
           closeLabel="フロア・日数・倍率の操作を畳む"
           collapsed={(compact) => periodNav(compact ? periodLabelShort : periodLabel, compact)}
           // 表題行へ移した時は、紙の分だけ残す（画面では表示しない＝読み上げにも2つ出ない。紙は今までどおりの位置）
-          persistent={headerSlot === null ? statusLine : <div className="hidden print:contents">{statusLine}</div>}
+          persistent={toHeader ? <div className="hidden print:contents">{statusLine}</div> : statusLine}
           full={(extra) => (
             <div className="sheet-pickbar">
               {floorOptions.length > 1 ? (
@@ -2144,12 +2166,19 @@ export function VitalsSheetPage({
 
               {/* 倍率は画面では選択欄1つ（「文字 100% ▾」・日報の表題行と同じ部品。2026-11-01 本人裁定）。4つのボタンより狭く、
                   iPad 横でも操作が1段に収まる。紙は今までどおり4つのボタン（印刷の見た目を変えない） */}
-              <div className="print:hidden">
-                <ZoomSelect />
-              </div>
-              <div className="hidden print:block">
+              {/* 印刷中（printing）は以前と同じ4ボタンだけを描く（紙と、印刷直前の枠の測り直しを以前と同じにする） */}
+              {printing ? (
                 <ZoomBar compact />
-              </div>
+              ) : (
+                <>
+                  <div className="print:hidden">
+                    <ZoomSelect />
+                  </div>
+                  <div className="hidden print:block">
+                    <ZoomBar compact />
+                  </div>
+                </>
+              )}
               {extra}
             </div>
           )}
@@ -2375,7 +2404,7 @@ export function VitalsSheetPage({
       )}
 
       {/* 保存状況と記録者を表題行へ（画面だけ。表題行は print:hidden） */}
-      {headerSlot !== null ? createPortal(statusLine, headerSlot) : null}
+      {toHeader && headerSlot !== null ? createPortal(statusLine, headerSlot) : null}
 
       {/* A4 の凡例（線は画面だけなので、説明も紙に出さない）。色だけに頼らない＝実線・点線と上下の位置で区別する */}
       {visibleResidents.length > 0 ? (
