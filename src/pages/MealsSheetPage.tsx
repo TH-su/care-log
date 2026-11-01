@@ -795,6 +795,21 @@ function AmountHalf({
 const HEADER_BAR_NARROW_PX = 480
 
 /**
+ * 表題行の置き場へ中身を描く小さな器（2026-11-01）。置き場はこの器が自分で探すので、見つけた時に描き直すのはこの器だけ
+ * （以前は画面全体の state に持っていたため、開いた直後に表全体をもう一度描いていた）。
+ * 置き場が見つからない時は onMissing で画面に知らせ、画面の中の操作バーへ戻す（操作が消えないように）
+ */
+function HeaderSlotPortal({ id, onMissing, children }: { id: string; onMissing: () => void; children: ReactNode }) {
+  const [el, setEl] = useState<HTMLElement | null>(null)
+  useLayoutEffect(() => {
+    const found = document.getElementById(id)
+    if (found) setEl(found)
+    else onMissing()
+  }, [id, onMissing])
+  return el ? createPortal(children, el) : null
+}
+
+/**
  * 表題行に置くフロア・日数の選択欄（2026-11-01 本人裁定・案C）。値と保存は操作バーのボタン（SegmentPicker）と同じで、
  * 幅を取らない選択欄にしただけ。高さ・幅は 44px 以上（OS の選択の一覧で選ぶ＝指で押し分けやすい・ZoomSelect と同じ見た目）
  */
@@ -834,6 +849,12 @@ export interface MealsSheetPageProps {
   actorId?: number | null
   /** 入力解禁フラグの初期値。渡されてもこの画面を開くたびに取り直す（ui-design §0.5） */
   inputEnabled?: boolean
+  /**
+   * App の表題行にある操作の置き場の id（App.tsx が食事一覧の時に 'cl-sheet-header-slot' を渡す）。
+   * 渡されれば最初の描画から表題行の形で描く（置き場を見つけてから表全体を描き直さない＝開く時の描画を1回に・2026-11-01 iPhone で重い）。
+   * 渡されない時（この画面だけを開いた時）は従来どおり画面の中の操作バーを使う
+   */
+  headerSlotId?: string
 }
 
 interface EditTarget extends SaveTarget {
@@ -851,6 +872,7 @@ export function MealsSheetPage({
   residents: residentsProp,
   actorId: actorIdProp,
   inputEnabled: inputEnabledProp,
+  headerSlotId,
 }: MealsSheetPageProps = {}) {
   // ── 表示条件（UI状態） ──
   const [days, setDays] = useState<SheetDays>(() => readDays())
@@ -858,13 +880,12 @@ export function MealsSheetPage({
   /** 表示期間の右端＝いちばん新しい日。日付は業務データに紐づくため保存しない（既定は当日） */
   const [endIso, setEndIso] = useState<string>(() => todayIso())
   /**
-   * 上部の操作の置き場（App の表題行・id は App.tsx と同じ 'cl-sheet-header-slot'。2026-11-01 本人裁定・案C「上部を1段に」）。
-   * 見つからない時（この画面だけを開いた時）は従来どおり画面の中の操作バーを使う
+   * 上部の操作を App の表題行に置くか（2026-11-01 本人裁定・案C「上部を1段に」）。App が置き場の id を渡した時は最初から表題行の形で描き、
+   * 置き場が見つからなかった時だけ（slotMissing）画面の中の操作バーへ戻す。置き場を探すのは HeaderSlotPortal（表全体を描き直さない）
    */
-  const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null)
-  useLayoutEffect(() => {
-    setHeaderSlot(document.getElementById('cl-sheet-header-slot'))
-  }, [])
+  const [slotMissing, setSlotMissing] = useState(false)
+  const onSlotMissing = useCallback(() => setSlotMissing(true), [])
+  const headerSlot = headerSlotId !== undefined && !slotMissing
   /** 表の下の記号の説明を画面で開いているか（紙は常に全文） */
   const [legendOpen, setLegendOpen] = useState<boolean>(() => readLegendOpen())
 
@@ -2499,41 +2520,40 @@ export function MealsSheetPage({
           フロアと日数は選択欄（幅を取らないため。値・保存は下の操作バーと同じ）。畳む器と開閉の保存（LS.mealsBarOpen）は従来と同じで、
           表題行の残りの幅に1行で収まらない時は器が中で折り返し、開閉のボタンを出す。表題行は紙に出ない（print:hidden）ので、
           紙には従来の操作バー（下の SectionCard）を今のまま出す */}
-      {headerSlot
-        ? createPortal(
-            <CollapsibleBar
-              storageKey={LS.mealsBarOpen}
-              openLabel="フロア・日数・倍率の操作を開く"
-              closeLabel="フロア・日数・倍率の操作を畳む"
-              collapsed={(compact) => periodNav(compact ? periodLabelShort : periodLabelMid, compact)}
-              persistent={<RecorderBar actorId={actorId ?? null} />}
-              // 表題行に並べて置ける幅が 480px より狭い時は畳んで始める（日報の表題行と同じ境目）
-              narrowWidth={HEADER_BAR_NARROW_PX}
-              full={(extra) => (
-                <div className="sheet-bar-fit flex flex-wrap items-center gap-gap">
-                  <PrefSelect options={floorOptions} value={floor} onChange={onChangeFloor} ariaLabel="フロアを選ぶ" />
-                  <PrefSelect
-                    options={DAYS_OPTIONS}
-                    value={String(days)}
-                    onChange={onChangeDays}
-                    ariaLabel="横に並べる日数を選ぶ"
-                  />
-                  {periodNav(periodLabelMid)}
-                  <ZoomSelect />
-                  <button
-                    type="button"
-                    onClick={onReload}
-                    className="min-h-tap shrink-0 rounded border border-border-strong px-3 text-base text-ink"
-                  >
-                    最新
-                  </button>
-                  {extra === null ? null : <div className="ml-auto min-w-0">{extra}</div>}
-                </div>
-              )}
-            />,
-            headerSlot,
-          )
-        : null}
+      {headerSlot && headerSlotId !== undefined ? (
+        <HeaderSlotPortal id={headerSlotId} onMissing={onSlotMissing}>
+          <CollapsibleBar
+            storageKey={LS.mealsBarOpen}
+            openLabel="フロア・日数・倍率の操作を開く"
+            closeLabel="フロア・日数・倍率の操作を畳む"
+            collapsed={(compact) => periodNav(compact ? periodLabelShort : periodLabelMid, compact)}
+            persistent={<RecorderBar actorId={actorId ?? null} />}
+            // 表題行に並べて置ける幅が 480px より狭い時は畳んで始める（日報の表題行と同じ境目）
+            narrowWidth={HEADER_BAR_NARROW_PX}
+            full={(extra) => (
+              <div className="sheet-bar-fit flex flex-wrap items-center gap-gap">
+                <PrefSelect options={floorOptions} value={floor} onChange={onChangeFloor} ariaLabel="フロアを選ぶ" />
+                <PrefSelect
+                  options={DAYS_OPTIONS}
+                  value={String(days)}
+                  onChange={onChangeDays}
+                  ariaLabel="横に並べる日数を選ぶ"
+                />
+                {periodNav(periodLabelMid)}
+                <ZoomSelect />
+                <button
+                  type="button"
+                  onClick={onReload}
+                  className="min-h-tap shrink-0 rounded border border-border-strong px-3 text-base text-ink"
+                >
+                  最新
+                </button>
+                {extra === null ? null : <div className="ml-auto min-w-0">{extra}</div>}
+              </div>
+            )}
+          />
+        </HeaderSlotPortal>
+      ) : null}
       {/* 表題行に操作がある時の読み込み中の一言（画面だけ。紙用の操作バーの中の同じ一言と読み上げは画面では隠れるので、
           読み上げの知らせもここに置く＝常に置いて中身だけ変える） */}
       {headerSlot ? (
