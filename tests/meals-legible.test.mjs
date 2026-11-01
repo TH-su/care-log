@@ -170,3 +170,15 @@ describe('5. 記号の説明を画面だけ畳む', () => {
     assert.match(meals, /<p id="msheet-legend" className=\{`text-sm text-ink2 \$\{legendOpen \? '' : 'hidden print:block'\}`\}>/)
   })
 })
+
+describe('6. 入力欄で打つたびに表全体を描き直さない（2026-11-01 iPhone で入力がカクつく）', () => {
+  it('打った文字は入力欄の部品（AmountInput）が持ち、画面へは控え（ref）として渡すだけ。確定はその控えを読む', () => {
+    const input = meals.slice(meals.indexOf('function AmountInput('), meals.indexOf('// ── 表題行の操作の部品'))
+    assert.match(input, /const \[text, setText\] = useState\(initialText\)/)
+    assert.match(input, /setText\(e\.target\.value\)\s*onText\(e\.target\.value\)/)
+    assert.match(meals, /const onEditText = useCallback\(\(v: string\) => \{\s*editTextRef\.current = v\s*\}, \[\]\)/)
+    assert.match(meals, /const parsed = parseAmount\(editTextRef\.current\)/)
+    // 表の中のマスへ state の setter をそのまま渡さない（渡すと打つたびに表全体を描き直す）
+    assert.doesNotMatch(meals, /onText=\{setEditText\}/)
+  })
+})
