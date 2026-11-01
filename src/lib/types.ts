@@ -799,6 +799,8 @@ export const LS = {
   /** バイタル一覧・食事一覧の上部の操作を開いているか（'1'／'0'・画面ごとに別・dailyBarOpen と同じ扱い） */
   vitalsBarOpen: 'cl_vitalsBarOpen',
   mealsBarOpen: 'cl_mealsBarOpen',
+  /** 食事一覧の表の下の記号の説明を画面で開いているか（'1'＝開く／'0'・未設定＝畳む。2026-11-01 本人裁定。紙は常に全文） */
+  mealsLegendOpen: 'cl_mealsLegendOpen',
   /** 一覧で表示中のフロア（1/2/all） */
   sheetFloor: 'cl_sheetFloor',
   /**

@@ -598,6 +598,12 @@ function isSheetPath(pathname: string): boolean {
   return SHEET_PATHS.includes(pathname)
 }
 
+/**
+ * 表題行に操作の置き場（cl-sheet-header-slot）を出す一覧の画面（2026-11-01 本人裁定・食事一覧の案C「上部を1段に」）。
+ * 中身は各画面が createPortal で描く。この置き場を出す画面と日報（'/'）は、表題行を 640px 以上で折り返さない（cl-daily-header-row）
+ */
+const SHEET_HEADER_SLOT_PATHS = ['/sheet/meals']
+
 /** ヘッダに出す画面名 */
 function screenTitle(pathname: string): string {
   if (pathname === '/') return '日報'
@@ -1452,6 +1458,9 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
     }
     window.location.reload()
   }
+  // 表題行に一覧の操作の置き場を出すか・表題行を1行に並べるか（日報と SHEET_HEADER_SLOT_PATHS の画面）
+  const sheetHeaderSlot = SHEET_HEADER_SLOT_PATHS.includes(location.pathname)
+  const oneRowHeader = location.pathname === '/' || sheetHeaderSlot
 
   return (
     <div className="min-h-screen bg-bg text-ink lg:pl-24">
@@ -1460,7 +1469,7 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
         {/* 日報（'/'）では 640px 以上で折り返さない（見出しと日付バーを1行に・2026-10-31 本人裁定・案C。足りない分は見出しの施設名が
             先に縮み、それでも足りない時は日付バーの畳む器が中で折り返す・畳む） */}
         <div
-          className={`flex min-h-tap flex-wrap items-center gap-gap px-4 py-2${location.pathname === '/' ? ' cl-daily-header-row' : ''}`}
+          className={`flex min-h-tap flex-wrap items-center gap-gap px-4 py-2${oneRowHeader ? ' cl-daily-header-row' : ''}`}
         >
           {back && (
             <button
@@ -1481,7 +1490,10 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
             className={
               location.pathname === '/'
                 ? 'cl-daily-title flex items-baseline gap-2'
-                : 'flex min-w-0 flex-1 flex-wrap items-baseline gap-2'
+                : sheetHeaderSlot
+                  ? // 一覧の画面は施設名を出さないので、見出しは縮めず文字の幅のまま（縮めると「食事一覧」が操作に重なった・2026-11-01 実測）
+                    'flex shrink-0 items-baseline gap-2'
+                  : 'flex min-w-0 flex-1 flex-wrap items-baseline gap-2'
             }
           >
             <h1 className="min-w-tap truncate text-lg font-bold">{screenTitle(location.pathname)}</h1>
@@ -1498,11 +1510,16 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
           {location.pathname === '/' && (
             <div id="cl-daily-header-slot" className="min-w-0 flex-1 basis-full sm:basis-auto print:hidden" />
           )}
+          {/* 一覧の画面（食事一覧）の操作の置き場（2026-11-01 本人裁定・案C「上部を1段に」）。中身は各画面がここへ描く
+              （MealsSheetPage の createPortal）。並べ方と紙に出さないことは日報の置き場と同じ */}
+          {sheetHeaderSlot && (
+            <div id="cl-sheet-header-slot" className="min-w-0 flex-1 basis-full sm:basis-auto print:hidden" />
+          )}
           {/* 表示倍率は各シート画面の操作バー側に1つだけ置く（契約 §5〜§7。日報は 2026-10-31 から上の置き場の
               「文字 100% ▾」）。この行に別に置くと倍率の操作が同一画面に2つ並ぶため置かない
               （値は lib/zoom.ts の1か所なので食い違いはしないが、操作の場所は1つにする） */}
           {/* 日報（'/'）では表題行を折り返さないので、未送信の札は縮めず1行のまま（cl-daily-status・sheet.css・画面だけ。2026-10-31） */}
-          <span role="status" className={location.pathname === '/' ? 'cl-daily-status' : undefined}>
+          <span role="status" className={oneRowHeader ? 'cl-daily-status' : undefined}>
             {/* 端末に残せていない時（保存領域が一杯・F01）は、閉じる・再読み込みで消えることを件数に添える */}
             {pending > 0 &&
               (unpersisted ? (
