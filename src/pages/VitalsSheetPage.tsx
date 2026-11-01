@@ -35,8 +35,12 @@
 // - 入力解禁フラグ（native_input_enabled）が false の間は編集不可＋理由文（閲覧は可能）
 // - UI 状態（フロア・日数）だけを localStorage に保存する。氏名・記録値・日付は保存しない
 // - 個人情報は console にも localStorage にも出さない
+// - 見やすさ（2026-11-01 本人裁定・案C・画面だけ）: 枠に .vsheet-legible を付け、シートの文字 13→14px・行 22→23px と列幅を
+//   差し替える（sheet.css）。氏名は「…」で切らず2行に折り返す（.vsheet-name）。倍率は「文字 100% ▾」の選択欄1つ（ZoomSelect）、
+//   保存状況と記録者は App の表題行（#cl-vitals-header-slot）へ移す。紙は従来どおり（13px・4ボタン・保存状況は操作バーの中）
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   FORBIDDEN_REASON,
   DbError,
@@ -80,7 +84,7 @@ import {
   LoadingBlock,
   SegmentPicker,
 } from '../components/ui'
-import { readSheetPref, SheetCell, SheetFrame, writeSheetPref, ZoomBar } from '../components/sheet'
+import { readSheetPref, SheetCell, SheetFrame, writeSheetPref, ZoomBar, ZoomSelect } from '../components/sheet'
 import { ConflictResolver, focusAfterResolve } from '../components/ConflictResolver'
 import type { ConflictResolution, ConflictTarget } from '../components/ConflictResolver'
 import {
@@ -2048,6 +2052,15 @@ export function VitalsSheetPage({
       </button>
     </>
   )
+  /**
+   * 保存状況と記録者の置き場（App の表題行の右・id は App.tsx と同じ 'cl-vitals-header-slot'。2026-11-01 本人裁定「表題行へも移して」）。
+   * 表題行の空いた幅へ移すと、iPad 横でも操作バーが1段に収まり、表が上がる。見つからない時（この画面だけを開いた時）は今までどおり
+   * 操作の行の末尾に置く。表題行は紙に出ない（print:hidden）ので、紙には今までどおり操作バーの中に出す
+   */
+  const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null)
+  useLayoutEffect(() => {
+    setHeaderSlot(document.getElementById('cl-vitals-header-slot'))
+  }, [])
   /** 保存状況（未送信・保存中・保存済み）。畳んでも隠さない（畳めない時は今と同じく操作の行の末尾） */
   // 同じ行の末尾に置く＝行を増やさない。画面が狭い時は折り返して2行目に来る（消さない＝保存できたかは必ず見せる）。
   // 並べて、いまの記録者（新しい行の記入者・変更の記録に付く）を常に出し、その場で切り替えられるようにする（F38。
@@ -2093,7 +2106,8 @@ export function VitalsSheetPage({
           openLabel="フロア・日数・倍率の操作を開く"
           closeLabel="フロア・日数・倍率の操作を畳む"
           collapsed={(compact) => periodNav(compact ? periodLabelShort : periodLabel, compact)}
-          persistent={statusLine}
+          // 表題行へ移した時は、紙の分だけ残す（画面では表示しない＝読み上げにも2つ出ない。紙は今までどおりの位置）
+          persistent={headerSlot === null ? statusLine : <div className="hidden print:contents">{statusLine}</div>}
           full={(extra) => (
             <div className="sheet-pickbar">
               {floorOptions.length > 1 ? (
@@ -2128,7 +2142,14 @@ export function VitalsSheetPage({
 
               <div className="flex items-center gap-gap">{periodNav(periodLabel)}</div>
 
-              <ZoomBar compact />
+              {/* 倍率は画面では選択欄1つ（「文字 100% ▾」・日報の表題行と同じ部品。2026-11-01 本人裁定）。4つのボタンより狭く、
+                  iPad 横でも操作が1段に収まる。紙は今までどおり4つのボタン（印刷の見た目を変えない） */}
+              <div className="print:hidden">
+                <ZoomSelect />
+              </div>
+              <div className="hidden print:block">
+                <ZoomBar compact />
+              </div>
               {extra}
             </div>
           )}
@@ -2220,7 +2241,8 @@ export function VitalsSheetPage({
           // 枠の高さ上限は sheet.css の .sheet-frame-fit（画面の高さ − 上に積まれた UI）。
           // 100vh のままだと枠が画面より下へはみ出し、ページを送ると上固定の見出しごと
           // 画面外へ出てしまう（見出しは「枠の上端」に貼り付くため）
-          className="sheet-frame-fit"
+          // vsheet-legible: 画面だけ文字 14px・列幅を差し替える（sheet.css・2026-11-01 本人裁定・案C。紙は変わらない）
+          className="sheet-frame-fit vsheet-legible"
         >
           {/* sheet-table: 列幅を値で動かさない（table-layout: fixed）＋
               sticky セルの罫線が消えない（border-collapse: separate）＋
@@ -2351,6 +2373,9 @@ export function VitalsSheetPage({
           </table>
         </SheetFrame>
       )}
+
+      {/* 保存状況と記録者を表題行へ（画面だけ。表題行は print:hidden） */}
+      {headerSlot !== null ? createPortal(statusLine, headerSlot) : null}
 
       {/* A4 の凡例（線は画面だけなので、説明も紙に出さない）。色だけに頼らない＝実線・点線と上下の位置で区別する */}
       {visibleResidents.length > 0 ? (
@@ -2619,7 +2644,8 @@ function FragmentRow({
             // ＝ボタンのフォーカスリングがセルに切り取られない
             <div className="flex items-center gap-1">
               {/* 他の端末が入力中の時は氏名の後ろに「✎」（読み上げは「入力中: 職員B」）。1文字なので並びは崩さない */}
-              <span className="min-w-0 flex-1 truncate">
+              {/* vsheet-name: 画面では「…」で切らず2行に折り返す（取り違え防止。紙は従来どおり1行） */}
+              <span className="vsheet-name min-w-0 flex-1 truncate">
                 {name}
                 {rowBusy !== null ? <RowBusyMark text={rowBusy} /> : null}
               </span>
