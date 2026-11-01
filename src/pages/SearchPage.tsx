@@ -11,9 +11,17 @@
 //   - console 出力を持たない。氏名・記録本文はコード・コメントに書かない（表示は実行時の取得値のみ）
 //   - Tailwind はトークン由来クラスのみ。色・px の直書きと arbitrary value は書かない
 //   - 入力封鎖中（native_input_enabled=false）でも検索は全機能有効（閲覧・検証専用モードの対象外）
+//
+// 見やすさ（2026-11-01 本人裁定・案B「検索の見やすさ」。画面の配置と機能はそのまま）:
+//   - 幅 672→1024px（iPad横・PC の左右の空きを使う）。15px の文字は 16px に（本文は 18px のまま・利用者名は 18px）
+//   - 見出し（検索語・探す場所・期間…）は 640px 以上で選択肢の左に置く（見出しだけの行をなくす）
+//   - 1024px 以上は「探す場所」と「勤務帯」を1段に並べる（1024px 未満は従来どおり勤務帯が最後）。
+//     期間・重要度は5択で、2つ並べると札の文字が語の途中で割れるため並べない（1280・1440px で実測）
+//   - 結果カードは記入者・既読を1行目の右端へ、「カルテを開く」を本文の右へ（640px 未満は従来どおり本文の下）
+//   - 共通部品（Chip・SegmentPicker 等）の既定の見た目と tokens.css は変えない（札の 16px はこの画面で渡す）
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import type { CompositionEvent, FormEvent } from 'react'
+import type { CompositionEvent, FormEvent, ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { Chip, EmptyBlock, ErrorBlock, LoadingBlock, SegmentPicker } from '../components/ui'
 import { CategoryChips, CategoryToggles } from '../components/noteCategory'
@@ -254,12 +262,12 @@ function NoteResultCard({
   const bodyId = useId()
 
   return (
-    <li className="rounded-md border border-border bg-surface p-3">
-      {/* 1行目: 日付・時刻・勤務帯・対象・職種タグ・重要度 */}
-      <div className="flex flex-wrap items-center gap-gap">
-        <span className="tabular text-sm font-bold text-ink2">{fmtDayLabel(note.note_on)}</span>
-        <span className="tabular text-sm text-ink2">{fmtRecordTime(note.occurred_at, noteIsNextMorning(note)) || '—'}</span>
-        <span className="text-sm text-ink2">{SHIFT_LABEL[note.shift] ?? ''}</span>
+    <li className="rounded-md border border-border bg-surface px-3 py-2">
+      {/* 1行目: 日付・時刻・勤務帯・対象・職種タグ・重要度（右端に記入者・既読） */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="tabular text-base font-bold text-ink2">{fmtDayLabel(note.note_on)}</span>
+        <span className="tabular text-base text-ink2">{fmtRecordTime(note.occurred_at, noteIsNextMorning(note)) || '—'}</span>
+        <span className="text-base text-ink2">{SHIFT_LABEL[note.shift] ?? ''}</span>
         {note.resident_id == null ? (
           <span className="text-base text-info">
             <span aria-hidden="true">ⓘ </span>スタッフへ
@@ -267,52 +275,68 @@ function NoteResultCard({
         ) : resident ? (
           // 申し送りの結果なので「申し送りでの表示名」で出す（2026-09-01 指示。
           // 下の利用者一覧はカルテへの導線なのでマスタの氏名のまま）
-          <span className="text-base font-bold text-ink">{noteDisplayName(resident)}</span>
+          <span className="text-lg font-bold text-ink">{noteDisplayName(resident)}</span>
         ) : (
           // 利用者マスタを取得できていない場合。IDは出さず「取れていない」ことだけを示す
           <span className="text-base text-ink3">利用者名 未取得</span>
         )}
+        {/* 札は共通部品の既定（15px）をこの画面だけ 16px にする（生成される CSS では text-base が Chip の text-sm より前に並び負けるため ! を付ける） */}
         {asArray<string>(note.role_tags).map((t) => (
-          <Chip key={t}>{t}</Chip>
+          <Chip key={t} className="!text-base">
+            {t}
+          </Chip>
         ))}
         <CategoryChips categories={note.categories ?? []} />
-        {note.importance === 'important' && <Chip tone="warn">{IMPORTANCE_LABEL.important}</Chip>}
-        {note.importance === 'critical' && <Chip tone="danger">{IMPORTANCE_LABEL.critical}</Chip>}
-        {note.ongoing && <Chip tone="info">継続</Chip>}
+        {note.importance === 'important' && (
+          <Chip tone="warn" className="!text-base">
+            {IMPORTANCE_LABEL.important}
+          </Chip>
+        )}
+        {note.importance === 'critical' && (
+          <Chip tone="danger" className="!text-base">
+            {IMPORTANCE_LABEL.critical}
+          </Chip>
+        )}
+        {note.ongoing && (
+          <Chip tone="info" className="!text-base">
+            継続
+          </Chip>
+        )}
+        {/* 記入者・既読（右端に寄せる。入らない時は次の行へ折り返す） */}
+        <span className="ml-auto flex flex-wrap items-center gap-x-3">
+          <span className="text-base text-ink2">
+            記入者{' '}
+            {reporterName === null ? '—' : <Highlight text={reporterName} q={reporterQuery} />}
+          </span>
+          {typeof note.read_count === 'number' ? (
+            <span className="tabular text-base text-ink2">
+              <span aria-hidden="true">✓</span>
+              <span className="sr-only">既読 </span>既読 {note.read_count}
+            </span>
+          ) : null}
+        </span>
       </div>
 
-      {/* 2行目: 本文（既定2行clamp・タップで展開＝明示操作。展開状態は保存しない） */}
-      <button
-        type="button"
-        aria-expanded={expanded}
-        aria-controls={bodyId}
-        onClick={() => setExpanded((v) => !v)}
-        className="mt-2 min-h-tap w-full text-left"
-      >
-        <span id={bodyId} className={`block text-lg text-ink ${expanded ? '' : 'clamp-2'}`}>
-          <Highlight text={note.body} q={bodyQuery} />
-        </span>
-        <span className="mt-1 block text-sm text-link">
-          {expanded ? '本文を閉じる' : '本文をすべて表示'}
-        </span>
-      </button>
-
-      {/* 3行目: 記入者・既読数・カルテへの導線 */}
-      <div className="mt-1 flex flex-wrap items-center gap-gap">
-        <span className="text-sm text-ink2">
-          記入者{' '}
-          {reporterName === null ? '—' : <Highlight text={reporterName} q={reporterQuery} />}
-        </span>
-        {typeof note.read_count === 'number' ? (
-          <span className="tabular text-sm text-ink2">
-            <span aria-hidden="true">✓</span>
-            <span className="sr-only">既読 </span>既読 {note.read_count}
+      {/* 2行目: 本文（既定2行clamp・タップで展開＝明示操作。展開状態は保存しない）とカルテへの導線（640px 以上は本文の右） */}
+      <div className="mt-1 flex flex-col gap-gap sm:flex-row sm:items-end">
+        <button
+          type="button"
+          aria-expanded={expanded}
+          aria-controls={bodyId}
+          onClick={() => setExpanded((v) => !v)}
+          className="min-h-tap min-w-0 flex-1 text-left"
+        >
+          <span id={bodyId} className={`block text-lg text-ink ${expanded ? '' : 'clamp-2'}`}>
+            <Highlight text={note.body} q={bodyQuery} />
           </span>
-        ) : null}
+          <span className="mt-1 block text-base text-link">
+            {expanded ? '本文を閉じる' : '本文をすべて表示'}
+          </span>
+        </button>
         {note.resident_id != null ? (
           <Link
             to={`/karte/${note.resident_id}`}
-            className="inline-flex min-h-tap items-center rounded border border-border-strong px-3 text-base text-link"
+            className="inline-flex min-h-tap shrink-0 items-center self-start rounded border border-border-strong px-3 text-base text-link sm:self-auto"
           >
             カルテを開く
             <span aria-hidden="true" className="ml-1">
@@ -322,6 +346,28 @@ function NoteResultCard({
         ) : null}
       </div>
     </li>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════
+// 絞り込みの1段（640px 以上は見出しを左・選択肢を右。未満は従来どおり見出しが上）
+// ══════════════════════════════════════════════════════════════
+
+function FilterRow({ label, note, children }: { label: string; note?: string; children: ReactNode }) {
+  return (
+    <div className="sm:flex sm:items-start sm:gap-3">
+      <span className="block shrink-0 text-base text-ink2 sm:w-20 sm:pt-2">{label}</span>
+      <div className="mt-1 min-w-0 flex-1 sm:mt-0">
+        {note ? (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            {children}
+            <span className="text-base text-ink2">{note}</span>
+          </div>
+        ) : (
+          children
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -515,17 +561,25 @@ export function SearchPage({ residents: residentsProp }: SearchPageProps = {}) {
     target !== 'resident' && typed === '' && (importanceFilter(importance) !== undefined || categories.length > 0)
   const tooShort = charCount(typed) < minLen && !filterOnly
 
+  const shiftRow = (
+    <FilterRow label="勤務帯">
+      <SegmentPicker options={SHIFT_OPTIONS} value={shift} onChange={setShift} ariaLabel="勤務帯" />
+    </FilterRow>
+  )
+
   return (
-    <div className="mx-auto w-full max-w-2xl pb-8">
-      <h1 className="text-xl font-heavy text-ink">検索</h1>
-      <p className="mt-1 text-sm text-ink2">{HINT[target]}</p>
+    <div className="mx-auto w-full max-w-5xl pb-8">
+      <div className="flex flex-wrap items-baseline gap-x-3">
+        <h1 className="text-xl font-heavy text-ink">検索</h1>
+        <p className="text-base text-ink2">{HINT[target]}</p>
+      </div>
 
       {/* ── 検索語 ───────────────────────────────── */}
-      <form onSubmit={onSubmit} role="search" className="mt-3">
-        <label htmlFor={fieldId} className="block text-sm text-ink2">
+      <form onSubmit={onSubmit} role="search" className="mt-2 sm:flex sm:items-start sm:gap-3">
+        <label htmlFor={fieldId} className="block shrink-0 text-base text-ink2 sm:w-20 sm:pt-2">
           検索語
         </label>
-        <div className="mt-1 flex items-start gap-gap">
+        <div className="mt-1 flex min-w-0 flex-1 items-start gap-gap sm:mt-0">
           <input
             id={fieldId}
             type="text"
@@ -550,10 +604,11 @@ export function SearchPage({ residents: residentsProp }: SearchPageProps = {}) {
       </form>
 
       {/* ── 対象・絞り込み ─────────────────────────── */}
-      <div className="mt-3 space-y-3">
-        <div>
-          <span className="block text-sm text-ink2">探す場所</span>
-          <div className="mt-1">
+      <div className="mt-2 space-y-2">
+        {/* 1024px 以上は「探す場所」と「勤務帯」を1段に並べる。勤務帯は並べる時だけここに出し、
+            1024px 未満は従来どおり最後に出す（display:none の側は読み上げ・Tab の順にも入らない） */}
+        <div className="space-y-2 lg:grid lg:grid-cols-2 lg:gap-x-6 lg:space-y-0">
+          <FilterRow label="探す場所">
             <SegmentPicker
               options={TARGET_OPTIONS}
               value={target}
@@ -562,58 +617,40 @@ export function SearchPage({ residents: residentsProp }: SearchPageProps = {}) {
               }}
               ariaLabel="探す場所"
             />
-          </div>
+          </FilterRow>
+          {showFilters && <div className="hidden lg:block">{shiftRow}</div>}
         </div>
 
         {showFilters && (
           <>
-            <div>
-              <span className="block text-sm text-ink2">期間</span>
-              <div className="mt-1">
-                <SegmentPicker
-                  options={PERIOD_OPTIONS}
-                  value={period}
-                  onChange={(v) => {
-                    if ((PERIODS as readonly string[]).includes(v)) setPeriod(v as PeriodKey)
-                  }}
-                  ariaLabel="期間"
-                />
-              </div>
-            </div>
-            <div>
-              <span className="block text-sm text-ink2">重要度</span>
-              <div className="mt-1">
-                <SegmentPicker
-                  options={IMPORTANCE_OPTIONS}
-                  value={importance}
-                  onChange={setImportance}
-                  ariaLabel="重要度"
-                />
-              </div>
-            </div>
-            <div>
-              <span className="block text-sm text-ink2">分類（2つ以上選ぶと、どれかが付いている申し送り）</span>
-              <div className="mt-1">
-                <CategoryToggles value={categories} disabled={false} onChange={setCategories} label="検索する" />
-              </div>
-            </div>
-            <div>
-              <span className="block text-sm text-ink2">勤務帯</span>
-              <div className="mt-1">
-                <SegmentPicker
-                  options={SHIFT_OPTIONS}
-                  value={shift}
-                  onChange={setShift}
-                  ariaLabel="勤務帯"
-                />
-              </div>
-            </div>
+            <FilterRow label="期間">
+              <SegmentPicker
+                options={PERIOD_OPTIONS}
+                value={period}
+                onChange={(v) => {
+                  if ((PERIODS as readonly string[]).includes(v)) setPeriod(v as PeriodKey)
+                }}
+                ariaLabel="期間"
+              />
+            </FilterRow>
+            <FilterRow label="重要度">
+              <SegmentPicker
+                options={IMPORTANCE_OPTIONS}
+                value={importance}
+                onChange={setImportance}
+                ariaLabel="重要度"
+              />
+            </FilterRow>
+            <FilterRow label="分類" note="2つ以上選ぶと、どれかが付いている申し送り">
+              <CategoryToggles value={categories} disabled={false} onChange={setCategories} label="検索する" />
+            </FilterRow>
+            <div className="lg:hidden">{shiftRow}</div>
           </>
         )}
       </div>
 
       {/* ── 結果 ───────────────────────────────── */}
-      <div className="mt-4">
+      <div className="mt-3">
         {target === 'resident' ? (
           <ResidentResults
             query={residentQuery}
@@ -628,7 +665,7 @@ export function SearchPage({ residents: residentsProp }: SearchPageProps = {}) {
           <>
             {/* 利用者名だけが取れなかった場合（検索結果そのものは表示を続ける） */}
             {residentsError !== null && (
-              <div className="mb-2 rounded-md border border-warn bg-warn-bg px-3 py-3 text-sm text-ink">
+              <div className="mb-2 rounded-md border border-warn bg-warn-bg px-3 py-3 text-base text-ink">
                 <p>
                   <span aria-hidden="true">▲ </span>
                   利用者の氏名を読み込めませんでした（通信エラー）。対象者名が「未取得」と表示されます。電波状態を確認して再読み込みしてください。
@@ -644,7 +681,7 @@ export function SearchPage({ residents: residentsProp }: SearchPageProps = {}) {
             )}
             {/* 記入者名だけが取れなかった場合（検索結果そのものは表示を続ける） */}
             {staffError && (
-              <div className="mb-2 rounded-md border border-warn bg-warn-bg px-3 py-3 text-sm text-ink">
+              <div className="mb-2 rounded-md border border-warn bg-warn-bg px-3 py-3 text-base text-ink">
                 <p>
                   <span aria-hidden="true">▲ </span>
                   記入者の氏名を読み込めませんでした（通信エラー）。記入者は「—」と表示されます。電波状態を確認して再読み込みしてください。
@@ -723,7 +760,7 @@ function ResidentResults({
   return (
     <>
       {error ? (
-        <p className="mb-2 text-sm text-warn">
+        <p className="mb-2 text-base text-warn">
           <span aria-hidden="true">▲ </span>
           最新の一覧を取得できませんでした。表示は前回取得した内容です。
         </p>
@@ -738,14 +775,15 @@ function ResidentResults({
               to={`/karte/${r.id}`}
               className="flex min-h-tap w-full items-center gap-gap rounded border border-border bg-surface px-3 py-2 text-base text-ink"
             >
-              <span className="tabular w-14 shrink-0 text-sm text-ink3">
+              <span className="tabular w-14 shrink-0 text-base text-ink3">
                 <Highlight text={r.room ?? '—'} q={query} />
               </span>
-              <span className="flex-1 truncate font-bold">
+              {/* 氏名は取り違え防止のため「…」で切らない（入らない時は2行に折り返す・2026-11-01） */}
+              <span className="min-w-0 flex-1 break-words text-lg font-bold">
                 <Highlight text={r.name} q={query} />
               </span>
               {r.kana ? (
-                <span className="shrink-0 text-sm text-ink3">
+                <span className="shrink-0 text-base text-ink3">
                   <Highlight text={r.kana} q={query} />
                 </span>
               ) : null}
