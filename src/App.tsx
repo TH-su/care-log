@@ -1490,10 +1490,9 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
             className={
               location.pathname === '/'
                 ? 'cl-daily-title flex items-baseline gap-2'
-                : sheetHeaderSlot
-                  ? // 一覧の画面は施設名を出さないので、見出しは縮めず文字の幅のまま（縮めると「食事一覧」が操作に重なった・2026-11-01 実測）
-                    'flex shrink-0 items-baseline gap-2'
-                  : 'flex min-w-0 flex-1 flex-wrap items-baseline gap-2'
+                : // 一覧の画面で表題行に操作を置く時は cl-sheet-title（sheet.css・画面の 640px 以上だけ見出しを縮めない。
+                  // 縮めると「食事一覧」が操作に重なった・2026-11-01 実測）。紙の表題行は以前と同じ指定のまま
+                  `flex min-w-0 flex-1 flex-wrap items-baseline gap-2${sheetHeaderSlot ? ' cl-sheet-title' : ''}`
             }
           >
             <h1 className="min-w-tap truncate text-lg font-bold">{screenTitle(location.pathname)}</h1>

@@ -377,7 +377,8 @@ describe('6. 上部を1段に（表題行へ）', () => {
     // 2026-11-01: 食事一覧（SHEET_HEADER_SLOT_PATHS）も表題行を1行に並べる（oneRowHeader）。見出しの縮み方（cl-daily-title）は日報だけ
     assert.match(app, /const oneRowHeader = location\.pathname === '\/' \|\| sheetHeaderSlot/)
     assert.match(app, /\$\{oneRowHeader \? ' cl-daily-header-row' : ''\}/)
-    assert.match(app, /location\.pathname === '\/'\s*\? 'cl-daily-title flex items-baseline gap-2'\s*: sheetHeaderSlot[\s\S]*?'flex shrink-0 items-baseline gap-2'\s*: 'flex min-w-0 flex-1 flex-wrap items-baseline gap-2'/)
+    // 日報以外は紙の表題行が以前と同じ指定（flex-1）。食事一覧は画面の 640px 以上だけ cl-sheet-title で縮めない
+    assert.match(app, /location\.pathname === '\/'\s*\? 'cl-daily-title flex items-baseline gap-2'\s*: [\s\S]*?`flex min-w-0 flex-1 flex-wrap items-baseline gap-2\$\{sheetHeaderSlot \? ' cl-sheet-title' : ''\}`/)
     assert.match(app, /<div id="cl-daily-header-slot" className="min-w-0 flex-1 basis-full sm:basis-auto print:hidden" \/>/)
     const plain = stripComments(css)
     // 640px 未満と紙: 以前の flex-1・折り返し・min-w-0 と同じ

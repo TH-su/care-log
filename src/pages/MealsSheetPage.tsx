@@ -2534,7 +2534,13 @@ export function MealsSheetPage({
             headerSlot,
           )
         : null}
-      {/* 表題行に操作がある時の読み込み中の一言（画面だけ。紙用の操作バーの中の同じ一言は画面では隠れる） */}
+      {/* 表題行に操作がある時の読み込み中の一言（画面だけ。紙用の操作バーの中の同じ一言と読み上げは画面では隠れるので、
+          読み上げの知らせもここに置く＝常に置いて中身だけ変える） */}
+      {headerSlot ? (
+        <p role="status" aria-live="polite" className="sr-only print:hidden">
+          {loading ? '読み込み中です' : ''}
+        </p>
+      ) : null}
       {headerSlot && loading ? (
         <p className="text-base text-ink2 print:hidden">
           ↻ 読み込み中です。表示がそろうまでお待ちください（この間は入力できません）

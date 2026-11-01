@@ -1317,6 +1317,11 @@ main:has(.dsheet-frame) {
   .cl-daily-title > h1 {
     flex-shrink: 0;
   }
+  /* 一覧の画面（食事一覧）の見出しは施設名を出さないので縮めず文字の幅のまま（App.tsx の cl-sheet-title・2026-11-01）。
+     紙と 640px 未満は以前の flex-1 のまま */
+  header .cl-sheet-title {
+    flex: 0 0 auto;
+  }
   /* 未送信の札（「▲ 未送信 n件・端末に残せていません」）は縮めず1行のまま（折り返さない行の中で縦に割れていた・
      2026-10-31 反証レビュー）。足りない幅は施設名 → 日付バー（畳む器が折り返す・畳む）の順に譲る */
   header .cl-daily-status {
@@ -1737,9 +1742,10 @@ main:has(.dsheet-frame) {
     overflow-wrap: anywhere;
   }
   /* 印はマスの角に小さく（0.62em＝16px で約10px）。数字の幅を取らないので列を広げずに済む。
-     デイ「デ」・水分の「▼」＝左上／未送信「⚠」・要再読込と未保存の「▲」＝右上／低摂取「▲」＝右下。
+     デイ「デ」・水分の「▼」＝左下／未送信「⚠」・要再読込と未保存の「▲」＝右上／低摂取「▲」＝右下。
      どれも読み上げは各マスの aria-label が持つ（印は aria-hidden）。低摂取は地の濃淡と斜線でも分かる */
-  .msheet-legible tbody td button {
+  /* 位置の基準は印を持つボタンだけ（全部のマスに付けると重ねて描く単位が増え、iPhone の指の動きが重くなる・2026-10-18 の対策と同じ考え） */
+  .msheet-legible tbody td button:has(> .cl-dc-mark, > .msheet-lowday, > .msheet-mark-phase, > .msheet-mark-low) {
     position: relative;
   }
   .msheet-legible tbody td button > .cl-dc-mark,
@@ -1751,9 +1757,10 @@ main:has(.dsheet-frame) {
     line-height: 1;
     pointer-events: none;
   }
+  /* 左上は他の端末の入力中の「✎」（BusyMark）が来るので、デイ「デ」・水分の「▼」は左下（水分の横棒 3px の上） */
   .msheet-legible tbody td button > .cl-dc-mark,
   .msheet-legible tbody td button > .msheet-lowday {
-    top: 1px;
+    bottom: 4px;
     left: 2px;
   }
   .msheet-legible tbody td button > .msheet-mark-phase {

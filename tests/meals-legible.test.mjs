@@ -87,7 +87,8 @@ describe('1. 食事の枠の文字と列幅（画面だけ）', () => {
     ]) {
       assert.match(block, re)
     }
-    assert.match(stripComments(css), /:root,\s*\.sheet-frame,\s*\.dsheet-legible \{/, '共有の算出の規則が変わっている')
+    // 共有の算出の規則（:root, .sheet-frame, .dsheet-legible …）に .msheet-legible を足していない（バイタル一覧の改善と同じ行を触らない）
+    assert.doesNotMatch(stripComments(css), /:root,[^{]*\.msheet-legible[^{]*\{/)
   })
 
   it('msheet の新しい規則は印刷にも @media の外にも無い（紙は 13px 基準のまま）', () => {
@@ -116,6 +117,9 @@ describe('2. 印をマスの角へ（画面だけ）', () => {
     const scr = mediaBlocks(css, 'screen').join('\n')
     assert.match(scr, /\.msheet-legible tbody td button > \.msheet-lowday/)
     assert.match(scr, /\.msheet-legible tbody td button > \.msheet-mark-low \{\s*bottom: 1px;\s*right: 2px;/)
+    // 位置の基準は印を持つボタンだけ（全部のマスに relative を付けない）
+    assert.match(scr, /\.msheet-legible tbody td button:has\(/)
+    assert.doesNotMatch(scr, /\.msheet-legible tbody td button \{\s*position: relative;/)
     assert.doesNotMatch(scr, /\.msheet-legible \.msheet-lowday/)
   })
 })
