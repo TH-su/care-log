@@ -9,7 +9,10 @@
 //
 // 使い方（ターミナル。接続先は必ず「検証用」のプロジェクトにすること）:
 //   SUPABASE_DB_URL='postgresql://ユーザー:パスワード@ホスト:5432/postgres?sslmode=require' \
+//   CARELOG_TENANT='施設の番号（public.tenants の id・uuid）' \
 //     npm run seed -- --days 3650
+//   ・CARELOG_TENANT は必須（施設の印の段階2・0052）。投入する施設を明示する。無い・uuid の形でない・tenants に無い時は
+//     何も書かずに止める。読むのはその施設の行だけ（名簿・職員・投入済みの日）、足す行には全部その施設の印を入れる
 //   ・--days N … 生成する日数（既定 3650 ＝ 10年相当。1〜7300）
 //   ・--help   … この使い方を表示
 //   接続文字列は process.env からのみ読む（.env は読み込まない・コードにも書かない）。
@@ -677,14 +680,30 @@ function buildInsertSql(table, cols, returning) {
   }`
 }
 
-async function insertRows(client, table, rows, returning) {
+/** 施設の番号（uuid）の形 */
+const TENANT_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+/** 施設の番号が無い・形でない時は止める（施設を見ずに読み書きしない・0052） */
+function assertTenant(tenant) {
+  if (typeof tenant !== 'string' || !TENANT_RE.test(tenant)) {
+    throw new Error('施設の番号（CARELOG_TENANT）がありません。施設を決めずには読み書きしません。')
+  }
+}
+
+/** 足す行の施設の印の列（どの表も最後に足す・0052） */
+const TENANT_COL = { name: 'tenant_id', type: 'uuid' }
+
+async function insertRows(client, table, rows, returning, tenant) {
+  assertTenant(tenant)
   if (rows.length === 0) return []
-  const cols = COLS[table]
+  const cols = [...COLS[table], TENANT_COL]
   const sql = buildInsertSql(table, cols, returning)
   const out = []
   for (let i = 0; i < rows.length; i += BATCH_ROWS) {
     const slice = rows.slice(i, i + BATCH_ROWS)
-    const params = cols.map((c) => slice.map((row) => (row[c.name] === undefined ? null : row[c.name])))
+    const params = cols.map((c) =>
+      c === TENANT_COL ? slice.map(() => tenant) : slice.map((row) => (row[c.name] === undefined ? null : row[c.name])),
+    )
     const res = await client.query(sql, params)
     if (returning) out.push(...res.rows)
   }
@@ -710,7 +729,23 @@ async function assertSchema(client) {
   }
 }
 
-// 実データらしき行が1件でもあれば、何も書かずに中止する（本番への誤投入防止）
+// 投入する施設がデータベースにあり、施設の列がある（0051 を当てた DB）こと
+async function assertTenantExists(client, tenant) {
+  assertTenant(tenant)
+  const col = await client.query(
+    `select 1 from information_schema.columns where table_schema = 'public' and table_name = 'residents' and column_name = 'tenant_id'`,
+  )
+  if (col.rows.length === 0) {
+    throw new Error('施設の列（tenant_id）がありません。supabase/migrations の 0051・0052 を当ててから再実行してください。')
+  }
+  const t = await client.query('select 1 from public.tenants where id = $1', [tenant])
+  if (t.rows.length !== 1) {
+    throw new Error('CARELOG_TENANT の施設がデータベースにありません（何も書き込まずに終了しました）。')
+  }
+}
+
+// 実データらしき行が1件でもあれば、何も書かずに中止する（本番への誤投入防止）。
+// ★施設で絞らない（データベース全体を見る）: よその施設に実データがある＝本番のデータベースなので、どの施設にも投入しない
 async function assertSyntheticOnly(client) {
   const res = await client.query(
     `select (select count(*)::int from residents where source_id not like 'SYN-%') as real_residents,
@@ -726,22 +761,26 @@ async function assertSyntheticOnly(client) {
   }
 }
 
-async function ensureMasters(client) {
+async function ensureMasters(client, tenant) {
+  assertTenant(tenant)
   const wantResidents = buildResidents()
   const wantStaff = buildStaff()
 
   await client.query('begin')
   try {
-    const existingR = await client.query('select id, source_id from residents where source_id like $1', ['SYN-%'])
+    // この取引の間だけ carelog.tenant をこの施設にする（0052 の印を入れるトリガもこの施設で動く）
+    await client.query(`select set_config('carelog.tenant', $1, true)`, [tenant])
+    // その施設の合成マスタだけ（0052）
+    const existingR = await client.query('select id, source_id from residents where source_id like $1 and tenant_id = $2', ['SYN-%', tenant])
     const haveR = new Map(existingR.rows.map((r) => [r.source_id, Number(r.id)]))
     const missingR = wantResidents.filter((r) => !haveR.has(r.source_id))
-    const insertedR = await insertRows(client, 'residents', missingR, 'id, source_id')
+    const insertedR = await insertRows(client, 'residents', missingR, 'id, source_id', tenant)
     for (const row of insertedR) haveR.set(row.source_id, Number(row.id))
 
-    const existingS = await client.query('select id, name from staff where name like $1', ['職員%'])
+    const existingS = await client.query('select id, name from staff where name like $1 and tenant_id = $2', ['職員%', tenant])
     const haveS = new Map(existingS.rows.map((r) => [r.name, Number(r.id)]))
     const missingS = wantStaff.filter((s) => !haveS.has(s.name))
-    const insertedS = await insertRows(client, 'staff', missingS, 'id, name')
+    const insertedS = await insertRows(client, 'staff', missingS, 'id, name', tenant)
     for (const row of insertedS) haveS.set(row.name, Number(row.id))
 
     await client.query('commit')
@@ -759,9 +798,12 @@ async function ensureMasters(client) {
 // 投入本体
 // ---------------------------------------------------------------------
 
-async function seedChunk(client, days, residents, staffIds, lastDay, stats) {
+async function seedChunk(client, days, residents, staffIds, lastDay, stats, tenant) {
+  assertTenant(tenant)
   await client.query('begin')
   try {
+    // この取引の間だけ carelog.tenant をこの施設にする（0052 の印を入れるトリガもこの施設で動く）
+    await client.query(`select set_config('carelog.tenant', $1, true)`, [tenant])
     const all = { vitals: [], meals: [], fluid_intake: [], outings: [], notes: [], import_days: [] }
 
     for (const day of days) {
@@ -803,14 +845,14 @@ async function seedChunk(client, days, residents, staffIds, lastDay, stats) {
       }
     }
 
-    await insertRows(client, 'vitals', all.vitals)
-    await insertRows(client, 'meals', all.meals)
-    await insertRows(client, 'fluid_intake', all.fluid_intake)
-    await insertRows(client, 'outings', all.outings)
+    await insertRows(client, 'vitals', all.vitals, undefined, tenant)
+    await insertRows(client, 'meals', all.meals, undefined, tenant)
+    await insertRows(client, 'fluid_intake', all.fluid_intake, undefined, tenant)
+    await insertRows(client, 'outings', all.outings, undefined, tenant)
 
     // 申し送りは id を受け取ってから既読を作る（import_key で確実に突き合わせる）
     const noteRows = all.notes.map((n) => ({ ...n, role_tags: pgTextArray(n.role_tags) }))
-    const returned = await insertRows(client, 'notes', noteRows, 'id, import_key')
+    const returned = await insertRows(client, 'notes', noteRows, 'id, import_key', tenant)
     const idByKey = new Map(returned.map((r) => [r.import_key, Number(r.id)]))
 
     const reads = []
@@ -821,8 +863,8 @@ async function seedChunk(client, days, residents, staffIds, lastDay, stats) {
         reads.push({ note_id: noteId, staff_id: staffId, read_at: tsJst(n._readDay, n._readAt[0], n._readAt[1]) })
       }
     }
-    await insertRows(client, 'note_reads', reads)
-    await insertRows(client, 'import_days', all.import_days)
+    await insertRows(client, 'note_reads', reads, undefined, tenant)
+    await insertRows(client, 'import_days', all.import_days, undefined, tenant)
 
     await client.query('commit')
 
@@ -854,7 +896,8 @@ async function seedChunk(client, days, residents, staffIds, lastDay, stats) {
 const USAGE = `care-log 合成テストデータ投入（実在氏名ゼロ・検証用）
 
   使い方（ターミナルに貼り付けて実行）:
-    SUPABASE_DB_URL='postgresql://ユーザー:パスワード@ホスト:5432/postgres?sslmode=require' npm run seed -- --days 3650
+    SUPABASE_DB_URL='postgresql://ユーザー:パスワード@ホスト:5432/postgres?sslmode=require' \
+    CARELOG_TENANT='施設の番号（uuid）' npm run seed -- --days 3650
 
   オプション:
     --days N   生成する日数（既定 3650 ＝ 10年相当。1〜7300）
@@ -864,6 +907,7 @@ const USAGE = `care-log 合成テストデータ投入（実在氏名ゼロ・�
     ・接続先は「検証用」の Supabase プロジェクト。本番データがある接続先では中止する
     ・supabase/migrations/0001_init.sql と 0002_timeline_rpc.sql を先に適用しておく
     ・接続文字列は環境変数 SUPABASE_DB_URL からのみ読む（.env は読み込まない）
+    ・投入する施設は環境変数 CARELOG_TENANT（public.tenants の id）で必ず指定する。読み書きはその施設の行だけ
     ・投入するのは合成データのみ（利用者01〜33／職員01〜14／本文は合成日本語）
     ・既存行の削除・更新は行わない。投入済みの日は飛ばして再開できる`
 
@@ -912,6 +956,15 @@ async function main() {
     return
   }
 
+  const tenant = (process.env.CARELOG_TENANT ?? '').trim().toLowerCase()
+  if (!TENANT_RE.test(tenant)) {
+    console.error('環境変数 CARELOG_TENANT（投入する施設の番号・uuid）が無いか、形が違います（施設が分からないため何もしていません）。')
+    console.error('')
+    console.error(USAGE)
+    process.exitCode = 1
+    return
+  }
+
   const lastDay = todayJst()
   const firstDay = addDays(lastDay, -(opts.days - 1))
   const client = new Client({ connectionString: url, application_name: 'care-log-seed' })
@@ -934,16 +987,17 @@ async function main() {
 
   try {
     await assertSchema(client)
+    await assertTenantExists(client, tenant)
     await assertSyntheticOnly(client)
 
-    const { residents, staffIds, addedResidents, addedStaff } = await ensureMasters(client)
+    const { residents, staffIds, addedResidents, addedStaff } = await ensureMasters(client, tenant)
     console.log(`マスタ: 利用者 ${residents.length}名（新規 ${addedResidents}）／職員 ${staffIds.length}名（新規 ${addedStaff}）`)
 
     // 投入済みの日（＝再実行時に飛ばす日）
     const done = await client.query(
       `select to_char(day, 'YYYY-MM-DD') as day from import_days
-        where source = $1 and day between $2 and $3`,
-      [IMPORT_SOURCE, firstDay, lastDay]
+        where source = $1 and day between $2 and $3 and tenant_id = $4`,
+      [IMPORT_SOURCE, firstDay, lastDay, tenant]
     )
     const skip = new Set(done.rows.map((r) => r.day))
 
@@ -965,7 +1019,7 @@ async function main() {
 
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i]
-      const r = await seedChunk(client, chunk, residents, staffIds, lastDay, stats)
+      const r = await seedChunk(client, chunk, residents, staffIds, lastDay, stats, tenant)
       const pct = Math.round(((i + 1) / chunks.length) * 100)
       console.log(
         `[${String(i + 1).padStart(String(chunks.length).length)}/${chunks.length}] ${pct
@@ -1028,5 +1082,5 @@ export {
   buildResidents, buildStaff, buildBody, buildInsertSql, pgTextArray, rngFor,
   generateVitals, generateMeals, generateFluids, generateNotes, generateOutings, awayKeys,
   hasAlert, addDays, todayJst, parseArgs,
-  assertSchema, assertSyntheticOnly, ensureMasters, seedChunk,
+  assertSchema, assertSyntheticOnly, assertTenantExists, ensureMasters, seedChunk,
 }

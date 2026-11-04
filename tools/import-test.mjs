@@ -22,6 +22,7 @@
 //   11. 集約GASの失敗情報（ping）の検査と警告（取込は止めず終了コードも変えない）
 //   12. アプリで直した取込行を戻さない・取り消さない・復活で上書きしない（2026-09-29 C3。notes/vitals/meals）
 //   13. 移行元でキーだけ変わっても、アプリで直した行が押さえている枠へ入れず窓が落ちない
+//   14. よその施設の名簿・取込行を読まない・取り消さない（施設が1つなら CARELOG_TENANT を省いてよい）。施設（CARELOG_TENANT）が無い・無い施設なら止まる（0052）
 // =====================================================================
 
 import { spawnSync, spawn } from 'node:child_process'
@@ -41,6 +42,9 @@ const BASE = process.env.TEST_PG_URL_BASE ?? 'postgresql://postgres@127.0.0.1:55
 const DBNAME = 'carelog_imp_test'
 const DB_URL = `${BASE}/${DBNAME}`
 const NAMEMAP = join(ROOT, 'tools', 'import-namemap.json')
+/** 取り込む施設と、よその施設（合成の番号） */
+const TENANT = '00000000-0000-0000-0000-0000000000aa'
+const OTHER_TENANT = '00000000-0000-0000-0000-0000000000bb'
 
 let passed = 0
 function ok(name, cond, detail = '') {
@@ -116,6 +120,14 @@ async function main() {
   for (const f of ['0001_init.sql', '0002_timeline_rpc.sql', '0003_sheet_ui.sql', '0004_vitals_client_key.sql', '0005_meals_sheet_fluids.sql', '0006_staff_manual.sql', '0007_resident_note_alias.sql', '0008_import_tombstone_mark.sql', '0009_manager_staff_id.sql', '0010_record_history.sql']) {
     psql(DB_URL, join(ROOT, 'supabase', 'migrations', f), true)
   }
+  // 施設の印（0051・0052）: 取込は CARELOG_TENANT の施設の行だけを読み、足す行に印を入れる。0001〜0010 だけの DB なので、
+  // 取込が触る表にだけ施設の列を足す（既定値＝この施設＝先住のアプリ入力の行もこの施設の行になる）。よその施設の行も1つ置き、
+  // 取込がそれを読まない・取り消さないことを確かめる（14）
+  psql(DB_URL, 'create table if not exists public.tenants (id uuid primary key, name text)')
+  psql(DB_URL, `insert into public.tenants (id, name) values ('${TENANT}', '見本の施設'), ('${OTHER_TENANT}', '見本の施設B')`)
+  for (const t of ['residents', 'staff', 'notes', 'vitals', 'meals', 'import_days', 'record_history']) {
+    psql(DB_URL, `alter table public.${t} add column if not exists tenant_id uuid default '${TENANT}' references public.tenants(id)`)
+  }
 
   const db = new Client({ connectionString: DB_URL })
   await db.connect()
@@ -136,6 +148,7 @@ async function main() {
     CARELOG_GAS_URL: fx.url,
     CARELOG_GAS_TOKEN: fx.token,
     SUPABASE_DB_URL: DB_URL,
+    CARELOG_TENANT: TENANT,
   }
   const argsBase = ['--from', '2026-06-01', '--to', '2026-06-03', '--report-dir', reportDir]
 
@@ -422,11 +435,41 @@ async function main() {
         m1.native_skip === 2 && m1.src_rows === m1.inserted + m1.updated + m1.skipped + m1.native_skip + m1.unmatched, JSON.stringify(m1))
     }
     r = await runImporter(env, [...argsBase, '--execute'])
+    let t13 = null
     {
       const t = parseTotals(r.stdout)
+      t13 = t
       ok('v5 の再実行も正常終了・追加0・更新0',
         r.status === 0 && t.events?.ins === 0 && t.events?.upd === 0 && t.measures?.ins === 0 && t.measures?.upd === 0, r.stdout + r.stderr)
     }
+
+    console.log('── 14. よその施設の行を読まない・取り消さない（施設の印の段階2・0052）──')
+    // よその施設に、同じ氏名の利用者と、取込の印（ev:）を持つ同じ日の申し送りを置く
+    await db.query(`insert into residents (source_id, name, room, active, tenant_id) values ('B01', '利用者01', '201', true, $1)`, [OTHER_TENANT])
+    await db.query(`insert into notes (note_on, shift, facility, category, body, import_key, tenant_id)
+                    values ('2026-06-01', 'day', 'facility', 'notice', 'よその施設の記録', 'ev:other-k1', $1)`, [OTHER_TENANT])
+    r = await runImporter(env, [...argsBase, '--execute'])
+    {
+      const t = parseTotals(r.stdout)
+      ok('よその施設の行があっても正常終了・追加0・更新0・照合不能の数は同じ（同じ氏名のよその利用者を名簿に入れない）',
+        r.status === 0 && t.events?.ins === 0 && t.events?.upd === 0 && t.measures?.ins === 0 && t.measures?.upd === 0
+          && t.events?.unm === t13.events?.unm && t.measures?.unm === t13.measures?.unm, r.stdout + r.stderr)
+      const other = await one(`select deleted_at, tenant_id from notes where import_key = 'ev:other-k1'`)
+      ok('よその施設の取込の印の行を取り消さない', other.deleted_at == null && other.tenant_id === OTHER_TENANT, JSON.stringify(other))
+      ok('取込が足した行は全部この施設の印', (await num(`select count(*)::int as n from notes where import_key like 'ev:k%' and tenant_id is distinct from '${TENANT}'`)) === 0)
+    }
+    r = await runImporter({ ...env, CARELOG_TENANT: '' }, [...argsBase])
+    ok('CARELOG_TENANT が無いと何もせずに止まる（終了コード 2）', r.status === 2 && /CARELOG_TENANT/.test(r.stderr), r.stderr)
+    r = await runImporter({ ...env, CARELOG_TENANT: '00000000-0000-0000-0000-0000000000cc' }, [...argsBase])
+    ok('データベースに無い施設では何もせずに止まる（終了コード 2）', r.status === 2, r.stderr)
+    // 施設がちょうど1つの時は CARELOG_TENANT を省いてよい（今の毎時の取込の包みを直さずに動く・2026-11-04）
+    for (const t of ['record_history', 'notes', 'vitals', 'meals', 'import_days', 'staff', 'residents']) {
+      await db.query(`delete from ${t} where tenant_id = $1`, [OTHER_TENANT])
+    }
+    await db.query(`delete from public.tenants where id = $1`, [OTHER_TENANT])
+    r = await runImporter({ ...env, CARELOG_TENANT: '' }, [...argsBase])
+    ok('施設が1つなら CARELOG_TENANT なしでもその施設で動く（終了コード 0）', r.status === 0 && /唯一の施設/.test(r.stdout), r.stdout + r.stderr)
+    ok('施設が1つの時に足した行も、その施設の印', (await num(`select count(*)::int as n from notes where tenant_id is distinct from '${TENANT}'`)) === 0)
 
     // 報告ファイルが書かれていること（氏名を含むのでリポジトリ外に置く仕様）
     const reports = readdirSync(reportDir).filter((f) => f.endsWith('.md'))
