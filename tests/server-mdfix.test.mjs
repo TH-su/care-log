@@ -180,7 +180,7 @@ describe('移行の作法（決定事項4）', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('★F39 record_history_capture の search_path に pg_temp を末尾で明示する（0021）', () => {
-  it('最後に作り直す移行が public, pg_temp を指定し、本文は 0010 と同じ', () => {
+  it('最後に作り直す移行が public, pg_temp を指定し、本文は 0010 と同じ（0052 の施設の印の1列だけを除く）', () => {
     const defs = migFiles().filter((f) => /create or replace function (public\.)?record_history_capture\(\)/.test(readFileSync(join(MIG, f), 'utf8')))
     const last = readFileSync(join(MIG, defs[defs.length - 1]), 'utf8')
     assert.ok(Number(defs[defs.length - 1].slice(0, 4)) >= 21, '0010 のまま（作り直していない）')
@@ -190,7 +190,14 @@ describe('★F39 record_history_capture の search_path に pg_temp を末尾で
       const j = s.indexOf('$$;', i)
       return s.slice(i, j).replace(/\s+/g, ' ')
     }
-    assert.equal(body(last), body(mig('0010')), '本文が 0010 と違う（取込の判定が変わる）')
+    // 0052（施設の印の段階2）は記録の行に元の行の施設の印を足すだけ。その1列を外すと 0010 と同じ本文であること
+    const TENANT_COL = ', tenant_id )'
+    const TENANT_VAL = ", coalesce(n ->> 'tenant_id', o ->> 'tenant_id')::uuid )"
+    const lastBody = body(last)
+    if (Number(defs[defs.length - 1].slice(0, 4)) >= 52) {
+      assert.ok(lastBody.includes(TENANT_COL) && lastBody.includes(TENANT_VAL), '0052 以降なのに施設の印の列が無い')
+    }
+    assert.equal(lastBody.replace(TENANT_COL, ' )').replace(TENANT_VAL, ' )'), body(mig('0010')), '本文が 0010 と違う（取込の判定が変わる）')
   })
 })
 

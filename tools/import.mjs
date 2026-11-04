@@ -11,8 +11,12 @@
 //   CARELOG_GAS_URL='https://script.google.com/macros/s/…/exec' \
 //   CARELOG_GAS_TOKEN='…' \
 //   SUPABASE_DB_URL='postgresql://…' \
+//   CARELOG_TENANT='施設の番号（public.tenants の id・uuid）' \
 //     node tools/import.mjs [--execute] [--from YYYY-MM-DD] [--to YYYY-MM-DD]
 //
+//   ・CARELOG_TENANT は施設が2つ以上ある時に必須（施設の印の段階2・0052）。施設がちょうど1つの時は省いてよい（その施設で取り込む）。
+//     無い・uuid の形でない・tenants に無い時は何もせずに止める（終了コード 2）。
+//     読むのはその施設の行だけ（名簿・職員・取込済みの行・追従の対象）、足す行にはその施設の印を入れる
 //   ・既定は**ドライラン**（DBに1行も書かず、何が起きるかの計数だけ出す）
 //   ・--execute      … 実際に書き込む
 //   ・--from / --to  … 取込期間。省略時は to=今日(JST)から後方へ、
@@ -378,10 +382,11 @@ function gasHealthWarnings(ping, nowMs = Date.now()) {
 // マスタ読み込みと名寄せ
 // ---------------------------------------------------------------------
 
-async function loadMasters(db) {
-  // active=false（退居済み）も含めて全員を対象にする＝過去の記録の帰属先が消えないように
-  const rs = await db.query('select id, source_id, name from residents')
-  const st = await db.query('select id, name, active from staff')
+async function loadMasters(db, tenant) {
+  assertTenant(tenant)
+  // active=false（退居済み）も含めて全員を対象にする＝過去の記録の帰属先が消えないように。その施設の名簿・職員だけ（0052）
+  const rs = await db.query('select id, source_id, name from residents where tenant_id = $1', [tenant])
+  const st = await db.query('select id, name, active from staff where tenant_id = $1', [tenant])
 
   let namemap = { residents: {}, staff: {} }
   if (existsSync(NAMEMAP_PATH)) {
@@ -621,13 +626,15 @@ function buildMealCandidates(mrow, masters, out) {
  * 既存行（import_key 一致）をまとめて引く。
  * rev も読む（F74）: UPDATE を「読んだ時の rev のままの時だけ」にするため（applyCandidates の UPDATE の注記）
  */
-async function selectExisting(db, table, cols, keys) {
+async function selectExisting(db, table, cols, keys, tenant) {
+  assertTenant(tenant)
   const found = new Map()
   for (let i = 0; i < keys.length; i += BATCH) {
     const chunk = keys.slice(i, i + BATCH)
+    // その施設の取込行だけ（0052）。id はここで読んだ行のものだけを使う＝後の UPDATE も施設の中に閉じる
     const r = await db.query(
-      `select import_key, id, rev, deleted_at, import_tombstoned_at, ${cols.join(', ')} from ${table} where import_key = any($1)`,
-      [chunk],
+      `select import_key, id, rev, deleted_at, import_tombstoned_at, ${cols.join(', ')} from ${table} where import_key = any($1) and tenant_id = $2`,
+      [chunk, tenant],
     )
     for (const row of r.rows) found.set(row.import_key, row)
   }
@@ -666,12 +673,13 @@ function sameValue(a, b, col) {
  * 戻り値は計数。execute=false なら SELECT だけ行い、書かずに同じ計数を出す。
  */
 async function applyCandidates(db, opts) {
-  const { table, candidates: rawCandidates, compareCols, insertCols, execute, nativeCheck, frameOf } = opts
+  const { table, candidates: rawCandidates, compareCols, insertCols, execute, nativeCheck, frameOf, tenant } = opts
+  assertTenant(tenant)
   // revived は updated の内訳（恒等式には updated として入る＝式は変わらない）
   // app_protected は native_skip の内訳（アプリで直した取込行に差分が来ても戻さなかった件数）
   const counts = { inserted: 0, updated: 0, unchanged: 0, tomb_skip: 0, native_skip: 0, dup_skip: 0, revived: 0, app_protected: 0 }
   const keys = rawCandidates.map((c) => c.row.import_key)
-  const existing = await selectExisting(db, table, compareCols, keys)
+  const existing = await selectExisting(db, table, compareCols, keys, tenant)
   // アプリで直した取込行（C3）。id は node-postgres が文字列で返すので String で揃えて引く
   const appTouched = await selectAppTouched(db, table, [...existing.values()].map((r) => r.id))
 
@@ -720,7 +728,7 @@ async function applyCandidates(db, opts) {
   // アプリ入力（import_key null）が同じ枠を先に持っていないか（vitals/meals のみ）
   const nativeTaken = new Set()
   if (nativeCheck && candidates.length > 0) {
-    const nat = await nativeCheck(db, candidates)
+    const nat = await nativeCheck(db, candidates, tenant)
     for (const k of nat) nativeTaken.add(k)
   }
 
@@ -804,19 +812,22 @@ async function applyCandidates(db, opts) {
   }
 
   if (execute) {
-    // INSERT（複数VALUES）。衝突は起きない前提（起きたら例外→窓ごと rollback）
+    // INSERT（複数VALUES）。衝突は起きない前提（起きたら例外→窓ごと rollback）。
+    // 施設の印は列の最後に明示する（トリガ任せにしない・0052）。全行で同じ値なので最後の1つの引数で渡す
     for (let i = 0; i < toInsert.length; i += BATCH) {
       const chunk = toInsert.slice(i, i + BATCH)
       const params = []
+      const tenantPh = `$${chunk.length * insertCols.length + 1}`
       const rowsSql = chunk.map((row, ri) => {
         const ph = insertCols.map((col, ci) => {
           params.push(col === 'raw_flags' ? (row[col] == null ? null : JSON.stringify(row[col])) : row[col])
           return `$${ri * insertCols.length + ci + 1}`
         })
-        return `(${ph.join(',')})`
+        return `(${ph.join(',')},${tenantPh})`
       })
+      params.push(tenant)
       await db.query(
-        `insert into ${table} (${insertCols.join(',')}) values ${rowsSql.join(',')}`,
+        `insert into ${table} (${insertCols.join(',')},tenant_id) values ${rowsSql.join(',')}`,
         params,
       )
     }
@@ -880,7 +891,8 @@ async function applyCandidates(db, opts) {
  *   ここで枠を「取られている」としないと新キーの INSERT が uq_vitals_routine_day に当たり、
  *   窓ごと rollback が毎回続く。
  */
-async function nativeCheckVitals(db, candidates) {
+async function nativeCheckVitals(db, candidates, tenant) {
+  assertTenant(tenant)
   const taken = new Set()
   const touched = await appTouchedCond(db, 'vitals', 'v')
   for (let i = 0; i < candidates.length; i += BATCH) {
@@ -890,8 +902,8 @@ async function nativeCheckVitals(db, candidates) {
          from vitals v
          join unnest($1::bigint[], $2::date[]) as t(rid, mon)
            on v.resident_id = t.rid and v.measured_on = t.mon
-        where v.kind = 'routine' and v.deleted_at is null and (v.import_key is null or ${touched})`,
-      [chunk.map((c) => c.row.resident_id), chunk.map((c) => c.row.measured_on)],
+        where v.kind = 'routine' and v.deleted_at is null and v.tenant_id = $3 and (v.import_key is null or ${touched})`,
+      [chunk.map((c) => c.row.resident_id), chunk.map((c) => c.row.measured_on), tenant],
     )
     const hit = new Set(r.rows.map((x) => `${x.resident_id}|${x.measured_on}`))
     for (const c of chunk) {
@@ -902,7 +914,8 @@ async function nativeCheckVitals(db, candidates) {
 }
 
 /** meals: 同じ（利用者×日×食）をアプリ入力（またはアプリで直した取込行）が先に持っていれば native_skip（vitals と同じ理由） */
-async function nativeCheckMeals(db, candidates) {
+async function nativeCheckMeals(db, candidates, tenant) {
+  assertTenant(tenant)
   const taken = new Set()
   const touched = await appTouchedCond(db, 'meals', 'm')
   for (let i = 0; i < candidates.length; i += BATCH) {
@@ -912,11 +925,12 @@ async function nativeCheckMeals(db, candidates) {
          from meals m
          join unnest($1::bigint[], $2::date[], $3::text[]) as t(rid, mon, slot)
            on m.resident_id = t.rid and m.meal_on = t.mon and m.meal_slot = t.slot
-        where m.deleted_at is null and (m.import_key is null or ${touched})`,
+        where m.deleted_at is null and m.tenant_id = $4 and (m.import_key is null or ${touched})`,
       [
         chunk.map((c) => c.row.resident_id),
         chunk.map((c) => c.row.meal_on),
         chunk.map((c) => c.row.meal_slot),
+        tenant,
       ],
     )
     const hit = new Set(r.rows.map((x) => `${x.resident_id}|${x.meal_on}|${x.meal_slot}`))
@@ -1017,12 +1031,14 @@ async function selectAppTouched(db, table, ids) {
  * 返り値: { tombstoned: 消した件数, kept: アプリで直した行なので消さずに残した件数
  *          （読んだ後に職員が触って取り消しが0行で終わった分も含む・F74） }
  */
-async function reconcileTombstones(db, table, dateCol, prefix, day, liveKeys, execute, extraWhere = '') {
-  // rev も読む（F74）: 取り消しも「読んだ時の rev のままの行だけ」にするため（下の update の注記）
+async function reconcileTombstones(db, tenant, table, dateCol, prefix, day, liveKeys, execute, extraWhere = '') {
+  assertTenant(tenant)
+  // rev も読む（F74）: 取り消しも「読んだ時の rev のままの行だけ」にするため（下の update の注記）。
+  // その施設の取込行だけ（0052）。下の取り消しはここで読んだ id だけに当てる＝よその施設の行を取り消さない
   const r = await db.query(
     `select id, rev, import_key from ${table}
-      where ${dateCol} = $1 and deleted_at is null and import_key like $2 ${extraWhere}`,
-    [day, `${prefix}%`],
+      where ${dateCol} = $1 and deleted_at is null and import_key like $2 and tenant_id = $3 ${extraWhere}`,
+    [day, `${prefix}%`, tenant],
   )
   const gone = r.rows.filter((row) => !liveKeys.has(row.import_key))
   const touched = await selectAppTouched(db, table, gone.map((g) => g.id))
@@ -1055,6 +1071,40 @@ async function reconcileTombstones(db, table, dateCol, prefix, day, liveKeys, ex
   return { tombstoned, kept: gone.length - tombstoned }
 }
 
+/**
+ * 取込済みの日（import_days）を施設の印つきで書く（0052）。
+ * 衝突の先は今の一意（source, day）のまま（段階③で施設ごとの一意に変える）。よその施設が同じ日の行を持っている時は
+ * 書き換えずに例外にする（その窓は rollback＝よその施設の取込済みの印を上書きしない・黙って取込済みにしない）
+ */
+async function upsertImportDay(db, tenant, source, day, counts) {
+  assertTenant(tenant)
+  const r = await db.query(
+    `insert into import_days (source, day, src_rows, inserted, updated, skipped, native_skip, unmatched, tenant_id)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     on conflict (source, day) do update set imported_at = now(),
+       src_rows = excluded.src_rows, inserted = excluded.inserted, updated = excluded.updated,
+       skipped = excluded.skipped, native_skip = excluded.native_skip, unmatched = excluded.unmatched
+     where import_days.tenant_id = excluded.tenant_id`,
+    [source, day, ...counts, tenant],
+  )
+  if (r.rowCount !== 1) {
+    throw new Error(`取込済みの日（${source} ${day}）を書けません（同じ日の行がよその施設にあります）`)
+  }
+}
+
+/** 施設の番号（uuid）の形 */
+const TENANT_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+/** 施設の番号が無い・形でない時は止める（施設を見ずに読み書きしない・0052） */
+function assertTenant(tenant) {
+  if (typeof tenant !== 'string' || !TENANT_RE.test(tenant)) {
+    throw new Error('施設の番号（CARELOG_TENANT）がありません。施設を決めずには読み書きしません')
+  }
+}
+
+/** 取り込む施設（main が環境変数 CARELOG_TENANT から決める） */
+let TENANT = null
+
 // ---------------------------------------------------------------------
 // メイン
 // ---------------------------------------------------------------------
@@ -1064,12 +1114,20 @@ async function main() {
   const GAS_URL = process.env.CARELOG_GAS_URL
   const GAS_TOKEN = process.env.CARELOG_GAS_TOKEN
   const DB_URL = process.env.SUPABASE_DB_URL
+  const TENANT_ENV = (process.env.CARELOG_TENANT ?? '').trim().toLowerCase()
   for (const [k, v] of [['CARELOG_GAS_URL', GAS_URL], ['CARELOG_GAS_TOKEN', GAS_TOKEN], ['SUPABASE_DB_URL', DB_URL]]) {
     if (!v) {
       console.error(`環境変数 ${k} がありません。~/bin/care-log-import.sh 経由で実行してください。`)
       process.exit(2)
     }
   }
+  // CARELOG_TENANT は施設が2つ以上ある時に必須。施設がちょうど1つの時は書かなくてよい（下で DB から決める。
+  //   今の毎時の取込（~/bin/care-log-import.sh）を直さずに動き続けるため・2026-11-04）
+  if (TENANT_ENV && !TENANT_RE.test(TENANT_ENV)) {
+    console.error('環境変数 CARELOG_TENANT が施設の番号（uuid）の形ではありません。何もせずに止めます。')
+    process.exit(2)
+  }
+  TENANT = TENANT_ENV || null
   const MODE = args.execute ? '書き込み（--execute）' : 'ドライラン（書き込みなし）'
   console.log(`care-log importer  モード: ${MODE}`)
 
@@ -1091,6 +1149,36 @@ async function main() {
     console.error(`DBに接続できません: ${e.message}`)
     console.error('  TLS で失敗する場合は接続文字列の末尾に ?sslmode=no-verify を付けて試してください。')
     process.exit(1)
+  }
+  // 施設を書かなかった時: 施設がちょうど1つならその施設。2つ以上・0なら止める（どの施設の記録か決めずに書かない）
+  if (!TENANT) {
+    try {
+      const all = await db.query('select id::text as id from public.tenants')
+      if (all.rows.length !== 1) {
+        console.error(`施設が ${all.rows.length} あります。環境変数 CARELOG_TENANT で取り込む施設の番号を指定してください。何もせずに止めます。`)
+        await db.end()
+        process.exit(2)
+      }
+      TENANT = all.rows[0].id
+      console.log('施設: データベースの唯一の施設で取り込みます（CARELOG_TENANT なし）')
+    } catch (e) {
+      console.error(`施設を確かめられません（0051・0052 を当てた DB か確認してください）: ${e.message}`)
+      await db.end()
+      process.exit(2)
+    }
+  }
+  // 施設がデータベースにあるか（無い施設の印で書かない）
+  try {
+    const t = await db.query('select 1 from public.tenants where id = $1', [TENANT])
+    if (t.rows.length !== 1) {
+      console.error('CARELOG_TENANT の施設がデータベースにありません。何もせずに止めます。')
+      await db.end()
+      process.exit(2)
+    }
+  } catch (e) {
+    console.error(`施設を確かめられません（0051・0052 を当てた DB か確認してください）: ${e.message}`)
+    await db.end()
+    process.exit(2)
   }
 
   const report = {
@@ -1116,7 +1204,7 @@ async function main() {
 
   try {
     // --- マスタ ---
-    const masters = await loadMasters(db)
+    const masters = await loadMasters(db, TENANT)
     report.suggestResidents = masters.residents
     report.suggestStaff = masters.staff
     console.log(`マスタ: 利用者 ${masters.residentCount} 名 / 職員 ${masters.staffCount} 名`)
@@ -1238,6 +1326,9 @@ async function main() {
       }
       await db.query('begin')
       try {
+        // この取引の間だけ carelog.tenant をこの施設にする（0052 の印を入れるトリガ・変更の記録もこの施設で動く）。
+        // 取引の中だけ（set_config の第3引数 true）＝接続の溜まり（pooler）を通しても他の接続へ持ち越さない
+        await db.query(`select set_config('carelog.tenant', $1, true)`, [TENANT])
         // === events → notes ===
         for (const day of [...ingested].sort()) {
           const evs = evByDay.get(day) ?? []
@@ -1253,7 +1344,7 @@ async function main() {
           //   生存集合はこの日の全 key（unmatched/invalid/empty も含む＝照合が壊れた時に消さない）
           const liveKeys = new Set(built.map((b) => b.key))
           {
-            const rt = await reconcileTombstones(db, 'notes', 'note_on', KEY_EV, day, liveKeys, args.execute)
+            const rt = await reconcileTombstones(db, TENANT, 'notes', 'note_on', KEY_EV, day, liveKeys, args.execute)
             report.reconciled.notes += rt.tombstoned
             report.reconcileKept.notes += rt.kept
           }
@@ -1264,6 +1355,7 @@ async function main() {
             compareCols: ['note_on', 'shift', 'facility', 'category', 'resident_id', 'body', 'occurred_at', 'after16', 'reporter_id'],
             insertCols: ['import_key', 'note_on', 'shift', 'facility', 'category', 'resident_id', 'body', 'occurred_at', 'after16', 'reporter_id'],
             execute: args.execute,
+            tenant: TENANT,
             nativeCheck: null,
           })
 
@@ -1274,14 +1366,7 @@ async function main() {
           report.days[day] = report.days[day] ?? {}
           report.days[day].events = { srcRows, ...c, invalid, unmatched, skipped }
           if (args.execute) {
-            await db.query(
-              `insert into import_days (source, day, src_rows, inserted, updated, skipped, native_skip, unmatched)
-               values ('events', $1, $2, $3, $4, $5, $6, $7)
-               on conflict (source, day) do update set imported_at = now(),
-                 src_rows = excluded.src_rows, inserted = excluded.inserted, updated = excluded.updated,
-                 skipped = excluded.skipped, native_skip = excluded.native_skip, unmatched = excluded.unmatched`,
-              [day, srcRows, c.inserted, c.updated, skipped, c.native_skip, unmatched],
-            )
+            await upsertImportDay(db, TENANT, 'events', day, [srcRows, c.inserted, c.updated, skipped, c.native_skip, unmatched])
           }
         }
 
@@ -1307,12 +1392,12 @@ async function main() {
           const vLive = new Set(vBuilt.map((b) => b.key))
           const mLive = new Set(mBuilt.map((b) => b.key))
           if (vitalDates.has(day)) {
-            const rt = await reconcileTombstones(db, 'vitals', 'measured_on', KEY_VT, day, vLive, args.execute, "and kind = 'routine'")
+            const rt = await reconcileTombstones(db, TENANT, 'vitals', 'measured_on', KEY_VT, day, vLive, args.execute, "and kind = 'routine'")
             report.reconciled.vitals += rt.tombstoned
             report.reconcileKept.vitals += rt.kept
           }
           if (mealDates.has(day)) {
-            const rt = await reconcileTombstones(db, 'meals', 'meal_on', KEY_ML, day, mLive, args.execute)
+            const rt = await reconcileTombstones(db, TENANT, 'meals', 'meal_on', KEY_ML, day, mLive, args.execute)
             report.reconciled.meals += rt.tombstoned
             report.reconcileKept.meals += rt.kept
           }
@@ -1325,6 +1410,7 @@ async function main() {
             compareCols: ['resident_id', 'measured_on', 'kind', 'temp', 'sys_bp', 'dia_bp', 'pulse', 'spo2', 'raw_flags'],
             insertCols: ['import_key', 'resident_id', 'measured_on', 'kind', 'temp', 'sys_bp', 'dia_bp', 'pulse', 'spo2', 'raw_flags'],
             execute: args.execute,
+            tenant: TENANT,
             nativeCheck: nativeCheckVitals,
             // 部分unique索引 uq_vitals_routine_day が押さえている枠
             frameOf: (r) => `${r.resident_id}|${r.measured_on}`,
@@ -1336,6 +1422,7 @@ async function main() {
             compareCols: ['resident_id', 'meal_on', 'meal_slot', 'main_amount', 'side_amount', 'raw_flags'],
             insertCols: ['import_key', 'resident_id', 'meal_on', 'meal_slot', 'main_amount', 'side_amount', 'raw_flags'],
             execute: args.execute,
+            tenant: TENANT,
             nativeCheck: nativeCheckMeals,
             // 部分unique索引 uq_meals_slot が押さえている枠
             frameOf: (r) => `${r.resident_id}|${r.meal_on}|${r.meal_slot}`,
@@ -1353,14 +1440,7 @@ async function main() {
           report.days[day] = report.days[day] ?? {}
           report.days[day].measures = { srcRows, inserted, updated, skipped, native_skip: nativeSkip, unmatched, revived: cv.revived + cm.revived, app_protected: cv.app_protected + cm.app_protected, vitals: cv, meals: cm }
           if (args.execute) {
-            await db.query(
-              `insert into import_days (source, day, src_rows, inserted, updated, skipped, native_skip, unmatched)
-               values ('measures', $1, $2, $3, $4, $5, $6, $7)
-               on conflict (source, day) do update set imported_at = now(),
-                 src_rows = excluded.src_rows, inserted = excluded.inserted, updated = excluded.updated,
-                 skipped = excluded.skipped, native_skip = excluded.native_skip, unmatched = excluded.unmatched`,
-              [day, srcRows, inserted, updated, skipped, nativeSkip, unmatched],
-            )
+            await upsertImportDay(db, TENANT, 'measures', day, [srcRows, inserted, updated, skipped, nativeSkip, unmatched])
           }
         }
 

@@ -28,8 +28,9 @@ create or replace function private.has_role(variadic roles text[]) returns boole
 $$;
 grant execute on function private.has_role(text[]) to authenticated;
 
+-- 試験では current_setting('test.tenant')（未設定・空＝施設 aa。'none'＝null＝ログインの無いサーバーの接続）。0052 の試験が施設 B の人を真似る
 create or replace function private.my_tenant() returns uuid language sql stable as $$
-  select '00000000-0000-0000-0000-0000000000aa'::uuid
+  select nullif(coalesce(nullif(current_setting('test.tenant', true), ''), '00000000-0000-0000-0000-0000000000aa'), 'none')::uuid
 $$;
 grant execute on function private.my_tenant() to authenticated;
 

@@ -40,10 +40,13 @@
 | `npm run dev` | 開発サーバ |
 | `npm run build` | 型チェック＋本番ビルド |
 | `npm test` | ロジックの回帰テスト |
-| `npm run seed` | 合成テストデータ投入（実在氏名ゼロ・検証用） |
+| `npm run seed` | 合成テストデータ投入（実在氏名ゼロ・検証用）。環境変数 `SUPABASE_DB_URL` と `CARELOG_TENANT`（投入する施設の番号＝`public.tenants` の id）が必須（施設の印の段階2・0052） |
+| `node tools/import.mjs` | 過去データの取込（通常は `~/bin/care-log-import.sh` 経由）。環境変数 `CARELOG_GAS_URL`・`CARELOG_GAS_TOKEN`・`SUPABASE_DB_URL` と `CARELOG_TENANT`（取り込む施設の番号）は施設が2つ以上ある時に必須。施設がちょうど1つの時は省いてよい（その施設で取り込む）。施設が決まらない・形が違う・データベースに無い時は何もせずに止まる（終了コード 2・0052） |
 | `CARELOG_PG_ADMIN_URL=postgres://postgres@127.0.0.1:<port>/postgres node tests/pg-run-all.mjs` | サーバーの契約の試験（使い捨ての Postgres に Supabase の真似と移行 0001〜最新を当て、`tests/*-pg.mjs` をすべて流す。本番には向けない＝127.0.0.1／localhost 以外は断る）。GitHub Actions の `pg-contract` が push のたびに同じものを流す |
 
 ## 変更の出し方（2026-10-22〜）
+
+施設の印（0051〜）: ケアログの表は施設の印（tenant_id）で分ける途中（4段階）。段階③（施設ごとの一意）と段階④（守りの入れ替え）が入るまで、2つ目の施設の職員を許可リストに入れない・2つ目の施設の取込を走らせない（一意が施設をまたいで1つのため、先に書いた施設が勝ち、もう一方の開所・自動の記録・取込が止まる）。
 
 main はルールセットで守られている: 変更は PR だけ・「試験とビルド」と「pg-contract」の合格が必須・削除と強制の上書きは禁止。
 main への取り込みがそのまま公開になるため、ブランチを切って push し、PR を作って自動の取り込み（`gh pr merge --auto --merge`）を入れる。試験に合格した時点で取り込まれ、公開が走る。

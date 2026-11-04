@@ -20,6 +20,8 @@ const SRC = process.env.CL_IMPORT_SRC
 const { __testHooks: H } = await import(SRC)
 
 const DAY = '2026-06-01'
+/** 取り込む施設（合成の番号・0052 で必須になった） */
+const TENANT = '00000000-0000-0000-0000-0000000000aa'
 const KEY = `vt:${DAY}|利用者01`
 const VIT_COMPARE = ['resident_id', 'measured_on', 'kind', 'temp', 'sys_bp', 'dia_bp', 'pulse', 'spo2', 'raw_flags']
 const VIT_INSERT = ['import_key', ...VIT_COMPARE]
@@ -80,6 +82,7 @@ async function apply({ existing, nativeTaken = [], touched = [], updateRowCount 
     compareCols: VIT_COMPARE,
     insertCols: VIT_INSERT,
     execute,
+    tenant: TENANT,
     nativeCheck: async () => new Set(nativeTaken),
     frameOf: (r) => `${r.resident_id}|${r.measured_on}`,
   })
@@ -150,7 +153,7 @@ describe('F74 取込の取り消し（移行元から消えた行への追従）
   const gone = [{ id: '21', rev: 5, import_key: KEY }]
   const run = (updateRowCount, execute = true) => {
     const db = fakeDb({ reconcileRows: gone, updateRowCount })
-    return H.reconcileTombstones(db, 'vitals', 'measured_on', 'vt:', DAY, new Set(), execute, "and kind = 'routine'").then((rt) => ({ rt, db }))
+    return H.reconcileTombstones(db, TENANT, 'vitals', 'measured_on', 'vt:', DAY, new Set(), execute, "and kind = 'routine'").then((rt) => ({ rt, db }))
   }
 
   it('追従の SELECT が rev を読み、取り消しの UPDATE は unnest(id[], rev[]) で読んだ時の rev と照合する', async () => {
@@ -204,5 +207,39 @@ describe('F75 取込が消した行の枠を端末が使った後に移行元へ
     const { counts, db } = await apply({ existing: [existingRow({ deleted_at: '2026-06-02T00:00:00Z' })], nativeTaken: [] })
     assert.equal(db.updates().length, 0)
     assert.equal(counts.tomb_skip, 1)
+  })
+})
+
+describe('施設の印の段階2（0052）: 取込はその施設の行だけを読み、足す行に施設の印を入れる', () => {
+  it('既存行の SELECT・追従の SELECT はその施設の行だけ（施設の番号を引数で渡す）', async () => {
+    const { db } = await apply({ existing: [existingRow()] })
+    const sel = db.log.find((q) => /^select import_key, id,/.test(q.sql))
+    assert.match(sel.sql, /where import_key = any\(\$1\) and tenant_id = \$2$/)
+    assert.equal(sel.params[1], TENANT)
+    const rdb = fakeDb({ reconcileRows: [], updateRowCount: 1 })
+    await H.reconcileTombstones(rdb, TENANT, 'vitals', 'measured_on', 'vt:', DAY, new Set(), true, "and kind = 'routine'")
+    const rsel = rdb.log.find((q) => /^select id, /.test(q.sql))
+    assert.match(rsel.sql, /import_key like \$2 and tenant_id = \$3 and kind = 'routine'$/)
+    assert.deepEqual(rsel.params, [DAY, 'vt:%', TENANT])
+  })
+
+  it('足す行に施設の印を明示する（列の最後・全行で同じ1つの引数）', async () => {
+    const { db } = await apply({ existing: [] })
+    const ins = db.log.find((q) => /^insert /.test(q.sql))
+    assert.match(ins.sql, /^insert into vitals \(import_key,resident_id,measured_on,kind,temp,sys_bp,dia_bp,pulse,spo2,raw_flags,tenant_id\) values \(\$1,.*,\$10,\$11\)$/)
+    assert.equal(ins.params.length, 11)
+    assert.equal(ins.params[10], TENANT)
+  })
+
+  it('施設の番号が無い・形でない時は何も読まずに止める', async () => {
+    for (const bad of [undefined, null, '', 'aa', '00000000-0000-0000-0000-0000000000AA ']) {
+      const db = fakeDb({ existing: [existingRow()] })
+      await assert.rejects(
+        H.applyCandidates(db, { table: 'vitals', candidates: [{ row: candidateRow() }], compareCols: VIT_COMPARE, insertCols: VIT_INSERT, execute: true, tenant: bad }),
+        /CARELOG_TENANT/,
+      )
+      await assert.rejects(H.reconcileTombstones(db, bad, 'vitals', 'measured_on', 'vt:', DAY, new Set(), true), /CARELOG_TENANT/)
+      assert.equal(db.log.length, 0, `施設が無いのに SQL を送った: ${JSON.stringify(bad)}`)
+    }
   })
 })
