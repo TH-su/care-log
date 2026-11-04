@@ -8,7 +8,10 @@
 //   1. 試験用の DB（既定 carelog_pgtest_tpl）を作り直し、Supabase の真似（tests/pg-supabase-stub.sql）・care-backend の部品の真似
 //      （tests/pg-backend-stub.sql）・Realtime 認可の真似（tests/pg-realtime-stub.sql）を当ててから、supabase/migrations の
 //      0001〜最新を番号順に当てる（1つでも失敗したら止める）。時刻帯は本番の Supabase と同じ UTC にそろえる
-//   2. 0021 以降（本人回答 4: 新しい移行は何度流しても同じ）をもう一度当て、2回目でも失敗しないことを確かめる
+//   2. 0021 以降（本人回答 4: 新しい移行は何度流しても同じ）は、当てたすぐ後にもう一度当て、2回目でも失敗しないことを
+//      確かめる（その移行が当たる時点の形で流し直す）。さらに、最後の形（0001〜最新）の上で 0021 以降をもう一度当てる。
+//      最後の形の上で流せない移行は FINAL_RERUN_SKIP に理由つきで書いたものだけ（0053 で一意を施設ごとにしたため、それより前の移行の
+//      on conflict (key) が最後の形では衝突の先を見つけられない＝流すと誤りで止まり、1回の取引なので何も変わらない）
 //   3. tests/*-pg.mjs（実行器）を1本ずつ、上の DB を写した新しい DB で流す（実行器どうしが残した行に左右されない）
 // 終了コード: すべて成功で 0・どれか失敗で 1・接続先が使い捨てでない時は 2。
 // 個人情報は扱わない（実行器は合成の 利用者01・職員01 と数値IDだけを使う）。
@@ -27,6 +30,23 @@ export const PG_STUB_FILES = ['pg-supabase-stub.sql', 'pg-backend-stub.sql', 'pg
 
 /** 0021 以降は何度流しても同じ（冪等）であること。0001〜0020 は本番に当たった中身のまま書き換えないので対象外 */
 export const IDEMPOTENT_FROM = 21
+
+/**
+ * 最後の形（0001〜最新を当てた後）の上で流し直せない移行と、その理由（2026-11-04 段階3・反証レビュー 低3）。
+ * 0053（施設の印の段階3）が一意・主キーを施設ごとにしたので、施設を含まない列を衝突の先に名指す on conflict を持つ移行は、
+ * 最後の形の上では衝突の先が無く（42P10）流せない。それ以外の 0021 以降は、最後の形の上でも流し直す。
+ * ★一覧に書いた移行が、本当に施設を含まない衝突の先を名指していることを下の FINAL_RERUN_SKIP_RE で確かめる
+ *   （理由の無い除外を置かない）。ここに足すのは、一意を変える移行を足した時だけ
+ */
+export const FINAL_RERUN_SKIP = new Map([
+  ['0023_min_client_build.sql', 'app_settings への on conflict (key)（0053 で主キーが (tenant_id, key) になった）'],
+  ['0041_daycare_stage1.sql', 'app_settings への on conflict (key)・daycare_days への on conflict (day)（0053 で施設ごとにした）'],
+  ['0044_daycare_activity.sql', 'app_settings への on conflict (key)（0053 で主キーが (tenant_id, key) になった）'],
+  ['0046_daycare_training.sql', 'app_settings への on conflict (key)・計画書の規則への on conflict (id)（0053 で施設ごとにした）'],
+  ['0047_daycare_auto_attendance.sql', 'app_settings への on conflict (key)（0053 で主キーが (tenant_id, key) になった）'],
+])
+/** 施設を含まない衝突の先（0053 で施設ごとにした一意）を名指す on conflict */
+export const FINAL_RERUN_SKIP_RE = /on\s+conflict\s*\(\s*(key|day|id|source\s*,\s*day|source_id|name|import_key)\s*\)/i
 
 /** 使い捨てのローカル DB だけを受け付ける（本番の Supabase に向けない） */
 export function isLocalPgUrl(url) {
@@ -100,18 +120,35 @@ async function main() {
   try {
     for (const f of PG_STUB_FILES) await apply(`tests/${f}`, readFileSync(path.join(TESTS_DIR, f), 'utf8'))
     const migrations = listMigrations()
-    for (const f of migrations) await apply(`supabase/migrations/${f}`, migrationSqlForTest(f, readFileSync(path.join(MIGRATIONS_DIR, f), 'utf8')))
-    console.log(`移行 ${migrations.length} 本を当てた（${migrations[0]} 〜 ${migrations.at(-1)}）`)
-
-    // 2. 0021 以降の流し直し（冪等）
-    for (const f of migrations.filter((m) => Number(m.slice(0, 4)) >= IDEMPOTENT_FROM)) {
+    const rerun = async (label, f) => {
       try {
         await db.query(migrationSqlForTest(f, readFileSync(path.join(MIGRATIONS_DIR, f), 'utf8')))
-        console.log(`ok 流し直し（冪等）: ${f}`)
+        console.log(`ok ${label}: ${f}`)
       } catch (e) {
         failed += 1
-        console.log(`NG 流し直し（冪等）: ${f}\n   ${e.code ?? ''} ${e.message}`)
+        console.log(`NG ${label}: ${f}\n   ${e.code ?? ''} ${e.message}`)
+        // 移行の中の begin で始めた取引が誤りで残っていたら閉じる（次の移行を流せるように）
+        await db.query('rollback').catch(() => {})
       }
+    }
+    for (const f of migrations) {
+      await apply(`supabase/migrations/${f}`, migrationSqlForTest(f, readFileSync(path.join(MIGRATIONS_DIR, f), 'utf8')))
+      // 2a. 0021 以降は、当てたすぐ後にもう一度（その時点の形で冪等）
+      if (Number(f.slice(0, 4)) >= IDEMPOTENT_FROM) await rerun('流し直し（冪等・当てた時点）', f)
+    }
+    console.log(`移行 ${migrations.length} 本を当てた（${migrations[0]} 〜 ${migrations.at(-1)}）`)
+
+    // 2b. 最後の形の上で 0021 以降をもう一度（冪等）。流せない理由のある移行（FINAL_RERUN_SKIP）だけ外す
+    for (const [f, why] of FINAL_RERUN_SKIP) {
+      const body = migrations.includes(f) ? readFileSync(path.join(MIGRATIONS_DIR, f), 'utf8') : ''
+      if (!FINAL_RERUN_SKIP_RE.test(body)) {
+        failed += 1
+        console.log(`NG 流し直しの除外: ${f} は施設を含まない衝突の先を持たない（除外の理由「${why}」が成り立たない）`)
+      }
+    }
+    for (const f of migrations.filter((m) => Number(m.slice(0, 4)) >= IDEMPOTENT_FROM)) {
+      if (FINAL_RERUN_SKIP.has(f)) { console.log(`skip 流し直し（最後の形）: ${f}（${FINAL_RERUN_SKIP.get(f)}）`); continue }
+      await rerun('流し直し（冪等・最後の形）', f)
     }
   } catch (e) {
     console.error(String(e.message ?? e))

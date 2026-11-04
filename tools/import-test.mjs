@@ -23,6 +23,8 @@
 //   12. アプリで直した取込行を戻さない・取り消さない・復活で上書きしない（2026-09-29 C3。notes/vitals/meals）
 //   13. 移行元でキーだけ変わっても、アプリで直した行が押さえている枠へ入れず窓が落ちない
 //   14. よその施設の名簿・取込行を読まない・取り消さない（施設が1つなら CARELOG_TENANT を省いてよい）。施設（CARELOG_TENANT）が無い・無い施設なら止まる（0052）
+//   15. 一意を施設ごとにした後（段階③・0053 と同じ一意・主キー）も同じ道具で取り込める。よその施設が同じ利用者No・同じ取込の印・
+//       同じ取込の日を持っていても止まらず、よその施設の行を書き換えない（取込の日は主キーの名前で衝突の先を指す）
 // =====================================================================
 
 import { spawnSync, spawn } from 'node:child_process'
@@ -470,6 +472,36 @@ async function main() {
     r = await runImporter({ ...env, CARELOG_TENANT: '' }, [...argsBase])
     ok('施設が1つなら CARELOG_TENANT なしでもその施設で動く（終了コード 0）', r.status === 0 && /唯一の施設/.test(r.stdout), r.stdout + r.stderr)
     ok('施設が1つの時に足した行も、その施設の印', (await num(`select count(*)::int as n from notes where tenant_id is distinct from '${TENANT}'`)) === 0)
+
+    console.log('── 15. 一意が施設ごとになった後も同じ道具で取り込める（施設の印の段階3・0053）──')
+    // この DB は 0001〜0010 だけなので、取込が触る一意・主キーだけを 0053 と同じ形（名前も同じ）にする
+    await db.query(`alter table import_days drop constraint import_days_pkey, add constraint import_days_pkey primary key (tenant_id, source, day)`)
+    for (const t of ['notes', 'vitals', 'meals']) {
+      await db.query(`alter table ${t} drop constraint ${t}_import_key_key, add constraint ${t}_tenant_id_import_key_key unique (tenant_id, import_key)`)
+    }
+    await db.query(`alter table residents drop constraint residents_source_id_key, add constraint residents_tenant_id_source_id_key unique (tenant_id, source_id)`)
+    await db.query(`alter table staff drop constraint staff_name_key, add constraint staff_tenant_id_name_key unique (tenant_id, name)`)
+    await db.query(`insert into public.tenants (id, name) values ($1, '見本の施設B')`, [OTHER_TENANT])
+    // よその施設に、同じ利用者No・同じ氏名・同じ取込の印（ev:k1）・同じ取込の日（events 6/1）を置く
+    await db.query(`insert into residents (source_id, name, room, active, tenant_id) values ('R01', '利用者01', '201', true, $1)`, [OTHER_TENANT])
+    await db.query(`insert into staff (name, active, tenant_id) values ('職員01', true, $1)`, [OTHER_TENANT])
+    await db.query(`insert into notes (note_on, shift, facility, category, body, import_key, tenant_id)
+                    values ('2026-06-01', 'day', 'facility', 'notice', 'よその施設の記録', 'ev:k1', $1)`, [OTHER_TENANT])
+    await db.query(`insert into import_days (source, day, src_rows, tenant_id) values ('events', '2026-06-01', 99, $1)`, [OTHER_TENANT])
+    const before15 = await one(`select imported_at::text as at from import_days where source = 'events' and day = '2026-06-01' and tenant_id = $1`, [TENANT])
+    r = await runImporter(env, [...argsBase, '--execute'])
+    {
+      const t = parseTotals(r.stdout)
+      ok('施設ごとの一意の上でも正常終了・追加0・更新0（よその施設の同じ取込の印・利用者No で止まらない）',
+        r.status === 0 && t.events?.ins === 0 && t.events?.upd === 0 && t.measures?.ins === 0 && t.measures?.upd === 0, r.stdout + r.stderr)
+      const mine = await one(`select imported_at::text as at from import_days where source = 'events' and day = '2026-06-01' and tenant_id = $1`, [TENANT])
+      ok('この施設の取込の日は書き直される（主キーの名前で衝突の先を指す文が動く）', mine.at !== before15.at, JSON.stringify({ before15, mine }))
+      const other = await one(`select src_rows from import_days where source = 'events' and day = '2026-06-01' and tenant_id = $1`, [OTHER_TENANT])
+      ok('よその施設の同じ取込の日は書き換えない', other.src_rows === 99, JSON.stringify(other))
+      const k1 = await one(`select body, deleted_at from notes where import_key = 'ev:k1' and tenant_id = $1`, [OTHER_TENANT])
+      ok('よその施設の同じ取込の印の行は書き換えも取り消しもしない', k1.body === 'よその施設の記録' && k1.deleted_at == null, JSON.stringify(k1))
+      ok('この施設の ev:k1 も1行のまま', (await num(`select count(*)::int as n from notes where import_key = 'ev:k1' and tenant_id = $1`, [TENANT])) === 1)
+    }
 
     // 報告ファイルが書かれていること（氏名を含むのでリポジトリ外に置く仕様）
     const reports = readdirSync(reportDir).filter((f) => f.endsWith('.md'))

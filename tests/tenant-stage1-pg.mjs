@@ -7,7 +7,8 @@
 //   1. 27表すべてに tenant_id の列と、印を入れるトリガ（carelog_fill_tenant）がある。27表以外の public の表は試験の真似だけ
 //   2. ログインした人（authenticated）が印を付けずに足すと、その人の施設（my_tenant()）の印が入る
 //   3. サーバーの接続（自動の記録・取込）が印を付けずに足すと、施設がちょうど1つの時はその施設の印が入る
-//   4. 施設が2つになると、サーバーの接続の行には印を勝手に付けない（null のまま＝どの施設か分からない行を作らない）
+//   4. 施設が2つになると、サーバーの接続の行には印を勝手に付けない（どの施設か分からない行を作らない。段階③（0053）で
+//      印が必須になったので、null のまま入るのではなく not null の誤り 23502 で止まる）
 //   5. 印を付けて足した時は、その印のまま（書き換えない）
 // 1件ずつトランザクションを張り、最後に必ず rollback する（表に何も残さない）。個人情報は置かない（数値IDと「職員01」だけ）。
 
@@ -74,8 +75,12 @@ await inTx(async () => {
   await client.query(`insert into staff (id, name) overriding system value values (9002, '職員02')`)
   ok('サーバーの接続（ログインの印なし）でも、施設が1つなら施設の印が入る', (await tenantOfStaff(9002)) === A, await tenantOfStaff(9002))
   await client.query(`insert into tenants (id, name) values ($1, '見本の施設B')`, [B])
-  await client.query(`insert into staff (id, name) overriding system value values (9003, '職員03')`)
-  ok('施設が2つになると、サーバーの接続の行に印を勝手に付けない（null のまま）', (await tenantOfStaff(9003)) === null, await tenantOfStaff(9003))
+  await client.query('savepoint two')
+  let code = null
+  try { await client.query(`insert into staff (id, name) overriding system value values (9003, '職員03')`) } catch (e) { code = e.code }
+  await client.query('rollback to savepoint two')
+  ok('施設が2つになると、サーバーの接続の行に印を勝手に付けない（0053 で印が必須＝23502 で止まり、行は作らない）',
+    code === '23502' && (await client.query(`select 1 from staff where id = 9003`)).rowCount === 0, code)
   await client.query(`insert into staff (id, name, tenant_id) overriding system value values (9004, '職員04', $1)`, [B])
   ok('印を付けて足した時は、その印のまま', (await tenantOfStaff(9004)) === B, await tenantOfStaff(9004))
 })

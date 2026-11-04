@@ -422,7 +422,7 @@ export const DAYCARE_CASES = [
     async run(h) {
       const d = '2026-10-19'
       const w = dowOf(d)
-      await h.pg(`insert into public.app_settings (key, value) values ('input_enabled_bath', 'true') on conflict (key) do update set value = 'true'`)
+      await h.pg(`insert into public.app_settings (key, value) values ('input_enabled_bath', 'true') on conflict (tenant_id, key) do update set value = 'true'`)
       await putSchedule(h, [
         schedRes('a', { masterId: 'M001', name: '見本 一郎' }, [{ dow: w, bathing: true }]),
         schedRes('b', { masterId: 'M002', name: '見本 別名' }, [{ dow: w, bathing: true }]), // 氏名が食い違う（mismatch）でも cron は作る
@@ -544,7 +544,7 @@ export const DAYCARE_CASES = [
     name: '先に欠席（cancel・absent の行がある）→ 自動の処理は作らない',
     async run(h) {
       const d = '2026-10-19' // 月曜
-      await h.pg(`insert into public.app_settings (key, value) values ('input_enabled_bath', 'true') on conflict (key) do update set value = 'true'`)
+      await h.pg(`insert into public.app_settings (key, value) values ('input_enabled_bath', 'true') on conflict (tenant_id, key) do update set value = 'true'`)
       await putSchedule(h, [schedRes('r1', { masterId: 'M001', name: '見本 一郎' }, [{ dow: dowOf(d), bathing: true }])])
       await h.as({}, (q) => q(`insert into public.bath_records (resident_id, bath_on, result, cancel_reason, recorded_by, client_key) values (1, $1::date, 'cancel', 'absent', 2, 'ck-a2-1')`, [d]))
       const made = (await h.pg(`select private.care_auto_bath_on($1::date) n`, [d]))[0].n
@@ -558,7 +558,7 @@ export const DAYCARE_CASES = [
     name: '後で欠席: 自動の行（auto=true）を rev 照合で cancel・absent・auto=false に直せる・変更の記録が残る',
     async run(h) {
       const d = '2026-10-19'
-      await h.pg(`insert into public.app_settings (key, value) values ('input_enabled_bath', 'true') on conflict (key) do update set value = 'true'`)
+      await h.pg(`insert into public.app_settings (key, value) values ('input_enabled_bath', 'true') on conflict (tenant_id, key) do update set value = 'true'`)
       await putSchedule(h, [schedRes('r1', { masterId: 'M001', name: '見本 一郎' }, [{ dow: dowOf(d), bathing: true }])])
       const made = (await h.pg(`select private.care_auto_bath_on($1::date) n`, [d]))[0].n
       const cur = (await h.pg(`select id, rev, result, auto from public.bath_records where resident_id = 1 and bath_on = $1::date`, [d]))[0]
@@ -577,7 +577,7 @@ export const DAYCARE_CASES = [
     name: '入浴の旗が false の日は自動の行を作らない（欠席の入浴の行も書かない前提）',
     async run(h) {
       const d = '2026-10-19'
-      await h.pg(`insert into public.app_settings (key, value) values ('input_enabled_bath', 'false') on conflict (key) do update set value = 'false'`)
+      await h.pg(`insert into public.app_settings (key, value) values ('input_enabled_bath', 'false') on conflict (tenant_id, key) do update set value = 'false'`)
       await putSchedule(h, [schedRes('r1', { masterId: 'M001', name: '見本 一郎' }, [{ dow: dowOf(d), bathing: true }])])
       const made = (await h.pg(`select private.care_auto_bath_on($1::date) n`, [d]))[0].n
       return { made }
@@ -589,7 +589,7 @@ export const DAYCARE_CASES = [
     name: '実測: 外泊中（outings の overnight）でも入浴の予定があれば自動の「全身浴」が入る（既存の挙動・直さない）',
     async run(h) {
       const d = '2026-10-19'
-      await h.pg(`insert into public.app_settings (key, value) values ('input_enabled_bath', 'true') on conflict (key) do update set value = 'true'`)
+      await h.pg(`insert into public.app_settings (key, value) values ('input_enabled_bath', 'true') on conflict (tenant_id, key) do update set value = 'true'`)
       await putSchedule(h, [schedRes('r1', { masterId: 'M001', name: '見本 一郎' }, [{ dow: dowOf(d), bathing: true }])])
       await h.pg(`insert into public.outings (resident_id, kind, start_on, end_on) values (1, 'overnight', '2026-10-18', '2026-10-20')`)
       const made = (await h.pg(`select private.care_auto_bath_on($1::date) n`, [d]))[0].n

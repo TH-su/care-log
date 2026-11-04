@@ -92,7 +92,7 @@ async function prepare(h, day = D, opts = {}) {
 async function flags(h, auto, daycare) {
   await h.pg(
     `insert into public.app_settings (key, value) values ('auto_enabled_daycare_attendance', $1), ('input_enabled_daycare', $2)
-     on conflict (key) do update set value = excluded.value`,
+     on conflict (tenant_id, key) do update set value = excluded.value`,
     [auto, daycare],
   )
 }
