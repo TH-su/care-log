@@ -62,3 +62,8 @@ $$;
 create or replace function cron.unschedule(p_name text) returns boolean language sql as $$
   with d as (delete from cron.job where jobname = p_name returning 1) select exists (select 1 from d)
 $$;
+
+-- 事業者の表の最小の真似（本番は care-backend 0001_foundation.sql の public.tenants）。0051 の施設の印が参照する。
+-- 試験では施設は1つ（my_tenant() と同じ id）
+create table if not exists public.tenants (id uuid primary key, name text);
+insert into public.tenants (id, name) values ('00000000-0000-0000-0000-0000000000aa', '見本の施設') on conflict (id) do nothing;
