@@ -5,8 +5,9 @@
 //
 // 施設 A（試験の土台の施設 aa）と施設 B（この試験で足す bb）に、それぞれの利用者・服薬の時間帯・週間計画・旗を置いて確かめる:
 //   1. 定時の処理の入口（与薬・入浴・デイの到着と帰宅）が、両方の施設に、その施設の印で、その施設の利用者の記録だけを書く
-//      （一意を施設ごとにした段階③の形を、トランザクションの中だけで真似る）
-//   2. 今の一意（旗の key・その日の写しの day）のままでは、施設 B は「何もしない」側に倒れ、施設 A は今までどおり書く
+//      （一意は段階③（0053）で施設ごとになった。前はトランザクションの中だけで真似ていた）
+//   2. 施設 B の旗が無い時は、施設 B は「何もしない」側に倒れ、施設 A は今までどおり書く。よその施設がその日の写しを
+//      持っていても、自分の施設の写しを作って書き、よその写しを使わない（段階③の前は、先に写しを作った施設が勝っていた）
 //   3. 1つの施設で失敗しても、もう1つの施設は書く。全部の施設で失敗した時だけ誤りが上がる。回した後は carelog.tenant が戻る
 //   4. 変更の記録（record_history）は、変えた行の施設の印を持つ（施設が2つでサーバーの接続の時も）
 //   5. デイの開所（daycare_open_day）は、施設 A の人なら施設 A の写しだけを読み書きし、施設 B の写しには触れない。
@@ -66,15 +67,7 @@ async function clock() {
   return r
 }
 
-/** 段階③の一意（施設と旗の名前・施設と日付）をトランザクションの中だけで真似る */
-async function stage3Keys() {
-  await q(`alter table public.app_settings drop constraint app_settings_pkey`)
-  await q(`alter table public.app_settings add constraint app_settings_pkey primary key (tenant_id, key)`)
-  await q(`drop index public.uq_daycare_days_day`)
-  await q(`create unique index uq_daycare_days_day on public.daycare_days (tenant_id, day)`)
-}
-
-/** 施設の旗を全部オンにする（施設 A は今ある行を書き換える・施設 B は行を足す＝段階③の一意が要る） */
+/** 施設の旗を全部オンにする（施設 A は今ある行を書き換える・施設 B は行を足す＝段階③（0053）の施設ごとの一意で書ける） */
 async function flagsOn(t) {
   for (const k of FLAGS) {
     const n = (await client.query(`update public.app_settings set value = 'true' where key = $1 and tenant_id = $2`, [k, t])).rowCount
@@ -99,15 +92,14 @@ async function seedTenant(t, c) {
            on conflict (tenant_id, key) do update set data = excluded.data`, [t, JSON.stringify({ residents })])
 }
 
-/** 施設 B と両方の施設のデータを置く。stage3=true なら段階③の一意を真似て、施設 B の旗も入れる */
-async function seedTwo({ stage3 = true } = {}) {
+/** 施設 B と両方の施設のデータを置く。flagsB=true なら施設 B の旗も入れる */
+async function seedTwo({ flagsB = true } = {}) {
   await q(`insert into public.tenants (id, name) values ($1, '見本の施設B') on conflict (id) do nothing`, [B])
   const c = await clock()
-  if (stage3) await stage3Keys()
   await seedTenant(A, c)
   await seedTenant(B, c)
   await flagsOn(A)
-  if (stage3) await flagsOn(B)
+  if (flagsB) await flagsOn(B)
   return c
 }
 
@@ -141,7 +133,7 @@ async function asUser(tenant, fn) {
   }
 }
 
-// 1. 入口が両方の施設に、その施設の印で書く（段階③の一意を真似る）
+// 1. 入口が両方の施設に、その施設の印で書く（段階③の一意）
 await inTx('定時の処理の入口は施設ごとに回り、施設を越えない', async () => {
   const c = await seedTwo()
   const med = (await q(`select private.care_auto_med('morning') as n`))[0].n
@@ -168,9 +160,9 @@ await inTx('定時の処理の入口は施設ごとに回り、施設を越え�
   ok('回した後は carelog.tenant が呼ぶ前（空）に戻る', ((await q(`select coalesce(current_setting('carelog.tenant', true), '') as v`))[0].v) === '')
 })
 
-// 2. 今の一意のまま（段階③の前）: 施設 B は何もしない・施設 A は今までどおり
-await inTx('今の一意のまま（段階③の前）は、施設 B は何もしない側に倒れ、施設 A は今までどおり書く', async () => {
-  const c = await seedTwo({ stage3: false })
+// 2. 施設 B の旗が無い時: 施設 B は何もしない・施設 A は今までどおり
+await inTx('施設 B の旗が無い時は、施設 B は何もしない側に倒れ、施設 A は今までどおり書く（旗は施設ごと）', async () => {
+  const c = await seedTwo({ flagsB: false })
   const med = (await q(`select private.care_auto_med('morning') as n`))[0].n
   const medRows = await rowsBy('med_admin', 'admin_on', c.day)
   ok('与薬: 施設 A だけに入る（B は旗の行が無い＝オンでない）', med === 3 && ridsOf(medRows, A).length === 3 && ridsOf(medRows, B).length === 0 && noCross(medRows), medRows)
@@ -181,13 +173,18 @@ await inTx('今の一意のまま（段階③の前）は、施設 B は何も�
   ok('デイの到着: 施設 A だけに入る（施設 B は旗が無い）', dc.arrived === 3 && ridsOf(attRows, B).length === 0 && noCross(attRows), { dc, attRows })
 })
 
-await inTx('今の一意のまま、よその施設がその日の写しを持つ時は、自分の施設の写しを作れず何もしない（よその写しを使わない）', async () => {
-  const c = await seedTwo({ stage3: false })
+await inTx('よその施設がその日の写しを持っていても、自分の施設の写しを作って書く（よその写しを使わない・段階③）', async () => {
+  const c = await seedTwo({ flagsB: false })
   await q(`insert into public.daycare_days (day, plan_source, plan_rows, tenant_id) values ($1::date, 'kv', $2::jsonb, $3)`,
     [c.day, JSON.stringify([{ resident_id: 201, match: 'mid', dup: false, external: false, hospitalized: false, start_time: c.st, end_time: '23:59' }]), B])
+  const before = (await q(`select md5(d::text) as m from public.daycare_days d where tenant_id = $1`, [B]))[0].m
   const dc = (await q(`select private.daycare_auto_attendance() as r`))[0].r
-  const att = await q(`select resident_id::int as rid from public.daycare_attendance where day = $1::date`, [c.day])
-  ok('施設 A は写しを作れない＝到着0件・施設 B の写しの利用者にも入れない', dc.arrived === 0 && att.length === 0 && dc.skipped === 'noplan', { dc, att })
+  const att = await q(`select resident_id::int as rid from public.daycare_attendance where day = $1::date order by 1`, [c.day])
+  ok('施設 A は自分の写しを作り、施設 A の3人だけに到着が入る（施設 B の写しの利用者には入れない）',
+    dc.arrived === 3 && dc.snapshot === true && att.length === 3 && att.every((r) => r.rid < 200), { dc, att })
+  const days = await q(`select tenant_id::text as t from public.daycare_days where day = $1::date order by tenant_id`, [c.day])
+  ok('その日の写しは施設ごとに1行（A と B）', days.length === 2 && days[0].t === A && days[1].t === B, days)
+  ok('施設 B の写しには触れない', (await q(`select md5(d::text) as m from public.daycare_days d where tenant_id = $1`, [B]))[0].m === before)
 })
 
 // 3. 1つの施設で失敗しても他の施設は続ける
@@ -246,7 +243,7 @@ await inTx('変更の記録（record_history）は、変えた行の施設の印
 })
 
 // 5. デイの開所は自分の施設の写しだけ
-await inTx('デイの開所（daycare_open_day）は自分の施設の写しだけを読み書きする（段階③の一意を真似る）', async () => {
+await inTx('デイの開所（daycare_open_day）は自分の施設の写しだけを読み書きする（段階③の一意）', async () => {
   const c = await seedTwo()
   await q(`insert into public.daycare_days (day, plan_source, plan_rows, tenant_id) values ($1::date, 'none', '[]'::jsonb, $2)`, [c.day, B])
   const before = (await q(`select md5(d::text) as m from public.daycare_days d where tenant_id = $1`, [B]))[0].m
@@ -264,11 +261,14 @@ await inTx('デイの開所（daycare_open_day）は自分の施設の写しだ�
   ok('施設 B の人の開所は施設 B の写し（先にあった none の行）を返す', rb?.plan_source === 'none' && rb.id !== r.id, rb)
 })
 
-await inTx('今の一意のまま、よその施設がその日の写しを持つ時、開所はよその写しを返さない（作れませんでした 40001）', async () => {
-  const c = await seedTwo({ stage3: false })
+await inTx('よその施設がその日の写しを持っていても、開所は自分の施設の写しを作り、よその写しを返さない（段階③）', async () => {
+  const c = await seedTwo({ flagsB: false })
   await q(`insert into public.daycare_days (day, plan_source, plan_rows, tenant_id) values ($1::date, 'none', '[]'::jsonb, $2)`, [c.day, B])
+  const before = (await q(`select md5(d::text) as m from public.daycare_days d where tenant_id = $1`, [B]))[0].m
   const r = await asUser(A, async () => (await q(`select public.daycare_open_day($1::date, null) as r`, [c.day]))[0].r)
-  ok('施設 A の人には 40001（施設 B の写しを返さない・書き換えない）', r?.error === '40001', r)
+  ok('施設 A の人には施設 A の写し（予定あり・施設 A の利用者だけ。段階③の前は 40001 で止まっていた）',
+    r?.plan_source === 'kv' && r.plan_rows.length === 3 && r.plan_rows.every((p) => p.resident_id < 200), r)
+  ok('施設 B の写しは書き換えない', (await q(`select md5(d::text) as m from public.daycare_days d where tenant_id = $1`, [B]))[0].m === before)
   const n = await asUser('none', async () => (await q(`select public.daycare_open_day($1::date, null) as r`, [c.day]))[0].r)
   ok('施設の分からないログインは 42501', n?.error === '42501', n)
 })
@@ -315,8 +315,12 @@ await inTx('施設が2つで施設を決めない直接の呼び出しは止ま�
   await q(`insert into public.staff (id, name) overriding system value values (9301, '職員21')`)
   ok('サーバーが決めた施設（carelog.tenant）の印が入る', (await q(`select tenant_id::text t from public.staff where id = 9301`))[0].t === B)
   await q(`select set_config('carelog.tenant', '', true)`)
-  await q(`insert into public.staff (id, name) overriding system value values (9302, '職員22')`)
-  ok('決めていなければ 0051 と同じ（施設が2つ・ログインなし＝null）', (await q(`select tenant_id t from public.staff where id = 9302`))[0].t === null)
+  await q('savepoint n')
+  let nn = null
+  try { await q(`insert into public.staff (id, name) overriding system value values (9302, '職員22')`) } catch (e) { nn = e.code }
+  await q('rollback to savepoint n')
+  ok('決めていなければ印は決まらない（施設が2つ・ログインなし）＝段階③で印が必須なので 23502 で止まり行を作らない',
+    nn === '23502' && (await q(`select count(*)::int n from public.staff where id = 9302`))[0].n === 0, nn)
 })
 
 await client.end()

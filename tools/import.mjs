@@ -1073,15 +1073,17 @@ async function reconcileTombstones(db, tenant, table, dateCol, prefix, day, live
 
 /**
  * 取込済みの日（import_days）を施設の印つきで書く（0052）。
- * 衝突の先は今の一意（source, day）のまま（段階③で施設ごとの一意に変える）。よその施設が同じ日の行を持っている時は
- * 書き換えずに例外にする（その窓は rollback＝よその施設の取込済みの印を上書きしない・黙って取込済みにしない）
+ * 衝突の先は主キーの名前（import_days_pkey）で指す（0053）。主キーは 0053 の前が (source, day)、後が (tenant_id, source, day) で、
+ * 名前は同じなので、この文は 0053 を当てる前でも後でも同じに動く（列で指すと、どちらか一方でしか動かない）。
+ * 0053 の前に、よその施設が同じ日の行を持っている時は書き換えずに例外にする（その窓は rollback＝よその施設の取込済みの印を
+ * 上書きしない・黙って取込済みにしない）。0053 の後は施設ごとの行なので、この判定はいつも通る
  */
 async function upsertImportDay(db, tenant, source, day, counts) {
   assertTenant(tenant)
   const r = await db.query(
     `insert into import_days (source, day, src_rows, inserted, updated, skipped, native_skip, unmatched, tenant_id)
      values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-     on conflict (source, day) do update set imported_at = now(),
+     on conflict on constraint import_days_pkey do update set imported_at = now(),
        src_rows = excluded.src_rows, inserted = excluded.inserted, updated = excluded.updated,
        skipped = excluded.skipped, native_skip = excluded.native_skip, unmatched = excluded.unmatched
      where import_days.tenant_id = excluded.tenant_id`,

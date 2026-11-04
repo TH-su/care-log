@@ -5321,7 +5321,8 @@ export async function fetchNoteReaders(noteId: number): Promise<Staff[]> {
   const sb = await getClient()
   const res = (await sb
     .from('note_reads')
-    .select(`read_at,staff:staff_id(${STAFF_COLS})`)
+    // 職員は外部キーの名前で指す（0053 で外部キーが施設の印との2列になると、列の名前での指し方は PostgREST が受け付けない。0053 の前でも後でも動く）
+    .select(`read_at,staff:staff!note_reads_staff_id_fkey(${STAFF_COLS})`)
     .eq('note_id', noteId)
     .order('read_at', { ascending: true })
     .limit(READERS_ROWS)) as Res<unknown>
