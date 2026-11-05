@@ -574,6 +574,7 @@ async function onAuthEvent(event: string): Promise<void> {
     forgetMyRole()
     // 走っている「許可リスト外か」の確かめは前のアカウントのもの。後の呼び出しを相乗りさせない（2026-10-29 反証レビュー）
     deniedProbeInFlight = null
+    forgetPresenceTopic() // 居場所のトピック名も前のアカウントの施設のもの（0056）
   }
   if (event !== 'SIGNED_IN' && event !== 'TOKEN_REFRESHED') return
   // ログインし直した: 拒否で止まった退避 op を1回だけ送り直す（F37。権限が直った後なら届く。TOKEN_REFRESHED では解かない）。
@@ -11027,6 +11028,41 @@ const presenceVisibilityHooks = new Set<() => void>()
 /** private チャンネルへの参加を断られたことを、この起動中に console へ残したか（F25。画面ごとに繰り返し出さない） */
 let presenceJoinWarned = false
 
+/**
+ * 居場所のトピック名（施設ごと・移行 0056・2026-11-05）。サーバーの carelog_presence_topic() が返す
+ * 'cl_note_presence:<施設の番号>' を起動中に1回だけ聞いてメモリに控える（ログインし直すと捨てる）。
+ * 関数が無い（0056 の前の DB）・許可リスト外で null の時は古い1本のトピック（PRESENCE_TOPIC）で参加する
+ * （0056 の後も施設が1つの間は古いトピックを使える。2つ目の施設を足すと古いトピックは断られ、入力中が出ないだけ）。
+ * 通信できない時は控えずに古いトピックを返す（次に参加する時にもう一度聞く）
+ */
+let presenceTopicCache: string | undefined = undefined
+let presenceTopicEpoch = 0
+async function presenceTopicFor(sb: SupabaseClient): Promise<string> {
+  if (presenceTopicCache !== undefined) return presenceTopicCache
+  const epoch = presenceTopicEpoch
+  try {
+    const res = await withTimeout(
+      () => sb.rpc('carelog_presence_topic') as unknown as PromiseLike<Res<unknown>>,
+      MY_ROLE_TIMEOUT_MS,
+    )
+    if (res.error !== null) {
+      if (isTransient(res) || isAuthFail(res)) return PRESENCE_TOPIC
+      if (epoch === presenceTopicEpoch) presenceTopicCache = PRESENCE_TOPIC // 関数が無い＝古いトピックで控える
+      return PRESENCE_TOPIC
+    }
+    const t = typeof res.data === 'string' && /^cl_note_presence:[0-9a-f-]{36}$/.test(res.data) ? res.data : PRESENCE_TOPIC
+    if (epoch === presenceTopicEpoch) presenceTopicCache = t
+    return t
+  } catch {
+    return PRESENCE_TOPIC
+  }
+}
+/** 控えた居場所のトピック名を捨てる（ログインし直した時） */
+function forgetPresenceTopic(): void {
+  presenceTopicEpoch += 1
+  presenceTopicCache = undefined
+}
+
 /** ページの表示状態が変わった（onLifecycle・pagehide から呼ぶ）。参加中の Presence へ知らせる */
 function setPresencePageVisible(visible: boolean): void {
   if (presencePageHidden === !visible) return
@@ -11111,7 +11147,9 @@ export function joinPresence(
       if (cancelled) return
       // 直前の画面が同じチャンネルを閉じている最中なら、閉じ終わるまで待つ
       // （閉じる前に channel() を呼ぶと閉じかけの実体が返り、受け口を足せずに参加できない）
-      const topic = `realtime:${PRESENCE_TOPIC}`
+      const topicName = await presenceTopicFor(sb)
+      if (cancelled) return
+      const topic = `realtime:${topicName}`
       const waitUntil = Date.now() + PRESENCE_WAIT_CLOSE_MS
       const open = () => (typeof sb.getChannels === 'function' ? sb.getChannels() : [])
       while (open().some((c) => c.topic === topic)) {
@@ -11124,7 +11162,7 @@ export function joinPresence(
       // 許可リストの職員だけに限る（公開のままだと、公開の anon キーだけで職員ID・利用者ID・入力中の欄を読め、偽の「入力中」を
       // 流せた）。0029 が当たっていない・Realtime 設定で使えない時は参加を断られるだけで、保存・画面は止めない
       // （居場所は表示の補助。公開チャンネルへは戻さない＝穴を開け直さない）
-      const ch = sb.channel(PRESENCE_TOPIC, { config: { private: true, presence: { key } } })
+      const ch = sb.channel(topicName, { config: { private: true, presence: { key } } })
       ch.on('presence', { event: 'sync' }, () => emit(ch))
       channel = ch
       ch.subscribe((status: string) => {

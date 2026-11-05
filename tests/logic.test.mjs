@@ -4550,7 +4550,11 @@ function registerPresenceTests() {
     })
     it('チャンネルは申し送りと同じ1本（joinNotePresence は joinPresence の上に載る）', () => {
       const s = src('lib/db.ts')
-      assert.match(s, /sb\.channel\(PRESENCE_TOPIC/)
+      // 施設ごとのトピック（0056）: サーバーに聞いた名前、関数が無い時は PRESENCE_TOPIC で1本だけ参加する
+      assert.match(s, /const topicName = await presenceTopicFor\(sb\)/)
+      assert.match(s, /sb\.channel\(topicName/)
+      assert.equal((s.match(/sb\.channel\(topicName/g) ?? []).length, 1)
+      assert.equal((s.match(/\.channel\(PRESENCE_TOPIC/g) ?? []).length, 0)
       assert.equal((s.match(/\.channel\('cl_note_presence'/g) ?? []).length, 0)
       assert.match(s, /const p = joinPresence\(self, \(others\) => onChange\(notePresence\(others\)\)\)/)
     })
