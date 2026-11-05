@@ -1,7 +1,7 @@
 // 0055（冪等キーの一意を施設ごとにする）を、素の Postgres（0001〜最新を適用済み）で確かめる実行器。
 // npm test には含めない（DB が要る）。使い捨てのクラスタでだけ動かす（本番に向けない）。
 //
-//   CARELOG_PG_URL=postgres://postgres@127.0.0.1:<port>/<db> node tests/tenant-stage4-pg.mjs
+//   CARELOG_PG_URL=postgres://postgres@127.0.0.1:<port>/<db> node tests/tenant-client-key-pg.mjs
 //
 // 施設 A（試験の土台の施設 aa）と施設 B（この試験で足す bb）で確かめる:
 //   1. 形: 15表の client_key の一意の頭が施設の印（名前は同じ・制約は制約のまま）・欄ごとの保存の衝突の先が施設の印つき
@@ -154,8 +154,8 @@ await inTx('よその施設の自動の記録のキー: 有る無しを当てら
 })
 
 // ── 3. 冪等・戻す・先の確かめ ──
-const MIG_BODY = MIG.replace(/^begin;$/m, '-- begin').replace(/^commit;$/m, '-- commit')
-const BACK_BODY = BACK.replace(/^begin;$/m, '-- begin').replace(/^commit;$/m, '-- commit')
+const MIG_BODY = MIG.replace(/^begin;$/gm, '-- begin').replace(/^commit;$/gm, '-- commit')
+const BACK_BODY = BACK.replace(/^begin;$/gm, '-- begin').replace(/^commit;$/gm, '-- commit')
 await inTx('冪等・戻す SQL・先の確かめ', async () => {
   ok('移行と戻す SQL は begin … commit で包み、do $$ を使わない',
     /^begin;$/m.test(MIG) && /^commit;$/m.test(MIG) && /^begin;$/m.test(BACK) && /^commit;$/m.test(BACK) && !/^\s*do\s+\$\$/im.test(MIG + BACK))
@@ -170,6 +170,22 @@ await inTx('冪等・戻す SQL・先の確かめ', async () => {
   ok('戻すと欄ごとの保存は on conflict (client_key)', /on conflict \(client_key\) do nothing/.test((await q(CELL_SQL))[0].src))
   const re = await tryq(MIG_BODY)
   ok('戻した後にもう一度入り、形は最初と一字一句同じ', re.code === null && JSON.stringify(await q(CK_SQL)) + (await q(CELL_SQL))[0].src === first, re)
+  // 施設をまたいで同じキーがあると、戻す SQL は件数だけを出して何も変えずに止まる（キーの値を出さない・反証レビュー3巡目 中2）
+  await seedTwo()
+  await q(`insert into public.med_admin (resident_id, admin_on, slot, status, client_key, tenant_id) values (1101, '2026-11-06', 'noon', 'taken', 'auto:med:2026-11-06:noon:2101', $1)`, [A])
+  await q(`insert into public.med_admin (resident_id, admin_on, slot, status, client_key, tenant_id) values (2101, '2026-11-06', 'noon', 'taken', 'auto:med:2026-11-06:noon:2101', $1)`, [B])
+  const dupBack = await tryq(BACK_BODY)
+  ok('施設をまたいで同じキーがあると、戻す SQL は組の数だけを出して止まる（キーの値・利用者の番号は出さない）',
+    dupBack.code === 'P0001' && /同じ冪等キーの行が 1 組ある/.test(dupBack.message) && !/2101|2026-11-06/.test(dupBack.message), dupBack)
+  ok('止まった時は何も変えていない（15本とも施設の印つき・欄ごとの保存も新しいまま）',
+    (await q(CK_SQL)).every((r) => /\(tenant_id, client_key\)$/.test(r.def)) && /on conflict \(tenant_id, client_key\)/.test((await q(CELL_SQL))[0].src))
+  await q(`delete from public.med_admin where admin_on = '2026-11-06'`)
+  // 1段目だけ入った形（古い一意と新しい一意が両方ある）からも、全文を流し直せば入る
+  const half = await tryq(BACK_BODY.split('-- ════ 2段目')[0])
+  ok('（前提）戻す SQL の1段目だけを流す', half.code === null, half)
+  const fromHalf = await tryq(MIG_BODY)
+  ok('両方の一意がある形から 0055 を流し直すと入る（仮の名前の索引は残らない）', fromHalf.code === null && fromHalf.rows?.every((r) => r.result === 'ok')
+    && (await q(`select count(*)::int n from pg_class where relname like '%client_key%\\_b' or relname like '%client_key%\\_t'`))[0].n === 0, fromHalf)
   await q(`alter table public.med_slots drop constraint med_slots_client_key_key`)
   await q(`create unique index med_slots_client_key_key on public.med_slots (client_key, resident_id)`)
   const e1 = await tryq(MIG_BODY)

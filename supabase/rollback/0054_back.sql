@@ -10,6 +10,22 @@ begin;
 -- 待つのは5秒まで（止まったら何も戻らないので、もう一度流す）
 set local lock_timeout = '5s';
 
+-- ── 先に確かめる（2026-11-05 反証レビュー3巡目 低1）: 0055（冪等キーの一意を施設ごと）が入っていたら、先にそちらを戻す ──
+create or replace function pg_temp.carelog_stage4_back_check()
+returns void
+language plpgsql
+as $fn$
+begin
+  if exists (select 1 from pg_catalog.pg_class i
+              where i.relnamespace = 'public'::regnamespace and i.relkind = 'i'
+                and i.relname in ('uq_vitals_client_key', 'med_admin_client_key_key', 'uq_vitals_client_key_t', 'uq_vitals_client_key_b')
+                and pg_catalog.pg_get_indexdef(i.oid) like '%(tenant_id, client_key)') then
+    raise exception 'tenant_stage4_back: 0055 が入っています。先に supabase/rollback/0055_back.sql を流してください（何も変えていません）';
+  end if;
+end
+$fn$;
+select pg_temp.carelog_stage4_back_check();
+
 drop policy if exists tenant_only on public.residents;
 drop policy if exists tenant_only on public.staff;
 drop policy if exists tenant_only on public.vitals;
