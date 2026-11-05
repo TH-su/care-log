@@ -7,6 +7,7 @@
 --   重なっている件数だけを出して何も変えずに止まる（キーの値は出さない）。その時は戻さずに代表者へ渡す
 --   （どちらの行のキーを付け替えるかは、その施設の記録を見て決めることになる）。
 -- 2段目が錠を待てずに止まった時は、1段目だけが入った形（両方の一意がある＝今と同じに動く）で残るので、もう一度全文を流す。
+-- 0055 が2段目で止まった形（仮の索引 <名前>_t が残っている）からも、この全文を流せば 0054 の後の形に戻る。
 -- ★ do $$ … $$ のブロックは使わない。何度流しても同じ。
 
 create or replace function pg_temp.carelog_ckb_list()
@@ -34,6 +35,14 @@ $fn$;
 -- ════ 1段目（取引1）════
 begin;
 set local lock_timeout = '5s';
+
+-- 重なりを数えてから一意を足すまでの間に、施設をまたぐ同じキーの行が足されないよう、書き込みだけを止める（読むのは止めない）
+-- （足されると一意づくりが 23505 で止まり、その誤りの文にキーの値が出るため・2026-11-05 反証レビュー4巡目 低4）
+lock table public.notes, public.vitals, public.fluid_intake, public.outings,
+           public.bath_records, public.med_slots, public.med_admin, public.incidents, public.resident_targets,
+           public.resident_vital_limits, public.daycare_attendance, public.daycare_activity_log,
+           public.daycare_training_sessions, public.daycare_home_visits, public.daycare_staffing
+  in share mode;
 
 create or replace function pg_temp.carelog_ckb_phase1()
 returns void
@@ -88,6 +97,11 @@ declare
   r record;
 begin
   for r in select * from pg_temp.carelog_ckb_list() loop
+    -- 0055 が1段目だけで止まっていた形（元の名前は古い形のまま・施設の印つきの仮の索引 <名前>_t がある）は、仮の索引を外すだけ
+    --（2026-11-05 反証レビュー4巡目 中1: 外さずに ok と出て、0054 の戻しが先へ進めなくなっていた）
+    if pg_catalog.to_regclass('public.' || r.name || '_t') is not null then
+      execute pg_catalog.format('drop index public.%I', r.name || '_t');
+    end if;
     if pg_catalog.to_regclass('public.' || r.name || '_b') is null then
       continue;  -- もう戻してある（または 0055 が入っていない）
     end if;
@@ -113,7 +127,9 @@ select '冪等キーの一意15本の頭が施設の印でない（0054 の後�
                   where pg_catalog.pg_get_indexdef(i.oid) = 'CREATE UNIQUE INDEX ' || l.name || ' ON public.' || l.tbl || ' USING btree (client_key)'
                     and (l.kind = 'con') = exists (select 1 from pg_catalog.pg_constraint k
                                                     where k.conname = l.name and k.conrelid = ('public.' || l.tbl)::regclass and k.contype = 'u')) = 15
-             and not exists (select 1 from pg_temp.carelog_ckb_list() l where pg_catalog.to_regclass('public.' || l.name || '_b') is not null)
+             and not exists (select 1 from pg_temp.carelog_ckb_list() l
+                              where pg_catalog.to_regclass('public.' || l.name || '_b') is not null
+                                 or pg_catalog.to_regclass('public.' || l.name || '_t') is not null)
             then 'ok' else 'NG' end as result
 union all
 select '欄ごとの保存の冪等キーの衝突の先が 0054 の後の形',
