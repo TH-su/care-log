@@ -36,6 +36,18 @@ const TABLES = ['residents', 'staff', 'vitals', 'meals', 'fluid_intake', 'notes'
   'resident_targets', 'resident_vital_limits', 'daycare_days', 'daycare_attendance', 'daycare_activity_log',
   'daycare_training_sessions', 'daycare_home_visits', 'daycare_training_due', 'daycare_training_due_settings', 'daycare_staffing']
 const QUAL = '(tenant_id = ( SELECT private.my_tenant() AS my_tenant))'
+const CELL_SRC_SQL = `select prosrc as src from pg_proc where oid = 'public.apply_cell_edits(text, jsonb, jsonb, jsonb, bigint, text)'::regprocedure`
+/** 0054 の前の欄ごとの保存の本文（2か所の衝突の先から施設の印を外した形）。今の本文から作る＝置き換えが2か所だけかを確かめる */
+const cellUndo = (src) => src
+  .replace("on conflict (tenant_id, resident_id, measured_on) where kind = 'routine'", "on conflict (resident_id, measured_on) where kind = 'routine'")
+  .replace('on conflict (tenant_id, resident_id, meal_on, meal_slot) where', 'on conflict (resident_id, meal_on, meal_slot) where')
+let CELL_BEFORE = ''
+const UQ_NAMES = ['uq_vitals_routine_day', 'uq_meals_slot', 'uq_bath_records_day', 'uq_med_admin_slot', 'uq_med_slots_resident',
+  'uq_resident_targets_resident', 'uq_resident_vital_limits', 'uq_daycare_attendance_day', 'uq_daycare_activity',
+  'uq_daycare_training_session', 'uq_daycare_home_visit', 'uq_daycare_training_due', 'uq_daycare_staffing', 'attendance_pkey', 'note_reads_pkey']
+const UQ_DEFS_SQL = `select i.relname as name, pg_get_indexdef(i.oid) as def from pg_class i
+                      where i.relnamespace = 'public'::regnamespace and i.relkind = 'i'
+                        and i.relname in (${UQ_NAMES.map((n) => `'${n}'`).join(', ')}) order by 1`
 
 const client = new pg.Client({ connectionString: url })
 await client.connect()
@@ -138,6 +150,39 @@ await inTx('形: 27表に自分の施設の行だけの守りが1本ずつ・今
   ok('今の守り（tenant_only 以外）は102件のまま', others === 102, others)
   const del = (await q(`select count(*)::int n from pg_policies where schemaname = 'public' and tablename = any($1) and cmd = 'DELETE'`, [TABLES]))[0].n
   ok('消す守りは今までどおり無い（tenant_only は restrictive なので消す許しを足さない）', del === 0, del)
+  const uq = await q(UQ_DEFS_SQL)
+  ok('自然キーの一意13本と出勤者・既読の主キーは、名前と条件はそのまま頭に施設の印', uq.length === 15 && uq.every((r) => /USING btree \(tenant_id, /.test(r.def)), uq)
+  ok('一意の条件（削除済みを除く・定時だけ・頓服を除く）は残っている',
+    uq.find((r) => r.name === 'uq_vitals_routine_day')?.def.endsWith("WHERE ((kind = 'routine'::text) AND (deleted_at IS NULL))")
+    && uq.find((r) => r.name === 'uq_med_admin_slot')?.def.endsWith("WHERE ((deleted_at IS NULL) AND (slot <> 'prn'::text))"), uq)
+  const cell = (await q(CELL_SRC_SQL))[0].src
+  CELL_BEFORE = cellUndo(cell)
+  const n = (re) => (cell.match(re) || []).length
+  ok('欄ごとの保存は、衝突の先2か所だけが施設の印つき（列で名指す衝突の先はほかに無い）',
+    n(/on conflict \(tenant_id, resident_id, measured_on\) where kind = 'routine' and deleted_at is null do nothing/g) === 1
+    && n(/on conflict \(tenant_id, resident_id, meal_on, meal_slot\) where deleted_at is null do nothing/g) === 1
+    && n(/on conflict \(resident_id/g) === 0 && CELL_BEFORE !== cell)
+  const left = await q(`select i.relname from pg_index x join pg_class i on i.oid = x.indexrelid join pg_class c on c.oid = x.indrelid
+                         where x.indisunique and c.relnamespace = 'public'::regnamespace and c.relname = any($1)
+                           and pg_get_indexdef(i.oid) !~ '\\(tenant_id' and pg_get_indexdef(i.oid) !~ '\\((id|client_key)\\)'`, [TABLES])
+  ok('施設の印の無い一意は、番号（id）と端末の冪等キー（client_key）だけ', left.length === 0, left)
+})
+
+// ── 1b. 誤りの種類で、よその施設の記録の有る無しを当てられない（2026-11-05 反証レビュー 中1）──
+await inTx('誤りの種類: よその施設の利用者の番号で足すと、記録の有る無しに関係なく 23503', async () => {
+  await seedTwo()
+  await q(`insert into public.vitals (resident_id, measured_on, kind, temp, tenant_id) values (2101, '2026-11-03', 'routine', 36.6, $1)`, [B])
+  await q(`insert into public.attendance (day, staff_id, role, sort, tenant_id) values ('2026-11-03', 2201, 'staff', 0, $1)`, [B])
+  const has = await asUser(A, () => q(`insert into public.vitals (resident_id, measured_on, kind, temp) values (2101, '2026-11-03', 'routine', 36.4)`))
+  const none = await asUser(A, () => q(`insert into public.vitals (resident_id, measured_on, kind, temp) values (2101, '2026-11-04', 'routine', 36.4)`))
+  ok('施設 B にその日の定時のバイタルがあっても無くても、施設 A の人には同じ 23503', has.error === '23503' && none.error === '23503', { has, none })
+  const att = await asUser(A, () => q(`insert into public.attendance (day, staff_id, role, sort) values ('2026-11-03', 2201, 'staff', 0)`))
+  ok('施設 B の職員の出勤日でも 23503（出勤者の主キーで 23505 にならない）', att.error === '23503', att)
+  await q(`insert into public.vitals (resident_id, measured_on, kind, temp, tenant_id) values (1101, '2026-11-03', 'routine', 36.6, $1)`, [A])
+  const dupA = await asUser(A, () => q(`insert into public.vitals (resident_id, measured_on, kind, temp) values (1101, '2026-11-03', 'routine', 36.4)`))
+  ok('自分の施設の中では今までどおり 23505（定時は1人1日1件）', dupA.error === '23505', dupA)
+  const dupB = await tryq(`insert into public.note_reads (note_id, staff_id, tenant_id) values (2301, 2201, $1), (2301, 2201, $1)`, [B])
+  ok('同じ既読の2回目は今までどおり 23505（既読の主キー）', dupB.code === '23505', dupB)
 })
 
 // ── 2. 読む ──
@@ -237,19 +282,36 @@ const BACK_BODY = BACK.replace(/^begin;$/m, '-- begin').replace(/^commit;$/m, '-
 await inTx('移行の先の確かめ・冪等・戻す SQL', async () => {
   ok('移行と戻す SQL は begin … commit で包んでいる', /^begin;$/m.test(MIG) && /^commit;$/m.test(MIG) && /^begin;$/m.test(BACK) && /^commit;$/m.test(BACK))
   ok('移行と戻す SQL は do $$ を使わない', !/^\s*do\s+\$\$/im.test(MIG) && !/^\s*do\s+\$\$/im.test(BACK))
+  const first = await q(UQ_DEFS_SQL)
   const again = await tryq(MIG_BODY)
   const n1 = (await q(`select count(*)::int n from pg_policies where schemaname = 'public' and policyname = 'tenant_only'`))[0].n
   ok('もう一度流しても通り、守りは27本のまま（冪等）', again.code === null && n1 === 27, { again, n1 })
-  ok('最後の確かめの3行が全部 ok', again.rows?.length === 3 && again.rows.every((r) => r.result === 'ok'), again.rows)
+  ok('最後の確かめの6行が全部 ok・7行目は知らせ（施設の数・利用者のいない施設の数＝許可リストの表の無い土台では -）',
+    again.rows?.length === 7 && again.rows.slice(0, 6).every((r) => r.result === 'ok') && again.rows[6].result === '1・-', again.rows)
 
   const back = await tryq(BACK_BODY)
   const n0 = (await q(`select count(*)::int n from pg_policies where schemaname = 'public' and policyname = 'tenant_only'`))[0].n
   const kept = (await q(`select count(*)::int n from pg_policies where schemaname = 'public' and tablename = any($1)`, [TABLES]))[0].n
   ok('戻す SQL で27本とも外れ、今の102件は残る', back.code === null && n0 === 0 && kept === 102, { back: back.code, n0, kept })
-  ok('戻す SQL の確かめは ok と施設の数', back.rows?.[0]?.result === 'ok' && back.rows?.[1]?.result === '1', back.rows)
+  ok('戻す SQL の確かめは ok・ok・ok と施設の数', back.rows?.length === 4 && back.rows.slice(0, 3).every((r) => r.result === 'ok') && back.rows[3].result === '1', back.rows)
+  const cellBack = (await q(CELL_SRC_SQL))[0].src
+  ok('戻すと欄ごとの保存の本文は 0053 の後と一字一句同じ', cellBack === CELL_BEFORE, { len: cellBack.length })
+  const after = await q(UQ_DEFS_SQL)
+  ok('戻すと一意15本は 0053 の後の形（施設の印の無い形・名前と条件は同じ）', after.every((r) => !/USING btree \(tenant_id, /.test(r.def)) && after.length === 15, after)
   const re = await tryq(MIG_BODY)
+  ok('もう一度入れた後の一意15本は、最初に入れた時と一字一句同じ', JSON.stringify(await q(UQ_DEFS_SQL)) === JSON.stringify(first), { first })
   ok('戻した後にもう一度入る', re.code === null && (await q(`select count(*)::int n from pg_policies where policyname = 'tenant_only'`))[0].n === 27, re)
 
+  await q(`create policy stage4_extra on public.notes for select to authenticated using (true)`)
+  const e0 = await tryq(MIG_BODY)
+  ok('今の守りが102件でないと止まる（足された守りを先に確かめる）', e0.code === 'P0001' && /102件ではない/.test(e0.message), e0)
+  await q(`drop policy stage4_extra on public.notes`)
+  await q(`drop index public.uq_meals_slot`)
+  await q(`create unique index uq_meals_slot on public.meals (resident_id, meal_on) where deleted_at is null`)
+  const e00 = await tryq(MIG_BODY)
+  ok('一意の形が思っていたものと違うと、名前だけを出して止まる', e00.code === 'P0001' && /一意 uq_meals_slot の形が思っていたものと違います/.test(e00.message), e00)
+  await q(`drop index public.uq_meals_slot`)
+  await q(`create unique index uq_meals_slot on public.meals (tenant_id, resident_id, meal_on, meal_slot) where deleted_at is null`)
   await q(`drop policy member_only on public.outings`)
   const e1 = await tryq(MIG_BODY)
   ok('許可リストの守りが無い表があると、表の名前だけを出して止まる', e1.code === 'P0001' && /tenant_stage4: .*outings（許可リストの守り member_only が無い）/.test(e1.message), e1)
