@@ -27,6 +27,8 @@ if (!url || !/^postgres(ql)?:\/\/[^@]*@(127\.0\.0\.1|localhost)[:/]/.test(url)) 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const MIG = readFileSync(path.join(ROOT, 'supabase', 'migrations', '0054_tenant_stage4.sql'), 'utf8')
 const BACK = readFileSync(path.join(ROOT, 'supabase', 'rollback', '0054_back.sql'), 'utf8')
+// 0055（冪等キーの一意を施設ごと）は 0054 の上に入るので、0054 を戻す前に 0055 を戻す（0054_back.sql は 0055 があると止まる）
+const BACK55 = readFileSync(path.join(ROOT, 'supabase', 'rollback', '0055_back.sql'), 'utf8')
 
 const A = '00000000-0000-0000-0000-0000000000aa'
 const B = '00000000-0000-0000-0000-0000000000bb'
@@ -41,6 +43,7 @@ const CELL_SRC_SQL = `select prosrc as src from pg_proc where oid = 'public.appl
 const cellUndo = (src) => src
   .replace("on conflict (tenant_id, resident_id, measured_on) where kind = 'routine'", "on conflict (resident_id, measured_on) where kind = 'routine'")
   .replace('on conflict (tenant_id, resident_id, meal_on, meal_slot) where', 'on conflict (resident_id, meal_on, meal_slot) where')
+  .replace('on conflict (tenant_id, client_key) do nothing', 'on conflict (client_key) do nothing') // 0055 の分
 let CELL_BEFORE = ''
 const UQ_NAMES = ['uq_vitals_routine_day', 'uq_meals_slot', 'uq_bath_records_day', 'uq_med_admin_slot', 'uq_med_slots_resident',
   'uq_resident_targets_resident', 'uq_resident_vital_limits', 'uq_daycare_attendance_day', 'uq_daycare_activity',
@@ -279,6 +282,7 @@ await inTx('施設が1つの時: 印を送らずに書く・読むのは今と�
 // ── 7. 移行の先の確かめ・冪等・戻す ──
 const MIG_BODY = MIG.replace(/^begin;$/m, '-- begin').replace(/^commit;$/m, '-- commit')
 const BACK_BODY = BACK.replace(/^begin;$/m, '-- begin').replace(/^commit;$/m, '-- commit')
+const BACK55_BODY = BACK55.replace(/^begin;$/gm, '-- begin').replace(/^commit;$/gm, '-- commit')
 await inTx('移行の先の確かめ・冪等・戻す SQL', async () => {
   ok('移行と戻す SQL は begin … commit で包んでいる', /^begin;$/m.test(MIG) && /^commit;$/m.test(MIG) && /^begin;$/m.test(BACK) && /^commit;$/m.test(BACK))
   ok('移行と戻す SQL は do $$ を使わない', !/^\s*do\s+\$\$/im.test(MIG) && !/^\s*do\s+\$\$/im.test(BACK))
@@ -289,6 +293,12 @@ await inTx('移行の先の確かめ・冪等・戻す SQL', async () => {
   ok('最後の確かめの6行が全部 ok・7行目は知らせ（施設の数・利用者のいない施設の数＝許可リストの表の無い土台では -）',
     again.rows?.length === 7 && again.rows.slice(0, 6).every((r) => r.result === 'ok') && again.rows[6].result === '1・-', again.rows)
 
+  const guard = await tryq(BACK_BODY)
+  ok('0055 が入っている間は、0054 を戻す SQL は何も変えずに止まる（先に 0055 を戻す）',
+    guard.code === 'P0001' && /0055 が入っています/.test(guard.message)
+    && (await q(`select count(*)::int n from pg_policies where policyname = 'tenant_only'`))[0].n === 27, guard)
+  const b55 = await tryq(BACK55_BODY)
+  ok('（前提）0055 を戻す', b55.code === null && b55.rows?.every((r) => r.result === 'ok'), b55)
   const back = await tryq(BACK_BODY)
   const n0 = (await q(`select count(*)::int n from pg_policies where schemaname = 'public' and policyname = 'tenant_only'`))[0].n
   const kept = (await q(`select count(*)::int n from pg_policies where schemaname = 'public' and tablename = any($1)`, [TABLES]))[0].n

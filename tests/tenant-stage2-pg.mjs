@@ -323,6 +323,18 @@ await inTx('施設が2つで施設を決めない直接の呼び出しは止ま�
     nn === '23502' && (await q(`select count(*)::int n from public.staff where id = 9302`))[0].n === 0, nn)
 })
 
+// 段階4の続き（0055）: よその施設の職員が自動の与薬のキーを先回りして入れても、その施設の自動の記録は作られる
+await inTx('自動の記録のキーを先回りされても、その施設の自動の与薬は作られる（0055）', async () => {
+  const c = await seedTwo()
+  const pre = await asUser(A, () => q(`insert into public.med_admin (resident_id, admin_on, slot, status, client_key)
+                                        values (101, $1::date, 'morning', 'taken', $2) returning 1`, [c.day, `auto:med:${c.day}:morning:201`]))
+  ok('（前提）施設 A の人が施設 B の利用者の自動のキーで自分の行を足せる（23505 にならない＝有る無しが分からない）', Array.isArray(pre) && pre.length === 1, pre)
+  await q(`select set_config('test.tenant', 'none', true)`) // 自動の記録はログインの無いサーバーの接続で動く
+  const med = (await q(`select private.care_auto_med('morning') as n`))[0].n
+  const rows = await rowsBy('med_admin', 'admin_on', c.day)
+  ok('施設 B の2人の自動の与薬は作られる（先回りの行に止められない）', ridsOf(rows, B).length === 2 && med === 4, { med, rows })
+})
+
 await client.end()
 console.log(failed ? `\n失敗 ${failed} 件` : '\nすべて成功')
 process.exit(failed === 0 ? 0 : 1)
