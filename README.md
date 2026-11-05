@@ -52,5 +52,9 @@
 
 応急処置（2026-11-05・本番にだけ当ててある）: 取込を動かしている機械の取込の道具が 0053 より前の版のままで、0053 の後の毎時の取込が取込の日を書く所で止まったため、本番の取込の日に一時の一意 (source, day)（import_days_source_day_bridge）を足した（supabase/hotfix/2026-11-05_import_days_bridge.sql・移行の並びには入れない）。これがある間は2つ目の施設の取込は書けない。取込を動かしている機械の care-log を最新にした（git pull）後、2つ目の施設を入れる前に supabase/hotfix/2026-11-05_import_days_bridge_back.sql で外す。
 
+取込の道具の版（0057・2026-11-05）: 取込の道具（tools/import.mjs）は自分の版（TOOL_VER）を持ち、書き込む実行のたびに取込の日（import_days.tool_ver）へ残す。データベースが求める版（private.carelog_import_min_ver()）より古ければ何も書かずに止まる。毎朝の点検（共通の DB の ops_carelog_health）が、古い版のまま動いていれば知らせる。データベースの形を変えて古い版の道具が動かなくなる移行を入れる時は、TOOL_VER と carelog_import_min_ver を一緒に上げる。
+
+取込の道具の自動の更新（2026-11-05）: 書き込む実行（--execute）の時、道具は動き始めに自分を最新にする（tools/self-update.mjs）。置き場所が main で手で直したファイルが無い時だけ、git fetch origin main → 早送りで合わせ、部品が変わっていれば npm ci をして、新しい版で同じ引数のまま動かし直す。ネットにつながらない・早送りできない時は今の版のまま取り込む。止めたい時は環境変数 CARELOG_AUTO_UPDATE=0。
+
 main はルールセットで守られている: 変更は PR だけ・「試験とビルド」と「pg-contract」の合格が必須・削除と強制の上書きは禁止。
 main への取り込みがそのまま公開になるため、ブランチを切って push し、PR を作って自動の取り込み（`gh pr merge --auto --merge`）を入れる。試験に合格した時点で取り込まれ、公開が走る。

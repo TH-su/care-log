@@ -79,6 +79,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { pathToFileURL } from 'node:url'
+import { selfUpdate, rerun } from './self-update.mjs'
 
 const { Client } = pg
 // date/time/numeric は文字列のまま受ける（JS Date のタイムゾーン解釈で日付がずれるのを防ぐ）
@@ -89,6 +90,10 @@ pg.types.setTypeParser(1083, (v) => v) // time
 // 定数
 // ---------------------------------------------------------------------
 
+/** この取込の道具の版（0057・2026-11-05）。データベースの private.carelog_import_min_ver() より小さければ何も書かずに止まる。
+ *  取込の日（import_days.tool_ver）にこの数を残し、毎朝の点検が古い版のまま動いていないかを見る。
+ *  データベースの形を変えて古い版の道具が動かなくなる移行を入れる時は、この数とその移行の carelog_import_min_ver を一緒に上げる */
+export const TOOL_VER = 57
 /** 必要なサーバー版（これ未満は after16 が無い） */
 const REQUIRED_VER = '2026-08-28a'
 /** apiEvents / apiMeasures の1窓（APIの上限150日より1日短くして丸めを踏まない） */
@@ -1113,6 +1118,12 @@ let TENANT = null
 
 async function main() {
   const args = parseArgs(process.argv.slice(2))
+  // 動き始めに道具を最新の版にする（tools/self-update.mjs・書き込む実行の時だけ。最新にできない時は今の版のまま続ける）
+  {
+    const up = selfUpdate({ execute: args.execute })
+    if (up.action === 'broken') process.exit(2)
+    if (up.action === 'updated') process.exit(rerun())
+  }
   const GAS_URL = process.env.CARELOG_GAS_URL
   const GAS_TOKEN = process.env.CARELOG_GAS_TOKEN
   const DB_URL = process.env.SUPABASE_DB_URL
@@ -1181,6 +1192,27 @@ async function main() {
     console.error(`施設を確かめられません（0051・0052 を当てた DB か確認してください）: ${e.message}`)
     await db.end()
     process.exit(2)
+  }
+
+  // 道具の版の確かめ（0057）: データベースが求める版より古ければ何も書かずに止まる。0057 の前の DB では比べない・版も書かない
+  let toolVerColumn = false
+  let dbStartedAt = null   // データベースの時計での動き始め（取込の日の imported_at はデータベースの now() で書かれるため）
+  try {
+    const r = await db.query(`select pg_catalog.clock_timestamp() as t, pg_catalog.to_regprocedure('private.carelog_import_min_ver()') is not null as f,
+                                     exists (select 1 from pg_catalog.pg_attribute
+                                              where attrelid = 'public.import_days'::regclass and attname = 'tool_ver' and not attisdropped) as c`)
+    if (r.rows[0].f) {
+      const need = Number((await db.query('select private.carelog_import_min_ver() as v')).rows[0].v)
+      if (TOOL_VER < need) {
+        console.error(`取込の道具が古い版です（${TOOL_VER} < ${need}）。取込を動かしている機械で care-log を最新にしてください（git pull）。何もせずに止めます。`)
+        await db.end()
+        process.exit(2)
+      }
+    }
+    toolVerColumn = r.rows[0].c === true
+    dbStartedAt = r.rows[0].t
+  } catch (e) {
+    console.log('取込の道具: データベースが求める版を確かめられませんでした（版は書かずに取り込みます）')
   }
 
   const report = {
@@ -1465,6 +1497,15 @@ async function main() {
       // 次の窓へ（古い方向）
       if (args.from != null && from === args.from) break
       to = addDaysYmd(from, -1)
+    }
+    // この回に書いた取込の日に、道具の版を残す（0057。毎朝の点検が古い版のまま動いていないかを見る）。失敗しても取込は成功のまま
+    if (args.execute && toolVerColumn && dbStartedAt) {
+      try {
+        await db.query('update public.import_days set tool_ver = $1 where tenant_id = $2 and imported_at >= $3::timestamptz',
+          [TOOL_VER, TENANT, dbStartedAt])
+      } catch (e) {
+        console.log('取込の道具: 取込の日に版を残せませんでした（取込は済んでいます）')
+      }
     }
   } finally {
     await db.end()
