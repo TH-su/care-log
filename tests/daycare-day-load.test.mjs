@@ -285,7 +285,7 @@ describe('「許可リスト外か」の確かめは同じ瞬間の分を1本に
 
   it('★ログインし直した・抜けた時は走っている確かめを外す（前のアカウントの答えに相乗りしない）・新しい確かめを古い方の終わりで外さない', () => {
     const src = read('../src/lib/db.ts')
-    assert.match(src, /forgetMyRole\(\)\n[^\n]*\n    deniedProbeInFlight = null\n  \}/)
+    assert.match(src, /forgetMyRole\(\)\n[^\n]*\n    deniedProbeInFlight = null\n(    forgetPresenceTopic\(\)[^\n]*\n)?  \}/)
     assert.match(src, /if \(deniedProbeInFlight === run\) deniedProbeInFlight = null/)
   })
 })
