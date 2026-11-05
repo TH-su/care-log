@@ -181,7 +181,9 @@ await inTx('冪等・戻す SQL・先の確かめ', async () => {
     (await q(CK_SQL)).every((r) => /\(tenant_id, client_key\)$/.test(r.def)) && /on conflict \(tenant_id, client_key\)/.test((await q(CELL_SQL))[0].src))
   await q(`delete from public.med_admin where admin_on = '2026-11-06'`)
   // 1段目だけ入った形（古い一意と新しい一意が両方ある）からも、全文を流し直せば入る
-  const half = await tryq(BACK_BODY.split('-- ════ 2段目')[0])
+  const parts = BACK_BODY.split('-- ════ 2段目')
+  ok('（前提）戻す SQL を1段目と2段目に切り分けられる（見出しの文字が変わって全文を流すことにならない）', parts.length === 2 && /carelog_ckb_phase1/.test(parts[0]) && !/carelog_ckb_phase2/.test(parts[0]))
+  const half = await tryq(parts[0])
   ok('（前提）戻す SQL の1段目だけを流す', half.code === null, half)
   const fromHalf = await tryq(MIG_BODY)
   ok('両方の一意がある形から 0055 を流し直すと入る（仮の名前の索引は残らない）', fromHalf.code === null && fromHalf.rows?.every((r) => r.result === 'ok')
@@ -192,6 +194,53 @@ await inTx('冪等・戻す SQL・先の確かめ', async () => {
   ok('一意の形が思っていたものと違うと、名前だけを出して何も変えずに止まる',
     e1.code === 'P0001' && /冪等キーの一意の形が思っていたものと違います.*med_slots_client_key_key/.test(e1.message), e1)
 })
+
+// ── 4. 本当に2つの取引で流す（begin … commit を外さない）: 2段目が錠を取れずに止まった形からの戻しと流し直し ──
+// （2026-11-05 反証レビュー4巡目 中1・低2）。この試験の DB の中だけで流す（この実行器専用の使い捨ての DB）
+console.log('── 2つの取引で流す: 2段目が止まった形から、戻す SQL も流し直しも通る')
+{
+  const ckState = async () => {
+    const tmp = (await q(`select count(*)::int n from pg_class where relnamespace = 'public'::regnamespace and relname ~ '_client_key(_key)?_t$'`))[0].n
+    const newShape = (await q(CK_SQL)).filter((r) => /\(tenant_id, client_key\)$/.test(r.def)).length
+    const cellNew = /on conflict \(tenant_id, client_key\)/.test((await q(CELL_SQL))[0].src)
+    return { tmp, newShape, cellNew }
+  }
+  const run = async (text) => {
+    try {
+      const res = await client.query(text)
+      const last = Array.isArray(res) ? res[res.length - 1] : res
+      return { code: null, rows: last.rows }
+    } catch (e) {
+      try { await client.query('rollback') } catch { /* 取引の外なら何もしない */ }
+      return { code: e.code ?? 'x', message: e.message }
+    }
+  }
+  try {
+    const b0 = await run(BACK)
+    ok('（前提）戻す SQL（2つの取引のまま）で 0054 の後の形へ', b0.code === null && b0.rows.every((r) => r.result === 'ok') && JSON.stringify(await ckState()) === JSON.stringify({ tmp: 0, newShape: 0, cellNew: false }), b0)
+    // 別の接続がデイの配置の表を読んだまま放さない → 2段目の錠が5秒で取れずに止まる
+    const other = new pg.Client({ connectionString: url })
+    await other.connect()
+    await other.query('begin')
+    await other.query('select 1 from public.daycare_staffing limit 1')
+    const m1 = await run(MIG)
+    await other.query('rollback')
+    await other.end()
+    const st1 = await ckState()
+    ok('2段目が錠を取れずに止まると、1段目だけが入った形（仮の索引15本・欄ごとの保存は新しい・元の名前は古い形）で残る',
+      m1.code === '55P03' && st1.tmp === 15 && st1.newShape === 0 && st1.cellNew === true, { m1, st1 })
+    const b1 = await run(BACK)
+    const st2 = await ckState()
+    ok('その形から戻す SQL を流すと、仮の索引も外れて 0054 の後の形になり、確かめは ok', b1.code === null && b1.rows.every((r) => r.result === 'ok')
+      && JSON.stringify(st2) === JSON.stringify({ tmp: 0, newShape: 0, cellNew: false }), { b1, st2 })
+    const g = await run(MIG)
+    const st3 = await ckState()
+    ok('もう一度全文を流すと入る（2つの取引のまま）', g.code === null && g.rows.every((r) => r.result === 'ok') && JSON.stringify(st3) === JSON.stringify({ tmp: 0, newShape: 15, cellNew: true }), { g, st3 })
+  } catch (e) {
+    failed++
+    console.log(`  ✗ 例外: ${e?.code ?? ''} ${e?.message ?? e}`)
+  }
+}
 
 await client.end()
 console.log(failed ? `\n失敗 ${failed} 件` : '\nすべて成功')
