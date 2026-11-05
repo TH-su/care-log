@@ -12,6 +12,7 @@
 // ・checkTargetsCase … 観測と expect の食い違いの一覧（空なら一致）
 //
 // 個人情報は置かない（利用者・職員は合成の 利用者01・職員01 と数値IDだけ）。
+// ポリシーの形の確かめは、この移行が置いたものだけを見る（段階4（0054）の施設の守り tenant_only は tests/tenant-stage4-pg.mjs が27表とも確かめる）
 
 /** 準備: 職員2人・利用者3人（合成）。ID は固定（overriding system value） */
 export const TARGETS_SEED_SQL = [
@@ -349,7 +350,7 @@ export const TARGETS_CASES = [
     name: 'ポリシーは read_auth・insert_office・update_office・member_only の4本（DELETE は無い）・anon の表の権限なし',
     async run(h) {
       const pol = await h.pg(
-        `select policyname, cmd, permissive from pg_policies where schemaname = 'public' and tablename = 'resident_targets' order by policyname`,
+        `select policyname, cmd, permissive from pg_policies where schemaname = 'public' and policyname <> 'tenant_only' and tablename = 'resident_targets' order by policyname`,
       )
       const priv = (
         await h.pg(

@@ -10,6 +10,7 @@
 // ・checkMasterWriteCase … 観測と expect の食い違いの一覧（空なら一致）
 //
 // 個人情報は置かない（利用者・職員は合成の 利用者01・職員01 と数値IDだけ）。
+// ポリシーの形の確かめは、この移行が置いたものだけを見る（段階4（0054）の施設の守り tenant_only は tests/tenant-stage4-pg.mjs が27表とも確かめる）
 
 /** 準備: 職員2人・利用者2人・台帳1行ずつ（合成）。ID は固定（overriding system value） */
 export const MASTER_WRITE_SEED_SQL = [
@@ -249,7 +250,7 @@ export const MASTER_WRITE_CASES = [
     async run(h) {
       const r = await h.pg(
         `select tablename t, string_agg(policyname, ',' order by policyname) p from pg_policies
-          where schemaname = 'public' and tablename in ('residents', 'staff', 'import_days', 'master_sync_log', 'med_slots')
+          where schemaname = 'public' and policyname <> 'tenant_only' and tablename in ('residents', 'staff', 'import_days', 'master_sync_log', 'med_slots')
           group by tablename order by tablename`,
       )
       return { policies: r.map((x) => [x.t, x.p]) }
