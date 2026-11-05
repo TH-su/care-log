@@ -7,6 +7,7 @@
 // ・npm test では DB を使わない。移行の文面の静的検査と端末側の試験は tests/daycare.test.mjs。
 //
 // 個人情報は置かない（利用者は架空の「見本」姓・職員は 職員01 と数値IDだけ）。
+// ポリシーの形の確かめは、この移行が置いたものだけを見る（段階4（0054）の施設の守り tenant_only は tests/tenant-stage4-pg.mjs が27表とも確かめる）
 
 /** 準備: 職員3人・利用者6人（架空）。ID は固定（overriding system value）。氏名の空白の違い（半角・全角）も混ぜる */
 export const DAYCARE_SEED_SQL = [
@@ -175,7 +176,7 @@ export const DAYCARE_CASES = [
       const policies = await h.pg(
         `select tablename, count(*) filter (where cmd = 'DELETE')::int del,
                 count(*) filter (where policyname = 'member_only' and permissive = 'RESTRICTIVE')::int mo
-           from pg_policies where schemaname = 'public' and tablename in ('daycare_attendance', 'daycare_days')
+           from pg_policies where schemaname = 'public' and policyname <> 'tenant_only' and tablename in ('daycare_attendance', 'daycare_days')
           group by tablename order by tablename`,
       )
       return {
@@ -750,7 +751,7 @@ export const DAYCARE_CASES = [
                 has_function_privilege('anon', 'public.daycare_attendance_past_guard()', 'execute') anon,
                 (select prosecdef from pg_proc where oid = 'public.daycare_attendance_past_guard()'::regprocedure) definer`,
       ))[0]
-      const pol = (await h.pg(`select string_agg(policyname, ',' order by policyname) p from pg_policies where schemaname = 'public' and tablename = 'daycare_attendance'`))[0].p
+      const pol = (await h.pg(`select string_agg(policyname, ',' order by policyname) p from pg_policies where schemaname = 'public' and policyname <> 'tenant_only' and tablename = 'daycare_attendance'`))[0].p
       return { trg, fn, pol }
     },
     expect: {

@@ -9,6 +9,7 @@
 // ・npm test では DB を使わない。移行の文面の静的検査と端末側の試験は tests/vital-limits.test.mjs。
 //
 // 個人情報は置かない（利用者は架空の「見本」姓・職員は 職員01 と数値IDだけ）。値は試験用の架空の数。
+// ポリシーの形の確かめは、この移行が置いたものだけを見る（段階4（0054）の施設の守り tenant_only は tests/tenant-stage4-pg.mjs が27表とも確かめる）
 
 export { checkDaycareCase as checkLimitCase } from './daycare-contract.mjs'
 
@@ -253,10 +254,10 @@ export const LIMIT_CASES = [
       const trunc = await h.as({ appRole: 'admin' }, (q) => q(`truncate public.resident_vital_limits`))
       const left = (await h.pg(`select count(*)::int n from public.resident_vital_limits where client_key = 'l8-1'`))[0].n
       const pol = await h.pg(
-        `select policyname, cmd, permissive from pg_policies where schemaname = 'public' and tablename = 'resident_vital_limits' order by policyname`,
+        `select policyname, cmd, permissive from pg_policies where schemaname = 'public' and policyname <> 'tenant_only' and tablename = 'resident_vital_limits' order by policyname`,
       )
       const rt = (await h.pg(`select count(*)::int n from pg_publication_tables where tablename = 'resident_vital_limits'`))[0].n
-      const targetsPol = (await h.pg(`select count(*)::int n from pg_policies where schemaname = 'public' and tablename = 'resident_targets'`))[0].n
+      const targetsPol = (await h.pg(`select count(*)::int n from pg_policies where schemaname = 'public' and policyname <> 'tenant_only' and tablename = 'resident_targets'`))[0].n
       return { del: out(del), trunc: out(trunc), left, pol, rt, targetsPol }
     },
     expect: {

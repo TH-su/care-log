@@ -7,6 +7,7 @@
 // ・npm test では DB を使わない。移行の文面の静的検査と端末側の試験は tests/daycare-activity.test.mjs。
 //
 // 個人情報は置かない（利用者は架空の「見本」姓・職員は 職員01 と数値IDだけ）。
+// ポリシーの形の確かめは、この移行が置いたものだけを見る（段階4（0054）の施設の守り tenant_only は tests/tenant-stage4-pg.mjs が27表とも確かめる）
 
 export { checkDaycareCase as checkActivityCase } from './daycare-contract.mjs'
 
@@ -186,7 +187,7 @@ export const ACTIVITY_CASES = [
     name: 'RLS とポリシーの形（read・insert・update・restrictive member_only の4つ・delete なし）・Realtime に載る',
     async run(h) {
       const pol = await h.pg(
-        `select policyname, cmd, permissive from pg_policies where schemaname = 'public' and tablename = 'daycare_activity_log' order by policyname`,
+        `select policyname, cmd, permissive from pg_policies where schemaname = 'public' and policyname <> 'tenant_only' and tablename = 'daycare_activity_log' order by policyname`,
       )
       const rt = (await h.pg(
         `select count(*)::int n from pg_publication_tables where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'daycare_activity_log'`,
@@ -208,7 +209,7 @@ export const ACTIVITY_CASES = [
     id: 'B9',
     name: '段階1の表と守りは変わらない（daycare_attendance のポリシー4つ・0042／0043 のトリガ1つ）',
     async run(h) {
-      const pol = (await h.pg(`select count(*)::int n from pg_policies where schemaname = 'public' and tablename = 'daycare_attendance'`))[0].n
+      const pol = (await h.pg(`select count(*)::int n from pg_policies where schemaname = 'public' and policyname <> 'tenant_only' and tablename = 'daycare_attendance'`))[0].n
       const trg = (await h.pg(
         `select count(*)::int n from pg_trigger where tgname = 'trg_daycare_attendance_past_guard' and not tgisinternal`,
       ))[0].n
