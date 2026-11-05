@@ -97,8 +97,10 @@ begin
     end if;
   end loop;
 
-  select pg_catalog.array_agg(x.child || '.' || x.conname order by x.child || '.' || x.conname) into v_want from pg_temp.carelog_stage3_fks() x;
-  select pg_catalog.array_agg(c.relname || '.' || k.conname order by c.relname || '.' || k.conname) into v_have
+  -- ★並べ方は両方とも C の規則にそろえる（本番の DB は en_US の並べ方で、relname（name 型）は C の並べ方のため、
+  --   同じ76本でも並び順が違って「違う」と誤って止まった・2026-11-05 本番で判明）
+  select pg_catalog.array_agg((x.child || '.' || x.conname)::text collate "C" order by (x.child || '.' || x.conname)::text collate "C") into v_want from pg_temp.carelog_stage3_fks() x;
+  select pg_catalog.array_agg((c.relname || '.' || k.conname)::text collate "C" order by (c.relname || '.' || k.conname)::text collate "C") into v_have
     from pg_catalog.pg_constraint k
     join pg_catalog.pg_class c on c.oid = k.conrelid
    where k.contype = 'f'
