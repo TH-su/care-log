@@ -346,6 +346,36 @@ async function pullRosterOrNull(url: string, token: string): Promise<RosterEntry
   return r.ok ? r.roster : null
 }
 
+/**
+ * 勤務表の職員一覧を、共通の Supabase の保存先（care-backend 0005・0007・0009 の KV ストア）から読む（2026-11-07）。
+ * 勤務表は 2026-10-16 に正本を Supabase へ切り替え、Google へは写し返していない。統合同期の GAS は読み取りを断らないため、
+ * GAS の pull は 10/16 のままの一覧を返し続ける＝この道を先に試し、読めた時は GAS を呼ばない。
+ *  - 呼ぶのは読み取りの関数 kv_get('staff') だけ（書く関数は呼ばない）。kv_entries は同じ施設の許可リストの人が読める（RLS）
+ *  - 使うのは、応答が ok:true で、その行が切り替え後（mode:'live'＝Supabase が正本）の時だけ。写しの期間・Google へ戻した後
+ *    （mode:'shadow'）・行が無い・形が違う・0件・関数が無い・断られた・通信の失敗・時間切れは null＝今までどおり GAS から読む
+ *  - 取り出すのは GAS の pull と同じ射影（氏名・在籍・入職順）だけ。応答の本文は console・localStorage に残さない
+ */
+async function pullStaffNamesFromKv(): Promise<StaffEntry[] | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const timeout = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), TIMEOUT_MS)
+    })
+    const got = await Promise.race([supabase.rpc('kv_get', { p_key: 'staff' }), timeout])
+    if (!got || got.error) return null
+    const r = got.data as unknown
+    if (!r || typeof r !== 'object' || Array.isArray(r)) return null
+    const rec = r as { ok?: unknown; mode?: unknown; data?: unknown }
+    if (rec.ok !== true || rec.mode !== 'live') return null
+    const names = projectStaffNames(rec.data)
+    return names !== null && names.length > 0 ? names : null
+  } catch {
+    return null // 読めなければ GAS へ戻す（例外を外へ出さない。中身は出さない）
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
 /** 取得失敗（null）と「0件」を区別したい内部用。syncMasters はこちらを使う */
 async function pullStaffNamesOrNull(url: string, token: string): Promise<StaffEntry[] | null> {
   const out = await gasPost<{ entries?: { staff?: { data?: unknown } } }>(
@@ -1102,6 +1132,8 @@ export interface SyncOptions {
  *  - 冪等: 同じ名簿で何度実行しても差分が無ければ書込は発生しない。途中で失敗しても再実行で追いつく。
  *  - 反映した後は notifyMastersChanged で他の画面へ知らせる（App の職員名簿の取り直し・F47）。
  *  - 自動の同期（起動時＋60分間隔）は autoSyncMasters が受け持つ（F50）。本関数は呼ばれたら常に同期する。
+ *  - 職員名簿は勤務表の正本（Supabase の kv_get('staff')・切り替え後の行だけ）を先に読み、読めた時は GAS の職員名簿を呼ばない
+ *    （2026-11-07。GAS の勤務表は 10/16 から更新されていない）。読めない・形が違う時は今までどおり GAS から読む。
  */
 export async function syncMasters(opts: SyncOptions = {}): Promise<MasterSyncOutcome | 'unconfigured'> {
   const cfg = readGasConfig()
@@ -1114,8 +1146,12 @@ export async function syncMasters(opts: SyncOptions = {}): Promise<MasterSyncOut
     )
   }
 
+  // 職員名簿は、勤務表の正本（Supabase の kv_get('staff')・切り替え後の時だけ）を先に読む。読めた時は GAS の職員名簿を使わない
+  // （GAS の勤務表は 2026-10-16 から更新されていない）。読めない時だけ、下の GAS の職員名簿へ戻す（今までどおり）
+  const kvNames = await pullStaffNamesFromKv()
+
   // 職員名簿は別のGASが持つ。未設定なら利用者名簿と同じ接続先へ問い合わせる（従来の挙動）
-  const staffCfg = readStaffGasConfig(cfg)
+  const staffCfg = kvNames !== null ? null : readStaffGasConfig(cfg)
   if (staffCfg === 'invalid') {
     throw new Error(
       '職員名簿の接続先URLの形式が正しくありません。設定画面で https://script.google.com/macros/s/.../exec の形式のURLを入力し直してください。',
@@ -1129,13 +1165,13 @@ export async function syncMasters(opts: SyncOptions = {}): Promise<MasterSyncOut
 
   // 先に両方を取得する（DBに触れる前に失敗を確定させ、中途半端な反映を減らす）
   const rosterRead = await pullRosterRead(cfg.url, cfg.token)
-  const names = await pullStaffNamesOrNull(staffCfg.url, staffCfg.token)
+  const names = staffCfg === null ? kvNames : await pullStaffNamesOrNull(staffCfg.url, staffCfg.token)
   const roster = rosterRead.ok ? rosterRead.roster : null
   const rosterOk = roster !== null && roster.length > 0 // 0件＝取得できずと同義に扱う
   const staffOk = names !== null && names.length > 0
   const rosterFail: GasReadFail | 'empty' | null = rosterOk ? null : rosterRead.ok ? 'empty' : rosterRead.reason
 
-  const sameEndpoint = staffCfg.url === cfg.url && staffCfg.token === cfg.token
+  const sameEndpoint = staffCfg !== null && staffCfg.url === cfg.url && staffCfg.token === cfg.token
   if (!rosterOk && !staffOk) {
     throw new Error(
       rosterFail === 'auth' || rosterFail === 'postOnly' || rosterFail === 'empty'
