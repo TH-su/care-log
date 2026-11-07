@@ -116,6 +116,7 @@ import { EXPLAINED_TOS, HOME_VISIT_PURPOSES, HOME_VISIT_TEXT_MAX } from './dayca
 import type { DaycareHomeVisit, ExplainedTo, HomeVisitPurpose, homeVisitPayload } from './daycareHomeVisit'
 import type { DueCopyRow, DueCopySettings } from './trainingDue'
 import type { TrainingDueCopyInput, TrainingDueSettingsInput, TrainingDueSyncResult } from './trainingPlanClient'
+import { clearWeightCache, setWeightDbReader } from './weightClient'
 import { addDays as addDaysIso } from './format'
 import { normalizeChoices, normalizeIncidentDetail, validateIncidentInput } from './incident'
 import type { IncidentInput } from './incident'
@@ -576,6 +577,7 @@ async function onAuthEvent(event: string): Promise<void> {
     // 走っている「許可リスト外か」の確かめは前のアカウントのもの。後の呼び出しを相乗りさせない（2026-10-29 反証レビュー）
     deniedProbeInFlight = null
     forgetPresenceTopic() // 居場所のトピック名も前のアカウントの施設のもの（0056）
+    clearWeightCache() // メモリの体重も前のアカウントのもの（共通の DB から読んだ分を使い回さない・0077）
   }
   if (event !== 'SIGNED_IN' && event !== 'TOKEN_REFRESHED') return
   // ログインし直した: 拒否で止まった退避 op を1回だけ送り直す（F37。権限が直った後なら届く。TOKEN_REFRESHED では解かない）。
@@ -9257,6 +9259,64 @@ export async function syncTrainingDue(
   const reason = r.reason === 'empty' || r.reason === 'nomatch' || r.reason === 'too_many' ? r.reason : null
   if (reason === null) throw new DbError('server', MSG.broken)
   return { ok: false, reason, existing: num(r.existing) ?? 0, incoming: num(r.incoming), cancel: num(r.cancel) }
+}
+
+// ── 体重と計画書の期限を、共通の DB の正本から読む（2026-11-08・care-backend 0077・写し返しを止める計画 3-2） ──
+//
+// どちらも読むだけ。切り替え済み（live）で形が正しい時だけ中身を返し、それ以外（関数が無い・切り替え前・断られた・形が違う・
+// 通信できない・待ちの上限を過ぎた）は null を返す＝呼ぶ側が今までどおり Google（体重管理・計画書の GAS）へ戻る。例外は投げない。
+// 結果は呼ぶ側のメモリにだけ渡す（dataCache・端末に置かない）。
+
+/** 共通の DB の読む口の応答待ちの上限（ms。読めなければ Google へ戻るので、長く待たせない） */
+const SHARED_READ_TIMEOUT_MS = 20_000
+
+/**
+ * 体重（care-backend 0077 の carelog_weight_read・許可リストの有効な人なら現場も）。
+ * 返すのは GAS の getAll と同じ名前の項目だけ（入居者の id・masterId、記録の residentId・measuredOn・weight・wheelchairKg・measureMode・updatedAt）
+ */
+export async function readWeightsFromDb(): Promise<{ residents: unknown[]; records: unknown[] } | null> {
+  try {
+    const sb = await getClient()
+    const res = await withTimeout(
+      (signal) => {
+        const q = sb.rpc('carelog_weight_read') as unknown as PromiseLike<Res<unknown>> & { abortSignal?: (s: AbortSignal) => PromiseLike<Res<unknown>> }
+        return signal !== null && typeof q.abortSignal === 'function' ? q.abortSignal(signal) : q
+      },
+      SHARED_READ_TIMEOUT_MS,
+    )
+    if (res.error !== null) return null
+    const r = asRecord(res.data)
+    if (r === null || r.ok !== true || !Array.isArray(r.residents) || !Array.isArray(r.records)) return null
+    return { residents: r.residents, records: r.records }
+  } catch {
+    return null
+  }
+}
+// 体重の読み口（weightClient.ts）に DB の読み手を置く（weightClient は db.ts を読み込まない＝試験から単独で読めるまま）
+setWeightDbReader(readWeightsFromDb)
+
+/**
+ * 計画書の索引の期限と状態（care-backend 0077 の carelog_training_due_index・事務所・管理者だけ）。
+ * 返すのは索引と同じ形（{rows:{利用者番号:{latestPlanDate, nextDue, status, stop:{reason, from}}}, settings:{dueRule, warnDays}}）だけ。
+ * 索引がまだ無い（data が null）時も null（Google へ戻る）
+ */
+export async function readTrainingPlanIndexFromDb(): Promise<Record<string, unknown> | null> {
+  try {
+    const sb = await getClient()
+    const res = await withTimeout(
+      (signal) => {
+        const q = sb.rpc('carelog_training_due_index') as unknown as PromiseLike<Res<unknown>> & { abortSignal?: (s: AbortSignal) => PromiseLike<Res<unknown>> }
+        return signal !== null && typeof q.abortSignal === 'function' ? q.abortSignal(signal) : q
+      },
+      SHARED_READ_TIMEOUT_MS,
+    )
+    if (res.error !== null) return null
+    const r = asRecord(res.data)
+    if (r === null || r.ok !== true || r.mode !== 'live') return null
+    return asRecord(r.data)
+  } catch {
+    return null
+  }
 }
 
 // ── デイ（せせらぎ）の記録 段階2c: 申し送りの印（2026-10-22 追加・代表承認・DB 変更なし） ─────────────
