@@ -8,6 +8,7 @@
 //   - 入力封鎖中（native_input_enabled=false）は入力導線を隠さずディセーブル＋理由文
 //   - supabase へは触れず db.ts の関数だけを呼ぶ。個人情報を console・localStorage に出さない
 
+import { reporterLabel } from '../lib/reporterName'
 import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -1140,9 +1141,7 @@ const DaySection = memo(function DaySection(props: DaySectionProps) {
                     <NoteCard
                       note={n}
                       resident={n.resident_id == null ? undefined : residentById.get(n.resident_id)}
-                      reporterName={
-                        n.reporter_id == null ? null : (staffById.get(n.reporter_id) ?? null)
-                      }
+                      reporterName={reporterLabel(n, (id) => staffById.get(id) ?? null) || null}
                       actorId={actorId}
                       inputEnabled={inputEnabled}
                       read={isRead(n)}
@@ -1494,9 +1493,7 @@ function NoteCard({
       <div className="tl-card-meta mt-1 flex flex-wrap items-center gap-gap">
         <span className="text-sm text-ink2">
           記入者{' '}
-          {note.reporter_id == null
-            ? '未記入'
-            : (reporterName ?? `ID ${note.reporter_id}`)}
+          {reporterName ?? (note.reporter_id == null ? '未記入' : `ID ${note.reporter_id}`)}
         </span>
         {/* ui-design.md §0/§2「タップで既読者一覧を表示」。開いた時にだけ既読者を取りに行く */}
         <button

@@ -1085,8 +1085,9 @@ if (DB === null) {
       const src = read('pages/DailySheetPage.tsx')
       assert.match(src, /onClear=\{staffPick\?\.for === 'noteReporter' \? onClearReporter : undefined\}/)
       const clear = src.slice(src.indexOf('const onClearReporter = useCallback('), src.indexOf('const onClearReporter = useCallback(') + 900)
-      assert.match(clear, /patchDraftOrRegistration\(target\.key, \{ reporterId: null, reporterPicked: false \}\)/)
-      assert.match(clear, /updateNoteCell\(note, \{ reporter_id: null \}\)/)
+      // 一覧に無い記入者の名前（0058）も一緒に空にする
+      assert.match(clear, /patchDraftOrRegistration\(target\.key, \{ reporterId: null, reporterName: null, reporterPicked: false \}\)/)
+      assert.match(clear, /updateNoteCell\(note, \(note\.reporter_name \?\? null\) !== null \? \{ reporter_id: null, reporter_name: null \} : \{ reporter_id: null \}\)/)
       for (const other of ['MedRecordPage', 'BathRecordPage', 'IncidentFormPage', 'MedSlotsPage', 'NoteFormPage']) {
         const o = read(`pages/${other}.tsx`)
         assert.doesNotMatch(o.slice(o.indexOf('<StaffPickerModal'), o.indexOf('<StaffPickerModal') + 600), /onClear=/, `${other} の選択画面に外す操作を出している`)
@@ -1101,6 +1102,25 @@ if (DB === null) {
       await DB.flushQueue(true)
       await settle()
       assert.equal(srv.db.notes.find((n) => n.id === row.id).reporter_id, null)
+      assert.equal(DB.listUnsentNotes().length, 0)
+    })
+
+    it('記入者: 一覧に無い名前を書く変更（0058）は、送信待ち → apply_note_edits で名前を書き、職員を選び直すと名前は空に戻る', async () => {
+      const srv = noteServer()
+      const row = srv.seed({ ...regBase, body: '名前を書く行', reporter_id: 1 })
+      DB.__testHooks.setClient(srv.client)
+      await DB.saveNoteEdits({ id: row.id }, { reporter_id: { value: null, base: 1 }, reporter_name: { value: '  応援　一 ', base: null } })
+      await DB.flushQueue(true)
+      await settle()
+      const got = srv.db.notes.find((n) => n.id === row.id)
+      assert.equal(got.reporter_id, null)
+      assert.equal(got.reporter_name, '応援 一', '送る前に名前をそろえていない')
+      await DB.saveNoteEdits({ id: row.id }, { reporter_id: { value: 2, base: null } })
+      await DB.flushQueue(true)
+      await settle()
+      const got2 = srv.db.notes.find((n) => n.id === row.id)
+      assert.equal(got2.reporter_id, 2)
+      assert.equal(got2.reporter_name, null)
       assert.equal(DB.listUnsentNotes().length, 0)
     })
 

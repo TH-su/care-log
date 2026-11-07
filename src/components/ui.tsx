@@ -7,6 +7,7 @@
 // - 実名・記録本文をコード・コメント・placeholder に書かない（表示は実行時の props のみ）
 // - console 出力を持たない
 
+import { normalizeReporterName, REPORTER_NAME_MAX } from '../lib/reporterName'
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode, RefObject } from 'react'
 import { hasNoteAlias, LEVEL_MARK, noteDisplayName } from '../lib/types'
@@ -676,6 +677,11 @@ export interface StaffPickerModalProps {
   primary?: Staff[] | null
   /** 先に出す職員の見出し（既定「この日の出勤者」） */
   primaryTitle?: string
+  /**
+   * 一覧に無い名前を書いて決める（例: 申し送りの記入者に応援・実習生の名前を書く・2026-11-07 本人指示）。
+   * 渡した時だけ窓の下に「一覧に無い名前を書く」の欄を出す。渡す名前は前後の空白を除いた1〜20字
+   */
+  onFreeName?: (name: string) => void
 }
 
 export function StaffPickerModal({
@@ -688,17 +694,22 @@ export function StaffPickerModal({
   clearLabel = '選んだ職員を外す',
   primary = null,
   primaryTitle = 'この日の出勤者',
+  onFreeName,
 }: StaffPickerModalProps) {
   const [q, setQ] = useState('')
   const [showAll, setShowAll] = useState(false)
+  const [free, setFree] = useState('')
   const fieldId = useId()
   const primaryHeadId = useId()
+  const freeId = useId()
+  const freeName = normalizeReporterName(free)
 
   // 閉じ直したとき絞込語・「ほかの職員」を開いた印が残らないようにする（前回の操作を持ち越さない）
   useEffect(() => {
     if (!open) {
       setQ('')
       setShowAll(false)
+      setFree('')
     }
   }, [open])
   /** 先に出す職員だけを並べている間（絞込語が空・ほかの職員を開いていない・先に出す職員が1人以上） */
@@ -782,6 +793,41 @@ export function StaffPickerModal({
             ))}
           </ul>
         )}
+        {onFreeName ? (
+          // 一覧に無い名前を書く（応援・実習生など・2026-11-07 本人指示）。窓を閉じると書いた文字は消える（端末に残さない）
+          <form
+            className="mt-4 border-t border-border pt-3"
+            onSubmit={(ev) => {
+              ev.preventDefault()
+              if (freeName !== null) onFreeName(freeName)
+            }}
+          >
+            <label htmlFor={freeId} className="block text-sm font-bold text-ink2">
+              一覧に無い名前を書く
+            </label>
+            <div className="mt-1 flex gap-gap">
+              <input
+                id={freeId}
+                type="text"
+                value={free}
+                maxLength={REPORTER_NAME_MAX + 10}
+                autoComplete="off"
+                onChange={(e) => setFree(e.target.value)}
+                className="min-h-tap min-w-0 flex-1 rounded border border-border-strong bg-surface px-3 text-base text-ink"
+              />
+              <button
+                type="submit"
+                disabled={freeName === null}
+                className="min-h-tap shrink-0 rounded border border-primary bg-surface px-3 text-base font-bold text-primary disabled:border-border disabled:text-ink3"
+              >
+                この名前にする
+              </button>
+            </div>
+            {free.trim() !== '' && freeName === null ? (
+              <p className="mt-1 text-sm text-ink2">名前は{REPORTER_NAME_MAX}字までで書いてください。</p>
+            ) : null}
+          </form>
+        ) : null}
       </div>
     </ModalShell>
   )

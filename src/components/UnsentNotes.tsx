@@ -243,18 +243,24 @@ export function UnsentNotes({ day, noteIds, actorId, staff, residentName, onChan
           // 元の申し送りの記入者を読めない（行 id のある変更で、電波が無い等）時は登録しない＝別人の名義を作らない。
           // 登録が取り下げられた後の変更（行 id の無い ck）は元の記入者が端末に残っていないので、記入者なしで登録する
           let reporterId = reporterOf(u, rowReporter)
+          // 一覧に無い記入者の名前（0058）。変更で書いた名前、無ければ読み直した元の行の名前
+          let reporterName: string | null = typeof u.row.values.reporter_name === 'string' ? u.row.values.reporter_name : null
           if (reporterId === undefined && u.row.id > 0) {
             const rows = await fetchNoteRows([u.row.id]).catch(() => null)
             // 読めた（rows がある）のに見つからない＝元の申し送りは取り消されている。元の記入者は分からないので記入者なし
             // （別人の名義にはしない）。読めなかった（通信）時は undefined のまま＝下で止める
-            if (rows !== null) reporterId = rows.find((r) => r.id === u.row.id)?.reporter_id ?? null
+            if (rows !== null) {
+              const r0 = rows.find((r) => r.id === u.row.id)
+              reporterId = r0?.reporter_id ?? null
+              if (reporterName === null) reporterName = r0?.reporter_name ?? null
+            }
           }
           if (reporterId === undefined && u.row.id > 0) {
             setMessage({ key: k, tone: 'danger', text: '▲ 元の申し送りの記入者を確かめられないため、新しい行にできません。電波状態を確認して、もう一度押してください' })
             return
           }
           const newKey = `${noteAsNewKey(u.row.id, u.row.vers.body ?? '')}${u.row.ck ?? ''}${u.row.fork ?? ''}`
-          const res = await insertNoteAsNew({ key: newKey, meta, body, reporterId: reporterId ?? null })
+          const res = await insertNoteAsNew({ key: newKey, meta, body, reporterId: reporterId ?? null, reporterName })
           // 登録できた・送信待ちに確保できた後で、元の行の本文（見せた版）を外す
           if (u.kind === 'rescued') await dropRescuedNote(u.raw)
           else await discardPendingNote(u.row.target, ['body'], { body: u.row.vers.body })

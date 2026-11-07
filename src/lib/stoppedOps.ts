@@ -229,6 +229,8 @@ const HIDDEN = new Set([
   'recorded_by',
   'edited_by',
   'reporter_id',
+  // 一覧に無い記入者の名前（0058）。氏名なので言葉にしない
+  'reporter_name',
   'confirmer_id',
   'auto',
   'deleted_at',

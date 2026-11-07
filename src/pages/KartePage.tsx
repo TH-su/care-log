@@ -31,6 +31,7 @@
 //   ・幅 1024px 以上: 文字の欄も画面の幅まで広げ、期間の切替を1行に、個別の目標｜個人の閾値と、排泄・申し送り｜入浴・与薬・事故を2列に
 //   ・幅 1024px 以上で期間が2週・1か月の時は、バイタルと食事・水分のグラフも2列（chartCols。3か月以上・印刷は1列）
 
+import { reporterLabel } from '../lib/reporterName'
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import { flushSync } from 'react-dom'
@@ -2208,7 +2209,7 @@ function NotesSection({ notes, staffById }: NotesSectionProps) {
                   <NoteCard
                     key={n.id}
                     note={n}
-                    reporterName={n.reporter_id == null ? null : (staffById.get(n.reporter_id) ?? null)}
+                    reporterName={reporterLabel(n, (id) => staffById.get(id) ?? null) || null}
                   />
                 ))}
               </ul>

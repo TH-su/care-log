@@ -111,6 +111,7 @@ import {
   trainingResultOf,
 } from './daycareTraining'
 import type { DaycareStaffing, DaycareTrainingSession, StaffingRole, trainingPayload } from './daycareTraining'
+import { normalizeReporterName } from './reporterName'
 import { EXPLAINED_TOS, HOME_VISIT_PURPOSES, HOME_VISIT_TEXT_MAX } from './daycareHomeVisit'
 import type { DaycareHomeVisit, ExplainedTo, HomeVisitPurpose, homeVisitPayload } from './daycareHomeVisit'
 import type { DueCopyRow, DueCopySettings } from './trainingDue'
@@ -217,7 +218,7 @@ const FLUID_COLS = 'id,resident_id,taken_on,taken_at,amount_ml,kind,recorded_by,
 // 「未入力」のままだと、2台目の終了が何度送っても競合のまま終わらなかったため
 // categories（分類・0032）は 2026-10-15 に足した。**0032 を当ててからこの版を公開する**（当てる前は列が無く読めない）
 const NOTE_COLS =
-  'id,note_on,shift,facility,category,resident_id,role_tags,categories,importance,body,occurred_at,ongoing,ended_at,ended_by,reporter_id,color,after16,rev,created_at'
+  'id,note_on,shift,facility,category,resident_id,role_tags,categories,importance,body,occurred_at,ongoing,ended_at,ended_by,reporter_id,reporter_name,color,after16,rev,created_at'
 const OUTING_COLS = 'id,resident_id,kind,start_on,start_at,end_on,end_at,companion,note,recorded_by,rev'
 const ATTENDANCE_COLS = 'day,staff_id,role,sort'
 const IMPORT_DAY_COLS = 'source,day,imported_at,src_rows,inserted,updated,skipped,native_skip,unmatched'
@@ -911,6 +912,8 @@ function normalizeNote(row: unknown): Note | null {
   }
   if (readCount !== null) note.read_count = readCount
   if (typeof r.my_read === 'boolean') note.my_read = r.my_read
+  // 一覧に無い記入者の名前（0058）。列を返さない経路では付けない＝分からない
+  if ('reporter_name' in r) note.reporter_name = normalizeReporterName(r.reporter_name)
   // 継続を終了した職員（F08）。列を返さない経路（0017 の応答・タイムラインの RPC）では付けない＝「分からない」。
   // 分からないのに null を基準にして送ると、自分で競合を作るため（null と区別する）
   if (Object.prototype.hasOwnProperty.call(r, 'ended_by')) note.ended_by = idNum(r.ended_by)
@@ -1386,6 +1389,7 @@ export type NoteEditField =
   | 'after16'
   | 'occurred_at'
   | 'reporter_id'
+  | 'reporter_name'
   | 'role_tags'
   | 'categories'
   | 'shift'
@@ -1401,6 +1405,7 @@ const NOTE_CELL_FIELDS: readonly string[] = [
   'after16',
   'occurred_at',
   'reporter_id',
+  'reporter_name',
   'role_tags',
   'categories',
   'shift',
@@ -1820,6 +1825,8 @@ function cellValueOf(field: string, v: unknown): CellValue | undefined {
     case 'reporter_id':
     case 'ended_by':
       return idNum(v) ?? undefined
+    case 'reporter_name':
+      return normalizeReporterName(v) ?? undefined
     case 'importance':
       return oneOf(v, IMPORTANCES) ?? undefined
     case 'color':
@@ -2049,6 +2056,7 @@ const NOTE_SEEN_FIELD_LIST = [
   'after16',
   'occurred_at',
   'reporter_id',
+  'reporter_name',
   'role_tags',
   'categories',
   'shift',
@@ -7574,6 +7582,8 @@ export async function insertNoteAsNew(p: {
   meta: NoteMeta
   body: string
   reporterId: number | null
+  /** 一覧に無い記入者の名前（0058）。職員（reporterId）が無い時だけ送る */
+  reporterName?: string | null
 }): Promise<Note | Queued> {
   if (p.body.trim() === '') throw new DbError('server', MSG.emptyBody)
   const payload: Record<string, unknown> = {
@@ -7589,6 +7599,7 @@ export async function insertNoteAsNew(p: {
     ongoing: false,
     ended_at: null,
     reporter_id: p.reporterId,
+    ...(p.reporterId === null && normalizeReporterName(p.reporterName) !== null ? { reporter_name: normalizeReporterName(p.reporterName) } : {}),
     color: null,
     after16: p.meta.after16,
     client_key: p.key,
