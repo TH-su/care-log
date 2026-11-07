@@ -183,7 +183,17 @@ const match = (row, filters) =>
               ? row[k] <= v
               : op === 'ov'
                 ? (row[k] ?? []).some((x) => v.includes(x))
-                : true,
+                : op === 'ilike'
+                  ? // PostgREST の ilike（% は何文字でも・\ は次の1字をそのまま）の写し。大文字小文字は区別しない
+                    typeof row[k] === 'string' &&
+                    new RegExp(
+                      `^${v
+                        .replace(/\\([%_\\])|([%_])|([.*+?^${}()|[\]\\])/g, (m, esc, wild, re) =>
+                          esc !== undefined ? esc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : wild === '%' ? '.*' : wild === '_' ? '.' : `\\${re}`,
+                        )}$`,
+                      'i',
+                    ).test(row[k])
+                  : true,
   )
 
 /**
@@ -839,6 +849,21 @@ if (D === null) {
       assert.deepEqual(two.map((n) => n.id).sort(), [701, 702, 703])
       // 7値以外は送らない（全部が知らない値なら分類で絞らない＝語も重要度も無いので何も引かない）
       assert.deepEqual(await D.searchNotes({ q: '', target: 'body', fromIso: '2026-09-01', toIso: '2026-09-30', categories: ['睡眠'] }), [])
+    })
+
+    it('記入者で探す時は、一覧に無い記入者の名前（0058）も部分一致で探し、職員の行と合わせて新しい順に返す', async () => {
+      const srv = server()
+      srv.db.staff.push({ id: 1, name: '職員01', active: true })
+      srv.db.notes.push({ ...NC.NOTE_BASE_ROW, id: 801, note_on: '2026-09-10', reporter_id: 1, reporter_name: null, deleted_at: null, ended_by: null })
+      srv.db.notes.push({ ...NC.NOTE_BASE_ROW, id: 802, note_on: '2026-09-12', reporter_id: null, reporter_name: '応援 一', deleted_at: null, ended_by: null })
+      srv.db.notes.push({ ...NC.NOTE_BASE_ROW, id: 803, note_on: '2026-09-11', reporter_id: null, reporter_name: '実習 二', deleted_at: null, ended_by: null })
+      D.__testHooks.setClient(srv.client)
+      const byName = await D.searchNotes({ q: '応援', target: 'reporter', fromIso: '2026-09-01', toIso: '2026-09-30' })
+      assert.deepEqual(byName.map((n) => n.id), [802])
+      assert.equal(byName[0].reporter_name, '応援 一')
+      srv.db.notes.push({ ...NC.NOTE_BASE_ROW, id: 804, note_on: '2026-09-13', reporter_id: null, reporter_name: '職員01の応援', deleted_at: null, ended_by: null })
+      const both = await D.searchNotes({ q: '職員01', target: 'reporter', fromIso: '2026-09-01', toIso: '2026-09-30' })
+      assert.deepEqual(both.map((n) => n.id), [804, 801])
     })
 
     it('語と重要度を両方入れた時は両方で絞る', async () => {

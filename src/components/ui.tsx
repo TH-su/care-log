@@ -799,7 +799,12 @@ export function StaffPickerModal({
             className="mt-4 border-t border-border pt-3"
             onSubmit={(ev) => {
               ev.preventDefault()
-              if (freeName !== null) onFreeName(freeName)
+              if (freeName === null) return
+              // 一覧の職員と同じ名前を書いた時は、その職員を選ぶ（同じ人が名前だけで別人として残らないように）
+              const key = kanaKey(freeName)
+              const same = staff.filter((s) => kanaKey(s.name) === key)
+              if (same.length === 1) onPick(same[0].id)
+              else onFreeName(freeName)
             }}
           >
             <label htmlFor={freeId} className="block text-sm font-bold text-ink2">
@@ -813,6 +818,10 @@ export function StaffPickerModal({
                 maxLength={REPORTER_NAME_MAX + 10}
                 autoComplete="off"
                 onChange={(e) => setFree(e.target.value)}
+                // 日本語入力の確定の Enter では決めない（確定のたびに窓が閉じないように）
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && (e.nativeEvent.isComposing || e.keyCode === 229)) e.preventDefault()
+                }}
                 className="min-h-tap min-w-0 flex-1 rounded border border-border-strong bg-surface px-3 text-base text-ink"
               />
               <button

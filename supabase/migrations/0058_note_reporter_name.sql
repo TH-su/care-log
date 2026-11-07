@@ -8,14 +8,16 @@
 --    記入者は今までどおり職員（reporter_id）を選ぶのが基本。一覧に無い人（応援・実習生など）の時だけ名前の文字を残す。
 --    表示は「職員の名前 → 無ければこの名前」の順（両方ある時は職員が勝つ）。既存の行・データには触れない。
 -- 2. apply_note_edits（0039 の本文を引き継いで create or replace。同じ名前・引数・返り値）
---    変えたのは、書ける欄と見た行で比べる欄に reporter_name を足したこと、職員を選び直した時（reporter_id に職員を書いた時）は
---    名前を書かない限り reporter_name を空に戻すこと、返す行に reporter_name を足したことだけ。判定の決まりは 0039 のまま。
+--    変えたのは、書ける欄と見た行で比べる欄に reporter_name を足したこと、職員と名前を組として扱う（両方送られて片方が競合なら
+--    相方も競合・継続の終了の組と同じ）こと、書いた後の行に職員がいる時は reporter_name をいつも空にすること、
+--    返す行に reporter_name を足したことだけ。ほかの判定の決まりは 0039 のまま。
 --    **0017・0027・0032・0039 を流し直したら、このファイルも流し直す**（同じ関数を create or replace するため）。
 -- 3. timeline_chunk（0050 の本文を引き継いで create or replace）の notes・pinned に reporter_name を足す。ほかは 0050 のまま。
 --    **0050 を流し直したら、このファイルも流し直す**。
 --
 -- 旧クライアント×新サーバー: 旧版はこの列を読まない・書かない。名前だけの記入者の行は、旧版では記入者が空に見える（データは消えない）。
---   旧版で職員を選び直すと、名前は空に戻る（職員が記入者になる・上の 2）。
+--   旧版で職員を選び直すと、名前は空に戻る（職員が記入者になる・上の 2）。旧版で名前だけの行の「記入者を消す」を押しても
+--   名前は消えない（旧版には空に見えるので、消えたように見える）。全端末を新しい版へ上げてから名前を使う。
 -- 新クライアント×旧サーバー（0057 まで）: 申し送りの読み取りが列の無さで失敗する＝この移行を先に当てる。
 -- 戻す: supabase/rollback/0058_back.sql（関数を 0039・0050 の本文に戻してから列を外す。名前だけの記入者の文字は消える）
 --
@@ -278,6 +280,21 @@ begin
       v_reason := v_reason || jsonb_build_object('ended_at', v_reason ->> 'ended_by');
     end if;
   end if;
+  -- ---------- 記入者の組（0058）: 職員と一覧に無い名前が両方送られ、片方が競合なら相方も書かずに競合へ ----------
+  -- （他の端末が選んだ職員と、この端末が書いた名前が両方残る行を作らない。継続の終了の組と同じ作り）
+  if v_edits ? 'reporter_id' and v_edits ? 'reporter_name' then
+    if 'reporter_id' = any (v_conf) and not ('reporter_name' = any (v_conf)) then
+      v_write := array_remove(v_write, 'reporter_name');
+      v_settled := array_remove(v_settled, 'reporter_name');
+      v_conf := v_conf || 'reporter_name'::text;
+      v_reason := v_reason || jsonb_build_object('reporter_name', v_reason ->> 'reporter_id');
+    elsif 'reporter_name' = any (v_conf) and not ('reporter_id' = any (v_conf)) then
+      v_write := array_remove(v_write, 'reporter_id');
+      v_settled := array_remove(v_settled, 'reporter_id');
+      v_conf := v_conf || 'reporter_id'::text;
+      v_reason := v_reason || jsonb_build_object('reporter_id', v_reason ->> 'reporter_name');
+    end if;
+  end if;
 
   -- ---------- 書く（1欄でも書く時だけ） ----------
   if v_live and cardinality(v_write) > 0 then
@@ -289,9 +306,10 @@ begin
       after16     = case when 'after16'     = any (v_write) then (v_edits -> 'after16' ->> 'value')::boolean else after16 end,
       occurred_at = case when 'occurred_at' = any (v_write) then nullif(v_edits -> 'occurred_at' ->> 'value', '')::time else occurred_at end,
       reporter_id = case when 'reporter_id' = any (v_write) then nullif(v_edits -> 'reporter_id' ->> 'value', '')::bigint else reporter_id end,
-      -- 一覧に無い記入者の名前（0058）。職員を選び直した時（記入者の id を書いた時）は、名前を書かない限り空に戻す
-      reporter_name = case when 'reporter_name' = any (v_write) then nullif(btrim(v_edits -> 'reporter_name' ->> 'value'), '')
-                           when 'reporter_id' = any (v_write) and nullif(v_edits -> 'reporter_id' ->> 'value', '') is not null then null
+      -- 一覧に無い記入者の名前（0058）。書いた後の行に職員がいる時はいつも空にする（職員と名前が両方残る行を作らない）
+      reporter_name = case when (case when 'reporter_id' = any (v_write) then nullif(v_edits -> 'reporter_id' ->> 'value', '')::bigint
+                                      else reporter_id end) is not null then null
+                           when 'reporter_name' = any (v_write) then nullif(btrim(v_edits -> 'reporter_name' ->> 'value'), '')
                            else reporter_name end,
       role_tags   = case when 'role_tags'   = any (v_write)
                          then array(select jsonb_array_elements_text(v_edits -> 'role_tags' -> 'value'))

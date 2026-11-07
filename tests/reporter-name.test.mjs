@@ -67,7 +67,10 @@ describe('一覧に無い記入者の名前（reporterName.ts）', () => {
   it('書いた名前は端末の控えに残さない（日報の書きかけ・申し送りの入力の控え）', () => {
     const daily = read('src/pages/DailySheetPage.tsx')
     const dd = daily.slice(daily.indexOf('function draftData<'), daily.indexOf('function noteHasInput('))
-    assert.match(dd, /if \('reporterName' in rest\) delete \(rest as Record<string, unknown>\)\.reporterName/)
+    assert.match(dd, /if \(typeof r\.reporterName === 'string' && r\.reporterName !== ''\) r\.reporterNameLost = true\n\s*delete r\.reporterName/)
+    // 戻した書きかけは、名前が消えた印があれば記入者を選び直すまで登録しない
+    assert.match(daily, /if \(o\.reporterNameLost === true && reporterId === null\) out\.reporterNameLost = true/)
+    assert.match(daily, /if \(cur0\.reporterNameLost === true && cur0\.reporterId === null && \(cur0\.reporterName \?\? null\) === null\) \{\n\s*patchNoteDraft\(key, \{ body \}\)\n\s*setRowStatus\(key, \{ tone: 'danger', text: MSG_REPORTER_NAME_LOST \}\)/)
     const form = read('src/pages/NoteFormPage.tsx')
     const sd = form.slice(form.indexOf('function saveDraft('), form.indexOf('function saveDraft(') + 400)
     assert.match(sd, /const \{ reporterName: _omit, \.\.\.f \} = f0/)
@@ -84,6 +87,9 @@ describe('一覧に無い記入者の名前（reporterName.ts）', () => {
     const ui = read('src/components/ui.tsx')
     assert.match(ui, /\{onFreeName \? \(/)
     assert.match(ui, /一覧に無い名前を書く/)
+    // 職員と同じ名前はその職員を選ぶ・日本語入力の確定の Enter では決めない
+    assert.match(ui, /if \(same\.length === 1\) onPick\(same\[0\]\.id\)\n\s*else onFreeName\(freeName\)/)
+    assert.match(ui, /e\.nativeEvent\.isComposing \|\| e\.keyCode === 229/)
   })
 
   it('送る時: 職員を選んだ行・夜勤は名前を送らない。保存済みの行で職員を選び直すと名前を空にする', () => {
@@ -91,7 +97,7 @@ describe('一覧に無い記入者の名前（reporterName.ts）', () => {
     assert.match(form, /\.\.\.\(form\.shift !== 'night' && form\.reporterId === null && \(form\.reporterName \?\? null\) !== null/)
     const daily = read('src/pages/DailySheetPage.tsx')
     assert.match(daily, /\.\.\.\(draft\.reporterId === null && \(draft\.reporterName \?\? null\) !== null \? \{ reporter_name: draft\.reporterName \} : \{\}\)/)
-    assert.match(daily, /updateNoteCell\(note, \(note\.reporter_name \?\? null\) !== null \? \{ reporter_id: id, reporter_name: null \} : \{ reporter_id: id \}\)/)
+    assert.match(daily, /updateNoteCell\(note, \{ reporter_id: id, reporter_name: null \}\)/)
     assert.match(daily, /updateNoteCell\(note, \{ reporter_id: null, reporter_name: name \}\)/)
   })
 
@@ -100,7 +106,9 @@ describe('一覧に無い記入者の名前（reporterName.ts）', () => {
     assert.match(m, /alter table public\.notes add column if not exists reporter_name text;/)
     assert.match(m, /check \(reporter_name is null or char_length\(btrim\(reporter_name\)\) between 1 and 20\)/)
     assert.match(m, /'reporter_id', 'reporter_name',\n    'role_tags', 'categories', 'shift', 'ongoing', 'ended_at', 'ended_by', 'deleted_at'/)
-    assert.match(m, /when 'reporter_id' = any \(v_write\) and nullif\(v_edits -> 'reporter_id' ->> 'value', ''\) is not null then null/)
+    // 書いた後の行に職員がいる時はいつも名前を空にする・職員と名前は組（片方が競合なら相方も競合）
+    assert.match(m, /reporter_name = case when \(case when 'reporter_id' = any \(v_write\) then nullif\(v_edits -> 'reporter_id' ->> 'value', ''\)::bigint\n\s*else reporter_id end\) is not null then null/)
+    assert.match(m, /if v_edits \? 'reporter_id' and v_edits \? 'reporter_name' then/)
     assert.equal((m.match(/n\.color, n\.reporter_id, n\.reporter_name, n\.rev, n\.created_at,/g) ?? []).length, 2)
     const back = read('supabase/rollback/0058_back.sql')
     assert.match(back, /alter table public\.notes drop column if exists reporter_name;/)

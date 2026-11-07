@@ -169,6 +169,8 @@ export function UnsentNotes({ day, noteIds, actorId, staff, residentName, onChan
   }, [onChanged, refresh])
 
   // 一覧を開いたら、変更の送信待ちの元の申し送りの記入者を読む（F41。読めなければ「確かめられません」のまま）
+  /** 元の申し送りの一覧に無い記入者の名前（0058。行 id → 名前。上の記入者と同じ読み取りで控える・メモリだけ） */
+  const [rowReporterName, setRowReporterName] = useState<ReadonlyMap<number, string | null>>(() => new Map())
   const editIdsKey = items
     .filter((u) => u.kind !== 'insert' && u.row.id > 0 && !Object.prototype.hasOwnProperty.call(u.row.values, 'reporter_id'))
     .map((u) => (u.kind === 'insert' ? 0 : u.row.id))
@@ -182,8 +184,13 @@ export function UnsentNotes({ day, noteIds, actorId, staff, residentName, onChan
       .then((rows) => {
         if (!alive) return
         const next = new Map<number, number | null>()
-        for (const r of rows) next.set(r.id, r.reporter_id)
+        const names = new Map<number, string | null>()
+        for (const r of rows) {
+          next.set(r.id, r.reporter_id)
+          names.set(r.id, r.reporter_name ?? null)
+        }
         setRowReporter(next)
+        setRowReporterName(names)
       })
       .catch(() => undefined)
     return () => {
@@ -244,7 +251,12 @@ export function UnsentNotes({ day, noteIds, actorId, staff, residentName, onChan
           // 登録が取り下げられた後の変更（行 id の無い ck）は元の記入者が端末に残っていないので、記入者なしで登録する
           let reporterId = reporterOf(u, rowReporter)
           // 一覧に無い記入者の名前（0058）。変更で書いた名前、無ければ読み直した元の行の名前
-          let reporterName: string | null = typeof u.row.values.reporter_name === 'string' ? u.row.values.reporter_name : null
+          let reporterName: string | null =
+            typeof u.row.values.reporter_name === 'string'
+              ? u.row.values.reporter_name
+              : u.row.id > 0
+                ? (rowReporterName.get(u.row.id) ?? null)
+                : null
           if (reporterId === undefined && u.row.id > 0) {
             const rows = await fetchNoteRows([u.row.id]).catch(() => null)
             // 読めた（rows がある）のに見つからない＝元の申し送りは取り消されている。元の記入者は分からないので記入者なし
@@ -273,7 +285,7 @@ export function UnsentNotes({ day, noteIds, actorId, staff, residentName, onChan
         setBusy(null)
       }
     },
-    [done, rowReporter],
+    [done, rowReporter, rowReporterName],
   )
 
   /** 〔取り下げ〕（確認の後） */

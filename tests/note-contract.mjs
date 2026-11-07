@@ -267,14 +267,28 @@ export function fakeApplyNoteEdits(db, args) {
       }
     }
   }
+  // 0058: 記入者（職員と一覧に無い名前）も1つの組。両方が送られ、片方が競合なら相方も競合へ
+  if (has(edits, 'reporter_id') && has(edits, 'reporter_name')) {
+    for (const [a, b] of [['reporter_id', 'reporter_name'], ['reporter_name', 'reporter_id']]) {
+      if (conf.includes(a) && !conf.includes(b)) {
+        const wi = write.indexOf(b)
+        if (wi >= 0) write.splice(wi, 1)
+        const si = settled.indexOf(b)
+        if (si >= 0) settled.splice(si, 1)
+        conf.push(b)
+        reason[b] = reason[a]
+        break
+      }
+    }
+  }
   // 返り値の競合は欄の並び（NOTE_FIELDS）にそろえる（0017 の返り値の作り方と同じ）
   conf.sort((x, y) => NOTE_FIELDS.indexOf(x) - NOTE_FIELDS.indexOf(y))
   const before = found ? { ...row, role_tags: [...(row.role_tags ?? [])], categories: [...(row.categories ?? [])] } : null
   if (live && write.length > 0) {
     const next = { ...row }
     for (const f of write) next[f] = typed(f, edits[f].value)
-    // 0058: 職員を選び直した時（記入者の id に職員を書いた時）は、名前を書かない限り名前を空に戻す
-    if (write.includes('reporter_id') && !write.includes('reporter_name') && next.reporter_id !== null) next.reporter_name = null
+    // 0058: 書いた後の行に職員がいる時はいつも名前を空にする
+    if (next.reporter_id !== null && next.reporter_id !== undefined) next.reporter_name = null
     next.edited_by = editor
     checkRow(db, next)
     next.rev = row.rev + 1
@@ -522,6 +536,38 @@ export const NOTE_CONTRACT_CASES = [
       conflicts: [],
       row: { reporter_id: 2, reporter_name: null },
       after: { revDelta: 1, history: 1 },
+    },
+  },
+  {
+    name: '記入者の組: 他の端末が職員を選んでいたら、書いた名前も書かずに競合へ（職員と名前が両方残らない・0058）',
+    row: { reporter_id: 2 },
+    edits: { reporter_id: { value: null, base: 1 }, reporter_name: { value: '応援 一', base: null } },
+    editor: 1,
+    expect: {
+      status: 'conflict',
+      applied: [],
+      settled: [],
+      conflicts: [
+        { field: 'reporter_id', reason: 'changed', server: 2 },
+        { field: 'reporter_name', reason: 'changed', server: null },
+      ],
+      row: { reporter_id: 2, reporter_name: null },
+      after: { revDelta: 0, history: 0 },
+    },
+  },
+  {
+    name: '職員がいる行に名前だけを書いても名前は残らない（職員が勝つ・0058）',
+    row: { reporter_id: 1 },
+    edits: { reporter_name: { value: '応援 一', base: null } },
+    editor: 1,
+    expect: {
+      status: 'applied',
+      applied: ['reporter_name'],
+      settled: [],
+      conflicts: [],
+      row: { reporter_id: 1, reporter_name: null },
+      // 中身は変わらない（版だけ上がる）。変更の記録の数は本物（中身が同じなら記録しない）と偽物で違うので比べない
+      after: { revDelta: 1 },
     },
   },
   {

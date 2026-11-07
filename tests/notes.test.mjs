@@ -1086,8 +1086,8 @@ if (DB === null) {
       assert.match(src, /onClear=\{staffPick\?\.for === 'noteReporter' \? onClearReporter : undefined\}/)
       const clear = src.slice(src.indexOf('const onClearReporter = useCallback('), src.indexOf('const onClearReporter = useCallback(') + 900)
       // 一覧に無い記入者の名前（0058）も一緒に空にする
-      assert.match(clear, /patchDraftOrRegistration\(target\.key, \{ reporterId: null, reporterName: null, reporterPicked: false \}\)/)
-      assert.match(clear, /updateNoteCell\(note, \(note\.reporter_name \?\? null\) !== null \? \{ reporter_id: null, reporter_name: null \} : \{ reporter_id: null \}\)/)
+      assert.match(clear, /patchDraftOrRegistration\(target\.key, \{ reporterId: null, reporterName: null, reporterNameLost: false, reporterPicked: false \}\)/)
+      assert.match(clear, /updateNoteCell\(note, \{ reporter_id: null, reporter_name: null \}\)/)
       for (const other of ['MedRecordPage', 'BathRecordPage', 'IncidentFormPage', 'MedSlotsPage', 'NoteFormPage']) {
         const o = read(`pages/${other}.tsx`)
         assert.doesNotMatch(o.slice(o.indexOf('<StaffPickerModal'), o.indexOf('<StaffPickerModal') + 600), /onClear=/, `${other} の選択画面に外す操作を出している`)

@@ -547,6 +547,8 @@ const MSG_REG_STOPPED =
  * ピッカーで選んだのに、その行が画面から無くなっていた時の案内。
  * 黙って捨てると「対象を選んだのに空欄のまま」になるため、理由と次の行動を必ず出す。
  */
+/** 控えから戻した書きかけで、一覧に無い記入者の名前が消えた時の一言（名前は端末に残さないため・2026-11-07・仮置き） */
+const MSG_REPORTER_NAME_LOST = '▲ 書きかけに書いた記入者の名前は端末に残さないため消えました。記入者を選び直してください'
 const MSG_PICK_LOST =
   '▲ 保存が完了したため選択を反映できませんでした。行の対象／記入者をもう一度選んでください'
 
@@ -1207,6 +1209,11 @@ interface NoteDraft {
    * 氏名なので端末の控え（cl_dailyDraft）には書かない（draftData が外す＝再読み込みすると、この名前だけ消える）
    */
   reporterName?: string | null
+  /**
+   * 一覧に無い記入者の名前を書いていたが、控えから戻したので名前が消えた印（名前そのものは控えに残さない・2026-11-07）。
+   * この印のある書きかけは、記入者を選び直すまで登録しない（記入者の空いた行を黙って登録しない）
+   */
+  reporterNameLost?: boolean
   color: NoteColor | null
   /**
    * 分類（2026-10-15 本人回答・0032）。分類窓で選ぶ。登録の時に一緒に送る。省略＝選んでいない（[] と同じ）。
@@ -1424,8 +1431,12 @@ function draftData<T extends { key: string; did?: string; from?: DraftOrigin[]; 
   d: T,
 ): Omit<T, 'key' | 'did' | 'from'> {
   const { key: _key, did: _did, from: _from, ...rest } = d
-  // 一覧に無い記入者の名前は氏名なので控えに書かない（2026-11-07）
-  if ('reporterName' in rest) delete (rest as Record<string, unknown>).reporterName
+  // 一覧に無い記入者の名前は氏名なので控えに書かない。書いていたことだけを印で残す（戻した時に選び直してもらう・2026-11-07）
+  const r = rest as Record<string, unknown>
+  if ('reporterName' in r) {
+    if (typeof r.reporterName === 'string' && r.reporterName !== '') r.reporterNameLost = true
+    delete r.reporterName
+  }
   return rest
 }
 
@@ -1669,6 +1680,8 @@ function readNoteDraft(v: unknown): NoteDraft | null {
     locked: false,
   }
   if (reporterPicked && reporterId !== null) out.reporterPicked = true
+  // 一覧に無い記入者の名前を書いていた印（名前は戻らない・2026-11-07）。職員を選んでいた行には付けない
+  if (o.reporterNameLost === true && reporterId === null) out.reporterNameLost = true
   // 分類（2026-10-15）。6値の配列だけを読む（読めない値は無かったことにする＝書きかけそのものは戻す）
   const cats = normalizeCategories(o.categories)
   if (cats !== null && cats.length > 0) out.categories = cats
@@ -4147,6 +4160,7 @@ function DaySheet({
           targetPicked: true,
           body: op.body,
           reporterId: op.reporter_id,
+          reporterName: op.reporter_name,
           color: op.color,
           locked: true,
           ck: op.qid,
@@ -4708,6 +4722,13 @@ function DaySheet({
       if (isLockedNow(draft.shift, draft.after16)) {
         patchNoteDraft(key, { body })
         setRowStatus(key, { tone: 'danger', text: `▲ ${NOTE_LOCKED_MESSAGE}` })
+        return
+      }
+      // 控えから戻した書きかけで、一覧に無い記入者の名前が消えた行は、記入者を選び直すまで登録しない（2026-11-07・文言は仮置き）
+      const cur0 = noteDraftsRef.current.find((d) => d.key === key) ?? draft
+      if (cur0.reporterNameLost === true && cur0.reporterId === null && (cur0.reporterName ?? null) === null) {
+        patchNoteDraft(key, { body })
+        setRowStatus(key, { tone: 'danger', text: MSG_REPORTER_NAME_LOST })
         return
       }
       savingRef.current.add(key)
@@ -5981,12 +6002,12 @@ function DaySheet({
         // 控え（ref）から読む（onPickResident と同じ）
         const draft = noteDraftsRef.current.find((d) => d.key === target.key)
         if (draft) {
-          patchDraftOrRegistration(target.key, { reporterId: id, reporterName: null, reporterPicked: true })
+          patchDraftOrRegistration(target.key, { reporterId: id, reporterName: null, reporterNameLost: false, reporterPicked: true })
           return
         }
         const note = notesRef.current.find((n) => `n${n.id}` === target.key)
-        // 一覧に無い名前が入っていた行は、名前も空に戻す（職員が記入者になる・0058）
-        if (note) void updateNoteCell(note, (note.reporter_name ?? null) !== null ? { reporter_id: id, reporter_name: null } : { reporter_id: id })
+        // 名前もいつも空にして送る（送信待ちに書いた名前が残っていても、職員と名前が両方残らない・0058）
+        if (note) void updateNoteCell(note, { reporter_id: id, reporter_name: null })
         // 行き先が見つからない（開いている間に行が保存・削除された）。黙って捨てない
         else show(MSG_PICK_LOST)
       }
@@ -6004,11 +6025,11 @@ function DaySheet({
     if (!target || target.for !== 'noteReporter') return
     const draft = noteDraftsRef.current.find((d) => d.key === target.key)
     if (draft) {
-      patchDraftOrRegistration(target.key, { reporterId: null, reporterName: null, reporterPicked: false })
+      patchDraftOrRegistration(target.key, { reporterId: null, reporterName: null, reporterNameLost: false, reporterPicked: false })
       return
     }
     const note = notesRef.current.find((n) => `n${n.id}` === target.key)
-    if (note) void updateNoteCell(note, (note.reporter_name ?? null) !== null ? { reporter_id: null, reporter_name: null } : { reporter_id: null })
+    if (note) void updateNoteCell(note, { reporter_id: null, reporter_name: null })
     else show(MSG_PICK_LOST)
   }, [patchDraftOrRegistration, show, staffPick, updateNoteCell])
 
@@ -6023,7 +6044,7 @@ function DaySheet({
       if (!target || target.for !== 'noteReporter') return
       const draft = noteDraftsRef.current.find((d) => d.key === target.key)
       if (draft) {
-        patchDraftOrRegistration(target.key, { reporterId: null, reporterName: name, reporterPicked: true })
+        patchDraftOrRegistration(target.key, { reporterId: null, reporterName: name, reporterNameLost: false, reporterPicked: true })
         return
       }
       const note = notesRef.current.find((n) => `n${n.id}` === target.key)
