@@ -91,6 +91,8 @@ import {
   DbError,
   discardPendingRow,
   fetchDailyReport,
+  fetchShiftDay,
+  fillAttendanceFromShift,
   fetchLatestVital,
   FORBIDDEN_REASON,
   getAppSetting,
@@ -128,6 +130,8 @@ import {
   NOTE_LOCKED_MESSAGE,
   subscribeMyRole,
 } from '../lib/db'
+import { canAutoFillAttendance, EMPTY_SHIFT_DAY, reporterCandidates } from '../lib/shiftDay'
+import type { ShiftDay } from '../lib/shiftDay'
 // 名簿と10日まとめ取りは読み込みの控え（裏での先読み・2026-10-17）を通す（同じ署名・毎回取りに行き、結果を控える）。
 // 区切りを開く時は、変更通知で古くなっていない控えの日をこの画面の取り置きへ移して使う（取り置きの世代・捨てる契機は
 // 今までどおり。この画面が日を捨てる時は控えにも古いの印を付ける＝区切りを戻った時に編集前の内容を見せない）
@@ -4024,6 +4028,58 @@ function DaySheet({
     onWrite(day)
   }, [day, onWrite])
 
+  // ── 勤務表（2026-11-07 代表者の決定）──────────────────────────────
+  // その日の勤務表の出勤者と夜勤の施設職員。出勤者の欄が一度も使われていない今日・昨日は、勤務表の出勤者で欄を埋める
+  // （人が選んだ・外した日は触らない＝db.ts の fillAttendanceFromShift）。夜勤の申し送りの記入者は、その夜の夜勤の
+  // 施設職員を自動で入れる（決まらない時は空のまま）。勤務表が読めない時は今までどおり
+  const [shiftDay, setShiftDay] = useState<ShiftDay>(EMPTY_SHIFT_DAY)
+  const shiftDayRef = useRef<ShiftDay>(EMPTY_SHIFT_DAY)
+  const autoFilledRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (phase !== 'ready' || staff.length === 0) return
+    let alive = true
+    void (async () => {
+      const sd = await fetchShiftDay(day, staff)
+      if (!alive || !aliveRef.current || dayRef.current !== day) return
+      shiftDayRef.current = sd
+      setShiftDay(sd)
+      if (
+        autoFilledRef.current === day ||
+        !enabled ||
+        attendanceRef.current.length > 0 ||
+        sd.staffIds.length === 0 ||
+        !canAutoFillAttendance(day, todayIso())
+      )
+        return
+      autoFilledRef.current = day
+      try {
+        markSelfWrite()
+        const filled = await fillAttendanceFromShift(day, sd.staffIds)
+        if (filled === null || !aliveRef.current || dayRef.current !== day) return
+        // 埋める間に人が足した分は残す（勤務表の分の後ろへ）
+        const extra = attendanceRef.current.filter((a) => !filled.some((f: Attendance) => f.staff_id === a.staff_id))
+        applyAttendance([...filled, ...extra.map((a, i) => ({ ...a, sort: filled.length + i }))])
+      } catch {
+        // 埋められなかった（通信・封鎖）。出勤者の欄は今までどおり手で選べる。次に開いた時にやり直す
+        autoFilledRef.current = null
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [phase, day, staff, enabled, applyAttendance, markSelfWrite])
+
+  /** 記入者を選ぶ窓の上に並べる、その日の出勤者（出勤者の欄が空なら勤務表の出勤者） */
+  const reporterFeatured = useMemo(() => {
+    const ids = reporterCandidates(
+      attendance.map((a) => a.staff_id),
+      shiftDay,
+      staff,
+    )
+    const byId = new Map(staff.map((s) => [s.id, s]))
+    return ids.map((id) => byId.get(id)).filter((s): s is Staff => s !== undefined)
+  }, [attendance, shiftDay, staff])
+
   /** 保存が通った時に、その行に残っている失敗・競合の一言を消す（成功の一言は出さない＝指示10） */
   const saveOk = useCallback(
     (key: string) => {
@@ -4683,6 +4739,13 @@ function DaySheet({
         patchNoteDraft(key, { body })
         setRowStatus(key, { tone: 'danger', text: `▲ ${NOTE_LOCKED_MESSAGE}` })
         return
+      }
+      // 夜勤の行は、記入者が空ならその夜の夜勤の施設職員を入れる（勤務表で決まっている・2026-11-07 代表者の決定）。
+      // 送る前に書きかけへ入れる＝登録で送った値・最初に送った中身・後の変更の基準が全部そろう
+      const nightId = shiftDayRef.current.nightStaffId
+      if (draft.shift === 'night' && draft.reporterId === null && draft.ck === undefined && nightId !== null) {
+        draft = { ...draft, reporterId: nightId, reporterPicked: true }
+        patchNoteDraft(key, { reporterId: nightId, reporterPicked: true })
       }
       savingRef.current.add(key)
       setRowStatus(key, null)
@@ -6510,6 +6573,9 @@ function DaySheet({
         onClose={() => setStaffPick(null)}
         // 〔記入者を消す〕は申し送りの記入者を選ぶ時だけ（出勤者・施設長には出さない）
         onClear={staffPick?.for === 'noteReporter' ? onClearReporter : undefined}
+        // 申し送りの記入者を選ぶ時だけ、その日の出勤者を氏名のボタンで上に並べる（2026-11-07 代表者の決定）
+        featured={staffPick?.for === 'noteReporter' ? reporterFeatured : undefined}
+        featuredLabel="この日の出勤者"
         clearLabel="記入者を消す"
         title={
           staffPick?.for === 'attendance'

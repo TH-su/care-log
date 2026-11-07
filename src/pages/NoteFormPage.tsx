@@ -42,7 +42,12 @@ import {
   deleteNote,
   isNoteRpcMissing,
   noteDeleted,
+  fetchAttendanceDay,
+  fetchShiftDay,
+  fillAttendanceFromShift,
 } from '../lib/db'
+import { canAutoFillAttendance, EMPTY_SHIFT_DAY, reporterCandidates } from '../lib/shiftDay'
+import type { ShiftDay } from '../lib/shiftDay'
 import { addDays, fmtDayLabel, fmtTimeHM, todayIso } from '../lib/format'
 import { fmtRecordTime, noteIsNextMorning, noteTimeFor } from '../lib/nextMorning'
 import { appendPhrase, NOTE_PHRASE_CATEGORIES, PHRASE_BLANK } from '../lib/notePhrases'
@@ -427,6 +432,11 @@ export function NoteFormPage() {
 
   const [residentPicker, setResidentPicker] = useState(false)
   const [staffPicker, setStaffPicker] = useState(false)
+  /**
+   * 記録日の出勤者（日報の出勤者の欄）と勤務表の1日分（2026-11-07 代表者の決定）。記入者の候補のボタンに使う。
+   * null＝まだ読めていない（候補のボタンを出さず、今までどおり全職員から選ぶ）
+   */
+  const [dayPeople, setDayPeople] = useState<{ day: string; attendance: number[]; shift: ShiftDay } | null>(null)
   const [restorePrompt, setRestorePrompt] = useState(false)
   /** 戻した書きかけが1日以上前なら「〇日前の書きかけ」（L1。黙って消さずに出す） */
   const [restoreAge, setRestoreAge] = useState<string | null>(null)
@@ -758,7 +768,8 @@ export function NoteFormPage() {
     if (f.ongoing && f.endedOn !== '' && f.endedOn < f.noteOn) {
       e.endedOn = '期限日が記録日より前になっています。記録日以降の日付を選んでください。'
     }
-    if (f.reporterId === null) {
+    // 夜勤は記入者を選ばない（勤務表で決まっている夜勤の施設職員を自動で入れる・2026-11-07 代表者の決定）
+    if (f.reporterId === null && f.shift !== 'night') {
       e.reporterId = '記入者が選ばれていません。記入者を選んでください。'
     }
     return e
@@ -868,7 +879,8 @@ export function NoteFormPage() {
           occurred_at: occurredAt,
           ongoing: form.ongoing,
           ended_at: form.ongoing && form.endedOn !== '' ? endOfDayStamp(form.endedOn) : null,
-          reporter_id: form.reporterId,
+          // 夜勤は勤務表のその夜の夜勤の施設職員（決まらない時は空）。日勤・デイは選んだ記入者
+          reporter_id: form.shift === 'night' ? (await fetchShiftDay(form.noteOn, staff)).nightStaffId : form.reporterId,
           // 色はシート画面で扱う項目。この入力画面では既定のまま送る
           color: null,
           // 日勤の 16:00 以降の申し送りは、日報の「↓16時以降の記録」の欄に載せる（F35。日報で書いた時と同じ欄になる）
@@ -908,8 +920,45 @@ export function NoteFormPage() {
         setSaving(false)
       }
     },
-    [enabled, form, saving, show, undoInsert, validate],
+    [enabled, form, saving, show, staff, undoInsert, validate],
   )
+
+  // ── 記入者の候補（その日の出勤者・2026-11-07 代表者の決定）─────────────────
+  // 記録日の出勤者の欄（attendance）を読み、空の日は勤務表の出勤者を候補にする。今日・昨日で欄が一度も使われて
+  // いなければ、勤務表の出勤者で欄を埋める（日報と同じ）。読めない時は候補のボタンを出さない（全職員から選ぶ）
+  useEffect(() => {
+    if (phase !== 'ready' || !ISO_DATE_RE.test(form.noteOn) || staff.length === 0) return
+    const day = form.noteOn
+    let alive = true
+    void (async () => {
+      let shift: ShiftDay = EMPTY_SHIFT_DAY
+      try {
+        shift = await fetchShiftDay(day, staff)
+      } catch {
+        shift = EMPTY_SHIFT_DAY
+      }
+      let attendance: number[] = []
+      try {
+        attendance = await fetchAttendanceDay(day)
+        if (attendance.length === 0 && enabled && canAutoFillAttendance(day, todayIso()) && shift.staffIds.length > 0) {
+          const filled = await fillAttendanceFromShift(day, shift.staffIds)
+          if (filled !== null) attendance = filled.map((a) => a.staff_id)
+        }
+      } catch {
+        // 出勤者の欄が読めない・埋められない時は勤務表の出勤者だけで候補を作る（次に開いた時にやり直す）
+      }
+      if (alive) setDayPeople({ day, attendance, shift })
+    })()
+    return () => {
+      alive = false
+    }
+  }, [phase, form.noteOn, staff, enabled])
+
+  /** 記入者の候補のボタン（その日の出勤者。0人の日は空＝今までどおり全職員から選ぶ・仮置き） */
+  const reporterChoices = useMemo(() => {
+    if (dayPeople === null || dayPeople.day !== form.noteOn) return []
+    return reporterCandidates(dayPeople.attendance, dayPeople.shift, staff)
+  }, [dayPeople, form.noteOn, staff])
 
   // ── 3状態 ───────────────────────────────────────────
 
@@ -1430,28 +1479,76 @@ export function NoteFormPage() {
                 </div>
               )}
 
-              <div>
-                <p id={ids.reporter} className={labelClass}>
-                  記入者
-                </p>
-                <button
-                  type="button"
-                  ref={reporterBtnRef}
-                  onClick={() => setStaffPicker(true)}
-                  aria-label={`記入者: ${reporterText}。押すと選び直せます`}
-                  aria-invalid={errors.reporterId ? true : undefined}
-                  aria-describedby={errors.reporterId ? ids.err('reporterId') : undefined}
-                  className={`mt-1 ${pickerBtnClass}`}
-                >
-                  <span className={form.reporterId === null ? 'text-ink3' : 'font-bold'}>
-                    {reporterText}
-                  </span>
-                  <span aria-hidden="true" className="shrink-0 text-link">
-                    選ぶ
-                  </span>
-                </button>
-                {fieldError('reporterId')}
-              </div>
+              {/* 夜勤は記入者の欄を出さない（勤務表で決まっている夜勤の施設職員を自動で入れる・2026-11-07 代表者の決定） */}
+              {form.shift !== 'night' && (
+                <div>
+                  <p id={ids.reporter} className={labelClass}>
+                    記入者
+                  </p>
+                  {reporterChoices.length > 0 && (
+                    // その日の出勤者の氏名のボタン（1タップで選ぶ・選んだボタンは色が付く）
+                    <div role="group" aria-labelledby={ids.reporter} className="mt-1 flex flex-wrap gap-2">
+                      {reporterChoices.map((id) => {
+                        const on = form.reporterId === id
+                        const name = staffById.get(id)?.name ?? `職員ID ${id}`
+                        return (
+                          <button
+                            key={id}
+                            type="button"
+                            aria-pressed={on}
+                            onClick={() => update({ reporterId: id }, 'reporterId')}
+                            className={
+                              on
+                                ? 'min-h-tap rounded-md border border-primary bg-primary px-4 text-base font-bold text-primary-ink'
+                                : 'min-h-tap rounded-md border border-border-strong bg-surface px-4 text-base text-ink'
+                            }
+                          >
+                            {on && (
+                              <span aria-hidden="true" className="mr-1">
+                                ✓
+                              </span>
+                            )}
+                            {name}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    ref={reporterBtnRef}
+                    onClick={() => setStaffPicker(true)}
+                    aria-label={
+                      reporterChoices.length > 0
+                        ? form.reporterId !== null && !reporterChoices.includes(form.reporterId)
+                          ? `記入者: ${reporterText}。押すと、ほかの職員から選び直せます`
+                          : 'ほかの職員から選ぶ'
+                        : `記入者: ${reporterText}。押すと選び直せます`
+                    }
+                    aria-invalid={errors.reporterId ? true : undefined}
+                    aria-describedby={errors.reporterId ? ids.err('reporterId') : undefined}
+                    className={`mt-2 ${pickerBtnClass}`}
+                  >
+                    {reporterChoices.length > 0 ? (
+                      <span
+                        className={
+                          form.reporterId !== null && !reporterChoices.includes(form.reporterId) ? 'font-bold' : 'text-ink2'
+                        }
+                      >
+                        {form.reporterId !== null && !reporterChoices.includes(form.reporterId)
+                          ? reporterText
+                          : 'ほかの職員から選ぶ'}
+                      </span>
+                    ) : (
+                      <span className={form.reporterId === null ? 'text-ink3' : 'font-bold'}>{reporterText}</span>
+                    )}
+                    <span aria-hidden="true" className="shrink-0 text-link">
+                      選ぶ
+                    </span>
+                  </button>
+                  {fieldError('reporterId')}
+                </div>
+              )}
             </div>
           </SectionCard>
 

@@ -303,6 +303,59 @@ describe('★F70 施設長は1日1人（0026）と、出勤者の保存の順番
   }
   const DAY = '2026-11-01'
 
+  // 勤務表から出勤者の欄を埋める（2026-11-07 代表者の決定）。架空の職員 id だけ
+  it('出勤者の欄が一度も使われていない日だけ、勤務表の出勤者で埋める（足すだけ・並びは勤務表の順）', async () => {
+    need()
+    const srv = attendanceServer()
+    DB.__testHooks.setClient(srv.client)
+    const got = await DB.fillAttendanceFromShift(DAY, [5, 3, 9])
+    assert.deepEqual(got.map((a) => [a.staff_id, a.role, a.sort]), [[5, 'staff', 0], [3, 'staff', 1], [9, 'staff', 2]])
+    assert.deepEqual(srv.rows.map((r) => `${r.staff_id}:${r.role}:${r.sort}`), ['5:staff:0', '3:staff:1', '9:staff:2'])
+    assert.equal(srv.calls.filter((q) => q.action === 'update').length, 0, '埋める時に既存の行を書き換えた')
+    assert.deepEqual(await DB.fetchAttendanceDay(DAY), [5, 3, 9])
+  })
+
+  it('人が選んだ日・外した行が残る日は埋めない（何も書かない）', async () => {
+    need()
+    for (const row of [{ day: DAY, staff_id: 2, role: 'staff', sort: 0 }, { day: DAY, staff_id: 2, role: 'staff', sort: -1 }]) {
+      const srv = attendanceServer()
+      srv.rows.push(row)
+      DB.__testHooks.setClient(srv.client)
+      assert.equal(await DB.fillAttendanceFromShift(DAY, [5, 3]), null)
+      assert.equal(srv.calls.filter((q) => q.action !== 'select').length, 0, `書いた: ${JSON.stringify(row)}`)
+      assert.deepEqual(await DB.fetchAttendanceDay(DAY), row.sort >= 0 ? [2] : [])
+    }
+  })
+
+  it('勤務表は自分の施設の kv_entries のその月の3つの表と2つの一覧だけを読み、夜勤の施設職員を決める', async () => {
+    need()
+    const kv = {
+      'sched:2026-12:plan': { cells: { s1: { 3: '早' }, s2: { 3: '(21' }, s3: { 3: '7)' } } },
+      staff: [
+        { id: 's1', name: '架空 一', mainDivision: '施設', order: 2 },
+        { id: 's2', name: '架空二', mainDivision: '施設', order: 1 },
+        { id: 's3', name: '架空三', mainDivision: '施設', order: 3 },
+      ],
+      symbols: [{ code: '休', type: 'off' }],
+    }
+    const fake = fakeSupabase((q) => {
+      if (q.table !== 'kv_entries') return { data: null, error: { code: 'X', message: `unexpected ${q.table}` }, status: 500 }
+      const keys = q.filters.find((f) => f[0] === 'in' && f[1] === 'key')?.[2] ?? []
+      return { data: keys.filter((k) => k in kv).map((k) => ({ key: k, data: kv[k] })), error: null, status: 200 }
+    })
+    DB.__testHooks.setClient(fake.client)
+    const care = [
+      { id: 21, name: '架空一', active: true },
+      { id: 22, name: '架空二', active: true },
+      { id: 23, name: '架空三', active: true },
+    ]
+    const d = await DB.fetchShiftDay('2026-12-03', care)
+    assert.deepEqual(d, { source: 'plan', staffIds: [21, 22], nightStaffId: 22 })
+    const asked = fake.calls.map((q) => q.filters.find((f) => f[0] === 'in')?.[2])
+    assert.deepEqual(asked, [['sched:2026-12:actual', 'sched:2026-12:official', 'sched:2026-12:plan', 'staff', 'symbols']])
+    assert.ok(fake.calls.every((q) => q.action === 'select'), '勤務表へ書いた')
+  })
+
   it('施設長の入れ替えは「前の施設長を外す→新しい施設長を入れる」の順に書く（索引の下でも通る）', async () => {
     need()
     const srv = attendanceServer()

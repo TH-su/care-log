@@ -116,6 +116,8 @@ import type { DaycareHomeVisit, ExplainedTo, HomeVisitPurpose, homeVisitPayload 
 import type { DueCopyRow, DueCopySettings } from './trainingDue'
 import type { TrainingDueCopyInput, TrainingDueSettingsInput, TrainingDueSyncResult } from './trainingPlanClient'
 import { addDays as addDaysIso } from './format'
+import { EMPTY_SHIFT_DAY, resolveShiftDay, shiftKeysFor } from './shiftDay'
+import type { ShiftDay, ShiftMonthDocs } from './shiftDay'
 import { normalizeChoices, normalizeIncidentDetail, validateIncidentInput } from './incident'
 import type { IncidentInput } from './incident'
 import {
@@ -11868,6 +11870,77 @@ export async function saveAttendance(
     }
     throw e
   }
+}
+
+// ── 勤務表（シフト作成アプリ）からの出勤者・夜勤者（2026-11-07 代表者の決定）──────────────────────
+// 勤務表の写しは共通 DB の kv_entries（自分の施設の行だけが読める）。読むのはその月の3つの表と職員・記号の一覧だけで、
+// 端末には残さない（このタブのメモリに5分だけ控える）。判定は shiftDay.ts の純関数。
+
+/** 月ごとの勤務表の控え（メモリだけ・5分） */
+const shiftDocsCache = new Map<string, { at: number; docs: ShiftMonthDocs }>()
+const SHIFT_CACHE_MS = 5 * 60_000
+
+/**
+ * その日の勤務表の出勤者と夜勤の施設職員（ケアログの職員 id）。読めない・勤務表が無い時は空（null を返さない）。
+ * careStaff＝氏名で結ぶケアログの職員（在籍の一覧）
+ */
+export async function fetchShiftDay(dayIso: string, careStaff: readonly Staff[]): Promise<ShiftDay> {
+  const keys = shiftKeysFor(dayIso)
+  if (keys.length === 0) return EMPTY_SHIFT_DAY
+  const ym = dayIso.slice(0, 7)
+  let docs = shiftDocsCache.get(ym)
+  if (docs === undefined || Date.now() - docs.at > SHIFT_CACHE_MS) {
+    try {
+      const sb = await getClient()
+      const res = await bounded(sb.from('kv_entries').select('key,data').in('key', keys).limit(keys.length))
+      // 読めない時は、このタブで前に読めた控え（5分を過ぎていても）を使う（電波の切れた夜勤の登録で記入者を空にしない）
+      if (res.error !== null) return docs === undefined ? EMPTY_SHIFT_DAY : resolveShiftDay(docs.docs, dayIso, careStaff)
+      const got: ShiftMonthDocs = {}
+      for (const row of Array.isArray(res.data) ? res.data : []) {
+        const r = asRecord(row)
+        const k = r === null ? null : str(r.key)
+        if (r === null || k === null) continue
+        if (k === keys[0]) got.actual = r.data
+        else if (k === keys[1]) got.official = r.data
+        else if (k === keys[2]) got.plan = r.data
+        else if (k === 'staff') got.staff = r.data
+        else if (k === 'symbols') got.symbols = r.data
+      }
+      docs = { at: Date.now(), docs: got }
+      shiftDocsCache.set(ym, docs)
+    } catch {
+      // 勤務表が読めない時は、前に読めた控え、それも無ければ今までどおり（出勤者の欄は手で選ぶ・夜勤の記入者は空）に倒す
+      return docs === undefined ? EMPTY_SHIFT_DAY : resolveShiftDay(docs.docs, dayIso, careStaff)
+    }
+  }
+  return resolveShiftDay(docs.docs, dayIso, careStaff)
+}
+
+/** その日の出勤者の欄に出ている職員（表示の順）。申し送りの記入者の候補に使う。読めない時は例外 */
+export async function fetchAttendanceDay(dayIso: string): Promise<number[]> {
+  assertDay(dayIso)
+  const sb = await getClient()
+  const rows = [...(await fetchAttendanceRows(sb, dayIso)).values()].filter((a) => a.sort >= 0)
+  rows.sort((a, b) => a.sort - b.sort || a.staff_id - b.staff_id)
+  return rows.map((a) => a.staff_id)
+}
+
+/**
+ * その日の出勤者の欄が一度も使われていない（取り消した行も無い）時だけ、勤務表の出勤者で埋める。
+ * 埋めた時はその一覧（表示の順）、埋めなかった時は null。人が一度でも選んだ・外した日は触らない（取り消した行が
+ * 残っている日も含む）。書き込みは画面からの保存と同じ applyAttendance（足すだけ・baseline は空＝誰も外さない）。
+ * 通信の失敗は送信待ちに積まない（次に開いた時にやり直す＝電波が戻ってから他の端末が選んだ分と二重にしない）
+ */
+export async function fillAttendanceFromShift(dayIso: string, staffIds: readonly number[]): Promise<Attendance[] | null> {
+  assertDay(dayIso)
+  if (staffIds.length === 0) return null
+  await assertWritable()
+  const sb = await getClient()
+  const existing = await fetchAttendanceRows(sb, dayIso)
+  if (existing.size > 0) return null
+  const rows = staffIds.map((id, i) => ({ staff_id: id, role: 'staff' as const, sort: i }))
+  await applyAttendance(sb, dayIso, rows, [], null)
+  return rows.map((r) => ({ day: dayIso, ...r }))
 }
 
 /** 見ていた役割（{職員ID: 'manager'|'staff'}）を読む。無い・読めなければ null（＝役割の基準が分からない） */

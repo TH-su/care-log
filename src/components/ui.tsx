@@ -666,6 +666,13 @@ export interface StaffPickerModalProps {
    * （出勤者など、外す操作の無い用途では渡さない）
    */
   onClear?: () => void
+  /**
+   * 一覧の上に氏名のボタンで並べる職員（例: 申し送りの記入者を選ぶ時のその日の出勤者・2026-11-07 代表者の決定）。
+   * 空・省略の時は今までどおり一覧だけ。絞り込みの文字を入れている間は出さない
+   */
+  featured?: Staff[]
+  /** featured の見出し（既定「今日の出勤者」） */
+  featuredLabel?: string
   /** 外す操作のボタンの文言（onClear を渡す時。既定「選んだ職員を外す」） */
   clearLabel?: string
 }
@@ -678,6 +685,8 @@ export function StaffPickerModal({
   title = '記録する職員を選ぶ',
   onClear,
   clearLabel = '選んだ職員を外す',
+  featured,
+  featuredLabel = '今日の出勤者',
 }: StaffPickerModalProps) {
   const [q, setQ] = useState('')
   const fieldId = useId()
@@ -719,6 +728,26 @@ export function StaffPickerModal({
             <span aria-hidden="true">✕ </span>
             {clearLabel}
           </button>
+        ) : null}
+        {featured !== undefined && featured.length > 0 && kanaKey(q) === '' ? (
+          <div className="mb-3">
+            <p id={`${fieldId}-featured`} className="mb-1 text-sm font-bold text-ink2">
+              {featuredLabel}
+            </p>
+            <div role="group" aria-labelledby={`${fieldId}-featured`} className="flex flex-wrap gap-2">
+              {featured.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => onPick(s.id)}
+                  className="min-h-tap rounded border border-border-strong bg-surface px-4 text-base font-bold text-ink"
+                >
+                  {s.name}
+                </button>
+              ))}
+            </div>
+            <p className="mt-3 text-sm font-bold text-ink2">ほかの職員</p>
+          </div>
         ) : null}
         {staff.length === 0 ? (
           <EmptyBlock message="職員の一覧がまだありません。設定タブでマスタ同期を実行してください。" />
