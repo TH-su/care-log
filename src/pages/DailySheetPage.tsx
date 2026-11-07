@@ -6543,10 +6543,11 @@ function DaySheet({
               onTouch={touchNoteRow}
             />
 
-            {/* 夜勤申し送りもデイサービスの下から少し離し、濃く太い罫線で区切る（2026-10-09 指示） */}
+            {/* 夜勤申し送りもデイサービスの下から少し離し、濃く太い罫線で区切る（2026-10-09 指示）。
+                画面では夜勤の欄をデイより左右に細くし、翌日との境目を分かりやすくする（2026-11-07 本人指示・sheet.css の .dsheet-island-night） */}
             <NoteBlock
               ctx={ctx}
-              className="dsheet-sep-block"
+              className="dsheet-sep-block dsheet-island-night"
               title="夜勤申し送り"
               tone="night"
               rows={nightNotes}
@@ -8382,7 +8383,7 @@ interface NoteBlockProps {
   onHistory: (note: Note) => void
   /** 書きかけの行の本文を打った（「書いています」を配るのは手を入れた行だけ・F21） */
   onTouch?: (key: string) => void
-  /** 枠の外側の余白・区切り線を足したい時だけ渡す（デイサービス欄の .dsheet-gap-block・.dsheet-island、夜勤の .dsheet-sep-block） */
+  /** 枠の外側の余白・区切り線を足したい時だけ渡す（デイサービス欄の .dsheet-gap-block・.dsheet-island、夜勤の .dsheet-sep-block・.dsheet-island-night） */
   className?: string
   /** この欄のロックの状態（2026-10-15 本人回答・仕様 §2） */
   lock: NoteLockView

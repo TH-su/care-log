@@ -960,6 +960,23 @@
   }
 }
 
+/* 夜勤申し送りの欄を、デイサービス欄よりさらに左右へ細くする（2026-11-07 本人指示）。
+   1日の流れの最後の欄が細くなり、その下に来る翌日の日付の行（横幅いっぱい）との境目が分かりやすくなる。
+   左右は日の枠の線（2px）の内側 16px（デイは 8px）。上の余白・上端の太線は .dsheet-sep-block のまま。
+   日の枠の下の線は横幅いっぱいのまま残すと細い欄の外へはみ出して見えるので、夜勤の欄がある日は外し、
+   夜勤の欄の下端に 3px の太線を持たせる（デイと同じ太さ）。影・overflow は付けない（行の左固定が効かなくなる）。
+   画面だけ・印刷は変えない */
+@media screen {
+  .dsheet-body > .dsheet-island-night {
+    margin-left: calc(var(--sp-4) + var(--sheet-rule-bold));
+    margin-right: calc(var(--sp-4) + var(--sheet-rule-bold));
+    border-bottom: 3px solid var(--c-ink);
+  }
+  .dsheet-day:has(.dsheet-island-night) {
+    border-bottom: none;
+  }
+}
+
 /* 「↓16時以降の記録」の帯。2026-10-09 指示で画面からは外す（16時以降の欄はタイトル帯の「（16時以降）」で分かる）。
    印刷は従来どおり黒い帯のまま（原則2） */
 .dsheet-late-band {
