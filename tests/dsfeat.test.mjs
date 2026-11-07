@@ -263,6 +263,13 @@ if (pureError !== null) {
       assert.match(daily, /line\.suffix === '' \|\| line\.sameAsPrev \? ' print:hidden' : ''/)
     })
 
+    it('申し送りの入力: 夜勤は記入者の欄を出さず・確かめず・記入者を入れない（2026-11-07 本人指示）', () => {
+      const form = readFileSync(new URL('../src/pages/NoteFormPage.tsx', import.meta.url), 'utf8')
+      assert.match(form, /\{form\.shift !== 'night' && \(\s*<div>\s*<p id=\{ids\.reporter\}/)
+      assert.match(form, /if \(f\.reporterId === null && f\.shift !== 'night'\)/)
+      assert.match(form, /reporter_id: form\.shift === 'night' \? null : form\.reporterId/)
+    })
+
     it('surnameOf: 最初の半角・全角空白より前／空白が無ければ全部／前後の空白は無視／空・null は空', () => {
       assert.equal(surnameOf('職員 01'), '職員')
       assert.equal(surnameOf('職員　01'), '職員')

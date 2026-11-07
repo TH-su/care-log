@@ -150,16 +150,16 @@ function memSupabase(tables = {}, fail = () => null) {
   }
   // ログインの役割（care-backend の public.my_account() の真似。db.ts の fetchMyRole が読む）
   // （calls には控えない＝「書き込みが0件か」の数え方を変えない。問い合わせた回数は rpcCalls に数える）
+  // rpcReplies[関数名](引数) が返す物をその関数の応答にする（勤務表の kv_get など。置いていない関数は「関数が無い」）
   const rpcCalls = []
-  const rpc = (fn) => {
+  const rpcReplies = {}
+  const rpc = (fn, args) => {
     rpcCalls.push(fn)
-    return Promise.resolve(
-      fn === 'my_account'
-        ? { data: { role: testRole }, error: null, status: 200 }
-        : { data: null, error: { message: 'no rpc', code: 'PGRST202' }, status: 404 },
-    )
+    if (fn === 'my_account') return Promise.resolve({ data: { role: testRole }, error: null, status: 200 })
+    if (typeof rpcReplies[fn] === 'function') return Promise.resolve().then(() => rpcReplies[fn](args))
+    return Promise.resolve({ data: null, error: { message: 'no rpc', code: 'PGRST202' }, status: 404 })
   }
-  return { db, calls, from, rpc, rpcCalls }
+  return { db, calls, from, rpc, rpcCalls, rpcReplies }
 }
 
 /** 偽のクライアントを gasClient（stub 経由）と db.ts（setClient）の両方に置く */
@@ -1224,5 +1224,136 @@ describe('現場のログインでは名簿の同期をしない（0040・代表
       assert.equal(sb.db.residents.length, 2, role)
       assert.ok(sb.db.master_sync_log.length >= 1, role)
     }
+  })
+})
+
+// ══════════════════════════════════════════════════════════════
+// 2026-11-07: 職員の名前は勤務表の正本（Supabase の kv_get('staff')）から先に読む
+//   勤務表は 2026-10-16 に正本を Supabase へ切り替え、Google へは写し返していない（GAS の pull は 10/16 のまま）。
+//   切り替え後（mode:'live'）の一覧が読めた時は GAS の職員名簿を呼ばない。読めない・形が違う時は今までどおり GAS から読む
+// ══════════════════════════════════════════════════════════════
+describe('職員の名前は勤務表の正本（Supabase の kv_get）から先に読む（2026-11-07）', { skip }, () => {
+  const base = () =>
+    memSupabase({ residents: [res(1, 'R001', '利用者01')], staff: [{ id: 1, name: '職員01', active: true, manual: false }] })
+  const kvLive = (data) => () => ({ data: { ok: true, rev: 12, data, updatedAt: '2026-11-07T00:00:00Z', mode: 'live' }, error: null, status: 200 })
+  const toShift = (gas) => gas.requests.filter((r) => r.url.startsWith(SHIFT_URL))
+  const staffWrites = (sb) => sb.calls.filter((q) => q.table === 'staff' && q.action !== 'select').length
+
+  it('切り替え後の一覧が読めた時は GAS の職員名簿を呼ばず、その一覧で職員の表を直す（退職は在籍を外す）', async () => {
+    configure()
+    const sb = base()
+    let args = null
+    sb.rpcReplies.kv_get = (a) => {
+      args = a
+      return kvLive([
+        { name: '職員01', active: true, status: '退職', order: 1 },
+        { name: '職員02', active: true, order: 2 },
+        { name: '職員03', active: true, order: 3 },
+      ])()
+    }
+    useClient(sb)
+    const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: ['職員01'] }) // GAS の勤務表は古いまま
+    const out = await G.syncMasters()
+    assert.equal(typeof out, 'object')
+    assert.deepEqual(args, { p_key: 'staff' }) // 読むのは勤務表の職員一覧のキーだけ
+    assert.equal(toShift(gas).length, 0, 'GAS の職員名簿を呼んでいない')
+    assert.ok(gas.requests.some((r) => r.body?.action === 'getRoster'), '利用者名簿は今までどおり GAS から読む')
+    const names = sb.db.staff.map((s) => [s.name, s.active]).sort()
+    assert.deepEqual(names, [['職員01', false], ['職員02', true], ['職員03', true]])
+    assert.equal(out.staff.added, 2)
+    assert.equal(out.staff.deactivated, 1)
+  })
+
+  it('配列でなく { staff: [...] } の形でも読む（GAS の pull と同じ受け取り方）', async () => {
+    configure()
+    const sb = base()
+    sb.rpcReplies.kv_get = kvLive({ staff: [{ name: '職員01', active: true }, { name: '職員04', active: true }] })
+    useClient(sb)
+    const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: ['職員01'] })
+    await G.syncMasters()
+    assert.equal(toShift(gas).length, 0)
+    assert.ok(sb.db.staff.some((s) => s.name === '職員04'))
+  })
+
+  it('一覧が読めた時は、職員名簿の接続設定が崩れていても止めない（GAS の職員名簿を使わないため）', async () => {
+    configure()
+    lsStore.set('cl_staffGasUrl', 'https://example.invalid/not-gas')
+    const sb = base()
+    sb.rpcReplies.kv_get = kvLive([{ name: '職員01', active: true }, { name: '職員05', active: true }])
+    useClient(sb)
+    const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: [] })
+    const out = await G.syncMasters()
+    assert.equal(typeof out, 'object')
+    assert.equal(gas.requests.some((r) => !r.url.startsWith(MASTER_URL)), false)
+    assert.ok(sb.db.staff.some((s) => s.name === '職員05'))
+  })
+
+  const fallbacks = [
+    ['関数が無い（PGRST202）', null],
+    ['断られた（42501）', () => ({ data: null, error: { message: 'permission denied', code: '42501' }, status: 403 })],
+    ['通信の失敗（例外）', () => Promise.reject(new Error('network'))],
+    ['写しの期間（mode:shadow）', () => ({ data: { ok: true, rev: 3, data: [{ name: '職員09', active: true }], mode: 'shadow' }, error: null, status: 200 })],
+    ['行が無い（rev 0・data null・mode なし）', () => ({ data: { ok: true, rev: 0, data: null }, error: null, status: 200 })],
+    ['ok が true でない', () => ({ data: { ok: false, data: [{ name: '職員09', active: true }], mode: 'live' }, error: null, status: 200 })],
+    ['中身が配列でも { staff } でもない', kvLive('職員09')],
+    ['中身が0件', kvLive([])],
+    ['氏名の無い行だけ', kvLive([{ active: true }, { name: '' }, null, 7])],
+    ['応答そのものが配列', () => ({ data: [{ name: '職員09', active: true }], error: null, status: 200 })],
+    ['応答が空', () => ({ data: null, error: null, status: 200 })],
+  ]
+  for (const [label, reply] of fallbacks) {
+    it(`読めない・形が違う時は今までどおり GAS の職員名簿から読む: ${label}`, async () => {
+      configure()
+      const sb = base()
+      if (reply) sb.rpcReplies.kv_get = reply
+      useClient(sb)
+      const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: ['職員01', '職員06'] })
+      const out = await G.syncMasters()
+      assert.equal(typeof out, 'object', label)
+      assert.ok(sb.rpcCalls.includes('kv_get'), label)
+      assert.deepEqual(toShift(gas).map((r) => [r.method, r.body?.action, r.body?.keys]), [['POST', 'pull', ['staff']]], label)
+      assert.ok(sb.db.staff.some((s) => s.name === '職員06'), label)
+      assert.equal(sb.db.staff.some((s) => s.name === '職員09'), false, `${label}: 使えない応答の氏名を入れていない`)
+    })
+  }
+
+  it('Supabase も GAS も読めない時は職員の表に1行も書かない（空上書き保護はそのまま）', async () => {
+    configure()
+    const sb = base()
+    sb.rpcReplies.kv_get = () => ({ data: { ok: true, rev: 3, data: [], mode: 'live' }, error: null, status: 200 })
+    useClient(sb)
+    lsStore.set('cl_staffGasToken', 'wrong') // GAS の職員名簿も断られる
+    fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: ['職員01'] })
+    await assert.rejects(G.syncMasters(), (e) => {
+      assert.match(e.message, /職員マスタを取得できませんでした/)
+      assert.match(e.message, /職員の一覧は変更していません/)
+      return true
+    })
+    assert.equal(staffWrites(sb), 0)
+    assert.deepEqual(sb.db.staff.map((s) => [s.name, s.active]), [['職員01', true]])
+  })
+
+  it('現場（field）のログインでは kv_get も呼ばない（役割の確かめの後に読む）', async () => {
+    configure()
+    testRole = 'field'
+    const sb = base()
+    sb.rpcReplies.kv_get = kvLive([{ name: '職員01', active: true }])
+    useClient(sb)
+    fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: ['職員01'] })
+    await assert.rejects(G.syncMasters(), (e) => e.message === G.MASTER_OFFICE_ONLY_MSG)
+    assert.equal(await G.autoSyncMasters(), 'officeOnly')
+    assert.equal(sb.rpcCalls.includes('kv_get'), false)
+  })
+
+  it('静的: 勤務表の正本は読み取りの kv_get だけで読み、書く関数を呼ばない・中身を console や localStorage に残さない', () => {
+    const s = src('lib/gasClient.ts')
+    const fn = s.slice(s.indexOf('async function pullStaffNamesFromKv'), s.indexOf('async function pullStaffNamesOrNull'))
+    assert.match(fn, /supabase\.rpc\('kv_get', \{ p_key: 'staff' \}\)/)
+    assert.match(fn, /rec\.ok !== true \|\| rec\.mode !== 'live'/)
+    assert.match(fn, /Promise\.race\(/) // 時間切れでも GAS へ戻す
+    assert.doesNotMatch(fn, /console\.|localStorage/)
+    assert.doesNotMatch(s, /rpc\('(kv_put|kv_import|kv_set_mode|kv_set_family_mode|shift_push|shift_lock_[a-z]+)'/)
+    assert.match(s, /const kvNames = await pullStaffNamesFromKv\(\)\n/)
+    assert.match(s, /await assertMasterWriter\(\)[\s\S]*?const kvNames = await pullStaffNamesFromKv\(\)/)
   })
 })

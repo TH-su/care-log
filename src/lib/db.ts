@@ -116,8 +116,6 @@ import type { DaycareHomeVisit, ExplainedTo, HomeVisitPurpose, homeVisitPayload 
 import type { DueCopyRow, DueCopySettings } from './trainingDue'
 import type { TrainingDueCopyInput, TrainingDueSettingsInput, TrainingDueSyncResult } from './trainingPlanClient'
 import { addDays as addDaysIso } from './format'
-import { EMPTY_SHIFT_DAY, resolveShiftDay, shiftKeysFor } from './shiftDay'
-import type { ShiftDay, ShiftMonthDocs } from './shiftDay'
 import { normalizeChoices, normalizeIncidentDetail, validateIncidentInput } from './incident'
 import type { IncidentInput } from './incident'
 import {
@@ -11872,103 +11870,6 @@ export async function saveAttendance(
   }
 }
 
-// ── 勤務表（シフト作成アプリ）からの出勤者・夜勤者（2026-11-07 代表者の決定）──────────────────────
-// 勤務表の写しは共通 DB の kv_entries（自分の施設の行だけが読める）。読むのはその月の3つの表と職員・記号の一覧だけで、
-// 端末には残さない（このタブのメモリに5分だけ控える）。判定は shiftDay.ts の純関数。
-
-/** 月ごとの勤務表の控え（メモリだけ・5分） */
-const shiftDocsCache = new Map<string, { at: number; docs: ShiftMonthDocs }>()
-const SHIFT_CACHE_MS = 5 * 60_000
-
-/**
- * その日の勤務表の出勤者と夜勤の施設職員（ケアログの職員 id）。読めない・勤務表が無い時は空（null を返さない）。
- * careStaff＝氏名で結ぶケアログの職員（在籍の一覧）
- */
-export async function fetchShiftDay(dayIso: string, careStaff: readonly Staff[]): Promise<ShiftDay> {
-  const keys = shiftKeysFor(dayIso)
-  if (keys.length === 0) return EMPTY_SHIFT_DAY
-  const ym = dayIso.slice(0, 7)
-  let docs = shiftDocsCache.get(ym)
-  if (docs === undefined || Date.now() - docs.at > SHIFT_CACHE_MS) {
-    try {
-      const sb = await getClient()
-      const res = await bounded(sb.from('kv_entries').select('key,data').in('key', keys).limit(keys.length * 2))
-      // 読めない時は、このタブで前に読めた控え（5分を過ぎていても）を使う（電波の切れた夜勤の登録で記入者を空にしない）
-      if (res.error !== null) return docs === undefined ? EMPTY_SHIFT_DAY : resolveShiftDay(docs.docs, dayIso, careStaff)
-      const got: ShiftMonthDocs = {}
-      const seen = new Set<string>()
-      for (const row of Array.isArray(res.data) ? res.data : []) {
-        const r = asRecord(row)
-        const k = r === null ? null : str(r.key)
-        if (r === null || k === null) continue
-        // 同じキーが2行（2つ以上の施設の行が見えるアカウント）の時は、どちらの施設の勤務表か決められないので使わない
-        if (seen.has(k)) return EMPTY_SHIFT_DAY
-        seen.add(k)
-        if (k === keys[0]) got.actual = r.data
-        else if (k === keys[1]) got.official = r.data
-        else if (k === keys[2]) got.plan = r.data
-        else if (k === 'staff') got.staff = r.data
-        else if (k === 'symbols') got.symbols = r.data
-      }
-      docs = { at: Date.now(), docs: got }
-      shiftDocsCache.set(ym, docs)
-    } catch {
-      // 勤務表が読めない時は、前に読めた控え、それも無ければ今までどおり（出勤者の欄は手で選ぶ・夜勤の記入者は空）に倒す
-      return docs === undefined ? EMPTY_SHIFT_DAY : resolveShiftDay(docs.docs, dayIso, careStaff)
-    }
-  }
-  return resolveShiftDay(docs.docs, dayIso, careStaff)
-}
-
-/** その日の出勤者の欄に出ている職員（表示の順）。申し送りの記入者の候補に使う。読めない時は例外 */
-export async function fetchAttendanceDay(dayIso: string): Promise<number[]> {
-  assertDay(dayIso)
-  const sb = await getClient()
-  const rows = [...(await fetchAttendanceRows(sb, dayIso)).values()].filter((a) => a.sort >= 0)
-  rows.sort((a, b) => a.sort - b.sort || a.staff_id - b.staff_id)
-  return rows.map((a) => a.staff_id)
-}
-
-/** この端末の送信待ちに、その日の出勤者の操作が残っているか（自動で埋める前に確かめる） */
-export function hasPendingAttendance(dayIso: string): boolean {
-  for (const q of queue) {
-    if (q.table !== 'attendance') continue
-    if (dateStr(asRecord(q.payload)?.day) === dayIso) return true
-  }
-  return false
-}
-
-/**
- * その日の出勤者の欄が一度も使われていない（取り消した行も無い）時だけ、勤務表の出勤者で埋める（足すだけ）。
- * 戻り値: 'filled'＝埋めた（rows はその一覧）／'skipped'＝埋めなかった（rows はサーバーにあるその日の表示中の一覧。
- * 人が選んだ・外した日・この端末に送信待ちがある日・他の端末が先に埋めた日）。
- * 既にある行は一切書き換えない（人が選んだ施設長・並びを下げない）。insert は1文で、主キーの競走（23505）に当たったら
- * 何も書かずに止める（他の端末が同時に選んだ・埋めた）。通信の失敗は送信待ちに積まない（次に開いた時にやり直す）。
- * beforeWrite＝書く直前に呼ぶ（日報の取り置きを捨てる印。書かない時は呼ばない）
- */
-export async function fillAttendanceFromShift(
-  dayIso: string,
-  staffIds: readonly number[],
-  beforeWrite?: () => void,
-): Promise<{ result: 'filled' | 'skipped'; rows: Attendance[] }> {
-  assertDay(dayIso)
-  const sb = await getClient()
-  const shown = (m: Map<number, Attendance>): Attendance[] =>
-    [...m.values()].filter((a) => a.sort >= 0).sort((x, y) => x.sort - y.sort || x.staff_id - y.staff_id)
-  const existing = await fetchAttendanceRows(sb, dayIso)
-  if (existing.size > 0 || staffIds.length === 0 || hasPendingAttendance(dayIso)) return { result: 'skipped', rows: shown(existing) }
-  await assertWritable()
-  const rows: Attendance[] = []
-  for (const id of staffIds) if (!rows.some((r) => r.staff_id === id)) rows.push({ day: dayIso, staff_id: id, role: 'staff', sort: rows.length })
-  beforeWrite?.()
-  const res = await bounded(sb.from('attendance').insert(rows).select('staff_id'))
-  if (res.error !== null) {
-    if (!isUniqueViolation(res)) throw writeError(res)
-    return { result: 'skipped', rows: shown(await fetchAttendanceRows(sb, dayIso)) }
-  }
-  return { result: 'filled', rows }
-}
-
 /** 見ていた役割（{職員ID: 'manager'|'staff'}）を読む。無い・読めなければ null（＝役割の基準が分からない） */
 function attendanceRolesOf(v: unknown): Map<number, Attendance['role']> | null {
   const r = asRecord(v)
@@ -12114,6 +12015,20 @@ async function applyAttendance(
   for (const row of toUpdate) if (!releaseUpdates.includes(row)) await updateOne(row)
   // 3. 一覧から外れた人を非表示にする（行は消さない＝再登録で戻せる）
   await hideRows(toHide.filter((id) => !releaseHides.includes(id)))
+}
+
+/**
+ * その日の出勤者（日報の出勤者の欄・取り消した行＝sort < 0 は除く）。申し送りの記入者を選ぶ窓に、この日の出勤者を
+ * 先に出すために読む（2026-11-07 代表者の決定）。読めない時は例外（呼ぶ側は全職員から選ぶ窓のままにする）
+ */
+export async function fetchAttendanceForDay(dayIso: string): Promise<Attendance[]> {
+  assertDay(dayIso)
+  const sb = await getClient()
+  const res = await bounded(
+    sb.from('attendance').select(ATTENDANCE_COLS).eq('day', dayIso).gte('sort', 0).order('sort', { ascending: true }).limit(MAX_ROWS),
+  )
+  if (res.error !== null) throw readError(res)
+  return list(res.data, normalizeAttendance)
 }
 
 /** その日の出勤者行（取り消し済み＝sort < 0 も含む）。置き換えの差分計算に使う */

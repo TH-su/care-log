@@ -425,6 +425,9 @@ autoSyncMasters(now?: number): Promise<'unconfigured' | 'officeOnly' | 'fresh' |
 - 照合（F49）: 氏名照合の候補から退去済み（active=false）の行を外す（退去者と同じ氏名の新しい入居者は新しい行になる）。在籍中の同名は従来どおり保留
 - 保留（F51）: source_id が一致して氏名だけが違う保留でも、部屋・介護度は名簿どおりに直す（氏名・かな・性別・在籍は変えない）
 - 同期・採用の後は db.notifyMastersChanged() を呼ぶ（App の名簿・設定画面の一覧が取り直す）
+- 職員名簿の読み先（2026-11-07）: syncMasters は役割の確かめの後、勤務表の正本（共通の Supabase の読み取り関数 `kv_get('staff')`・care-backend 0005／0007／0009）を先に読む。
+  応答が ok:true・mode:'live'・氏名のある行が1件以上の時だけ使い、その時は GAS の職員名簿（pull）を呼ばない（職員名簿の接続設定も見ない）。
+  関数が無い・断られた・通信の失敗・時間切れ・写しの期間（shadow）・形の違いは捨てて、今までどおり GAS から読む。書く関数は呼ばない。射影（氏名・在籍・入職順）と空上書き保護は同じ
 
 ## src/hooks/useTimeline.ts
 

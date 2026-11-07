@@ -666,15 +666,16 @@ export interface StaffPickerModalProps {
    * （出勤者など、外す操作の無い用途では渡さない）
    */
   onClear?: () => void
-  /**
-   * 一覧の上に氏名のボタンで並べる職員（例: 申し送りの記入者を選ぶ時のその日の出勤者・2026-11-07 代表者の決定）。
-   * 空・省略の時は今までどおり一覧だけ。絞り込みの文字を入れている間は出さない
-   */
-  featured?: Staff[]
-  /** featured の見出し（既定「今日の出勤者」） */
-  featuredLabel?: string
   /** 外す操作のボタンの文言（onClear を渡す時。既定「選んだ職員を外す」） */
   clearLabel?: string
+  /**
+   * 先に出す職員（例: 申し送りの記入者を選ぶ時の、その日の出勤者・2026-11-07 代表者の決定）。1人以上いる時だけ、
+   * 開いた時はこの職員だけを並べ、下の「ほかの職員から選ぶ」で staff の全員を出す。氏名で絞る時は全員から探す。
+   * 省略・null・0人の時は今までどおり staff の全員を出す
+   */
+  primary?: Staff[] | null
+  /** 先に出す職員の見出し（既定「この日の出勤者」） */
+  primaryTitle?: string
 }
 
 export function StaffPickerModal({
@@ -685,16 +686,23 @@ export function StaffPickerModal({
   title = '記録する職員を選ぶ',
   onClear,
   clearLabel = '選んだ職員を外す',
-  featured,
-  featuredLabel = '今日の出勤者',
+  primary = null,
+  primaryTitle = 'この日の出勤者',
 }: StaffPickerModalProps) {
   const [q, setQ] = useState('')
+  const [showAll, setShowAll] = useState(false)
   const fieldId = useId()
+  const primaryHeadId = useId()
 
-  // 閉じ直したとき絞込語が残らないようにする（前回の入力を持ち越さない）
+  // 閉じ直したとき絞込語・「ほかの職員」を開いた印が残らないようにする（前回の操作を持ち越さない）
   useEffect(() => {
-    if (!open) setQ('')
+    if (!open) {
+      setQ('')
+      setShowAll(false)
+    }
   }, [open])
+  /** 先に出す職員だけを並べている間（絞込語が空・ほかの職員を開いていない・先に出す職員が1人以上） */
+  const primaryOnly = !showAll && kanaKey(q) === '' && Array.isArray(primary) && primary.length > 0
 
   const list = useMemo(() => {
     const key = kanaKey(q)
@@ -729,27 +737,33 @@ export function StaffPickerModal({
             {clearLabel}
           </button>
         ) : null}
-        {featured !== undefined && featured.length > 0 && kanaKey(q) === '' ? (
-          <div className="mb-3">
-            <p id={`${fieldId}-featured`} className="mb-1 text-sm font-bold text-ink2">
-              {featuredLabel}
+        {primaryOnly ? (
+          <>
+            <p id={primaryHeadId} className="mb-2 text-sm font-bold text-ink2">
+              {primaryTitle}
             </p>
-            <div role="group" aria-labelledby={`${fieldId}-featured`} className="flex flex-wrap gap-2">
-              {featured.map((s) => (
-                <button
-                  key={s.id}
-                  type="button"
-                  onClick={() => onPick(s.id)}
-                  className="min-h-tap rounded border border-border-strong bg-surface px-4 text-base font-bold text-ink"
-                >
-                  {s.name}
-                </button>
+            <ul className="space-y-2" aria-labelledby={primaryHeadId}>
+              {(primary ?? []).map((s) => (
+                <li key={s.id}>
+                  <button
+                    type="button"
+                    onClick={() => onPick(s.id)}
+                    className="min-h-tap w-full rounded border border-border-strong bg-surface px-3 py-2 text-left text-base font-bold text-ink"
+                  >
+                    {s.name}
+                  </button>
+                </li>
               ))}
-            </div>
-            <p className="mt-3 text-sm font-bold text-ink2">ほかの職員</p>
-          </div>
-        ) : null}
-        {staff.length === 0 ? (
+            </ul>
+            <button
+              type="button"
+              onClick={() => setShowAll(true)}
+              className="mt-3 min-h-tap w-full rounded border border-primary bg-surface px-3 text-left text-base font-bold text-primary"
+            >
+              ほかの職員から選ぶ
+            </button>
+          </>
+        ) : staff.length === 0 ? (
           <EmptyBlock message="職員の一覧がまだありません。設定タブでマスタ同期を実行してください。" />
         ) : list.length === 0 ? (
           <EmptyBlock message="該当する職員がいません。入力した文字を減らしてお試しください。" />

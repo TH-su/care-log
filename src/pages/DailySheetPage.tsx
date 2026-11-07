@@ -91,8 +91,6 @@ import {
   DbError,
   discardPendingRow,
   fetchDailyReport,
-  fetchShiftDay,
-  fillAttendanceFromShift,
   fetchLatestVital,
   FORBIDDEN_REASON,
   getAppSetting,
@@ -130,8 +128,6 @@ import {
   NOTE_LOCKED_MESSAGE,
   subscribeMyRole,
 } from '../lib/db'
-import { canAutoFillAttendance, EMPTY_SHIFT_DAY, reporterCandidates } from '../lib/shiftDay'
-import type { ShiftDay } from '../lib/shiftDay'
 // 名簿と10日まとめ取りは読み込みの控え（裏での先読み・2026-10-17）を通す（同じ署名・毎回取りに行き、結果を控える）。
 // 区切りを開く時は、変更通知で古くなっていない控えの日をこの画面の取り置きへ移して使う（取り置きの世代・捨てる契機は
 // 今までどおり。この画面が日を捨てる時は控えにも古いの印を付ける＝区切りを戻った時に編集前の内容を見せない）
@@ -226,6 +222,7 @@ import { groupNotesByResident, noteGroupLines, noteSectionOf } from '../lib/note
 import type { NoteGroupRow, NoteSection } from '../lib/noteGroup'
 import { matchSearch, noteSearchText, parseSearchQuery } from '../lib/noteSearch'
 import { normalizeCategories, scheduleColorPatch } from '../lib/noteCategory'
+import { reporterPrimary } from '../lib/reporterPick'
 // 発熱者・他症状者のバイタル欄の印（A1 平熱との差・A9 SpO2 の個別の下限）。平熱と目標は画面を開いた時に1回読んで控える
 // （個別の目標は読み込みの控えを通す＝先読みがもう一度読まない・2026-10-29）
 import { fetchUsualTemps, loadVitalThresholds } from '../lib/db'
@@ -4028,71 +4025,6 @@ function DaySheet({
     onWrite(day)
   }, [day, onWrite])
 
-  // ── 勤務表（2026-11-07 代表者の決定）──────────────────────────────
-  // その日の勤務表の出勤者と夜勤の施設職員。出勤者の欄が一度も使われていない今日・昨日は、勤務表の出勤者で欄を埋める
-  // （人が選んだ・外した日は触らない＝db.ts の fillAttendanceFromShift）。夜勤の申し送りの記入者は、その夜の夜勤の
-  // 施設職員を自動で入れる（決まらない時は空のまま）。勤務表が読めない時は今までどおり
-  const [shiftDay, setShiftDay] = useState<ShiftDay>(EMPTY_SHIFT_DAY)
-  const shiftDayRef = useRef<ShiftDay>(EMPTY_SHIFT_DAY)
-  const autoFilledRef = useRef<string | null>(null)
-  useEffect(() => {
-    if (phase !== 'ready' || staff.length === 0) return
-    let alive = true
-    void (async () => {
-      const sd = await fetchShiftDay(day, staff)
-      if (!alive || !aliveRef.current || dayRef.current !== day) return
-      shiftDayRef.current = sd
-      setShiftDay(sd)
-      if (
-        autoFilledRef.current === day ||
-        !enabled ||
-        attendanceRef.current.length > 0 ||
-        sd.staffIds.length === 0 ||
-        !canAutoFillAttendance(day, todayIso())
-      )
-        return
-      autoFilledRef.current = day
-      // 出勤者の保存と同じ列に並べる（人の保存と同時に走らせない＝実行の時点の一覧で判定する）
-      const job = async () => {
-        if (!aliveRef.current || dayRef.current !== day || attendanceRef.current.length > 0) return
-        try {
-          // 書く直前にだけ取り置きを捨てる印を付ける（書かない時は付けない）
-          const out = await fillAttendanceFromShift(day, sd.staffIds, markSelfWrite)
-          if (!aliveRef.current || dayRef.current !== day) return
-          // 埋めた一覧、または埋めなかった時のサーバーの一覧（他の端末が先に選んだ・埋めた分）を出す。
-          // 待つ間にこの画面で人が選んだ時は、その一覧のまま（変更の通知で読み直す）
-          if (attendanceRef.current.length === 0) applyAttendance(out.rows)
-        } catch {
-          // 埋められなかった（通信・封鎖）。出勤者の欄は今までどおり手で選べる。次に開いた時にやり直す
-          autoFilledRef.current = null
-        }
-      }
-      const chain = attendanceChainRef.current
-      const prevChain = chain.get(day) ?? Promise.resolve()
-      chain.set(
-        day,
-        prevChain
-          .catch(() => undefined)
-          .then(job)
-          .catch(() => undefined),
-      )
-    })()
-    return () => {
-      alive = false
-    }
-  }, [phase, day, staff, enabled, applyAttendance, markSelfWrite])
-
-  /** 記入者を選ぶ窓の上に並べる、その日の出勤者（出勤者の欄が空なら勤務表の出勤者） */
-  const reporterFeatured = useMemo(() => {
-    const ids = reporterCandidates(
-      attendance.map((a) => a.staff_id),
-      shiftDay,
-      staff,
-    )
-    const byId = new Map(staff.map((s) => [s.id, s]))
-    return ids.map((id) => byId.get(id)).filter((s): s is Staff => s !== undefined)
-  }, [attendance, shiftDay, staff])
-
   /** 保存が通った時に、その行に残っている失敗・競合の一言を消す（成功の一言は出さない＝指示10） */
   const saveOk = useCallback(
     (key: string) => {
@@ -4752,21 +4684,6 @@ function DaySheet({
         patchNoteDraft(key, { body })
         setRowStatus(key, { tone: 'danger', text: `▲ ${NOTE_LOCKED_MESSAGE}` })
         return
-      }
-      // 夜勤の行は、記入者が空ならその夜の夜勤の施設職員を入れる（勤務表で決まっている・2026-11-07 代表者の決定）。
-      // 送る前に書きかけへ入れる＝登録で送った値・最初に送った中身・後の変更の基準が全部そろう
-      // 人が〔記入者を消す〕を押した行（reporterPicked が false）には入れない。判定は控え（ref）の新しい値で行う
-      const nightId = shiftDayRef.current.nightStaffId
-      const latest = noteDraftsRef.current.find((d) => d.key === key) ?? draft
-      if (
-        draft.shift === 'night' &&
-        draft.ck === undefined &&
-        nightId !== null &&
-        latest.reporterId === null &&
-        latest.reporterPicked !== false
-      ) {
-        draft = { ...draft, reporterId: nightId, reporterPicked: true }
-        patchNoteDraft(key, { reporterId: nightId, reporterPicked: true })
       }
       savingRef.current.add(key)
       setRowStatus(key, null)
@@ -6065,6 +5982,22 @@ function DaySheet({
     else show(MSG_PICK_LOST)
   }, [patchDraftOrRegistration, show, staffPick, updateNoteCell])
 
+  /**
+   * 申し送りの記入者を選ぶ窓に先に出す職員＝この日の出勤者の欄に名前を入れた職員（2026-11-07 代表者の決定）。
+   * 夜勤の行は今までどおり全員（夜勤の記入者は空欄のまま・出勤者の欄に夜勤の区別が無い）。出勤者が0人の日も全員
+   */
+  const reporterPick =
+    staffPick?.for === 'noteReporter'
+      ? reporterPrimary(
+          noteDraftsRef.current.find((d) => d.key === staffPick.key)?.shift ??
+            notesRef.current.find((n) => `n${n.id}` === staffPick.key)?.shift ??
+            null,
+          staff,
+          attendance,
+          day,
+        )
+      : null
+
   // ── 表示用の仕分け ─────────────────────────────────────────
 
   /**
@@ -6590,13 +6523,12 @@ function DaySheet({
             ? staff.filter((s) => s.id === managerStaffId)
             : staff
         }
+        // 申し送りの記入者は、この日の出勤者を先に出す（窓の「ほかの職員から選ぶ」で全員も出せる・2026-11-07）
+        primary={reporterPick}
         onPick={onPickStaff}
         onClose={() => setStaffPick(null)}
         // 〔記入者を消す〕は申し送りの記入者を選ぶ時だけ（出勤者・施設長には出さない）
         onClear={staffPick?.for === 'noteReporter' ? onClearReporter : undefined}
-        // 申し送りの記入者を選ぶ時だけ、その日の出勤者を氏名のボタンで上に並べる（2026-11-07 代表者の決定）
-        featured={staffPick?.for === 'noteReporter' ? reporterFeatured : undefined}
-        featuredLabel="この日の出勤者"
         clearLabel="記入者を消す"
         title={
           staffPick?.for === 'attendance'
