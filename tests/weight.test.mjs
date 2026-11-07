@@ -655,7 +655,7 @@ describe('体重の配線（静的検査）', () => {
   it('カルテは localStorage を期間（cl_karteRange）にしか使わず、console を使わない', () => {
     const src = strip(read('../src/pages/KartePage.tsx'))
     const keys = [...src.matchAll(/localStorage\.(?:get|set)Item\(([^,)]+)/g)].map((m) => m[1].trim())
-    assert.deepEqual([...new Set(keys)], ['LS.karteRange'])
+    assert.deepEqual([...new Set(keys)].sort(), ['LS.karteListOrder', 'LS.karteRange']) // 2026-11-07 一覧の並びを足した
     assert.equal(/wtmgr_/.test(src), false)
     assert.equal(/console\./.test(src), false)
   })

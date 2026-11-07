@@ -7,7 +7,7 @@
 // - 取得は db.ts の fetchResidents / fetchAllStaff / fetchKarte / fetchRecordHistory のみ
 //   （記入者名は退職者も含む全員から引く＝F48・2026-10-10。退職者が書いた過去の記録の記入者を「—」にしない）
 //   （supabase 直呼びなし・期間指定必須。変更の記録は14日ずつ遡る＝全件ロードしない）
-// - localStorage に保存するのは期間セグメント（cl_karteRange）だけ。氏名・記録本文は保存しない
+// - localStorage に保存するのは期間セグメント（cl_karteRange）と利用者一覧の並び（cl_karteListOrder・居室順／五十音順）だけ。氏名・記録本文は保存しない
 // - 体重（2026-09-27 追加）は weightClient.ts の fetchWeights で体重管理アプリの GAS から読むだけ。
 //   体重管理アプリの接続設定（wtmgr_api_*）は weightClient が読むだけで、この画面は localStorage に触れない。
 //   取得した体重は画面のメモリだけに持つ（期間切替では取り直さない。利用者・再試行・「体重を読み直す」で取り直す）
@@ -89,6 +89,7 @@ import {
   splitThresholds,
 } from '../lib/chart'
 import type { AxisSpec } from '../lib/chart'
+import { groupByKanaRow, kanaRowLabel } from '../lib/kanaRow'
 import { diaBpLevelBy, pulseLevelBy, sysBpLevelBy, vitalThresholds } from '../lib/vitalThresholds'
 import type { VitalThresholds } from '../lib/vitalThresholds'
 import { changedFromText, groupIsIndividual, lastChangeDay, sameGroupLimits, thresholdsLookup } from '../lib/vitalLimits'
@@ -396,6 +397,32 @@ function readRange(): RangeKey {
   return DEFAULT_RANGE
 }
 
+/** 利用者一覧の並び（居室順・五十音順）。既知の値だけを受け入れ、それ以外は居室順 */
+type ListOrder = 'room' | 'kana'
+const LIST_ORDER_OPTIONS: { value: ListOrder; label: string }[] = [
+  { value: 'room', label: '居室順' },
+  { value: 'kana', label: '五十音順' },
+]
+
+function readListOrder(): ListOrder {
+  try {
+    if (typeof localStorage === 'undefined') return 'room'
+    const v = localStorage.getItem(LS.karteListOrder)
+    if (v === 'room' || v === 'kana') return v
+  } catch {
+    // 読めない環境では居室順
+  }
+  return 'room'
+}
+
+function writeListOrder(v: ListOrder): void {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(LS.karteListOrder, v)
+  } catch {
+    // 保存できなくても表示は成立させる
+  }
+}
+
 function writeRange(v: RangeKey): void {
   try {
     if (typeof localStorage !== 'undefined') localStorage.setItem(LS.karteRange, v)
@@ -488,6 +515,13 @@ function ResidentList({ state }: ResidentListProps) {
   const { residents, loading, error, reload } = state
   const [q, setQ] = useState('')
   const fieldId = useId()
+  // 並び（居室順・五十音順・2026-11-07 本人指示）。端末に覚えるのは並びの種類だけ
+  const [order, setOrder] = useState<ListOrder>(readListOrder)
+  const onOrderChange = useCallback((v: string) => {
+    const next: ListOrder = v === 'kana' ? 'kana' : 'room'
+    setOrder(next)
+    writeListOrder(next)
+  }, [])
   // マウスが行に乗り続けた時だけ先読みする（一覧の上を通り過ぎただけで全員分を取りに行かない）
   const hoverRef = useRef<number | null>(null)
   const hoverCancel = useCallback(() => {
@@ -525,9 +559,19 @@ function ResidentList({ state }: ResidentListProps) {
       [r.name, r.kana ?? '', r.room ?? ''].some((f) => kanaKey(f).includes(key)),
     )
   }, [ordered, q])
+  /** 五十音順の時の行ごとのまとまり（あ行・か行…・読みの無い方は「その他」） */
+  const kanaGroups = useMemo(() => (order === 'kana' ? groupByKanaRow(list) : []), [order, list])
+  /** 行の中の1名（押すとカルテ。押し始め・フォーカス・マウスが乗り続けた時に先読み） */
+  const linkProps = (id: number) => ({
+    to: `/karte/${id}`,
+    onPointerDown: () => warmKarte(id),
+    onFocus: () => warmKarte(id),
+    onMouseEnter: () => hoverStart(id),
+    onMouseLeave: hoverCancel,
+  })
 
   return (
-    <div className="mx-auto w-full max-w-2xl p-4">
+    <div className={`mx-auto w-full p-4 ${order === 'kana' ? 'max-w-6xl' : 'max-w-2xl'}`}>
       <h1 className="text-xl font-heavy text-ink">カルテ（利用者一覧）</h1>
       <Link to="/glance" className="inline-flex min-h-tap items-center text-base text-link print:hidden">見守りボード（全員の直近の様子）<span aria-hidden="true"> ›</span></Link>
       <p className="mt-1 text-sm text-ink2">
@@ -547,6 +591,11 @@ function ResidentList({ state }: ResidentListProps) {
           placeholder="氏名の一部を入力"
           className="mt-1 min-h-tap w-full rounded border border-border bg-surface px-3 text-base text-ink"
         />
+      </div>
+
+      {/* 並び（2026-11-07 本人指示）: 居室順＝今までの1列の一覧／五十音順＝入居者マスタの五十音順のように行ごとにまとめてカードで並べる */}
+      <div className="mt-3 print:hidden">
+        <SegmentPicker options={LIST_ORDER_OPTIONS} value={order} onChange={onOrderChange} ariaLabel="利用者一覧の並び" />
       </div>
 
       <div className="mt-3">
@@ -573,6 +622,42 @@ function ResidentList({ state }: ResidentListProps) {
             <p className="mb-2 text-sm text-ink2">
               <span className="tabular">{list.length}</span> 名
             </p>
+            {order === 'kana' ? (
+              <div className="space-y-4">
+                {kanaGroups.map((g) => (
+                  <section key={g.row} aria-label={`${kanaRowLabel(g.row)} ${g.people.length}名`}>
+                    <h2 className="rounded border-l-4 border-ink2 bg-surface2 px-3 py-2 text-base font-bold text-ink">
+                      {kanaRowLabel(g.row)} <span className="tabular text-sm font-normal text-ink2">{g.people.length}名</span>
+                    </h2>
+                    <ul className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                      {g.people.map((r) => (
+                        <li key={r.id}>
+                          <Link
+                            {...linkProps(r.id)}
+                            className="block h-full min-h-tap rounded-lg border border-border bg-surface px-3 py-2 text-ink"
+                          >
+                            <span className="flex items-center gap-1">
+                              <span className="min-w-0 flex-1 break-words text-base font-bold">{r.name}</span>
+                              {r.needs_review ? (
+                                <span className="shrink-0 text-sm text-warn">
+                                  <span aria-hidden="true">▲</span>
+                                  <span className="sr-only">要確認</span>
+                                </span>
+                              ) : null}
+                            </span>
+                            {r.kana ? <span className="block text-sm text-ink2">{r.kana}</span> : null}
+                            <span className="mt-1 flex flex-wrap gap-1">
+                              <span className="tabular rounded-full bg-surface2 px-2 text-sm text-ink">{r.room ? `${r.room}号室` : '居室未登録'}</span>
+                              {r.care_level ? <span className="rounded-full bg-surface2 px-2 text-sm text-ink">{r.care_level}</span> : null}
+                            </span>
+                          </Link>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                ))}
+              </div>
+            ) : (
             <ul className="space-y-2">
               {list.map((r) => (
                 <li key={r.id}>
@@ -600,6 +685,7 @@ function ResidentList({ state }: ResidentListProps) {
                 </li>
               ))}
             </ul>
+            )}
           </>
         )}
       </div>
