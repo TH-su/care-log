@@ -731,7 +731,7 @@ describe('静的な見張り（読むだけ・個人情報を残さない）', (
     const listSrc = src.slice(src.indexOf('export const KARTE_JUMPS'), src.indexOf('function findShellHeader'))
     const ids = [...listSrc.matchAll(/id: '([^']+)'/g)].map((m) => m[1])
     assert.equal(ids[ids.indexOf('karte-meals') + 1], 'karte-excretion')
-    assert.match(src, /<SectionCard title="排泄" className="mt-4" id="karte-excretion">/)
+    assert.match(src, /<FoldCard title="排泄" className="mt-4" id="karte-excretion">/) // 2026-11-07 折りたたみ（印刷は SectionCard）
     // 読み直しは excretionTick の時だけ force
     assert.match(src, /const force = excretionTick !== forcedExcretionTickRef\.current/)
   })

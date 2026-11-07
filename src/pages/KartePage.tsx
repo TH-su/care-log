@@ -32,7 +32,8 @@
 //   ・幅 1024px 以上で期間が2週・1か月の時は、バイタルと食事・水分のグラフも2列（chartCols。3か月以上・印刷は1列）
 
 import { reporterLabel } from '../lib/reporterName'
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import type { RefObject } from 'react'
 import { flushSync } from 'react-dom'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
@@ -1426,6 +1427,94 @@ function HoverCard({ info, width }: { info: { day: string; rows: HoverRow[]; px:
   )
 }
 
+// ══════════════════════════════════════════════════════════════
+// 下の欄の折りたたみ（2026-11-07 本人指示）
+// 水分量のグラフ・日ごとの記録・排泄・申し送り・入浴・与薬・事故・ヒヤリ・変更の記録は、既定で見出しだけを出し、
+// 押すと開く。画面の移動ボタン・今日の要注意から開いた欄は開いて出す（KARTE_OPEN_EVENT）。
+// 印刷中は今までどおり全部開いた形（SectionCard・元の見出し）で描く＝紙の版面を変えない
+// ══════════════════════════════════════════════════════════════
+
+/** 折りたたみの欄を開く合図（detail＝欄の id） */
+const KARTE_OPEN_EVENT = 'cl-karte-open'
+/** 印刷中か（KarteDetail が配る。折りたたみの欄は印刷中だけ元の形で全部描く） */
+const KartePrintingCtx = createContext(false)
+
+/** 欄（h2）の折りたたみ。閉じている間は見出しだけ。中身（children）は開いた時だけ描く */
+function FoldCard({ title, id, className = '', children }: { title: string; id?: string; className?: string; children: ReactNode }) {
+  const printing = useContext(KartePrintingCtx)
+  const [open, setOpen] = useState(false)
+  const bodyId = useId()
+  useEffect(() => {
+    if (!id || typeof window === 'undefined') return
+    const onOpen = (e: Event) => {
+      if ((e as CustomEvent<string>).detail === id) setOpen(true)
+    }
+    window.addEventListener(KARTE_OPEN_EVENT, onOpen)
+    return () => window.removeEventListener(KARTE_OPEN_EVENT, onOpen)
+  }, [id])
+  if (printing) {
+    return (
+      <SectionCard title={title} className={className} id={id}>
+        {children}
+      </SectionCard>
+    )
+  }
+  return (
+    <section id={id} tabIndex={id ? -1 : undefined} className={`cl-karte-fold rounded-lg border border-border bg-surface ${className}`}>
+      <h2 className="text-lg font-bold text-ink">
+        <FoldButton open={open} bodyId={bodyId} onToggle={() => setOpen((v) => !v)} className="px-4">
+          {title}
+        </FoldButton>
+      </h2>
+      {open ? (
+        <div id={bodyId} className="cl-karte-fold-body px-4 pb-3">
+          {children}
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
+/** 欄の中の小見出し（h3）の折りたたみ。print には元の形（printForm）を出す */
+function FoldBlock({ title, className = '', printForm, children }: { title: string; className?: string; printForm: ReactNode; children: ReactNode }) {
+  const printing = useContext(KartePrintingCtx)
+  const [open, setOpen] = useState(false)
+  const bodyId = useId()
+  if (printing) return <>{printForm}</>
+  return (
+    <div className={`cl-karte-fold-sub ${className}`}>
+      <h3 className="text-lg font-bold text-ink">
+        <FoldButton open={open} bodyId={bodyId} onToggle={() => setOpen((v) => !v)}>
+          {title}
+        </FoldButton>
+      </h3>
+      {open ? (
+        <div id={bodyId} className="cl-karte-fold-body pb-2">
+          {children}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+/** 折りたたみの見出しのボタン（行いっぱい・44px 以上・開閉を記号と aria-expanded で伝える） */
+function FoldButton({ open, bodyId, onToggle, className = '', children }: { open: boolean; bodyId: string; onToggle: () => void; className?: string; children: ReactNode }) {
+  return (
+    <button
+      type="button"
+      aria-expanded={open}
+      aria-controls={open ? bodyId : undefined}
+      onClick={onToggle}
+      className={`flex min-h-tap w-full items-center gap-2 text-left ${className}`}
+    >
+      <span aria-hidden="true" className="w-4 shrink-0 text-ink2">
+        {open ? '▾' : '▸'}
+      </span>
+      <span className="min-w-0">{children}</span>
+    </button>
+  )
+}
+
 interface VitalPanelProps {
   panel: PanelSpec
   days: string[]
@@ -1433,10 +1522,12 @@ interface VitalPanelProps {
   height: number
   /** 印刷中（グラフに画面だけの数値を描かない） */
   printing?: boolean
+  /** 画面では見出しだけにたたむ（水分量・2026-11-07 本人指示。印刷では今までどおり開いた形） */
+  fold?: boolean
 }
 
 /** 1指標のパネル（見出し＋グラフ＋数値表フォールバック） */
-function VitalPanel({ panel, days, box, height, printing = false }: VitalPanelProps) {
+function VitalPanel({ panel, days, box, height, printing = false, fold = false }: VitalPanelProps) {
   // 表は開いたときに組み立てる（1年表示×4パネルで数千ノードになるのを避ける）
   const [tableOpen, setTableOpen] = useState(false)
   const rows = useMemo(
@@ -1444,15 +1535,8 @@ function VitalPanel({ panel, days, box, height, printing = false }: VitalPanelPr
     [days, panel],
   )
 
-  return (
-    <div className="mt-4 border-t border-border pt-3">
-      <div className="flex flex-wrap items-baseline gap-gap">
-        <h3 className="text-lg font-bold text-ink">{panel.title}</h3>
-        {panel.unit ? <span className="text-sm text-ink2">単位 {panel.unit}</span> : null}
-        {panel.legend ? <span className="text-sm text-ink2">{panel.legend}</span> : null}
-        {/* 画面だけ（カルテの印刷の版面は変えない＝原則2・反証 中2） */}
-        {panel.note ? <span className="text-sm font-bold text-ink print:hidden">{panel.note}</span> : null}
-      </div>
+  const body = (
+    <>
       {rows.length === 0 ? (
         <p className="mt-2 text-base text-ink2">
           <span aria-hidden="true">— </span>
@@ -1512,6 +1596,36 @@ function VitalPanel({ panel, days, box, height, printing = false }: VitalPanelPr
           </details>
         </>
       )}
+    </>
+  )
+  if (fold && !printing) {
+    return (
+      <FoldBlock
+        title={panel.title}
+        className="mt-4 border-t border-border"
+        printForm={null}
+      >
+        {panel.unit || panel.legend ? (
+          <p className="text-sm text-ink2">
+            {panel.unit ? `単位 ${panel.unit}` : ''}
+            {panel.unit && panel.legend ? '　' : ''}
+            {panel.legend ?? ''}
+          </p>
+        ) : null}
+        {body}
+      </FoldBlock>
+    )
+  }
+  return (
+    <div className="mt-4 border-t border-border pt-3">
+      <div className="flex flex-wrap items-baseline gap-gap">
+        <h3 className="text-lg font-bold text-ink">{panel.title}</h3>
+        {panel.unit ? <span className="text-sm text-ink2">単位 {panel.unit}</span> : null}
+        {panel.legend ? <span className="text-sm text-ink2">{panel.legend}</span> : null}
+        {/* 画面だけ（カルテの印刷の版面は変えない＝原則2・反証 中2） */}
+        {panel.note ? <span className="text-sm font-bold text-ink print:hidden">{panel.note}</span> : null}
+      </div>
+      {body}
     </div>
   )
 }
@@ -2066,6 +2180,92 @@ function MealsSection({ meals, fluids, outings, days, printing, target }: MealsS
     [byDay, lowMax],
   )
 
+  /** 日ごとの記録の表（withHead＝印刷用に今までの見出しを付ける） */
+  const mealsTable = (withHead: boolean) => (
+    <>
+      {withHead ? <h3 className="mt-4 border-t border-border pt-3 text-lg font-bold text-ink">日ごとの記録</h3> : null}
+      <div className="mt-2 max-w-2xl overflow-x-auto">
+        <table className="w-full border-collapse text-sm">
+          <caption className="sr-only">
+            食事（主食／副食）と水分量の履歴。新しい日が上。
+          </caption>
+          <thead>
+            <tr className="border-b border-border-strong text-ink2">
+              <th scope="col" className="py-2 pr-2 text-left font-bold">
+                日付
+              </th>
+              {TABLE_SLOTS.map((s) => (
+                <th key={s} scope="col" className="py-2 pr-2 text-right font-bold">
+                  {SLOT_HEAD[s]}
+                </th>
+              ))}
+              <th scope="col" className="py-2 pr-2 text-right font-bold">
+                水分(ml)
+              </th>
+              <th scope="col" className="py-2 text-left font-bold">
+                外出・外泊
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.day} className="border-b border-border">
+                <th scope="row" className="py-2 pr-2 text-left font-normal text-ink">
+                  {fmtDayLabel(r.day)}
+                  {lowStreak.has(r.day) ? (
+                    <span className="block text-sm font-bold text-warn">{mealLowLabel(lowStreak.get(r.day) ?? 0)}</span>
+                  ) : null}
+                </th>
+                {TABLE_SLOTS.map((s) => {
+                  const meal = r.meals.get(s)
+                  const shade = mealShade(meal)
+                  return (
+                    <td
+                      key={s}
+                      className={`whitespace-nowrap py-2 pr-2 text-right${shade ? ` ${shadeClass(shade.stage)}` : ''}${shade?.hatched ? ' cl-shade-hatch' : ''}`}
+                      style={shade ? shadeStyle(shade.stage) : undefined}
+                    >
+                      <MealCell meal={meal} shaded={shade !== null} />
+                      {shade?.hatched ? <span className="sr-only">（半分以下）</span> : null}
+                    </td>
+                  )
+                })}
+                <td className="tabular py-2 pr-2 text-right text-ink">
+                  {r.fluid == null ? (
+                    <>
+                      <span className="sr-only">記録なし</span>
+                      <span aria-hidden="true" className="text-ink3">
+                        —
+                      </span>
+                    </>
+                  ) : (
+                    <FluidCell total={r.fluid} target={target} />
+                  )}
+                </td>
+                <td className="py-2">
+                  {r.outings.length === 0 ? (
+                    <span aria-hidden="true" className="text-ink3">
+                      —
+                    </span>
+                  ) : (
+                    <span className="flex flex-wrap gap-gap">
+                      {r.outings.map((o) => (
+                        <Chip key={o.id} tone="info">
+                          {OUTING_KIND_LABEL[o.kind] ?? '外出'}
+                          {o.end_on == null ? '（帰着未定）' : ''}
+                        </Chip>
+                      ))}
+                    </span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </>
+  )
+
   return (
     <SectionCard title="食事・水分" className="mt-4" id="karte-meals">
       <p className="text-sm text-ink2">
@@ -2086,91 +2286,15 @@ function MealsSection({ meals, fluids, outings, days, printing, target }: MealsS
             <AxisProbe probeRef={probeRef} />
             <div className={cols.className}>
               {panels.map((p) => (
-                <VitalPanel key={p.key} panel={p} days={days} box={cols.box} height={chartH} printing={printing} />
+                <VitalPanel key={p.key} panel={p} days={days} box={cols.box} height={chartH} printing={printing} fold={p.key === 'fluid'} />
               ))}
             </div>
           </div>
           {/* 表は今までの幅のまま（広い画面で列が間延びして行を追いにくくならないように） */}
-          <h3 className="mt-4 border-t border-border pt-3 text-lg font-bold text-ink">日ごとの記録</h3>
-          <div className="mt-2 max-w-2xl overflow-x-auto">
-            <table className="w-full border-collapse text-sm">
-              <caption className="sr-only">
-                食事（主食／副食）と水分量の履歴。新しい日が上。
-              </caption>
-              <thead>
-                <tr className="border-b border-border-strong text-ink2">
-                  <th scope="col" className="py-2 pr-2 text-left font-bold">
-                    日付
-                  </th>
-                  {TABLE_SLOTS.map((s) => (
-                    <th key={s} scope="col" className="py-2 pr-2 text-right font-bold">
-                      {SLOT_HEAD[s]}
-                    </th>
-                  ))}
-                  <th scope="col" className="py-2 pr-2 text-right font-bold">
-                    水分(ml)
-                  </th>
-                  <th scope="col" className="py-2 text-left font-bold">
-                    外出・外泊
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r) => (
-                  <tr key={r.day} className="border-b border-border">
-                    <th scope="row" className="py-2 pr-2 text-left font-normal text-ink">
-                      {fmtDayLabel(r.day)}
-                      {lowStreak.has(r.day) ? (
-                        <span className="block text-sm font-bold text-warn">{mealLowLabel(lowStreak.get(r.day) ?? 0)}</span>
-                      ) : null}
-                    </th>
-                    {TABLE_SLOTS.map((s) => {
-                      const meal = r.meals.get(s)
-                      const shade = mealShade(meal)
-                      return (
-                        <td
-                          key={s}
-                          className={`whitespace-nowrap py-2 pr-2 text-right${shade ? ` ${shadeClass(shade.stage)}` : ''}${shade?.hatched ? ' cl-shade-hatch' : ''}`}
-                          style={shade ? shadeStyle(shade.stage) : undefined}
-                        >
-                          <MealCell meal={meal} shaded={shade !== null} />
-                          {shade?.hatched ? <span className="sr-only">（半分以下）</span> : null}
-                        </td>
-                      )
-                    })}
-                    <td className="tabular py-2 pr-2 text-right text-ink">
-                      {r.fluid == null ? (
-                        <>
-                          <span className="sr-only">記録なし</span>
-                          <span aria-hidden="true" className="text-ink3">
-                            —
-                          </span>
-                        </>
-                      ) : (
-                        <FluidCell total={r.fluid} target={target} />
-                      )}
-                    </td>
-                    <td className="py-2">
-                      {r.outings.length === 0 ? (
-                        <span aria-hidden="true" className="text-ink3">
-                          —
-                        </span>
-                      ) : (
-                        <span className="flex flex-wrap gap-gap">
-                          {r.outings.map((o) => (
-                            <Chip key={o.id} tone="info">
-                              {OUTING_KIND_LABEL[o.kind] ?? '外出'}
-                              {o.end_on == null ? '（帰着未定）' : ''}
-                            </Chip>
-                          ))}
-                        </span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          {/* 日ごとの記録は画面では見出しだけにたたむ（2026-11-07 本人指示）。印刷では今までどおり見出しと表を出す */}
+          <FoldBlock title="日ごとの記録" className="mt-4 border-t border-border" printForm={mealsTable(true)}>
+            {mealsTable(false)}
+          </FoldBlock>
         </>
       )}
     </SectionCard>
@@ -2323,7 +2447,7 @@ interface ExcretionSectionProps {
 /** 最後の排便から◯日（注意・危険）と、直近14日の排便・下剤・排尿の回数 */
 function ExcretionSection({ state, view, onReload }: ExcretionSectionProps) {
   return (
-    <SectionCard title="排泄" className="mt-4" id="karte-excretion">
+    <FoldCard title="排泄" className="mt-4" id="karte-excretion">
       <p className="text-sm text-ink2">
         排便記録のアプリの記録です（この画面では読むだけです）。少量は1回だけでは数えず、48時間以内に少量が3回続いたら3回目で排便1回とみなします（排便記録のアプリと同じ数え方）。
       </p>
@@ -2397,7 +2521,7 @@ function ExcretionSection({ state, view, onReload }: ExcretionSectionProps) {
           </button>
         </div>
       )}
-    </SectionCard>
+    </FoldCard>
   )
 }
 
@@ -2429,7 +2553,7 @@ function NotesSection({ notes, staffById }: NotesSectionProps) {
   }, [notes])
 
   return (
-    <SectionCard title="この方の申し送り" className="mt-4" id="karte-notes">
+    <FoldCard title="この方の申し送り" className="mt-4" id="karte-notes">
       {groups.length === 0 ? (
         <div className="mt-2">
           <EmptyBlock message="この期間の申し送りはありません。期間を広げてお試しください。" />
@@ -2454,7 +2578,7 @@ function NotesSection({ notes, staffById }: NotesSectionProps) {
           ))}
         </div>
       )}
-    </SectionCard>
+    </FoldCard>
   )
 }
 
@@ -2478,7 +2602,7 @@ function BathSection({ baths, staffById }: BathSectionProps) {
     [baths],
   )
   return (
-    <SectionCard title="入浴（デイ）" className="mt-4" id="karte-bath">
+    <FoldCard title="入浴（デイ）" className="mt-4" id="karte-bath">
       {sorted.length === 0 ? (
         <div className="mt-2">
           <EmptyBlock message="この期間の入浴（デイ）の記録はありません。期間を広げてお試しください。" />
@@ -2501,7 +2625,7 @@ function BathSection({ baths, staffById }: BathSectionProps) {
           ))}
         </ul>
       )}
-    </SectionCard>
+    </FoldCard>
   )
 }
 
@@ -2535,7 +2659,7 @@ function MedSection({ meds }: MedSectionProps) {
     [meds],
   )
   return (
-    <SectionCard title="与薬" className="mt-4" id="karte-med">
+    <FoldCard title="与薬" className="mt-4" id="karte-med">
       {sorted.length === 0 ? (
         <div className="mt-2">
           <EmptyBlock message="この期間の与薬の記録はありません。期間を広げてお試しください。" />
@@ -2572,7 +2696,7 @@ function MedSection({ meds }: MedSectionProps) {
           })}
         </ul>
       )}
-    </SectionCard>
+    </FoldCard>
   )
 }
 
@@ -2595,7 +2719,7 @@ function IncidentSection({ incidents }: IncidentSectionProps) {
     [incidents],
   )
   return (
-    <SectionCard title="事故・ヒヤリ" className="mt-4" id="karte-incident">
+    <FoldCard title="事故・ヒヤリ" className="mt-4" id="karte-incident">
       {sorted.length === 0 ? (
         <div className="mt-2">
           <EmptyBlock message="この期間の事故・ヒヤリハットの記録はありません。期間を広げてお試しください。" />
@@ -2626,7 +2750,7 @@ function IncidentSection({ incidents }: IncidentSectionProps) {
           ))}
         </ul>
       )}
-    </SectionCard>
+    </FoldCard>
   )
 }
 
@@ -2802,7 +2926,7 @@ function HistorySection({ residentId, staffById }: HistorySectionProps) {
   }, [more, oldest, residentId])
 
   return (
-    <SectionCard title="変更の記録" className="mt-4" id="karte-history">
+    <FoldCard title="変更の記録" className="mt-4" id="karte-history">
       {state === 'loading' ? (
         <LoadingBlock label="変更の記録を読み込み中です…" />
       ) : state === 'error' ? (
@@ -2844,7 +2968,7 @@ function HistorySection({ residentId, staffById }: HistorySectionProps) {
           </button>
         </>
       )}
-    </SectionCard>
+    </FoldCard>
   )
 }
 
@@ -3250,6 +3374,8 @@ function jumpToSection(id: string, bar: HTMLElement | null): void {
   if (typeof document === 'undefined' || typeof window === 'undefined') return
   const el = document.getElementById(id)
   if (!el) return
+  // たたんである欄は開いてから移る（欄の上端の位置は自分の中身に左右されないので、開く前に測ってよい）
+  window.dispatchEvent(new CustomEvent(KARTE_OPEN_EVENT, { detail: id }))
   const offset = measureShellHeaderH() + (bar ? bar.getBoundingClientRect().height : 0) + 8
   const top = Math.max(0, Math.round(el.getBoundingClientRect().top + window.scrollY - offset))
   const reduce = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -3624,6 +3750,7 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
   // 欄ごとに幅を決める（2026-10-08）: 文字の欄は今までの幅（LANE）、グラフの欄（バイタル・体重のグラフ・食事）だけ
   // 広い画面で画面幅まで広げる（LANE_WIDE）。氏名バーは外側の枠いっぱいを親にして、ページの最後まで上部に残す
   return (
+    <KartePrintingCtx.Provider value={printing}>
     <div className="cl-karte-legible w-full py-4">
       {/* グラフの高さを決めるための画面の高さの物差し（100svh・見えない・読み上げない・押せない） */}
       <div aria-hidden="true" data-karte-vh="" className="pointer-events-none invisible fixed left-0 top-0 h-svh w-0" />
@@ -3814,6 +3941,7 @@ function KarteDetail({ residentId, state, staff }: KarteDetailProps) {
         <HistorySection residentId={residentId} staffById={staffById} />
       </div>
     </div>
+    </KartePrintingCtx.Provider>
   )
 }
 

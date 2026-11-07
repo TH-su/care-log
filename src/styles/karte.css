@@ -67,3 +67,31 @@
     color: #ffb3b8;
   }
 }
+
+/* 下の欄の折りたたみ（2026-11-07 本人指示）。開いた時も縦に間延びしないよう、欄の中の行の間・枠の余白・本文の大きさを詰める
+   （押す所の 44px・文字の最小 13px は保つ）。印刷では折りたたみを使わない（KartePage が元の形で描く） */
+@media screen {
+  .cl-karte-fold-body .space-y-4 > :not([hidden]) ~ :not([hidden]) {
+    margin-top: 0.5rem;
+  }
+  .cl-karte-fold-body .space-y-2 > :not([hidden]) ~ :not([hidden]) {
+    margin-top: 0.25rem;
+  }
+  .cl-karte-fold-body .p-3 {
+    padding: 0.375rem 0.625rem;
+  }
+  .cl-karte-fold-body .mt-1 {
+    margin-top: 0.125rem;
+  }
+  .cl-karte-fold-body .mt-2,
+  .cl-karte-fold-body .mt-3 {
+    margin-top: 0.375rem;
+  }
+  .cl-karte-fold-body .text-lg {
+    font-size: var(--fs-base);
+  }
+  .cl-karte-fold-body .py-2 {
+    padding-top: 0.25rem;
+    padding-bottom: 0.25rem;
+  }
+}

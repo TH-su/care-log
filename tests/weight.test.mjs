@@ -594,7 +594,8 @@ describe('カルテ上部の移動ボタン（静的検査・2026-09-27）', () 
     const listSrc = src.slice(src.indexOf('export const KARTE_JUMPS'), src.indexOf('function findShellHeader'))
     const ids = [...listSrc.matchAll(/id: '([^']+)'/g)].map((m) => m[1])
     assert.equal(ids.length, 9) // 2026-10-16 に排泄（karte-excretion）を足した
-    const cards = [...src.matchAll(/<SectionCard [^>]*id="([^"]+)"/g)].map((m) => m[1])
+    // 2026-11-07: 下の欄は折りたたみの入れ物（FoldCard・印刷では SectionCard）
+    const cards = [...src.matchAll(/<(?:SectionCard|FoldCard) [^>]*id="([^"]+)"/g)].map((m) => m[1])
     assert.deepEqual(cards, ids)
   })
 
@@ -607,7 +608,7 @@ describe('カルテ上部の移動ボタン（静的検査・2026-09-27）', () 
     // 各欄の関数が付けている id が、ボタンの並びと同じ順
     const idOf = (fn) => {
       const f = src.slice(src.indexOf(`function ${fn}(`))
-      return /<SectionCard [^>]*id="([^"]+)"/.exec(f)[1]
+      return /<(?:SectionCard|FoldCard) [^>]*id="([^"]+)"/.exec(f)[1]
     }
     const ids = ['VitalsSection', 'WeightSection', 'MealsSection', 'ExcretionSection', 'NotesSection', 'BathSection', 'MedSection', 'IncidentSection', 'HistorySection'].map(idOf)
     const listSrc = src.slice(src.indexOf('export const KARTE_JUMPS'), src.indexOf('function findShellHeader'))

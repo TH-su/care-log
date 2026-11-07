@@ -376,7 +376,8 @@ describe('★F66 既読の人数を確かめられない申し送りに「既読
     assert.doesNotMatch(daily, /read_count/)
     assert.doesNotMatch(daily, /markRead\(/)
     assert.match(read('lib/db.ts'), /export async function markRead\(noteId: number, staffId: number\): Promise<void>/)
-    assert.match(read('pages/TimelinePage.tsx'), /read_count/)
+    // 2026-11-07 本人指示でタイムラインにも既読の人数・〔既読にする〕は出さない。本文を開いた時に既読を付ける仕組みは残る
+    assert.match(read('pages/TimelinePage.tsx'), /if \(opening\) onMarkRead\(note\)/)
   })
 })
 
