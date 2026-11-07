@@ -38,3 +38,14 @@
     margin-top: 0;
   }
 }
+
+/* グラフの期間の最高・最低の数値（2026-11-07 本人指示）。線や帯に重なっても読めるよう、地の色で縁取る。
+   数値は画面だけに描く（印刷中は KartePage の printing で描かない・数値の窓も print:hidden） */
+@media screen {
+  .cl-karte-extreme {
+    paint-order: stroke;
+    stroke: var(--c-surface);
+    stroke-width: 3px;
+    stroke-linejoin: round;
+  }
+}

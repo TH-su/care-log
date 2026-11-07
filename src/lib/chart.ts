@@ -330,3 +330,67 @@ export function fluidSeries(byDay: Map<string, MealDay>): Map<string, number> {
  * app_settings の上書きは反映しない＝上書きを効かせる画面は vitalThresholds().lowIntakeMax を読む）
  */
 export const LOW_INTAKE_MAX: number = DEFAULT_VITAL_THRESHOLDS.lowIntakeMax
+
+// ══════════════════════════════════════════════════════════════
+// グラフの点に乗せた時の数値の窓・期間の最高と最低（2026-11-07 本人指示）
+// ══════════════════════════════════════════════════════════════
+
+/** 期間の中の1系列の集計（記録の無い期間は null） */
+export interface SeriesStats {
+  /** 記録のある日の数 */
+  count: number
+  /** 平均（記録のある日の値の平均） */
+  avg: number
+  max: number
+  /** 最高の日（同じ値が2日以上ある時は新しい方） */
+  maxDay: string
+  min: number
+  /** 最低の日（同じ値が2日以上ある時は新しい方） */
+  minDay: string
+}
+
+/** 期間（days・古い順）の中で、その系列の平均・最高・最低を数える。期間の外の日の値は数えない */
+export function seriesStats(values: ReadonlyMap<string, number>, days: readonly string[]): SeriesStats | null {
+  let count = 0
+  let sum = 0
+  let max = -Infinity
+  let min = Infinity
+  let maxDay = ''
+  let minDay = ''
+  for (const d of days) {
+    const v = values.get(d)
+    if (v == null || !Number.isFinite(v)) continue
+    count++
+    sum += v
+    if (v >= max) {
+      max = v
+      maxDay = d
+    }
+    if (v <= min) {
+      min = v
+      minDay = d
+    }
+  }
+  if (count === 0) return null
+  return { count, avg: sum / count, max, maxDay, min, minDay }
+}
+
+/** days[i] より前で、その系列に記録のあるいちばん近い日の値（無ければ null） */
+export function prevValueBefore(
+  values: ReadonlyMap<string, number>,
+  days: readonly string[],
+  i: number,
+): { day: string; v: number } | null {
+  for (let k = Math.min(i, days.length) - 1; k >= 0; k--) {
+    const v = values.get(days[k])
+    if (v != null && Number.isFinite(v)) return { day: days[k], v }
+  }
+  return null
+}
+
+/** 差の書き方（+0.3／−0.3／±0）。digits は小数の桁数 */
+export function fmtDiff(diff: number, digits: number): string {
+  const r = Number(diff.toFixed(digits))
+  if (r === 0) return '±0'
+  return `${r > 0 ? '+' : '−'}${Math.abs(r).toFixed(digits)}`
+}
