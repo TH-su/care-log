@@ -49,3 +49,21 @@
     stroke-linejoin: round;
   }
 }
+
+/* グラフの点に乗せた時の数値の窓（2026-11-07 本人指示）。黒の半透明の地に白い字（明るい表示・暗い表示とも同じ。
+   白の半透明より字と地の差が大きく、下にあるものが少し透けても読める）。窓はグラフの上の外側に出す（KartePage の HoverCard） */
+@media screen {
+  .cl-karte-hover {
+    background: rgb(17 22 28 / 0.86);
+    color: #ffffff;
+    box-shadow: 0 2px 8px rgb(0 0 0 / 0.3);
+    margin-bottom: 4px;
+  }
+  .cl-karte-hover-sub {
+    color: rgb(255 255 255 / 0.85);
+  }
+  /* しきい値を外れた印（↑↓）。黒の地で読める明るい赤 */
+  .cl-karte-hover-alert {
+    color: #ffb3b8;
+  }
+}
