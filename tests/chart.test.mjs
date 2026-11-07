@@ -283,7 +283,9 @@ describe('カルテ画面への組み込み', () => {
   it('食事・水分の表とグラフは同じ集計（mealDays）を使い、表の上にグラフを置く', () => {
     assert.ok(/mealDays\(meals, fluids\)/.test(src), '見つからない: /mealDays\(meals, fluids\)/')
     const sec = src.slice(src.indexOf('function MealsSection'))
-    assert.ok(sec.indexOf('<VitalPanel') > 0 && sec.indexOf('<VitalPanel') < sec.indexOf('<table'), 'グラフが表の上にない')
+    // 2026-11-07: 表は折りたたみ（日ごとの記録）の中。描く順はグラフ → 日ごとの記録
+    assert.ok(sec.indexOf('<VitalPanel') > 0 && sec.indexOf('<VitalPanel') < sec.indexOf('<FoldBlock title="日ごとの記録"'), 'グラフが表の上にない')
+    assert.ok(sec.indexOf('<table') > 0, '表が無い')
   })
 
   it('グラフの欄だけ広げ（max-w-6xl）、印刷は今までの幅（max-w-2xl）に戻す', () => {

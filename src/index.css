@@ -122,19 +122,12 @@
   div.tl-legible {
     max-width: 72rem;
   }
-  .tl-legible .tl-card .text-sm,
-  .tl-legible .day-section h3,
-  .tl-legible .day-section td.text-sm {
+  /* 2026-11-07 本人指示: 文字が大きすぎて場所を取るので、日報と同じくらい（本文・氏名 16px、記入者・時刻など 15px）に戻す */
+  .tl-legible .tl-card .tl-name {
     font-size: var(--fs-base);
   }
-  .tl-legible .tl-card .tl-name {
-    font-size: var(--fs-lg);
-  }
   .tl-legible .tl-card .tl-card-text {
-    font-size: var(--fs-xl);
-  }
-  .tl-legible .day-section th {
-    font-size: var(--fs-sm);
+    font-size: var(--fs-base);
   }
 }
 /* 幅 768px 以上（iPad縦・iPad横・PC）は「記入者・既読」をカードの1行目（時刻・氏名の右）へ寄せ、本文を1行ぶん上げる。

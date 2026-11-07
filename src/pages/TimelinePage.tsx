@@ -180,12 +180,6 @@ const NO_STAFF: Staff[] = []
  */
 const NAME_HIT = 'relative before:absolute before:inset-x-0 before:-inset-y-2.5'
 
-/**
- * 「✓既読 n」の縦ヒット拡張。text-sm（15px・行高1.55≒23px）なので上下 12px ずつで 47px。
- * 同じ行の「既読にする」ボタン（44px）と隣り合うが、拡張するのは縦だけなので
- * gap-gap（8px）の横の間隔は保たれる。
- */
-const READ_HIT = 'relative before:absolute before:inset-x-0 before:-inset-y-3'
 
 // ── 小さなヘルパ（純関数・この画面専用）────────────────────
 
@@ -1047,12 +1041,9 @@ const DaySection = memo(function DaySection(props: DaySectionProps) {
 
         {/* サマリチップ列（タップで該当ブロックへ移動） */}
         <div className="mt-2 flex flex-wrap items-center gap-gap">
-          <Chip
-            tone={summary.unread > 0 ? 'accent' : 'plain'}
-            onClick={() => scrollToBlock(anchorId(iso, 'notes'))}
-          >
+          {/* 未読の数は出さない（未読の確かめは使わない・2026-11-07 本人指示） */}
+          <Chip tone="plain" onClick={() => scrollToBlock(anchorId(iso, 'notes'))}>
             {`申し送り ${summary.noteCount}件`}
-            {actorId != null && summary.unread > 0 ? `（未読${summary.unread}）` : ''}
           </Chip>
           {summary.fever > 0 && (
             <Chip tone="warn" onClick={() => scrollToBlock(anchorId(iso, 'vitals'))}>
@@ -1381,11 +1372,8 @@ function NoteCard({
   reporterName,
   actorId,
   inputEnabled,
-  read,
-  locallyRead,
   expanded,
   onToggleExpand,
-  onMarkRead,
   onOpenKarte,
   onDeleteNote,
   onUpdateNoteBody,
@@ -1395,8 +1383,6 @@ function NoteCard({
 }: NoteCardProps) {
   // 画面に出すのは送信待ちの値を重ねた行（送信待ちの本文を出す）。保存の基準はサーバーの生の値（note）
   const shown = overlayNote(note, pending?.values)
-  const unread = actorId != null && !read
-  const readCount = (note.read_count ?? 0) + (locallyRead && note.my_read !== true ? 1 : 0)
   const bodyId = `cl-note-${note.id}-body`
 
   // 既読者一覧（開いた時にだけ取りに行く。閉じている間は通信しない）
@@ -1441,7 +1427,7 @@ function NoteCard({
 
   return (
     <article
-      className={`tl-card rounded-md bg-surface px-3 py-2 ${unread ? 'border-l-4 border-accent' : ''}`}
+      className="tl-card rounded-md bg-surface px-3 py-2"
     >
       {/* 1行目: 時刻・対象・職種タグ・重要度 */}
       <div className="tl-card-head flex flex-wrap items-center gap-2">
@@ -1468,7 +1454,6 @@ function NoteCard({
         {note.importance === 'important' && <Chip tone="warn">{IMPORTANCE_LABEL.important}</Chip>}
         {note.importance === 'critical' && <Chip tone="danger">{IMPORTANCE_LABEL.critical}</Chip>}
         {note.ongoing && <Chip tone="info">継続</Chip>}
-        {unread && <Chip tone="accent">未読</Chip>}
       </div>
 
       {/* 2行目: 本文（既定2行clamp・タップで展開＝明示操作。展開状態は保存しない）。
@@ -1495,30 +1480,8 @@ function NoteCard({
           記入者{' '}
           {reporterName ?? (note.reporter_id == null ? '未記入' : `ID ${note.reporter_id}`)}
         </span>
-        {/* ui-design.md §0/§2「タップで既読者一覧を表示」。開いた時にだけ既読者を取りに行く */}
-        <button
-          type="button"
-          className={`${READ_HIT} rounded-md text-sm text-link tabular`}
-          onClick={() => setReadersOpen(true)}
-          aria-haspopup="dialog"
-          aria-label={`既読 ${readCount}名。既読にした職員の一覧を開く`}
-        >
-          <span aria-hidden="true">✓</span>既読 {readCount}
-        </button>
-        {actorId != null &&
-          (read ? (
-            <span className="text-sm text-ok">
-              <span aria-hidden="true">✓ </span>既読済み
-            </span>
-          ) : (
-            <button
-              type="button"
-              className="min-h-tap rounded-md border border-border-strong px-3 text-base text-ink"
-              onClick={() => onMarkRead(note)}
-            >
-              既読にする
-            </button>
-          ))}
+        {/* 既読の人数・〔既読にする〕・既読済みの印は出さない（未読の確かめは使わない・2026-11-07 本人指示）。
+            本文を開いた時に既読を付ける仕組み（onToggleExpand→onMarkRead）とデータはそのまま */}
       </div>
 
       {/* 送信待ち・止まっている変更の印（2026-09-29）。止まっている時は〔くらべて選ぶ〕 */}
