@@ -7,6 +7,7 @@
 //   並び … 日報と同じ（時刻 timeSortKey〔夜勤明けの「翌」は夜の後ろ〕→ id）。まとめた行は最初の記録の位置に出す
 //   内容 … 最初の本文、改行して2件目以降の本文。記入者の列がある区分では、記録ごとに記入者の枠を区切って出す
 //          （2026-10-20 本人指示）。記入者の列が無い区分（夜勤）だけ、2件目以降の末尾に「（記入者の姓）」を付ける
+//          （1つ前の記録と同じ記入者の時は紙に出さない・2026-11-07 本人指示）
 //
 // 拡張子付きで import する（tests から直接読めるようにするため）。個人情報は扱わない。
 
@@ -100,6 +101,11 @@ export interface NoteGroupLine {
   body: string
   /** 末尾に付ける「（姓）」。最初の記録・記入者なし・名前が引けない時は '' */
   suffix: string
+  /**
+   * 1つ前の記録と同じ記入者（2026-11-07 本人指示「同じ人なら姓を出さないようにして」）。
+   * true の時は紙に姓を出さない（画面は記入者を選び直すボタンとして薄い字で残す）
+   */
+  sameAsPrev: boolean
 }
 
 /**
@@ -108,8 +114,13 @@ export interface NoteGroupLine {
  */
 export function noteGroupLines(row: Pick<NoteGroupRow, 'notes'>, staffName: (id: number) => string | null): NoteGroupLine[] {
   return row.notes.map((n, i) => {
-    if (i === 0 || n.reporter_id === null) return { note: n, body: n.body, suffix: '' }
+    if (i === 0 || n.reporter_id === null) return { note: n, body: n.body, suffix: '', sameAsPrev: false }
     const s = surnameOf(staffName(n.reporter_id))
-    return { note: n, body: n.body, suffix: s === '' ? '' : `（${s}）` }
+    return {
+      note: n,
+      body: n.body,
+      suffix: s === '' ? '' : `（${s}）`,
+      sameAsPrev: row.notes[i - 1].reporter_id === n.reporter_id,
+    }
   })
 }

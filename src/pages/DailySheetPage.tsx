@@ -8709,7 +8709,7 @@ function NoteRow({
                   </div>
                   {i > 0 && !perLineReporter ? (
                     // 記入者の列が無い区分（夜勤）だけ: 2件目以降の末尾に記入者の姓（押すとこの記録の記入者を選び直す）。
-                    // 記入者が無い時は紙には何も出さない
+                    // 記入者が無い時・1つ前の記録と同じ記入者の時は紙には何も出さない（同じ人は画面だけ薄い字・2026-11-07 本人指示）
                     <button
                       type="button"
                       disabled={disabled}
@@ -8717,11 +8717,11 @@ function NoteRow({
                       aria-label={
                         line.suffix === ''
                           ? `${i + 1}件目の記入者を選ぶ`
-                          : `${i + 1}件目の記入者 ${nameOf(n.reporter_id ?? -1) ?? ''}。押すと選び直します`
+                          : `${i + 1}件目の記入者 ${nameOf(n.reporter_id ?? -1) ?? ''}${line.sameAsPrev ? '（前の記録と同じ）' : ''}。押すと選び直します`
                       }
                       style={ROW_BTN_STYLE}
-                      className={`${CELL_HIT} shrink-0 rounded-sm px-1 text-left ${disabled ? 'text-ink2' : 'text-link'}${
-                        line.suffix === '' ? ' print:hidden' : ''
+                      className={`${CELL_HIT} shrink-0 rounded-sm px-1 text-left ${disabled || line.sameAsPrev ? 'text-ink2' : 'text-link'}${
+                        line.suffix === '' || line.sameAsPrev ? ' print:hidden' : ''
                       }`}
                     >
                       {line.suffix === '' ? <span aria-hidden="true">（—）</span> : line.suffix}

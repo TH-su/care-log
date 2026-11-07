@@ -13,6 +13,7 @@
 
 import { afterEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { performance } from 'node:perf_hooks'
 import { registerLoadFailure } from './ts-load.mjs'
 import { LOCK_JUDGE_CASES, LOCK_SECTIONS, LOCK_DAY, addMin } from './note-lock-contract.mjs'
@@ -237,6 +238,29 @@ if (pureError !== null) {
         [4, '四', '（職員03）'],
         [5, '五', ''],
       ])
+      assert.deepEqual(lines.map((l) => l.sameAsPrev), [false, false, false, false, false])
+    })
+
+    it('1つ前の記録と同じ記入者の時は印（sameAsPrev）を付け、紙に姓を出さない（2026-11-07 本人指示）', () => {
+      const names = { 1: '職員 01', 2: '職員02' }
+      const row = groupNotesByResident([
+        note({ id: 1, body: '一', reporter_id: 1 }),
+        note({ id: 2, body: '二', reporter_id: 1 }),
+        note({ id: 3, body: '三', reporter_id: 2 }),
+        note({ id: 4, body: '四', reporter_id: 1 }),
+        note({ id: 5, body: '五', reporter_id: 1 }),
+      ])[0]
+      const lines = noteGroupLines(row, (id) => names[id] ?? null)
+      assert.deepEqual(lines.map((l) => [l.note.id, l.suffix, l.sameAsPrev]), [
+        [1, '', false],
+        [2, '（職員）', true],
+        [3, '（職員02）', false],
+        [4, '（職員）', false],
+        [5, '（職員）', true],
+      ])
+      // 日報の夜勤の欄: 同じ人の行は紙に出さない（画面だけ）
+      const daily = readFileSync(new URL('../src/pages/DailySheetPage.tsx', import.meta.url), 'utf8')
+      assert.match(daily, /line\.suffix === '' \|\| line\.sameAsPrev \? ' print:hidden' : ''/)
     })
 
     it('surnameOf: 最初の半角・全角空白より前／空白が無ければ全部／前後の空白は無視／空・null は空', () => {
