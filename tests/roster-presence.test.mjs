@@ -960,7 +960,7 @@ describe('入職日の取り込みの結果を同期の結果に出す（2026-10
     assert.deepEqual(r, { active: 3, known: 2, unknownNames: ['職員C'] })
   })
   it('理由ごとの一文（接続設定なし・読めない・日付なし・結果）', () => {
-    assert.match(G.hireDateSyncText({ status: 'no-config', active: 0, known: 0, written: 0 }), /接続設定がないため/)
+    assert.match(G.hireDateSyncText({ status: 'no-config', active: 0, known: 0, written: 0 }), /接続設定もないため/)
     assert.match(G.hireDateSyncText({ status: 'read-failed', active: 0, known: 0, written: 0 }), /読めませんでした/)
     assert.match(G.hireDateSyncText({ status: 'no-rows', active: 3, known: 0, written: 0 }), /見つかりませんでした/)
     assert.equal(
@@ -1353,7 +1353,283 @@ describe('職員の名前は勤務表の正本（Supabase の kv_get）から先
     assert.match(fn, /Promise\.race\(/) // 時間切れでも GAS へ戻す
     assert.doesNotMatch(fn, /console\.|localStorage/)
     assert.doesNotMatch(s, /rpc\('(kv_put|kv_import|kv_set_mode|kv_set_family_mode|shift_push|shift_lock_[a-z]+)'/)
-    assert.match(s, /const kvNames = await pullStaffNamesFromKv\(\)\n/)
-    assert.match(s, /await assertMasterWriter\(\)[\s\S]*?const kvNames = await pullStaffNamesFromKv\(\)/)
+    assert.match(s, /const dbNames = await pullStaffNamesFromDb\(\)\n/)
+    assert.match(s, /await assertMasterWriter\(\)[\s\S]*?const dbNames = await pullStaffNamesFromDb\(\)/)
+  })
+})
+
+// ══════════════════════════════════════════════════════════════
+// 2026-11-08: 職員の名前・入職日は、共通のデータベースの読む口（care-backend 0076）から先に読む
+//   carelog_staff_names … 勤務表（shift）が live の時だけ、GAS の pull staff と同じ並びの要素（name・active・status・order だけ）
+//   carelog_staff_hire_dates … 職員マスタが live の時だけ、職員マスタの GAS の list と同じ形（rows の name・hireDate・retireDate・legacyNo だけ）
+//   関数が無い・断られた・切り替える前・形の違い・0件は、今までどおりの読み先（名前は kv_get → GAS、入職日は職員マスタの GAS）へ戻す
+// ══════════════════════════════════════════════════════════════
+describe('職員の名前・入職日は共通のデータベースの読む口（0076）から先に読む（2026-11-08）', { skip }, () => {
+  const STFM_URL = 'https://script.google.com/macros/s/STFM_DUMMY/exec'
+  const base = (staff = [{ id: 1, name: '職員01', active: true, manual: false }]) =>
+    memSupabase({ residents: [res(1, 'R001', '利用者01')], staff })
+  const ok = (data) => () => ({ data, error: null, status: 200 })
+  const namesLive = (staff) => ok({ mode: 'live', staff })
+  const hireLive = (rows) => ok({ mode: 'live', ok: true, ver: 3, rows })
+  const toShift = (gas) => gas.requests.filter((r) => r.url.startsWith(SHIFT_URL))
+  /** 職員マスタの GAS（偽物）を足す。list は合言葉が合えば rows を返す。送った要求は gas.requests に控える */
+  const withStaffMaster = (gas, rows) => {
+    const inner = globalThis.fetch
+    globalThis.fetch = async (url, init = {}) => {
+      if (!String(url).startsWith(STFM_URL)) return inner(url, init)
+      const body = typeof init.body === 'string' ? JSON.parse(init.body) : null
+      gas.requests.push({ url: String(url), method: (init.method ?? 'GET').toUpperCase(), body })
+      const o = body?.action === 'list' && body.token === 'tok-stfm' ? { ok: true, ver: 9, rows } : { ok: false, error: '認証エラー' }
+      return { ok: true, status: 200, json: async () => o }
+    }
+  }
+  const toStfm = (gas) => gas.requests.filter((r) => r.url.startsWith(STFM_URL))
+  const configureStfm = () => lsStore.set('stfm_cfg', JSON.stringify({ url: STFM_URL, token: 'tok-stfm' }))
+
+  it('名前: 読む口が live で答えた時は kv_get も GAS の職員名簿も呼ばず、その一覧で職員の表を直す（退職は在籍を外す・入職順も写す）', async () => {
+    configure()
+    const sb = base()
+    sb.rpcReplies.carelog_staff_names = namesLive([
+      { name: '職員01', active: true, status: '退職', order: 1 },
+      { name: '職員02', active: true, status: '在籍', order: 2 },
+      { name: '職員03', active: false, order: 3 },
+      { name: '職員04', order: 4 },
+    ])
+    sb.rpcReplies.kv_get = () => {
+      throw new Error('呼ばれてはいけない')
+    }
+    useClient(sb)
+    const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: ['職員01'] }) // GAS の勤務表は古いまま
+    const out = await G.syncMasters()
+    assert.equal(typeof out, 'object')
+    assert.equal(toShift(gas).length, 0, 'GAS の職員名簿を呼んでいない')
+    assert.equal(sb.rpcCalls.includes('kv_get'), false, 'kv_get を呼んでいない')
+    assert.deepEqual(sb.db.staff.map((s) => [s.name, s.active]).sort(), [['職員01', false], ['職員02', true], ['職員03', false], ['職員04', true]])
+  })
+
+  it('名前: 読む口から読んだ時と kv_get から読んだ時で、職員の表は同じになる（同じ射影を通す）', async () => {
+    const list = [
+      { name: ' 職員01 ', active: true, status: '退職', order: 2 },
+      { name: '職員02', active: true, order: 1 },
+      { name: '職員０２', active: true, order: 5 }, // 全角の数字＝同じ人として2件目を捨てる
+      { name: '職員03', active: false },
+      { name: 7, order: 3 },
+      { name: '', order: 9 },
+    ]
+    const run = async (viaRpc) => {
+      configure()
+      const sb = base([])
+      if (viaRpc) sb.rpcReplies.carelog_staff_names = namesLive(list)
+      else sb.rpcReplies.kv_get = ok({ ok: true, rev: 1, data: list, mode: 'live' })
+      useClient(sb)
+      fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: [] })
+      await G.syncMasters()
+      const rows = sb.db.staff.map(({ id: _id, synced_at: _s, ...rest }) => rest)
+      D.forgetMyRole()
+      return rows
+    }
+    const a = await run(true)
+    const b = await run(false)
+    assert.ok(a.length >= 4)
+    assert.deepEqual(a, b)
+  })
+
+  const nameFallbacks = [
+    // [見出し, 応答, kv_get へ進むか]
+    ['関数が無い（0076 が未適用）', null, true],
+    ['断られた（42501）', () => ({ data: null, error: { message: 'not allowed', code: '42501' }, status: 403 }), true],
+    ['通信の失敗（例外）', () => Promise.reject(new Error('network')), true],
+    ['切り替える前（mode:shadow）', ok({ mode: 'shadow' }), false],
+    ['応答が配列', ok([{ name: '職員09', active: true }]), false],
+    ['応答が空', ok(null), false],
+  ]
+  for (const [label, reply, toKv] of nameFallbacks) {
+    it(`名前: 使えない時は今までどおりの読み先へ戻す（${toKv ? 'kv_get → GAS' : 'GAS'}）: ${label}`, async () => {
+      configure()
+      const sb = base()
+      if (reply) sb.rpcReplies.carelog_staff_names = reply
+      useClient(sb)
+      const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: ['職員01', '職員06'] })
+      const out = await G.syncMasters()
+      assert.equal(typeof out, 'object', label)
+      assert.ok(sb.rpcCalls.includes('carelog_staff_names'), label)
+      assert.equal(sb.rpcCalls.includes('kv_get'), toKv, `${label}: kv_get へ進むか`)
+      assert.deepEqual(toShift(gas).map((r) => [r.method, r.body?.action]), [['POST', 'pull']], label)
+      assert.ok(sb.db.staff.some((s) => s.name === '職員06'), label)
+      assert.equal(sb.db.staff.some((s) => s.name === '職員09'), false, `${label}: 使えない応答の氏名を入れていない`)
+    })
+  }
+
+  const nameBroken = [
+    ['形が違う（noshape）', ok({ mode: 'live', error: 'noshape' })],
+    ['staff が配列でない', ok({ mode: 'live', staff: '職員09' })],
+    ['0件', namesLive([])],
+    ['氏名の無い行だけ', namesLive([{ active: true }, { name: '' }])],
+  ]
+  for (const [label, reply] of nameBroken) {
+    it(`名前: 勤務表が live なのに読めない時は GAS（古い一覧）へ戻さず、職員の行を書き換えずに止める: ${label}`, async () => {
+      configure()
+      const sb = base()
+      sb.rpcReplies.carelog_staff_names = reply
+      sb.rpcReplies.kv_get = () => {
+        throw new Error('呼ばれてはいけない')
+      }
+      useClient(sb)
+      const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }, { id: 'R002', name: '利用者02' }], staff: ['職員06'] })
+      await assert.rejects(G.syncMasters(), (e) => {
+        assert.equal(e.message, G.STAFF_LIST_DB_BROKEN_MSG, label)
+        assert.match(e.message, /職員の一覧を読めませんでした/)
+        assert.match(e.message, /職員の一覧は変えていません/)
+        return true
+      })
+      assert.equal(toShift(gas).length, 0, `${label}: GAS の職員名簿を呼んでいない`)
+      assert.equal(sb.rpcCalls.includes('kv_get'), false, `${label}: kv_get へ進まない`)
+      assert.equal(sb.calls.filter((q) => q.table === 'staff' && q.action !== 'select').length, 0, `${label}: 職員の表に書いていない`)
+      assert.deepEqual(sb.db.staff.map((s) => [s.name, s.active]), [['職員01', true]], label)
+      assert.ok(sb.db.residents.some((r) => r.source_id === 'R002'), `${label}: 利用者マスタは同期する`)
+    })
+  }
+
+  it('入職日: 読む口が live で答えた時は職員マスタの GAS を呼ばず（接続設定が無くても）入職日と職員No を書き、結果の一文に読み先を出す', async () => {
+    configure() // 職員マスタの接続設定（stfm_cfg）は置かない
+    const sb = base([
+      { id: 1, name: '職員01', active: true, manual: false, hire_date: null },
+      { id: 2, name: '職員02', active: true, manual: false, hire_date: null },
+    ])
+    sb.rpcReplies.carelog_staff_names = namesLive([{ name: '職員01', active: true }, { name: '職員02', active: true }])
+    sb.rpcReplies.carelog_staff_hire_dates = hireLive([
+      { name: '職員01', hireDate: '2020-04-01', retireDate: '', legacyNo: '012' },
+      { name: '職員02', hireDate: '2018-10-15', retireDate: '', legacyNo: 'S-3' },
+    ])
+    useClient(sb)
+    const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: [] })
+    withStaffMaster(gas, [{ name: '職員01', hireDate: '1999-01-01' }])
+    const out = await G.syncMasters()
+    assert.equal(toStfm(gas).length, 0, '職員マスタの GAS を呼んでいない')
+    assert.equal(out.hireDates.status, 'done')
+    assert.equal(out.hireDates.source, 'db')
+    assert.equal(out.hireDates.written, 2)
+    const byName = Object.fromEntries(sb.db.staff.map((s) => [s.name, [s.hire_date, s.master_no]]))
+    assert.deepEqual(byName, { 職員01: ['2020-04-01', 12], 職員02: ['2018-10-15', 3] })
+    assert.match(G.hireDateSyncText(out.hireDates), /^共通のデータベースの職員マスタから読みました。在籍 2 名のうち 2 名/)
+  })
+
+  it('入職日: 読む口から読んだ時と職員マスタの GAS から読んだ時で、書く入職日・職員No は同じになる（同じ射影を通す）', async () => {
+    const rows = [
+      { name: '甲山 一郎', hireDate: '2010-04-01', retireDate: '2015-03-31', legacyNo: '1' },
+      { name: '甲山 一郎', hireDate: '2020-04-01', retireDate: '', legacyNo: '2' },
+      { name: '乙川 花子', hireDate: '2016-04-01', retireDate: '', legacyNo: '' },
+      { name: '丙田 三郎', hireDate: 'R2.4.1', retireDate: '', legacyNo: '2015-03' },
+    ]
+    const run = async (viaRpc) => {
+      configure()
+      if (!viaRpc) configureStfm()
+      const sb = base([
+        { id: 1, name: '甲山 一郎', active: true, manual: false, hire_date: null },
+        { id: 2, name: '乙川', active: true, manual: false, hire_date: null },
+        { id: 3, name: '丙田 三郎', active: true, manual: false, hire_date: null },
+      ])
+      sb.rpcReplies.carelog_staff_names = namesLive([{ name: '甲山 一郎' }, { name: '乙川' }, { name: '丙田 三郎' }])
+      if (viaRpc) sb.rpcReplies.carelog_staff_hire_dates = hireLive(rows)
+      useClient(sb)
+      const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: [] })
+      withStaffMaster(gas, rows)
+      const out = await G.syncMasters()
+      assert.equal(toStfm(gas).length, viaRpc ? 0 : 1)
+      D.forgetMyRole()
+      return [out.hireDates.source, sb.db.staff.map((s) => [s.id, s.hire_date ?? null, s.master_no ?? null])]
+    }
+    const [sa, a] = await run(true)
+    const [sg, g] = await run(false)
+    assert.deepEqual([sa, sg], ['db', 'gas'])
+    assert.deepEqual(a, g)
+    assert.deepEqual(a, [[1, '2020-04-01', 2], [2, '2016-04-01', null], [3, null, null]])
+  })
+
+  const hireFallbacks = [
+    ['関数が無い（0076 が未適用）', null],
+    ['断られた（42501）', () => ({ data: null, error: { message: 'not allowed', code: '42501' }, status: 403 })],
+    ['通信の失敗（例外）', () => Promise.reject(new Error('network'))],
+    ['切り替える前（mode:shadow）', ok({ mode: 'shadow' })],
+    ['応答が空', ok(null)],
+  ]
+  for (const [label, reply] of hireFallbacks) {
+    it(`入職日: 使えない時は今までどおり職員マスタの GAS から読む: ${label}`, async () => {
+      configure()
+      configureStfm()
+      const sb = base([{ id: 1, name: '職員01', active: true, manual: false, hire_date: null }])
+      sb.rpcReplies.carelog_staff_names = namesLive([{ name: '職員01', active: true }])
+      if (reply) sb.rpcReplies.carelog_staff_hire_dates = reply
+      useClient(sb)
+      const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: [] })
+      withStaffMaster(gas, [{ name: '職員01', hireDate: '2019-07-01' }])
+      const out = await G.syncMasters()
+      assert.ok(sb.rpcCalls.includes('carelog_staff_hire_dates'), label)
+      assert.deepEqual(toStfm(gas).map((r) => [r.method, r.body?.action]), [['POST', 'list']], label)
+      assert.equal(out.hireDates.source, 'gas', label)
+      assert.equal(sb.db.staff[0].hire_date, '2019-07-01', label)
+    })
+  }
+
+  const hireBroken = [
+    ['形が違う（noshape）', ok({ mode: 'live', error: 'noshape' })],
+    ['ok が無い', ok({ mode: 'live', rows: [{ name: '職員01', hireDate: '2001-01-01' }] })],
+    ['rows が配列でない', ok({ mode: 'live', ok: true, rows: '職員01' })],
+    ['rows が0件', hireLive([])],
+  ]
+  for (const [label, reply] of hireBroken) {
+    it(`入職日: 職員マスタが live なのに読めない時は GAS へ戻さず、入職日を変えない: ${label}`, async () => {
+      configure()
+      configureStfm()
+      const sb = base([{ id: 1, name: '職員01', active: true, manual: false, hire_date: '2010-01-01' }])
+      sb.rpcReplies.carelog_staff_names = namesLive([{ name: '職員01', active: true }])
+      sb.rpcReplies.carelog_staff_hire_dates = reply
+      useClient(sb)
+      const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: [] })
+      withStaffMaster(gas, [{ name: '職員01', hireDate: '2019-07-01' }])
+      const out = await G.syncMasters()
+      assert.equal(toStfm(gas).length, 0, `${label}: 職員マスタの GAS を呼んでいない`)
+      assert.equal(out.hireDates.status, 'db-broken', label)
+      assert.equal(sb.db.staff[0].hire_date, '2010-01-01', `${label}: 入職日を変えていない`)
+      assert.equal(G.hireDateSyncText(out.hireDates), G.STAFF_MASTER_DB_BROKEN_MSG)
+      assert.match(G.hireDateSyncText(out.hireDates), /入職日は変えていません/)
+    })
+  }
+
+  it('入職日: 読む口も使えず接続設定も無い時は書かずに no-config（一文は両方を読めなかったと伝える）', async () => {
+    configure()
+    const sb = base([{ id: 1, name: '職員01', active: true, manual: false, hire_date: null }])
+    sb.rpcReplies.carelog_staff_names = namesLive([{ name: '職員01', active: true }])
+    sb.rpcReplies.carelog_staff_hire_dates = ok({ mode: 'shadow' })
+    useClient(sb)
+    fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: [] })
+    const out = await G.syncMasters()
+    assert.equal(out.hireDates.status, 'no-config')
+    assert.equal(sb.db.staff[0].hire_date, null)
+    assert.match(G.hireDateSyncText(out.hireDates), /共通のデータベースから職員マスタを読めず/)
+  })
+
+  it('現場（field）のログインでは読む口も呼ばない（役割の確かめの後に読む）', async () => {
+    configure()
+    testRole = 'field'
+    const sb = base()
+    sb.rpcReplies.carelog_staff_names = namesLive([{ name: '職員01', active: true }])
+    sb.rpcReplies.carelog_staff_hire_dates = hireLive([{ name: '職員01', hireDate: '2020-04-01' }])
+    useClient(sb)
+    fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: ['職員01'] })
+    await assert.rejects(G.syncMasters(), (e) => e.message === G.MASTER_OFFICE_ONLY_MSG)
+    assert.equal(sb.rpcCalls.some((f) => f.startsWith('carelog_staff_')), false)
+  })
+
+  it('静的: 読む口は引数なしの読み取りだけ・時間切れつき・中身を console や localStorage に残さない', () => {
+    const s = src('lib/gasClient.ts')
+    const part = s.slice(s.indexOf('async function callReadRpc'), s.indexOf('async function pullStaffNamesOrNull'))
+    assert.match(part, /Promise\.race\(\[supabase\.rpc\(fn\), timeout\]\)/)
+    assert.doesNotMatch(part, /console\.|localStorage\./)
+    const hire = s.slice(s.indexOf('async function pullStaffHireDatesFromDb'), s.indexOf('async function syncStaffHireDates'))
+    assert.match(hire, /callReadRpc\('carelog_staff_hire_dates', STAFF_MASTER_TIMEOUT_MS\)/)
+    assert.match(hire, /return projectStaffHireDates\(r\)/)
+    assert.doesNotMatch(hire, /console\.|localStorage\./)
+    assert.match(s, /const r = await callReadRpc\('carelog_staff_names', TIMEOUT_MS\)[\s\S]*?const names = projectStaffNames\(r\)/)
   })
 })
