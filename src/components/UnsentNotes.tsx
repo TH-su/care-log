@@ -306,7 +306,7 @@ export function UnsentNotes({ day, noteIds, actorId, staff, residentName, onChan
           if (r === 'dropped' && Object.keys(vers).length > 0) await discardPendingNote({ clientKey: u.op.qid }, undefined, vers)
           if (r === 'sent') {
             // 一覧からは消えるので、一覧の上に残す（閉じるまで出す）
-            setNotice('⚠ 取り下げようとした申し送りは、既に登録されていました（取り下げられませんでした）。不要なら、日報・タイムラインの申し送りから削除してください。')
+            setNotice('⚠ 取り下げようとした申し送りは、既に登録されていました（取り下げられませんでした）。不要なら、申送・タイムラインの申し送りから削除してください。')
           }
         } else if (u.kind === 'rescued') await dropRescuedNote(u.raw)
         else await discardPendingNote(u.row.target, undefined, u.row.vers)

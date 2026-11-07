@@ -41,7 +41,7 @@ export const STOPPED_TABLE_LABEL: Record<string, string> = {
   incidents: '事故・ヒヤリハット',
   notes: '申し送り',
   note_reads: '申し送りの既読',
-  attendance: '日報の出勤者',
+  attendance: '申送の出勤者',
   residents: '申し送りでの表示名',
   daycare_attendance: 'デイの到着・欠席',
   daycare_activity_log: 'デイの活動',
@@ -66,7 +66,7 @@ export function stoppedOpTitle(op: Pick<StoppedOpLike, 'table' | 'kind' | 'paylo
     case 'read':
       return '申し送りの既読'
     case 'attendance':
-      return '日報の出勤者'
+      return '申送の出勤者'
     case 'alias':
       return '申し送りでの表示名の変更'
   }

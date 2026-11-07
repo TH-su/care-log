@@ -95,3 +95,20 @@
     padding-bottom: 0.25rem;
   }
 }
+
+/* 開いた欄の中を画面の半分ほどの高さの窓で縦に送る（2026-11-07 本人指示・申し送り・入浴・与薬・事故・ヒヤリ）。
+   窓の上下に薄い線を引き、窓の中で送れると分かるようにする */
+@media screen {
+  .cl-karte-fold-scroll {
+    max-height: 50vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border-top: 1px solid var(--c-border);
+    padding-top: 0.25rem;
+  }
+  /* 日ごとの記録の横向きの表（新しい日が左・右へ送ると過去）。左の列は送っても残る。区切りの線で列の見出しと分ける */
+  .cl-karte-hscroll-head {
+    box-shadow: inset -1px 0 0 var(--c-border-strong);
+  }
+}
+

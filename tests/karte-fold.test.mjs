@@ -14,7 +14,7 @@ const icss = read('../src/index.css')
 describe('カルテ: 下の欄は見出しだけにたたむ', () => {
   it('排泄・申し送り・入浴・与薬・事故・変更の記録は折りたたみの入れ物（FoldCard）', () => {
     for (const id of ['karte-excretion', 'karte-notes', 'karte-bath', 'karte-med', 'karte-incident', 'karte-history']) {
-      assert.match(karte, new RegExp(`<FoldCard title="[^"]+" className="mt-4" id="${id}">`), id)
+      assert.match(karte, new RegExp(`<FoldCard title="[^"]+" className="mt-4" id="${id}"( scroll)?>`), id)
     }
   })
   it('水分量のグラフと日ごとの記録もたたむ（主食＋副食のグラフ・バイタル・体重はたたまない）', () => {
@@ -84,6 +84,37 @@ describe('タイムライン: 縦に詰める（2026-11-07 本人指示・画面
     assert.match(block, /\.tl-legible \.day-section \{\s*margin-top: 0\.75rem;/)
     assert.match(block, /\.tl-legible \.day-section td\.py-3,\s*\.tl-legible \.day-section th\.py-2,\s*\.tl-legible \.day-section li\.py-2 \{\s*padding-top: 0\.25rem;/)
     assert.doesNotMatch(block, /font-size|min-height/)
+  })
+})
+
+describe('カルテ: 開いた欄の読み方（2026-11-07 本人指示）', () => {
+  it('日ごとの記録は画面では横向き（新しい日が左・右へ送ると過去）・左の列は残る・印刷は今までの縦の表', () => {
+    assert.match(karte, /printForm=\{mealsTable\(true\)\}>\s*\{mealsTableWide\}/)
+    const wide = karte.slice(karte.indexOf('const mealsTableWide'), karte.indexOf('<SectionCard title="食事・水分"'))
+    assert.match(wide, /className="cl-karte-hscroll mt-1 overflow-x-auto"/)
+    assert.match(wide, /\{rows\.map\(\(r\) => \(\s*<th key=\{r\.day\} scope="col"/)
+    assert.equal((wide.match(/sticky left-0/g) ?? []).length, 4) // 日付・朝昼夕（1行を3回）・水分・外出
+  })
+  it('申し送り・入浴・与薬・事故・ヒヤリは画面の半分ほどの窓で縦に送る（排泄・変更の記録は今のまま）', () => {
+    for (const id of ['karte-notes', 'karte-bath', 'karte-med', 'karte-incident']) {
+      assert.match(karte, new RegExp(`id="${id}" scroll>`), id)
+    }
+    for (const id of ['karte-excretion', 'karte-history']) {
+      assert.match(karte, new RegExp(`id="${id}">`), id)
+    }
+    assert.match(kcss, /\.cl-karte-fold-scroll \{\s*max-height: 50vh;\s*overflow-y: auto;/)
+  })
+})
+
+describe('「日報」を「申送」に（2026-11-07 本人指示）', () => {
+  it('下のタブ・見出し・読み込み中・知らせの文に「日報」を出さない', () => {
+    const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')
+    assert.equal((app.match(/label: '申送'/g) ?? []).length, 2)
+    assert.match(app, /if \(pathname === '\/'\) return '申送'/)
+    assert.match(app, /'申送へ戻る'/)
+    const daily = readFileSync(new URL('../src/pages/DailySheetPage.tsx', import.meta.url), 'utf8')
+    assert.match(daily, /<LoadingBlock label="申送を読み込んでいます…" \/>/)
+    assert.match(daily, /今日の記録は今日の申送に書いてください。/)
   })
 })
 

@@ -463,7 +463,7 @@ function mergeById<T extends { id: number }>(all: readonly T[] | null, active: r
 }
 
 const ERR_LOAD =
-  '日報を読み込めませんでした（通信エラー）。電波状態を確認してから、再試行してください。記録は消えていません'
+  '申送を読み込めませんでした（通信エラー）。電波状態を確認してから、再試行してください。記録は消えていません'
 const ERR_SAVE =
   '保存できませんでした（通信エラー）。電波状態を確認して、もう一度お試しください。入力は消えていません'
 /**
@@ -3412,7 +3412,7 @@ export function DailySheetPage({
 
   // 3状態（初回だけ画面ごと差し替える。2回目以降は下の帯で知らせる＝書きかけを消さない）
   if (phase === 'loading' && !everReady) {
-    return <LoadingBlock label="日報を読み込んでいます…" />
+    return <LoadingBlock label="申送を読み込んでいます…" />
   }
 
   if (phase === 'error' && !everReady) {
@@ -3467,7 +3467,7 @@ export function DailySheetPage({
         <div className="flex flex-wrap items-center gap-gap rounded-md border border-warn bg-warn-bg p-3 print:hidden">
           <p className="flex-1 text-base text-ink">
             <span aria-hidden="true">▲ </span>
-            日付が変わりました（いまは {fmtSheetDayShort(today)}。表示中は {fmtSheetDayShort(day)}）。今日の記録は今日の日報に書いてください。
+            日付が変わりました（いまは {fmtSheetDayShort(today)}。表示中は {fmtSheetDayShort(day)}）。今日の記録は今日の申送に書いてください。
           </p>
           <button
             type="button"
@@ -3575,7 +3575,7 @@ export function DailySheetPage({
                   if (el) dayElsRef.current.set(d, el)
                   else dayElsRef.current.delete(d)
                 }}
-                aria-label={`${fmtSheetDay(d)} の日報`}
+                aria-label={`${fmtSheetDay(d)} の申送`}
                 aria-current={d === day ? 'date' : undefined}
                 className="dsheet-day"
               >
@@ -6375,7 +6375,7 @@ function DaySheet({
           日付の行・この日の上の窓（選択画面・確認・〔くらべて選ぶ〕）はこの外に置く */}
       <div className="dsheet-body">
         {/* 3状態。失敗したのは**この日だけ**で、他の日は読めたまま残る（部分表示） */}
-        {phase === 'loading' && <LoadingBlock label={`${fmtSheetDay(day)}の日報を読み込んでいます…`} />}
+        {phase === 'loading' && <LoadingBlock label={`${fmtSheetDay(day)}の申送を読み込んでいます…`} />}
         {phase === 'error' && (
           <ErrorBlock message={ERR_LOAD} onRetry={() => setReload((n) => n + 1)} />
         )}
@@ -7014,7 +7014,7 @@ function DateBar({
           type="date"
           value={day}
           onChange={(e) => onGo(e.target.value)}
-          aria-label={`日報の日付 ${fmtSheetDay(day)}。カレンダーから選べます`}
+          aria-label={`申送の日付 ${fmtSheetDay(day)}。カレンダーから選べます`}
           className="min-h-tap rounded-md border border-border-strong bg-surface px-2 text-base text-ink"
         />
       </label>
@@ -7154,7 +7154,7 @@ function DayPicker({
           // 開ける時だけ既定動作を止める（開けない環境ではキーボード入力を妨げない）
           if (openPicker()) e.preventDefault()
         }}
-        aria-label={`日報の日付 ${fmtSheetDay(day)}。押すとカレンダーから日にちを選べます`}
+        aria-label={`申送の日付 ${fmtSheetDay(day)}。押すとカレンダーから日にちを選べます`}
       />
     </label>
   )
