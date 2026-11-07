@@ -181,6 +181,12 @@ const NO_STAFF: Staff[] = []
 const NAME_HIT = 'relative before:absolute before:inset-x-0 before:-inset-y-2.5'
 
 
+/**
+ * 申し送りの1件ずつのカード（と見出しの「申し送り n件」）を出すか。2026-11-07 本人指示で出さない
+ * （個別の申し送りは日報で読む。タイムラインはピン留め・外出・バイタル・食事を見る）
+ */
+const SHOW_NOTE_CARDS: boolean = false
+
 // ── 小さなヘルパ（純関数・この画面専用）────────────────────
 
 /** 日内ブロックのアンカーid。日付とブロック名だけで構成し、氏名・記録本文を含めない */
@@ -1042,9 +1048,11 @@ const DaySection = memo(function DaySection(props: DaySectionProps) {
         {/* サマリチップ列（タップで該当ブロックへ移動） */}
         <div className="mt-2 flex flex-wrap items-center gap-gap">
           {/* 未読の数は出さない（未読の確かめは使わない・2026-11-07 本人指示） */}
-          <Chip tone="plain" onClick={() => scrollToBlock(anchorId(iso, 'notes'))}>
-            {`申し送り ${summary.noteCount}件`}
-          </Chip>
+          {SHOW_NOTE_CARDS && (
+            <Chip tone="plain" onClick={() => scrollToBlock(anchorId(iso, 'notes'))}>
+              {`申し送り ${summary.noteCount}件`}
+            </Chip>
+          )}
           {summary.fever > 0 && (
             <Chip tone="warn" onClick={() => scrollToBlock(anchorId(iso, 'vitals'))}>
               {`▲発熱 ${summary.fever}名`}
@@ -1116,7 +1124,9 @@ const DaySection = memo(function DaySection(props: DaySectionProps) {
         </div>
       )}
 
-      {/* 申し送り */}
+      {/* 申し送り（1件ずつのカード）。2026-11-07 本人指示で出さない（個別の申し送りは日報で読む）。
+          部品と読み込みは残し、SHOW_NOTE_CARDS で止める（戻す時はこの印を true にするだけ） */}
+      {SHOW_NOTE_CARDS && (
       <div id={anchorId(iso, 'notes')} tabIndex={-1} className="mt-2">
         {notesByShift.length === 0 ? (
           <p className="rounded-md bg-surface px-3 py-3 text-base text-ink3">
@@ -1154,6 +1164,7 @@ const DaySection = memo(function DaySection(props: DaySectionProps) {
           ))
         )}
       </div>
+      )}
 
       {/* 外出・外泊 */}
       {day.outings.length > 0 && (

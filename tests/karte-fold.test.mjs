@@ -63,3 +63,14 @@ describe('タイムライン: 文字を日報程度に・未読の印を出さ�
     assert.match(timeline, /if \(opening\) onMarkRead\(note\)/)
   })
 })
+
+describe('タイムライン: 申し送りの1件ずつのカードを出さない（2026-11-07 本人指示・日報で読む）', () => {
+  it('カードの欄と見出しの「申し送り n件」を SHOW_NOTE_CARDS（false）で止める・ピン留め・外出・バイタル・食事は出す', () => {
+    const t = readFileSync(new URL('../src/pages/TimelinePage.tsx', import.meta.url), 'utf8')
+    assert.match(t, /const SHOW_NOTE_CARDS: boolean = false/)
+    assert.match(t, /\{SHOW_NOTE_CARDS && \(\s*<div id=\{anchorId\(iso, 'notes'\)\}/)
+    assert.match(t, /\{SHOW_NOTE_CARDS && \(\s*<Chip tone="plain" onClick=\{\(\) => scrollToBlock\(anchorId\(iso, 'notes'\)\)\}>/)
+    assert.match(t, /\{pinnedRows\.length > 0 && \(/)
+    assert.match(t, /id=\{anchorId\(iso, 'vitals'\)\}/)
+  })
+})
