@@ -18,6 +18,13 @@
 //       無い端末（現場の iPhone）でも、事務所PCと同じ体重が出るようにするため。順番はサーバー＞端末＞id からの推定で、
 //       サーバーか端末がその id に masterId を持つ時は推定を使わない（食い違いを推定で上書きしない）。
 //  5. 実名・合言葉・接続先の具体値をコードに書かない。
+//  6. 体重の正本は 2026-11-02 から共通の DB（care-backend 0032）。2026-11-08 から、先に共通の DB の読む口
+//     （carelog_weight_read・care-backend 0077・ケアログが使う項目だけ）を読み、切り替え済み（live）で形が正しい時だけそれを使う。
+//     関数が無い・切り替え前・断られた・形が違う・通信できない時は、今までどおり体重管理の GAS の getAll へ戻る
+//     （戻り道を消すのは Google への写し返しを止めた後・写し返しを止める計画 3-2）。
+//     DB を呼ぶのは db.ts だけ（contracts: rpc は db.ts と gasClient.ts だけ）。db.ts が読み込まれた時に setWeightDbReader で読み手を置く
+//     （このファイルは db.ts を読み込まない＝試験から単独で読めるまま）。読み手が無い時は GAS だけ（今までと同じ）。
+//     DB の応答は GAS の getAll と同じ名前の項目なので、同じ parseWeightPayload と照合を通す（結果は GAS 経由と同じ）。
 
 import { fmtDayLabel } from './format.ts'
 import type { Resident } from './types.ts'
@@ -350,18 +357,53 @@ export function mapWeights(
 
 // ───────────────────────── 取得（読み取りのみ） ─────────────────────────
 
-type SnapFetchResult = { ok: true; snap: WeightSnapshot } | { ok: false; reason: WeightFailReason }
+/** 'unconfigured'＝DB から読めず、この端末に体重管理アプリの接続設定も無い（＝今までの null） */
+type SnapFetchResult = { ok: true; snap: WeightSnapshot } | { ok: false; reason: WeightFailReason | 'unconfigured' }
 
-/** 画面のメモリにだけ持つ直近の成功結果（接続先ごと）と、送信中の取得（同時に何本も投げない） */
-let weightCache: { url: string; at: number; snap: WeightSnapshot } | null = null
-let weightInflight: { url: string; p: Promise<SnapFetchResult> } | null = null
+/**
+ * 共通の DB から体重を読む手（db.ts が置く）。切り替え済みで形が正しい時だけ getAll と同じ形の中身
+ * （{residents, records}）を返し、それ以外（関数が無い・切り替え前・断られた・形が違う・通信できない）は null。例外は投げない
+ */
+export type WeightDbReader = () => Promise<{ residents: unknown[]; records: unknown[] } | null>
+let weightDbReader: WeightDbReader | null = null
 
-/** メモリの体重を捨てる（テストと、将来のログアウト処理用） */
+/** DB の読み手を置く（db.ts が読み込まれた時に1回だけ呼ぶ。試験は null で外せる） */
+export function setWeightDbReader(reader: WeightDbReader | null): void {
+  weightDbReader = reader
+  weightGen += 1
+  weightCache = null
+  weightInflight = null
+}
+
+/** メモリの結果の出どころ（DB から読めた時はこの印・GAS の時は接続先） */
+const WEIGHT_SRC_DB = 'db:'
+
+/** 画面のメモリにだけ持つ直近の成功結果（出どころごと）と、送信中の取得（同時に何本も投げない） */
+let weightCache: { src: string; at: number; snap: WeightSnapshot } | null = null
+let weightInflight: { key: string; p: Promise<SnapFetchResult> } | null = null
+/** 捨てた回数（捨てる前に出した取得の結果をメモリに控えない＝ログインし直した後に前のアカウントの体重を使い回さない） */
+let weightGen = 0
+
+/** メモリの体重を捨てる（テストと、ログインし直した時＝db.ts が呼ぶ） */
 export function clearWeightCache(): void {
+  weightGen += 1
   weightCache = null
   weightInflight = null
   localMapKey = null
   localMapCache = new Map()
+}
+
+/** DB の読み手を1回呼ぶ（読み手が無い・null・例外は「DB からは読めない」＝GAS へ戻る） */
+async function readFromDb(): Promise<WeightSnapshot | null> {
+  const reader = weightDbReader
+  if (reader === null) return null
+  try {
+    const payload = await reader()
+    if (payload === null || !Array.isArray(payload.residents) || !Array.isArray(payload.records)) return null
+    return parseWeightPayload(payload)
+  } catch {
+    return null
+  }
 }
 
 async function requestAll(url: string, token: string): Promise<SnapFetchResult> {
@@ -395,10 +437,26 @@ async function requestAll(url: string, token: string): Promise<SnapFetchResult> 
   }
 }
 
+/** 先に DB、読めなければ体重管理の GAS（接続設定がある時だけ）。メモリへの控えもここで行う */
+async function loadAll(cfg: { url: string; token: string } | 'invalid' | null): Promise<SnapFetchResult> {
+  const gen = weightGen
+  const fromDb = await readFromDb()
+  if (fromDb !== null) {
+    if (gen === weightGen) weightCache = { src: WEIGHT_SRC_DB, at: Date.now(), snap: fromDb }
+    return { ok: true, snap: fromDb }
+  }
+  if (cfg === null) return { ok: false, reason: 'unconfigured' }
+  if (cfg === 'invalid') return { ok: false, reason: 'url' }
+  const url = cfg.url
+  const r = await requestAll(url, cfg.token)
+  if (r.ok && gen === weightGen) weightCache = { src: url, at: Date.now(), snap: r.snap }
+  return r
+}
+
 /**
- * 体重管理の GAS から getAll を取り、resident_id ごとの測定の列にする。
- * 接続設定が無い端末では null。失敗は { ok:false, reason }（例外を外へ出さない）。
- * 直近 WEIGHT_CACHE_MS 以内に同じ接続先から取れていれば、通信せずその結果を使う。
+ * 体重を読み、resident_id ごとの測定の列にする。先に共通の DB（切り替え済みの時だけ）、読めなければ体重管理の GAS の getAll。
+ * DB から読めず接続設定も無い端末では null。失敗は { ok:false, reason }（例外を外へ出さない）。
+ * 直近 WEIGHT_CACHE_MS 以内に DB か同じ接続先から取れていれば、通信せずその結果を使う。
  * force（「再試行する」）の時はメモリの結果を使わず取り直す。送信中の取得があればそれを待つ（二重に投げない）。
  */
 export async function fetchWeights(
@@ -406,35 +464,35 @@ export async function fetchWeights(
   opts: { force?: boolean } = {},
 ): Promise<WeightFetchResult | null> {
   const cfg = readWeightConfig()
-  if (cfg === null) return null
-  if (cfg === 'invalid') return { ok: false, reason: 'url' }
+  const hasDb = weightDbReader !== null
+  // DB の読み手が無い時は今までどおり（接続設定が無ければ通信せずに null）
+  if (!hasDb && cfg === null) return null
+  if (!hasDb && cfg === 'invalid') return { ok: false, reason: 'url' }
+  const gasUrl = cfg !== null && cfg !== 'invalid' ? cfg.url : null
   const now = Date.now()
   if (
     !opts.force &&
     weightCache !== null &&
-    weightCache.url === cfg.url &&
+    (weightCache.src === WEIGHT_SRC_DB || weightCache.src === gasUrl) &&
     now - weightCache.at >= 0 &&
     now - weightCache.at < WEIGHT_CACHE_MS
   ) {
     return pickWithLocal(weightCache.snap, residents)
   }
+  const key = `${hasDb ? WEIGHT_SRC_DB : ''}${gasUrl ?? (cfg === 'invalid' ? 'invalid' : '')}`
   let p: Promise<SnapFetchResult>
-  if (weightInflight !== null && weightInflight.url === cfg.url) {
+  if (weightInflight !== null && weightInflight.key === key) {
     p = weightInflight.p
   } else {
-    const url = cfg.url
-    p = requestAll(url, cfg.token).then((r) => {
-      if (r.ok) weightCache = { url, at: Date.now(), snap: r.snap }
-      return r
-    })
-    const mine = { url, p }
+    p = loadAll(cfg)
+    const mine = { key, p }
     weightInflight = mine
     void p.finally(() => {
       if (weightInflight === mine) weightInflight = null
     })
   }
   const r = await p
-  if (!r.ok) return { ok: false, reason: r.reason }
+  if (!r.ok) return r.reason === 'unconfigured' ? null : { ok: false, reason: r.reason }
   return pickWithLocal(r.snap, residents)
 }
 

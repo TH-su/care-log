@@ -4,8 +4,10 @@
 //   「終了 → 計画なし → 期限の状態」の順で出す（trainingDue.ts の reviewDueList）
 // ・写した日時を必ず出す（古さを隠さない）。写しが今日のものでなければ、事務所の PC で写すよう知らせる
 // ・数（期限切れ・間近・計画なし）を先に出し、一覧は〔一覧を開く〕で出す。開いているかだけを端末に残す（LS.dcTrainingReviewOpen）
-// ・〔計画書の期限を写す〕は、事務所・管理者のログインで、この端末に計画書アプリの接続設定がある時だけ出す。
-//   現場のログインでは接続設定を読まない（役割を先に見る）。押した時だけ写す（開いた時には書かない）
+// ・〔計画書の期限を写す〕は、事務所・管理者のログインの時に出す（2026-11-08 から。計画書の正本は共通の DB で、
+//   事務所・管理者のログインで読めるので、この端末に計画書アプリの接続設定が無くても写せる・care-backend 0077）。
+//   DB から読めず接続設定も無い端末で押した時は、接続設定が無い旨の文を出して何も書かない（trainingDueSync.ts）。
+//   現場のログインでは出さず、接続設定も読まない（役割を先に見る）。押した時だけ写す（開いた時には書かない）
 // ・写しを読めない時は「計画書の期限を確かめられません」と出し、「計画なし」「期限内」に倒さない
 
 import { useState } from 'react'
@@ -13,7 +15,7 @@ import { DbError, canWriteMasters } from '../lib/db'
 import type { MyRole } from '../lib/db'
 import { REVIEW_STATE_LABEL, normalizeDueRule, normalizeWarnDays, reviewCopyState, reviewDueCounts, scopedReviewDueList } from '../lib/trainingDue'
 import type { DueCopyLoad, ReviewDueRow, WeekScope } from '../lib/trainingDue'
-import { readTrainingPlanConfig, trainingDueSyncText } from '../lib/trainingPlanClient'
+import { trainingDueSyncText } from '../lib/trainingPlanClient'
 import { syncTrainingPlanDue } from '../lib/trainingDueSync'
 import { fmtDayLabel, isoDate } from '../lib/format'
 import { LS } from '../lib/types'
@@ -79,8 +81,8 @@ export function DaycareReviewDueSection({ today, residents, copy, role, actorId,
       writeOpen(!v)
       return !v
     })
-  // 〔写す〕は事務所・管理者で、この端末に計画書アプリの接続設定がある時だけ（役割を先に見る＝現場では接続設定を読まない）
-  const canCopy = canWriteMasters(role) && readTrainingPlanConfig() !== null
+  // 〔写す〕は事務所・管理者の時（役割を先に見る＝現場では出さない・接続設定も読まない）。2026-11-08 から接続設定の有無は問わない
+  const canCopy = canWriteMasters(role)
 
   const loaded = copy !== null && copy !== 'missing' && copy !== 'error' ? copy : null
   const rows: ReviewDueRow[] =

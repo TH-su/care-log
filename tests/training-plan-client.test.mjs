@@ -229,9 +229,10 @@ describe('静的検査（段階3c の規律）', () => {
     assert.ok(role > 0 && read > role)
     assert.match(s, /syncTrainingDue\(idx\.rows, idx\.settings, actorId\)/)
   })
-  it('区画: 〔写す〕は事務所・管理者で接続設定がある時だけ（役割を先に見る）・押した時だけ写す・端末に残すのは開閉だけ', () => {
+  it('区画: 〔写す〕は事務所・管理者の時（役割を先に見る・2026-11-08 から接続設定の有無は問わない＝DB から読める）・押した時だけ写す・端末に残すのは開閉だけ', () => {
     const c = code('../src/components/DaycareReviewDueSection.tsx')
-    assert.match(c, /const canCopy = canWriteMasters\(role\) && readTrainingPlanConfig\(\) !== null/)
+    assert.match(c, /const canCopy = canWriteMasters\(role\)\n/)
+    assert.doesNotMatch(c, /readTrainingPlanConfig|tp_cfg/)
     assert.equal((c.match(/syncTrainingPlanDue\(/g) ?? []).length, 1)
     assert.match(c, /onClick=\{\(\) => void doSync\(\)\}/)
     assert.equal((c.match(/localStorage\.(get|set)Item\(/g) ?? []).length, 2)

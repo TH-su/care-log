@@ -370,6 +370,20 @@ fetchResidentPinnedNotes(residentId: number): Promise<Note[]>   // 任意・足�
 - 2画面とも読み取りだけで書かない。端末に残すのは UI 状態の `cl_glanceRange`・`cl_glanceSort` だけ（ui-design.md §10）
 
 集計の純関数（副作用なし・db を import しない）は `src/lib/glance.ts`、試験は `tests/glance.test.mjs`。
+
+### 2026-11-08 追加: 体重と計画書の期限を、共通の DB の正本から読む（db.ts・care-backend 0077）
+
+```ts
+// 体重（カルテ・ひと目ボード・見守りボード）。RPC carelog_weight_read（許可リストの有効な人・現場も）
+readWeightsFromDb(): Promise<{ residents: unknown[]; records: unknown[] } | null>
+// 計画書の索引の期限と状態（〔計画書の期限を写す〕）。RPC carelog_training_due_index（事務所・管理者）
+readTrainingPlanIndexFromDb(): Promise<Record<string, unknown> | null>
+```
+
+- どちらも読むだけ。切り替え済み（live）で形が正しい時だけ中身を返し、関数が無い・切り替え前・断られた・形が違う・通信できない・待ちの上限（20秒）を過ぎた時は null（投げない）。null の時、呼ぶ側は今までどおり Google（体重管理・計画書の GAS）へ戻る
+- `readWeightsFromDb` は db.ts が読み込まれた時に `setWeightDbReader`（`weightClient.ts`）で体重の読み口に置く。`weightClient.ts` は db.ts を import しない（試験から単独で読めるまま）。画面は今までどおり `fetchWeights` だけを使う
+- 返す中身は GAS の getAll・索引と同じ名前の項目だけなので、GAS 経由と同じそろえ方（`parseWeightPayload`・`normalizeTrainingPlanIndex`）を通す。試験は `tests/weight-db.test.mjs`・`tests/daycare-training-db.test.mjs`
+- `rpc('carelog_weight_read'` と `rpc('carelog_training_due_index'` が現れるのは `src/lib/db.ts` の1か所ずつだけ。結果は呼ぶ側のメモリにだけ渡す（dataCache・端末に置かない）
 開発用の見本は `glance-preview.html`＋`src/dev/glancePreview.tsx`（架空データだけ・db／supabase／gasClient を import しない・vite build の入口に入れない＝`npx vite` で開いて見るだけ。端末に置くのは `cl_glanceRange`・`cl_glanceSort` だけ）
 
 ## src/lib/actor.ts
