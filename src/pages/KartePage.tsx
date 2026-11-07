@@ -559,9 +559,58 @@ function ResidentList({ state }: ResidentListProps) {
       [r.name, r.kana ?? '', r.room ?? ''].some((f) => kanaKey(f).includes(key)),
     )
   }, [ordered, q])
+  /**
+   * 居室順の時の階ごとのまとまり（2026-11-07 本人指示: 左に1階・右に2階を並べ、その下に方のボタン）。
+   * 階は居室の番号から決める（floorOf）。決められない方は列の下にまとめて出す
+   */
+  const floorGroups = useMemo(() => {
+    const map = new Map<number, Resident[]>()
+    const unknown: Resident[] = []
+    for (const r of list) {
+      const f = floorOf(r.room)
+      if (f === null) {
+        unknown.push(r)
+        continue
+      }
+      const g = map.get(f)
+      if (g) g.push(r)
+      else map.set(f, [r])
+    }
+    const floors = Array.from(map.keys()).sort((a, b) => a - b)
+    return { floors: floors.map((f) => ({ floor: f, people: map.get(f) as Resident[] })), unknown }
+  }, [list])
   /** 五十音順の時の行ごとのまとまり（あ行・か行…・読みの無い方は「その他」） */
   const kanaGroups = useMemo(() => (order === 'kana' ? groupByKanaRow(list) : []), [order, list])
   /** 行の中の1名（押すとカルテ。押し始め・フォーカス・マウスが乗り続けた時に先読み） */
+  /** 居室順の1名のボタン（居室・氏名・要確認の印・›） */
+  const residentRow = (r: Resident) => (
+    <li key={r.id}>
+      <Link
+        to={`/karte/${r.id}`}
+        // 行に指が触れた（押し始め・フォーカス・マウスが乗り続けた）時に、その方のカルテを裏で先読みする
+        onPointerDown={() => warmKarte(r.id)}
+        onFocus={() => warmKarte(r.id)}
+        onMouseEnter={() => hoverStart(r.id)}
+        onMouseLeave={hoverCancel}
+        className="flex min-h-tap w-full items-center gap-gap rounded border border-border bg-surface px-3 py-2 text-base text-ink"
+      >
+        {/* 列が2つ並ぶので、狭い画面（640px 未満）は居室を氏名の上に置く。氏名は「…」で切らず折り返す（取り違え防止） */}
+        <span className="flex min-w-0 flex-1 flex-col sm:flex-row sm:items-center sm:gap-gap">
+          <span className="tabular shrink-0 text-sm text-ink3 sm:w-14">{r.room ?? '—'}</span>
+          <span className="min-w-0 break-words font-bold">{r.name}</span>
+        </span>
+        {r.needs_review ? (
+          <span className="shrink-0 text-sm text-warn">
+            <span aria-hidden="true">▲</span>
+            <span className="sr-only">要確認</span>
+          </span>
+        ) : null}
+        <span aria-hidden="true" className="shrink-0 text-ink3">
+          ›
+        </span>
+      </Link>
+    </li>
+  )
   const linkProps = (id: number) => ({
     to: `/karte/${id}`,
     onPointerDown: () => warmKarte(id),
@@ -571,7 +620,7 @@ function ResidentList({ state }: ResidentListProps) {
   })
 
   return (
-    <div className={`mx-auto w-full p-4 ${order === 'kana' ? 'max-w-6xl' : 'max-w-2xl'}`}>
+    <div className={`mx-auto w-full p-4 ${order === 'kana' ? 'max-w-6xl' : 'max-w-4xl'}`}>
       <h1 className="text-xl font-heavy text-ink">カルテ（利用者一覧）</h1>
       <Link to="/glance" className="inline-flex min-h-tap items-center text-base text-link print:hidden">見守りボード（全員の直近の様子）<span aria-hidden="true"> ›</span></Link>
       <p className="mt-1 text-sm text-ink2">
@@ -658,33 +707,30 @@ function ResidentList({ state }: ResidentListProps) {
                 ))}
               </div>
             ) : (
-            <ul className="space-y-2">
-              {list.map((r) => (
-                <li key={r.id}>
-                  <Link
-                    to={`/karte/${r.id}`}
-                    // 行に指が触れた（押し始め・フォーカス・マウスが乗り続けた）時に、その方のカルテを裏で先読みする
-                    onPointerDown={() => warmKarte(r.id)}
-                    onFocus={() => warmKarte(r.id)}
-                    onMouseEnter={() => hoverStart(r.id)}
-                    onMouseLeave={hoverCancel}
-                    className="flex min-h-tap w-full items-center gap-gap rounded border border-border bg-surface px-3 py-2 text-base text-ink"
-                  >
-                    <span className="tabular w-14 shrink-0 text-sm text-ink3">{r.room ?? '—'}</span>
-                    <span className="flex-1 truncate font-bold">{r.name}</span>
-                    {r.needs_review ? (
-                      <span className="shrink-0 text-sm text-warn">
-                        <span aria-hidden="true">▲</span>
-                        <span className="sr-only">要確認</span>
-                      </span>
-                    ) : null}
-                    <span aria-hidden="true" className="shrink-0 text-ink3">
-                      ›
-                    </span>
-                  </Link>
-                </li>
-              ))}
-            </ul>
+              // 居室順: 階ごとの列（左に1階・右に2階…）。列の中は居室の順。1名のボタンは今までの見た目のまま
+              <>
+                <div
+                  className="grid items-start gap-3"
+                  style={{ gridTemplateColumns: `repeat(${Math.max(1, floorGroups.floors.length)}, minmax(0, 1fr))` }}
+                >
+                  {floorGroups.floors.map((g) => (
+                    <section key={g.floor} aria-label={`${g.floor}階 ${g.people.length}名`}>
+                      <h2 className="rounded border-l-4 border-ink2 bg-surface2 px-3 py-2 text-base font-bold text-ink">
+                        {g.floor}階 <span className="tabular text-sm font-normal text-ink2">{g.people.length}名</span>
+                      </h2>
+                      <ul className="mt-2 space-y-2">{g.people.map((r) => residentRow(r))}</ul>
+                    </section>
+                  ))}
+                </div>
+                {floorGroups.unknown.length > 0 ? (
+                  <section className="mt-4" aria-label={`階の分からない方 ${floorGroups.unknown.length}名`}>
+                    <h2 className="rounded border-l-4 border-ink2 bg-surface2 px-3 py-2 text-base font-bold text-ink">
+                      階の分からない方 <span className="tabular text-sm font-normal text-ink2">{floorGroups.unknown.length}名</span>
+                    </h2>
+                    <ul className="mt-2 space-y-2">{floorGroups.unknown.map((r) => residentRow(r))}</ul>
+                  </section>
+                ) : null}
+              </>
             )}
           </>
         )}
@@ -1536,8 +1582,11 @@ function FoldCard({
   title: string
   id?: string
   className?: string
-  /** 開いた中身を画面の半分ほどの高さの窓に入れ、窓の中で縦に送る（2026-11-07 本人指示・申し送り・入浴・与薬・事故） */
-  scroll?: boolean
+  /**
+   * 開いた中身を窓に入れ、窓の中で縦に送る（2026-11-07 本人指示）。
+   * true＝画面の半分ほどの高さ（申し送り・入浴・与薬・事故）／'tall'＝画面の 2/3 ほどの高さ（変更の記録）
+   */
+  scroll?: boolean | 'tall'
   children: ReactNode
 }) {
   const printing = useContext(KartePrintingCtx)
@@ -1566,7 +1615,7 @@ function FoldCard({
         </FoldButton>
       </h2>
       {open ? (
-        <div id={bodyId} className={`cl-karte-fold-body px-4 pb-3${scroll ? ' cl-karte-fold-scroll' : ''}`} tabIndex={scroll ? 0 : undefined}>
+        <div id={bodyId} className={`cl-karte-fold-body px-4 pb-3${scroll ? ' cl-karte-fold-scroll' : ''}${scroll === 'tall' ? ' cl-karte-fold-scroll-tall' : ''}`} tabIndex={scroll ? 0 : undefined}>
           {children}
         </div>
       ) : null}
@@ -3120,7 +3169,7 @@ function HistorySection({ residentId, staffById }: HistorySectionProps) {
   }, [more, oldest, residentId])
 
   return (
-    <FoldCard title="変更の記録" className="mt-4" id="karte-history">
+    <FoldCard title="変更の記録" className="mt-4" id="karte-history" scroll="tall">
       {state === 'loading' ? (
         <LoadingBlock label="変更の記録を読み込み中です…" />
       ) : state === 'error' ? (

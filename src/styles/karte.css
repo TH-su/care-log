@@ -112,3 +112,10 @@
   }
 }
 
+/* 変更の記録は画面の 2/3 ほどの高さの窓で縦に送る（2026-11-07 本人指示） */
+@media screen {
+  .cl-karte-fold-scroll.cl-karte-fold-scroll-tall {
+    max-height: 66vh;
+  }
+}
+

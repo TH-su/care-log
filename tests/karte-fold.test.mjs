@@ -14,7 +14,7 @@ const icss = read('../src/index.css')
 describe('カルテ: 下の欄は見出しだけにたたむ', () => {
   it('排泄・申し送り・入浴・与薬・事故・変更の記録は折りたたみの入れ物（FoldCard）', () => {
     for (const id of ['karte-excretion', 'karte-notes', 'karte-bath', 'karte-med', 'karte-incident', 'karte-history']) {
-      assert.match(karte, new RegExp(`<FoldCard title="[^"]+" className="mt-4" id="${id}"( scroll)?>`), id)
+      assert.match(karte, new RegExp(`<FoldCard title="[^"]+" className="mt-4" id="${id}"( scroll| scroll="tall")?>`), id)
     }
   })
   it('水分量のグラフと日ごとの記録もたたむ（主食＋副食のグラフ・バイタル・体重はたたまない）', () => {
@@ -95,13 +95,13 @@ describe('カルテ: 開いた欄の読み方（2026-11-07 本人指示）', () 
     assert.match(wide, /\{rows\.map\(\(r\) => \(\s*<th key=\{r\.day\} scope="col"/)
     assert.equal((wide.match(/sticky left-0/g) ?? []).length, 4) // 日付・朝昼夕（1行を3回）・水分・外出
   })
-  it('申し送り・入浴・与薬・事故・ヒヤリは画面の半分ほどの窓で縦に送る（排泄・変更の記録は今のまま）', () => {
+  it('申し送り・入浴・与薬・事故・ヒヤリは画面の半分ほど・変更の記録は 2/3 ほどの窓で縦に送る（排泄は今のまま）', () => {
     for (const id of ['karte-notes', 'karte-bath', 'karte-med', 'karte-incident']) {
       assert.match(karte, new RegExp(`id="${id}" scroll>`), id)
     }
-    for (const id of ['karte-excretion', 'karte-history']) {
-      assert.match(karte, new RegExp(`id="${id}">`), id)
-    }
+    assert.match(karte, /id="karte-excretion">/)
+    assert.match(karte, /id="karte-history" scroll="tall">/)
+    assert.match(kcss, /\.cl-karte-fold-scroll\.cl-karte-fold-scroll-tall \{\s*max-height: 66vh;/)
     assert.match(kcss, /\.cl-karte-fold-scroll \{\s*max-height: 50vh;\s*overflow-y: auto;/)
   })
 })
@@ -115,6 +115,17 @@ describe('「日報」を「申送」に（2026-11-07 本人指示）', () => {
     const daily = readFileSync(new URL('../src/pages/DailySheetPage.tsx', import.meta.url), 'utf8')
     assert.match(daily, /<LoadingBlock label="申送を読み込んでいます…" \/>/)
     assert.match(daily, /今日の記録は今日の申送に書いてください。/)
+  })
+})
+
+describe('カルテの利用者一覧: 居室順は階ごとの列（2026-11-07 本人指示）', () => {
+  it('左に1階・右に2階…の列に分け、見出しの下に方のボタンを居室の順で並べる・階の分からない方は列の下', () => {
+    const list = karte.slice(karte.indexOf('function ResidentList('), karte.indexOf('// バイタル折れ線'))
+    assert.match(list, /const f = floorOf\(r\.room\)/)
+    assert.match(list, /gridTemplateColumns: `repeat\(\$\{Math\.max\(1, floorGroups\.floors\.length\)\}, minmax\(0, 1fr\)\)`/)
+    assert.match(list, /\{g\.floor\}階 <span/)
+    assert.match(list, /階の分からない方/)
+    assert.match(list, /\.sort\(\(a, b\) => a - b\)/)
   })
 })
 
