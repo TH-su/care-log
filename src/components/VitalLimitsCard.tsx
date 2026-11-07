@@ -189,7 +189,7 @@ export function VitalLimitsCard({ residentId, role, onChanged }: Props) {
         主治医の指示などで、この方だけ基準を変える時に使います。空欄の項目は施設の基準です。足した行は書き換えられず、開始日より前の日の記録には効きません。
       </p>
       <p className="mt-1 text-sm text-ink2">
-        足した値は、開始日からの記録の印（カルテ・バイタルの一覧・日報・時系列・要注意・デイ・温度板）に効きます。
+        足した値は、開始日からの記録の印（カルテ・バイタルの一覧・申送・時系列・要注意・デイ・温度板）に効きます。
       </p>
       {state === 'loading' ? <p className="mt-2 text-sm text-ink2">読み込んでいます…</p> : null}
       {state === 'error' ? (

@@ -1526,7 +1526,20 @@ const KARTE_OPEN_EVENT = 'cl-karte-open'
 const KartePrintingCtx = createContext(false)
 
 /** 欄（h2）の折りたたみ。閉じている間は見出しだけ。中身（children）は開いた時だけ描く */
-function FoldCard({ title, id, className = '', children }: { title: string; id?: string; className?: string; children: ReactNode }) {
+function FoldCard({
+  title,
+  id,
+  className = '',
+  scroll = false,
+  children,
+}: {
+  title: string
+  id?: string
+  className?: string
+  /** 開いた中身を画面の半分ほどの高さの窓に入れ、窓の中で縦に送る（2026-11-07 本人指示・申し送り・入浴・与薬・事故） */
+  scroll?: boolean
+  children: ReactNode
+}) {
   const printing = useContext(KartePrintingCtx)
   const [open, setOpen] = useState(false)
   const bodyId = useId()
@@ -1553,7 +1566,7 @@ function FoldCard({ title, id, className = '', children }: { title: string; id?:
         </FoldButton>
       </h2>
       {open ? (
-        <div id={bodyId} className="cl-karte-fold-body px-4 pb-3">
+        <div id={bodyId} className={`cl-karte-fold-body px-4 pb-3${scroll ? ' cl-karte-fold-scroll' : ''}`} tabIndex={scroll ? 0 : undefined}>
           {children}
         </div>
       ) : null}
@@ -2352,6 +2365,101 @@ function MealsSection({ meals, fluids, outings, days, printing, target }: MealsS
     </>
   )
 
+  /**
+   * 画面の日ごとの記録（2026-11-07 本人指示）。日を横に並べ（新しい日が左）、枠の中を右へ送ると過去の日を読める。
+   * 左の列（朝・昼・夕・水分・外出）は横に送っても残す。中身の書き方（マス・地の色・斜線・▲）は縦の表と同じ部品。
+   * 印刷は今までの縦の表（mealsTable）のまま
+   */
+  const mealsTableWide = (
+    <div className="cl-karte-hscroll mt-1 overflow-x-auto">
+      <table className="border-collapse text-sm">
+        <caption className="sr-only">
+          食事（主食／副食）と水分量の履歴。左が新しい日で、右へ送ると前の日になります。
+        </caption>
+        <thead>
+          <tr className="border-b border-border-strong text-ink2">
+            <th scope="col" className="cl-karte-hscroll-head sticky left-0 z-[1] whitespace-nowrap bg-surface py-1 pr-2 text-left font-bold">
+              日付
+            </th>
+            {rows.map((r) => (
+              <th key={r.day} scope="col" className="whitespace-nowrap px-2 py-1 text-right font-bold">
+                {fmtDayLabel(r.day)}
+                {lowStreak.has(r.day) ? (
+                  <span className="block text-sm font-bold text-warn">{mealLowLabel(lowStreak.get(r.day) ?? 0)}</span>
+                ) : null}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {TABLE_SLOTS.map((s) => (
+            <tr key={s} className="border-b border-border">
+              <th scope="row" className="cl-karte-hscroll-head sticky left-0 z-[1] whitespace-nowrap bg-surface py-1 pr-2 text-left font-bold text-ink2">
+                {SLOT_HEAD[s]}
+              </th>
+              {rows.map((r) => {
+                const meal = r.meals.get(s)
+                const shade = mealShade(meal)
+                return (
+                  <td
+                    key={r.day}
+                    className={`whitespace-nowrap px-2 py-1 text-right${shade ? ` ${shadeClass(shade.stage)}` : ''}${shade?.hatched ? ' cl-shade-hatch' : ''}`}
+                    style={shade ? shadeStyle(shade.stage) : undefined}
+                  >
+                    <MealCell meal={meal} shaded={shade !== null} />
+                    {shade?.hatched ? <span className="sr-only">（半分以下）</span> : null}
+                  </td>
+                )
+              })}
+            </tr>
+          ))}
+          <tr className="border-b border-border">
+            <th scope="row" className="cl-karte-hscroll-head sticky left-0 z-[1] whitespace-nowrap bg-surface py-1 pr-2 text-left font-bold text-ink2">
+              水分(ml)
+            </th>
+            {rows.map((r) => (
+              <td key={r.day} className="tabular whitespace-nowrap px-2 py-1 text-right text-ink">
+                {r.fluid == null ? (
+                  <>
+                    <span className="sr-only">記録なし</span>
+                    <span aria-hidden="true" className="text-ink3">
+                      —
+                    </span>
+                  </>
+                ) : (
+                  <FluidCell total={r.fluid} target={target} />
+                )}
+              </td>
+            ))}
+          </tr>
+          <tr>
+            <th scope="row" className="cl-karte-hscroll-head sticky left-0 z-[1] whitespace-nowrap bg-surface py-1 pr-2 text-left font-bold text-ink2">
+              外出・外泊
+            </th>
+            {rows.map((r) => (
+              <td key={r.day} className="px-2 py-1 text-right">
+                {r.outings.length === 0 ? (
+                  <span aria-hidden="true" className="text-ink3">
+                    —
+                  </span>
+                ) : (
+                  <span className="flex flex-wrap justify-end gap-gap">
+                    {r.outings.map((o) => (
+                      <Chip key={o.id} tone="info">
+                        {OUTING_KIND_LABEL[o.kind] ?? '外出'}
+                        {o.end_on == null ? '（帰着未定）' : ''}
+                      </Chip>
+                    ))}
+                  </span>
+                )}
+              </td>
+            ))}
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  )
+
   return (
     <SectionCard title="食事・水分" className="mt-4" id="karte-meals">
       <p className="text-sm text-ink2">
@@ -2379,7 +2487,7 @@ function MealsSection({ meals, fluids, outings, days, printing, target }: MealsS
           {/* 表は今までの幅のまま（広い画面で列が間延びして行を追いにくくならないように） */}
           {/* 日ごとの記録は画面では見出しだけにたたむ（2026-11-07 本人指示）。印刷では今までどおり見出しと表を出す */}
           <FoldBlock title="日ごとの記録" className="mt-4 border-t border-border" printForm={mealsTable(true)}>
-            {mealsTable(false)}
+            {mealsTableWide}
           </FoldBlock>
         </>
       )}
@@ -2639,7 +2747,7 @@ function NotesSection({ notes, staffById }: NotesSectionProps) {
   }, [notes])
 
   return (
-    <FoldCard title="この方の申し送り" className="mt-4" id="karte-notes">
+    <FoldCard title="この方の申し送り" className="mt-4" id="karte-notes" scroll>
       {groups.length === 0 ? (
         <div className="mt-2">
           <EmptyBlock message="この期間の申し送りはありません。期間を広げてお試しください。" />
@@ -2688,7 +2796,7 @@ function BathSection({ baths, staffById }: BathSectionProps) {
     [baths],
   )
   return (
-    <FoldCard title="入浴（デイ）" className="mt-4" id="karte-bath">
+    <FoldCard title="入浴（デイ）" className="mt-4" id="karte-bath" scroll>
       {sorted.length === 0 ? (
         <div className="mt-2">
           <EmptyBlock message="この期間の入浴（デイ）の記録はありません。期間を広げてお試しください。" />
@@ -2745,7 +2853,7 @@ function MedSection({ meds }: MedSectionProps) {
     [meds],
   )
   return (
-    <FoldCard title="与薬" className="mt-4" id="karte-med">
+    <FoldCard title="与薬" className="mt-4" id="karte-med" scroll>
       {sorted.length === 0 ? (
         <div className="mt-2">
           <EmptyBlock message="この期間の与薬の記録はありません。期間を広げてお試しください。" />
@@ -2805,7 +2913,7 @@ function IncidentSection({ incidents }: IncidentSectionProps) {
     [incidents],
   )
   return (
-    <FoldCard title="事故・ヒヤリ" className="mt-4" id="karte-incident">
+    <FoldCard title="事故・ヒヤリ" className="mt-4" id="karte-incident" scroll>
       {sorted.length === 0 ? (
         <div className="mt-2">
           <EmptyBlock message="この期間の事故・ヒヤリハットの記録はありません。期間を広げてお試しください。" />

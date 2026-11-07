@@ -430,7 +430,7 @@ type IconName = View
 type NavItem = { view: View; to: string; label: string }
 
 const NAV_BOTTOM: NavItem[] = [
-  { view: 'daily', to: '/', label: '日報' },
+  { view: 'daily', to: '/', label: '申送' },
   { view: 'vitalsSheet', to: '/sheet/vitals', label: 'バイタル' },
   { view: 'mealsSheet', to: '/sheet/meals', label: '食事' },
   { view: 'karte', to: '/karte', label: 'カルテ' },
@@ -438,7 +438,7 @@ const NAV_BOTTOM: NavItem[] = [
 ]
 
 const NAV_RAIL: NavItem[] = [
-  { view: 'daily', to: '/', label: '日報' },
+  { view: 'daily', to: '/', label: '申送' },
   { view: 'vitalsSheet', to: '/sheet/vitals', label: 'バイタル' },
   { view: 'mealsSheet', to: '/sheet/meals', label: '食事' },
   { view: 'karte', to: '/karte', label: 'カルテ' },
@@ -606,7 +606,7 @@ const SHEET_HEADER_SLOT_PATHS = ['/sheet/meals']
 
 /** ヘッダに出す画面名 */
 function screenTitle(pathname: string): string {
-  if (pathname === '/') return '日報'
+  if (pathname === '/') return '申送'
   if (pathname === '/sheet/vitals') return 'バイタル一覧'
   if (pathname === '/sheet/meals') return '食事一覧'
   if (pathname === '/more') return 'その他'
@@ -905,7 +905,7 @@ function PageFailure({
             to={pathname === '/' ? '/more' : '/'}
             className="inline-flex min-h-tap items-center rounded-md border border-border-strong px-4 text-base text-link"
           >
-            {pathname === '/' ? '「その他」を開く' : '日報へ戻る'}
+            {pathname === '/' ? '「その他」を開く' : '申送へ戻る'}
           </Link>
         </p>
       ) : null}
