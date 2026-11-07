@@ -74,3 +74,16 @@ describe('タイムライン: 申し送りの1件ずつのカードを出さな�
     assert.match(t, /id=\{anchorId\(iso, 'vitals'\)\}/)
   })
 })
+
+describe('タイムライン: 縦に詰める（2026-11-07 本人指示・画面だけ）', () => {
+  it('日と日の間・見出しの上下・欄の間・枠の余白・表の行の上下を詰める（押す所と文字の大きさは変えない）', () => {
+    const css = readFileSync(new URL('../src/index.css', import.meta.url), 'utf8')
+    const i = css.indexOf('.tl-legible .day-section {')
+    assert.ok(i > 0)
+    const block = css.slice(css.lastIndexOf('@media screen {', i), css.indexOf('/* 幅 768px 以上', i))
+    assert.match(block, /\.tl-legible \.day-section \{\s*margin-top: 0\.75rem;/)
+    assert.match(block, /\.tl-legible \.day-section td\.py-3,\s*\.tl-legible \.day-section th\.py-2,\s*\.tl-legible \.day-section li\.py-2 \{\s*padding-top: 0\.25rem;/)
+    assert.doesNotMatch(block, /font-size|min-height/)
+  })
+})
+

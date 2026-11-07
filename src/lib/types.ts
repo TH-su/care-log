@@ -767,6 +767,8 @@ export const LS = {
   recordTab: 'cl_recordTab',
   vitalsFloor: 'cl_vitalsFloor',
   karteRange: 'cl_karteRange',
+  /** カルテの利用者一覧の並び（'room' 居室順／'kana' 五十音順・2026-11-07） */
+  karteListOrder: 'cl_karteListOrder',
   mode: 'cl_mode',
   staffId: 'cl_staffId',
   sendQueue: 'cl_sendQueue',

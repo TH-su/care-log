@@ -165,8 +165,9 @@ if (DC === null) {
       // どれも <span>（押せない札・横棒）。<button> には付いていない
       for (const h of hits) assert.match(h, /<span |\$\{base\} rounded-full/, h)
       // 押せない札7か所（食事一括の「デイ」の札＝今回を含む）＋カルテの水分の横棒1か所＝8
+      // ＋カルテの利用者一覧（五十音順）の居室・介護度の札2か所（2026-11-07・押せない札。押せるのはカード全体）＝10
       // （食事の表の水分の横棒 .cl-fluid-bar は sheet.css の border-radius: 9999px で、ここには数えない）
-      assert.equal(hits.length, 8, hits.join('\n'))
+      assert.equal(hits.length, 10, hits.join('\n'))
     })
     it('ボタンは rounded（6px）: 申し送りの分類・申し送りの入力・カルテの欄へ移動・押せるチップ', () => {
       assert.match(code('../src/components/noteCategory.tsx'), /className=\{`dsheet-cat-btn min-h-tap shrink-0 rounded px-3 text-base/)

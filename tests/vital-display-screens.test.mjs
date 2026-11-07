@@ -372,7 +372,7 @@ describe('カルテの配線（A1・A2・A3・A6・A7・A9・個別の目標）'
   it('カルテは localStorage を使わない（期間 cl_karteRange の読み書きは LS 経由のまま）', () => {
     const s = src()
     const uses = [...s.matchAll(/localStorage\.(getItem|setItem|removeItem)\(([^)]*)\)/g)].map((m) => m[2].split(',')[0].trim())
-    assert.deepEqual([...new Set(uses)], ['LS.karteRange'])
+    assert.deepEqual([...new Set(uses)].sort(), ['LS.karteListOrder', 'LS.karteRange']) // 2026-11-07 一覧の並びを足した
   })
 })
 
