@@ -428,6 +428,11 @@ autoSyncMasters(now?: number): Promise<'unconfigured' | 'officeOnly' | 'fresh' |
 - 職員名簿の読み先（2026-11-07）: syncMasters は役割の確かめの後、勤務表の正本（共通の Supabase の読み取り関数 `kv_get('staff')`・care-backend 0005／0007／0009）を先に読む。
   応答が ok:true・mode:'live'・氏名のある行が1件以上の時だけ使い、その時は GAS の職員名簿（pull）を呼ばない（職員名簿の接続設定も見ない）。
   関数が無い・断られた・通信の失敗・時間切れ・写しの期間（shadow）・形の違いは捨てて、今までどおり GAS から読む。書く関数は呼ばない。射影（氏名・在籍・入職順）と空上書き保護は同じ
+- 職員名簿・入職日の読み先（2026-11-08・care-backend 0076）: 職員名簿は読む口 `carelog_staff_names()`（勤務表が live の時だけ name・active・status・order を返す）を先に読み、
+  関数が無い・断られた・通信の失敗・時間切れの時だけ上の `kv_get('staff')` を試す（切り替える前・形の違い・0件と答えた時は GAS へ）。
+  入職日は読む口 `carelog_staff_hire_dates()`（職員マスタが live の時だけ・事務所・管理者だけ・GAS の list と同じ rows の name・hireDate・retireDate・legacyNo）を先に読み、
+  mode:'live'・ok:true・rows が1件以上の時だけ使う（職員マスタの接続設定 stfm_cfg が無い端末でも読める）。それ以外は今までどおり職員マスタの GAS（stfm_cfg のある端末だけ）。
+  どちらも GAS と同じ射影（projectStaffNames・projectStaffHireDates）を通す。GAS への戻り道は、写し返しを止めるまで消さない
 
 ## src/hooks/useTimeline.ts
 

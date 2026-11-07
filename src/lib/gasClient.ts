@@ -347,7 +347,58 @@ async function pullRosterOrNull(url: string, token: string): Promise<RosterEntry
 }
 
 /**
+ * 共通の Supabase の読み取りの関数を、引数なしで時間切れつきで呼ぶ（2026-11-08・care-backend 0076）。
+ * 戻り値: 'unavailable' … 関数が無い（0076 が未適用）・断られた・通信の失敗・時間切れ・例外（中身は出さない）
+ *         それ以外 … 応答の data（形は呼び出し側が確かめる）
+ */
+async function callReadRpc(fn: 'carelog_staff_names' | 'carelog_staff_hire_dates', timeoutMs: number): Promise<unknown | 'unavailable'> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const timeout = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), timeoutMs)
+    })
+    const got = await Promise.race([supabase.rpc(fn), timeout])
+    if (!got || got.error) return 'unavailable'
+    return got.data as unknown
+  } catch {
+    return 'unavailable' // 読めなければ今までの読み先へ戻す（例外を外へ出さない。中身は出さない）
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+/** 応答が {mode:'live', …} の形か（それ以外＝切り替える前・Google へ戻した後・形の違い） */
+function isLiveReply(r: unknown): r is Record<string, unknown> {
+  return !!r && typeof r === 'object' && !Array.isArray(r) && (r as { mode?: unknown }).mode === 'live'
+}
+
+/**
+ * 勤務表の職員一覧を、共通の Supabase の読む口 carelog_staff_names（care-backend 0076）から読む（2026-11-08）。
+ * 返すのは GAS の pull staff と同じ並びの要素の、ケアログが使う項目（name・active・status・order）だけ（労務の項目は来ない）。
+ * 戻り値: 職員の一覧（1件以上）… これを使う／'unavailable' … 関数が無い・断られた・通信の失敗＝前の読み先（kv_get）を試す／
+ *         null … 関数は答えたが使えない（切り替える前・形の違い・0件）＝ GAS から読む
+ */
+async function pullStaffNamesFromCarelogRpc(): Promise<StaffEntry[] | null | 'unavailable'> {
+  const r = await callReadRpc('carelog_staff_names', TIMEOUT_MS)
+  if (r === 'unavailable') return 'unavailable'
+  if (!isLiveReply(r) || !Array.isArray(r.staff)) return null
+  const names = projectStaffNames(r)
+  return names !== null && names.length > 0 ? names : null
+}
+
+/**
+ * 職員の名前の読み先（2026-11-08）: ① carelog_staff_names（0076）→ ② 関数が無い・断られた時だけ kv_get('staff')（2026-11-07 の道）。
+ * どちらも使えない時は null＝今までどおり GAS から読む
+ */
+async function pullStaffNamesFromDb(): Promise<StaffEntry[] | null> {
+  const r = await pullStaffNamesFromCarelogRpc()
+  if (r !== 'unavailable') return r
+  return pullStaffNamesFromKv()
+}
+
+/**
  * 勤務表の職員一覧を、共通の Supabase の保存先（care-backend 0005・0007・0009 の KV ストア）から読む（2026-11-07）。
+ * ★2026-11-08 から、carelog_staff_names（0076）が無い・断られた時だけの戻り道（pullStaffNamesFromDb）。
  * 勤務表は 2026-10-16 に正本を Supabase へ切り替え、Google へは写し返していない。統合同期の GAS は読み取りを断らないため、
  * GAS の pull は 10/16 のままの一覧を返し続ける＝この道を先に試し、読めた時は GAS を呼ばない。
  *  - 呼ぶのは読み取りの関数 kv_get('staff') だけ（書く関数は呼ばない）。kv_entries は同じ施設の許可リストの人が読める（RLS）
@@ -957,6 +1008,8 @@ export interface HireDateSync {
   unknownNames?: string[]
   /** 同じ入職日の中の順（職員No）を今回書いた人数。null = 書けなかった（0038 の列が無い 等） */
   nosWritten?: number | null
+  /** どこから読んだか（'db' = 共通のデータベースの職員マスタ（care-backend 0076）・'gas' = 職員マスタの GAS）。読めなかった時は無い */
+  source?: 'db' | 'gas'
 }
 
 /** 職員マスタの一覧の待ち時間（職員マスタの画面と同じ45秒。名簿の15秒では間に合わないことがある） */
@@ -974,15 +1027,36 @@ export function countKnownHireDates(
   return { active: act.length, known: known.length, unknownNames }
 }
 
-/** 職員マスタの入職日を読んで職員の表に書く（接続設定が無い・読めない時は書かずに理由を返す） */
+/**
+ * 職員マスタの入職日を、共通の Supabase の読む口 carelog_staff_hire_dates（care-backend 0076）から読む（2026-11-08）。
+ * 職員マスタは 2026-11-02 に正本を Supabase へ切り替えた（Google へは写し返しているが、写し返しを止める前に読み手を移す・計画 3-2）。
+ * 返すのは職員マスタの GAS の list と同じ形（{rows:[…]}）の、ケアログが使う項目（name・hireDate・retireDate・legacyNo）だけ。
+ * 使うのは mode:'live'・ok:true・rows が1件以上の配列の時だけ。関数が無い・断られた（現場のログイン等）・通信の失敗・時間切れ・
+ * 切り替える前（shadow）・形の違い・0件は null＝今までどおり職員マスタの GAS から読む。応答の中身は console・localStorage に残さない
+ */
+async function pullStaffHireDatesFromDb(): Promise<Map<string, StaffMasterHire> | null> {
+  const r = await callReadRpc('carelog_staff_hire_dates', STAFF_MASTER_TIMEOUT_MS)
+  if (r === 'unavailable' || !isLiveReply(r) || r.ok !== true || !Array.isArray(r.rows) || r.rows.length === 0) return null
+  return projectStaffHireDates(r)
+}
+
+/**
+ * 職員マスタの入職日を読んで職員の表に書く。読み先は ① 共通のデータベースの職員マスタ（0076）→ ② 職員マスタの GAS（接続設定のある端末だけ）。
+ * どちらも読めない時は書かずに理由を返す
+ */
 async function syncStaffHireDates(): Promise<HireDateSync> {
-  const cfg = readStaffMasterConfig()
-  if (!cfg) return { status: 'no-config', active: 0, known: 0, written: 0 }
-  const out = await gasPost<{ rows?: unknown }>(cfg.url, { action: 'list' }, cfg.token, STAFF_MASTER_TIMEOUT_MS)
-  if (!out) return { status: 'read-failed', active: 0, known: 0, written: 0 }
-  const dates = projectStaffHireDates(out)
+  let dates = await pullStaffHireDatesFromDb()
+  let source: 'db' | 'gas' = 'db'
+  if (dates === null) {
+    source = 'gas'
+    const cfg = readStaffMasterConfig()
+    if (!cfg) return { status: 'no-config', active: 0, known: 0, written: 0 }
+    const out = await gasPost<{ rows?: unknown }>(cfg.url, { action: 'list' }, cfg.token, STAFF_MASTER_TIMEOUT_MS)
+    if (!out) return { status: 'read-failed', active: 0, known: 0, written: 0 }
+    dates = projectStaffHireDates(out)
+  }
   const rows = await readStaffRows()
-  if (!dates || dates.size === 0) return { status: 'no-rows', ...countKnownHireDates(rows, []), written: 0 }
+  if (!dates || dates.size === 0) return { status: 'no-rows', ...countKnownHireDates(rows, []), written: 0, source }
   const plan = planStaffHireDates(rows, dates)
   for (const p of plan) await updateStaffRow(p.id, { hire_date: p.hire_date })
   // 同じ入職日の中の順（職員No・0038）。列が無い DB（0038 未適用）では書けないので、失敗しても入職日の結果は返し、
@@ -996,22 +1070,24 @@ async function syncStaffHireDates(): Promise<HireDateSync> {
   } catch {
     nosWritten = null
   }
-  return { status: 'done', ...countKnownHireDates(rows, plan), written: plan.length, nosWritten }
+  return { status: 'done', ...countKnownHireDates(rows, plan), written: plan.length, nosWritten, source }
 }
 
 /** 入職日の取り込みの結果を、設定画面に出す一文にする（純関数） */
 export function hireDateSyncText(r: HireDateSync | null | undefined): string {
   if (!r) return ''
   if (r.status === 'no-config') {
-    return 'この端末には職員マスタの接続設定がないため、入職日は読みませんでした。職員マスタのアプリを使っている端末（事務所PC など）で〔マスタを同期〕を押してください。'
+    // 2026-11-08: 共通のデータベースの職員マスタ（0076）を読めなかった時だけここへ来る（読めれば接続設定は要らない）
+    return '共通のデータベースから職員マスタを読めず、この端末には職員マスタの接続設定もないため、入職日は読みませんでした。時間をおいてもう一度〔マスタを同期〕を押すか、職員マスタのアプリを使っている端末（事務所PC など）で〔マスタを同期〕を押してください。'
   }
   if (r.status === 'read-failed') {
     return '職員マスタを読めませんでした（通信・合言葉・応答の遅れ）。入職日は変えていません。時間をおいてもう一度〔マスタを同期〕を押してください。'
   }
-  if (r.status === 'no-rows') return '職員マスタに入職日のある職員が見つかりませんでした。入職日は変えていません。'
+  const from = r.source === 'db' ? '共通のデータベースの職員マスタから読みました。' : ''
+  if (r.status === 'no-rows') return `${from}職員マスタに入職日のある職員が見つかりませんでした。入職日は変えていません。`
   const unknown = r.active - r.known
   const names = r.unknownNames && r.unknownNames.length > 0 ? `（${r.unknownNames.join('・')}）` : ''
-  return `在籍 ${r.active} 名のうち ${r.known} 名の入職日が分かりました（今回書いた ${r.written} 名）。${
+  return `${from}在籍 ${r.active} 名のうち ${r.known} 名の入職日が分かりました（今回書いた ${r.written} 名）。${
     unknown > 0
       ? `分からない ${unknown} 名${names}は、末尾に名前の順で並びます。職員マスタの氏名の書き方（字体・姓だけか）と、同じ氏名の方が2人いないかを確かめてください。`
       : ''
@@ -1132,8 +1208,9 @@ export interface SyncOptions {
  *  - 冪等: 同じ名簿で何度実行しても差分が無ければ書込は発生しない。途中で失敗しても再実行で追いつく。
  *  - 反映した後は notifyMastersChanged で他の画面へ知らせる（App の職員名簿の取り直し・F47）。
  *  - 自動の同期（起動時＋60分間隔）は autoSyncMasters が受け持つ（F50）。本関数は呼ばれたら常に同期する。
- *  - 職員名簿は勤務表の正本（Supabase の kv_get('staff')・切り替え後の行だけ）を先に読み、読めた時は GAS の職員名簿を呼ばない
- *    （2026-11-07。GAS の勤務表は 10/16 から更新されていない）。読めない・形が違う時は今までどおり GAS から読む。
+ *  - 職員名簿は勤務表の正本（Supabase の carelog_staff_names（0076）・無い時は kv_get('staff')・切り替え後だけ）を先に読み、
+ *    読めた時は GAS の職員名簿を呼ばない（2026-11-07・11-08。GAS の勤務表は 10/16 から更新されていない）。読めない・形が違う時は今までどおり GAS から読む。
+ *  - 入職日は職員マスタの正本（Supabase の carelog_staff_hire_dates（0076）・切り替え後だけ）を先に読み、読めない時だけ職員マスタの GAS から読む。
  */
 export async function syncMasters(opts: SyncOptions = {}): Promise<MasterSyncOutcome | 'unconfigured'> {
   const cfg = readGasConfig()
@@ -1146,9 +1223,9 @@ export async function syncMasters(opts: SyncOptions = {}): Promise<MasterSyncOut
     )
   }
 
-  // 職員名簿は、勤務表の正本（Supabase の kv_get('staff')・切り替え後の時だけ）を先に読む。読めた時は GAS の職員名簿を使わない
-  // （GAS の勤務表は 2026-10-16 から更新されていない）。読めない時だけ、下の GAS の職員名簿へ戻す（今までどおり）
-  const kvNames = await pullStaffNamesFromKv()
+  // 職員名簿は、勤務表の正本（Supabase の carelog_staff_names・無い時は kv_get('staff')・切り替え後の時だけ）を先に読む。
+  // 読めた時は GAS の職員名簿を使わない（GAS の勤務表は 2026-10-16 から更新されていない）。読めない時だけ、下の GAS の職員名簿へ戻す（今までどおり）
+  const kvNames = await pullStaffNamesFromDb()
 
   // 職員名簿は別のGASが持つ。未設定なら利用者名簿と同じ接続先へ問い合わせる（従来の挙動）
   const staffCfg = kvNames !== null ? null : readStaffGasConfig(cfg)
