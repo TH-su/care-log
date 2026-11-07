@@ -376,21 +376,24 @@ function isLiveReply(r: unknown): r is Record<string, unknown> {
  * 勤務表の職員一覧を、共通の Supabase の読む口 carelog_staff_names（care-backend 0076）から読む（2026-11-08）。
  * 返すのは GAS の pull staff と同じ並びの要素の、ケアログが使う項目（name・active・status・order）だけ（労務の項目は来ない）。
  * 戻り値: 職員の一覧（1件以上）… これを使う／'unavailable' … 関数が無い・断られた・通信の失敗＝前の読み先（kv_get）を試す／
- *         null … 関数は答えたが使えない（切り替える前・形の違い・0件）＝ GAS から読む
+ *         'broken' … 勤務表は切り替え後（live）なのに形が違う・0件＝ GAS（10/16 のままの古い一覧）へ戻さず、職員の同期を止める
+ *                    （代表者の決定 2026-11-08: 古い一覧で在籍を外さない）／
+ *         null … 切り替える前（shadow）・live でない応答＝ GAS から読む（GAS が正本の間）
  */
-async function pullStaffNamesFromCarelogRpc(): Promise<StaffEntry[] | null | 'unavailable'> {
+async function pullStaffNamesFromCarelogRpc(): Promise<StaffEntry[] | null | 'unavailable' | 'broken'> {
   const r = await callReadRpc('carelog_staff_names', TIMEOUT_MS)
   if (r === 'unavailable') return 'unavailable'
-  if (!isLiveReply(r) || !Array.isArray(r.staff)) return null
+  if (!isLiveReply(r)) return null
+  if (!Array.isArray(r.staff)) return 'broken'
   const names = projectStaffNames(r)
-  return names !== null && names.length > 0 ? names : null
+  return names !== null && names.length > 0 ? names : 'broken'
 }
 
 /**
  * 職員の名前の読み先（2026-11-08）: ① carelog_staff_names（0076）→ ② 関数が無い・断られた時だけ kv_get('staff')（2026-11-07 の道）。
- * どちらも使えない時は null＝今までどおり GAS から読む
+ * どちらも使えない時は null＝今までどおり GAS から読む。'broken'（live なのに形が違う・0件）は GAS へ戻さない
  */
-async function pullStaffNamesFromDb(): Promise<StaffEntry[] | null> {
+async function pullStaffNamesFromDb(): Promise<StaffEntry[] | null | 'broken'> {
   const r = await pullStaffNamesFromCarelogRpc()
   if (r !== 'unavailable') return r
   return pullStaffNamesFromKv()
@@ -997,7 +1000,8 @@ export function planStaffHireDates(
  * 何が起きたかが画面に出ないと、接続設定の無い端末で同期した・読めなかった、の見分けがつかないため
  */
 export interface HireDateSync {
-  status: 'no-config' | 'read-failed' | 'no-rows' | 'done'
+  /** db-broken = 共通のデータベースの職員マスタは切り替え後なのに中身の形が違う・0件（GAS へ戻さず入職日を変えない・2026-11-08） */
+  status: 'no-config' | 'read-failed' | 'db-broken' | 'no-rows' | 'done'
   /** 在籍の職員の人数（ケアログ側） */
   active: number
   /** そのうち入職日が分かった人数（今回書いた分と、前から同じ値だった分の合計） */
@@ -1032,11 +1036,13 @@ export function countKnownHireDates(
  * 職員マスタは 2026-11-02 に正本を Supabase へ切り替えた（Google へは写し返しているが、写し返しを止める前に読み手を移す・計画 3-2）。
  * 返すのは職員マスタの GAS の list と同じ形（{rows:[…]}）の、ケアログが使う項目（name・hireDate・retireDate・legacyNo）だけ。
  * 使うのは mode:'live'・ok:true・rows が1件以上の配列の時だけ。関数が無い・断られた（現場のログイン等）・通信の失敗・時間切れ・
- * 切り替える前（shadow）・形の違い・0件は null＝今までどおり職員マスタの GAS から読む。応答の中身は console・localStorage に残さない
+ * 切り替える前（shadow）は null＝今までどおり職員マスタの GAS から読む。live なのに形が違う・0件は 'broken'＝ GAS へ戻さず、入職日を変えない
+ * （代表者の決定 2026-11-08）。応答の中身は console・localStorage に残さない
  */
-async function pullStaffHireDatesFromDb(): Promise<Map<string, StaffMasterHire> | null> {
+async function pullStaffHireDatesFromDb(): Promise<Map<string, StaffMasterHire> | null | 'broken'> {
   const r = await callReadRpc('carelog_staff_hire_dates', STAFF_MASTER_TIMEOUT_MS)
-  if (r === 'unavailable' || !isLiveReply(r) || r.ok !== true || !Array.isArray(r.rows) || r.rows.length === 0) return null
+  if (r === 'unavailable' || !isLiveReply(r)) return null
+  if (r.ok !== true || !Array.isArray(r.rows) || r.rows.length === 0) return 'broken'
   return projectStaffHireDates(r)
 }
 
@@ -1045,7 +1051,9 @@ async function pullStaffHireDatesFromDb(): Promise<Map<string, StaffMasterHire> 
  * どちらも読めない時は書かずに理由を返す
  */
 async function syncStaffHireDates(): Promise<HireDateSync> {
-  let dates = await pullStaffHireDatesFromDb()
+  const fromDb = await pullStaffHireDatesFromDb()
+  if (fromDb === 'broken') return { status: 'db-broken', active: 0, known: 0, written: 0, source: 'db' }
+  let dates = fromDb
   let source: 'db' | 'gas' = 'db'
   if (dates === null) {
     source = 'gas'
@@ -1073,6 +1081,10 @@ async function syncStaffHireDates(): Promise<HireDateSync> {
   return { status: 'done', ...countKnownHireDates(rows, plan), written: plan.length, nosWritten, source }
 }
 
+/** 職員マスタが切り替え後なのに中身を読めなかった時の一文（GAS へは戻さない・2026-11-08 代表者の決定） */
+export const STAFF_MASTER_DB_BROKEN_MSG =
+  '職員マスタを読めませんでした。入職日は変えていません。時間をおいてもう一度〔マスタを同期〕を押し、続く時は開発者に連絡してください。'
+
 /** 入職日の取り込みの結果を、設定画面に出す一文にする（純関数） */
 export function hireDateSyncText(r: HireDateSync | null | undefined): string {
   if (!r) return ''
@@ -1080,6 +1092,7 @@ export function hireDateSyncText(r: HireDateSync | null | undefined): string {
     // 2026-11-08: 共通のデータベースの職員マスタ（0076）を読めなかった時だけここへ来る（読めれば接続設定は要らない）
     return '共通のデータベースから職員マスタを読めず、この端末には職員マスタの接続設定もないため、入職日は読みませんでした。時間をおいてもう一度〔マスタを同期〕を押すか、職員マスタのアプリを使っている端末（事務所PC など）で〔マスタを同期〕を押してください。'
   }
+  if (r.status === 'db-broken') return STAFF_MASTER_DB_BROKEN_MSG
   if (r.status === 'read-failed') {
     return '職員マスタを読めませんでした（通信・合言葉・応答の遅れ）。入職日は変えていません。時間をおいてもう一度〔マスタを同期〕を押してください。'
   }
@@ -1162,6 +1175,10 @@ function rosterFailHint(reason: GasReadFail | 'empty' | null): string {
 export const MASTER_OFFICE_ONLY_MSG =
   '名簿の同期は、事務・管理者のログインでだけ行います（現場のログインでは同期しません）。事務所のパソコンで同期してください。利用者・職員の一覧は変更していません。'
 
+/** 勤務表が切り替え後なのに職員の一覧を読めなかった時の文（GAS へは戻さない・2026-11-08 代表者の決定） */
+export const STAFF_LIST_DB_BROKEN_MSG =
+  '職員の一覧を読めませんでした（利用者マスタは同期しました）。職員の一覧は変えていません。時間をおいてもう一度〔マスタを同期〕を押し、続く時は開発者に連絡してください。'
+
 /**
  * 名簿を書いてよい役割（事務所・管理者）でなければ MASTER_OFFICE_ONLY_MSG で throw する（0040・代表者の決定 2026-10-22）。
  * 役割は db.ts の my_account の結果（端末のメモリの控え）。分からない時（通信できない・関数が無い）も書かない側に倒す
@@ -1225,10 +1242,14 @@ export async function syncMasters(opts: SyncOptions = {}): Promise<MasterSyncOut
 
   // 職員名簿は、勤務表の正本（Supabase の carelog_staff_names・無い時は kv_get('staff')・切り替え後の時だけ）を先に読む。
   // 読めた時は GAS の職員名簿を使わない（GAS の勤務表は 2026-10-16 から更新されていない）。読めない時だけ、下の GAS の職員名簿へ戻す（今までどおり）
-  const kvNames = await pullStaffNamesFromDb()
+  // 勤務表が切り替え後なのに形が違う・0件と答えた時（'broken'）は、10/16 のままの GAS の一覧へ戻さず、職員の同期だけを止める
+  // （職員の行は書き換えない・代表者の決定 2026-11-08）
+  const dbNames = await pullStaffNamesFromDb()
+  const staffBroken = dbNames === 'broken'
+  const kvNames = Array.isArray(dbNames) ? dbNames : null
 
   // 職員名簿は別のGASが持つ。未設定なら利用者名簿と同じ接続先へ問い合わせる（従来の挙動）
-  const staffCfg = kvNames !== null ? null : readStaffGasConfig(cfg)
+  const staffCfg = kvNames !== null || staffBroken ? null : readStaffGasConfig(cfg)
   if (staffCfg === 'invalid') {
     throw new Error(
       '職員名簿の接続先URLの形式が正しくありません。設定画面で https://script.google.com/macros/s/.../exec の形式のURLを入力し直してください。',
@@ -1287,6 +1308,7 @@ export async function syncMasters(opts: SyncOptions = {}): Promise<MasterSyncOut
       `利用者マスタを取得できませんでした（職員マスタは同期しました）。${rosterFailHint(rosterFail)}、もう一度お試しください。利用者の一覧は変更していません。`,
     )
   }
+  if (!staff && staffBroken) throw new Error(STAFF_LIST_DB_BROKEN_MSG)
   if (!staff) {
     // 職員名簿の接続先を別に設定していない場合は、そこが原因である可能性が高いので明示する
     throw new Error(

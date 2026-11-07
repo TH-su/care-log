@@ -1353,8 +1353,8 @@ describe('職員の名前は勤務表の正本（Supabase の kv_get）から先
     assert.match(fn, /Promise\.race\(/) // 時間切れでも GAS へ戻す
     assert.doesNotMatch(fn, /console\.|localStorage/)
     assert.doesNotMatch(s, /rpc\('(kv_put|kv_import|kv_set_mode|kv_set_family_mode|shift_push|shift_lock_[a-z]+)'/)
-    assert.match(s, /const kvNames = await pullStaffNamesFromDb\(\)\n/)
-    assert.match(s, /await assertMasterWriter\(\)[\s\S]*?const kvNames = await pullStaffNamesFromDb\(\)/)
+    assert.match(s, /const dbNames = await pullStaffNamesFromDb\(\)\n/)
+    assert.match(s, /await assertMasterWriter\(\)[\s\S]*?const dbNames = await pullStaffNamesFromDb\(\)/)
   })
 })
 
@@ -1440,10 +1440,6 @@ describe('職員の名前・入職日は共通のデータベースの読む口�
     ['断られた（42501）', () => ({ data: null, error: { message: 'not allowed', code: '42501' }, status: 403 }), true],
     ['通信の失敗（例外）', () => Promise.reject(new Error('network')), true],
     ['切り替える前（mode:shadow）', ok({ mode: 'shadow' }), false],
-    ['形が違う（noshape）', ok({ mode: 'live', error: 'noshape' }), false],
-    ['staff が配列でない', ok({ mode: 'live', staff: '職員09' }), false],
-    ['0件', namesLive([]), false],
-    ['氏名の無い行だけ', namesLive([{ active: true }, { name: '' }]), false],
     ['応答が配列', ok([{ name: '職員09', active: true }]), false],
     ['応答が空', ok(null), false],
   ]
@@ -1461,6 +1457,36 @@ describe('職員の名前・入職日は共通のデータベースの読む口�
       assert.deepEqual(toShift(gas).map((r) => [r.method, r.body?.action]), [['POST', 'pull']], label)
       assert.ok(sb.db.staff.some((s) => s.name === '職員06'), label)
       assert.equal(sb.db.staff.some((s) => s.name === '職員09'), false, `${label}: 使えない応答の氏名を入れていない`)
+    })
+  }
+
+  const nameBroken = [
+    ['形が違う（noshape）', ok({ mode: 'live', error: 'noshape' })],
+    ['staff が配列でない', ok({ mode: 'live', staff: '職員09' })],
+    ['0件', namesLive([])],
+    ['氏名の無い行だけ', namesLive([{ active: true }, { name: '' }])],
+  ]
+  for (const [label, reply] of nameBroken) {
+    it(`名前: 勤務表が live なのに読めない時は GAS（古い一覧）へ戻さず、職員の行を書き換えずに止める: ${label}`, async () => {
+      configure()
+      const sb = base()
+      sb.rpcReplies.carelog_staff_names = reply
+      sb.rpcReplies.kv_get = () => {
+        throw new Error('呼ばれてはいけない')
+      }
+      useClient(sb)
+      const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }, { id: 'R002', name: '利用者02' }], staff: ['職員06'] })
+      await assert.rejects(G.syncMasters(), (e) => {
+        assert.equal(e.message, G.STAFF_LIST_DB_BROKEN_MSG, label)
+        assert.match(e.message, /職員の一覧を読めませんでした/)
+        assert.match(e.message, /職員の一覧は変えていません/)
+        return true
+      })
+      assert.equal(toShift(gas).length, 0, `${label}: GAS の職員名簿を呼んでいない`)
+      assert.equal(sb.rpcCalls.includes('kv_get'), false, `${label}: kv_get へ進まない`)
+      assert.equal(sb.calls.filter((q) => q.table === 'staff' && q.action !== 'select').length, 0, `${label}: 職員の表に書いていない`)
+      assert.deepEqual(sb.db.staff.map((s) => [s.name, s.active]), [['職員01', true]], label)
+      assert.ok(sb.db.residents.some((r) => r.source_id === 'R002'), `${label}: 利用者マスタは同期する`)
     })
   }
 
@@ -1525,10 +1551,6 @@ describe('職員の名前・入職日は共通のデータベースの読む口�
     ['断られた（42501）', () => ({ data: null, error: { message: 'not allowed', code: '42501' }, status: 403 })],
     ['通信の失敗（例外）', () => Promise.reject(new Error('network'))],
     ['切り替える前（mode:shadow）', ok({ mode: 'shadow' })],
-    ['形が違う（noshape）', ok({ mode: 'live', error: 'noshape' })],
-    ['ok が無い', ok({ mode: 'live', rows: [{ name: '職員01', hireDate: '2001-01-01' }] })],
-    ['rows が配列でない', ok({ mode: 'live', ok: true, rows: '職員01' })],
-    ['rows が0件', hireLive([])],
     ['応答が空', ok(null)],
   ]
   for (const [label, reply] of hireFallbacks) {
@@ -1546,6 +1568,31 @@ describe('職員の名前・入職日は共通のデータベースの読む口�
       assert.deepEqual(toStfm(gas).map((r) => [r.method, r.body?.action]), [['POST', 'list']], label)
       assert.equal(out.hireDates.source, 'gas', label)
       assert.equal(sb.db.staff[0].hire_date, '2019-07-01', label)
+    })
+  }
+
+  const hireBroken = [
+    ['形が違う（noshape）', ok({ mode: 'live', error: 'noshape' })],
+    ['ok が無い', ok({ mode: 'live', rows: [{ name: '職員01', hireDate: '2001-01-01' }] })],
+    ['rows が配列でない', ok({ mode: 'live', ok: true, rows: '職員01' })],
+    ['rows が0件', hireLive([])],
+  ]
+  for (const [label, reply] of hireBroken) {
+    it(`入職日: 職員マスタが live なのに読めない時は GAS へ戻さず、入職日を変えない: ${label}`, async () => {
+      configure()
+      configureStfm()
+      const sb = base([{ id: 1, name: '職員01', active: true, manual: false, hire_date: '2010-01-01' }])
+      sb.rpcReplies.carelog_staff_names = namesLive([{ name: '職員01', active: true }])
+      sb.rpcReplies.carelog_staff_hire_dates = reply
+      useClient(sb)
+      const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: [] })
+      withStaffMaster(gas, [{ name: '職員01', hireDate: '2019-07-01' }])
+      const out = await G.syncMasters()
+      assert.equal(toStfm(gas).length, 0, `${label}: 職員マスタの GAS を呼んでいない`)
+      assert.equal(out.hireDates.status, 'db-broken', label)
+      assert.equal(sb.db.staff[0].hire_date, '2010-01-01', `${label}: 入職日を変えていない`)
+      assert.equal(G.hireDateSyncText(out.hireDates), G.STAFF_MASTER_DB_BROKEN_MSG)
+      assert.match(G.hireDateSyncText(out.hireDates), /入職日は変えていません/)
     })
   }
 
