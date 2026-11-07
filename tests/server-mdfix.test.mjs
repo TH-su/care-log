@@ -308,23 +308,55 @@ describe('★F70 施設長は1日1人（0026）と、出勤者の保存の順番
     need()
     const srv = attendanceServer()
     DB.__testHooks.setClient(srv.client)
-    const got = await DB.fillAttendanceFromShift(DAY, [5, 3, 9])
-    assert.deepEqual(got.map((a) => [a.staff_id, a.role, a.sort]), [[5, 'staff', 0], [3, 'staff', 1], [9, 'staff', 2]])
+    let marked = 0
+    const got = await DB.fillAttendanceFromShift(DAY, [5, 3, 9], () => marked++)
+    assert.equal(got.result, 'filled')
+    assert.deepEqual(got.rows.map((a) => [a.staff_id, a.role, a.sort]), [[5, 'staff', 0], [3, 'staff', 1], [9, 'staff', 2]])
     assert.deepEqual(srv.rows.map((r) => `${r.staff_id}:${r.role}:${r.sort}`), ['5:staff:0', '3:staff:1', '9:staff:2'])
     assert.equal(srv.calls.filter((q) => q.action === 'update').length, 0, '埋める時に既存の行を書き換えた')
+    assert.equal(marked, 1)
     assert.deepEqual(await DB.fetchAttendanceDay(DAY), [5, 3, 9])
   })
 
-  it('人が選んだ日・外した行が残る日は埋めない（何も書かない）', async () => {
+  it('人が選んだ日・外した行が残る日は埋めない（何も書かない・サーバーの一覧を返す）', async () => {
     need()
-    for (const row of [{ day: DAY, staff_id: 2, role: 'staff', sort: 0 }, { day: DAY, staff_id: 2, role: 'staff', sort: -1 }]) {
+    for (const row of [{ day: DAY, staff_id: 2, role: 'manager', sort: 0 }, { day: DAY, staff_id: 2, role: 'staff', sort: -1 }]) {
       const srv = attendanceServer()
       srv.rows.push(row)
       DB.__testHooks.setClient(srv.client)
-      assert.equal(await DB.fillAttendanceFromShift(DAY, [5, 3]), null)
+      let marked = 0
+      const got = await DB.fillAttendanceFromShift(DAY, [5, 2], () => marked++)
+      assert.equal(got.result, 'skipped')
+      assert.deepEqual(got.rows.map((a) => a.staff_id), row.sort >= 0 ? [2] : [])
       assert.equal(srv.calls.filter((q) => q.action !== 'select').length, 0, `書いた: ${JSON.stringify(row)}`)
+      assert.equal(marked, 0, '書かないのに取り置きを捨てた')
       assert.deepEqual(await DB.fetchAttendanceDay(DAY), row.sort >= 0 ? [2] : [])
     }
+  })
+
+  it('同時に他の端末が施設長を選んでいた（23505）時は何も書き換えずに止める（施設長を職員へ下げない）', async () => {
+    need()
+    const srv = attendanceServer()
+    DB.__testHooks.setClient(srv.client)
+    // 空を確かめた後・入れる前に、他の端末が職員05 を施設長に選ぶ
+    let first = true
+    const orig = srv.client.from
+    srv.client.from = (table) => {
+      const b = orig(table)
+      const ins = b.insert
+      b.insert = (p) => {
+        if (first) {
+          first = false
+          srv.rows.push({ day: DAY, staff_id: 5, role: 'manager', sort: 0 })
+        }
+        return ins(p)
+      }
+      return b
+    }
+    const got = await DB.fillAttendanceFromShift(DAY, [5, 3])
+    assert.equal(got.result, 'skipped')
+    assert.deepEqual(srv.rows.map((r) => `${r.staff_id}:${r.role}:${r.sort}`), ['5:manager:0'])
+    assert.equal(srv.calls.filter((q) => q.action === 'update').length, 0)
   })
 
   it('勤務表は自分の施設の kv_entries のその月の3つの表と2つの一覧だけを読み、夜勤の施設職員を決める', async () => {
@@ -336,7 +368,7 @@ describe('★F70 施設長は1日1人（0026）と、出勤者の保存の順番
         { id: 's2', name: '架空二', mainDivision: '施設', order: 1 },
         { id: 's3', name: '架空三', mainDivision: '施設', order: 3 },
       ],
-      symbols: [{ code: '休', type: 'off' }],
+      symbols: [{ code: '休', type: 'off' }, { code: '早', type: 'work' }],
     }
     const fake = fakeSupabase((q) => {
       if (q.table !== 'kv_entries') return { data: null, error: { code: 'X', message: `unexpected ${q.table}` }, status: 500 }

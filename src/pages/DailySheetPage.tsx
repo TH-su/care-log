@@ -4052,17 +4052,30 @@ function DaySheet({
       )
         return
       autoFilledRef.current = day
-      try {
-        markSelfWrite()
-        const filled = await fillAttendanceFromShift(day, sd.staffIds)
-        if (filled === null || !aliveRef.current || dayRef.current !== day) return
-        // 埋める間に人が足した分は残す（勤務表の分の後ろへ）
-        const extra = attendanceRef.current.filter((a) => !filled.some((f: Attendance) => f.staff_id === a.staff_id))
-        applyAttendance([...filled, ...extra.map((a, i) => ({ ...a, sort: filled.length + i }))])
-      } catch {
-        // 埋められなかった（通信・封鎖）。出勤者の欄は今までどおり手で選べる。次に開いた時にやり直す
-        autoFilledRef.current = null
+      // 出勤者の保存と同じ列に並べる（人の保存と同時に走らせない＝実行の時点の一覧で判定する）
+      const job = async () => {
+        if (!aliveRef.current || dayRef.current !== day || attendanceRef.current.length > 0) return
+        try {
+          // 書く直前にだけ取り置きを捨てる印を付ける（書かない時は付けない）
+          const out = await fillAttendanceFromShift(day, sd.staffIds, markSelfWrite)
+          if (!aliveRef.current || dayRef.current !== day) return
+          // 埋めた一覧、または埋めなかった時のサーバーの一覧（他の端末が先に選んだ・埋めた分）を出す。
+          // 待つ間にこの画面で人が選んだ時は、その一覧のまま（変更の通知で読み直す）
+          if (attendanceRef.current.length === 0) applyAttendance(out.rows)
+        } catch {
+          // 埋められなかった（通信・封鎖）。出勤者の欄は今までどおり手で選べる。次に開いた時にやり直す
+          autoFilledRef.current = null
+        }
       }
+      const chain = attendanceChainRef.current
+      const prevChain = chain.get(day) ?? Promise.resolve()
+      chain.set(
+        day,
+        prevChain
+          .catch(() => undefined)
+          .then(job)
+          .catch(() => undefined),
+      )
     })()
     return () => {
       alive = false
@@ -4742,8 +4755,16 @@ function DaySheet({
       }
       // 夜勤の行は、記入者が空ならその夜の夜勤の施設職員を入れる（勤務表で決まっている・2026-11-07 代表者の決定）。
       // 送る前に書きかけへ入れる＝登録で送った値・最初に送った中身・後の変更の基準が全部そろう
+      // 人が〔記入者を消す〕を押した行（reporterPicked が false）には入れない。判定は控え（ref）の新しい値で行う
       const nightId = shiftDayRef.current.nightStaffId
-      if (draft.shift === 'night' && draft.reporterId === null && draft.ck === undefined && nightId !== null) {
+      const latest = noteDraftsRef.current.find((d) => d.key === key) ?? draft
+      if (
+        draft.shift === 'night' &&
+        draft.ck === undefined &&
+        nightId !== null &&
+        latest.reporterId === null &&
+        latest.reporterPicked !== false
+      ) {
         draft = { ...draft, reporterId: nightId, reporterPicked: true }
         patchNoteDraft(key, { reporterId: nightId, reporterPicked: true })
       }

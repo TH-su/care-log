@@ -880,7 +880,13 @@ export function NoteFormPage() {
           ongoing: form.ongoing,
           ended_at: form.ongoing && form.endedOn !== '' ? endOfDayStamp(form.endedOn) : null,
           // 夜勤は勤務表のその夜の夜勤の施設職員（決まらない時は空）。日勤・デイは選んだ記入者
-          reporter_id: form.shift === 'night' ? (await fetchShiftDay(form.noteOn, staff)).nightStaffId : form.reporterId,
+          // （記録日を開いた時に読んだ勤務表を使う。まだ読めていない時だけここで読む）
+          reporter_id:
+            form.shift === 'night'
+              ? dayPeople !== null && dayPeople.day === form.noteOn && dayPeople.shift.source !== null
+                ? dayPeople.shift.nightStaffId
+                : (await fetchShiftDay(form.noteOn, staff)).nightStaffId
+              : form.reporterId,
           // 色はシート画面で扱う項目。この入力画面では既定のまま送る
           color: null,
           // 日勤の 16:00 以降の申し送りは、日報の「↓16時以降の記録」の欄に載せる（F35。日報で書いた時と同じ欄になる）
@@ -920,7 +926,7 @@ export function NoteFormPage() {
         setSaving(false)
       }
     },
-    [enabled, form, saving, show, staff, undoInsert, validate],
+    [dayPeople, enabled, form, saving, show, staff, undoInsert, validate],
   )
 
   // ── 記入者の候補（その日の出勤者・2026-11-07 代表者の決定）─────────────────
@@ -940,9 +946,10 @@ export function NoteFormPage() {
       let attendance: number[] = []
       try {
         attendance = await fetchAttendanceDay(day)
-        if (attendance.length === 0 && enabled && canAutoFillAttendance(day, todayIso()) && shift.staffIds.length > 0) {
-          const filled = await fillAttendanceFromShift(day, shift.staffIds)
-          if (filled !== null) attendance = filled.map((a) => a.staff_id)
+        // 書く直前にも、まだこの画面のこの記録日か（記録日を切り替えた・閉じた後に書かない）を確かめる
+        if (alive && attendance.length === 0 && enabled && canAutoFillAttendance(day, todayIso()) && shift.staffIds.length > 0) {
+          const out = await fillAttendanceFromShift(day, shift.staffIds)
+          attendance = out.rows.map((a) => a.staff_id)
         }
       } catch {
         // 出勤者の欄が読めない・埋められない時は勤務表の出勤者だけで候補を作る（次に開いた時にやり直す）
@@ -1479,7 +1486,14 @@ export function NoteFormPage() {
                 </div>
               )}
 
-              {/* 夜勤は記入者の欄を出さない（勤務表で決まっている夜勤の施設職員を自動で入れる・2026-11-07 代表者の決定） */}
+              {/* 夜勤は記入者の欄を出さない（勤務表で決まっている夜勤の施設職員を自動で入れる・2026-11-07 代表者の決定）。
+                  勤務表から夜勤の職員が決まらない日だけ、空で登録することを知らせる（文言は仮置き） */}
+              {form.shift === 'night' &&
+                dayPeople !== null &&
+                dayPeople.day === form.noteOn &&
+                dayPeople.shift.nightStaffId === null && (
+                  <p className="text-sm text-ink2">勤務表から夜勤の職員が決まらないため、記入者は空で登録します。</p>
+                )}
               {form.shift !== 'night' && (
                 <div>
                   <p id={ids.reporter} className={labelClass}>

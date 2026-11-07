@@ -11892,14 +11892,18 @@ export async function fetchShiftDay(dayIso: string, careStaff: readonly Staff[])
   if (docs === undefined || Date.now() - docs.at > SHIFT_CACHE_MS) {
     try {
       const sb = await getClient()
-      const res = await bounded(sb.from('kv_entries').select('key,data').in('key', keys).limit(keys.length))
+      const res = await bounded(sb.from('kv_entries').select('key,data').in('key', keys).limit(keys.length * 2))
       // 読めない時は、このタブで前に読めた控え（5分を過ぎていても）を使う（電波の切れた夜勤の登録で記入者を空にしない）
       if (res.error !== null) return docs === undefined ? EMPTY_SHIFT_DAY : resolveShiftDay(docs.docs, dayIso, careStaff)
       const got: ShiftMonthDocs = {}
+      const seen = new Set<string>()
       for (const row of Array.isArray(res.data) ? res.data : []) {
         const r = asRecord(row)
         const k = r === null ? null : str(r.key)
         if (r === null || k === null) continue
+        // 同じキーが2行（2つ以上の施設の行が見えるアカウント）の時は、どちらの施設の勤務表か決められないので使わない
+        if (seen.has(k)) return EMPTY_SHIFT_DAY
+        seen.add(k)
         if (k === keys[0]) got.actual = r.data
         else if (k === keys[1]) got.official = r.data
         else if (k === keys[2]) got.plan = r.data
@@ -11925,22 +11929,44 @@ export async function fetchAttendanceDay(dayIso: string): Promise<number[]> {
   return rows.map((a) => a.staff_id)
 }
 
+/** この端末の送信待ちに、その日の出勤者の操作が残っているか（自動で埋める前に確かめる） */
+export function hasPendingAttendance(dayIso: string): boolean {
+  for (const q of queue) {
+    if (q.table !== 'attendance') continue
+    if (dateStr(asRecord(q.payload)?.day) === dayIso) return true
+  }
+  return false
+}
+
 /**
- * その日の出勤者の欄が一度も使われていない（取り消した行も無い）時だけ、勤務表の出勤者で埋める。
- * 埋めた時はその一覧（表示の順）、埋めなかった時は null。人が一度でも選んだ・外した日は触らない（取り消した行が
- * 残っている日も含む）。書き込みは画面からの保存と同じ applyAttendance（足すだけ・baseline は空＝誰も外さない）。
- * 通信の失敗は送信待ちに積まない（次に開いた時にやり直す＝電波が戻ってから他の端末が選んだ分と二重にしない）
+ * その日の出勤者の欄が一度も使われていない（取り消した行も無い）時だけ、勤務表の出勤者で埋める（足すだけ）。
+ * 戻り値: 'filled'＝埋めた（rows はその一覧）／'skipped'＝埋めなかった（rows はサーバーにあるその日の表示中の一覧。
+ * 人が選んだ・外した日・この端末に送信待ちがある日・他の端末が先に埋めた日）。
+ * 既にある行は一切書き換えない（人が選んだ施設長・並びを下げない）。insert は1文で、主キーの競走（23505）に当たったら
+ * 何も書かずに止める（他の端末が同時に選んだ・埋めた）。通信の失敗は送信待ちに積まない（次に開いた時にやり直す）。
+ * beforeWrite＝書く直前に呼ぶ（日報の取り置きを捨てる印。書かない時は呼ばない）
  */
-export async function fillAttendanceFromShift(dayIso: string, staffIds: readonly number[]): Promise<Attendance[] | null> {
+export async function fillAttendanceFromShift(
+  dayIso: string,
+  staffIds: readonly number[],
+  beforeWrite?: () => void,
+): Promise<{ result: 'filled' | 'skipped'; rows: Attendance[] }> {
   assertDay(dayIso)
-  if (staffIds.length === 0) return null
-  await assertWritable()
   const sb = await getClient()
+  const shown = (m: Map<number, Attendance>): Attendance[] =>
+    [...m.values()].filter((a) => a.sort >= 0).sort((x, y) => x.sort - y.sort || x.staff_id - y.staff_id)
   const existing = await fetchAttendanceRows(sb, dayIso)
-  if (existing.size > 0) return null
-  const rows = staffIds.map((id, i) => ({ staff_id: id, role: 'staff' as const, sort: i }))
-  await applyAttendance(sb, dayIso, rows, [], null)
-  return rows.map((r) => ({ day: dayIso, ...r }))
+  if (existing.size > 0 || staffIds.length === 0 || hasPendingAttendance(dayIso)) return { result: 'skipped', rows: shown(existing) }
+  await assertWritable()
+  const rows: Attendance[] = []
+  for (const id of staffIds) if (!rows.some((r) => r.staff_id === id)) rows.push({ day: dayIso, staff_id: id, role: 'staff', sort: rows.length })
+  beforeWrite?.()
+  const res = await bounded(sb.from('attendance').insert(rows).select('staff_id'))
+  if (res.error !== null) {
+    if (!isUniqueViolation(res)) throw writeError(res)
+    return { result: 'skipped', rows: shown(await fetchAttendanceRows(sb, dayIso)) }
+  }
+  return { result: 'filled', rows }
 }
 
 /** 見ていた役割（{職員ID: 'manager'|'staff'}）を読む。無い・読めなければ null（＝役割の基準が分からない） */
