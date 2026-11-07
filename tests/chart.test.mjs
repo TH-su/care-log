@@ -291,3 +291,50 @@ describe('カルテ画面への組み込み', () => {
     assert.ok(/print:max-w-2xl/.test(src), '見つからない: /print:max-w-2xl/')
   })
 })
+
+describe('グラフの点に乗せた時の窓・期間の最高と最低（2026-11-07 本人指示）', () => {
+  const days = ['2026-11-01', '2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05']
+  it('平均・最高・最低は期間の中の記録だけで数え、同じ値は新しい日を採る', () => {
+    assert.ok(C, '部品が無い')
+    const v = new Map([
+      ['2026-10-31', 40], // 期間の外は数えない
+      ['2026-11-01', 36.5],
+      ['2026-11-02', 37.8],
+      ['2026-11-04', 37.8],
+      ['2026-11-05', 36.1],
+    ])
+    const st = C.seriesStats(v, days)
+    assert.equal(st.count, 4)
+    near(st.avg, (36.5 + 37.8 + 37.8 + 36.1) / 4, '平均')
+    assert.equal(st.max, 37.8)
+    assert.equal(st.maxDay, '2026-11-04')
+    assert.equal(st.min, 36.1)
+    assert.equal(st.minDay, '2026-11-05')
+  })
+  it('記録が無い期間は null', () => {
+    assert.equal(C.seriesStats(new Map(), days), null)
+  })
+  it('前回の値は、その日より前で記録のあるいちばん近い日（欠測の日は飛ばす・最初の日は無し）', () => {
+    const v = new Map([['2026-11-01', 60], ['2026-11-04', 72]])
+    assert.deepEqual(C.prevValueBefore(v, days, 4), { day: '2026-11-04', v: 72 })
+    assert.deepEqual(C.prevValueBefore(v, days, 3), { day: '2026-11-01', v: 60 })
+    assert.equal(C.prevValueBefore(v, days, 0), null)
+  })
+  it('差は +・−・±0 で書き、桁は丸めてから判定する', () => {
+    assert.equal(C.fmtDiff(0.3, 1), '+0.3')
+    assert.equal(C.fmtDiff(-1.25, 1), '−1.3')
+    assert.equal(C.fmtDiff(0.04, 1), '±0')
+    assert.equal(C.fmtDiff(-5, 0), '−5')
+  })
+  it('カルテのグラフ: 右端の数値・最高と最低の数値・乗せた時の窓は画面だけ（印刷中は描かない）・マウスの時だけ・外すと消える', () => {
+    const src = read('pages/KartePage.tsx')
+    assert.match(src, /const padR = printing \? PAD_R : Math\.max\(PAD_R, labelW \+ AXIS_LABEL_GAP \+ 2\)/)
+    assert.match(src, /const padR = Math\.max\(PAD_R, box\.labelW \+ AXIS_LABEL_GAP \+ 2\)/, 'chartCols の右の余白が VitalChart とそろっていない')
+    assert.match(src, /if \(printing \|\| e\.pointerType !== 'mouse'\) return/)
+    assert.match(src, /onPointerLeave=\{\(\) => setHovered\(null\)\}/)
+    assert.match(src, /if \(printing\) return out/, '最高・最低の数値を印刷中も描いている')
+    assert.match(src, /if \(printing \|\| hovered == null/)
+    assert.match(src, /cl-karte-hover pointer-events-none [^"]*print:hidden/)
+    assert.equal((src.match(/printing=\{printing\}/g) ?? []).length >= 4, true, '印刷中の印を各グラフへ渡していない')
+  })
+})

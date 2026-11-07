@@ -82,6 +82,9 @@ import {
   mealIntakeSeries,
   offRangeSpeech,
   offRangeText,
+  prevValueBefore,
+  fmtDiff,
+  seriesStats,
   splitThresholds,
 } from '../lib/chart'
 import type { AxisSpec } from '../lib/chart'
@@ -772,7 +775,9 @@ function chartCols(box: ChartBox, printing: boolean, dayCount: number): { box: C
   if (printing || !wide || dayCount > CHART_COLS_MAX_DAYS) return { box, className: undefined }
   const colW = Math.max(CHART_MIN_W, Math.floor((box.width - CHART_COL_GAP) / 2))
   const padL = Math.max(PAD_L_MIN, box.labelW + AXIS_LABEL_GAP + 2)
-  const gap = dayCount <= 1 ? Infinity : (colW - padL - PAD_R) / (dayCount - 1)
+  // 右の余白も VitalChart と同じ式（画面では右端にも縦軸の数値を出す・2026-11-07）
+  const padR = Math.max(PAD_R, box.labelW + AXIS_LABEL_GAP + 2)
+  const gap = dayCount <= 1 ? Infinity : (colW - padL - padR) / (dayCount - 1)
   if (gap < MARK_MIN_GAP) return { box, className: undefined }
   return { box: { ...box, width: colW }, className: 'grid grid-cols-2 items-start gap-x-4' }
 }
@@ -799,16 +804,21 @@ interface VitalChartProps {
   box: ChartBox
   /** グラフの高さ（px）。height と viewBox の両方に渡す */
   height: number
+  /** 印刷中（右端の数値・最高と最低の数値・乗せた時の窓を描かない＝紙の版面を変えない） */
+  printing?: boolean
 }
 
-function VitalChart({ panel, days, box, height }: VitalChartProps) {
+function VitalChart({ panel, days, box, height, printing = false }: VitalChartProps) {
   const { width, fs, labelW, dateW, dateShortW, markCharW } = box
   const [selected, setSelected] = useState<number | null>(null)
+  /** マウスを乗せている日（画面だけ・マウスの時だけ。外すと消える・2026-11-07 本人指示） */
+  const [hovered, setHovered] = useState<number | null>(null)
   const svgRef = useRef<SVGSVGElement>(null)
 
   // 期間や指標が変わったら選択を解除する（別の日の値を指したままにしない）
   useEffect(() => {
     setSelected(null)
+    setHovered(null)
   }, [panel.key, days.length])
 
   // 余白は文字の大きさに合わせる（文字100%では今までの 48/12/22。左は「上151↑」の実測幅＋目盛との間隔）
@@ -821,11 +831,13 @@ function VitalChart({ panel, days, box, height }: VitalChartProps) {
   const baselineDy = Math.round(fs * 0.3)
   const dateDy = Math.max(6, Math.ceil(fs * 0.35))
   // 期間の両端の日付が1行に並ばない幅（文字を大きくした狭い画面）では曜日を省き、それでも並ばなければ終わりの日付を2行目に回す
-  const dateRoom = width - padL - PAD_R
+  // 右の余白: 画面では右端にも縦軸の数値を出すので左と同じ幅を取る（2026-11-07 本人指示）。印刷は今までの 12px
+  const padR = printing ? PAD_R : Math.max(PAD_R, labelW + AXIS_LABEL_GAP + 2)
+  const dateRoom = width - padL - padR
   const datesShort = dateRoom < dateW * 2 + 8
   const datesTwoRows = datesShort && dateRoom < dateShortW * 2 + 8
   const dateText = (iso: string) => (datesShort ? fmtDayShort(iso) : fmtDayLabel(iso))
-  const plotW = Math.max(1, width - padL - PAD_R)
+  const plotW = Math.max(1, width - padL - padR)
   const plotH = Math.max(1, height - padT - padB - (datesTwoRows ? lineH : 0))
   const n = days.length
 
@@ -945,10 +957,10 @@ function VitalChart({ panel, days, box, height }: VitalChartProps) {
    * （近い方を必ず選ぶ＝取り違えを防ぐ。細かい値の読み取りは下の数値表で行う）。
    * どの点からも44pxより遠い位置のタップでは選択を変えない。
    */
-  const pickNearest = useCallback(
-    (clientX: number) => {
+  const nearestIdx = useCallback(
+    (clientX: number): number | null => {
       const el = svgRef.current
-      if (!el || filledIdx.length === 0) return
+      if (!el || filledIdx.length === 0) return null
       const box = el.getBoundingClientRect()
       // ブラウザのズーム等で表示倍率が変わっても viewBox 座標に合わせ直す
       const scale = box.width > 0 ? width / box.width : 1
@@ -962,11 +974,95 @@ function VitalChart({ panel, days, box, height }: VitalChartProps) {
           best = i
         }
       }
-      if (best == null || bestDist > HIT_MIN_W) return
-      setSelected((prev) => (prev === best ? null : best))
+      if (best == null || bestDist > HIT_MIN_W) return null
+      return best
     },
     [filledIdx, width, x],
   )
+  const pickNearest = useCallback(
+    (clientX: number) => {
+      const best = nearestIdx(clientX)
+      if (best == null) return
+      setSelected((prev) => (prev === best ? null : best))
+    },
+    [nearestIdx],
+  )
+
+  /** 期間の中の系列ごとの平均・最高・最低（乗せた時の窓と、最高・最低の数値に使う） */
+  const stats = useMemo(() => panel.series.map((s) => seriesStats(s.values, days)), [panel, days])
+  const avgDigits = Math.max(1, panel.digits)
+
+  /**
+   * 期間の最高・最低の点の近くに常に出す数値（画面だけ・2026-11-07 本人指示）。
+   * 最高は点の上、最低は点の下に置く（↑↓の記号がある点はその外側へ）。枠の外へ出る時と、
+   * ほかの数値・記号と重なる時は反対側へ回す。最高と最低が同じ値（1日だけ・全部同じ）の時は最高だけ
+   */
+  const extremes = useMemo(() => {
+    const out: { key: string; x: number; y: number; text: string }[] = []
+    if (printing) return out
+    const boxes: [number, number, number, number][] = marks.map((m) => {
+      const w = Math.ceil(m.text.length * markCharW) + 2
+      return [m.x - w / 2, m.x + w / 2, m.y - fs, m.y + fs * 0.25]
+    })
+    const hasMark = (label: string, d: string) => marks.some((m) => m.key === `${label}-mk-${d}`)
+    const top = padT
+    const bottom = padT + plotH
+    panel.series.forEach((s, si) => {
+      const st = stats[si]
+      if (!st) return
+      const items: { kind: 'max' | 'min'; v: number; day: string }[] = [{ kind: 'max', v: st.max, day: st.maxDay }]
+      if (st.min !== st.max) items.push({ kind: 'min', v: st.min, day: st.minDay })
+      for (const it of items) {
+        const i = days.indexOf(it.day)
+        if (i < 0) continue
+        const text = fmtNum(it.v, panel.digits)
+        const w = Math.ceil(text.length * markCharW * 0.75) + 4
+        const cx = Math.min(padL + plotW - w / 2, Math.max(padL + w / 2, x(i)))
+        const py = y(it.v)
+        const lift = hasMark(s.label, it.day) ? fs : 0
+        const above = py - 7 - lift
+        const below = py + 7 + lift + Math.ceil(fs * 0.8)
+        const boxAt = (base: number): [number, number, number, number] => [cx - w / 2, cx + w / 2, base - fs, base + fs * 0.25]
+        const fits = (base: number) => base - fs >= top - 2 && base <= bottom + fs
+        const free = (b: [number, number, number, number]) => !boxes.some((o) => o[0] < b[1] && b[0] < o[1] && o[2] < b[3] && b[2] < o[3])
+        const first = it.kind === 'max' ? above : below
+        const second = it.kind === 'max' ? below : above
+        let base = first
+        if (!fits(first) || !free(boxAt(first))) {
+          if (fits(second) && free(boxAt(second))) base = second
+          else if (!fits(first) && fits(second)) base = second
+        }
+        boxes.push(boxAt(base))
+        out.push({ key: `${s.label}-${it.kind}`, x: cx, y: base, text })
+      }
+    })
+    return out
+  }, [printing, marks, markCharW, fs, padT, plotH, panel, stats, days, padL, plotW, x, y])
+
+  /** マウスを乗せた日の数値の窓の中身（日付・系列ごとの値と判定・前回からの差・期間の平均と平均との差） */
+  const hoverInfo = useMemo(() => {
+    if (printing || hovered == null || days[hovered] == null) return null
+    const day = days[hovered]
+    const rows = panel.series.map((s, si) => {
+      const v = s.values.get(day)
+      const st = stats[si]
+      const avg = st ? `${fmtNum(st.avg, avgDigits)}${panel.unit}` : '—'
+      if (v == null) return { label: s.label, value: '—（未測定）', level: null as string | null, note: null as string | null, prev: null as string | null, avg, fromAvg: null as string | null }
+      const lv = s.level(v, day)
+      const prev = prevValueBefore(s.values, days, hovered)
+      return {
+        label: s.label,
+        value: `${fmtNum(v, panel.digits)}${panel.unit}`,
+        level: lv ? (s.levelLabel ?? s.levelMark ?? LEVEL_MARK[lv]) : null,
+        note: s.noteOf?.(v, day) ?? null,
+        prev: prev ? `${fmtDiff(v - prev.v, panel.digits)}（${fmtDayShort(prev.day)}）` : null,
+        avg,
+        fromAvg: st && st.count > 1 ? fmtDiff(v - st.avg, avgDigits) : null,
+      }
+    })
+    const ys = panel.series.map((s) => s.values.get(day)).filter((v): v is number => v != null).map((v) => y(v))
+    return { day, rows, px: x(hovered), py: ys.length > 0 ? Math.min(...ys) : padT }
+  }, [printing, hovered, days, panel, stats, avgDigits, x, y, padT])
 
   const readout = useMemo(() => {
     if (selected == null || days[selected] == null) {
@@ -1002,7 +1098,7 @@ function VitalChart({ panel, days, box, height }: VitalChartProps) {
   }, [panel, days, thresholds])
 
   return (
-    <div>
+    <div className="relative">
       <svg
         ref={svgRef}
         role="img"
@@ -1012,6 +1108,13 @@ function VitalChart({ panel, days, box, height }: VitalChartProps) {
         viewBox={`0 0 ${width} ${height}`}
         className="block"
         onClick={(e) => pickNearest(e.clientX)}
+        // マウスを乗せると、いちばん近い点の数値の窓を出し、外すと消す（画面だけ・指で押した時は今までどおり下の行に出す）
+        onPointerMove={(e) => {
+          if (printing || e.pointerType !== 'mouse') return
+          const i = nearestIdx(e.clientX)
+          setHovered((prev) => (prev === i ? prev : i))
+        }}
+        onPointerLeave={() => setHovered(null)}
       >
         {/* しきい値帯（半透明の面）。表示範囲の外にはみ出す部分は切る（y が範囲の端で止まる） */}
         {panel.bands.map((b) => {
@@ -1086,6 +1189,33 @@ function VitalChart({ panel, days, box, height }: VitalChartProps) {
             {l.text}
           </text>
         ))}
+        {/* 右の列: 左の列と同じ数値（しきい値・目盛）を右端にも出す（画面だけ・2026-11-07 本人指示。紙は今までどおり左だけ） */}
+        {printing
+          ? null
+          : axisLabels.fixed.map((l) => (
+              <text
+                key={`thr-${l.text}`}
+                x={padL + plotW + AXIS_LABEL_GAP}
+                y={l.y + baselineDy}
+                textAnchor="start"
+                className="text-2xs font-bold fill-ink2"
+              >
+                {l.text}
+              </text>
+            ))}
+        {printing
+          ? null
+          : axisLabels.ticks.map((l) => (
+              <text
+                key={`tickr-${l.text}`}
+                x={padL + plotW + AXIS_LABEL_GAP}
+                y={l.y + baselineDy}
+                textAnchor="start"
+                className="tabular text-2xs fill-ink2"
+              >
+                {l.text}
+              </text>
+            ))}
 
         {/* 外枠（下辺・左辺） */}
         <line
@@ -1102,6 +1232,28 @@ function VitalChart({ panel, days, box, height }: VitalChartProps) {
           y2={padT + plotH}
           className="stroke-1 stroke-border"
         />
+        {/* 右辺（画面だけ。右端の数値の軸） */}
+        {printing ? null : (
+          <line
+            x1={padL + plotW}
+            x2={padL + plotW}
+            y1={padT}
+            y2={padT + plotH}
+            className="stroke-1 stroke-border"
+          />
+        )}
+
+        {/* マウスを乗せている日を示す縦の破線（画面だけ） */}
+        {hoverInfo ? (
+          <line
+            x1={hoverInfo.px}
+            x2={hoverInfo.px}
+            y1={padT}
+            y2={padT + plotH}
+            strokeDasharray="3 3"
+            className="stroke-1 stroke-border-strong"
+          />
+        ) : null}
 
         {/* 選択中の日を示す縦線 */}
         {selected != null ? (
@@ -1149,6 +1301,18 @@ function VitalChart({ panel, days, box, height }: VitalChartProps) {
             {m.text}
           </text>
         ))}
+        {/* 期間の最高・最低の数値（画面だけ・常に出す）。線に重なっても読めるよう地の色で縁取る */}
+        {extremes.map((m) => (
+          <text
+            key={m.key}
+            x={m.x}
+            y={m.y}
+            textAnchor="middle"
+            className="cl-karte-extreme tabular text-2xs font-bold fill-ink"
+          >
+            {m.text}
+          </text>
+        ))}
 
         {/* 期間の両端の日付 */}
         {days.length > 0 ? (
@@ -1183,10 +1347,59 @@ function VitalChart({ panel, days, box, height }: VitalChartProps) {
         />
       </svg>
 
+      {/* マウスを乗せた点の数値の窓（画面だけ・外すと消える・2026-11-07 本人指示）。読み上げは下の行と表が担うので隠す。
+          点の右に出し、右半分では点の左に出す。窓はマウスの動きを受けない（下の点を選び続けられる） */}
+      {hoverInfo ? (
+        <HoverCard info={hoverInfo} width={width} />
+      ) : null}
+
       {/* タップした点の値（SVG 内の浮動ボックスにしないのは、文字サイズ200%でも崩れないようにするため） */}
       <p role="status" aria-live="polite" className="tabular mt-1 min-h-tap text-sm text-ink2">
         {readout}
       </p>
+    </div>
+  )
+}
+
+interface HoverRow {
+  label: string
+  value: string
+  level: string | null
+  note: string | null
+  prev: string | null
+  avg: string
+  fromAvg: string | null
+}
+
+/** グラフの点に乗せた時の数値の窓（画面だけ・印刷しない） */
+function HoverCard({ info, width }: { info: { day: string; rows: HoverRow[]; px: number; py: number }; width: number }) {
+  const right = info.px > width / 2
+  return (
+    <div
+      aria-hidden="true"
+      data-karte-hover=""
+      className="cl-karte-hover pointer-events-none absolute z-20 rounded-md border border-border-strong bg-surface px-2 py-1 text-sm text-ink shadow-md print:hidden"
+      style={{
+        top: Math.max(0, info.py - 12),
+        ...(right ? { right: Math.max(0, width - info.px + 12) } : { left: info.px + 12 }),
+      }}
+    >
+      <div className="font-bold">{fmtDayLabel(info.day)}</div>
+      {info.rows.map((r) => (
+        <div key={r.label} className="tabular mt-0.5">
+          <div>
+            {info.rows.length > 1 ? <span className="text-ink2">{r.label} </span> : null}
+            <span className="font-bold">{r.value}</span>
+            {r.level ? <span className="font-bold text-danger"> {r.level}</span> : null}
+            {r.note ? <span className="text-ink2">（{r.note}）</span> : null}
+          </div>
+          {r.prev ? <div className="text-ink2">前回から {r.prev}</div> : null}
+          <div className="text-ink2">
+            期間の平均 {r.avg}
+            {r.fromAvg ? `（平均との差 ${r.fromAvg}）` : ''}
+          </div>
+        </div>
+      ))}
     </div>
   )
 }
@@ -1196,10 +1409,12 @@ interface VitalPanelProps {
   days: string[]
   box: ChartBox
   height: number
+  /** 印刷中（グラフに画面だけの数値を描かない） */
+  printing?: boolean
 }
 
 /** 1指標のパネル（見出し＋グラフ＋数値表フォールバック） */
-function VitalPanel({ panel, days, box, height }: VitalPanelProps) {
+function VitalPanel({ panel, days, box, height, printing = false }: VitalPanelProps) {
   // 表は開いたときに組み立てる（1年表示×4パネルで数千ノードになるのを避ける）
   const [tableOpen, setTableOpen] = useState(false)
   const rows = useMemo(
@@ -1223,7 +1438,7 @@ function VitalPanel({ panel, days, box, height }: VitalPanelProps) {
         </p>
       ) : (
         <>
-          <VitalChart panel={panel} days={days} box={box} height={height} />
+          <VitalChart panel={panel} days={days} box={box} height={height} printing={printing} />
           <details
             className="mt-2"
             onToggle={(e) => setTableOpen((e.currentTarget as HTMLDetailsElement).open)}
@@ -1484,8 +1699,8 @@ function VitalsSection({ vitals, days, weightPanel, printing, usual, usualAbsent
         ) : null}
         {/* 体重のグラフはバイタルが0件の期間でも出す（今までどおり。反証 高1） */}
         <div className={cols.className}>
-          {hasAny ? panels.map((p) => <VitalPanel key={p.key} panel={p} days={days} box={cols.box} height={chartH} />) : null}
-          {weightPanel ? <VitalPanel panel={weightPanel} days={days} box={cols.box} height={chartH} /> : null}
+          {hasAny ? panels.map((p) => <VitalPanel key={p.key} panel={p} days={days} box={cols.box} height={chartH} printing={printing} />) : null}
+          {weightPanel ? <VitalPanel panel={weightPanel} days={days} box={cols.box} height={chartH} printing={printing} /> : null}
         </div>
       </div>
     </SectionCard>
@@ -1849,7 +2064,7 @@ function MealsSection({ meals, fluids, outings, days, printing, target }: MealsS
             <AxisProbe probeRef={probeRef} />
             <div className={cols.className}>
               {panels.map((p) => (
-                <VitalPanel key={p.key} panel={p} days={days} box={cols.box} height={chartH} />
+                <VitalPanel key={p.key} panel={p} days={days} box={cols.box} height={chartH} printing={printing} />
               ))}
             </div>
           </div>
