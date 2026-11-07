@@ -1348,7 +1348,7 @@ function VitalChart({ panel, days, box, height, printing = false }: VitalChartPr
       </svg>
 
       {/* マウスを乗せた点の数値の窓（画面だけ・外すと消える・2026-11-07 本人指示）。読み上げは下の行と表が担うので隠す。
-          点の右に出し、右半分では点の左に出す。窓はマウスの動きを受けない（下の点を選び続けられる） */}
+          グラフの上の外側に出し、グラフに重ねない。窓はマウスの動きを受けない（下の点を選び続けられる） */}
       {hoverInfo ? (
         <HoverCard info={hoverInfo} width={width} />
       ) : null}
@@ -1371,33 +1371,36 @@ interface HoverRow {
   fromAvg: string | null
 }
 
-/** グラフの点に乗せた時の数値の窓（画面だけ・印刷しない） */
+/**
+ * グラフの点に乗せた時の数値の窓（画面だけ・印刷しない）。
+ * グラフに重ねると下の線が見えなくなるので、グラフ（SVG）の上の外側に出す（窓の下端をグラフの上端にそろえる・2026-11-07 本人指示）。
+ * 横は乗せた点に合わせ、右半分では窓の右端を点にそろえる。色は黒の半透明の地に白い字（karte.css の .cl-karte-hover）。
+ * 1系列を1行にまとめて背を低くする（上の見出しより上へ大きくはみ出さないように）
+ */
 function HoverCard({ info, width }: { info: { day: string; rows: HoverRow[]; px: number; py: number }; width: number }) {
   const right = info.px > width / 2
   return (
     <div
       aria-hidden="true"
       data-karte-hover=""
-      className="cl-karte-hover pointer-events-none absolute z-20 rounded-md border border-border-strong bg-surface px-2 py-1 text-sm text-ink shadow-md print:hidden"
+      className="cl-karte-hover pointer-events-none absolute z-20 whitespace-nowrap rounded-md px-2 py-1 text-sm print:hidden"
       style={{
-        top: Math.max(0, info.py - 12),
-        ...(right ? { right: Math.max(0, width - info.px + 12) } : { left: info.px + 12 }),
+        bottom: '100%',
+        ...(right ? { right: Math.max(0, width - info.px - 12) } : { left: Math.max(0, info.px - 12) }),
       }}
     >
       <div className="font-bold">{fmtDayLabel(info.day)}</div>
       {info.rows.map((r) => (
-        <div key={r.label} className="tabular mt-0.5">
-          <div>
-            {info.rows.length > 1 ? <span className="text-ink2">{r.label} </span> : null}
-            <span className="font-bold">{r.value}</span>
-            {r.level ? <span className="font-bold text-danger"> {r.level}</span> : null}
-            {r.note ? <span className="text-ink2">（{r.note}）</span> : null}
-          </div>
-          {r.prev ? <div className="text-ink2">前回から {r.prev}</div> : null}
-          <div className="text-ink2">
-            期間の平均 {r.avg}
-            {r.fromAvg ? `（平均との差 ${r.fromAvg}）` : ''}
-          </div>
+        <div key={r.label} className="tabular">
+          {info.rows.length > 1 ? <span className="cl-karte-hover-sub">{r.label} </span> : null}
+          <span className="font-bold">{r.value}</span>
+          {r.level ? <span className="cl-karte-hover-alert font-bold"> {r.level}</span> : null}
+          {r.note ? <span className="cl-karte-hover-sub">（{r.note}）</span> : null}
+          <span className="cl-karte-hover-sub">
+            {r.prev ? `　前回 ${r.prev}` : ''}
+            {`　平均 ${r.avg}`}
+            {r.fromAvg ? `（差 ${r.fromAvg}）` : ''}
+          </span>
         </div>
       ))}
     </div>
