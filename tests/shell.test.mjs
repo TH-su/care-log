@@ -499,7 +499,8 @@ describe('★F41 送れていない申し送りの記入者', () => {
   it('〔新しい行として登録〕でも記入者は元の人のまま（押した人＝この端末の操作者の名義にしない）', () => {
     const u = code('src/components/UnsentNotes.tsx')
     assert.doesNotMatch(u, /reporterId: actorId/)
-    assert.match(u, /const res = await insertNoteAsNew\(\{ key: newKey, meta, body, reporterId: reporterId \?\? null \}\)/)
+    // 一覧に無い記入者の名前（0058）も元の行のまま渡す
+    assert.match(u, /const res = await insertNoteAsNew\(\{ key: newKey, meta, body, reporterId: reporterId \?\? null, reporterName \}\)/)
     // 元の記入者を確かめられない時は登録しない（別人の名義を作らない）
     assert.match(u, /元の申し送りの記入者を確かめられないため、新しい行にできません/)
   })

@@ -14,6 +14,7 @@
 import type { Note, NoteCategory } from './types.ts'
 import { noteIsNextMorning, timeSortKey } from './nextMorning.ts'
 import { hasSchedule, unionCategories } from './noteCategory.ts'
+import { normalizeReporterName, sameReporter } from './reporterName.ts'
 
 /** 日報の区分（表題帯の単位） */
 export type NoteSection = 'day' | 'late' | 'daycare' | 'night'
@@ -114,13 +115,15 @@ export interface NoteGroupLine {
  */
 export function noteGroupLines(row: Pick<NoteGroupRow, 'notes'>, staffName: (id: number) => string | null): NoteGroupLine[] {
   return row.notes.map((n, i) => {
-    if (i === 0 || n.reporter_id === null) return { note: n, body: n.body, suffix: '', sameAsPrev: false }
-    const s = surnameOf(staffName(n.reporter_id))
+    // 記入者は職員の名前、無ければ一覧に無い名前（0058・2026-11-07）
+    const who = n.reporter_id !== null ? staffName(n.reporter_id) : normalizeReporterName(n.reporter_name)
+    if (i === 0 || who === null) return { note: n, body: n.body, suffix: '', sameAsPrev: false }
+    const s = surnameOf(who)
     return {
       note: n,
       body: n.body,
       suffix: s === '' ? '' : `（${s}）`,
-      sameAsPrev: row.notes[i - 1].reporter_id === n.reporter_id,
+      sameAsPrev: sameReporter(row.notes[i - 1], n),
     }
   })
 }

@@ -182,6 +182,11 @@ export interface Note {
    */
   ended_by?: number | null
   reporter_id: number | null
+  /**
+   * 一覧に無い記入者の名前（0058・2026-11-07 本人指示・省略可）。職員（reporter_id）が無い時だけ使う。
+   * 列を返さない旧サーバー・経路では付かない
+   */
+  reporter_name?: string | null
   /** 行の色。null=既定（白）。生の色コードでなくトークン名を持つ（ダークモードでも読める色へ解決する） */
   color: NoteColor | null
   /** 日勤の「↓16時以降の記録」より後に書かれた行（現行スプシの区切りを再現する） */

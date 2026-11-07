@@ -9,6 +9,8 @@ export interface DraftFields {
   residentId: number | null
   targetPicked: boolean
   reporterId: number | null
+  /** 一覧に無い記入者の名前（0058・2026-11-07）。省略・null＝書いていない */
+  reporterName?: string | null
   color: NoteColor | null
   /** 分類（0032・2026-10-15）。省略＝分類を選んでいない（[] と同じ扱い） */
   categories?: NoteCategory[]
@@ -30,7 +32,7 @@ export type FieldEdit = { value: unknown; base: unknown }
 export function followUpEdits(
   sent: DraftFields,
   now: DraftFields,
-  inserted: Pick<Note, 'body' | 'resident_id' | 'reporter_id' | 'color' | 'categories'>,
+  inserted: Pick<Note, 'body' | 'resident_id' | 'reporter_id' | 'reporter_name' | 'color' | 'categories'>,
 ): Record<string, FieldEdit> {
   const out: Record<string, FieldEdit> = {}
   const body = now.body.trim()
@@ -40,6 +42,11 @@ export function followUpEdits(
   }
   if (now.reporterId !== sent.reporterId && now.reporterId !== inserted.reporter_id) {
     out.reporter_id = { value: now.reporterId, base: inserted.reporter_id }
+  }
+  // 一覧に無い記入者の名前（0058）。応答待ちの間に書いた・消した名前
+  const nowName = now.reporterName ?? null
+  if (nowName !== (sent.reporterName ?? null) && nowName !== (inserted.reporter_name ?? null)) {
+    out.reporter_name = { value: nowName, base: inserted.reporter_name ?? null }
   }
   if (now.color !== sent.color && now.color !== inserted.color) out.color = { value: now.color, base: inserted.color }
   // 分類（2026-10-15）: 応答待ちの間に選び直した分類。登録できた行の分類（無ければ []）を基準にする
@@ -56,7 +63,7 @@ export function overlayNote(note: Note, values: Record<string, unknown> | null |
   let changed = false
   for (const [k, v] of Object.entries(values)) {
     // 分類（0032）は行に無くても重ねる（列を返さない経路で読んだ行にも、送信待ちの分類を出す）
-    if (k === 'deleted_at' || (!(k in note) && k !== 'categories')) continue
+    if (k === 'deleted_at' || (!(k in note) && k !== 'categories' && k !== 'reporter_name')) continue
     out[k] = v
     changed = true
   }

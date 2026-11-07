@@ -125,6 +125,7 @@ const TABLE_LABEL: Record<string, Record<string, string>> = {
     ended_at: '継続の終了',
     ended_by: '継続を終えた職員',
     reporter_id: '記入者',
+    reporter_name: '記入者（一覧に無い名前）',
     color: '行の色',
     after16: '16時以降',
   },

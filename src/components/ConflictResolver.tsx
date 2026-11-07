@@ -805,6 +805,7 @@ const NOTE_FIELD_NAME: Record<string, string> = {
   after16: '16時以降',
   occurred_at: '時刻',
   reporter_id: '記入者',
+  reporter_name: '記入者（一覧に無い名前）',
   role_tags: '職種タグ',
   // 申し送りの分類（体調・食事など・0032・2026-10-15）
   categories: '分類',

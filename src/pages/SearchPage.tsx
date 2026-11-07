@@ -20,6 +20,7 @@
 //   - 結果カードは記入者・既読を1行目の右端へ、「カルテを開く」を本文の右へ（640px 未満は従来どおり本文の下）
 //   - 共通部品（Chip・SegmentPicker 等）の既定の見た目と tokens.css は変えない（札の 16px はこの画面で渡す）
 
+import { reporterLabel } from '../lib/reporterName'
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { CompositionEvent, FormEvent, ReactNode } from 'react'
 import { Link } from 'react-router-dom'
@@ -860,7 +861,7 @@ function NoteResults({
             key={n.id}
             note={n}
             resident={n.resident_id == null ? undefined : residentById.get(n.resident_id)}
-            reporterName={n.reporter_id == null ? null : (staffById.get(n.reporter_id) ?? null)}
+            reporterName={reporterLabel(n, (id) => staffById.get(id) ?? null) || null}
             bodyQuery={target === 'body' ? query : ''}
             reporterQuery={target === 'reporter' ? query : ''}
           />

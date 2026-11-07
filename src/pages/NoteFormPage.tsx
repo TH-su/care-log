@@ -44,6 +44,7 @@ import {
   isNoteRpcMissing,
   noteDeleted,
 } from '../lib/db'
+import { reporterLabel } from '../lib/reporterName'
 import { addDays, fmtDayLabel, fmtTimeHM, todayIso } from '../lib/format'
 import { fmtRecordTime, noteIsNextMorning, noteTimeFor } from '../lib/nextMorning'
 import { appendPhrase, NOTE_PHRASE_CATEGORIES, PHRASE_BLANK } from '../lib/notePhrases'
@@ -117,6 +118,11 @@ interface FormState {
   endedOn: string
   body: string
   reporterId: number | null
+  /**
+   * 一覧に無い記入者の名前（2026-11-07 本人指示・0058）。職員（reporterId）を選んだ時は空。
+   * 氏名なので端末の控えには残さない（saveDraft が外す・再読み込みすると消える）
+   */
+  reporterName?: string | null
 }
 
 type ErrorKey = 'noteOn' | 'residentId' | 'body' | 'endedOn' | 'reporterId'
@@ -337,7 +343,10 @@ function clearDraft(): void {
   lastDraft = null
 }
 
-function saveDraft(f: FormState): void {
+function saveDraft(f0: FormState): void {
+  // 一覧に無い記入者の名前は氏名なので控えに残さない（2026-11-07）
+  const { reporterName: _omit, ...f } = f0
+  void _omit
   const json = JSON.stringify(f)
   const at = lastDraft !== null && lastDraft.json === json ? lastDraft.at : Date.now()
   lastDraft = { json, at }
@@ -781,7 +790,7 @@ export function NoteFormPage() {
       e.endedOn = '期限日が記録日より前になっています。記録日以降の日付を選んでください。'
     }
     // 夜勤は記入者の欄を出さない（スプレッドシートと同じ見た目・2026-11-07 本人指示）
-    if (f.reporterId === null && f.shift !== 'night') {
+    if (f.reporterId === null && (f.reporterName ?? null) === null && f.shift !== 'night') {
       e.reporterId = '記入者が選ばれていません。記入者を選んでください。'
     }
     return e
@@ -893,6 +902,10 @@ export function NoteFormPage() {
           ended_at: form.ongoing && form.endedOn !== '' ? endOfDayStamp(form.endedOn) : null,
           // 夜勤は記入者を入れない（欄を出さない・2026-11-07 本人指示）
           reporter_id: form.shift === 'night' ? null : form.reporterId,
+          // 一覧に無い記入者の名前（0058）。職員を選んだ時・夜勤は送らない
+          ...(form.shift !== 'night' && form.reporterId === null && (form.reporterName ?? null) !== null
+            ? { reporter_name: form.reporterName }
+            : {}),
           // 色はシート画面で扱う項目。この入力画面では既定のまま送る
           color: null,
           // 日勤の 16:00 以降の申し送りは、日報の「↓16時以降の記録」の欄に載せる（F35。日報で書いた時と同じ欄になる）
@@ -1031,7 +1044,9 @@ export function NoteFormPage() {
         : `利用者ID ${form.residentId}`
   const reporterText =
     form.reporterId === null
-      ? '未選択'
+      ? (form.reporterName ?? null) !== null
+        ? `${form.reporterName}（一覧に無い名前）`
+        : '未選択'
       : (staffById.get(form.reporterId)?.name ?? `職員ID ${form.reporterId}`)
   const dayLabel = ISO_DATE_RE.test(form.noteOn) ? fmtDayLabel(form.noteOn) : ''
   const inputsDisabled = !enabled || saving
@@ -1241,9 +1256,9 @@ export function NoteFormPage() {
                               {fmtTimeHM(n.occurred_at) ? ` ${fmtRecordTime(n.occurred_at, noteIsNextMorning(n))}` : ''}
                             </span>
                             <span className="ml-2">{n.body}</span>
-                            {n.reporter_id !== null && (
+                            {(n.reporter_id !== null || (n.reporter_name ?? null) !== null) && (
                               <span className="ml-2 text-ink2">
-                                {staffById.get(n.reporter_id)?.name ?? ''}
+                                {n.reporter_id !== null ? (staffById.get(n.reporter_id)?.name ?? '') : reporterLabel(n, () => null)}
                               </span>
                             )}
                           </li>
@@ -1469,7 +1484,7 @@ export function NoteFormPage() {
                   aria-describedby={errors.reporterId ? ids.err('reporterId') : undefined}
                   className={`mt-1 ${pickerBtnClass}`}
                 >
-                  <span className={form.reporterId === null ? 'text-ink3' : 'font-bold'}>
+                  <span className={form.reporterId === null && (form.reporterName ?? null) === null ? 'text-ink3' : 'font-bold'}>
                     {reporterText}
                   </span>
                   <span aria-hidden="true" className="shrink-0 text-link">
@@ -1526,7 +1541,12 @@ export function NoteFormPage() {
             : null
         }
         onPick={(id) => {
-          update({ reporterId: id }, 'reporterId')
+          update({ reporterId: id, reporterName: null }, 'reporterId')
+          setStaffPicker(false)
+        }}
+        // 一覧に無い名前を書く（応援・実習生など・2026-11-07 本人指示）
+        onFreeName={(name) => {
+          update({ reporterId: null, reporterName: name }, 'reporterId')
           setStaffPicker(false)
         }}
         onClose={() => setStaffPicker(false)}

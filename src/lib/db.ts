@@ -111,6 +111,7 @@ import {
   trainingResultOf,
 } from './daycareTraining'
 import type { DaycareStaffing, DaycareTrainingSession, StaffingRole, trainingPayload } from './daycareTraining'
+import { normalizeReporterName } from './reporterName'
 import { EXPLAINED_TOS, HOME_VISIT_PURPOSES, HOME_VISIT_TEXT_MAX } from './daycareHomeVisit'
 import type { DaycareHomeVisit, ExplainedTo, HomeVisitPurpose, homeVisitPayload } from './daycareHomeVisit'
 import type { DueCopyRow, DueCopySettings } from './trainingDue'
@@ -217,7 +218,7 @@ const FLUID_COLS = 'id,resident_id,taken_on,taken_at,amount_ml,kind,recorded_by,
 // 「未入力」のままだと、2台目の終了が何度送っても競合のまま終わらなかったため
 // categories（分類・0032）は 2026-10-15 に足した。**0032 を当ててからこの版を公開する**（当てる前は列が無く読めない）
 const NOTE_COLS =
-  'id,note_on,shift,facility,category,resident_id,role_tags,categories,importance,body,occurred_at,ongoing,ended_at,ended_by,reporter_id,color,after16,rev,created_at'
+  'id,note_on,shift,facility,category,resident_id,role_tags,categories,importance,body,occurred_at,ongoing,ended_at,ended_by,reporter_id,reporter_name,color,after16,rev,created_at'
 const OUTING_COLS = 'id,resident_id,kind,start_on,start_at,end_on,end_at,companion,note,recorded_by,rev'
 const ATTENDANCE_COLS = 'day,staff_id,role,sort'
 const IMPORT_DAY_COLS = 'source,day,imported_at,src_rows,inserted,updated,skipped,native_skip,unmatched'
@@ -911,6 +912,8 @@ function normalizeNote(row: unknown): Note | null {
   }
   if (readCount !== null) note.read_count = readCount
   if (typeof r.my_read === 'boolean') note.my_read = r.my_read
+  // 一覧に無い記入者の名前（0058）。列を返さない経路では付けない＝分からない
+  if ('reporter_name' in r) note.reporter_name = normalizeReporterName(r.reporter_name)
   // 継続を終了した職員（F08）。列を返さない経路（0017 の応答・タイムラインの RPC）では付けない＝「分からない」。
   // 分からないのに null を基準にして送ると、自分で競合を作るため（null と区別する）
   if (Object.prototype.hasOwnProperty.call(r, 'ended_by')) note.ended_by = idNum(r.ended_by)
@@ -1386,6 +1389,7 @@ export type NoteEditField =
   | 'after16'
   | 'occurred_at'
   | 'reporter_id'
+  | 'reporter_name'
   | 'role_tags'
   | 'categories'
   | 'shift'
@@ -1401,6 +1405,7 @@ const NOTE_CELL_FIELDS: readonly string[] = [
   'after16',
   'occurred_at',
   'reporter_id',
+  'reporter_name',
   'role_tags',
   'categories',
   'shift',
@@ -1820,6 +1825,8 @@ function cellValueOf(field: string, v: unknown): CellValue | undefined {
     case 'reporter_id':
     case 'ended_by':
       return idNum(v) ?? undefined
+    case 'reporter_name':
+      return normalizeReporterName(v) ?? undefined
     case 'importance':
       return oneOf(v, IMPORTANCES) ?? undefined
     case 'color':
@@ -2049,6 +2056,7 @@ const NOTE_SEEN_FIELD_LIST = [
   'after16',
   'occurred_at',
   'reporter_id',
+  'reporter_name',
   'role_tags',
   'categories',
   'shift',
@@ -5248,30 +5256,44 @@ export async function searchNotes(p: {
       .filter((s) => normalizeName(s.name).includes(needle))
       .slice(0, 100) // URL 長対策。100名を超える一致は現場運用上あり得ない
       .map((s) => s.id)
-    if (reporterIds.length === 0) return []
   }
 
-  let query = sb
-    .from('notes')
-    .select(NOTE_COLS)
-    .gte('note_on', p.fromIso)
-    .lte('note_on', p.toIso)
-    .is('deleted_at', null)
-  if (q !== '') {
-    if (p.target === 'body') query = query.ilike('body', likePattern(q))
-    else query = query.in('reporter_id', reporterIds)
+  const build = (byName: boolean) => {
+    let query = sb
+      .from('notes')
+      .select(NOTE_COLS)
+      .gte('note_on', p.fromIso)
+      .lte('note_on', p.toIso)
+      .is('deleted_at', null)
+    if (q !== '') {
+      if (p.target === 'body') query = query.ilike('body', likePattern(q))
+      // 一覧に無い記入者の名前（0058）は名前の部分一致で別に探す（職員の id の絞り込みとは or にせず、2回に分けて合わせる）
+      else if (byName) query = query.ilike('reporter_name', likePattern(q))
+      else query = query.in('reporter_id', reporterIds)
+    }
+    if (levels.length === 1) query = query.eq('importance', levels[0])
+    else if (levels.length > 1) query = query.in('importance', levels)
+    if (cats.length > 0) query = query.overlaps('categories', cats)
+    if (p.shift !== undefined) query = query.eq('shift', p.shift)
+    return query
+      .order('note_on', { ascending: false })
+      .order('id', { ascending: false })
+      .limit(cap) as unknown as Promise<Res<unknown>>
   }
-  if (levels.length === 1) query = query.eq('importance', levels[0])
-  else if (levels.length > 1) query = query.in('importance', levels)
-  if (cats.length > 0) query = query.overlaps('categories', cats)
-  if (p.shift !== undefined) query = query.eq('shift', p.shift)
-
-  const res = (await query
-    .order('note_on', { ascending: false })
-    .order('id', { ascending: false })
-    .limit(cap)) as Res<unknown>
-  if (res.error !== null) throw readError(res)
-  return list(res.data, normalizeNote, cap)
+  const byReporter = p.target === 'reporter' && q !== ''
+  const [res, resName] = await Promise.all([
+    byReporter && reporterIds.length === 0 ? Promise.resolve(null) : build(false),
+    byReporter ? build(true) : Promise.resolve(null),
+  ])
+  if (res !== null && res.error !== null) throw readError(res)
+  if (resName !== null && resName.error !== null) throw readError(resName)
+  const rows = res === null ? [] : list(res.data, normalizeNote, cap)
+  if (resName === null) return rows
+  // 職員で見つけた行と名前で見つけた行を合わせ、新しい順（記録日 → id）に並べて上限までにする
+  const seen = new Set(rows.map((n) => n.id))
+  for (const n of list(resName.data, normalizeNote, cap)) if (!seen.has(n.id)) rows.push(n)
+  rows.sort((x, y) => (x.note_on === y.note_on ? y.id - x.id : x.note_on < y.note_on ? 1 : -1))
+  return rows.slice(0, cap)
 }
 
 /** 自分（staffId）が未読の申し送り件数（sinceIso 以降・上限2000件の範囲で数える） */
@@ -7133,6 +7155,8 @@ export interface QueuedNoteInsert {
   resident_id: number | null
   body: string
   reporter_id: number | null
+  /** 一覧に無い記入者の名前（0058。登録で送った値に、登録後の変更を重ねた値・職員がいる時は null） */
+  reporter_name: string | null
   after16: boolean
   /** 色（登録で送った値に、登録後の変更を重ねた値） */
   color: NoteColor | null
@@ -7181,6 +7205,7 @@ export function listUnsentNotes(): UnsentNote[] {
         resident_id: idNum(p.resident_id),
         body: str(p.body) ?? '',
         reporter_id: idNum(p.reporter_id),
+        reporter_name: idNum(p.reporter_id) !== null ? null : normalizeReporterName(p.reporter_name),
         after16: bool(p.after16, false),
         color: oneOf(p.color, NOTE_COLORS),
         changes,
@@ -7534,6 +7559,8 @@ export async function registerQueuedInsertAsNew(qid: string): Promise<Note | Que
   const newKey = `nr-${qid}`
   const payload: Record<string, unknown> = { ...op.payload, ...(changes?.values ?? {}), client_key: newKey }
   delete payload.deleted_at
+  // 職員がいる時は一覧に無い名前を送らない（登録後に職員を選び直した変更を重ねた時に、両方入った行を作らない・0058）
+  if (idNum(payload.reporter_id) !== null || normalizeReporterName(payload.reporter_name) === null) delete payload.reporter_name
   if (str(payload.body)?.trim() === '' || str(payload.body) === null) throw new DbError('server', MSG.emptyBody)
   const res = await insertRow('notes', payload, normalizeNote)
   if (res === 'queued' && !isQueuePersisted()) return res
@@ -7574,6 +7601,8 @@ export async function insertNoteAsNew(p: {
   meta: NoteMeta
   body: string
   reporterId: number | null
+  /** 一覧に無い記入者の名前（0058）。職員（reporterId）が無い時だけ送る */
+  reporterName?: string | null
 }): Promise<Note | Queued> {
   if (p.body.trim() === '') throw new DbError('server', MSG.emptyBody)
   const payload: Record<string, unknown> = {
@@ -7589,6 +7618,7 @@ export async function insertNoteAsNew(p: {
     ongoing: false,
     ended_at: null,
     reporter_id: p.reporterId,
+    ...(p.reporterId === null && normalizeReporterName(p.reporterName) !== null ? { reporter_name: normalizeReporterName(p.reporterName) } : {}),
     color: null,
     after16: p.meta.after16,
     client_key: p.key,
@@ -7663,7 +7693,7 @@ export async function softDeleteFluid(
 // ── 申し送り ─────────────────────────────────────────────────────────────────
 
 /** 登録で送った欄のうち、登録の後に書きかけで直せる欄の値（「その冪等キーで最初に送った中身」を画面の控えに持つ形・R6-3） */
-export type NoteFirstSent = Partial<Record<'body' | 'resident_id' | 'reporter_id' | 'color' | 'categories', unknown>>
+export type NoteFirstSent = Partial<Record<'body' | 'resident_id' | 'reporter_id' | 'reporter_name' | 'color' | 'categories', unknown>>
 
 /**
  * 申し送りの新規登録。opts.clientKey を渡すと、その冪等キーで送る（画面が同じ行の登録を後から直す＝
@@ -7743,7 +7773,7 @@ async function insertNoteUnderKey(
 let noteInsertTimeoutMs = 20_000
 
 /** 登録の後に書きかけで直せる欄（同じ冪等キーの登録どうしの食い違いを比べる欄・R6） */
-const NOTE_REG_FIELDS = ['body', 'resident_id', 'reporter_id', 'color', 'categories'] as const
+const NOTE_REG_FIELDS = ['body', 'resident_id', 'reporter_id', 'reporter_name', 'color', 'categories'] as const
 /** この端末が冪等キーごとに最初に送った登録の中身（食い違いの基準に使う。メモリだけ・R6） */
 const firstSentNote = new Map<string, Record<string, unknown>>()
 function rememberNoteSent(ck: string, payload: Record<string, unknown>): void {
@@ -7758,6 +7788,8 @@ function sameValue(a: unknown, b: unknown): boolean {
  */
 function regValue(src: Record<string, unknown>, f: (typeof NOTE_REG_FIELDS)[number]): unknown {
   if (f === 'categories') return normalizeCategories(Array.isArray(src[f]) ? (src[f] as unknown[]).filter(isNoteCategory) : []) ?? []
+  // 一覧に無い記入者の名前（0058）: そろえた名前（書いていない・送らない＝null）
+  if (f === 'reporter_name') return normalizeReporterName(src[f])
   return src[f] ?? null
 }
 function noteMetaOfPayload(p: Record<string, unknown>): NoteMeta {

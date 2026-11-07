@@ -218,6 +218,7 @@ import type { BootBlock } from '../lib/bootBlock'
 import { noteIsNextMorning, noteTimeFor, recordTimeFor, timeSortKey } from '../lib/nextMorning'
 // 日報の4機能（2026-10-15 本人回答）: ロックの判定・同じ方の統合・検索・分類（純関数は lib、画面の部品は noteCategory.tsx）
 import { lockState, msUntilNextLock } from '../lib/noteLock'
+import { reporterLabel } from '../lib/reporterName'
 import { groupNotesByResident, noteGroupLines, noteSectionOf } from '../lib/noteGroup'
 import type { NoteGroupRow, NoteSection } from '../lib/noteGroup'
 import { matchSearch, noteSearchText, parseSearchQuery } from '../lib/noteSearch'
@@ -546,6 +547,8 @@ const MSG_REG_STOPPED =
  * ピッカーで選んだのに、その行が画面から無くなっていた時の案内。
  * 黙って捨てると「対象を選んだのに空欄のまま」になるため、理由と次の行動を必ず出す。
  */
+/** 控えから戻した書きかけで、一覧に無い記入者の名前が消えた時の一言（名前は端末に残さないため・2026-11-07・仮置き） */
+const MSG_REPORTER_NAME_LOST = '▲ 書きかけに書いた記入者の名前は端末に残さないため消えました。記入者を選び直してください'
 const MSG_PICK_LOST =
   '▲ 保存が完了したため選択を反映できませんでした。行の対象／記入者をもう一度選んでください'
 
@@ -775,7 +778,17 @@ const NARROW_STICKY: CSSProperties = {
 type NotePatch = Partial<
   Pick<
     Note,
-    'body' | 'resident_id' | 'importance' | 'color' | 'after16' | 'occurred_at' | 'reporter_id' | 'role_tags' | 'shift' | 'categories'
+    | 'body'
+    | 'resident_id'
+    | 'importance'
+    | 'color'
+    | 'after16'
+    | 'occurred_at'
+    | 'reporter_id'
+    | 'reporter_name'
+    | 'role_tags'
+    | 'shift'
+    | 'categories'
   >
 >
 
@@ -785,6 +798,7 @@ function overlayDraft<T extends DraftFields>(d: T, v: Record<string, unknown>): 
   if (typeof v.body === 'string') next.body = v.body
   if ('resident_id' in v) next.residentId = (v.resident_id as number | null) ?? null
   if ('reporter_id' in v) next.reporterId = (v.reporter_id as number | null) ?? null
+  if ('reporter_name' in v) next.reporterName = typeof v.reporter_name === 'string' ? v.reporter_name : null
   if ('color' in v) next.color = (v.color as NoteColor | null) ?? null
   // 分類（2026-10-15）: 送信待ちの登録の行へ積んだ分類を重ねる（読めない値は重ねない）
   if ('categories' in v) {
@@ -795,6 +809,7 @@ function overlayDraft<T extends DraftFields>(d: T, v: Record<string, unknown>): 
     next.body === d.body &&
     next.residentId === d.residentId &&
     next.reporterId === d.reporterId &&
+    (next.reporterName ?? null) === (d.reporterName ?? null) &&
     next.color === d.color &&
     JSON.stringify(next.categories ?? []) === JSON.stringify(d.categories ?? [])
   return same ? d : next
@@ -1189,6 +1204,16 @@ interface NoteDraft {
   targetPicked: boolean
   body: string
   reporterId: number | null
+  /**
+   * 一覧に無い記入者の名前（2026-11-07 本人指示・0058）。職員（reporterId）を選んだ時は空。
+   * 氏名なので端末の控え（cl_dailyDraft）には書かない（draftData が外す＝再読み込みすると、この名前だけ消える）
+   */
+  reporterName?: string | null
+  /**
+   * 一覧に無い記入者の名前を書いていたが、控えから戻したので名前が消えた印（名前そのものは控えに残さない・2026-11-07）。
+   * この印のある書きかけは、記入者を選び直すまで登録しない（記入者の空いた行を黙って登録しない）
+   */
+  reporterNameLost?: boolean
   color: NoteColor | null
   /**
    * 分類（2026-10-15 本人回答・0032）。分類窓で選ぶ。登録の時に一緒に送る。省略＝選んでいない（[] と同じ）。
@@ -1406,6 +1431,12 @@ function draftData<T extends { key: string; did?: string; from?: DraftOrigin[]; 
   d: T,
 ): Omit<T, 'key' | 'did' | 'from'> {
   const { key: _key, did: _did, from: _from, ...rest } = d
+  // 一覧に無い記入者の名前は氏名なので控えに書かない。書いていたことだけを印で残す（戻した時に選び直してもらう・2026-11-07）
+  const r = rest as Record<string, unknown>
+  if ('reporterName' in r) {
+    if (typeof r.reporterName === 'string' && r.reporterName !== '') r.reporterNameLost = true
+    delete r.reporterName
+  }
   return rest
 }
 
@@ -1649,6 +1680,8 @@ function readNoteDraft(v: unknown): NoteDraft | null {
     locked: false,
   }
   if (reporterPicked && reporterId !== null) out.reporterPicked = true
+  // 一覧に無い記入者の名前を書いていた印（名前は戻らない・2026-11-07）。職員を選んでいた行には付けない
+  if (o.reporterNameLost === true && reporterId === null) out.reporterNameLost = true
   // 分類（2026-10-15）。6値の配列だけを読む（読めない値は無かったことにする＝書きかけそのものは戻す）
   const cats = normalizeCategories(o.categories)
   if (cats !== null && cats.length > 0) out.categories = cats
@@ -3341,7 +3374,7 @@ export function DailySheetPage({
             target: n.resident_id === null ? 'スタッフへ（全体）' : noteTargetName(resById.get(n.resident_id), n.resident_id),
             categories: n.categories ?? [],
             body: n.body,
-            reporter: n.reporter_id === null ? '' : staffName(stById.get(n.reporter_id), n.reporter_id),
+            reporter: reporterLabel(n, (id) => staffName(stById.get(id), id)),
           })
         }
       }
@@ -4127,6 +4160,7 @@ function DaySheet({
           targetPicked: true,
           body: op.body,
           reporterId: op.reporter_id,
+          reporterName: op.reporter_name,
           color: op.color,
           locked: true,
           ck: op.qid,
@@ -4513,6 +4547,7 @@ function DaySheet({
         if (patch.body !== undefined) dp.body = patch.body
         if (patch.resident_id !== undefined) dp.residentId = patch.resident_id
         if (patch.reporter_id !== undefined) dp.reporterId = patch.reporter_id
+        if (patch.reporter_name !== undefined) dp.reporterName = patch.reporter_name
         if (patch.color !== undefined) dp.color = patch.color
         if (patch.categories !== undefined) dp.categories = patch.categories
         patchNoteDraft(draft.key, dp)
@@ -4652,6 +4687,10 @@ function DaySheet({
           np.reporter_id = patch.reporterId
           seen.reporter_id = d.reporterId
         }
+        if (patch.reporterName !== undefined && (patch.reporterName ?? null) !== (d.reporterName ?? null)) {
+          np.reporter_name = patch.reporterName ?? null
+          seen.reporter_name = d.reporterName ?? null
+        }
         if (patch.categories !== undefined) {
           np.categories = patch.categories
           seen.categories = d.categories ?? []
@@ -4685,6 +4724,13 @@ function DaySheet({
         setRowStatus(key, { tone: 'danger', text: `▲ ${NOTE_LOCKED_MESSAGE}` })
         return
       }
+      // 控えから戻した書きかけで、一覧に無い記入者の名前が消えた行は、記入者を選び直すまで登録しない（2026-11-07・文言は仮置き）
+      const cur0 = noteDraftsRef.current.find((d) => d.key === key) ?? draft
+      if (cur0.reporterNameLost === true && cur0.reporterId === null && (cur0.reporterName ?? null) === null) {
+        patchNoteDraft(key, { body })
+        setRowStatus(key, { tone: 'danger', text: MSG_REPORTER_NAME_LOST })
+        return
+      }
       savingRef.current.add(key)
       setRowStatus(key, null)
       // 登録の冪等キー（登録を押した後の変更は notes#ck:<ck> に積む＝登録の op の中身は書き換えない・第3巡）
@@ -4712,6 +4758,7 @@ function DaySheet({
         residentId: draft.residentId,
         targetPicked: draft.targetPicked,
         reporterId: draft.reporterId,
+        reporterName: draft.reporterId === null ? (draft.reporterName ?? null) : null,
         color: draft.color,
         categories: draft.categories ?? [],
       }
@@ -4719,6 +4766,7 @@ function DaySheet({
         body: sentFields.body,
         resident_id: sentFields.residentId,
         reporter_id: sentFields.reporterId,
+        reporter_name: sentFields.reporterName,
         color: sentFields.color,
         categories: sentFields.categories,
       }
@@ -4729,7 +4777,7 @@ function DaySheet({
        */
       const stageUntilSettled = async (
         stage: (edits: Record<string, { value: unknown; base: unknown }>) => Promise<boolean>,
-        landed: Pick<Note, 'body' | 'resident_id' | 'reporter_id' | 'color' | 'categories'>,
+        landed: Pick<Note, 'body' | 'resident_id' | 'reporter_id' | 'reporter_name' | 'color' | 'categories'>,
       ): Promise<boolean> => {
         const landedRec = landed as unknown as Record<string, unknown>
         const same = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
@@ -4769,6 +4817,8 @@ function DaySheet({
           ongoing: false,
           ended_at: null,
           reporter_id: draft.reporterId,
+          // 一覧に無い記入者の名前（0058）。職員を選んだ行・書いていない行は送らない
+          ...(draft.reporterId === null && (draft.reporterName ?? null) !== null ? { reporter_name: draft.reporterName } : {}),
           color: draft.color,
           after16: draft.after16,
           // 分類（2026-10-15）。選んでいない書きかけは送らない（サーバーの既定値 {}）
@@ -5952,11 +6002,12 @@ function DaySheet({
         // 控え（ref）から読む（onPickResident と同じ）
         const draft = noteDraftsRef.current.find((d) => d.key === target.key)
         if (draft) {
-          patchDraftOrRegistration(target.key, { reporterId: id, reporterPicked: true })
+          patchDraftOrRegistration(target.key, { reporterId: id, reporterName: null, reporterNameLost: false, reporterPicked: true })
           return
         }
         const note = notesRef.current.find((n) => `n${n.id}` === target.key)
-        if (note) void updateNoteCell(note, { reporter_id: id })
+        // 名前もいつも空にして送る（送信待ちに書いた名前が残っていても、職員と名前が両方残らない・0058）
+        if (note) void updateNoteCell(note, { reporter_id: id, reporter_name: null })
         // 行き先が見つからない（開いている間に行が保存・削除された）。黙って捨てない
         else show(MSG_PICK_LOST)
       }
@@ -5974,13 +6025,34 @@ function DaySheet({
     if (!target || target.for !== 'noteReporter') return
     const draft = noteDraftsRef.current.find((d) => d.key === target.key)
     if (draft) {
-      patchDraftOrRegistration(target.key, { reporterId: null, reporterPicked: false })
+      patchDraftOrRegistration(target.key, { reporterId: null, reporterName: null, reporterNameLost: false, reporterPicked: false })
       return
     }
     const note = notesRef.current.find((n) => `n${n.id}` === target.key)
-    if (note) void updateNoteCell(note, { reporter_id: null })
+    if (note) void updateNoteCell(note, { reporter_id: null, reporter_name: null })
     else show(MSG_PICK_LOST)
   }, [patchDraftOrRegistration, show, staffPick, updateNoteCell])
+
+  /**
+   * 一覧に無い名前を記入者にする（応援・実習生など・2026-11-07 本人指示・0058）。書きかけは名前を持ち（端末の控えには残さない）、
+   * 保存済みの行は「職員を空・名前を書く」変更を選び直しと同じ経路で送る
+   */
+  const onFreeReporter = useCallback(
+    (name: string) => {
+      const target = staffPick
+      setStaffPick(null)
+      if (!target || target.for !== 'noteReporter') return
+      const draft = noteDraftsRef.current.find((d) => d.key === target.key)
+      if (draft) {
+        patchDraftOrRegistration(target.key, { reporterId: null, reporterName: name, reporterNameLost: false, reporterPicked: true })
+        return
+      }
+      const note = notesRef.current.find((n) => `n${n.id}` === target.key)
+      if (note) void updateNoteCell(note, { reporter_id: null, reporter_name: name })
+      else show(MSG_PICK_LOST)
+    },
+    [patchDraftOrRegistration, show, staffPick, updateNoteCell],
+  )
 
   /**
    * 申し送りの記入者を選ぶ窓に先に出す職員＝この日の出勤者の欄に名前を入れた職員（2026-11-07 代表者の決定）。
@@ -6028,7 +6100,7 @@ function DaySheet({
     for (const n of shownNotes) {
       const r = n.resident_id === null ? undefined : residentById.get(n.resident_id)
       const target = n.resident_id === null ? 'スタッフへ（全体）' : noteTargetName(r, n.resident_id)
-      const reporter = n.reporter_id === null ? null : (staffById.get(n.reporter_id)?.name ?? null)
+      const reporter = reporterLabel(n, (id) => staffById.get(id)?.name ?? null) || null
       m.set(n.id, noteSearchText([n.body, target, r?.name, reporter]))
     }
     return m
@@ -6530,6 +6602,8 @@ function DaySheet({
         // 〔記入者を消す〕は申し送りの記入者を選ぶ時だけ（出勤者・施設長には出さない）
         onClear={staffPick?.for === 'noteReporter' ? onClearReporter : undefined}
         clearLabel="記入者を消す"
+        // 一覧に無い名前は申し送りの記入者を選ぶ時だけ（出勤者・施設長には出さない・2026-11-07 本人指示）
+        onFreeName={staffPick?.for === 'noteReporter' ? onFreeReporter : undefined}
         title={
           staffPick?.for === 'attendance'
             ? staffPick.role === 'manager'
@@ -8522,6 +8596,8 @@ function NoteRow({
   const residentId = first ? first.resident_id : (draft?.residentId ?? null)
   const targetPicked = first !== null || (draft?.targetPicked ?? false)
   const reporterId = first ? first.reporter_id : (draft?.reporterId ?? null)
+  /** 一覧に無い記入者の名前（0058・職員が無い時だけ使う） */
+  const reporterName = first ? (first.reporter_name ?? null) : (draft?.reporterName ?? null)
   const categories: NoteCategory[] = group ? group.categories : (draft?.categories ?? [])
   /** 重要度の印（分類欄の頭に出す。まとめた行は一番重いもの・詳細列を外したので行の上に残す） */
   const importance = notes.some((n) => n.importance === 'critical')
@@ -8538,7 +8614,7 @@ function NoteRow({
       : noteTargetName(target, residentId)
   /** 表示名を使っている行だけ、分類の窓にマスタの氏名を添える（本名で確かめられるように） */
   const targetRealName = target && hasNoteAlias(target) ? target.name : null
-  const reporterText = reporterId === null ? '' : staffName(ctx.staffById.get(reporterId), reporterId)
+  const reporterText = reporterLabel({ reporter_id: reporterId, reporter_name: reporterName }, (id) => staffName(ctx.staffById.get(id), id))
   const nameOf = (id: number): string | null => ctx.staffById.get(id)?.name ?? null
   const lines = group ? noteGroupLines(group, nameOf) : []
 
@@ -8614,7 +8690,7 @@ function NoteRow({
               const n = line.note
               const k = `n${n.id}`
               const dim = matched !== null && !matched.has(n.id)
-              const lineReporter = n.reporter_id === null ? '' : staffName(ctx.staffById.get(n.reporter_id), n.reporter_id)
+              const lineReporter = reporterLabel(n, (id) => staffName(ctx.staffById.get(id), id))
               return (
                 <div
                   key={n.id}
@@ -8649,7 +8725,7 @@ function NoteRow({
                       aria-label={
                         line.suffix === ''
                           ? `${i + 1}件目の記入者を選ぶ`
-                          : `${i + 1}件目の記入者 ${nameOf(n.reporter_id ?? -1) ?? ''}${line.sameAsPrev ? '（前の記録と同じ）' : ''}。押すと選び直します`
+                          : `${i + 1}件目の記入者 ${reporterLabel(n, nameOf)}${line.sameAsPrev ? '（前の記録と同じ）' : ''}。押すと選び直します`
                       }
                       style={ROW_BTN_STYLE}
                       className={`${CELL_HIT} shrink-0 rounded-sm px-1 text-left ${disabled || line.sameAsPrev ? 'text-ink2' : 'text-link'}${

@@ -22,6 +22,8 @@ export const NOTE_FIELDS = [
   'after16',
   'occurred_at',
   'reporter_id',
+  // 一覧に無い記入者の名前（0058）
+  'reporter_name',
   'role_tags',
   'categories',
   'shift',
@@ -50,6 +52,7 @@ const NOTE_ROW = [
   'ended_at',
   'ended_by',
   'reporter_id',
+  'reporter_name',
   'color',
   'after16',
   'rev',
@@ -115,6 +118,13 @@ export function canonNote(field, v) {
 /** 比較用の文字列 → 行に入れる値 */
 function typed(field, v) {
   if (field === 'role_tags') return [...v]
+  // 0058: nullif(btrim(値), '')（btrim は半角の空白だけを除く）
+  if (field === 'reporter_name') {
+    const t = jsonText(v)
+    if (t === null) return null
+    const s = t.replace(/^ +| +$/g, '')
+    return s === '' ? null : s
+  }
   // 0032: 重複を除き、6値の並びで書く（6値以外は後ろ・check が拒否する）
   if (field === 'categories') {
     const pos = (x) => (NOTE_CATEGORY_VALUES.includes(x) ? NOTE_CATEGORY_VALUES.indexOf(x) : NOTE_CATEGORY_VALUES.length)
@@ -149,6 +159,11 @@ function checkRow(db, row) {
   if (row.body === null || row.body === '') throw new PgError('23514', 'new row for relation "notes" violates check constraint "notes_body_check"')
   if (!(row.categories ?? []).every((c) => NOTE_CATEGORY_VALUES.includes(c))) {
     throw new PgError('23514', 'new row for relation "notes" violates check constraint "notes_categories_check"')
+  }
+  // 0058: 記入者の名前は空か、前後の半角空白を除いて1〜20字
+  if (row.reporter_name !== null && row.reporter_name !== undefined) {
+    const n = [...row.reporter_name.replace(/^ +| +$/g, '')].length
+    if (n < 1 || n > 20) throw new PgError('23514', 'new row for relation "notes" violates check constraint "notes_reporter_name_check"')
   }
   for (const k of ['edited_by', 'reporter_id', 'ended_by']) {
     const v = row[k]
@@ -252,12 +267,28 @@ export function fakeApplyNoteEdits(db, args) {
       }
     }
   }
+  // 0058: 記入者（職員と一覧に無い名前）も1つの組。両方が送られ、片方が競合なら相方も競合へ
+  if (has(edits, 'reporter_id') && has(edits, 'reporter_name')) {
+    for (const [a, b] of [['reporter_id', 'reporter_name'], ['reporter_name', 'reporter_id']]) {
+      if (conf.includes(a) && !conf.includes(b)) {
+        const wi = write.indexOf(b)
+        if (wi >= 0) write.splice(wi, 1)
+        const si = settled.indexOf(b)
+        if (si >= 0) settled.splice(si, 1)
+        conf.push(b)
+        reason[b] = reason[a]
+        break
+      }
+    }
+  }
   // 返り値の競合は欄の並び（NOTE_FIELDS）にそろえる（0017 の返り値の作り方と同じ）
   conf.sort((x, y) => NOTE_FIELDS.indexOf(x) - NOTE_FIELDS.indexOf(y))
   const before = found ? { ...row, role_tags: [...(row.role_tags ?? [])], categories: [...(row.categories ?? [])] } : null
   if (live && write.length > 0) {
     const next = { ...row }
     for (const f of write) next[f] = typed(f, edits[f].value)
+    // 0058: 書いた後の行に職員がいる時はいつも名前を空にする
+    if (next.reporter_id !== null && next.reporter_id !== undefined) next.reporter_name = null
     next.edited_by = editor
     checkRow(db, next)
     next.rev = row.rev + 1
@@ -301,6 +332,7 @@ const BASE_ROW = {
   after16: false,
   occurred_at: null,
   reporter_id: 1,
+  reporter_name: null,
   role_tags: [],
   categories: [],
   ongoing: false,
@@ -478,6 +510,72 @@ export const NOTE_CONTRACT_CASES = [
       row: { resident_id: 2, reporter_id: 2, after16: true, ongoing: true, role_tags: ['看護', '介護'] },
       after: { revDelta: 1, history: 1 },
     },
+  },
+  {
+    name: '一覧に無い記入者の名前を書く（職員を空・名前を書く・0058）',
+    edits: { reporter_id: { value: null, base: 1 }, reporter_name: { value: ' 応援 一 ', base: null } },
+    editor: 2,
+    expect: {
+      status: 'applied',
+      applied: ['reporter_id', 'reporter_name'],
+      settled: [],
+      conflicts: [],
+      row: { reporter_id: null, reporter_name: '応援 一' },
+      after: { revDelta: 1, history: 1 },
+    },
+  },
+  {
+    name: '職員を選び直すと一覧に無い名前は空に戻る（0058）',
+    row: { reporter_id: null, reporter_name: '応援 一' },
+    edits: { reporter_id: { value: 2, base: null } },
+    editor: 2,
+    expect: {
+      status: 'applied',
+      applied: ['reporter_id'],
+      settled: [],
+      conflicts: [],
+      row: { reporter_id: 2, reporter_name: null },
+      after: { revDelta: 1, history: 1 },
+    },
+  },
+  {
+    name: '記入者の組: 他の端末が職員を選んでいたら、書いた名前も書かずに競合へ（職員と名前が両方残らない・0058）',
+    row: { reporter_id: 2 },
+    edits: { reporter_id: { value: null, base: 1 }, reporter_name: { value: '応援 一', base: null } },
+    editor: 1,
+    expect: {
+      status: 'conflict',
+      applied: [],
+      settled: [],
+      conflicts: [
+        { field: 'reporter_id', reason: 'changed', server: 2 },
+        { field: 'reporter_name', reason: 'changed', server: null },
+      ],
+      row: { reporter_id: 2, reporter_name: null },
+      after: { revDelta: 0, history: 0 },
+    },
+  },
+  {
+    name: '職員がいる行に名前だけを書いても名前は残らない（職員が勝つ・0058）',
+    row: { reporter_id: 1 },
+    edits: { reporter_name: { value: '応援 一', base: null } },
+    editor: 1,
+    expect: {
+      status: 'applied',
+      applied: ['reporter_name'],
+      settled: [],
+      conflicts: [],
+      row: { reporter_id: 1, reporter_name: null },
+      // 中身は変わらない（版だけ上がる）。変更の記録の数は本物（中身が同じなら記録しない）と偽物で違うので比べない
+      after: { revDelta: 1 },
+    },
+  },
+  {
+    name: '一覧に無い記入者の名前が21字なら止める（check・0058）',
+    row: { reporter_id: null },
+    edits: { reporter_name: { value: '一二三四五六七八九十一二三四五六七八九十一', base: null } },
+    editor: 2,
+    expect: { error: '23514', after: { revDelta: 0, history: 0 } },
   },
   {
     name: '記入者を消す（reporter_id を null に・2026-09-29 記入者の削除）',
