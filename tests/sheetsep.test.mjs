@@ -25,7 +25,7 @@ describe('デイサービス・夜勤の区切り', () => {
   it('デイサービス欄と夜勤申し送り欄に区切りの class が付いている', () => {
     const src = read('pages/DailySheetPage.tsx')
     assert.match(src, /className="dsheet-gap-block dsheet-island"\s*\n\s*title="デイサービス"/, 'デイサービス欄が浮島になっていない')
-    assert.match(src, /className="dsheet-sep-block"\s*\n\s*title="夜勤申し送り"/, '夜勤申し送り欄に区切りが無い')
+    assert.match(src, /className="dsheet-sep-block dsheet-island-night"\s*\n\s*title="夜勤申し送り"/, '夜勤申し送り欄に区切りが無い')
   })
   it('区切りは画面だけ（印刷は変えない）・日の切れ目より狭い余白・日の枠より太い罫線', () => {
     const css = read('styles/sheet.css')
@@ -56,6 +56,16 @@ describe('デイサービス・夜勤の区切り', () => {
     assert.match(src, /setProperty\('--dsheet-daybar-h'/, '日付の行の高さを書いていない')
     const css = read('styles/sheet.css')
     assert.match(css, /@media screen \{\s*\.dsheet-note-title \{\s*position:\s*sticky;\s*top:\s*var\(--dsheet-daybar-h, 0px\);/, 'タイトル帯が sticky になっていない')
+  })
+  it('夜勤申し送り欄はデイより左右に細い（16px 内側）・下端を 3px の太線・その日の枠の下の線は外す（画面だけ・2026-11-07 本人指示）', () => {
+    const css = read('styles/sheet.css')
+    const m = css.match(/@media screen \{\s*\.dsheet-body > \.dsheet-island-night \{([^}]*)\}\s*\.dsheet-day:has\(\.dsheet-island-night\) \{([^}]*)\}/)
+    assert.ok(m, '夜勤の欄を細くする指定が @media screen の中に無い')
+    assert.match(m[1], /margin-left:\s*calc\(var\(--sp-4\) \+ var\(--sheet-rule-bold\)\)/, '左が 16px 内側でない')
+    assert.match(m[1], /margin-right:\s*calc\(var\(--sp-4\) \+ var\(--sheet-rule-bold\)\)/, '右が 16px 内側でない')
+    assert.match(m[1], /border-bottom:\s*3px solid var\(--c-ink\)/, '下端の太線が無い')
+    assert.doesNotMatch(m[1], /overflow|box-shadow/, '影・overflow を付けない')
+    assert.match(m[2], /border-bottom:\s*none/, '日の枠の下の線が残っている')
   })
   it('デイ欄の左右の線はほかの欄の外側の線と同じ太さ・色', () => {
     const css = read('styles/sheet.css')
