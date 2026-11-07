@@ -32,7 +32,7 @@
 //   ・幅 1024px 以上で期間が2週・1か月の時は、バイタルと食事・水分のグラフも2列（chartCols。3か月以上・印刷は1列）
 
 import { reporterLabel } from '../lib/reporterName'
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import { flushSync } from 'react-dom'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
@@ -1079,6 +1079,17 @@ function VitalChart({ panel, days, box, height, printing = false }: VitalChartPr
     return `${fmtDayLabel(day)}　${parts.join('　')}`
   }, [selected, days, panel])
 
+  /** 押した点の値の行を、点のだいたい真下に寄せる量（px）。文の幅を測って、中心を点にそろえ、左右の端で止める */
+  const readoutRef = useRef<HTMLSpanElement>(null)
+  const [readoutLeft, setReadoutLeft] = useState(0)
+  useLayoutEffect(() => {
+    const el = readoutRef.current
+    if (!el || selected == null) return
+    const w = el.getBoundingClientRect().width
+    const left = Math.round(Math.min(Math.max(0, x(selected) - w / 2), Math.max(0, width - w)))
+    setReadoutLeft((prev) => (prev === left ? prev : left))
+  }, [selected, readout, x, width])
+
   const ariaLabel = useMemo(() => {
     const head = `${panel.title}の推移。${days.length > 0 ? `${fmtDayLabel(days[0])}から${fmtDayLabel(days[days.length - 1])}まで` : '期間なし'}。`
     const body = panel.series
@@ -1353,9 +1364,17 @@ function VitalChart({ panel, days, box, height, printing = false }: VitalChartPr
         <HoverCard info={hoverInfo} width={width} />
       ) : null}
 
-      {/* タップした点の値（SVG 内の浮動ボックスにしないのは、文字サイズ200%でも崩れないようにするため） */}
+      {/* タップした点の値（SVG 内の浮動ボックスにしないのは、文字サイズ200%でも崩れないようにするため）。
+          点を選んだ時は、その点のだいたい真下に寄せる（文の中心を点にそろえ、グラフの左右の端からははみ出さない・2026-11-07 本人指示）。
+          選んでいない時の案内は今までどおり左端 */}
       <p role="status" aria-live="polite" className="tabular mt-1 min-h-tap text-sm text-ink2">
-        {readout}
+        <span
+          ref={readoutRef}
+          className="inline-block max-w-full"
+          style={selected != null ? { position: 'relative', left: readoutLeft } : undefined}
+        >
+          {readout}
+        </span>
       </p>
     </div>
   )
