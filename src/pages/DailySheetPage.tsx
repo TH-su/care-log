@@ -2253,7 +2253,8 @@ function NoteTitleBand({
       className={`dsheet-note-title flex flex-wrap items-center gap-1 px-1 font-bold ${NOTE_TONE_CLASS[tone]}`}
       style={{ minHeight: 'var(--sheet-row-h-note)' }}
     >
-      <span className="tabular">{fmtSheetDayShort(day)}</span>
+      {/* 帯の先頭の日付（曜日）は画面では出さない（日付の行の日付の枠が目立つようになったため・2026-11-07 本人指示）。紙は今のまま */}
+      <span className="tabular hidden print:inline">{fmtSheetDayShort(day)}</span>
       <span>{title}</span>
       {/* 検索で絞り込んでいる時は「n件中m件」（記録の件数で数える＝同じ方の統合で数が変わらない）。
           紙は絞り込まずに全部を刷るので「中m件」は画面だけ */}

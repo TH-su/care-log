@@ -406,14 +406,23 @@ describe('7. 日と日の間', () => {
 
 // ══════════════════════════════════════════════════════════════════════
 describe('7b. 日付の枠を上と左へはみ出させる（2026-11-07 本人指示・画面だけ）', () => {
-  it('日付のセルだけ 8px 上と左へ・幅を足して右端を変えない・太線と影・中身の左と上に余白・最小幅に 8px', () => {
+  it('日付のセルだけ 12px 上と左へ・幅を足して右端を変えない・太線と影・中身の左と上に余白・最小幅にも足す', () => {
     const block = mediaBlocks(css, 'screen').find((b) => /\.dsheet-date-cell \{/.test(b))
     assert.ok(block, '日付の枠をはみ出させる指定が画面だけの中に無い')
-    assert.match(block, /\.dsheet-legible \.sheet-dense \{\s*padding-top: var\(--sp-2\);\s*padding-left: var\(--sp-2\);/)
-    assert.match(block, /margin-top: calc\(var\(--sp-2\) \* -1\);\s*margin-left: calc\(var\(--sp-2\) \* -1\);\s*width: calc\(var\(--w-facility\) \+ var\(--sp-2\)\) !important;/)
+    assert.match(css, /--dsheet-date-out: var\(--sp-3\);\n\s*--dsheet-sheet-min-w:/)
+    assert.match(block, /\.dsheet-legible \.sheet-dense \{\s*padding-top: var\(--dsheet-date-out\);\s*padding-left: var\(--dsheet-date-out\);/)
+    assert.match(block, /margin-top: calc\(var\(--dsheet-date-out\) \* -1\);\s*margin-left: calc\(var\(--dsheet-date-out\) \* -1\);\s*width: calc\(var\(--w-facility\) \+ var\(--dsheet-date-out\)\) !important;/)
     assert.match(block, /border: 3px solid var\(--c-ink\);/)
-    assert.match(css, /var\(--sheet-rule-bold\) \* 2 \+ var\(--sp-2\)\n\s*\);/)
+    assert.match(css, /var\(--sheet-rule-bold\) \* 2 \+ var\(--dsheet-date-out\)\n\s*\);/)
     assert.match(daily, /className="dsheet-date-cell sticky left-0 shrink-0/)
+  })
+  it('上に貼り付いている間も上の太線が切れない：日付の行ははみ出す量だけ下に貼り付き、上の帯を地の色で覆う・タイトル帯も同じだけ下げる', () => {
+    const block = mediaBlocks(css, 'screen').find((b) => /\.dsheet-date-cell \{/.test(b))
+    assert.match(block, /\.dsheet-legible \.dsheet-day > \[data-day-bar\] \{\s*top: var\(--dsheet-date-out\);\s*box-shadow:\s*0 var\(--sheet-rule\) 0 var\(--c-border-strong\),\s*0 calc\(var\(--dsheet-date-out\) \* -1\) 0 var\(--c-surface\);/)
+    assert.match(block, /\.dsheet-legible \.dsheet-note-title \{\s*top: calc\(var\(--dsheet-daybar-h, 0px\) \+ var\(--dsheet-date-out\)\);/)
+  })
+  it('申し送りのタイトル帯の先頭の日付は画面では出さず、紙には出す', () => {
+    assert.match(daily, /<span className="tabular hidden print:inline">\{fmtSheetDayShort\(day\)\}<\/span>\n\s*<span>\{title\}<\/span>/)
   })
 })
 

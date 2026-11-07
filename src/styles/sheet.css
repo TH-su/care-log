@@ -909,7 +909,7 @@
   margin-top: var(--sp-6); /* 32px */
 }
 /* 画面の日と日の間（2026-10-31 本人裁定・案C で 16px に詰めた）。2026-11-07 本人指示で倍の 32px へ戻す
-   （前日の夜勤の欄と次の日の日付の枠の間を広げ、日の境目を分かりやすくする。日付の枠が 8px 上へはみ出すので、見える空きは 24px）。
+   （前日の夜勤の欄と次の日の日付の枠の間を広げ、日の境目を分かりやすくする。日付の枠が 12px 上へはみ出すので、見える空きは 20px）。
    同日内のブロック間（12px）より広いまま＝余白の序列「日の切れ目 ＞ 同日内の欄の切れ目」は保つ。
    印刷は 32px のまま（原則2） */
 @media screen {
@@ -918,21 +918,36 @@
   }
 }
 
-/* 日付の枠（日付の行の左端のセル）だけを、日の枠から上と左へ 8px はみ出させ、太い線と影で目立たせる（2026-11-07 本人指示）。
+/* 日付の枠（日付の行の左端のセル）だけを、日の枠から上と左へ 12px（--dsheet-date-out）はみ出させ、太い線と影で目立たせる（2026-11-07 本人指示）。
    右の施設長・出勤者の欄、下の最終取込の行は今のまま。右端と下端の位置は変えない（幅と高さをはみ出す分だけ足す）。
-   はみ出した分がスクロールの器で切れないよう、日報の表の中身の左と上に 8px の余白を取り、最小幅にもその分を足す。
-   上に貼り付いている間（スクロール中）は上へはみ出した分が器の上端で隠れる。画面だけ・印刷は変えない */
+   はみ出した分がスクロールの器で切れないよう、日報の表の中身の左と上に同じ幅の余白を取り、最小幅にもその分を足す。
+   画面だけ・印刷は変えない */
 @media screen {
+  /* はみ出す量 --dsheet-date-out は日報の枠の変数の塊（.dsheet-legible・表の最小幅の上）に置く */
   .dsheet-legible .sheet-dense {
-    padding-top: var(--sp-2);
-    padding-left: var(--sp-2);
+    padding-top: var(--dsheet-date-out);
+    padding-left: var(--dsheet-date-out);
   }
   .dsheet-day > [data-day-bar] > .dsheet-date-cell {
-    margin-top: calc(var(--sp-2) * -1);
-    margin-left: calc(var(--sp-2) * -1);
-    width: calc(var(--w-facility) + var(--sp-2)) !important;
+    margin-top: calc(var(--dsheet-date-out) * -1);
+    margin-left: calc(var(--dsheet-date-out) * -1);
+    width: calc(var(--w-facility) + var(--dsheet-date-out)) !important;
     border: 3px solid var(--c-ink);
     box-shadow: 0 2px 6px rgb(0 0 0 / 0.3);
+  }
+  /* 上に貼り付いている間も日付の枠の上の太線を同じ太さで出す（2026-11-07 本人指示）。
+     日付の行は器の上端からはみ出す量だけ下に貼り付け、その帯は日付の行の地の色の影で覆う（下を流れる行を透かさない）。
+     日付の枠は覆いの帯の上に描かれるので、上へはみ出した分も太線も切れない。
+     下の行の線の影（0 1px）はそのまま並べて残す。申し送りのタイトル帯も同じだけ下に貼り付ける */
+  /* 詳細度は .dsheet-legible を頭に付けて1つ上げる（後ろにある日付の行・タイトル帯の既存の指定に勝つため） */
+  .dsheet-legible .dsheet-day > [data-day-bar] {
+    top: var(--dsheet-date-out);
+    box-shadow:
+      0 var(--sheet-rule) 0 var(--c-border-strong),
+      0 calc(var(--dsheet-date-out) * -1) 0 var(--c-surface);
+  }
+  .dsheet-legible .dsheet-note-title {
+    top: calc(var(--dsheet-daybar-h, 0px) + var(--dsheet-date-out));
   }
 }
 
@@ -1257,10 +1272,12 @@ main:has(.dsheet-frame) {
        100% で 975px＝iPad 横（表の幅 1,052px）では横スクロールなし（125% では 1,219px で横スクロールあり）。
        iPad 縦・iPhone は今と同じく横スクロールあり。
        印刷はこの変数が無い＝従来の SHEET_MIN_W（発熱者の固定列の合計）のまま */
+    /* 日付の枠を上と左へはみ出させる量（2026-11-07 本人指示。「もう少し大きく」で 8px → 12px）。表の最小幅にも足す */
+    --dsheet-date-out: var(--sp-3);
     --dsheet-sheet-min-w: calc(
       var(--w-block) + var(--w-name) * 2 + var(--w-datelink) * 2 + var(--w-tilde) + var(--w-target) + var(--dsheet-w-reg) +
-        var(--sheet-rule-bold) * 2 + var(--sp-2)
-    ); /* 末尾の 8px は日付の枠のはみ出し用の左の余白（2026-11-07） */
+        var(--sheet-rule-bold) * 2 + var(--dsheet-date-out)
+    ); /* 末尾は日付の枠のはみ出し用の左の余白（2026-11-07） */
   }
   /* 血圧の列（日報だけの --dsheet-w-bp。TSX の SHEET_BP_W_CLASS＝84px を画面だけ上書きする。印刷側の print: の指定はそのまま）。
      「300/200↑↑」92.5px ＋ 余白8 ＋ 罫線1 → 102px（倍率に追従） */
