@@ -12017,6 +12017,20 @@ async function applyAttendance(
   await hideRows(toHide.filter((id) => !releaseHides.includes(id)))
 }
 
+/**
+ * その日の出勤者（日報の出勤者の欄・取り消した行＝sort < 0 は除く）。申し送りの記入者を選ぶ窓に、この日の出勤者を
+ * 先に出すために読む（2026-11-07 代表者の決定）。読めない時は例外（呼ぶ側は全職員から選ぶ窓のままにする）
+ */
+export async function fetchAttendanceForDay(dayIso: string): Promise<Attendance[]> {
+  assertDay(dayIso)
+  const sb = await getClient()
+  const res = await bounded(
+    sb.from('attendance').select(ATTENDANCE_COLS).eq('day', dayIso).gte('sort', 0).order('sort', { ascending: true }).limit(MAX_ROWS),
+  )
+  if (res.error !== null) throw readError(res)
+  return list(res.data, normalizeAttendance)
+}
+
 /** その日の出勤者行（取り消し済み＝sort < 0 も含む）。置き換えの差分計算に使う */
 async function fetchAttendanceRows(
   sb: SupabaseClient,

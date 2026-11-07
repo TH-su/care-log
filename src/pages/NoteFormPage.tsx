@@ -30,6 +30,7 @@ import { touchActivity } from '../lib/actor'
 import {
   DbError,
   fetchAllStaff,
+  fetchAttendanceForDay,
   fetchResidents,
   fetchStaff,
   FORBIDDEN_REASON,
@@ -60,9 +61,10 @@ import {
 } from '../lib/noteDrafts'
 import type { DraftFile, DraftOrigin, DraftRow } from '../lib/noteDrafts'
 import { IMPORTANCE_LABEL, LS, noteDisplayName, ROLE_TAGS, SHIFT_LABEL } from '../lib/types'
+import { reporterPrimary } from '../lib/reporterPick'
 import type { PresenceHere } from '../lib/db'
 import { presenceOnDay, presenceWhoNames } from '../lib/presence'
-import type { Importance, Note, Resident, Shift, Staff } from '../lib/types'
+import type { Attendance, Importance, Note, Resident, Shift, Staff } from '../lib/types'
 
 // ── 定数 ──────────────────────────────────────────────
 
@@ -427,6 +429,26 @@ export function NoteFormPage() {
 
   const [residentPicker, setResidentPicker] = useState(false)
   const [staffPicker, setStaffPicker] = useState(false)
+  /**
+   * 記入者を選ぶ窓に先に出す、記録日の出勤者（日報の出勤者の欄・2026-11-07 代表者の決定）。窓を開いた時に記録日の分を読む。
+   * 読めない・まだ読んでいない時は空（窓は今までどおり全職員）。ほかの日の分は使わない（day で確かめる）
+   */
+  const [pickAttendance, setPickAttendance] = useState<{ day: string; rows: Attendance[] } | null>(null)
+  useEffect(() => {
+    if (!staffPicker || !ISO_DATE_RE.test(form.noteOn) || form.shift === 'night') return
+    let alive = true
+    const day = form.noteOn
+    fetchAttendanceForDay(day)
+      .then((rows) => {
+        if (alive) setPickAttendance({ day, rows })
+      })
+      .catch(() => {
+        // 読めない時は全職員から選ぶ窓のまま（書くのを止めない）
+      })
+    return () => {
+      alive = false
+    }
+  }, [staffPicker, form.noteOn, form.shift])
   const [restorePrompt, setRestorePrompt] = useState(false)
   /** 戻した書きかけが1日以上前なら「〇日前の書きかけ」（L1。黙って消さずに出す） */
   const [restoreAge, setRestoreAge] = useState<string | null>(null)
@@ -1492,6 +1514,12 @@ export function NoteFormPage() {
         open={staffPicker}
         staff={staff}
         title="記入者を選ぶ"
+        // 日勤・デイは記録日の出勤者を先に出す（夜勤・出勤者0人・読めない時は全員・2026-11-07 代表者の決定）
+        primary={
+          pickAttendance !== null && pickAttendance.day === form.noteOn
+            ? reporterPrimary(form.shift, staff, pickAttendance.rows, form.noteOn)
+            : null
+        }
         onPick={(id) => {
           update({ reporterId: id }, 'reporterId')
           setStaffPicker(false)

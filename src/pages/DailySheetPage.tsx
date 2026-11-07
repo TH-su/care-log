@@ -222,6 +222,7 @@ import { groupNotesByResident, noteGroupLines, noteSectionOf } from '../lib/note
 import type { NoteGroupRow, NoteSection } from '../lib/noteGroup'
 import { matchSearch, noteSearchText, parseSearchQuery } from '../lib/noteSearch'
 import { normalizeCategories, scheduleColorPatch } from '../lib/noteCategory'
+import { reporterPrimary } from '../lib/reporterPick'
 // 発熱者・他症状者のバイタル欄の印（A1 平熱との差・A9 SpO2 の個別の下限）。平熱と目標は画面を開いた時に1回読んで控える
 // （個別の目標は読み込みの控えを通す＝先読みがもう一度読まない・2026-10-29）
 import { fetchUsualTemps, loadVitalThresholds } from '../lib/db'
@@ -5981,6 +5982,22 @@ function DaySheet({
     else show(MSG_PICK_LOST)
   }, [patchDraftOrRegistration, show, staffPick, updateNoteCell])
 
+  /**
+   * 申し送りの記入者を選ぶ窓に先に出す職員＝この日の出勤者の欄に名前を入れた職員（2026-11-07 代表者の決定）。
+   * 夜勤の行は今までどおり全員（夜勤の記入者は空欄のまま・出勤者の欄に夜勤の区別が無い）。出勤者が0人の日も全員
+   */
+  const reporterPick =
+    staffPick?.for === 'noteReporter'
+      ? reporterPrimary(
+          noteDraftsRef.current.find((d) => d.key === staffPick.key)?.shift ??
+            notesRef.current.find((n) => `n${n.id}` === staffPick.key)?.shift ??
+            null,
+          staff,
+          attendance,
+          day,
+        )
+      : null
+
   // ── 表示用の仕分け ─────────────────────────────────────────
 
   /**
@@ -6506,6 +6523,8 @@ function DaySheet({
             ? staff.filter((s) => s.id === managerStaffId)
             : staff
         }
+        // 申し送りの記入者は、この日の出勤者を先に出す（窓の「ほかの職員から選ぶ」で全員も出せる・2026-11-07）
+        primary={reporterPick}
         onPick={onPickStaff}
         onClose={() => setStaffPick(null)}
         // 〔記入者を消す〕は申し送りの記入者を選ぶ時だけ（出勤者・施設長には出さない）
