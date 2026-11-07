@@ -780,7 +780,8 @@ export function NoteFormPage() {
     if (f.ongoing && f.endedOn !== '' && f.endedOn < f.noteOn) {
       e.endedOn = '期限日が記録日より前になっています。記録日以降の日付を選んでください。'
     }
-    if (f.reporterId === null) {
+    // 夜勤は記入者の欄を出さない（スプレッドシートと同じ見た目・2026-11-07 本人指示）
+    if (f.reporterId === null && f.shift !== 'night') {
       e.reporterId = '記入者が選ばれていません。記入者を選んでください。'
     }
     return e
@@ -890,7 +891,8 @@ export function NoteFormPage() {
           occurred_at: occurredAt,
           ongoing: form.ongoing,
           ended_at: form.ongoing && form.endedOn !== '' ? endOfDayStamp(form.endedOn) : null,
-          reporter_id: form.reporterId,
+          // 夜勤は記入者を入れない（欄を出さない・2026-11-07 本人指示）
+          reporter_id: form.shift === 'night' ? null : form.reporterId,
           // 色はシート画面で扱う項目。この入力画面では既定のまま送る
           color: null,
           // 日勤の 16:00 以降の申し送りは、日報の「↓16時以降の記録」の欄に載せる（F35。日報で書いた時と同じ欄になる）
@@ -1452,6 +1454,8 @@ export function NoteFormPage() {
                 </div>
               )}
 
+              {/* 夜勤は記入者の欄を出さない（スプレッドシートと同じ見た目・2026-11-07 本人指示） */}
+              {form.shift !== 'night' && (
               <div>
                 <p id={ids.reporter} className={labelClass}>
                   記入者
@@ -1474,6 +1478,7 @@ export function NoteFormPage() {
                 </button>
                 {fieldError('reporterId')}
               </div>
+              )}
             </div>
           </SectionCard>
 
