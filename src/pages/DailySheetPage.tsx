@@ -7274,7 +7274,8 @@ function DayHeader({
       >
         <div
           // 横スクロールしても日付は左に残す（横の sticky は枠の中で効く）。背景で下を透かさない
-          className="sticky left-0 shrink-0 border-r border-border bg-surface"
+          // dsheet-date-cell: 画面では日付の枠だけを上と左へはみ出させ、日の境目を目立たせる（2026-11-07 本人指示・sheet.css）
+          className="dsheet-date-cell sticky left-0 shrink-0 border-r border-border bg-surface"
           // 幅は左上セル専用の --w-facility のまま（出勤者の15枠は残りの幅で足りる。sheet.css の計算参照）
           style={{ width: 'var(--w-facility)', minHeight: 'var(--sheet-row-h-note)', zIndex: 1 }}
         >

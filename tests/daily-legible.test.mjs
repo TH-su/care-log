@@ -5,7 +5,7 @@
 //   4. 0件の付帯ブロックを画面で1行にまとめる条件（空行は作ったまま隠す＝紙は全ブロック）
 //   5. 発熱者・他症状者の器（横にずらす）は画面だけ
 //   6. 上部を1段に（表題行へ portal・倍率は日報だけ選択欄1つ・紙には従来の日付バー）
-//   7. 日と日の間は画面だけ 16px（印刷は 32px・同日内 12px より広い）
+//   7. 日と日の間は画面も 32px（2026-10-31 に 16px へ詰め、2026-11-07 本人指示で倍へ戻した・同日内 12px より広い）
 // ソースを読んで正規表現・宣言の抜き出しで確かめる（画面の部品は描かない）。倍率のリセットだけは lib/zoom.ts を読み込んで動かす。
 // 実行: npm test（node --experimental-strip-types --test "tests/**/*.test.mjs"）。個人情報は置かない。
 
@@ -395,16 +395,28 @@ describe('6. 上部を1段に（表題行へ）', () => {
 
 // ══════════════════════════════════════════════════════════════════════
 describe('7. 日と日の間', () => {
-  it('印刷（既定）は 32px のまま・画面だけ 16px・同日内のブロック間（12px）より広い', () => {
+  it('印刷（既定）は 32px のまま・画面も 32px（2026-11-07 本人指示）・同日内のブロック間（12px）より広い', () => {
     assert.match(css, /\.dsheet-day \+ \.dsheet-day \{[^}]*margin-top: var\(--sp-6\);/)
     const block = mediaBlocks(css, 'screen').find((b) => /\.dsheet-day \+ \.dsheet-day \{/.test(b))
     assert.ok(block, '画面だけの日の間の指定が無い')
-    assert.match(block, /margin-top: var\(--sp-4\);/)
+    assert.match(block, /margin-top: var\(--sp-6\);/)
     assert.match(css, /\.dsheet-gap-block \{\s*margin-top: var\(--sp-3\);/)
   })
 })
 
 // ══════════════════════════════════════════════════════════════════════
+describe('7b. 日付の枠を上と左へはみ出させる（2026-11-07 本人指示・画面だけ）', () => {
+  it('日付のセルだけ 8px 上と左へ・幅を足して右端を変えない・太線と影・中身の左と上に余白・最小幅に 8px', () => {
+    const block = mediaBlocks(css, 'screen').find((b) => /\.dsheet-date-cell \{/.test(b))
+    assert.ok(block, '日付の枠をはみ出させる指定が画面だけの中に無い')
+    assert.match(block, /\.dsheet-legible \.sheet-dense \{\s*padding-top: var\(--sp-2\);\s*padding-left: var\(--sp-2\);/)
+    assert.match(block, /margin-top: calc\(var\(--sp-2\) \* -1\);\s*margin-left: calc\(var\(--sp-2\) \* -1\);\s*width: calc\(var\(--w-facility\) \+ var\(--sp-2\)\) !important;/)
+    assert.match(block, /border: 3px solid var\(--c-ink\);/)
+    assert.match(css, /var\(--sheet-rule-bold\) \* 2 \+ var\(--sp-2\)\n\s*\);/)
+    assert.match(daily, /className="dsheet-date-cell sticky left-0 shrink-0/)
+  })
+})
+
 describe('8. 表題行と1日目の枠の間（画面だけ詰める）', () => {
   it('main の上の余白を 8px・紙用の日付バーのすぐ後の間隔を 0（間に帯がある時は空ける）・検索欄は表題行で 11rem', () => {
     const block = mediaBlocks(css, 'screen').find((b) => /main:has\(\.dsheet-frame\) \{\s*padding-top/.test(b))
