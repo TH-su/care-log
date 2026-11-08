@@ -46,6 +46,22 @@ export const MIGRATION_PG_CASES = [
     },
     expect: { definer: true, config: ['search_path=public, pg_temp'] },
   },
+  // ── 0059: トリガ専用の関数は外から呼べない・set_updated_at_rev の search_path は '' ──
+  {
+    finding: '0059',
+    name: 'anon・authenticated は record_history_capture を実行できず、変更の記録はトリガで残る',
+    async run(h) {
+      const p = (await h.pg(`select has_function_privilege('anon', 'public.record_history_capture()', 'execute') a,
+                                     has_function_privilege('authenticated', 'public.record_history_capture()', 'execute') u`))[0]
+      await h.pg(`insert into vitals (id, resident_id, measured_on, kind, temp) overriding system value values (902, 1, '${DAY}', 'routine', 36.5)`)
+      const before = (await h.pg(`select count(*)::int n from public.record_history where table_name = 'vitals' and row_id = 902`))[0].n
+      await h.pg(`update vitals set temp = 36.8 where id = 902`)
+      const after = (await h.pg(`select count(*)::int n from public.record_history where table_name = 'vitals' and row_id = 902`))[0].n
+      const cfg = (await h.pg(`select proconfig from pg_proc where oid = 'public.set_updated_at_rev()'::regprocedure`))[0].proconfig
+      return { anon: p.a, auth: p.u, delta: after - before, cfg }
+    },
+    expect: { anon: false, auth: false, delta: 1, cfg: ['search_path=""'] },
+  },
 
   // ── F40①: app_settings は authenticated から書けない（0022）・F28③: min_client_build の行（0023） ──
   {
