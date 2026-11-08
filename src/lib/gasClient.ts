@@ -2,7 +2,8 @@
 //
 // ── 読み取り専用・PII 非残留規約（wsClient.ts と同型。レビューで機械確認される）──
 //  1. GAS エンドポイント・合言葉（トークン）の具体値をコード/リポジトリに書かない（localStorage 手入力のみ）。
-//  2. GAS へ送るのは読み取り action（getRoster / pull）だけ。書込 action（save/put/push 系）の
+//  2. GAS へ送るのは読み取り action（getRoster / pull）だけ（2026-11-08 から利用者名簿・職員名簿・入職日は、まず共通の Supabase の
+//     読むだけの関数（carelog_roster・carelog_staff_names・carelog_staff_hire_dates）を読み、使えない時だけ GAS へ）。書込 action（save/put/push 系）の
 //     コードパスを作らない＝既存GAS・スプレッドシートへの書込は構造的に不可能。
 //  3. GAS 応答・Supabase 応答の本文（氏名・かな・居室・介護度）を console / localStorage に一切残さない。
 //     console に出すのはエラー種別だけ。
@@ -347,11 +348,14 @@ async function pullRosterOrNull(url: string, token: string): Promise<RosterEntry
 }
 
 /**
- * 共通の Supabase の読み取りの関数を、引数なしで時間切れつきで呼ぶ（2026-11-08・care-backend 0076）。
- * 戻り値: 'unavailable' … 関数が無い（0076 が未適用）・断られた・通信の失敗・時間切れ・例外（中身は出さない）
+ * 共通の Supabase の読み取りの関数を、引数なしで時間切れつきで呼ぶ（2026-11-08・care-backend 0076・0078）。
+ * 戻り値: 'unavailable' … 関数が無い（0076・0078 が未適用）・断られた・通信の失敗・時間切れ・例外（中身は出さない）
  *         それ以外 … 応答の data（形は呼び出し側が確かめる）
  */
-async function callReadRpc(fn: 'carelog_staff_names' | 'carelog_staff_hire_dates', timeoutMs: number): Promise<unknown | 'unavailable'> {
+async function callReadRpc(
+  fn: 'carelog_staff_names' | 'carelog_staff_hire_dates' | 'carelog_roster',
+  timeoutMs: number,
+): Promise<unknown | 'unavailable'> {
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     const timeout = new Promise<null>((resolve) => {
@@ -370,6 +374,24 @@ async function callReadRpc(fn: 'carelog_staff_names' | 'carelog_staff_hire_dates
 /** 応答が {mode:'live', …} の形か（それ以外＝切り替える前・Google へ戻した後・形の違い） */
 function isLiveReply(r: unknown): r is Record<string, unknown> {
   return !!r && typeof r === 'object' && !Array.isArray(r) && (r as { mode?: unknown }).mode === 'live'
+}
+
+/**
+ * 利用者名簿を、共通の Supabase の読む口 carelog_roster（care-backend 0078）から読む（2026-11-08・代表者の決定 2026-11-07 問い6=A）。
+ * 入居者マスタは 2026-10-30 に正本を Supabase へ切り替えた（Google へは写し返しているが、写し返しを止める前に読み手を移す・計画 3-2）。
+ * 返すのは GAS の getRoster と同じ形（{roster:[…]}）の、ケアログが使う項目（id・name・kana・room・gender・careLevel・active）だけ。
+ * 退去した方も行として返す（active:false）＝事務所の合言葉の GAS の getRoster と同じ。GAS と同じ取り出し方（projectRoster）を通す。
+ * 戻り値: 名簿（1人以上）… これを使い、入居者マスタの GAS を呼ばない／
+ *         null … 関数が無い・断られた・通信の失敗・時間切れ・切り替える前（shadow）＝今までどおり入居者マスタの GAS から読む／
+ *         'broken' … 入居者マスタは切り替え後（live）なのに形が違う・0人＝ GAS へ戻さず、利用者の一覧を変えずに止める（代表者の決定 2026-11-08 と同じ）
+ * 応答の中身は console・localStorage に残さない
+ */
+async function pullRosterFromDb(): Promise<RosterEntry[] | null | 'broken'> {
+  const r = await callReadRpc('carelog_roster', TIMEOUT_MS)
+  if (r === 'unavailable' || !isLiveReply(r)) return null
+  if (r.ok !== true || !Array.isArray(r.roster)) return 'broken'
+  const roster = projectRoster(r)
+  return roster !== null && roster.length > 0 ? roster : 'broken'
 }
 
 /**
@@ -1175,6 +1197,14 @@ function rosterFailHint(reason: GasReadFail | 'empty' | null): string {
 export const MASTER_OFFICE_ONLY_MSG =
   '名簿の同期は、事務・管理者のログインでだけ行います（現場のログインでは同期しません）。事務所のパソコンで同期してください。利用者・職員の一覧は変更していません。'
 
+/** 入居者マスタが切り替え後なのに利用者名簿を読めなかった時の文（GAS へは戻さない・0078・代表者の決定 2026-11-08 と同じ形） */
+export const ROSTER_DB_BROKEN_MSG =
+  '利用者の名簿を読めませんでした（職員マスタは同期しました）。利用者の一覧は変えていません。時間をおいてもう一度〔マスタを同期〕を押し、続く時は開発者に連絡してください。'
+
+/** 利用者名簿も職員名簿も読めなかった時のうち、利用者名簿が「切り替え後なのに読めない」だった時の文 */
+export const ROSTER_DB_BROKEN_BOTH_MSG =
+  '利用者の名簿を読めませんでした（職員名簿も取得できませんでした）。安全のため、利用者・職員の一覧は変えていません。時間をおいてもう一度〔マスタを同期〕を押し、続く時は開発者に連絡してください。'
+
 /** 勤務表が切り替え後なのに職員の一覧を読めなかった時の文（GAS へは戻さない・2026-11-08 代表者の決定） */
 export const STAFF_LIST_DB_BROKEN_MSG =
   '職員の一覧を読めませんでした（利用者マスタは同期しました）。職員の一覧は変えていません。時間をおいてもう一度〔マスタを同期〕を押し、続く時は開発者に連絡してください。'
@@ -1228,6 +1258,9 @@ export interface SyncOptions {
  *  - 職員名簿は勤務表の正本（Supabase の carelog_staff_names（0076）・無い時は kv_get('staff')・切り替え後だけ）を先に読み、
  *    読めた時は GAS の職員名簿を呼ばない（2026-11-07・11-08。GAS の勤務表は 10/16 から更新されていない）。読めない・形が違う時は今までどおり GAS から読む。
  *  - 入職日は職員マスタの正本（Supabase の carelog_staff_hire_dates（0076）・切り替え後だけ）を先に読み、読めない時だけ職員マスタの GAS から読む。
+ *  - 利用者名簿は入居者マスタの正本（Supabase の carelog_roster（0078）・切り替え後だけ）を先に読み、読めた時は入居者マスタの GAS を呼ばない。
+ *    関数が無い・断られた・通信の失敗・切り替える前は今までどおり GAS から読む。切り替え後なのに形が違う・0人の時は GAS へ戻さず、
+ *    利用者の行を書き換えない（職員は同期する）。読んだ名簿にも、一斉の在籍解除の歯止め・空上書き保護・保留は同じに効く。
  */
 export async function syncMasters(opts: SyncOptions = {}): Promise<MasterSyncOutcome | 'unconfigured'> {
   const cfg = readGasConfig()
@@ -1262,15 +1295,25 @@ export async function syncMasters(opts: SyncOptions = {}): Promise<MasterSyncOut
   }
 
   // 先に両方を取得する（DBに触れる前に失敗を確定させ、中途半端な反映を減らす）
-  const rosterRead = await pullRosterRead(cfg.url, cfg.token)
+  // 利用者名簿は、入居者マスタの正本（Supabase の carelog_roster・切り替え後の時だけ）を先に読む（0078・2026-11-08）。
+  // 読めた時は入居者マスタの GAS を呼ばない。切り替え後なのに形が違う・0人と答えた時（'broken'）は GAS へ戻さず、利用者の同期だけを止める
+  const dbRoster = await pullRosterFromDb()
+  const rosterBroken = dbRoster === 'broken'
+  const rosterRead: { ok: true; roster: RosterEntry[] } | { ok: false; reason: GasReadFail } | null = Array.isArray(dbRoster)
+    ? { ok: true, roster: dbRoster }
+    : rosterBroken
+      ? null
+      : await pullRosterRead(cfg.url, cfg.token)
   const names = staffCfg === null ? kvNames : await pullStaffNamesOrNull(staffCfg.url, staffCfg.token)
-  const roster = rosterRead.ok ? rosterRead.roster : null
+  const roster = rosterRead !== null && rosterRead.ok ? rosterRead.roster : null
   const rosterOk = roster !== null && roster.length > 0 // 0件＝取得できずと同義に扱う
   const staffOk = names !== null && names.length > 0
-  const rosterFail: GasReadFail | 'empty' | null = rosterOk ? null : rosterRead.ok ? 'empty' : rosterRead.reason
+  const rosterFail: GasReadFail | 'empty' | null =
+    rosterOk || rosterRead === null ? null : rosterRead.ok ? 'empty' : rosterRead.reason
 
   const sameEndpoint = staffCfg !== null && staffCfg.url === cfg.url && staffCfg.token === cfg.token
   if (!rosterOk && !staffOk) {
+    if (rosterBroken) throw new Error(ROSTER_DB_BROKEN_BOTH_MSG)
     throw new Error(
       rosterFail === 'auth' || rosterFail === 'postOnly' || rosterFail === 'empty'
         ? `マスタを取得できませんでした。${rosterFailHint(rosterFail)}、もう一度お試しください（職員名簿も取得できませんでした）。安全のため、利用者・職員の一覧は変更していません。`
@@ -1303,6 +1346,7 @@ export async function syncMasters(opts: SyncOptions = {}): Promise<MasterSyncOut
   // 反映した分を、開いている画面（App の職員名簿など）へ知らせる（F47）。知らせる先が無くても何も起きない
   if (residents || staff || hireDates.written > 0) notifyMastersChanged()
 
+  if (!residents && rosterBroken) throw new Error(ROSTER_DB_BROKEN_MSG)
   if (!residents) {
     throw new Error(
       `利用者マスタを取得できませんでした（職員マスタは同期しました）。${rosterFailHint(rosterFail)}、もう一度お試しください。利用者の一覧は変更していません。`,

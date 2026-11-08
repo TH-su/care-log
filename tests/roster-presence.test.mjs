@@ -1633,3 +1633,172 @@ describe('職員の名前・入職日は共通のデータベースの読む口�
     assert.match(s, /const r = await callReadRpc\('carelog_staff_names', TIMEOUT_MS\)[\s\S]*?const names = projectStaffNames\(r\)/)
   })
 })
+
+// ══════════════════════════════════════════════════════════════
+// 2026-11-08: 利用者名簿は、共通のデータベースの読む口 carelog_roster（care-backend 0078）から先に読む
+//   入居者マスタが live の時だけ、GAS の getRoster と同じ形（{roster:[…]}）の id・name・kana・room・gender・careLevel・active だけ（退去も返す）
+//   関数が無い・断られた・切り替える前は今までどおり入居者マスタの GAS。live なのに形が違う・0人は GAS へ戻さず利用者の一覧を変えない
+// ══════════════════════════════════════════════════════════════
+describe('利用者名簿は共通のデータベースの読む口（0078）から先に読む（2026-11-08）', { skip }, () => {
+  const ok = (data) => () => ({ data, error: null, status: 200 })
+  const rosterLive = (roster) => ok({ mode: 'live', ok: true, roster })
+  const toMaster = (gas) => gas.requests.filter((r) => r.url.startsWith(MASTER_URL))
+  const resWrites = (sb) => sb.calls.filter((q) => q.table === 'residents' && q.action !== 'select').length
+  const base = () =>
+    memSupabase({
+      residents: [res(1, 'R001', '利用者01', { room: '101' }), res(2, 'R002', '利用者02', { room: '102' }), res(3, 'R003', '利用者03')],
+      staff: [{ id: 1, name: '職員01', active: true, manual: false }],
+    })
+  // 退去（active:false）・部屋の移動・新しい方・数の利用者No と居室を含む架空の名簿
+  const LIST = [
+    { id: 'R001', name: '利用者01', kana: 'りようしゃ', room: '101', gender: '女', careLevel: '要介護1', active: true },
+    { id: 'R002', name: '利用者02', room: '205', active: true },
+    { id: 'R003', name: '利用者03', active: false },
+    { id: 4, name: '利用者04', room: 301, careLevel: '要支援2', active: true },
+  ]
+
+  it('読む口が live で答えた時は入居者マスタの GAS を呼ばず、その名簿で利用者の表を直す（退去は在籍を外す・部屋の移動・新しい方）', async () => {
+    configure()
+    const sb = base()
+    sb.rpcReplies.carelog_roster = rosterLive(LIST)
+    useClient(sb)
+    const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: ['職員01'] }) // GAS の名簿は古いまま
+    const out = await G.syncMasters()
+    assert.equal(typeof out, 'object')
+    assert.equal(toMaster(gas).length, 0, '入居者マスタの GAS を呼んでいない')
+    assert.ok(sb.rpcCalls.includes('carelog_roster'))
+    const by = Object.fromEntries(sb.db.residents.map((r) => [r.source_id, [r.name, r.room, r.active]]))
+    assert.deepEqual(by, {
+      R001: ['利用者01', '101', true],
+      R002: ['利用者02', '205', true],
+      R003: ['利用者03', null, false],
+      4: ['利用者04', '301', true],
+    })
+    assert.equal(out.residents.deactivated, 1)
+  })
+
+  it('読む口から読んだ時と入居者マスタの GAS から読んだ時で、利用者の表と増減の数は同じになる（同じ取り出し方を通す）', async () => {
+    const list = [
+      ...LIST,
+      { id: ' R005 ', name: ' 利用者05 ', kana: '', room: '  ', active: true }, // 前後の空白・空の項目
+      { id: 'R001', name: '利用者01（重複）' }, // 同じ番号の2件目は捨てる
+      { id: '', name: '番号なし' },
+      { id: 'R006' }, // 氏名の無い行は捨てる
+      { id: 'R007', name: '利用者07', careLevel: { x: 1 }, gender: true }, // 形の違う値は載せない
+    ]
+    const run = async (viaRpc) => {
+      configure()
+      const sb = base()
+      if (viaRpc) sb.rpcReplies.carelog_roster = rosterLive(list)
+      useClient(sb)
+      const gas = fakeGas({ roster: viaRpc ? [] : list, staff: ['職員01'] })
+      const out = await G.syncMasters()
+      assert.equal(toMaster(gas).length, viaRpc ? 0 : 1)
+      D.forgetMyRole()
+      return [out.residents, sb.db.residents.map(({ synced_at: _s, ...rest }) => rest)]
+    }
+    const a = await run(true)
+    const g = await run(false)
+    assert.ok(a[1].length >= 6)
+    assert.deepEqual(a, g)
+  })
+
+  const fallbacks = [
+    ['関数が無い（0078 が未適用）', null],
+    ['断られた（42501・現場や写し返し専用のアカウント）', () => ({ data: null, error: { message: 'not allowed', code: '42501' }, status: 403 })],
+    ['通信の失敗（例外）', () => Promise.reject(new Error('network'))],
+    ['切り替える前（mode:shadow）', ok({ mode: 'shadow' })],
+    ['応答が配列', ok([{ id: 'R009', name: '利用者09' }])],
+    ['応答が空', ok(null)],
+  ]
+  for (const [label, reply] of fallbacks) {
+    it(`使えない時は今までどおり入居者マスタの GAS から読む: ${label}`, async () => {
+      configure()
+      const sb = base()
+      if (reply) sb.rpcReplies.carelog_roster = reply
+      useClient(sb)
+      const gas = fakeGas({ roster: [...LIST, { id: 'R008', name: '利用者08' }], staff: ['職員01'] })
+      const out = await G.syncMasters()
+      assert.equal(typeof out, 'object', label)
+      assert.ok(sb.rpcCalls.includes('carelog_roster'), label)
+      assert.deepEqual(toMaster(gas).map((r) => [r.method, r.body?.action]), [['POST', 'getRoster']], label)
+      assert.ok(sb.db.residents.some((r) => r.source_id === 'R008'), `${label}: GAS の名簿を反映した`)
+      assert.equal(sb.db.residents.some((r) => r.source_id === 'R009'), false, `${label}: 使えない応答の方を入れていない`)
+    })
+  }
+
+  const broken = [
+    ['形が違う（noshape）', ok({ mode: 'live', error: 'noshape' })],
+    ['ok が無い', ok({ mode: 'live', roster: LIST })],
+    ['roster が配列でない', ok({ mode: 'live', ok: true, roster: '利用者09' })],
+    ['0人', rosterLive([])],
+    ['番号か氏名の無い行だけ', rosterLive([{ id: 'R009' }, { name: '利用者09' }, { id: '', name: '' }])],
+  ]
+  for (const [label, reply] of broken) {
+    it(`入居者マスタが live なのに読めない時は GAS へ戻さず、利用者の行を書き換えずに止める（職員は同期する）: ${label}`, async () => {
+      configure()
+      const sb = base()
+      sb.rpcReplies.carelog_roster = reply
+      useClient(sb)
+      const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: ['職員01', '職員02'] })
+      await assert.rejects(G.syncMasters(), (e) => {
+        assert.equal(e.message, G.ROSTER_DB_BROKEN_MSG, label)
+        assert.match(e.message, /利用者の名簿を読めませんでした/)
+        assert.match(e.message, /利用者の一覧は変えていません/)
+        return true
+      })
+      assert.equal(toMaster(gas).length, 0, `${label}: 入居者マスタの GAS を呼んでいない`)
+      assert.equal(resWrites(sb), 0, `${label}: 利用者の表に書いていない`)
+      assert.equal(sb.db.residents.filter((r) => r.active).length, 3, label)
+      assert.ok(sb.db.staff.some((s) => s.name === '職員02'), `${label}: 職員マスタは同期する`)
+      assert.equal(sb.db.master_sync_log.some((l) => l.source === 'residents'), false, label)
+    })
+  }
+
+  it('利用者名簿が live なのに読めず、職員名簿も読めない時は、どちらの表にも書かずに止める', async () => {
+    configure()
+    const sb = base()
+    sb.rpcReplies.carelog_roster = rosterLive([])
+    sb.rpcReplies.carelog_staff_names = ok({ mode: 'live', error: 'noshape' })
+    useClient(sb)
+    const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: ['職員02'] })
+    await assert.rejects(G.syncMasters(), (e) => e.message === G.ROSTER_DB_BROKEN_BOTH_MSG)
+    assert.equal(toMaster(gas).length, 0)
+    assert.equal(sb.calls.filter((q) => q.action !== 'select').length, 0)
+  })
+
+  it('読む口の名簿にも一斉の在籍解除の歯止めが効く（40人中3人しか返らない時は何も書かずに MasterDropError）', async () => {
+    configure()
+    const sb = memSupabase({
+      residents: Array.from({ length: 40 }, (_, i) => res(i + 1, `R${two(i + 1)}`, `利用者${two(i + 1)}`)),
+      staff: [{ id: 1, name: '職員01', active: true, manual: false }],
+    })
+    sb.rpcReplies.carelog_roster = rosterLive(Array.from({ length: 3 }, (_, i) => ({ id: `R${two(i + 1)}`, name: `利用者${two(i + 1)}`, active: true })))
+    useClient(sb)
+    const gas = fakeGas({ roster: [], staff: ['職員01'] })
+    await assert.rejects(G.syncMasters(), (e) => e instanceof G.MasterDropError && e.residents === 37)
+    assert.equal(toMaster(gas).length, 0)
+    assert.equal(sb.calls.filter((q) => q.action !== 'select').length, 0)
+  })
+
+  it('現場（field）のログインでは読む口も呼ばない（役割の確かめの後に読む）', async () => {
+    configure()
+    testRole = 'field'
+    const sb = base()
+    sb.rpcReplies.carelog_roster = rosterLive(LIST)
+    useClient(sb)
+    fakeGas({ roster: LIST, staff: ['職員01'] })
+    await assert.rejects(G.syncMasters(), (e) => e.message === G.MASTER_OFFICE_ONLY_MSG)
+    assert.equal(sb.rpcCalls.includes('carelog_roster'), false)
+  })
+
+  it('静的: 名簿の読む口は引数なしの読み取りだけ・GAS と同じ取り出し方・中身を console や localStorage に残さない', () => {
+    const s = src('lib/gasClient.ts')
+    const fn = s.slice(s.indexOf('async function pullRosterFromDb'), s.indexOf('async function pullStaffNamesFromCarelogRpc'))
+    assert.match(fn, /callReadRpc\('carelog_roster', TIMEOUT_MS\)/)
+    assert.match(fn, /const roster = projectRoster\(r\)/)
+    assert.doesNotMatch(fn, /console\.|localStorage\./)
+    assert.equal((s.match(/'carelog_roster'/g) ?? []).length, 2, '型の並びと呼ぶ所の2か所だけ')
+    assert.doesNotMatch(s, /rpc\('res_(roster|get|commit|set_mode|import_[a-z]+)'/)
+  })
+})

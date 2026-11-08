@@ -449,6 +449,11 @@ autoSyncMasters(now?: number): Promise<'unconfigured' | 'officeOnly' | 'fresh' |
   mode:'live'・ok:true・rows が1件以上の時だけ使う（職員マスタの接続設定 stfm_cfg が無い端末でも読める）。live なのに形が違う・0件は GAS へ戻さず入職日を変えない（status 'db-broken'）。
   関数が無い・断られた・通信の失敗・切り替える前は、今までどおり職員マスタの GAS（stfm_cfg のある端末だけ）。
   どちらも GAS と同じ射影（projectStaffNames・projectStaffHireDates）を通す。GAS への戻り道は、写し返しを止めるまで消さない
+- 利用者名簿の読み先（2026-11-08・care-backend 0078）: syncMasters は役割の確かめの後、読む口 `carelog_roster()`（入居者マスタが live の時だけ・事務所・管理者だけ・
+  GAS の getRoster と同じ {roster:[…]} の id・name・kana・room・gender・careLevel・active だけ・退去も返す）を先に読み、mode:'live'・ok:true・取り出して1人以上の時だけ使う
+  （その時は入居者マスタの GAS を呼ばない）。関数が無い・断られた・通信の失敗・時間切れ・切り替える前は今までどおり入居者マスタの GAS から読む。
+  live なのに形が違う・0人と答えた時は GAS へ戻さず、利用者の行を書き換えない（職員は同期する・ROSTER_DB_BROKEN_MSG／職員も読めない時は ROSTER_DB_BROKEN_BOTH_MSG）。
+  GAS と同じ射影（projectRoster）を通し、一斉の在籍解除の歯止め（isMassDrop）・空上書き保護・保留はそのまま効く。接続設定（cl_gasUrl・cl_gasToken）の無い端末は今までどおり同期しない
 
 ## src/hooks/useTimeline.ts
 
