@@ -281,7 +281,7 @@ if (M === null) {
       // 0044（段階2b）の後に入るのは、段階2d の個人の閾値 0045 だけ（2c の分は無い）
       const after = migs.filter((f) => f > '0044_daycare_activity.sql')
       // 段階3の 0046 も 2c の分ではない（固定し直し・意図は同じ＝段階2c は移行を足さない）。今日の画面の改善 1回目の 0047 も同じ。タイムラインの継続の遡りの 0050 も同じ。施設の印の段階1の 0051・段階2の 0052・段階3の 0053・段階4の 0054・0055 も同じ（段階2c の分ではない）
-      assert.deepEqual(after.filter((f) => !['0045_resident_vital_limits.sql', '0046_daycare_training.sql', '0047_daycare_auto_attendance.sql', '0048_daycare_auto_attendance_fix.sql', '0049_daycare_auto_leave_editor.sql', '0050_pinned_open_lookback.sql', '0051_tenant_stage1.sql', '0052_tenant_stage2.sql', '0053_tenant_stage3.sql', '0054_tenant_stage4.sql', '0055_tenant_client_key.sql', '0056_presence_tenant.sql', '0057_import_tool_ver.sql', '0058_note_reporter_name.sql', '0059_trigger_fn_hardening.sql'].includes(f)), [], '段階2c は移行を足さない')
+      assert.deepEqual(after.filter((f) => !['0045_resident_vital_limits.sql', '0046_daycare_training.sql', '0047_daycare_auto_attendance.sql', '0048_daycare_auto_attendance_fix.sql', '0049_daycare_auto_leave_editor.sql', '0050_pinned_open_lookback.sql', '0051_tenant_stage1.sql', '0052_tenant_stage2.sql', '0053_tenant_stage3.sql', '0054_tenant_stage4.sql', '0055_tenant_client_key.sql', '0056_presence_tenant.sql', '0057_import_tool_ver.sql', '0058_note_reporter_name.sql', '0059_trigger_fn_hardening.sql', '0060_trigger_fn_revoke_rest.sql'].includes(f)), [], '段階2c は移行を足さない')
       assert.doesNotMatch(read('../src/lib/types.ts'), /dcn:|NoteMark/)
       // 取り消した申し送りも読む読み取りは、印の鍵の頭で絞った1か所だけ
       const db = code('../src/lib/db.ts')
