@@ -62,6 +62,32 @@ export const MIGRATION_PG_CASES = [
     },
     expect: { anon: false, auth: false, delta: 1, cfg: ['search_path=""'] },
   },
+  // ── 0060: トリガ専用の関数は、どれも anon・authenticated が実行できない ──
+  {
+    finding: '0060',
+    name: 'public のトリガ専用の関数を anon・authenticated が実行できない',
+    async run(h) {
+      const r = await h.pg(`select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+                             where n.nspname = 'public' and p.prorettype = 'trigger'::regtype
+                               and (has_function_privilege('anon', p.oid, 'execute') or has_function_privilege('authenticated', p.oid, 'execute'))
+                               and not exists (select 1 from pg_depend d where d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'e')
+                             order by 1`)
+      return { callable: r.map((x) => x.proname) }
+    },
+    expect: { callable: [] },
+  },
+  {
+    finding: '0060',
+    name: '出勤の変更の記録は、権限を外した後もログインした職員の更新でトリガが残す',
+    async run(h) {
+      await h.pg(`insert into attendance (day, staff_id) values ('${DAY}', 1) on conflict do nothing`)
+      const n0 = (await h.pg(`select count(*)::int n from public.record_history where table_name = 'attendance'`))[0].n
+      const r = await h.as({}, (q) => q(`update public.attendance set sort = sort + 1 where day = '${DAY}' and staff_id = 1`))
+      const n1 = (await h.pg(`select count(*)::int n from public.record_history where table_name = 'attendance'`))[0].n
+      return { error: r.error ?? null, delta: n1 - n0 }
+    },
+    expect: { error: null, delta: 1 },
+  },
 
   // ── F40①: app_settings は authenticated から書けない（0022）・F28③: min_client_build の行（0023） ──
   {
