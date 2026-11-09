@@ -29,7 +29,8 @@ describe('デイの今日のカードを小さく（2026-11-09）', () => {
   })
   it('一覧は画面の幅いっぱい（max-w-5xl と外側の p-4 を外した）・上の段は2段（件数は日付の右）', () => {
     assert.doesNotMatch(today, /max-w-5xl|space-y-4 p-4/)
-    assert.match(today, /const header = \(counts: ReactNode = null\) => \(/)
+    // 2026-11-09 計画B（固定し直し・意図は同じ）: 切り替えに添える未入力の数（navPending）も、件数と同じく読み込めた後だけ渡す
+    assert.match(today, /const header = \(counts: ReactNode = null, navPending\?: DaycareNavPending\) => \(/)
     // 件数は日付の段の中（日付の group の後）
     const h = today.slice(today.indexOf('const header = (counts'), today.indexOf('if (loading && data === null)'))
     assert.ok(h.indexOf('aria-label="日付"') < h.indexOf('{counts}'), '件数は日付の右')
@@ -40,25 +41,30 @@ describe('デイの今日のカードを小さく（2026-11-09）', () => {
     assert.match(today, /const DANGER_CELL_BTN =\s*'inline-flex min-h-tap min-w-tap /)
     assert.doesNotMatch(list, /min-w-\[5rem\]/)
   })
-  it('カードの中: 氏名とふりがなは〔休み〕の横・行の間を詰める・文字は 15px 以上（ふりがなだけ 14px）・切らずに折り返す', () => {
+  it('カードの中: 氏名は〔休み〕の横・行の間を詰める・文字は 15px 以上（ふりがなだけ 14px）・切らずに折り返す', () => {
+    // 2026-11-09 計画B（固定し直し・意図は同じ）: ふりがなは〔休み〕の横から、氏名と〔休み〕の段の下（カードの幅いっぱい）へ戻した
+    // （2026-10-24 の決まり）。予定・到着と帰宅の2段は状態の段1つに、入浴・昼食・バイタルの文字の段は進み具合の印にした（daycare-progress.test.mjs）
     assert.match(list, /<div className="min-w-\[5em\] flex-1">\s*<Link to=\{personPath\(row\.residentId, day, today\)\} className="dc-card-link block rounded">/)
-    assert.match(list, /<span className=\{`block break-words text-base font-bold leading-tight /)
+    assert.match(list, /<span className="block break-words text-base font-bold leading-tight text-ink">/)
     assert.match(list, /<p className="break-words text-xs leading-tight text-ink2">\{kana\}<\/p>/)
     // 14px（text-xs）はふりがなの1か所だけ。13px（text-2xs）は使わない
     assert.equal((list.match(/\btext-xs\b/g) ?? []).length, 1)
     assert.doesNotMatch(today, /\btext-2xs\b/)
     assert.doesNotMatch(list, /\btruncate\b/)
-    // 予定・到着と帰宅・入浴と昼食とバイタルは 15px（text-sm）の詰めた行
-    assert.match(list, /<p className="break-words text-sm leading-tight text-ink2">\{planText\}<\/p>/)
-    assert.match(list, /<p className="flex flex-wrap gap-x-2 text-sm leading-tight text-ink">\s*<span className="whitespace-nowrap">\s*到着/)
-    // 入浴の予定は「入浴 予定」の欄で分かるので、予定の行に「・入浴」を足さない
+    // 状態の段と進み具合の印は 15px（text-sm）の詰めた段
+    assert.match(list, /<p className="break-words text-sm font-bold leading-tight text-ink">\s*<span aria-hidden="true">\{tone\.mark\} <\/span>\s*\{tone\.word\}\s*<\/p>/)
+    assert.match(list, /className=\{`rounded px-1 text-sm leading-tight \$\{PROGRESS_MARK_CLS\[mk\.state\]\}`\}/)
+    // 入浴の予定は印の「浴」で分かるので、状態の段に「・入浴」を足さない
     assert.doesNotMatch(list, /'・入浴'/)
-    assert.match(list, /入浴 \{bathText\}/)
+    assert.doesNotMatch(list, /入浴 \{bathText\}/)
   })
-  it('切り替え: 押せる高さ 44px のまま文字と左右の余白を詰める・狭い画面では括弧の補足（到着・休み）を出さない', () => {
+  it('切り替え: 押せる高さ 44px のまま文字と左右の余白を詰める・1280px 未満では括弧の補足（到着・休み）を出さない', () => {
     const nav = today.slice(today.indexOf('export function DaycareNav'), today.indexOf('function PlanBanners'))
     assert.match(nav, /const navCls = 'flex min-h-tap items-center rounded border border-border-strong bg-surface px-3 text-sm text-ink'/)
-    assert.match(nav, /<span className="hidden sm:inline">\{it\.label\.slice\(it\.label\.indexOf\('（'\)\)\}<\/span>/)
+    // 2026-11-09 計画B（固定し直し・意図は同じ）: 補足を出す幅を 640px（sm）から 1280px（xl）に上げた（今日の画面で未入力の数を添えても、
+    // iPad 横 1180px で切り替えと記録者が1段に収まるように＝親の決定・デイの5画面で共通）
+    assert.match(nav, /<span className="hidden xl:inline">\{it\.label\.slice\(it\.label\.indexOf\('（'\)\)\}<\/span>/)
+    assert.doesNotMatch(nav, /hidden sm:inline/)
     // 項目の名前（読み上げの元）は今までどおり
     assert.match(nav, /label: '今日（到着・休み）'/)
   })
@@ -88,7 +94,8 @@ describe('一括の4画面で行を増やす（2026-11-09）', () => {
     }
   })
   it('氏名の列: 1人の記録への入口は氏名のリンク（押せる高さ 44px の中に氏名と札の2段）。活動一括・機能訓練の〔記録 ›〕〔1日の記録 ›〕はまとめた', () => {
-    assert.match(BULK.activity, /aria-label=\{`\$\{name\}さん\$\{late \? '（未到着）' : ''\}の1日の記録を開く（活動の度合い・前回と同じ）`\}\s+className="flex min-h-tap flex-col justify-center rounded/)
+    // 2026-11-09 計画B（固定し直し・意図は同じ）: 名前の後の「（未到着）」は、見えている来た・まだの言葉（daycareCameMark）に
+    assert.match(BULK.activity, /aria-label=\{`\$\{name\}さん（\$\{cm\.word\}）の1日の記録を開く（活動の度合い・前回と同じ）`\}\s+className="flex min-h-tap flex-col justify-center rounded/)
     assert.match(BULK.training, /aria-label=\{`\$\{name\}さんの1日の記録を開く`\}\s+className="flex min-h-tap items-center rounded/)
     assert.match(BULK.meals, /<Link to=\{personPath\(rid, day, today\)\} className="flex min-h-tap flex-col justify-center/)
     for (const k of ['activity', 'training']) {
@@ -103,7 +110,8 @@ describe('一括の4画面で行を増やす（2026-11-09）', () => {
     assert.match(BULK.vitals, /<div className="flex flex-wrap items-center gap-x-4 gap-y-2">\s*<div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">[\s\S]*?<div className="flex flex-wrap gap-gap" role="group" aria-label="表示する方">/)
     const m = BULK.meals
     const top = m.slice(m.indexOf('<section aria-labelledby="h-meals"'), m.indexOf('<table'))
-    assert.ok(top.indexOf('id="h-meals"') < top.indexOf('未入力なし') && top.indexOf('未入力なし') < top.indexOf('予定の方'), '昼食 → 未入力の数 → 予定の人数')
+    // 2026-11-09 計画B（固定し直し・意図は同じ）: 未入力の数は4画面で同じ部品（DaycareUnfilledCount）にした
+    assert.ok(top.indexOf('id="h-meals"') < top.indexOf('<DaycareUnfilledCount') && top.indexOf('<DaycareUnfilledCount') < top.indexOf('予定の方'), '昼食 → 未入力の数 → 予定の人数')
     const body = m.slice(m.indexOf('<tbody>'), m.indexOf('</tbody>'))
     assert.match(body, /<div className="flex flex-wrap items-center gap-x-2 gap-y-1">\s*<p className="text-base text-ink">\s*計 /)
     assert.match(body, /className="flex items-center gap-2"\s*>\s*<input/)

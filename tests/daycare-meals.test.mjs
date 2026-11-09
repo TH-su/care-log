@@ -309,7 +309,8 @@ if (DP === null) {
     it('氏名の列: 1人の画面へのリンク（44px）・在席／帰宅／未到着・保存の印（昼食だけ）・取り込みの印', () => {
       // 2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 来た・まだの文字は氏名のリンクの中（押せる高さ 44px の中に2段）
       assert.match(body, /<Link to=\{personPath\(rid, day, today\)\} className="flex min-h-tap flex-col justify-center/)
-      assert.match(body, /<span className="text-sm leading-tight text-ink2">\{cameText\(row\)\}<\/span>\s*<\/Link>/)
+      // 2026-11-09 計画B（固定し直し・意図は同じ）: 来た・まだは今日のカードと同じ記号＋言葉（daycareCameMark・色は文字だけ）
+      assert.match(body, /<span className=\{`text-sm leading-tight \$\{cm\.textCls\}`\}>\s*<span aria-hidden="true">\{cm\.mark\} <\/span>\s*\{cm\.word\}\s*<\/span>\s*<\/Link>/)
       assert.match(body, /const mark = mealBandMark\(\[kindOf\(lt, stL\)\]\)/)
       assert.match(body, /\{source !== null && source !== '画面で入力' \?/)
     })
@@ -322,11 +323,13 @@ if (DP === null) {
     })
     it('未入力の数は表の上に（画面に出している値で数える）。1名以上は「▲ 未入力 n名」（赤字）・0名は「✓ 未入力なし」・未到着は灰色で別に', () => {
       assert.match(page, /const counts = lunchUnfilledCount\(came\.map\(\(row\) => \(\{ state: row\.state, lunch: mealShownFor\(targetOf\(row\.residentId\)\) \}\)\)\)/)
-      assert.match(page, /<span className="font-bold text-danger">\s*<span aria-hidden="true">▲ <\/span>未入力 <span className="font-num">\{counts\.unfilled\}<\/span>名/)
-      assert.match(page, /<span className="font-bold text-ok">\s*<span aria-hidden="true">✓ <\/span>未入力なし/)
-      assert.match(page, /\{counts\.notArrived > 0 \? \(\s*<span className="text-ink2">\s*未到着 <span className="font-num">\{counts\.notArrived\}<\/span>名（数えていません）/)
+      // 2026-11-09 計画B（固定し直し・意図は同じ）: 表示は一括の4画面で同じ部品（DaycareUnfilledCount）にした（見た目は同じ）
+      const unf = code('../src/components/DaycareUnfilledCount.tsx')
+      assert.match(unf, /<span className="font-bold text-danger">\s*<span aria-hidden="true">▲ <\/span>未入力 <span className="font-num">\{counts\.unfilled\}<\/span>名/)
+      assert.match(unf, /<span className="font-bold text-ok">\s*<span aria-hidden="true">✓ <\/span>未入力なし/)
+      assert.match(unf, /\{counts\.notArrived > 0 \? \(\s*<span className="text-ink2">\s*未到着 <span className="font-num">\{counts\.notArrived\}<\/span>名（数えていません）/)
       assert.ok(page.indexOf('const counts = lunchUnfilledCount') < page.indexOf('<table'), '表の上')
-      assert.ok(page.indexOf('未入力なし') < page.indexOf('<table'), '表の上')
+      assert.ok(page.indexOf('<DaycareUnfilledCount counts={counts} />') > 0 && page.indexOf('<DaycareUnfilledCount counts={counts} />') < page.indexOf('<table'), '表の上')
     })
     it('水分: form の submit（改行キー）でも〔＋〕でも足す・欄は inputMode numeric（44px・text-lg）・〔＋〕は 44px と「水分を足す」', () => {
       assert.match(body, /<form\s+onSubmit=\{\(e\) => \{\s*e\.preventDefault\(\)\s*submitFluid\(rid\)\s*\}\}/)

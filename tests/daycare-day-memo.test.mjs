@@ -178,7 +178,8 @@ describe('静的検査', () => {
   })
   it('今日の画面も、読み込みの失敗の時だけ同じ日の控えで開き、同じ帯を出す・控えで開いた時は控えを書き直さない（親の確かめ 中1）', () => {
     assert.match(today, /const m = memoForDay\(daycareDayMemo\(\), target, e\)\s*if \(m !== null && target === dayRef\.current && !quiet\) \{/)
-    assert.match(today, /activities: null,\s*intakeOk: m\.intakeOk,\s*memoAt: m\.savedAt,/)
+    // 2026-11-09 計画B（固定し直し・意図は同じ）: 機能訓練の記録も控えに無い（読めない＝「読めない」の印）
+    assert.match(today, /activities: null,\s*training: null,\s*intakeOk: m\.intakeOk,\s*memoAt: m\.savedAt,/)
     assert.match(today, /サーバーに届かないため、今日の一覧で読んだ時点（/)
     assert.match(today, /if \(data === null \|\| data\.missing \|\| data\.memoAt !== null\) return\s*rememberDaycareDay\(/)
     assert.match(today, /if \(!onMemo\) return\s*const t = window\.setInterval\(\(\) => scheduleReload\(\), 30_000\)/)

@@ -45,6 +45,7 @@ import {
 } from '../lib/db'
 import type { MyRole } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
+import { DaycareUnfilledCount } from '../components/DaycareUnfilledCount'
 import { DaycareHomeVisitSection } from '../components/DaycareHomeVisitSection'
 import { DaycareReviewDueSection } from '../components/DaycareReviewDueSection'
 import { TARGET_NO_PLAN_LABEL, targetPlanTags, weekScope } from '../lib/trainingDue'
@@ -81,6 +82,7 @@ import {
 } from '../lib/daycareTraining'
 import type { DaycareStaffing, DaycareTrainingSession, StaffingRole, TrainingInput, TrainingResult } from '../lib/daycareTraining'
 import { personPath, readPersonDay } from '../lib/daycarePerson'
+import { attendedUnfilledCount, trainingFilled } from '../lib/daycareProgress'
 import { addDays, fmtDayLabel, todayIso } from '../lib/format'
 import type { DaycareAttendance, DaycareDay, DaycarePlanRow, DaycarePlanSource, Resident, Staff } from '../lib/types'
 import { useTableFit } from '../lib/useTableFit'
@@ -356,6 +358,10 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
   const dual = dualRoleWithoutTime(staffing, day)
   // 対象者でない方の記録（到着を取り消した・欠席にした方。直す入口を残す＝反証 中4）
   const outside = sessionsOutsideTargets(sessions, targets, day)
+  // 未入力の数（在席・帰宅の方だけ数える・2026-11-09 計画B）。入力済み＝その日の記録がある（この端末の送信待ちの追加を含む）
+  const unfilled = attendedUnfilledCount(
+    targets.map((rid) => ({ state: board?.rows.find((r) => r.residentId === rid)?.state ?? 'planned', filled: trainingFilled(sessions, pending, rid, day) })),
+  )
   /** その方の今日の送信待ちの追加（stopped＝止まっている） */
   const pendingAdd = (rid: number) =>
     pending.find((p) => p.kind === 'add' && p.table === 'daycare_training_sessions' && p.residentId === rid && p.day === day)
@@ -729,121 +735,21 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
     )
 
   return (
-    // 幅を広げ（max-w-3xl → 6xl）、区画の余白と見出しを詰める（2026-11-09 代表者の指示「一括入力の画面で、もっと多くの行が出るように」。
-    // 配置・計画の見直し・居宅訪問の区画は今までどおり表の上に出す）
+    // 幅を広げ（max-w-3xl → 6xl）、区画の余白と見出しを詰める（2026-11-09 代表者の指示「一括入力の画面で、もっと多くの行が出るように」）。
+    // 2026-11-09 計画B: 並びは 上の段 → 今日の対象者の表（対象者でない方の記録を含む）→ その日の配置 → 計画の見直しの期限 → 居宅訪問の期限
+    // （表を画面の上に。中身・処理は変えない。〔完了〕は指導員が決まらない時に小窓を出すので、配置の注意は上に足さない）
     <div className="mx-auto w-full max-w-6xl space-y-2">
       {header}
 
-      <section aria-labelledby="h-staffing" className="space-y-2 rounded-lg border border-border bg-surface p-2">
-        <h2 id="h-staffing" className="text-lg font-bold leading-tight text-ink">
-          その日の配置
-        </h2>
-        {data.staffing === null && !missing ? (
-          <p role="alert" className="rounded border border-danger bg-danger-bg p-2 text-base text-ink">
-            <span aria-hidden="true">▲ </span>配置を読み込めませんでした。通信状態を確認して、〔最新に更新〕を押してください。
-          </p>
-        ) : null}
-        {data.staffing !== null && trainers.length === 0 ? (
-          <p role="status" className="rounded border border-warn bg-warn-bg p-2 text-base text-ink">
-            <span aria-hidden="true">▲ </span>この日の機能訓練指導員の配置が記録されていません。
-          </p>
-        ) : null}
-        {dual.length > 0 ? (
-          <p role="status" className="rounded border border-warn bg-warn-bg p-2 text-base text-ink">
-            <span aria-hidden="true">▲ </span>
-            {dual.map((id) => `${staffName(id)}さん`).join('・')}は、機能訓練指導員と看護職員の両方に入っています。兼務の時は時間帯を分けて書いてください。
-          </p>
-        ) : null}
-        {staffingShown.length > 0 ? (
-          <ul className="divide-y divide-border">
-            {STAFFING_ROLES.flatMap((r) => staffingShown.filter((s) => s.role === r)).map((s) => {
-              const p = s.id > 0 ? pendingRow('daycare_staffing', s.id) : undefined
-              return (
-                <li key={s.id} className="flex flex-wrap items-center justify-between gap-gap py-2">
-                  <p className="text-base text-ink">
-                    <span className="font-bold">{STAFFING_ROLE_LABEL[s.role]}</span> {staffName(s.staff_id)}
-                    {staffingTimeText(s) !== '' ? <span className="ml-2 text-ink2">{staffingTimeText(s)}</span> : null}
-                    {s.id < 0 ? <span className="ml-2 text-sm text-warn">（送信待ち）</span> : null}
-                    {p !== undefined ? (
-                      <span className="ml-2 text-sm text-warn">（{p.stopped ? '止まっています' : p.kind === 'update' && p.deleted ? '外す・送信待ち' : '送信待ち'}）</span>
-                    ) : null}
-                  </p>
-                  {s.id > 0 ? (
-                    <button type="button" disabled={!canWrite || busy} onClick={() => setDelStaff(s)} className={btn} aria-label={`${STAFFING_ROLE_LABEL[s.role]} ${staffName(s.staff_id)}さんを配置から外す`}>
-                      外す
-                    </button>
-                  ) : null}
-                </li>
-              )
-            })}
-          </ul>
-        ) : null}
-        {/* min-w-0: fieldset は既定で中身の最小幅より狭くならず、選択欄の長い氏名に引っぱられて横にはみ出した（積み残し 47） */}
-        <fieldset className="min-w-0 space-y-2" disabled={!canWrite || busy}>
-          <legend className="text-base font-bold text-ink">配置に入れる</legend>
-          <div className="flex flex-wrap gap-gap" role="group" aria-label="役割">
-            {STAFFING_ROLES.map((r) => (
-              <button key={r} type="button" aria-pressed={addRole === r} onClick={() => setAddRole(r)} className={chipCls(addRole === r)}>
-                {addRole === r ? <span aria-hidden="true">✓ </span> : null}
-                {STAFFING_ROLE_LABEL[r]}
-              </button>
-            ))}
-          </div>
-          <div className="flex flex-wrap items-end gap-gap">
-            <label className="min-w-0 max-w-full text-sm text-ink2">
-              職員
-              <select value={addStaffId} onChange={(e) => setAddStaffId(e.target.value)} className="mt-1 block min-h-tap max-w-full rounded border border-border-strong bg-surface px-2 text-lg text-ink">
-                <option value="">選んでください</option>
-                {staffList.map((s) => (
-                  <option key={s.id} value={String(s.id)}>
-                    {s.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="text-sm text-ink2">
-              から（任意）
-              <input type="time" value={addFrom} onChange={(e) => setAddFrom(e.target.value)} className="mt-1 block min-h-tap rounded border border-border-strong bg-surface px-2 text-lg text-ink" />
-            </label>
-            <label className="text-sm text-ink2">
-              まで（任意）
-              <input type="time" value={addTo} onChange={(e) => setAddTo(e.target.value)} className="mt-1 block min-h-tap rounded border border-border-strong bg-surface px-2 text-lg text-ink" />
-            </label>
-            <button type="button" disabled={addStaffId === ''} onClick={() => void addStaffing()} className={primaryBtn}>
-              配置に入れる
-            </button>
-          </div>
-        </fieldset>
-        {staffMsg !== null && staffMsg.day === day ? msgBox(staffMsg.msg) : null}
-      </section>
-
-      <DaycareReviewDueSection
-        today={today}
-        residents={residents}
-        copy={data.copy}
-        role={role}
-        actorId={actorId}
-        blockedReason={homeVisitBlocked()}
-        onSynced={scheduleReload}
-        scope={week}
-        arrived={targets}
-      />
-
-      <DaycareHomeVisitSection
-        today={today}
-        residents={residents}
-        targets={targets}
-        staff={staff}
-        actorId={actorId}
-        blockedReason={homeVisitBlocked()}
-        refreshKey={dataTick}
-        scope={week}
-      />
-
       <section aria-labelledby="h-targets" className="space-y-2 rounded-lg border border-border bg-surface p-2">
-        <h2 id="h-targets" className="text-lg font-bold leading-tight text-ink">
-          {day === today ? '今日' : 'この日'}の対象者
-        </h2>
+        {/* 見出しと未入力の数を1段に並べる（2026-11-09 計画B。幅が足りない時は折り返す）。記録を読めない時は数を出さない
+            （下の「読み込めませんでした」の知らせのまま） */}
+        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+          <h2 id="h-targets" className="text-lg font-bold leading-tight text-ink">
+            {day === today ? '今日' : 'この日'}の対象者
+          </h2>
+          {data.sessions !== null && targets.length > 0 ? <DaycareUnfilledCount counts={unfilled} /> : null}
+        </div>
         <p className="text-sm leading-snug text-ink2">
           予定の方（休み・入院中を除く）と予定外で来た方です（五十音順）。〔完了〕は前回と同じ内容・{TRAINING_DEFAULT_MIN}分・配置の機能訓練指導員で記録します（違う時は〔一部〕か、記録の後に〔記録を開く〕で直してください）。
         </p>
@@ -1071,6 +977,112 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
           </div>
         ) : null}
       </section>
+
+      <section aria-labelledby="h-staffing" className="space-y-2 rounded-lg border border-border bg-surface p-2">
+        <h2 id="h-staffing" className="text-lg font-bold leading-tight text-ink">
+          その日の配置
+        </h2>
+        {data.staffing === null && !missing ? (
+          <p role="alert" className="rounded border border-danger bg-danger-bg p-2 text-base text-ink">
+            <span aria-hidden="true">▲ </span>配置を読み込めませんでした。通信状態を確認して、〔最新に更新〕を押してください。
+          </p>
+        ) : null}
+        {data.staffing !== null && trainers.length === 0 ? (
+          <p role="status" className="rounded border border-warn bg-warn-bg p-2 text-base text-ink">
+            <span aria-hidden="true">▲ </span>この日の機能訓練指導員の配置が記録されていません。
+          </p>
+        ) : null}
+        {dual.length > 0 ? (
+          <p role="status" className="rounded border border-warn bg-warn-bg p-2 text-base text-ink">
+            <span aria-hidden="true">▲ </span>
+            {dual.map((id) => `${staffName(id)}さん`).join('・')}は、機能訓練指導員と看護職員の両方に入っています。兼務の時は時間帯を分けて書いてください。
+          </p>
+        ) : null}
+        {staffingShown.length > 0 ? (
+          <ul className="divide-y divide-border">
+            {STAFFING_ROLES.flatMap((r) => staffingShown.filter((s) => s.role === r)).map((s) => {
+              const p = s.id > 0 ? pendingRow('daycare_staffing', s.id) : undefined
+              return (
+                <li key={s.id} className="flex flex-wrap items-center justify-between gap-gap py-2">
+                  <p className="text-base text-ink">
+                    <span className="font-bold">{STAFFING_ROLE_LABEL[s.role]}</span> {staffName(s.staff_id)}
+                    {staffingTimeText(s) !== '' ? <span className="ml-2 text-ink2">{staffingTimeText(s)}</span> : null}
+                    {s.id < 0 ? <span className="ml-2 text-sm text-warn">（送信待ち）</span> : null}
+                    {p !== undefined ? (
+                      <span className="ml-2 text-sm text-warn">（{p.stopped ? '止まっています' : p.kind === 'update' && p.deleted ? '外す・送信待ち' : '送信待ち'}）</span>
+                    ) : null}
+                  </p>
+                  {s.id > 0 ? (
+                    <button type="button" disabled={!canWrite || busy} onClick={() => setDelStaff(s)} className={btn} aria-label={`${STAFFING_ROLE_LABEL[s.role]} ${staffName(s.staff_id)}さんを配置から外す`}>
+                      外す
+                    </button>
+                  ) : null}
+                </li>
+              )
+            })}
+          </ul>
+        ) : null}
+        {/* min-w-0: fieldset は既定で中身の最小幅より狭くならず、選択欄の長い氏名に引っぱられて横にはみ出した（積み残し 47） */}
+        <fieldset className="min-w-0 space-y-2" disabled={!canWrite || busy}>
+          <legend className="text-base font-bold text-ink">配置に入れる</legend>
+          <div className="flex flex-wrap gap-gap" role="group" aria-label="役割">
+            {STAFFING_ROLES.map((r) => (
+              <button key={r} type="button" aria-pressed={addRole === r} onClick={() => setAddRole(r)} className={chipCls(addRole === r)}>
+                {addRole === r ? <span aria-hidden="true">✓ </span> : null}
+                {STAFFING_ROLE_LABEL[r]}
+              </button>
+            ))}
+          </div>
+          <div className="flex flex-wrap items-end gap-gap">
+            <label className="min-w-0 max-w-full text-sm text-ink2">
+              職員
+              <select value={addStaffId} onChange={(e) => setAddStaffId(e.target.value)} className="mt-1 block min-h-tap max-w-full rounded border border-border-strong bg-surface px-2 text-lg text-ink">
+                <option value="">選んでください</option>
+                {staffList.map((s) => (
+                  <option key={s.id} value={String(s.id)}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="text-sm text-ink2">
+              から（任意）
+              <input type="time" value={addFrom} onChange={(e) => setAddFrom(e.target.value)} className="mt-1 block min-h-tap rounded border border-border-strong bg-surface px-2 text-lg text-ink" />
+            </label>
+            <label className="text-sm text-ink2">
+              まで（任意）
+              <input type="time" value={addTo} onChange={(e) => setAddTo(e.target.value)} className="mt-1 block min-h-tap rounded border border-border-strong bg-surface px-2 text-lg text-ink" />
+            </label>
+            <button type="button" disabled={addStaffId === ''} onClick={() => void addStaffing()} className={primaryBtn}>
+              配置に入れる
+            </button>
+          </div>
+        </fieldset>
+        {staffMsg !== null && staffMsg.day === day ? msgBox(staffMsg.msg) : null}
+      </section>
+
+      <DaycareReviewDueSection
+        today={today}
+        residents={residents}
+        copy={data.copy}
+        role={role}
+        actorId={actorId}
+        blockedReason={homeVisitBlocked()}
+        onSynced={scheduleReload}
+        scope={week}
+        arrived={targets}
+      />
+
+      <DaycareHomeVisitSection
+        today={today}
+        residents={residents}
+        targets={targets}
+        staff={staff}
+        actorId={actorId}
+        blockedReason={homeVisitBlocked()}
+        refreshKey={dataTick}
+        scope={week}
+      />
 
       <ModalShell open={ed !== null} label={ed?.row === null ? '機能訓練を記録する' : '機能訓練の記録'} onClose={() => setEditor(null)}>
         {ed !== null ? (

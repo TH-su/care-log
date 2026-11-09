@@ -294,11 +294,14 @@ describe('「許可リスト外か」の確かめは同じ瞬間の分を1本に
 describe('今日の画面の読み込みの配線', () => {
   const t = read('../src/pages/DaycarePage.tsx')
   it('1日の読み込みは loadDaycareDayParts を通し、バイタルは生きている行だけを読む', () => {
-    assert.match(t, /await loadDaycareDayParts\(target, DAY_READERS\)/)
+    // 2026-11-09 計画B（固定し直し・意図は同じ）: 機能訓練の記録（カードの「訓」の印）も同時に出す（loadDaycareDayParts と並べて待つ・
+    // 読めない時は null＝画面の他の部分を止めない）
+    assert.match(t, /await Promise\.all\(\[\s*loadDaycareDayParts\(target, DAY_READERS\),\s*fetchTrainingSessions\(target\)\.catch\(\(\): DaycareTrainingSession\[\] \| null => null\),\s*\]\)/)
     assert.match(t, /vitals: fetchDaycareVitalsLive,/)
     assert.doesNotMatch(t, /fetchDaycareVitals\(/)
-    // 活動を出欠などの後に別に待たない
+    // 活動・機能訓練を出欠などの後に別に待たない
     assert.doesNotMatch(t, /await fetchDaycareActivities\(/)
+    assert.doesNotMatch(t, /await fetchTrainingSessions\(/)
   })
   it('世代と日付の確かめは画面に残す', () => {
     assert.match(t, /if \(gen !== genRef\.current \|\| target !== dayRef\.current\) return/)

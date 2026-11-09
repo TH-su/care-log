@@ -44,6 +44,7 @@ import {
 } from '../lib/db'
 import type { CellConflict, CellEditInput, VitalCellField, VitalTarget } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
+import { DaycareUnfilledCount } from '../components/DaycareUnfilledCount'
 import { ConfirmDialog, ErrorBlock, LoadingBlock } from '../components/ui'
 import { registerUnsaved } from '../lib/leaveGuard'
 import { useTableFit } from '../lib/useTableFit'
@@ -80,6 +81,7 @@ import {
   vitalRangeError,
 } from '../lib/daycare'
 import { writeDaycareHandoffFor } from '../lib/daycareHandoff'
+import { attendedUnfilledCount, vitalSlotsFilled } from '../lib/daycareProgress'
 import type { DaycareBoardRow, DaycareReleaseIssue, DaycareVitalField, DaycareVitalSlot, DcVitalsFilter, KeyedVital } from '../lib/daycare'
 import { useVitalLimits } from '../hooks/useVitalLimits'
 import { vitalThresholds } from '../lib/vitalThresholds'
@@ -887,6 +889,15 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   }, [active, tableBox, kpBox, kpHeight])
 
   // ── 描画 ──
+  // 未入力の数（2026-11-09 計画B・一括の4画面で同じ数え方）。数える方は「表示する方」によらず予定の方（daycareBulkRows＝休み・入院中を
+  // 除く）で、在席・帰宅の方だけ。入力済み＝どれかの回のどれかの欄に値がある（画面に出している値＝端末の値・送信待ち・サーバーの値）
+  const countRows = board === null || data === null || data.day !== day ? [] : daycareBulkRows(board.rows)
+  const unfilled = attendedUnfilledCount(
+    countRows.map((r) => ({
+      state: r.state,
+      filled: vitalSlotsFilled(slotsOf(r.residentId).map((slot) => DAYCARE_VITAL_FIELDS.map((f) => valueOf(slot, f).v))),
+    })),
+  )
   // 上の段は詰める（日付と「表示する方」を1段に・余白と文字を小さく＝2026-11-09 代表者の指示「一括入力の画面で、もっと多くの行が出るように」）
   const header = (
     <div className="space-y-2">
@@ -955,6 +966,8 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
             </button>
           ))}
         </div>
+        {/* 未入力の数は日付と「表示する方」の段の右（新しい段を足さない・幅が足りない時は折り返す） */}
+        {countRows.length > 0 ? <DaycareUnfilledCount counts={unfilled} /> : null}
       </div>
       {releasing ? (
         <p role="status" className="text-base text-ink2">
