@@ -82,15 +82,25 @@ if (P === null) {
       assert.deepEqual(t(row({ state: 'absent', attendance: att({ absent: true }) })), ['absent', '✕', '休み（理由なし）', muted])
       assert.deepEqual(t(row({ hospitalized: true })), ['hospitalized', '－', '入院中', muted])
     })
-    it('予定の誤り（dup・同じ日に2件）は今の文言のまま頭に ▲（まだ来ていない方）。来た方・休みの方は状態を出す', () => {
-      assert.deepEqual(
-        [P.daycareStateTone(row({ dup: true })).mark, P.daycareStateTone(row({ dup: true })).word],
-        ['▲', '予定 要確認（週間計画にこの方の記録が2件あります）'],
-      )
-      const two = row({ plans: [{ start: '09:30', end: '12:00', bathing: false }, { start: '13:00', end: '15:30', bathing: false }] })
-      assert.equal(P.daycareStateTone(two).word, '予定 要確認（週間計画にこの方の予定が同じ日に2件あります）')
-      assert.equal(P.daycareStateTone(two).mark, '▲')
-      assert.equal(P.daycareStateTone(row({ dup: true, state: 'present', attendance: att({ arrived_at: '10:05' }) })).word, '在席 10:05〜')
+    it('予定の誤り（dup・同じ日に2件）はどの状態でも出す（反証 中3）: まだ来ていない方は状態の段（頭に ▲）・ほかは状態の段の下に1行', () => {
+      const DUP = '予定 要確認（週間計画にこの方の記録が2件あります）'
+      const TWO = '予定 要確認（週間計画にこの方の予定が同じ日に2件あります）'
+      const twoPlans = [{ start: '09:30', end: '12:00', bathing: false }, { start: '13:00', end: '15:30', bathing: false }]
+      const w = (r) => {
+        const x = P.daycareStateTone(r)
+        return [x.kind, x.mark, x.word, x.planWarn]
+      }
+      assert.deepEqual(w(row({ dup: true })), ['planError', '▲', DUP, null])
+      assert.deepEqual(w(row({ plans: twoPlans })), ['planError', '▲', TWO, null])
+      assert.deepEqual(w(row({ dup: true, state: 'present', attendance: att({ arrived_at: '10:05' }) })), ['present', '●', '在席 10:05〜', DUP])
+      assert.deepEqual(w(row({ plans: twoPlans, state: 'left', attendance: att({ arrived_at: '10:05', left_at: '15:10' }) })), ['left', '✓', '帰宅 15:10', TWO])
+      assert.deepEqual(w(row({ dup: true, state: 'absent', attendance: att({ absent: true, absent_reason: 'wish' }) })), ['absent', '✕', '休み（本人の希望）', DUP])
+      assert.deepEqual(w(row({ dup: true, hospitalized: true })), ['hospitalized', '－', '入院中', DUP])
+      // 誤りが無い方は1行足さない
+      for (const r of [row(), row({ state: 'present', attendance: att({ arrived_at: '09:00' }) }), row({ state: 'absent', attendance: att({ absent: true }) })]) {
+        assert.equal(P.daycareStateTone(r).planWarn, null)
+      }
+      assert.equal(P.daycarePlanWarning({ dup: false, plans: [] }), null)
     })
   })
 
@@ -115,7 +125,8 @@ if (P === null) {
       hospitalized: false,
       vitals: { done: false, abnormal: false },
       lunch: null,
-      activityCount: 0,
+      lunchRead: true,
+      activity: false,
       training: false,
       bath: { kind: 'noPlan' },
     }
@@ -128,21 +139,46 @@ if (P === null) {
       assert.deepEqual(ms.map((m) => m.label), ['バイタル', '昼食', '活動', '訓練', '入浴'])
       assert.deepEqual(P.PROGRESS_STATE_WORD, { done: '済', todo: '未', na: '対象外', check: '要確認', unread: '読み込めません' })
     })
-    it('札の形（色だけに頼らない）: 塗り＝済・点線＝未・枠なし＝対象外・太枠＝要確認・細かい点線＝読めない', () => {
+    it('札の形（色だけに頼らない）: 実線＝済・点線＝未・枠なし＝対象外・太枠＝要確認・細い点線＝読めない', () => {
+      // 2026-11-09 反証 軽3（固定し直し・意図は同じ）: 済の地は bg-surface（在席のカードの地 bg-ok-bg と同じ色にしない）
       assert.deepEqual(P.PROGRESS_MARK_CLS, {
-        done: 'border border-ok bg-ok-bg font-bold text-ok',
+        done: 'border border-ok bg-surface font-bold text-ok',
         todo: 'border border-dashed border-ink2 text-ink',
         na: 'border border-transparent text-ink3',
         check: 'border-2 border-warn bg-warn-bg font-bold text-ink',
         unread: 'border border-dotted border-ink2 text-ink2',
       })
+      // 親の決定 2026-11-09: 「?」はやめた（札の文字はどの状態も同じ）。読めない項目は一覧の上の1行の知らせで名前を出す
+      assert.equal(P.progressMarkText, undefined)
     })
-    it('バイタル: 来ていない → 対象外・異常 → 要確認・測った → 済・ほか → 未', () => {
+    it('読めなかった項目の知らせ（unreadProgressLabels・unreadProgressNotice）: 名前だけを印の順に並べる・無ければ出さない', () => {
+      const ok = { vitalsOk: true, intakeOk: true, activitiesOk: true, trainingOk: true, bathsOk: true }
+      assert.deepEqual(P.unreadProgressLabels(ok), [])
+      assert.equal(P.unreadProgressNotice([]), null)
+      assert.deepEqual(P.unreadProgressLabels({ ...ok, activitiesOk: false, trainingOk: false }), ['活動', '機能訓練'])
+      assert.equal(
+        P.unreadProgressNotice(P.unreadProgressLabels({ ...ok, activitiesOk: false, trainingOk: false })),
+        '活動・機能訓練の記録を読み込めませんでした（印は細い点線）。通信状態を確認して、〔最新に更新〕を押してください。',
+      )
+      assert.deepEqual(
+        P.unreadProgressLabels({ vitalsOk: false, intakeOk: false, activitiesOk: false, trainingOk: false, bathsOk: false }),
+        ['バイタル', '昼食', '活動', '機能訓練', '入浴'],
+      )
+    })
+    it('バイタル: 異常 → 要確認・測った → 済（来ていない方でも値があれば＝反証 中4）・値が無い → 来た方は未・ほかは対象外・読めない → 読めない', () => {
       assert.equal(st({}).vitals, 'todo')
       assert.equal(st({ state: 'left' }).vitals, 'todo')
       assert.equal(st({ vitals: { done: true, abnormal: false } }).vitals, 'done')
       assert.equal(st({ vitals: { done: true, abnormal: true } }).vitals, 'check')
-      for (const s of ['planned', 'absent']) assert.equal(st({ state: s, vitals: { done: true, abnormal: true } }).vitals, 'na', s)
+      // 2026-11-09 反証 中4（固定し直し・意図は同じ）: 来ていない方も、値がある時は 異常→要確認・測った→済（値が無い時だけ対象外）
+      for (const s of ['planned', 'absent']) {
+        assert.equal(st({ state: s, vitals: { done: true, abnormal: true } }).vitals, 'check', s)
+        assert.equal(st({ state: s, vitals: { done: true, abnormal: false } }).vitals, 'done', s)
+        assert.equal(st({ state: s, vitals: { done: false, abnormal: false } }).vitals, 'na', s)
+      }
+      // 反証 中6: 読めない時は「未」に見せない
+      assert.equal(st({ vitals: null }).vitals, 'unread')
+      assert.equal(st({ state: 'planned', vitals: null }).vitals, 'unread')
     })
     it('昼食: 来た → 拒食か主食・副食の両方 → 済・ほか → 未／来ていない → 入力済みなら済・ほか → 対象外', () => {
       const full = { main_amount: 5, side_amount: 8, status: 'eaten' }
@@ -156,14 +192,18 @@ if (P === null) {
       assert.equal(st({ state: 'planned', lunch: half }).lunch, 'na')
       assert.equal(st({ state: 'planned', lunch: full }).lunch, 'done')
       assert.equal(st({ state: 'absent', lunch: refused }).lunch, 'done')
+      // 反証 中6: 昼食を読めない（intakeOk=false）時は「読めない」
+      assert.equal(st({ lunchRead: false, lunch: null }).lunch, 'unread')
+      assert.equal(st({ lunchRead: false, state: 'planned' }).lunch, 'unread')
     })
     it('活動・訓練: 読めない → 読めない（来た・来ていないとも）・来た → 記録があれば済・ほか未／来ていない → 記録があれば済・ほか対象外', () => {
-      assert.equal(st({ activityCount: null }).activity, 'unread')
-      assert.equal(st({ state: 'planned', activityCount: null }).activity, 'unread')
-      assert.equal(st({ activityCount: 0 }).activity, 'todo')
-      assert.equal(st({ activityCount: 2 }).activity, 'done')
-      assert.equal(st({ state: 'planned', activityCount: 0 }).activity, 'na')
-      assert.equal(st({ state: 'absent', activityCount: 1 }).activity, 'done')
+      // 2026-11-09 反証 中1（固定し直し・意図は同じ）: 活動は数でなく「記録がある」（送信待ちを重ねた値＝activityShownCells）で渡す
+      assert.equal(st({ activity: null }).activity, 'unread')
+      assert.equal(st({ state: 'planned', activity: null }).activity, 'unread')
+      assert.equal(st({ activity: false }).activity, 'todo')
+      assert.equal(st({ activity: true }).activity, 'done')
+      assert.equal(st({ state: 'planned', activity: false }).activity, 'na')
+      assert.equal(st({ state: 'absent', activity: true }).activity, 'done')
       assert.equal(st({ training: null }).training, 'unread')
       assert.equal(st({ state: 'absent', training: null }).training, 'unread')
       assert.equal(st({ training: false }).training, 'todo')
@@ -183,6 +223,9 @@ if (P === null) {
       assert.equal(st({ state: 'absent', bath: { kind: 'todo' } }).bath, 'na')
       assert.equal(st({ state: 'planned', hospitalized: true, bath: { kind: 'todo' } }).bath, 'na')
       assert.equal(st({ state: 'present', hospitalized: true, bath: { kind: 'todo' } }).bath, 'todo', '入院中の印は予定のままの方だけ')
+      // 反証 中6: 入浴を読めない時は「読めない」（休みの方も）
+      assert.equal(st({ bath: null }).bath, 'unread')
+      assert.equal(st({ state: 'absent', bath: null }).bath, 'unread')
     })
   })
 
@@ -222,19 +265,90 @@ if (P === null) {
       assert.equal(P.trainingFilled([], [{ kind: 'update', table: 'daycare_training_sessions', rowId: 4, deleted: false, stopped: false }], 4, '2026-11-09'), false)
     })
     it('切り替えの数（daycareNavPending）: 来た方で印が「未」の数だけ・読めない印は数えない・0 は入れない', () => {
-      const base = { hospitalized: false, vitals: { done: false, abnormal: false }, lunch: null, activityCount: 0, training: null, bath: { kind: 'todo' } }
+      const base = { hospitalized: false, vitals: { done: false, abnormal: false }, lunch: null, lunchRead: true, activity: false, training: null, bath: { kind: 'todo' } }
       const rows = [
         { state: 'present', marks: P.daycareProgressMarks({ ...base, state: 'present' }) },
-        { state: 'left', marks: P.daycareProgressMarks({ ...base, state: 'left', vitals: { done: true, abnormal: false }, activityCount: 1 }) },
+        { state: 'left', marks: P.daycareProgressMarks({ ...base, state: 'left', vitals: { done: true, abnormal: false }, activity: true }) },
         { state: 'planned', marks: P.daycareProgressMarks({ ...base, state: 'planned' }) },
       ]
       assert.deepEqual(P.daycareNavPending(rows), { vitals: 1, meals: 2, activity: 1 })
+      // 反証 中6: 読めない項目（バイタル・昼食・活動）は数を出さない
+      const unread = { ...base, vitals: null, lunchRead: false, activity: null, state: 'present' }
+      assert.deepEqual(P.daycareNavPending([{ state: 'present', marks: P.daycareProgressMarks(unread) }]), {})
       assert.deepEqual(P.daycareNavPending([]), {})
       assert.equal(P.navPendingOf(undefined, 'vitals'), null)
       assert.equal(P.navPendingOf({ vitals: 0 }, 'vitals'), null)
       assert.equal(P.navPendingOf({ vitals: 1.5 }, 'vitals'), null)
       assert.equal(P.navPendingOf({ vitals: 5 }, 'vitals'), 5)
       assert.equal(P.navPendingOf({ vitals: 5 }, 'today'), null)
+    })
+  })
+
+  describe('送信待ちの重ね（今日の画面と一括の画面で同じ純関数・反証 中1）', () => {
+    it('昼食（lunchShownWith＝食事一括の mealShownFor）: 送っている途中の値だけ重ねる・止まった値（食い違い）・拒まれた値は重ねない・順番待ちが先', () => {
+      const cur = { main_amount: null, side_amount: null, status: 'eaten' }
+      assert.equal(P.lunchShownWith(cur, null), cur)
+      assert.equal(P.lunchShownWith(null, null), null)
+      assert.deepEqual(P.lunchShownWith(cur, { state: 'pending', values: { main_amount: 8 } }), { main_amount: 8, side_amount: null, status: 'eaten' })
+      assert.deepEqual(P.lunchShownWith(null, { state: 'pending', values: { status: 'refused' } }), { main_amount: null, side_amount: null, status: 'refused' })
+      for (const state of ['conflict', 'rejected']) assert.equal(P.lunchShownWith(cur, { state, values: { main_amount: 8, side_amount: 8 } }), cur, state)
+      // 順番待ち（後に押した方）→ 送信待ち → サーバー
+      assert.deepEqual(
+        P.lunchShownWith(cur, { state: 'pending', values: { main_amount: 8, side_amount: 6 } }, [{ values: { main_amount: 3 } }, { values: { main_amount: 5 } }]),
+        { main_amount: 5, side_amount: 6, status: 'eaten' },
+      )
+      // 今日の画面でも同じ決まりで入力済みになる（送信待ちの主食・副食がそろえば済）
+      assert.equal(P.lunchFilled(P.lunchShownWith(null, { state: 'pending', values: { main_amount: 8, side_amount: 7 } })), true)
+      assert.equal(P.lunchFilled(P.lunchShownWith(null, { state: 'conflict', values: { main_amount: 8, side_amount: 7 } })), false)
+    })
+    it('バイタル（daycareVitalSlotsWithPending・vitalShownValue＝バイタル一括の slotsOf・valueOf）: 送信待ちにだけある回も出す・送信待ちの値はどの状態でも重ねる', () => {
+      const D = '2026-11-09'
+      const live = [{ id: 11, resident_id: 7, client_key: `dc:${D}:7:1`, temp: 36.5, sys_bp: null, dia_bp: null, pulse: null, spo2: null }]
+      const keys = live.map((v) => v.client_key)
+      const pend = new Set([`dc:${D}:7:2`])
+      const slots = P.daycareVitalSlotsWithPending(live, keys, 7, D, [], (k) => pend.has(k))
+      assert.deepEqual(slots.map((x) => [x.seq, x.vital?.id ?? null]), [[1, 11], [2, null]])
+      // 送信待ちが無い方は1回分の空の回（バイタル一括と同じ）
+      assert.deepEqual(P.daycareVitalSlotsWithPending([], [], 8, D, [], () => false).map((x) => x.seq), [1])
+      assert.deepEqual(P.vitalShownValue(null, live[0], 'temp'), { v: 36.5, local: false })
+      assert.deepEqual(P.vitalShownValue({ values: { temp: 37.9 } }, live[0], 'temp'), { v: 37.9, local: true })
+      assert.deepEqual(P.vitalShownValue({ values: { temp: null } }, live[0], 'temp'), { v: null, local: true }, '送信待ちで消した値は空')
+      assert.deepEqual(P.vitalShownValue({ values: { temp: 'x' } }, null, 'temp'), { v: null, local: true }, '数でない値は信じない')
+      assert.deepEqual(P.vitalShownValues({ values: { dia_bp: 70 } }, null), { temp: null, sys_bp: null, dia_bp: 70, pulse: null, spo2: null })
+      // 血圧の下だけでも測った（反証 軽4）
+      assert.equal(P.vitalSlotsFilled([Object.values(P.vitalShownValues({ values: { dia_bp: 70 } }, null))]), true)
+    })
+    it('活動（activityShownCells＝活動一括の cellOf と同じ重ね方）: 止まっていない変更・取り消しを重ねる・止まった変更は重ねない・追加は止まっていても出す', () => {
+      const D = '2026-11-09'
+      const rows = [
+        { id: 1, resident_id: 5, day: D, label: '体操', participation: 'full' },
+        { id: 2, resident_id: 5, day: D, label: '歌', participation: 'partial' },
+        { id: 3, resident_id: 6, day: D, label: '体操', participation: 'full' },
+      ]
+      const shown = (pending, rid = 5) => Object.fromEntries(P.activityShownCells(rows, pending, rid, D).map((c) => [c.label, [c.shown, c.deleting]]))
+      assert.deepEqual(shown([]), { 体操: ['full', false], 歌: ['partial', false] })
+      // 止まっていない度合いの変更は重ねる・止まった変更は重ねない（サーバーの値）
+      assert.deepEqual(shown([{ kind: 'update', rowId: 1, participation: 'observed', deleted: false, stopped: false }]).体操, ['observed', false])
+      assert.deepEqual(shown([{ kind: 'update', rowId: 1, participation: 'observed', deleted: false, stopped: true }]).体操, ['full', false])
+      // 止まっていない取り消しは「取り消しの送信待ち」（入力済みに数えない）・止まった取り消しは重ねない
+      assert.deepEqual(shown([{ kind: 'update', rowId: 1, participation: null, deleted: true, stopped: false }]).体操, ['full', true])
+      assert.deepEqual(shown([{ kind: 'update', rowId: 1, participation: null, deleted: true, stopped: true }]).体操, ['full', false])
+      // 取り消しの後に入れ直した送信待ちの追加は、その度合い
+      assert.deepEqual(
+        shown([
+          { kind: 'update', rowId: 1, participation: null, deleted: true, stopped: false },
+          { kind: 'add', residentId: 5, day: D, label: '体操', participation: 'partial', stopped: false },
+        ]).体操,
+        ['partial', false],
+      )
+      // サーバーに無い項目の追加は、止まっていない方 → 止まった方。別の方・別の日の追加は入れない
+      assert.deepEqual(shown([{ kind: 'add', residentId: 5, day: D, label: '散歩', participation: 'full', stopped: true }]).散歩, ['full', false])
+      assert.deepEqual(P.activityShownCells([], [{ kind: 'add', residentId: 9, day: D, label: '散歩', participation: 'full', stopped: false }], 5, D), [])
+      assert.deepEqual(P.activityShownCells([], [{ kind: 'add', residentId: 5, day: '2026-11-08', label: '散歩', participation: 'full', stopped: false }], 5, D), [])
+      // 入力済み: 全部の枠が取り消しの送信待ちなら未
+      assert.equal(P.activityCellsFilled(P.activityShownCells(rows, [], 6, D)), true)
+      assert.equal(P.activityCellsFilled(P.activityShownCells(rows, [{ kind: 'update', rowId: 3, participation: null, deleted: true, stopped: false }], 6, D)), false)
+      assert.equal(P.activityCellsFilled(P.activityShownCells(rows, [{ kind: 'add', residentId: 7, day: D, label: '歌', participation: 'full', stopped: false }], 7, D)), true)
     })
   })
 }
@@ -268,22 +382,27 @@ describe('静的検査（計画B）', () => {
     assert.match(list, /<p className="break-words text-sm font-bold leading-tight text-ink">\s*<span aria-hidden="true">\{tone\.mark\} <\/span>\s*\{tone\.word\}\s*<\/p>/)
     // 氏名は text-ink（休みの方も）
     assert.match(list, /<span className="block break-words text-base font-bold leading-tight text-ink">/)
+    // 予定の誤りは、来た方・休みの方・入院中の方でも状態の段の下に1行（反証 中3）。印の段より上
+    assert.ok(iState < list.indexOf('{tone.planWarn}') && list.indexOf('{tone.planWarn}') < iMarks)
   })
   it('進み具合の印は押せない表示（button・a・Link・onClick でない）。読み上げの言葉（sr-only）と title を持つ', () => {
     const marks = list.slice(list.indexOf('{marks.map((mk) => ('), list.indexOf('{pending ? ('))
     assert.ok(marks.length > 100)
     assert.doesNotMatch(marks, /<button|<a\b|<Link|onClick|role="button"|tabIndex/)
     assert.match(marks, /title=\{`\$\{mk\.label\}: \$\{PROGRESS_STATE_WORD\[mk\.state\]\}`\}/)
+    // 札の文字はどの状態も同じ（VS・食・活・訓・浴。読めない札は細い点線だけ＝親の決定 2026-11-09）
     assert.match(marks, /<span aria-hidden="true">\{mk\.short\}<\/span>\s*<span className="sr-only">\s*\{mk\.label\} \{PROGRESS_STATE_WORD\[mk\.state\]\}\s*<\/span>/)
+    assert.doesNotMatch(today, /progressMarkText/)
     assert.match(list, /<p className="flex flex-wrap gap-1">\s*\{marks\.map\(\(mk\) => \(/)
     // カードのボタンは今までどおり2つ（〔休み〕〔取消〕）だけ
     assert.equal((list.match(/<button/g) ?? []).length, 2)
   })
   it('印の説明は一覧の下（〔＋ 予定にない方を追加〕の横）に1行。上の段には足さない', () => {
-    const legend = '印: VS バイタル・食 昼食・活 活動・訓 訓練・浴 入浴（塗り＝済・点線＝未・枠なし＝対象外・太枠＝要確認）'
+    // 2026-11-09 反証 軽2・軽3（固定し直し・意図は同じ）: 済は「実線」（地を塗らない）・「細い点線＝読めない」を足した
+    const legend = '印: VS バイタル・食 昼食・活 活動・訓 訓練・浴 入浴（実線＝済・点線＝未・枠なし＝対象外・太枠＝要確認・細い点線＝読めない）'
     assert.equal(today.split(legend).length, 2, '1か所だけ')
     assert.ok(today.indexOf(legend) > today.indexOf('＋ 予定にない方を追加'))
-    assert.match(today, new RegExp(`<p className="text-sm text-ink2">${legend.replace(/[()（）]/g, '.')}</p>`))
+    assert.match(today, new RegExp(`<p className="text-sm text-ink2">${legend.replace(/[()（）?]/g, '.')}</p>`))
     const header = today.slice(today.indexOf('const header = (counts'), today.indexOf('if (loading && data === null)'))
     assert.doesNotMatch(header, /VS バイタル/)
   })
@@ -291,8 +410,41 @@ describe('静的検査（計画B）', () => {
     assert.match(today, /fetchTrainingSessions\(target\)\.catch\(\(\): DaycareTrainingSession\[\] \| null => null\)/)
     assert.match(today, /training: trainingRead === null \? null : trainingFilled\(trainingRead, trainingPending, id, data\.day\)/)
     assert.match(today, /const trainingPending = trainingRead === null \? \[\] : pendingTrainingOps\(\)/)
-    assert.match(today, /activityCount: data\.activities === null \? null : data\.activities\.filter\(\(x\) => x\.resident_id === id && x\.day === data\.day\)\.length/)
-    assert.match(today, /const navPending = daycareNavPending\(board\.rows\.map/)
+    // 購読は増やさない（機能訓練の変更は購読しない＝親の決定）
+    assert.doesNotMatch(today, /subscribeDaycareTrainingChanges/)
+  })
+  it('今日の画面の印と切り替えの数は送信待ちを一括の画面と同じ純関数で重ねる（反証 中1）・読めない項目は「読めない」（中6）', () => {
+    // 昼食: 食事一括の mealShownFor と同じ lunchShownWith（送っている途中の値だけ）
+    assert.match(today, /lunch: lunchShownWith\(lunchOf\(id\), pendingRow\('meals', \{ residentId: id, day: data\.day, slot: 'lunch' \}\)\)/)
+    assert.match(BULK.meals, /lunchShownWith\(mealRowFor\(t\)\?\.meal \?\? null, pendingRow\('meals', t\), waiting\[mealKeyOf\(t\)\] \?\? \[\]\)/)
+    // バイタル: バイタル一括の slotsOf・valueOf と同じ daycareVitalSlotsWithPending・vitalShownValue(s)
+    assert.match(today, /daycareVitalSlotsWithPending\(vitalsOf\(id\), vitalKeys, id, data\.day, \[\], \(key\) => pendingRow\('vitals', vitalTarget\(id, key\)\) !== null\)/)
+    assert.match(today, /vals: vitalShownValues\(pendingRow\('vitals', vitalTarget\(id, slot\.key\)\), slot\.vital\)/)
+    assert.match(BULK.vitals, /return daycareVitalSlotsWithPending\(\s*data\.live,\s*data\.keys,\s*residentId,\s*data\.day,\s*extraSeqs\.get\(residentId\) \?\? \[\],/)
+    assert.match(BULK.vitals, /return vitalShownValue\(pendingRow\('vitals', targetOf\(slot\)\), slot\.vital, f\)/)
+    // 血圧の下も「測った」に入れる（反証 軽4）＝5つの欄（DAYCARE_VITAL_FIELDS）のどれか
+    assert.match(today, /const vitalsDone = \(id: number\) => vitalSlotsFilled\(\(vitalShown\.get\(id\) \?\? \[\]\)\.map\(\(s\) => DAYCARE_VITAL_FIELDS\.map\(\(f\) => s\.vals\[f\]\)\)\)/)
+    assert.doesNotMatch(today, /v\.temp !== null \|\| v\.sys_bp !== null/)
+    // 活動: 活動一括の数と同じ activityShownCells（枠の cellOf と同じ重ね方）
+    assert.match(today, /activity: activityRead === null \? null : activityCellsFilled\(activityShownCells\(activityRead, activityPending, id, data\.day\)\)/)
+    assert.match(today, /const activityPending = activityRead === null \? \[\] : pendingActivityOps\(\)/)
+    assert.match(BULK.activity, /filled: activityCellsFilled\(activityShownCells\(data\.activities \?\? \[\], pending, rid, day\)\)/)
+    // 読めない: バイタル・入浴（daycareDayLoad の vitalsOk・bathsOk）・昼食（intakeOk）
+    assert.match(today, /vitals: data\.vitalsOk \? \{ done: vDone, abnormal: vDone && vitalsAbnormal\(id\) \} : null/)
+    assert.match(today, /lunchRead: data\.intakeOk/)
+    assert.match(today, /bath: data\.bathsOk \? daycareBathStatus\(bathOf\(id\), r\.bathingPlanned\) : null/)
+    assert.match(today, /bathsOk,\s*vitalsOk,\s*meals: intake\?\.meals \?\? \[\]/)
+  })
+  it('読めなかった項目があれば、一覧の上（PlanBanners の次）に1行の知らせ（role="status"・ほかの帯と同じ見た目）。カードがある時だけ', () => {
+    const iPlan = today.indexOf('<PlanBanners data={data}')
+    const iNote = today.indexOf('{unreadNotice !== null && board.rows.length > 0 ? (')
+    const iCards = today.indexOf('<ul className="dc-cards"')
+    assert.ok(iPlan > 0 && iPlan < iNote && iNote < iCards)
+    assert.match(today, /\{unreadNotice !== null && board\.rows\.length > 0 \? \(\s*<p role="status" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">\s*<span aria-hidden="true">▲ <\/span>\s*\{unreadNotice\}\s*<\/p>/)
+    assert.match(today, /unreadProgressLabels\(\{\s*vitalsOk: data\.vitalsOk,\s*intakeOk: data\.intakeOk,\s*activitiesOk: data\.activities !== null,\s*trainingOk: data\.training !== null,\s*bathsOk: data\.bathsOk,\s*\}\)/)
+  })
+  it('切り替えの数は今日を見ている時だけ渡す（リンクの先は今日を開く＝反証 中2）', () => {
+    assert.match(today, /const navPending =\s*data\.day === today \? daycareNavPending\(board\.rows\.map\([\s\S]*?\) : undefined/)
   })
   it('DaycareNav: 省略できる pending（今日の画面だけ渡す）・0 は出さない（navPendingOf）・「未5」＋読み上げ「（未入力 5名）」・44px のまま', () => {
     assert.match(nav, /pending\?: DaycareNavPending/)
@@ -310,13 +462,16 @@ describe('静的検査（計画B）', () => {
     // バイタル一括: 日付と「表示する方」の段の右
     const v = BULK.vitals
     assert.ok(v.indexOf('aria-label="表示する方"') < v.indexOf('<DaycareUnfilledCount counts={unfilled} />'))
-    assert.match(v, /<\/div>\s*(\{\}\s*)?\{countRows\.length > 0 \? <DaycareUnfilledCount counts=\{unfilled\} \/> : null\}\s*<\/div>\s*\{releasing \? \(/)
+    // 2026-11-09 反証 軽1（固定し直し・意図は同じ）: 残りの幅が 16rem 以上あれば同じ段に置き、収まらない分は数の中で折り返す（段の間は 12px）
+    assert.match(v, /<\/div>\s*(\{\}\s*)?\{countRows\.length > 0 \? \(\s*<div className="min-w-0 grow basis-64">\s*<DaycareUnfilledCount counts=\{unfilled\} \/>\s*<\/div>\s*\) : null\}\s*<\/div>\s*\{releasing \? \(/)
+    assert.match(v, /<div className="flex flex-wrap items-center gap-x-3 gap-y-2">\s*<div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">/)
     assert.match(v, /const countRows = board === null \|\| data === null \|\| data\.day !== day \? \[\] : daycareBulkRows\(board\.rows\)/)
     assert.match(v, /filled: vitalSlotsFilled\(slotsOf\(r\.residentId\)\.map\(\(slot\) => DAYCARE_VITAL_FIELDS\.map\(\(f\) => valueOf\(slot, f\)\.v\)\)\)/)
     // 活動一括: 見出しの段（読めない時は出さない）
     const a = BULK.activity
     assert.match(a, /<div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">\s*<h2 id="h-bulk" className="text-lg font-bold leading-tight text-ink">\s*活動一括\s*<\/h2>\s*\{readable && targets\.length > 0 \? <DaycareUnfilledCount counts=\{unfilled\} \/> : null\}\s*<\/div>/)
-    assert.match(a, /filled: activityCellsFilled\(\[\.\.\.DAYCARE_ACTIVITY_CHIPS, \.\.\.otherLabelsOf\(rid\)\]\.map\(\(l\) => cellOf\(rid, l\)\)\)/)
+    // 2026-11-09 反証 中1（固定し直し・意図は同じ）: 重ね方は枠（cellOf）と同じ決まりの純関数 activityShownCells（今日の画面と同じ関数）
+    assert.match(a, /filled: activityCellsFilled\(activityShownCells\(data\.activities \?\? \[\], pending, rid, day\)\)/)
     // 機能訓練: 見出し「今日の対象者」の段（読めない時は出さない）
     const t = BULK.training
     assert.match(t, /<div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">\s*<h2 id="h-targets" className="text-lg font-bold leading-tight text-ink">\s*\{day === today \? '今日' : 'この日'\}の対象者\s*<\/h2>\s*\{data\.sessions !== null && targets\.length > 0 \? <DaycareUnfilledCount counts=\{unfilled\} \/> : null\}\s*<\/div>/)
@@ -359,6 +514,18 @@ describe('静的検査（計画B）', () => {
     // 配置の注意を対象者の上に足さない
     const above = body.slice(0, body.indexOf('aria-labelledby="h-targets"'))
     assert.doesNotMatch(above, /機能訓練指導員の配置が記録されていません/)
+  })
+  it('機能訓練: 配置を読み込めない時の知らせを、今日の対象者の区画の先頭にも同じ文で出す（反証 中5・読み上げの知らせは配置の区画の1か所）', () => {
+    const t = BULK.training
+    assert.match(t, /const MSG_STAFFING_UNREAD = '配置を読み込めませんでした。通信状態を確認して、〔最新に更新〕を押してください。'/)
+    const sec = t.slice(t.indexOf('aria-labelledby="h-targets"'), t.indexOf('aria-labelledby="h-staffing"'))
+    const top = sec.slice(0, sec.indexOf('<table'))
+    assert.match(top, /\{data\.staffing === null && !missing \? \(\s*<p className="rounded border border-danger bg-danger-bg p-2 text-base text-ink">\s*<span aria-hidden="true">▲ <\/span>\s*\{MSG_STAFFING_UNREAD\}/)
+    // 見出しの段の次（説明文より上）
+    assert.ok(top.indexOf('</h2>') < top.indexOf('{MSG_STAFFING_UNREAD}') && top.indexOf('{MSG_STAFFING_UNREAD}') < top.indexOf('予定の方（休み・入院中を除く）'))
+    const staffing = t.slice(t.indexOf('aria-labelledby="h-staffing"'), t.indexOf('<DaycareReviewDueSection'))
+    assert.match(staffing, /\{data\.staffing === null && !missing \? \(\s*<p role="alert" className="rounded border border-danger bg-danger-bg p-2 text-base text-ink">\s*<span aria-hidden="true">▲ <\/span>\s*\{MSG_STAFFING_UNREAD\}/)
+    assert.equal((t.match(/\{MSG_STAFFING_UNREAD\}/g) ?? []).length, 2)
   })
   it('色はトークンだけ（任意値を足さない）・氏名と記録を localStorage・console に出さない', () => {
     const files = ['../src/lib/daycareProgress.ts', '../src/components/DaycareUnfilledCount.tsx']

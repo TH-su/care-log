@@ -123,6 +123,9 @@ describe('デイの今日の1日の読み込み（loadDaycareDayParts）', { ski
     assert.deepEqual(got.vitals, [{ id: 3 }])
     assert.deepEqual(got.intake, { meals: [], fluids: [{ id: 4 }] })
     assert.deepEqual(got.activities, [{ id: 5 }])
+    // 2026-11-09 計画B: 入浴・バイタルを読めたかも返す（読めない時に印を「未」に見せない＝反証 中6）
+    assert.equal(got.bathsOk, true)
+    assert.equal(got.vitalsOk, true)
     assert.equal(got.missing, false)
     assert.equal(got.snapshot, null)
   })
@@ -180,6 +183,9 @@ describe('デイの今日の1日の読み込み（loadDaycareDayParts）', { ski
     const got = await L.loadDaycareDayParts(T, r)
     assert.deepEqual(got.baths, [])
     assert.deepEqual(got.vitals, [])
+    // 2026-11-09 計画B: 空の一覧のまま、読めなかったことを返す（反証 中6）
+    assert.equal(got.bathsOk, false)
+    assert.equal(got.vitalsOk, false)
     assert.equal(got.intake, null)
     assert.equal(got.activities, null)
     assert.deepEqual(got.attendance, [{ id: 1 }])

@@ -51,7 +51,7 @@ import { DaycareUnfilledCount } from '../components/DaycareUnfilledCount'
 import { ErrorBlock, LoadingBlock, useToast } from '../components/ui'
 import { writeDaycareHandoffFor } from '../lib/daycareHandoff'
 import { buildDaycareBoard, nowHm } from '../lib/daycare'
-import { daycareCameMark } from '../lib/daycareProgress'
+import { daycareCameMark, lunchShownWith } from '../lib/daycareProgress'
 import {
   LUNCH_SELECT_OPTIONS,
   createFluidInputs,
@@ -354,21 +354,11 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
   }
   /**
    * 画面に出す値: 送信待ち（まだ送っていない・送っている途中）の値だけ重ねる。止まった値（食い違い）・拒まれた値は重ねず、
-   * サーバーの値を出して行の下で知らせる（1人の画面・既存の食事一括と同じ）
+   * サーバーの値を出して行の下で知らせる（1人の画面・既存の食事一括と同じ）。順番待ちの値（後に押した方）→ 送信待ちの値 → サーバーの値。
+   * 2026-11-09 計画B: 今日の画面の印と同じ純関数（daycareProgress.ts の lunchShownWith。中身は前と同じ）
    */
-  const mealShownFor = (t: MealTarget): Pick<Meal, 'main_amount' | 'side_amount' | 'status'> | null => {
-    const cur = mealRowFor(t)?.meal ?? null
-    const p = pendingRow('meals', t)
-    const wait = waiting[mealKeyOf(t)] ?? []
-    if ((p === null || p.state !== 'pending') && wait.length === 0) return cur
-    const pick = <K extends MealField>(f: K): Meal[K] | null => {
-      // 順番待ちの値（後に押した方）→ 送信待ちの値 → サーバーの値
-      for (let i = wait.length - 1; i >= 0; i--) if (f in wait[i].values) return wait[i].values[f] as Meal[K] | null
-      if (p !== null && p.state === 'pending' && f in p.values) return p.values[f] as Meal[K] | null
-      return (cur?.[f] ?? null) as Meal[K] | null
-    }
-    return { main_amount: pick('main_amount'), side_amount: pick('side_amount'), status: pick('status') }
-  }
+  const mealShownFor = (t: MealTarget): Pick<Meal, 'main_amount' | 'side_amount' | 'status'> | null =>
+    lunchShownWith(mealRowFor(t)?.meal ?? null, pendingRow('meals', t), waiting[mealKeyOf(t)] ?? [])
   const setMealFor = (t: MealTarget, st: SaveState | null) =>
     setMealState((prev) => {
       const next = { ...prev }

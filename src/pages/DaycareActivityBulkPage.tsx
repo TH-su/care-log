@@ -65,7 +65,7 @@ import {
 } from '../lib/daycareActivity'
 import type { ActivityAddOutcome, ActivityParticipation, DaycareActivity } from '../lib/daycareActivity'
 import { personPath, readPersonDay } from '../lib/daycarePerson'
-import { activityCellsFilled, attendedUnfilledCount, daycareCameMark } from '../lib/daycareProgress'
+import { activityCellsFilled, activityShownCells, attendedUnfilledCount, daycareCameMark } from '../lib/daycareProgress'
 import { addDays, fmtDayLabel, todayIso } from '../lib/format'
 import type { DaycareAttendance, DaycareDay, DaycarePlanRow, DaycarePlanSource, Resident, Staff } from '../lib/types'
 import { useTableFit } from '../lib/useTableFit'
@@ -824,11 +824,12 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
   if (data === null) return null
 
   const readable = data.activities !== null
-  // 未入力の数（在席・帰宅の方だけ数える）。入力済み＝活動の枠のどれかに記録がある（画面に出している値＝送信待ちを含む・2026-11-09 計画B）
+  // 未入力の数（在席・帰宅の方だけ数える）。入力済み＝活動の枠のどれかに記録がある（画面に出している値＝送信待ちを含む・2026-11-09 計画B）。
+  // 重ね方は枠（cellOf）と同じ決まりの純関数 activityShownCells（今日の画面の印・切り替えの数と同じ関数＝反証 中1）
   const unfilled = attendedUnfilledCount(
     targets.map((rid) => ({
       state: rowOf(rid)?.state ?? 'planned',
-      filled: activityCellsFilled([...DAYCARE_ACTIVITY_CHIPS, ...otherLabelsOf(rid)].map((l) => cellOf(rid, l))),
+      filled: activityCellsFilled(activityShownCells(data.activities ?? [], pending, rid, day)),
     })),
   )
   /** 枠1つ（定型の列は大きな枠・「その他」の列は項目つきの小さなボタン） */

@@ -101,6 +101,8 @@ const MSG_TAKEN = '先に別の端末で記録されていました。その記�
 const MSG_CONFLICT = '他の端末で先に直されていました。読み直しました。確かめてから、もう一度直してください。'
 const MSG_STOPPED =
   '送れずに止まっている記録があります。設定の「送れていない記録」で、いまの記録とくらべて選ぶか、取り下げてください。'
+/** 配置を読み込めなかった時（配置の区画と、今日の対象者の区画の先頭の2か所に同じ文で出す＝2026-11-09 反証 中5） */
+const MSG_STAFFING_UNREAD = '配置を読み込めませんでした。通信状態を確認して、〔最新に更新〕を押してください。'
 const MSG_PAST_START = '過去の日の記録です。開始時刻を実際の時刻で入れてください（押した時刻は使いません）。'
 const MSG_START_FLOORED = '来所の時刻から間もないため、開始時刻と時間が合っているか確かめてから保存してください。'
 
@@ -750,6 +752,14 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
           </h2>
           {data.sessions !== null && targets.length > 0 ? <DaycareUnfilledCount counts={unfilled} /> : null}
         </div>
+        {/* 配置を読み込めない時は、表を上に移したので対象者の区画の先頭にも同じ文を出す（〔完了〕の指導員が決まらない・反証 中5）。
+            読み上げの知らせ（role="alert"）は配置の区画の1か所だけ（同じ文を2回読まない） */}
+        {data.staffing === null && !missing ? (
+          <p className="rounded border border-danger bg-danger-bg p-2 text-base text-ink">
+            <span aria-hidden="true">▲ </span>
+            {MSG_STAFFING_UNREAD}
+          </p>
+        ) : null}
         <p className="text-sm leading-snug text-ink2">
           予定の方（休み・入院中を除く）と予定外で来た方です（五十音順）。〔完了〕は前回と同じ内容・{TRAINING_DEFAULT_MIN}分・配置の機能訓練指導員で記録します（違う時は〔一部〕か、記録の後に〔記録を開く〕で直してください）。
         </p>
@@ -984,7 +994,8 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
         </h2>
         {data.staffing === null && !missing ? (
           <p role="alert" className="rounded border border-danger bg-danger-bg p-2 text-base text-ink">
-            <span aria-hidden="true">▲ </span>配置を読み込めませんでした。通信状態を確認して、〔最新に更新〕を押してください。
+            <span aria-hidden="true">▲ </span>
+            {MSG_STAFFING_UNREAD}
           </p>
         ) : null}
         {data.staffing !== null && trainers.length === 0 ? (

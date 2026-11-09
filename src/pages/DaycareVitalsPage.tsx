@@ -61,7 +61,6 @@ import {
   buildDaycareBoard,
   daycareBulkRows,
   daycareVitalKey,
-  daycareVitalSlots,
   editsHeldInQueue,
   firstAbnormalField,
   keypadAppend,
@@ -81,7 +80,7 @@ import {
   vitalRangeError,
 } from '../lib/daycare'
 import { writeDaycareHandoffFor } from '../lib/daycareHandoff'
-import { attendedUnfilledCount, vitalSlotsFilled } from '../lib/daycareProgress'
+import { attendedUnfilledCount, daycareVitalSlotsWithPending, vitalShownValue, vitalSlotsFilled } from '../lib/daycareProgress'
 import type { DaycareBoardRow, DaycareReleaseIssue, DaycareVitalField, DaycareVitalSlot, DcVitalsFilter, KeyedVital } from '../lib/daycare'
 import { useVitalLimits } from '../hooks/useVitalLimits'
 import { vitalThresholds } from '../lib/vitalThresholds'
@@ -361,15 +360,15 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   const slotsOf = useCallback(
     (residentId: number): DaycareVitalSlot[] => {
       if (data === null) return []
-      const extra = extraSeqs.get(residentId) ?? []
-      const top = nextDaycareSeq([...data.keys, ...extra.map((x) => daycareVitalKey(data.day, residentId, x))], data.day, residentId) + 3
-      const queued: number[] = []
-      for (let seq = 1; seq <= top; seq += 1) {
-        const key = daycareVitalKey(data.day, residentId, seq)
-        if (data.keys.includes(key)) continue
-        if (pendingRow('vitals', { routine: false, clientKey: key, residentId, day: data.day, kind: 'observation' }) !== null) queued.push(seq)
-      }
-      return daycareVitalSlots(data.live, data.keys, residentId, data.day, [...extra, ...queued])
+      // 2026-11-09 計画B: 今日の画面の印と同じ純関数（daycareProgress.ts の daycareVitalSlotsWithPending。中身は前と同じ）
+      return daycareVitalSlotsWithPending(
+        data.live,
+        data.keys,
+        residentId,
+        data.day,
+        extraSeqs.get(residentId) ?? [],
+        (key) => pendingRow('vitals', { routine: false, clientKey: key, residentId, day: data.day, kind: 'observation' }) !== null,
+      )
     },
     // queueTick: 送信待ちが増減した時に並びを作り直す
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -390,13 +389,8 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   const valueOf = (slot: DaycareVitalSlot, f: DaycareVitalField): { v: number | null; local: boolean } => {
     const d = drafts.get(slot.key)
     if (d !== undefined && f in d) return { v: d[f] ?? null, local: true }
-    const p = pendingRow('vitals', targetOf(slot))
-    if (p !== null && f in p.values) {
-      const pv = p.values[f]
-      return { v: typeof pv === 'number' ? pv : null, local: true }
-    }
-    const sv = slot.vital?.[f]
-    return { v: typeof sv === 'number' ? sv : null, local: false }
+    // 送信待ち → サーバーの値（2026-11-09 計画B: 今日の画面の印と同じ純関数 vitalShownValue。中身は前と同じ）
+    return vitalShownValue(pendingRow('vitals', targetOf(slot)), slot.vital, f)
   }
 
   const canWrite = gate !== null && gate.observed && gate.value === true && !(data?.missing ?? false) && day <= today
@@ -905,7 +899,8 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
         <DaycareNav current="vitals" handoff={() => writeDaycareHandoffFor({ rows: board?.rows ?? null, residents, boardDay: data?.day ?? null, today })} />
         <RecorderBar actorId={actorId} staff={staff ?? null} />
       </div>
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+      {/* 段の間は 12px（2026-11-09 反証 軽1: 未入力の数を同じ段に入れるため 16px から詰めた。押す所どうしは 8px 以上のまま） */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">
           <button
             type="button"
@@ -966,8 +961,13 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
             </button>
           ))}
         </div>
-        {/* 未入力の数は日付と「表示する方」の段の右（新しい段を足さない・幅が足りない時は折り返す） */}
-        {countRows.length > 0 ? <DaycareUnfilledCount counts={unfilled} /> : null}
+        {/* 未入力の数は日付と「表示する方」の段の右（新しい段を足さない）。残りの幅が 16rem 以上あれば同じ段に置き、その幅に収まらない分
+            （未到着の数）は数の中で折り返す（反証 軽1・iPad 横 1180px で残りは約 340px）。16rem も無い時だけ次の段へ回る */}
+        {countRows.length > 0 ? (
+          <div className="min-w-0 grow basis-64">
+            <DaycareUnfilledCount counts={unfilled} />
+          </div>
+        ) : null}
       </div>
       {releasing ? (
         <p role="status" className="text-base text-ink2">

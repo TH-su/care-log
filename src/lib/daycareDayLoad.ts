@@ -9,6 +9,7 @@
 // - 写しの読み取りがサーバー側の設定待ち（0041 未適用）なら missing。出欠は使わない（前は読みに行かなかった。いまは同時に出すので
 //   読みに行くが、結果も失敗も捨てる）。写しのそれ以外の失敗はそのまま投げる（画面の控え・エラーの扱いへ）
 // - 予定・出欠の失敗はそのまま投げる。入浴・バイタル・食事と水分・活動は失敗しても止めない（空・null）
+// - 入浴・バイタルは読めなかったかどうかも返す（bathsOk・vitalsOk。空の一覧は今までどおり＝読めない時に印を「未」に見せない・2026-11-09 計画B）
 // - 画面の世代（genRef）・日付の確かめ・DayData の組み立て・控え（daycareDayMemo）の扱いは画面に残す
 
 import type { DaycareMealRow, DaycarePlanResult } from './db'
@@ -40,6 +41,9 @@ export interface DaycareDayParts {
   attendance: DaycareAttendance[]
   baths: BathRecord[]
   vitals: KeyedVital[]
+  /** 入浴・バイタルを読めたか（読めない時の baths・vitals は空。空を「記録なし」に見せないために使う） */
+  bathsOk: boolean
+  vitalsOk: boolean
   /** 読めない時は null（空の一覧を「読めた」にしない） */
   intake: { meals: DaycareMealRow[]; fluids: FluidIntake[] } | null
   /** 読めない時は null（印を出さない） */
@@ -51,8 +55,9 @@ export async function loadDaycareDayParts(target: string, r: DaycareDayReaders):
   const pAttendance = r.attendance(target)
   // 写しが設定待ちで出欠を捨てる時・写しの失敗で先に投げる時に、出欠の失敗を「受け手の無い失敗」にしない
   pAttendance.catch(() => undefined)
-  const pBaths = r.baths(target).catch(() => [] as BathRecord[])
-  const pVitals = r.vitals(target).catch(() => [] as KeyedVital[])
+  // 読めない時は null にして、下で空の一覧と「読めなかった」に分ける
+  const pBaths = r.baths(target).catch((): BathRecord[] | null => null)
+  const pVitals = r.vitals(target).catch((): KeyedVital[] | null => null)
   const pIntake = r.intake(target).catch(() => null)
   const pActivities = r.activities(target).catch(() => null)
 
@@ -74,5 +79,16 @@ export async function loadDaycareDayParts(target: string, r: DaycareDayReaders):
     pIntake,
     pActivities,
   ])
-  return { snapshot, missing, plan, attendance, baths, vitals, intake, activities }
+  return {
+    snapshot,
+    missing,
+    plan,
+    attendance,
+    baths: baths ?? [],
+    vitals: vitals ?? [],
+    bathsOk: baths !== null,
+    vitalsOk: vitals !== null,
+    intake,
+    activities,
+  }
 }

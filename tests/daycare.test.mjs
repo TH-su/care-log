@@ -1421,10 +1421,12 @@ if (DC === null) {
       assert.doesNotMatch(undo, /prevBath/)
     })
     it('予定が2件の方は「予定 要確認」と出す（代表者の回答 A2・定時の処理も入れない）', () => {
-      // 2026-11-09 計画B（固定し直し・意図は同じ）: カードの状態の段の文言は daycareProgress.ts の daycareStateTone（頭に ▲）
+      // 2026-11-09 計画B（固定し直し・意図は同じ）: 文言は daycareProgress.ts の daycarePlanWarning。どの状態でも出す（反証 中3）:
+      // まだ来ていない方は状態の段そのもの、来た方・休みの方・入院中の方は状態の段の下に1行（tone.planWarn）。状態ごとの試験は daycare-progress.test.mjs
       const pg = read('../src/lib/daycareProgress.ts')
-      assert.match(pg, /if \(row\.plans\.length > 1\) \{[\s\S]*?word: '予定 要確認（週間計画にこの方の予定が同じ日に2件あります）'/)
+      assert.match(pg, /if \(row\.plans\.length > 1\) return '予定 要確認（週間計画にこの方の予定が同じ日に2件あります）'/)
       assert.match(list, /const tone = daycareStateTone\(row\)/)
+      assert.match(list, /\{tone\.planWarn !== null \? \(\s*<p className="break-words text-sm font-bold leading-tight text-ink">\s*<span aria-hidden="true">▲ <\/span>\s*\{tone\.planWarn\}/)
     })
     it('休みの文言（ボタン・状態・件数の帯）。入浴の理由の「欠席」は変えない（B6）', () => {
       // 2026-11-09 計画B（固定し直し・意図は同じ）: カードの状態の文言は daycareProgress.ts の daycareStateTone

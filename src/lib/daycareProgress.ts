@@ -6,8 +6,8 @@
 // ・未入力の数: 在席・帰宅の方だけ数える（送信待ち・順番待ち・端末の値は入力済み）。まだ来ていない方は別に数える
 // 個人情報は扱わない（数値と記号だけ。氏名は画面が持つ）。
 
-import { fmtPlanTimes } from './daycare.ts'
-import type { AttendanceState, DaycareBathStatus, DaycareBoardRow } from './daycare.ts'
+import { DAYCARE_VITAL_FIELDS, daycareVitalKey, daycareVitalSlots, fmtPlanTimes, nextDaycareSeq } from './daycare.ts'
+import type { AttendanceState, DaycareBathStatus, DaycareBoardRow, DaycareVitalField, DaycareVitalSlot, KeyedVital } from './daycare.ts'
 import { DAYCARE_ABSENT_REASON_LABEL } from './types.ts'
 import type { Meal } from './types.ts'
 
@@ -34,6 +34,19 @@ export interface DaycareStateTone {
   word: string
   /** カードの枠と地（tokens.css のトークンだけ） */
   cardCls: string
+  /**
+   * 予定の誤り（▲ 予定 要確認（…））を状態の段の下に1行足す時の文（来た方・休みの方・入院中の方）。まだ来ていない方は状態の段そのものが
+   * この文になるので null（反証 中3・2026-11-09: どの状態でも出す）
+   */
+  planWarn: string | null
+}
+
+/** 予定の誤りの文（週間計画の記録が2件・同じ日に予定が2件）。誤りが無ければ null */
+export function daycarePlanWarning(row: Pick<DaycareBoardRow, 'dup' | 'plans'>): string | null {
+  if (row.dup) return '予定 要確認（週間計画にこの方の記録が2件あります）'
+  // 同じ方に同じ日の予定が2件＝データの誤り（代表者の回答 A2「そのような日はない」）。定時の処理も到着・帰宅を入れない
+  if (row.plans.length > 1) return '予定 要確認（週間計画にこの方の予定が同じ日に2件あります）'
+  return null
 }
 
 /** 来所前・予定外（点線の枠）／在席（緑）／帰宅（青）／休み・入院中（灰＝今の休みと同じ） */
@@ -46,7 +59,8 @@ export const DAYCARE_CARD_CLS = {
 
 /**
  * カードの状態の段（記号＋言葉＋時刻）と、カードの枠と地（2026-11-09 計画B）。
- * 予定の誤り（週間計画の記録が2件・同じ日に予定が2件）は、まだ来ていない方だけこの段で知らせる（来た方・休みの方は状態を出す）。
+ * 予定の誤り（週間計画の記録が2件・同じ日に予定が2件）は、どの状態でも知らせる: まだ来ていない方はこの段で（▲ 予定 要確認（…））、
+ * 来た方・休みの方・入院中の方は状態を出して、下に1行（planWarn）足す（反証 中3）。
  * 時刻は1つだけ（来所前＝予定の始まり・在席＝到着・帰宅＝帰宅）。iPad 横の6列のカードの幅（中身 約155px）で1行に収め、5段を見せるため
  * （親の決定 2026-11-09: 「○ 来所前 9:30〜15:30」「✓ 帰宅 9:32〜15:28」は 15px 太字で2行に折れた）
  */
@@ -54,24 +68,21 @@ export function daycareStateTone(
   row: Pick<DaycareBoardRow, 'state' | 'attendance' | 'planned' | 'dup' | 'plans' | 'hospitalized'>,
 ): DaycareStateTone {
   const a = row.attendance
+  const warn = daycarePlanWarning(row)
   if (row.state === 'absent') {
     const reason = a?.absent_reason ? DAYCARE_ABSENT_REASON_LABEL[a.absent_reason] : '理由なし'
-    return { kind: 'absent', mark: '✕', word: `休み（${reason}）`, cardCls: DAYCARE_CARD_CLS.muted }
+    return { kind: 'absent', mark: '✕', word: `休み（${reason}）`, cardCls: DAYCARE_CARD_CLS.muted, planWarn: warn }
   }
-  if (row.state === 'left') return { kind: 'left', mark: '✓', word: `帰宅 ${hm(a?.left_at)}`.trimEnd(), cardCls: DAYCARE_CARD_CLS.left }
-  if (row.state === 'present') return { kind: 'present', mark: '●', word: `在席 ${hm(a?.arrived_at)}〜`, cardCls: DAYCARE_CARD_CLS.present }
-  if (row.hospitalized) return { kind: 'hospitalized', mark: '－', word: '入院中', cardCls: DAYCARE_CARD_CLS.muted }
-  if (row.dup) return { kind: 'planError', mark: '▲', word: '予定 要確認（週間計画にこの方の記録が2件あります）', cardCls: DAYCARE_CARD_CLS.before }
-  if (row.plans.length > 1) {
-    // 同じ方に同じ日の予定が2件＝データの誤り（代表者の回答 A2「そのような日はない」）。定時の処理も到着・帰宅を入れない
-    return { kind: 'planError', mark: '▲', word: '予定 要確認（週間計画にこの方の予定が同じ日に2件あります）', cardCls: DAYCARE_CARD_CLS.before }
-  }
+  if (row.state === 'left') return { kind: 'left', mark: '✓', word: `帰宅 ${hm(a?.left_at)}`.trimEnd(), cardCls: DAYCARE_CARD_CLS.left, planWarn: warn }
+  if (row.state === 'present') return { kind: 'present', mark: '●', word: `在席 ${hm(a?.arrived_at)}〜`, cardCls: DAYCARE_CARD_CLS.present, planWarn: warn }
+  if (row.hospitalized) return { kind: 'hospitalized', mark: '－', word: '入院中', cardCls: DAYCARE_CARD_CLS.muted, planWarn: warn }
+  if (warn !== null) return { kind: 'planError', mark: '▲', word: warn, cardCls: DAYCARE_CARD_CLS.before, planWarn: null }
   if (row.planned) {
     // 予定の始まりの時刻だけ（読めない・時間未定の時は言葉だけ）
     const start = hm(row.plans[0]?.start)
-    return { kind: 'before', mark: '○', word: start === '' ? '来所前' : `来所前 ${start}〜`, cardCls: DAYCARE_CARD_CLS.before }
+    return { kind: 'before', mark: '○', word: start === '' ? '来所前' : `来所前 ${start}〜`, cardCls: DAYCARE_CARD_CLS.before, planWarn: null }
   }
-  return { kind: 'unplanned', mark: '○', word: '予定外の来所', cardCls: DAYCARE_CARD_CLS.before }
+  return { kind: 'unplanned', mark: '○', word: '予定外の来所', cardCls: DAYCARE_CARD_CLS.before, planWarn: null }
 }
 
 /**
@@ -122,13 +133,36 @@ export const PROGRESS_STATE_WORD: Record<ProgressState, string> = {
   unread: '読み込めません',
 }
 
-/** 札の形（色だけに頼らない: 塗り＝済・点線＝未・枠なし＝対象外・太枠＝要確認・細かい点線＝読めない） */
+/**
+ * 札の形（色だけに頼らない: 実線＝済・点線＝未・枠なし＝対象外・太枠＝要確認・細い点線＝読めない）。札の文字はどの状態も同じ
+ * （VS・食・活・訓・浴）。読めない項目は、一覧の上の1行の知らせ（unreadProgressNotice）で名前を出す（親の決定 2026-11-09）。
+ * 済の地は bg-surface（在席のカードの地 bg-ok-bg と同じ色にしない＝反証 軽3。text-ok と bg-surface は明 7.2・暗 8.8）
+ */
 export const PROGRESS_MARK_CLS: Record<ProgressState, string> = {
-  done: 'border border-ok bg-ok-bg font-bold text-ok',
+  done: 'border border-ok bg-surface font-bold text-ok',
   todo: 'border border-dashed border-ink2 text-ink',
   na: 'border border-transparent text-ink3',
   check: 'border-2 border-warn bg-warn-bg font-bold text-ink',
   unread: 'border border-dotted border-ink2 text-ink2',
+}
+
+/**
+ * その日に読めなかった項目の名前（印の並び＝バイタル・昼食・活動・機能訓練・入浴の順）。読めない項目が無ければ空
+ */
+export function unreadProgressLabels(r: { vitalsOk: boolean; intakeOk: boolean; activitiesOk: boolean; trainingOk: boolean; bathsOk: boolean }): string[] {
+  const out: string[] = []
+  if (!r.vitalsOk) out.push('バイタル')
+  if (!r.intakeOk) out.push('昼食')
+  if (!r.activitiesOk) out.push('活動')
+  if (!r.trainingOk) out.push('機能訓練')
+  if (!r.bathsOk) out.push('入浴')
+  return out
+}
+
+/** 一覧の上の1行の知らせ（何が起きたか＋次にどうするか）。読めない項目が無ければ null（出さない） */
+export function unreadProgressNotice(labels: readonly string[]): string | null {
+  if (labels.length === 0) return null
+  return `${labels.join('・')}の記録を読み込めませんでした（印は細い点線）。通信状態を確認して、〔最新に更新〕を押してください。`
 }
 
 /** 昼食が入力済みか（拒食か、主食・副食の両方がある＝lunchUnfilledCount と同じ考え） */
@@ -142,43 +176,49 @@ export interface ProgressInput {
   state: AttendanceState
   /** 週間計画で入院中（カードの「入院中」は state が planned の時だけ） */
   hospitalized: boolean
-  /** バイタルを測った（どれかの値がある）・最新の測定が再測定の目安に当たる */
-  vitals: { done: boolean; abnormal: boolean }
+  /** バイタルを測った（どれかの値がある）・最新の測定が再測定の目安に当たる。null＝読めない */
+  vitals: { done: boolean; abnormal: boolean } | null
+  /** 昼食（画面に出している値＝送信待ちを重ねた値）。lunchRead=false＝読めない */
   lunch: Pick<Meal, 'main_amount' | 'side_amount' | 'status'> | null | undefined
-  /** その日のその方の活動の記録の数。null＝読めない */
-  activityCount: number | null
+  lunchRead: boolean
+  /** その日のその方の活動の記録がある（送信待ちを重ねた値）。null＝読めない */
+  activity: boolean | null
   /** その日のその方の機能訓練の記録がある（送信待ちの追加を含む）。null＝読めない */
   training: boolean | null
-  bath: DaycareBathStatus
+  /** 入浴の状態。null＝読めない */
+  bath: DaycareBathStatus | null
 }
 
 /**
- * 進み具合の印（2026-11-09 計画B）。来た＝在席か帰宅。
- * ・バイタル: 来ていない → 対象外。再測定の目安に当たる → 要確認。測った → 済。ほか → 未
+ * 進み具合の印（2026-11-09 計画B）。来た＝在席か帰宅。読めない項目はどれも「読めない」（「未」に見せない＝反証 中6）。
+ * ・バイタル: 再測定の目安に当たる → 要確認。測った → 済（来ていない方でも値があれば＝反証 中4）。値が無い → 来た方は未・ほかは対象外
  * ・昼食: 来ていない → 入力済みなら済・ほかは対象外。来た → 入力済みなら済・ほかは未
- * ・活動・訓練: 読めない → 読めない。来ていない → 記録があれば済・ほかは対象外。来た → 記録があれば済・ほかは未
+ * ・活動・訓練: 来ていない → 記録があれば済・ほかは対象外。来た → 記録があれば済・ほかは未
  * ・入浴: 休みの方に入浴の記録が残っている → 要確認。予定なし → 対象外。記録あり（自動・中止を含む）→ 済。
  *   予定あり・未記録 → 休み・入院中なら対象外、ほかは未
  */
 export function daycareProgressMarks(input: ProgressInput): ProgressMark[] {
   const came = hasCome(input.state)
   const recorded = (has: boolean): ProgressState => (has ? 'done' : came ? 'todo' : 'na')
-  const vitals: ProgressState = !came ? 'na' : input.vitals.abnormal ? 'check' : input.vitals.done ? 'done' : 'todo'
-  const lunch = recorded(lunchFilled(input.lunch))
-  const activity: ProgressState = input.activityCount === null ? 'unread' : recorded(input.activityCount > 0)
+  const v = input.vitals
+  const vitals: ProgressState = v === null ? 'unread' : v.abnormal ? 'check' : recorded(v.done)
+  const lunch: ProgressState = !input.lunchRead ? 'unread' : recorded(lunchFilled(input.lunch))
+  const activity: ProgressState = input.activity === null ? 'unread' : recorded(input.activity)
   const training: ProgressState = input.training === null ? 'unread' : recorded(input.training)
   const b = input.bath
   const absent = input.state === 'absent'
   const bath: ProgressState =
-    absent && (b.kind === 'auto' || b.kind === 'done')
-      ? 'check'
-      : b.kind === 'noPlan'
-        ? 'na'
-        : b.kind !== 'todo'
-          ? 'done'
-          : absent || (input.hospitalized && input.state === 'planned')
-            ? 'na'
-            : 'todo'
+    b === null
+      ? 'unread'
+      : absent && (b.kind === 'auto' || b.kind === 'done')
+        ? 'check'
+        : b.kind === 'noPlan'
+          ? 'na'
+          : b.kind !== 'todo'
+            ? 'done'
+            : absent || (input.hospitalized && input.state === 'planned')
+              ? 'na'
+              : 'todo'
   const by: Record<ProgressKey, ProgressState> = { vitals, lunch, activity, training, bath }
   return PROGRESS_ITEMS.map((it) => ({ ...it, state: by[it.key] }))
 }
@@ -251,4 +291,123 @@ export function trainingFilled(
     sessions.some((s) => s.resident_id === residentId && s.day === day) ||
     pending.some((p) => p.kind === 'add' && p.table === 'daycare_training_sessions' && p.residentId === residentId && p.day === day)
   )
+}
+
+// ── 送信待ちの重ね（今日の画面と一括の画面で同じ決まり＝反証 中1・2026-11-09） ──
+
+/**
+ * 昼食の画面に出す値（食事一括の mealShownFor と同じ決まり）: 送信待ち（まだ送っていない・送っている途中＝state 'pending'）の値と、
+ * 画面の順番待ち（後に押した方が先）だけ重ねる。止まった値（食い違い）・拒まれた値は重ねず、サーバーの値を出す
+ */
+export function lunchShownWith(
+  cur: Pick<Meal, 'main_amount' | 'side_amount' | 'status'> | null,
+  pending: { state: string; values: Record<string, unknown> } | null,
+  wait: readonly { values: Record<string, unknown> }[] = [],
+): Pick<Meal, 'main_amount' | 'side_amount' | 'status'> | null {
+  const p = pending !== null && pending.state === 'pending' ? pending : null
+  if (p === null && wait.length === 0) return cur
+  const pick = (f: 'main_amount' | 'side_amount' | 'status'): unknown => {
+    // 順番待ちの値（後に押した方）→ 送信待ちの値 → サーバーの値
+    for (let i = wait.length - 1; i >= 0; i--) if (f in wait[i].values) return wait[i].values[f]
+    if (p !== null && f in p.values) return p.values[f]
+    return cur?.[f] ?? null
+  }
+  return {
+    main_amount: pick('main_amount') as Meal['main_amount'],
+    side_amount: pick('side_amount') as Meal['side_amount'],
+    status: pick('status') as Meal['status'],
+  }
+}
+
+/**
+ * 1人のその日の測定の回（バイタル一括の slotsOf と同じ決まり）: サーバーの行＋足した再測定（extra）＋送信待ちにだけある回。
+ * hasPending(key)＝その回のキーに送信待ちがあるか（db.ts の pendingRow を画面が渡す）
+ */
+export function daycareVitalSlotsWithPending(
+  live: readonly KeyedVital[],
+  keys: readonly string[],
+  residentId: number,
+  day: string,
+  extra: readonly number[],
+  hasPending: (key: string) => boolean,
+): DaycareVitalSlot[] {
+  const top = nextDaycareSeq([...keys, ...extra.map((x) => daycareVitalKey(day, residentId, x))], day, residentId) + 3
+  const queued: number[] = []
+  for (let seq = 1; seq <= top; seq += 1) {
+    const key = daycareVitalKey(day, residentId, seq)
+    if (keys.includes(key)) continue
+    if (hasPending(key)) queued.push(seq)
+  }
+  return daycareVitalSlots(live, keys, residentId, day, [...extra, ...queued])
+}
+
+/**
+ * 測定の欄に出す値の、送信待ち → サーバーの値の部分（バイタル一括の valueOf と同じ決まり。送っていない値＝端末の下書きは画面が先に見る）。
+ * 送信待ちの値は状態（送信待ち・食い違い・拒まれた）によらず重ねる（バイタル一括と同じ）
+ */
+export function vitalShownValue(
+  pending: { values: Record<string, unknown> } | null,
+  vital: Partial<Record<DaycareVitalField, unknown>> | null,
+  f: DaycareVitalField,
+): { v: number | null; local: boolean } {
+  if (pending !== null && f in pending.values) {
+    const pv = pending.values[f]
+    return { v: typeof pv === 'number' ? pv : null, local: true }
+  }
+  const sv = vital?.[f]
+  return { v: typeof sv === 'number' ? sv : null, local: false }
+}
+
+/** 回の5つの欄の値（vitalShownValue を5欄に） */
+export function vitalShownValues(
+  pending: { values: Record<string, unknown> } | null,
+  vital: Partial<Record<DaycareVitalField, unknown>> | null,
+): Record<DaycareVitalField, number | null> {
+  const out = {} as Record<DaycareVitalField, number | null>
+  for (const f of DAYCARE_VITAL_FIELDS) out[f] = vitalShownValue(pending, vital, f).v
+  return out
+}
+
+/** 活動の送信待ち（db.ts の PendingActivityOp と同じ形） */
+export type ActivityPendingLike =
+  | { kind: 'add'; residentId: number; day: string; label: string; participation: string; stopped: boolean }
+  | { kind: 'update'; rowId: number; participation: string | null; deleted: boolean; stopped: boolean }
+
+/**
+ * 1人のその日の活動の枠ごとの、画面に出す度合い（活動一括の cellOf と同じ決まり）:
+ * ・サーバーの行: 止まっていない度合いの変更を重ねる。止まっていない取り消しは「取り消しの送信待ち」（deleting）。取り消しの後に
+ *   入れ直した送信待ちの追加があれば、その度合い。止まった変更・取り消しは重ねない（サーバーの値）
+ * ・サーバーに無い項目: 送信待ちの追加（止まっていない方 → 止まった方）の度合い
+ */
+export function activityShownCells(
+  rows: readonly { id: number; resident_id: number; day: string; label: string; participation: string }[],
+  pending: readonly ActivityPendingLike[],
+  residentId: number,
+  day: string,
+): { label: string; shown: string | null; deleting: boolean }[] {
+  const byLabel = new Map<string, { id: number; participation: string }>()
+  for (const a of rows) if (a.resident_id === residentId && a.day === day) byLabel.set(a.label, a)
+  const upd = new Map<number, { participation: string | null; deleted: boolean }>()
+  const adds: { label: string; participation: string; stopped: boolean }[] = []
+  for (const p of pending) {
+    if (p.kind === 'update') {
+      if (!p.stopped) upd.set(p.rowId, p)
+    } else if (p.residentId === residentId && p.day === day) adds.push(p)
+  }
+  const labels = [...byLabel.keys()]
+  for (const p of adds) if (!labels.includes(p.label)) labels.push(p.label)
+  return labels.map((label) => {
+    const a = byLabel.get(label) ?? null
+    const liveAdd = adds.find((p) => p.label === label && !p.stopped)
+    const stoppedAdd = adds.find((p) => p.label === label && p.stopped)
+    if (a !== null) {
+      const p = upd.get(a.id)
+      const deleting = p?.deleted === true
+      if (deleting && liveAdd !== undefined) return { label, shown: liveAdd.participation, deleting: false }
+      return { label, shown: p?.participation ?? a.participation, deleting }
+    }
+    if (liveAdd !== undefined) return { label, shown: liveAdd.participation, deleting: false }
+    if (stoppedAdd !== undefined) return { label, shown: stoppedAdd.participation, deleting: false }
+    return { label, shown: null, deleting: false }
+  })
 }

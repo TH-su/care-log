@@ -107,7 +107,8 @@ describe('一括の4画面で行を増やす（2026-11-09）', () => {
     for (const [k, p] of Object.entries(BULK)) assert.doesNotMatch(p, /\btext-(2xs|xs)\b/, k)
   })
   it('バイタル一括: 日付と「表示する方」を1段に。食事一括: 見出し・未入力の数・予定の人数を1段に、合計と水分の欄を横に', () => {
-    assert.match(BULK.vitals, /<div className="flex flex-wrap items-center gap-x-4 gap-y-2">\s*<div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">[\s\S]*?<div className="flex flex-wrap gap-gap" role="group" aria-label="表示する方">/)
+    // 2026-11-09 計画B（固定し直し・意図は同じ）: 未入力の数を同じ段に入れるため、段の間を 16px から 12px に詰めた（押す所どうしは 8px 以上）
+    assert.match(BULK.vitals, /<div className="flex flex-wrap items-center gap-x-3 gap-y-2">\s*<div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">[\s\S]*?<div className="flex flex-wrap gap-gap" role="group" aria-label="表示する方">/)
     const m = BULK.meals
     const top = m.slice(m.indexOf('<section aria-labelledby="h-meals"'), m.indexOf('<table'))
     // 2026-11-09 計画B（固定し直し・意図は同じ）: 未入力の数は4画面で同じ部品（DaycareUnfilledCount）にした

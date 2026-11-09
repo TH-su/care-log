@@ -96,8 +96,13 @@ if (DP === null) {
       assert.match(page, /\.\.\.\(cur === null \? \{ fill: \{ recorded_by: actorId \} \} : \{\}\),\s*editedBy: actorId,\s*rebase: opts\.rebase !== undefined,/)
     })
     it('送信待ちの値・順番待ちの値だけ重ねて出す（止まった値・拒まれた値は重ねない）', () => {
-      assert.match(page, /if \(\(p === null \|\| p\.state !== 'pending'\) && wait\.length === 0\) return cur/)
-      assert.match(page, /if \(p !== null && p\.state === 'pending' && f in p\.values\) return p\.values\[f\]/)
+      // 2026-11-09 計画B（固定し直し・意図は同じ）: 重ね方は今日の画面の印と同じ純関数 lunchShownWith（daycareProgress.ts）に移した
+      // （中身の試験は daycare-progress.test.mjs）
+      assert.match(page, /const mealShownFor = \(t: MealTarget\): Pick<Meal, 'main_amount' \| 'side_amount' \| 'status'> \| null =>\s*lunchShownWith\(mealRowFor\(t\)\?\.meal \?\? null, pendingRow\('meals', t\), waiting\[mealKeyOf\(t\)\] \?\? \[\]\)/)
+      const pg = read('../src/lib/daycareProgress.ts')
+      const fn = pg.slice(pg.indexOf('export function lunchShownWith('), pg.indexOf('export function daycareVitalSlotsWithPending('))
+      assert.match(fn, /const p = pending !== null && pending\.state === 'pending' \? pending : null\s*if \(p === null && wait\.length === 0\) return cur/)
+      assert.match(fn, /if \(p !== null && f in p\.values\) return p\.values\[f\]/)
     })
     it('同じ人・日・枠は順番待ち（前の応答を待ってから次を送る）・基準は送る時のいちばん新しい値（#45 の確認の反証 中）', () => {
       assert.match(page, /const tail = \(chainRef\.current\.get\(k\) \?\? Promise\.resolve\(\)\)\s*\.then\(\(\) => sendMeal\(t, patch, opts\)\)/)

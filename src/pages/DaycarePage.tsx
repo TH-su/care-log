@@ -45,6 +45,8 @@ import {
   isSelfWrite,
   kindBlockedMessage,
   openDaycareDay,
+  pendingActivityOps,
+  pendingRow,
   pendingTrainingOps,
   queuePending,
   queueSubscribe,
@@ -54,7 +56,7 @@ import {
   subscribeDaycareChanges,
   subscribeMyRole,
 } from '../lib/db'
-import type { DaycareMealRow, MyRole } from '../lib/db'
+import type { DaycareMealRow, MyRole, VitalTarget } from '../lib/db'
 // 名簿は読み込みの控えを通し、在籍者は全員の名簿から切り出す（同じ取得に相乗り＝residents 表を1回だけ読む・2026-10-29）
 import { fetchAllResidents, fetchResidentsFromAll } from '../lib/cachedReads'
 import { personPath } from '../lib/daycarePerson'
@@ -67,6 +69,7 @@ import { hasTimes, useDaycareAttendanceOps } from '../components/DaycareAttendan
 import { HAIBEN_DAYCARE_HREF, writeDaycareHandoffFor } from '../lib/daycareHandoff'
 import { daycareDayMemo, memoForDay, memoWithAttendance, memoWithBath, memoWithoutAttendance, rememberDaycareDay, updateDaycareDayMemo } from '../lib/daycareDayMemo'
 import {
+  DAYCARE_VITAL_FIELDS,
   bathCountsUnchecked,
   buildDaycareBoard,
   canChangeDaycareTimes,
@@ -79,11 +82,19 @@ import type { KeyedVital } from '../lib/daycare'
 import {
   PROGRESS_MARK_CLS,
   PROGRESS_STATE_WORD,
+  activityCellsFilled,
+  activityShownCells,
   daycareNavPending,
   daycareProgressMarks,
   daycareStateTone,
+  daycareVitalSlotsWithPending,
+  lunchShownWith,
   navPendingOf,
+  unreadProgressLabels,
+  unreadProgressNotice,
   trainingFilled,
+  vitalShownValues,
+  vitalSlotsFilled,
 } from '../lib/daycareProgress'
 import type { DaycareNavPending, ProgressMark } from '../lib/daycareProgress'
 import type { DaycareTrainingSession } from '../lib/daycareTraining'
@@ -120,6 +131,12 @@ interface DayData {
   attendance: DaycareAttendance[]
   baths: BathRecord[]
   vitals: KeyedVital[]
+  /**
+   * 入浴・バイタルを読めたか（2026-11-09 反証 中6: 読めない時の空の一覧で印を「未」に見せない＝「読めない」の印）。
+   * 控えで開いた時は控えの値（読んだ時点の値）を出すので true
+   */
+  bathsOk: boolean
+  vitalsOk: boolean
   /** 昼食・おやつ（取り込みの印つき）と水分（段階2a・行の小さな印と1人の記録への入口に使う） */
   meals: DaycareMealRow[]
   fluids: FluidIntake[]
@@ -408,7 +425,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       // 写しが「読めなかった」（unknown）の日は、いまの週間計画も読む（読めれば表示に使い、次のタップで写し直す＝反証レビュー中2）
       // 機能訓練の記録も同時に読む（2026-11-09 計画B）。読めない時は null（印を「読めない」にするだけ）。この読み込みの中に置くので、
       // 日の切り替え後の古い応答は入れず（世代と日付の守り）、送信待ちが届いた時・〔最新に更新〕の読み直しでも一緒に読み直す
-      const [{ snapshot, missing, plan, attendance, baths, vitals, intake, activities }, training] = await Promise.all([
+      const [{ snapshot, missing, plan, attendance, baths, vitals, bathsOk, vitalsOk, intake, activities }, training] = await Promise.all([
         loadDaycareDayParts(target, DAY_READERS),
         fetchTrainingSessions(target).catch((): DaycareTrainingSession[] | null => null),
       ])
@@ -423,6 +440,8 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         attendance,
         baths,
         vitals,
+        bathsOk,
+        vitalsOk,
         meals: intake?.meals ?? [],
         fluids: intake?.fluids ?? [],
         activities,
@@ -448,6 +467,8 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
           attendance: m.attendance,
           baths: m.baths,
           vitals: m.vitals,
+          bathsOk: true,
+          vitalsOk: true,
           meals: m.meals,
           fluids: m.fluids,
           // 活動・機能訓練は控えに無い（読めない＝印を出さない／「読めない」の印）
@@ -724,11 +745,24 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   if (data === null || board === null) return null
 
   const c = board.counts
-  const vitalsDone = (id: number) => vitalsOf(id).some((v) => v.temp !== null || v.sys_bp !== null || v.pulse !== null || v.spo2 !== null)
+  // バイタルの回ごとの値（サーバーの値に、この端末の送信待ちを重ねる＝バイタル一括と同じ純関数 daycareVitalSlotsWithPending・vitalShownValues
+  // ・2026-11-09 反証 中1）。描くたびに1回だけ作る（送信待ちを読むのは端末の中だけ・通信しない）
+  const vitalKeys = data.vitals.flatMap((v) => (typeof v.client_key === 'string' ? [v.client_key] : []))
+  const vitalTarget = (id: number, key: string): VitalTarget => ({ routine: false, clientKey: key, residentId: id, day: data.day, kind: 'observation' })
+  const vitalShown = new Map(
+    board.rows.map((r) => {
+      const id = r.residentId
+      const slots = daycareVitalSlotsWithPending(vitalsOf(id), vitalKeys, id, data.day, [], (key) => pendingRow('vitals', vitalTarget(id, key)) !== null)
+      return [id, slots.map((slot) => ({ seq: slot.seq, vals: vitalShownValues(pendingRow('vitals', vitalTarget(id, slot.key)), slot.vital) }))]
+    }),
+  )
+  /** 測った（どれかの回のどれかの欄に値がある。血圧の下も入れる＝反証 軽4・送信待ちを含む） */
+  const vitalsDone = (id: number) => vitalSlotsFilled((vitalShown.get(id) ?? []).map((s) => DAYCARE_VITAL_FIELDS.map((f) => s.vals[f])))
+  /** 値のある回のうち一番後の回が、再測定の目安に当たる */
   const vitalsAbnormal = (id: number) => {
-    const list = vitalsOf(id)
-    const latest = list.length === 0 ? null : list.reduce((a, b) => (b.id > a.id ? b : a))
-    return latest !== null && vitalNeedsRecheck(latest, targets.get(id), limits.lookup(id, data.day))
+    const withVal = (vitalShown.get(id) ?? []).filter((s) => DAYCARE_VITAL_FIELDS.some((f) => s.vals[f] !== null))
+    const latest = withVal.length === 0 ? null : withVal.reduce((a, b) => (b.seq > a.seq ? b : a))
+    return latest !== null && vitalNeedsRecheck(latest.vals, targets.get(id), limits.lookup(id, data.day))
   }
   const vitalsWaiting = board.rows.filter((r) => r.state === 'present' && !vitalsDone(r.residentId)).length
   // 入浴を確かめていない方（代表者の決定 2026-10-23 の 3: 自動の行は「済」で数えない。12:30 を過ぎても行が無い方と、
@@ -736,9 +770,13 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   const bathClock = { pastDay: data.day < today, nowHm: nowHm() }
   const bathUnchecked = board.rows.filter((r) => bathCountsUnchecked(daycareBathStatus(bathOf(r.residentId), r.bathingPlanned), r.state, bathClock)).length
 
-  // 進み具合の印（2026-11-09 計画B・daycareProgress.ts）。カードの段4と、上の切り替えの未入力の数（来た方で「未」の数）の両方に使う
+  // 進み具合の印（2026-11-09 計画B・daycareProgress.ts）。カードの段4と、上の切り替えの未入力の数（来た方で「未」の数）の両方に使う。
+  // 送信待ちは一括の画面と同じ決まりで重ねる（反証 中1: 食事＝送っている途中の値だけ・バイタル＝どの状態の値も・活動＝枠と同じ・訓練＝追加）。
+  // 読めない項目は「読めない」の印（反証 中6）
   const trainingRead = data.training
   const trainingPending = trainingRead === null ? [] : pendingTrainingOps()
+  const activityRead = data.activities
+  const activityPending = activityRead === null ? [] : pendingActivityOps()
   const marksOf = new Map<number, ProgressMark[]>(
     board.rows.map((r) => {
       const id = r.residentId
@@ -748,16 +786,29 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         daycareProgressMarks({
           state: r.state,
           hospitalized: r.hospitalized,
-          vitals: { done: vDone, abnormal: vDone && vitalsAbnormal(id) },
-          lunch: lunchOf(id),
-          activityCount: data.activities === null ? null : data.activities.filter((x) => x.resident_id === id && x.day === data.day).length,
+          vitals: data.vitalsOk ? { done: vDone, abnormal: vDone && vitalsAbnormal(id) } : null,
+          lunch: lunchShownWith(lunchOf(id), pendingRow('meals', { residentId: id, day: data.day, slot: 'lunch' })),
+          lunchRead: data.intakeOk,
+          activity: activityRead === null ? null : activityCellsFilled(activityShownCells(activityRead, activityPending, id, data.day)),
           training: trainingRead === null ? null : trainingFilled(trainingRead, trainingPending, id, data.day),
-          bath: daycareBathStatus(bathOf(id), r.bathingPlanned),
+          bath: data.bathsOk ? daycareBathStatus(bathOf(id), r.bathingPlanned) : null,
         }),
       ]
     }),
   )
-  const navPending = daycareNavPending(board.rows.map((r) => ({ state: r.state, marks: marksOf.get(r.residentId) ?? [] })))
+  // 読めなかった項目の知らせ（一覧の上に1行）
+  const unreadNotice = unreadProgressNotice(
+    unreadProgressLabels({
+      vitalsOk: data.vitalsOk,
+      intakeOk: data.intakeOk,
+      activitiesOk: data.activities !== null,
+      trainingOk: data.training !== null,
+      bathsOk: data.bathsOk,
+    }),
+  )
+  // 切り替えの数は今日を見ている時だけ（リンクの先は今日を開くため＝反証 中2）
+  const navPending =
+    data.day === today ? daycareNavPending(board.rows.map((r) => ({ state: r.state, marks: marksOf.get(r.residentId) ?? [] }))) : undefined
 
   const tiles: { label: string; value: number; tone?: 'warn' }[] = [
     { label: '予定', value: c.planned },
@@ -790,6 +841,13 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       )}
       {limits.failed ? <VitalLimitsFailedNote className="" onRetry={() => void limits.refresh()} /> : null}
       <PlanBanners data={data} notInRoster={board.notInRoster} unconfirmed={board.unconfirmed} today={today} />
+      {/* その日に読めなかった項目があれば1行で知らせる（読めない項目の名前だけ・印は細い点線＝親の決定 2026-11-09）。カードがある時だけ */}
+      {unreadNotice !== null && board.rows.length > 0 ? (
+        <p role="status" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">
+          <span aria-hidden="true">▲ </span>
+          {unreadNotice}
+        </p>
+      ) : null}
 
       {board.rows.length === 0 ? (
         <div className="rounded-lg border border-border bg-surface p-4">
@@ -866,6 +924,13 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                   <span aria-hidden="true">{tone.mark} </span>
                   {tone.word}
                 </p>
+                {/* 予定の誤りは、来た方・休みの方・入院中の方でも状態の段の下に1行出す（その方のカードだけ伸びる＝反証 中3） */}
+                {tone.planWarn !== null ? (
+                  <p className="break-words text-sm font-bold leading-tight text-ink">
+                    <span aria-hidden="true">▲ </span>
+                    {tone.planWarn}
+                  </p>
+                ) : null}
                 {/* 段4: 進み具合の印（押せない表示。VS バイタル・食 昼食・活 活動・訓 訓練・浴 入浴。形と文字でも分ける＝色だけに頼らない。
                     記録は1人の画面・上の切り替えの一括の画面で） */}
                 <p className="flex flex-wrap gap-1">
@@ -915,7 +980,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         </button>
         {/* 印の説明（一覧の下に1行。上の段には足さない＝2026-11-09 計画B） */}
         {board.rows.length > 0 ? (
-          <p className="text-sm text-ink2">印: VS バイタル・食 昼食・活 活動・訓 訓練・浴 入浴（塗り＝済・点線＝未・枠なし＝対象外・太枠＝要確認）</p>
+          <p className="text-sm text-ink2">印: VS バイタル・食 昼食・活 活動・訓 訓練・浴 入浴（実線＝済・点線＝未・枠なし＝対象外・太枠＝要確認・細い点線＝読めない）</p>
         ) : null}
       </div>
 
