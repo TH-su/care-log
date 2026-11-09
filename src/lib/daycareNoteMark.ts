@@ -4,6 +4,8 @@
 // ・〔申し送りにする〕で、記録から文を組み立てた申し送り（区分「デイ」shift='daycare'）を1件作る。notes の表は変えない
 // ・分類は記録の種類から: 食事・水分 →「食事」、バイタル・排泄 →「体調」、活動 → 付けない
 // ・冪等キー: dcn:<業務日>:<利用者id>:<記録>:<世代>-<送るたびの印>。記録は vital・lunch・snack・ex・fl<水分の id>・ac<活動の id>。
+//   2026-11-10 計画D: 一括の画面のワンタップの印に、acday（活動一括の行＝その日の活動をまとめて1件）・tr<機能訓練の記録の id> を足した。
+//   どちらも分類は付けない（活動と同じ）。1人の画面の ac<id>（活動1つずつ）とは別の鍵なので、両方の印が並ぶことがある
 //   世代は「その記録の印をこれまで何回付けたか」（取り消した申し送りも数える・いちばん新しい印を選ぶのに使う）。
 //   送るたびの印（短い乱数）で、別の端末・取り消した申し送りの鍵には決して当たらない（当たると insertNote は先の行を
 //   「届いた」として返し、ひと言・記入者や印そのものが黙って消える＝2c の反証 重大2・中3・中4）。同じ送信の送り直しは
@@ -13,19 +15,22 @@
 
 import type { NoteCategory } from './types.ts'
 
-/** 印を付けられる記録の種類 */
-export type MarkKind = 'vital' | 'lunch' | 'snack' | 'ex' | 'fluid' | 'activity'
+/** 印を付けられる記録の種類（activityDay＝その日の活動をまとめて・training＝機能訓練の記録。2026-11-10 計画D） */
+export type MarkKind = 'vital' | 'lunch' | 'snack' | 'ex' | 'fluid' | 'activity' | 'activityDay' | 'training'
 
-/** 印を付ける記録（kind と、水分・活動はその行の id） */
+/** 印を付ける記録（kind と、水分・活動・機能訓練はその行の id） */
 export type MarkRecord =
-  | { kind: 'vital' | 'lunch' | 'snack' | 'ex' }
+  | { kind: 'vital' | 'lunch' | 'snack' | 'ex' | 'activityDay' }
   | { kind: 'fluid'; id: number }
   | { kind: 'activity'; id: number }
+  | { kind: 'training'; id: number }
 
-/** 鍵の中の記録の部分（vital・lunch・snack・ex・fl<id>・ac<id>） */
+/** 鍵の中の記録の部分（vital・lunch・snack・ex・fl<id>・ac<id>・acday・tr<id>） */
 export function markWhat(r: MarkRecord): string {
   if (r.kind === 'fluid') return `fl${r.id}`
   if (r.kind === 'activity') return `ac${r.id}`
+  if (r.kind === 'training') return `tr${r.id}`
+  if (r.kind === 'activityDay') return 'acday'
   return r.kind
 }
 
@@ -39,6 +44,42 @@ export function markDayPrefix(day: string, residentId: number): string {
   return `dcn:${day}:${residentId}:`
 }
 
+/**
+ * 1人1日1件として扱う印の頭（2026-11-10 計画D の反証 中3）。機能訓練は記録を取り消して入れ直すと id が替わるので、その方・その日の tr＊ を
+ * 1つの印として扱う（dcn:<日>:<利用者id>:tr）。ほかの記録は markPrefix と同じ
+ */
+export function markFamilyPrefix(day: string, residentId: number, r: MarkRecord): string {
+  return r.kind === 'training' ? `dcn:${day}:${residentId}:tr` : markPrefix(day, residentId, r)
+}
+
+/** その日の全員の印の鍵の頭（一括の画面の送信待ちの絞り込み・2026-11-10 計画D） */
+export function markDayAllPrefix(day: string): string {
+  return `dcn:${day}:`
+}
+
+/** 鍵の中の記録の部分（markWhat の形）から記録を戻す（形が違えば null・2026-11-10 計画D: 元の記録が無くなった印を外すため） */
+export function markRecordOf(what: string): MarkRecord | null {
+  if (what === 'vital' || what === 'lunch' || what === 'snack' || what === 'ex') return { kind: what }
+  if (what === 'acday') return { kind: 'activityDay' }
+  const m = /^(fl|ac|tr)(\d+)$/.exec(what)
+  if (m === null) return null
+  const id = Number(m[2])
+  if (!Number.isSafeInteger(id) || id <= 0) return null
+  return m[1] === 'fl' ? { kind: 'fluid', id } : m[1] === 'ac' ? { kind: 'activity', id } : { kind: 'training', id }
+}
+
+/** 記録の種類の呼び名（一括の画面の読み上げ・知らせ） */
+export const MARK_KIND_LABEL: Record<MarkKind, string> = {
+  vital: 'バイタル',
+  lunch: '昼食',
+  snack: 'おやつ',
+  ex: '排泄',
+  fluid: '水分',
+  activity: '活動',
+  activityDay: '活動',
+  training: '機能訓練',
+}
+
 /** 送るたびの印の形（英小文字と数字・1〜16字） */
 const TOKEN_RE = /^[0-9a-z]{1,16}$/
 
@@ -48,10 +89,10 @@ export function markKey(day: string, residentId: number, r: MarkRecord, gen: num
   return `${markPrefix(day, residentId, r)}${gen}-${token}`
 }
 
-/** 鍵を読む（形が違えば null）。what は vital・lunch・snack・ex・fl<id>・ac<id>。token の無い鍵（#21 の版）も読む */
+/** 鍵を読む（形が違えば null）。what は vital・lunch・snack・ex・fl<id>・ac<id>・acday・tr<id>。token の無い鍵（#21 の版）も読む */
 export function parseMarkKey(key: string | null | undefined): { day: string; residentId: number; what: string; gen: number } | null {
   if (typeof key !== 'string') return null
-  const m = /^dcn:(\d{4}-\d{2}-\d{2}):(\d+):(vital|lunch|snack|ex|fl\d+|ac\d+):(\d+)(?:-[0-9a-z]{1,16})?$/.exec(key)
+  const m = /^dcn:(\d{4}-\d{2}-\d{2}):(\d+):(vital|lunch|snack|ex|acday|fl\d+|ac\d+|tr\d+):(\d+)(?:-[0-9a-z]{1,16})?$/.exec(key)
   if (m === null) return null
   const residentId = Number(m[2])
   const gen = Number(m[4])
@@ -73,7 +114,7 @@ export function nextGen(prefix: string, keys: readonly string[]): number {
   return max + 1
 }
 
-/** 記録の種類から付ける分類（食事・水分→食事／バイタル・排泄→体調／活動→付けない） */
+/** 記録の種類から付ける分類（食事・水分→食事／バイタル・排泄→体調／活動・その日の活動・機能訓練→付けない） */
 export function markCategories(kind: MarkKind): NoteCategory[] {
   if (kind === 'lunch' || kind === 'snack' || kind === 'fluid') return ['食事']
   if (kind === 'vital' || kind === 'ex') return ['体調']
@@ -135,6 +176,32 @@ export function vitalMarkText(v: { temp: number | null; sys_bp: number | null; d
   return parts.length === 0 ? null : `バイタル ${parts.join('・')}`
 }
 
+/** バイタルの5項目の値 */
+export interface VitalValues {
+  temp: number | null
+  sys_bp: number | null
+  dia_bp: number | null
+  pulse: number | null
+  spo2: number | null
+}
+
+/**
+ * その方・その日のバイタルの行から、項目ごとにいちばん新しい値（測った時刻 → id の順に並べて、後ろから値のある行）。
+ * 1人の画面の申し送りの文と、バイタル・食事のテンキーの〔⚐ 申し送り〕の文の共通の元（2026-11-10 計画D の反証 中1: 全部の回から項目ごとの最新）。
+ * 送信待ち・打ちかけの値は渡さない（サーバーの行だけ）
+ */
+export function latestVitalValues(rows: readonly (VitalValues & { id: number; measured_at: string | null })[]): VitalValues {
+  const sorted = [...rows].sort((a, b) => (a.measured_at ?? '').localeCompare(b.measured_at ?? '') || a.id - b.id)
+  const pick = (f: keyof VitalValues): number | null => {
+    for (let i = sorted.length - 1; i >= 0; i -= 1) {
+      const v = sorted[i][f]
+      if (typeof v === 'number') return v
+    }
+    return null
+  }
+  return { temp: pick('temp'), sys_bp: pick('sys_bp'), dia_bp: pick('dia_bp'), pulse: pick('pulse'), spo2: pick('spo2') }
+}
+
 /** 昼食・おやつの文（表示の言葉＝lunchLabel・snackLabel をそのまま渡す）。記録なしは null */
 export function mealMarkText(slot: 'lunch' | 'snack', label: string): string | null {
   if (label === '記録なし') return null
@@ -149,6 +216,19 @@ export function fluidMarkText(f: { taken_at: string | null; amount_ml: number })
 /** 活動の文（activityText の言葉をそのまま渡す） */
 export function activityMarkText(text: string): string {
   return `活動 ${text}`
+}
+
+/**
+ * その日の活動をまとめた文（活動一括の行・2026-11-10 計画D）。texts は activityText の言葉を表の並び（activitiesOf＝定型の順 → 入れた順）で
+ * 渡す。1つも無ければ null（押せない）
+ */
+export function activityDayMarkText(texts: readonly string[]): string | null {
+  return texts.length === 0 ? null : `活動 ${texts.join('・')}`
+}
+
+/** 機能訓練の文（その日の記録の要約＝sessionText の言葉をそのまま渡す・2026-11-10 計画D。指導員の氏名は入れない） */
+export function trainingMarkText(text: string): string {
+  return `機能訓練 ${text}`
 }
 
 /** 排泄の文（その日の回数）。排泄ケアアプリの記録を読めていない時は null */

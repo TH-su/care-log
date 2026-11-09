@@ -389,7 +389,8 @@ describe('静的検査（計画B）', () => {
     // 段の間はあけない（カードの li に gap・space-y を付けない）・上下の余白 py-1.5・枠 1px は今のまま
     assert.match(list, /<li key=\{row\.residentId\} className=\{`dc-card relative flex min-w-0 flex-col rounded-lg border px-1\.5 py-1\.5 \$\{tone\.cardCls\}`\}>/)
     // 状態の段は text-sm 太字 leading-tight・記号は読み上げない
-    assert.match(list, /<p className="break-words text-sm font-bold leading-tight text-ink">\s*<span aria-hidden="true">\{tone\.mark\} <\/span>\s*\{tone\.word\}\s*<\/p>/)
+    // 2026-11-10 計画D（固定し直し・意図は同じ）: 状態の段の右に申し送りの数「⚑n」（0件は出さない・枠なし・押せない表示）を足した。段の作りは同じ
+    assert.match(list, /<p className="break-words text-sm font-bold leading-tight text-ink">\s*<span aria-hidden="true">\{tone\.mark\} <\/span>\s*\{tone\.word\}\s*(\{\}\s*)?\{noteN > 0 \? \([\s\S]*?\) : null\}\s*<\/p>/)
     // 氏名は text-ink（休みの方も）
     assert.match(list, /<span className="block break-words text-base font-bold leading-tight text-ink">/)
     // 予定の誤りは、来た方・休みの方・入院中の方でも状態の段の下に1行（反証 中3）。印の段より上
@@ -412,7 +413,8 @@ describe('静的検査（計画B）', () => {
     const legend = '印: VS バイタル・食 昼食・活 活動・訓 訓練・浴 入浴（実線＝済・点線＝未・枠なし＝対象外・太枠＝要確認・細い点線＝読めない）'
     assert.equal(today.split(legend).length, 2, '1か所だけ')
     assert.ok(today.indexOf(legend) > today.indexOf('＋ 予定にない方を追加'))
-    assert.match(today, new RegExp(`<p className="text-sm text-ink2">${legend.replace(/[()（）?]/g, '.')}</p>`))
+    // 2026-11-10 計画D（固定し直し・意図は同じ）: カードの「⚑n」の説明（・⚑ 申し送り（数））を同じ1行の後ろに足した
+    assert.match(today, new RegExp(`<p className="text-sm text-ink2">${legend.replace(/[()（）?]/g, '.')}・⚑ 申し送り（数）</p>`))
     const header = today.slice(today.indexOf('const header = (counts'), today.indexOf('if (loading && data === null)'))
     assert.doesNotMatch(header, /VS バイタル/)
   })

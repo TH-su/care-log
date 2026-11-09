@@ -561,7 +561,8 @@ if (A === null) {
       // 行の列は見出しと同じ並び（定型の7つの枠 → その他の枠）
       const body = b.slice(b.indexOf('<tbody>'), b.indexOf('</tbody>'))
       assert.ok(body.indexOf('{DAYCARE_ACTIVITY_CHIPS.map((c) => (') < body.indexOf('{others.map((l) => cellButton(rid, name, l, true))}'))
-      assert.match(body, /<td colSpan=\{DAYCARE_ACTIVITY_CHIPS\.length \+ 2\} className="p-0">\s*<div className="w-0 min-w-full">\s*<div className="sticky left-0 space-y-1 px-2 pb-2" style=\{\{ maxWidth: tableBoxWidth > 0 \? tableBoxWidth : undefined \}\}>/)
+      // 2026-11-10 計画D（固定し直し・意図は同じ）: 行の右に申し送りの列を足したので、知らせの行は定型の7つ＋氏名・その他・申し送りの列にまたがる
+      assert.match(body, /<td colSpan=\{DAYCARE_ACTIVITY_CHIPS\.length \+ 3\} className="p-0">\s*<div className="w-0 min-w-full">\s*<div className="sticky left-0 space-y-1 px-2 pb-2" style=\{\{ maxWidth: tableBoxWidth > 0 \? tableBoxWidth : undefined \}\}>/)
       // 表の枠の幅は ResizeObserver で測る（バイタル一括と同じ）
       assert.match(b, /const ro = new ResizeObserver\(check\)\s+ro\.observe\(el\)\s+if \(el\.firstElementChild\) ro\.observe\(el\.firstElementChild\)/)
       // 氏名の列: 1人の画面への入口（44px）。2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 〔記録 ›〕のボタンは氏名のリンクにまとめた

@@ -9400,6 +9400,48 @@ export function pendingDaycareNoteMarks(prefix: string): PendingNoteMark[] {
   return out
 }
 
+// ── デイ 計画D（2026-11-10）: その日のデイの申し送りを1本で読む（一括の画面の印・今日の画面の件数。読むだけ・DB 変更なし） ─────────────
+
+/** 1日のデイの申し送りとして読む上限（予定の方 30名 × 記録の種類 × 付け直しの回数と、手で書いたデイの申し送りを十分に上回る） */
+const DAYCARE_DAY_NOTE_ROWS = 2000
+
+/** その日のデイの申し送り1件。clientKey＝冪等キー（無い行は null）。deleted＝取り消した申し送り（印の世代を数えるためだけに読む） */
+export interface DaycareDayNoteRow {
+  note: Note
+  clientKey: string | null
+  deleted: boolean
+}
+
+/**
+ * その日の区分「デイ」の申し送りを全部読む（全員分・1本）。一括の画面は冪等キー dcn: の行を印に使い（fetchDaycareNoteMarks の
+ * その日の全員の版）、今日の画面は取り消していない行を数える（手で書いたデイの申し送りも数える）。
+ * ★取り消した申し送りも読む（fetchDaycareNoteMarks と同じ理由: 印の世代は取り消した分も数える）。取り消した行は画面に出さない
+ */
+export async function fetchDaycareDayNotes(dayIso: string): Promise<DaycareDayNoteRow[]> {
+  assertDay(dayIso)
+  const sb = await getClient()
+  const res = (await bounded(
+    sb
+      .from('notes')
+      .select(`${NOTE_COLS},client_key,deleted_at`)
+      .eq('note_on', dayIso)
+      .eq('shift', 'daycare')
+      .order('id', { ascending: true })
+      .limit(DAYCARE_DAY_NOTE_ROWS),
+  )) as Res<unknown>
+  if (res.error !== null) throw readError(res)
+  const out: DaycareDayNoteRow[] = []
+  for (const raw of Array.isArray(res.data) ? res.data.slice(0, DAYCARE_DAY_NOTE_ROWS) : []) {
+    const r = asRecord(raw)
+    const note = normalizeNote(raw)
+    // 受信した行を信じない: 日・区分の違う行は捨てる（読み違いで別の日の印を数えない）
+    if (note === null || note.note_on !== dayIso || note.shift !== 'daycare') continue
+    out.push({ note, clientKey: str(r?.client_key), deleted: r?.deleted_at !== null && r?.deleted_at !== undefined })
+  }
+  await assertSessionIfEmpty(sb, out.length) // anon で読んだ0件を「申し送りなし」と出さない（F58）
+  return out
+}
+
 /** デイの1日の昼食・おやつの行（取り込みの印つき）。段階2a・2026-10-22 */
 export interface DaycareMealRow {
   meal: Meal

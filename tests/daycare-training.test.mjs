@@ -398,7 +398,8 @@ describe('静的検査（段階3a の規律）', () => {
     assert.match(sec, /'記録（送信待ち）'/)
     assert.match(sec, /（\{p\.stopped \? '止まっています' : '送信待ち'\}）/)
     // 行の下の知らせ（rowMsg・MSG_STOPPED）はバイタル一括と同じ形（幅0＋最小100% の箱・左に残す）
-    assert.match(sec, /<td colSpan=\{5\} className="p-0">\s*<div className="w-0 min-w-full">\s*<div className="sticky left-0 space-y-1 px-2 pb-2" style=\{\{ maxWidth: tableBoxWidth > 0 \? tableBoxWidth : undefined \}\}>\s*\{stoppedNote \? msgBox\(\{ tone: 'warn', text: MSG_STOPPED \}\) : null\}\s*\{m !== null \? msgBox\(m\) : null\}/)
+    // 2026-11-10 計画D（固定し直し・意図は同じ）: 表の右に申し送りの列を足したので、知らせの行は6列にまたがる（印の知らせ markNote もこの行に出す）
+    assert.match(sec, /<td colSpan=\{6\} className="p-0">\s*<div className="w-0 min-w-full">\s*<div className="sticky left-0 space-y-1 px-2 pb-2" style=\{\{ maxWidth: tableBoxWidth > 0 \? tableBoxWidth : undefined \}\}>\s*\{stoppedNote \? msgBox\(\{ tone: 'warn', text: MSG_STOPPED \}\) : null\}\s*\{m !== null \? msgBox\(m\) : null\}/)
     assert.match(sec, /const stoppedNote = add\?\.stopped === true \|\| p\?\.stopped === true/)
     assert.match(sec, /const m = rowMsg !== null && rowMsg\.rid === rid && rowMsg\.day === day \? rowMsg\.msg : null/)
     assert.match(p, /const ro = new ResizeObserver\(check\)\s+ro\.observe\(el\)\s+if \(el\.firstElementChild\) ro\.observe\(el\.firstElementChild\)/)

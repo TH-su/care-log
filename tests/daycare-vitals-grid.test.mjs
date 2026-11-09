@@ -110,9 +110,11 @@ if (DC === null) {
       // （iPad 縦で氏名の横の印が折り返して行が伸びたため）
       // 2026-11-09 計画B3（固定し直し・意図は同じ）: 氏名は1人の画面へのリンク（来た・まだの文字もリンクの中＝それまでの食事一括と同じ）。基準の札はその下のまま
       // 2026-11-09 計画B3 の手直し（固定し直し・意図は同じ）: 基準の札は氏名のリンクの2段目（押せる高さ 44px の中に2段＝活動一括と同じ形・行の高さ 53px）
+      // 2026-11-10 計画D の反証の確認（固定し直し・意図は同じ）: 止まった印の読み上げ「申し送りは止まっています」（⚑▲）を足した
       assert.match(
         page,
-        /<span className="text-base font-bold leading-tight text-link">\s*\{nameOf\(row\.residentId\)\}\s*<span className="sr-only">さんの1日の記録を開く<\/span>\s*<\/span>\s*<span className="text-sm leading-tight text-ink2">\s*\{\(blankCount \?\? 0\) > 0 \? <DaycareRowBlankMark lead \/> : null\}\s*\{basis\}\s*<\/span>\s*<\/Link>/,
+        // 2026-11-10 計画D（固定し直し・意図は同じ）: 氏名は1段（入らない時は省略記号）・同じ段の右に申し送りの印「⚑」。札は2段目のまま
+        /<span className="flex min-w-0 items-baseline text-base font-bold leading-tight text-link">\s*<span className="min-w-0 truncate">\{nameOf\(row\.residentId\)\}<\/span>\s*\{markMk !== null \? \([\s\S]*?\) : null\}\s*<span className="sr-only">\s*さんの1日の記録を開く\s*\{markMk === 'live' \? '（申し送り済み）' : markMk === 'pending' \? '（申し送りは送信待ち）' : markMk === 'stopped' \? '（申し送りは止まっています）' : ''\}\s*<\/span>\s*<\/span>\s*<span className="text-sm leading-tight text-ink2">\s*\{\(blankCount \?\? 0\) > 0 \? <DaycareRowBlankMark lead \/> : null\}\s*\{basis\}\s*<\/span>\s*<\/Link>/,
       )
       // 「1回目（時刻）」は再測定の回がある方だけ
       assert.match(page, /\{slots\.length > 1 \? \(\s*<span className="block text-sm leading-tight text-ink2">1回目/)
