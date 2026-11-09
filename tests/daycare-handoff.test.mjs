@@ -175,7 +175,8 @@ describe('静的検査', () => {
     assert.match(today, /\}, \[board, data, residents, day, today\]\)/)
   })
   it('〔排泄〕を押した直前に書き直す（今日の画面・一括の4画面・1人の画面）。日は画面の日付でなく一覧を読んだ日（data.day＝反証 重1）', () => {
-    assert.match(today, /<DaycareNav current="today" handoff=\{\(\) => writeDaycareHandoffFor\(\{ rows: board\?\.rows \?\? null, residents, boardDay: data\?\.day \?\? null, today \}\)\} \/>/)
+    // 2026-11-09 計画B（固定し直し・意図は同じ）: 今日の画面だけ、切り替えに未入力の数（pending）も渡す
+    assert.match(today, /<DaycareNav current="today" handoff=\{\(\) => writeDaycareHandoffFor\(\{ rows: board\?\.rows \?\? null, residents, boardDay: data\?\.day \?\? null, today \}\)\} pending=\{navPending\} \/>/)
     // 中クリック・長押しのメニューで新しいタブに開く時も書く（反証 軽4）・読み上げの名前は見えている文字から（反証 軽5）
     const nav = today.slice(today.indexOf('export function DaycareNav'), today.indexOf('/** 予定の帯'))
     assert.match(nav, /onClick=\{\(\) => handoff\?\.\(\)\}\s*onAuxClick=\{\(\) => handoff\?\.\(\)\}\s*onContextMenu=\{\(\) => handoff\?\.\(\)\}/)

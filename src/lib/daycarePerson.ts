@@ -8,6 +8,7 @@
 
 import { daycareBulkRows } from './daycare.ts'
 import type { AttendanceState, DaycareBoardRow } from './daycare.ts'
+import { attendedUnfilledCount, lunchFilled } from './daycareProgress.ts'
 import type { FluidIntake, Meal } from './types.ts'
 
 /** 昼食の主食・副食の割合（既存の食事一括と同じ 0〜10 の11段階） */
@@ -275,16 +276,6 @@ export function lunchSelectPatch(
 export function lunchUnfilledCount(
   rows: readonly { state: AttendanceState; lunch: Pick<Meal, 'main_amount' | 'side_amount' | 'status'> | null | undefined }[],
 ): { unfilled: number; notArrived: number } {
-  let unfilled = 0
-  let notArrived = 0
-  for (const r of rows) {
-    if (r.state !== 'present' && r.state !== 'left') {
-      notArrived += 1
-      continue
-    }
-    const m = r.lunch
-    if (m !== null && m !== undefined && m.status === 'refused') continue
-    if (m === null || m === undefined || m.main_amount === null || m.side_amount === null) unfilled += 1
-  }
-  return { unfilled, notArrived }
+  // 2026-11-09 計画B: 一括の4画面で同じ数え方（attendedUnfilledCount）にそろえた（中身の数え方は今までと同じ）
+  return attendedUnfilledCount(rows.map((r) => ({ state: r.state, filled: lunchFilled(r.lunch) })))
 }

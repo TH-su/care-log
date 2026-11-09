@@ -3,6 +3,8 @@
 // 一覧＝その日の予定（週間計画の写し・RPC daycare_plan。開所の後はその日の写し daycare_days）＋記録のある人＋予定外に足した人。
 // 各行: 氏名・予定の時間・状態（予定○／在席●時刻／帰宅✓時刻／欠席✕理由）・次の操作（到着を記録／帰宅を記録）・欠席・
 //       進み具合（バイタル・入浴）。到着の1タップで在席（代表者の回答 5.2 の8）。1タップの操作はトーストの「元に戻す」（8秒）。
+// 2026-11-09 計画B: カードは 氏名と〔休み〕／ふりがな／状態の段（記号＋言葉＋時刻）／進み具合の印（VS・食・活・訓・浴）の4段。
+//       カードの地と枠は状態の4色（daycareProgress.ts の daycareStateTone）。上の切り替えに未入力の数を添える（今日の画面だけ）
 // 欠席: 理由（体調不良・受診入院・本人の希望・ご家族の都合・その他）を選んだ時点で記録する。在席・帰宅の人は
 //       「到着の記録を取り消して欠席にします」と確かめる。欠席を記録したら、その日の入浴を「中止・欠席」にする
 //       （db.ts の recordAbsentBath: 読む → あれば更新（自動の行は手入力へ）→ 無ければ追加 → 23505 なら読み直して更新）。
@@ -36,12 +38,16 @@ import {
   fetchDaycareVitalsLive,
   fetchMyRole,
   fetchResidentTargets,
+  fetchTrainingSessions,
   getAppSetting,
   getKindInputGate,
   hasPendingDaycareAttendance,
   isSelfWrite,
   kindBlockedMessage,
   openDaycareDay,
+  pendingActivityOps,
+  pendingRow,
+  pendingTrainingOps,
   queuePending,
   queueSubscribe,
   subscribeBathChanges,
@@ -50,34 +56,61 @@ import {
   subscribeDaycareChanges,
   subscribeMyRole,
 } from '../lib/db'
-import type { DaycareMealRow, MyRole } from '../lib/db'
+import type { DaycareMealRow, MyRole, VitalTarget } from '../lib/db'
 // 名簿は読み込みの控えを通し、在籍者は全員の名簿から切り出す（同じ取得に相乗り＝residents 表を1回だけ読む・2026-10-29）
 import { fetchAllResidents, fetchResidentsFromAll } from '../lib/cachedReads'
-import { lunchShortLabel, personPath } from '../lib/daycarePerson'
+import { personPath } from '../lib/daycarePerson'
 import type { DaycareActivity } from '../lib/daycareActivity'
 import { loadDaycareDayParts } from '../lib/daycareDayLoad'
 import type { DaycareDayReaders } from '../lib/daycareDayLoad'
 import { RecorderBar } from '../components/RecorderBar'
 import { ErrorBlock, LoadingBlock, ResidentPickerModal, useToast } from '../components/ui'
-import { hasTimes, hmShort, useDaycareAttendanceOps } from '../components/DaycareAttendanceOps'
+import { hasTimes, useDaycareAttendanceOps } from '../components/DaycareAttendanceOps'
 import { HAIBEN_DAYCARE_HREF, writeDaycareHandoffFor } from '../lib/daycareHandoff'
-import { daycareDayMemo, memoForDay, memoWithAttendance, memoWithBath, memoWithoutAttendance, rememberDaycareDay, updateDaycareDayMemo } from '../lib/daycareDayMemo'
 import {
+  daycareDayMemo,
+  memoBathsOk,
+  memoForDay,
+  memoVitalsOk,
+  memoWithAttendance,
+  memoWithBath,
+  memoWithoutAttendance,
+  rememberDaycareDay,
+  updateDaycareDayMemo,
+} from '../lib/daycareDayMemo'
+import {
+  DAYCARE_VITAL_FIELDS,
   bathCountsUnchecked,
   buildDaycareBoard,
   canChangeDaycareTimes,
   canEditPastDaycareTimes,
-  daycareBathShortLabel,
   daycareBathStatus,
-  fmtPlanTimes,
   nowHm,
   vitalNeedsRecheck,
 } from '../lib/daycare'
-import type { DaycareBoardRow, KeyedVital } from '../lib/daycare'
+import type { KeyedVital } from '../lib/daycare'
+import {
+  PROGRESS_MARK_CLS,
+  PROGRESS_STATE_WORD,
+  activityCellsFilled,
+  activityShownCells,
+  daycareNavPending,
+  daycareProgressMarks,
+  daycareStateTone,
+  daycareVitalSlotsWithPending,
+  lunchShownWith,
+  navPendingOf,
+  unreadProgressLabels,
+  unreadProgressNotice,
+  trainingFilled,
+  vitalShownValues,
+  vitalSlotsFilled,
+} from '../lib/daycareProgress'
+import type { DaycareNavPending, ProgressMark } from '../lib/daycareProgress'
+import type { DaycareTrainingSession } from '../lib/daycareTraining'
 import { useVitalLimits } from '../hooks/useVitalLimits'
 import { VitalLimitsFailedNote } from '../components/VitalLimitsFailedNote'
 import { addDays, fmtDayLabel, todayIso } from '../lib/format'
-import { DAYCARE_ABSENT_REASON_LABEL } from '../lib/types'
 import type {
   BathRecord,
   FluidIntake,
@@ -108,11 +141,22 @@ interface DayData {
   attendance: DaycareAttendance[]
   baths: BathRecord[]
   vitals: KeyedVital[]
+  /**
+   * 入浴・バイタルを読めたか（2026-11-09 反証 中6: 読めない時の空の一覧で印を「未」に見せない＝「読めない」の印）。
+   * 控えで開いた時は、控えに残した「読めたか」を使う（daycareDayMemo の bathsOk・vitalsOk＝確認の反証 中1）
+   */
+  bathsOk: boolean
+  vitalsOk: boolean
   /** 昼食・おやつ（取り込みの印つき）と水分（段階2a・行の小さな印と1人の記録への入口に使う） */
   meals: DaycareMealRow[]
   fluids: FluidIntake[]
-  /** 活動・レク（段階2b・行の小さな印）。null＝読めない（0044 未適用・通信エラー）＝印を出さない（「記録なし」に見せない） */
+  /** 活動・レク（段階2b・行の小さな印）。null＝読めない（0044 未適用・通信エラー）＝「記録なし」に見せない（2026-11-09 計画B から「読めない」の印） */
   activities: DaycareActivity[] | null
+  /**
+   * その日の機能訓練の記録（2026-11-09 計画B・カードの「訓」の印と切り替えの未入力の数）。null＝読めない（表が無い・通信エラー）＝
+   * 印を「読めない」にするだけで、画面の他の部分は止めない
+   */
+  training: DaycareTrainingSession[] | null
   /** 昼食・おやつ・水分を読めたか（読めない時の空の一覧を控えに「読めた」として入れない＝確認の反証 中1） */
   intakeOk: boolean
   /** サーバーに届かず、控え（daycareDayMemo）で開いた時の控えの「読んだ時点」。サーバーから読めた時は null（親の確かめ 中1・2026-10-25） */
@@ -143,25 +187,22 @@ const DANGER_CELL_BTN =
 const REST_BTN =
   'inline-flex min-h-tap min-w-tap items-center justify-center rounded border-2 border-border-strong bg-surface px-1.5 text-sm font-bold text-ink disabled:border-border disabled:text-ink3'
 
-/** 状態の表示（記号＋文字＋時刻。色だけに頼らない） */
-function stateLabel(row: DaycareBoardRow): { mark: string; text: string; tone: 'plain' | 'ok' | 'info' | 'muted' } {
-  const a = row.attendance
-  if (row.state === 'absent') {
-    const reason = a?.absent_reason ? DAYCARE_ABSENT_REASON_LABEL[a.absent_reason] : '理由なし'
-    return { mark: '✕', text: `休み（${reason}）`, tone: 'muted' }
-  }
-  if (row.state === 'left') return { mark: '✓', text: `帰宅 ${hmShort(a?.left_at ?? null)}`, tone: 'muted' }
-  if (row.state === 'present') return { mark: '●', text: `在席 ${hmShort(a?.arrived_at ?? null)}`, tone: 'ok' }
-  if (row.hospitalized) return { mark: '－', text: '入院中', tone: 'muted' }
-  return { mark: '○', text: row.extra ? '予定外' : '予定', tone: 'plain' }
-}
-
 /**
  * デイの画面の上の切り替え（今日／バイタル／食事／排泄／活動／機能訓練）。今いる画面は塗りと aria-current で示す。
  * 〔排泄〕（2026-10-25 §9.7）は別のアプリ（排泄ケアアプリのデイの表示）へ同じタブで移る＝Link でなく a。押した直前に handoff を呼ぶ
  * （今日の一覧を持つ画面は受け渡しのキーを書き直す。今日の一覧が無い画面は渡さない＝書かずに移る）
+ * pending（2026-11-09 計画B）: 今日の画面だけ、〔バイタル一括〕〔食事一括〕〔活動一括〕〔機能訓練〕に未入力の数（来た方で印が「未」の数）を
+ * 「未5」と添える（0 は出さない）。読み上げは見えている名前から「バイタル一括（未入力 5名）」。ほかの画面は渡さない（今のまま）
  */
-export function DaycareNav({ current, handoff }: { current: 'today' | 'vitals' | 'meals' | 'activity' | 'training'; handoff?: () => void }) {
+export function DaycareNav({
+  current,
+  handoff,
+  pending,
+}: {
+  current: 'today' | 'vitals' | 'meals' | 'activity' | 'training'
+  handoff?: () => void
+  pending?: DaycareNavPending
+}) {
   const items: { key: 'today' | 'vitals' | 'meals' | 'activity' | 'training'; to: string; label: string }[] = [
     { key: 'today', to: '/record/daycare', label: '今日（到着・休み）' },
     { key: 'vitals', to: '/record/daycare/vitals', label: 'バイタル一括' },
@@ -203,15 +244,25 @@ export function DaycareNav({ current, handoff }: { current: 'today' | 'vitals' |
           }
         >
           {current === it.key ? <span aria-hidden="true">✓ </span> : null}
-          {/* 狭い画面（640px 未満）では括弧の補足を出さない（「今日（到着・休み）」→「今日」。切り替えが2段に収まる） */}
+          {/* 1280px 未満では括弧の補足を出さない（「今日（到着・休み）」→「今日」。狭い画面で切り替えが2段に収まる）。
+              2026-11-09 計画B: 640px（sm）から 1280px（xl）に上げた（今日の画面で未入力の数を添えても、iPad 横 1180px で切り替えと
+              記録者が1段に収まるように＝親の決定。デイの5画面で共通） */}
           {it.label.indexOf('（') > 0 ? (
             <>
               {it.label.slice(0, it.label.indexOf('（'))}
-              <span className="hidden sm:inline">{it.label.slice(it.label.indexOf('（'))}</span>
+              <span className="hidden xl:inline">{it.label.slice(it.label.indexOf('（'))}</span>
             </>
           ) : (
             it.label
           )}
+          {navPendingOf(pending, it.key) !== null ? (
+            <>
+              <span aria-hidden="true" className="ml-1 rounded bg-danger-bg px-1 font-bold text-danger">
+                未{navPendingOf(pending, it.key)}
+              </span>
+              <span className="sr-only">（未入力 {navPendingOf(pending, it.key)}名）</span>
+            </>
+          ) : null}
         </Link>,
         // 記録の順（バイタル → 食事 → 排泄）に、食事一括の次へ置く
         ...(it.key === 'meals' ? [excretion] : []),
@@ -382,7 +433,12 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     try {
       // 写し・出欠・入浴・バイタル・食事と水分・活動を同時に出し、予定だけを写しの後に出す（daycareDayLoad・2026-10-29 本人指示）。
       // 写しが「読めなかった」（unknown）の日は、いまの週間計画も読む（読めれば表示に使い、次のタップで写し直す＝反証レビュー中2）
-      const { snapshot, missing, plan, attendance, baths, vitals, intake, activities } = await loadDaycareDayParts(target, DAY_READERS)
+      // 機能訓練の記録も同時に読む（2026-11-09 計画B）。読めない時は null（印を「読めない」にするだけ）。この読み込みの中に置くので、
+      // 日の切り替え後の古い応答は入れず（世代と日付の守り）、送信待ちが届いた時・〔最新に更新〕の読み直しでも一緒に読み直す
+      const [{ snapshot, missing, plan, attendance, baths, vitals, bathsOk, vitalsOk, intake, activities }, training] = await Promise.all([
+        loadDaycareDayParts(target, DAY_READERS),
+        fetchTrainingSessions(target).catch((): DaycareTrainingSession[] | null => null),
+      ])
       const usable = snapshot !== null && snapshot.plan_source !== 'unknown'
       if (gen !== genRef.current || target !== dayRef.current) return
       const next: DayData = {
@@ -394,9 +450,12 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         attendance,
         baths,
         vitals,
+        bathsOk,
+        vitalsOk,
         meals: intake?.meals ?? [],
         fluids: intake?.fluids ?? [],
         activities,
+        training,
         intakeOk: intake !== null,
         memoAt: null,
         readAt: Date.now(),
@@ -418,10 +477,14 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
           attendance: m.attendance,
           baths: m.baths,
           vitals: m.vitals,
+          // 控えに「読めなかった」と残っている時は、控えで開いても「読めない」の印（空の一覧を「未」に見せない＝確認の反証 中1）
+          bathsOk: memoBathsOk(m),
+          vitalsOk: memoVitalsOk(m),
           meals: m.meals,
           fluids: m.fluids,
-          // 活動は控えに無い（読めない＝印を出さない）
+          // 活動・機能訓練は控えに無い（読めない＝印を出さない／「読めない」の印）
           activities: null,
+          training: null,
           intakeOk: m.intakeOk,
           memoAt: m.savedAt,
           readAt: m.savedAt,
@@ -492,6 +555,9 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       attendance: data.attendance,
       baths: data.baths,
       vitals: data.vitals,
+      // 入浴・バイタルを読めなかった一覧の時も、控えの値を前の値のまま残す（前に読めた値が無ければ「読めない」と控える＝確認の反証 中1）
+      bathsOk: data.bathsOk,
+      vitalsOk: data.vitalsOk,
       meals: data.meals,
       fluids: data.fluids,
       // 食事・水分を読めなかった一覧の時は、控えの食事・水分を前の値のまま残す（rememberDaycareDay の中＝親の反証 軽3）
@@ -606,11 +672,11 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
 
   // ── 描画 ──
   // 上の段は2段（切り替え＋記録者／日付＋件数）に詰める（2026-11-09 代表者の指示「タイトル帯やその他表示が小さくなってもよい」）。
-  // 件数（counts）は読み込めた後だけ、日付の右に並べる（幅が足りない時は次の行へ回る）
-  const header = (counts: ReactNode = null) => (
+  // 件数（counts）は読み込めた後だけ、日付の右に並べる（幅が足りない時は次の行へ回る）。切り替えの未入力の数（navPending）も読み込めた後だけ
+  const header = (counts: ReactNode = null, navPending?: DaycareNavPending) => (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-gap">
-        <DaycareNav current="today" handoff={() => writeDaycareHandoffFor({ rows: board?.rows ?? null, residents, boardDay: data?.day ?? null, today })} />
+        <DaycareNav current="today" handoff={() => writeDaycareHandoffFor({ rows: board?.rows ?? null, residents, boardDay: data?.day ?? null, today })} pending={navPending} />
         <RecorderBar actorId={actorId} staff={staff ?? null} />
       </div>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -693,11 +759,24 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   if (data === null || board === null) return null
 
   const c = board.counts
-  const vitalsDone = (id: number) => vitalsOf(id).some((v) => v.temp !== null || v.sys_bp !== null || v.pulse !== null || v.spo2 !== null)
+  // バイタルの回ごとの値（サーバーの値に、この端末の送信待ちを重ねる＝バイタル一括と同じ純関数 daycareVitalSlotsWithPending・vitalShownValues
+  // ・2026-11-09 反証 中1）。描くたびに1回だけ作る（送信待ちを読むのは端末の中だけ・通信しない）
+  const vitalKeys = data.vitals.flatMap((v) => (typeof v.client_key === 'string' ? [v.client_key] : []))
+  const vitalTarget = (id: number, key: string): VitalTarget => ({ routine: false, clientKey: key, residentId: id, day: data.day, kind: 'observation' })
+  const vitalShown = new Map(
+    board.rows.map((r) => {
+      const id = r.residentId
+      const slots = daycareVitalSlotsWithPending(vitalsOf(id), vitalKeys, id, data.day, [], (key) => pendingRow('vitals', vitalTarget(id, key)) !== null)
+      return [id, slots.map((slot) => ({ seq: slot.seq, vals: vitalShownValues(pendingRow('vitals', vitalTarget(id, slot.key)), slot.vital) }))]
+    }),
+  )
+  /** 測った（どれかの回のどれかの欄に値がある。血圧の下も入れる＝反証 軽4・送信待ちを含む） */
+  const vitalsDone = (id: number) => vitalSlotsFilled((vitalShown.get(id) ?? []).map((s) => DAYCARE_VITAL_FIELDS.map((f) => s.vals[f])))
+  /** 値のある回のうち一番後の回が、再測定の目安に当たる */
   const vitalsAbnormal = (id: number) => {
-    const list = vitalsOf(id)
-    const latest = list.length === 0 ? null : list.reduce((a, b) => (b.id > a.id ? b : a))
-    return latest !== null && vitalNeedsRecheck(latest, targets.get(id), limits.lookup(id, data.day))
+    const withVal = (vitalShown.get(id) ?? []).filter((s) => DAYCARE_VITAL_FIELDS.some((f) => s.vals[f] !== null))
+    const latest = withVal.length === 0 ? null : withVal.reduce((a, b) => (b.seq > a.seq ? b : a))
+    return latest !== null && vitalNeedsRecheck(latest.vals, targets.get(id), limits.lookup(id, data.day))
   }
   const vitalsWaiting = board.rows.filter((r) => r.state === 'present' && !vitalsDone(r.residentId)).length
   // 入浴を確かめていない方（代表者の決定 2026-10-23 の 3: 自動の行は「済」で数えない。12:30 を過ぎても行が無い方と、
@@ -705,14 +784,59 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   const bathClock = { pastDay: data.day < today, nowHm: nowHm() }
   const bathUnchecked = board.rows.filter((r) => bathCountsUnchecked(daycareBathStatus(bathOf(r.residentId), r.bathingPlanned), r.state, bathClock)).length
 
-  const tiles: { label: string; value: number; tone?: 'warn' }[] = [
+  // 進み具合の印（2026-11-09 計画B・daycareProgress.ts）。カードの段4と、上の切り替えの未入力の数（来た方で「未」の数）の両方に使う。
+  // 送信待ちは一括の画面と同じ決まりで重ねる（反証 中1: 食事＝送っている途中の値だけ・バイタル＝どの状態の値も・活動＝枠と同じ・訓練＝追加）。
+  // 読めない項目は「読めない」の印（反証 中6）
+  const trainingRead = data.training
+  const trainingPending = trainingRead === null ? [] : pendingTrainingOps()
+  const activityRead = data.activities
+  const activityPending = activityRead === null ? [] : pendingActivityOps()
+  const marksOf = new Map<number, ProgressMark[]>(
+    board.rows.map((r) => {
+      const id = r.residentId
+      const vDone = vitalsDone(id)
+      return [
+        id,
+        daycareProgressMarks({
+          state: r.state,
+          hospitalized: r.hospitalized,
+          vitals: data.vitalsOk ? { done: vDone, abnormal: vDone && vitalsAbnormal(id) } : null,
+          lunch: lunchShownWith(lunchOf(id), pendingRow('meals', { residentId: id, day: data.day, slot: 'lunch' })),
+          lunchRead: data.intakeOk,
+          activity: activityRead === null ? null : activityCellsFilled(activityShownCells(activityRead, activityPending, id, data.day)),
+          training: trainingRead === null ? null : trainingFilled(trainingRead, trainingPending, id, data.day),
+          bath: data.bathsOk ? daycareBathStatus(bathOf(id), r.bathingPlanned) : null,
+        }),
+      ]
+    }),
+  )
+  // 読めなかった項目の知らせ（一覧の上に1行）
+  const unreadNotice = unreadProgressNotice(
+    unreadProgressLabels({
+      vitalsOk: data.vitalsOk,
+      intakeOk: data.intakeOk,
+      activitiesOk: data.activities !== null,
+      trainingOk: data.training !== null,
+      bathsOk: data.bathsOk,
+    }),
+  )
+  // 切り替えの数は今日を見ている時だけ（リンクの先は今日を開くため＝反証 中2）
+  const navPending =
+    data.day === today ? daycareNavPending(board.rows.map((r) => ({ state: r.state, marks: marksOf.get(r.residentId) ?? [] }))) : undefined
+
+  // value=null＝読めない（バイタル・入浴を読めなかった日は数を「—」にし、▲ の注意の形にしない＝確認の反証 軽2）
+  const tiles: { label: string; value: number | null; tone?: 'warn' }[] = [
     { label: '予定', value: c.planned },
     { label: '在席', value: c.present },
     { label: '帰宅', value: c.left },
     { label: '休み', value: c.absent },
     { label: '未到着', value: c.waiting },
-    { label: 'バイタル未', value: vitalsWaiting, tone: vitalsWaiting > 0 ? 'warn' : undefined },
-    { label: '入浴 未確認', value: bathUnchecked, tone: bathUnchecked > 0 ? 'warn' : undefined },
+    data.vitalsOk
+      ? { label: 'バイタル未', value: vitalsWaiting, tone: vitalsWaiting > 0 ? 'warn' : undefined }
+      : { label: 'バイタル未', value: null },
+    data.bathsOk
+      ? { label: '入浴 未確認', value: bathUnchecked, tone: bathUnchecked > 0 ? 'warn' : undefined }
+      : { label: '入浴 未確認', value: null },
   ]
 
   return (
@@ -728,13 +852,30 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
             >
               {t.tone === 'warn' ? <span aria-hidden="true">▲</span> : null}
               <span>{t.label}</span>
-              <span className="font-num text-lg font-bold text-ink">{t.value}</span>
+              <span className="font-num text-lg font-bold text-ink">
+                {t.value === null ? (
+                  <>
+                    <span aria-hidden="true">—</span>
+                    <span className="sr-only">読み込めません</span>
+                  </>
+                ) : (
+                  t.value
+                )}
+              </span>
             </li>
           ))}
         </ul>,
+        navPending,
       )}
       {limits.failed ? <VitalLimitsFailedNote className="" onRetry={() => void limits.refresh()} /> : null}
       <PlanBanners data={data} notInRoster={board.notInRoster} unconfirmed={board.unconfirmed} today={today} />
+      {/* その日に読めなかった項目があれば1行で知らせる（読めない項目の名前だけ・印は細い点線＝親の決定 2026-11-09）。カードがある時だけ */}
+      {unreadNotice !== null && board.rows.length > 0 ? (
+        <p role="status" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">
+          <span aria-hidden="true">▲ </span>
+          {unreadNotice}
+        </p>
+      ) : null}
 
       {board.rows.length === 0 ? (
         <div className="rounded-lg border border-border bg-surface p-4">
@@ -749,13 +890,12 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         // カード（2026-10-24 代表者の決定 §9.4 の1〜3）: 五十音の通しの並び（見出しなし）。カードを押すと1人の画面へ
         // （到着・帰宅・時刻の直し・休みの理由・入浴はそこで）。〔休み〕〔取消〕はリンクの外の別のボタン（入れ子にしない）。
         // 列の数は幅で自動（src/index.css の .dc-cards・iPad 横で6列・縦で4列・スマホで2列＝2026-11-09 代表者の指示）。
-        // カードの中は詰めて並べる（氏名とふりがなを〔休み〕の横に・行の間をあけない）
+        // 2026-11-09 計画B: カードの中は4段だけ（氏名と〔休み〕／ふりがな／状態の段／進み具合の印。段の間はあけない）。
+        // iPad 横 1180×820 で 6列×5段＝30名が見える高さ（1枚 約121px 以下）に収める。未送信の印・行の知らせは出た時だけ下に足す
         <ul className="dc-cards" aria-label="利用者の一覧">
           {board.rows.map((row) => {
             const pending = hasPendingDaycareAttendance(row.residentId, day, row.attendance?.id ?? null)
             const isBusy = ops.busy.has(row.residentId) || pending
-            const bath = bathOf(row.residentId)
-            const bst = daycareBathStatus(bath, row.bathingPlanned)
             const m = ops.rowMsg.get(row.residentId)
             const name = nameOf(row.residentId)
             const kana = kanaOf(row.residentId)
@@ -763,41 +903,23 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
             /** 時刻の入った方を休みにする（時刻を消す）のは、今日は誰でも・過去の日は事務所のログインだけ（0042 と同じ規則） */
             const timesOk = canChangeDaycareTimes(day, today, role)
             const rowHasTimes = hasTimes(row)
-            const vDone = vitalsDone(row.residentId)
-            const vAbn = vDone && vitalsAbnormal(row.residentId)
-            const attended = row.state === 'present' || row.state === 'left'
             const absent = row.state === 'absent'
-            const a = row.attendance
-            /** 休みの方に入浴の記録（自動・人の入浴）が残っている＝直す要る（▲ と注意の枠で示す。緑の「済」に見せない） */
-            const absentBathLeft = absent && (bst.kind === 'auto' || bst.kind === 'done')
-            const bathText = bst.kind === 'noPlan' && !attended ? '—' : daycareBathShortLabel(bst)
-            const lunch = lunchOf(row.residentId)
-            const planText = row.dup
-              ? '予定 要確認（週間計画にこの方の記録が2件あります）'
-              : row.plans.length > 1
-                ? // 同じ方に同じ日の予定が2件＝データの誤り（代表者の回答 A2「そのような日はない」）。定時の処理も到着・帰宅を入れない
-                  '予定 要確認（週間計画にこの方の予定が同じ日に2件あります）'
-                : row.planned
-                  ? `予定 ${fmtPlanTimes(row.plans)}`
-                  : '予定外の来所'
+            /** 状態の段（記号＋言葉＋時刻）とカードの地と枠（状態の4色・色だけに頼らない） */
+            const tone = daycareStateTone(row)
+            const marks = marksOf.get(row.residentId) ?? []
             return (
-              <li
-                key={row.residentId}
-                className={`dc-card relative flex min-w-0 flex-col rounded-lg border px-1.5 py-1.5 ${absent ? 'border-border bg-surface2' : 'border-border-strong bg-surface'}`}
-              >
-                <div className="flex flex-wrap items-start gap-2">
-                  {/* 氏名（押すと1人の記録へ。カード全体を押せる＝.dc-card-link の ::after）。長い氏名は切らずに折り返す。
-                      カードが狭い時（拡大表示・大きな文字）は〔休み〕を氏名の下へ回す（氏名の幅を 5 文字分は残す）。
-                      ふりがなは氏名の下・〔休み〕の横に置く（〔休み〕の高さの中に収まり、行が1つ減る＝2026-11-09。長い時は切らずに折り返す）。
-                      ふりがなの文字は 14px（入居者マスタの決まり＝0.875rem 未満を使わない・2026-10-24 の A4 と同じ下限） */}
+              <li key={row.residentId} className={`dc-card relative flex min-w-0 flex-col rounded-lg border px-1.5 py-1.5 ${tone.cardCls}`}>
+                <div className="flex flex-wrap items-center gap-2">
+                  {/* 段1: 氏名（押すと1人の記録へ。カード全体を押せる＝.dc-card-link の ::after）と〔休み〕／〔取消〕（44px）。
+                      長い氏名は切らずに折り返す（2行までなら〔休み〕の高さの中に収まる）。カードが狭い時（拡大表示・大きな文字）は
+                      〔休み〕を氏名の下へ回す（氏名の幅を 5 文字分は残す） */}
                   <div className="min-w-[5em] flex-1">
                     <Link to={personPath(row.residentId, day, today)} className="dc-card-link block rounded">
-                      <span className={`block break-words text-base font-bold leading-tight ${absent ? 'text-ink2' : 'text-ink'}`}>
+                      <span className="block break-words text-base font-bold leading-tight text-ink">
                         {name}
                         <span className="sr-only">さんの1日の記録を開く</span>
                       </span>
                     </Link>
-                    {kana !== null && kana !== '' ? <p className="break-words text-xs leading-tight text-ink2">{kana}</p> : null}
                   </div>
                   {/* 休み（リンクの外の別のボタン。休みの方は〔取消〕だけ・理由は1人の画面で選ぶ） */}
                   {absent ? (
@@ -822,34 +944,36 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                     </button>
                   )}
                 </div>
-                {/* 入浴の予定は下の「入浴 予定」で分かるので、予定の行には「・入浴」を付けない（6列の幅で行が折り返して1段減ったため・2026-11-09） */}
-                <p className="break-words text-sm leading-tight text-ink2">{planText}</p>
-                {absent ? (
-                  <p className="text-sm font-bold leading-tight text-ink2">
-                    <span aria-hidden="true">✕ </span>
-                    {stateLabel(row).text}
+                {/* 段2: ふりがな（カードの幅いっぱい・切らずに折り返す。〔休み〕の横に置かない＝2026-10-24 の決まりに戻した）。
+                    文字は 14px（入居者マスタの決まり＝0.875rem 未満を使わない・2026-10-24 の A4 と同じ下限） */}
+                {kana !== null && kana !== '' ? <p className="break-words text-xs leading-tight text-ink2">{kana}</p> : null}
+                {/* 段3: 状態の段（予定・到着・帰宅を1段に。記号は読み上げない・言葉と時刻を読む） */}
+                <p className="break-words text-sm font-bold leading-tight text-ink">
+                  <span aria-hidden="true">{tone.mark} </span>
+                  {tone.word}
+                </p>
+                {/* 予定の誤りは、来た方・休みの方・入院中の方でも状態の段の下に1行出す（その方のカードだけ伸びる＝反証 中3） */}
+                {tone.planWarn !== null ? (
+                  <p className="break-words text-sm font-bold leading-tight text-ink">
+                    <span aria-hidden="true">▲ </span>
+                    {tone.planWarn}
                   </p>
-                ) : row.hospitalized && row.state === 'planned' ? (
-                  <p className="text-sm leading-tight text-ink2">入院中</p>
-                ) : (
-                  <p className="flex flex-wrap gap-x-2 text-sm leading-tight text-ink">
-                    <span className="whitespace-nowrap">
-                      到着 <span className="font-num font-bold">{a?.arrived_at ? hmShort(a.arrived_at) : '—'}</span>
+                ) : null}
+                {/* 段4: 進み具合の印（押せない表示。VS バイタル・食 昼食・活 活動・訓 訓練・浴 入浴。形と文字でも分ける＝色だけに頼らない。
+                    記録は1人の画面・上の切り替えの一括の画面で） */}
+                <p className="flex flex-wrap gap-1">
+                  {marks.map((mk) => (
+                    <span
+                      key={mk.key}
+                      title={`${mk.label}: ${PROGRESS_STATE_WORD[mk.state]}`}
+                      className={`rounded px-1 text-sm leading-tight ${PROGRESS_MARK_CLS[mk.state]}`}
+                    >
+                      <span aria-hidden="true">{mk.short}</span>
+                      <span className="sr-only">
+                        {mk.label} {PROGRESS_STATE_WORD[mk.state]}
+                      </span>
                     </span>
-                    <span className="whitespace-nowrap">
-                      帰宅 <span className="font-num font-bold">{a?.left_at ? hmShort(a.left_at) : '—'}</span>
-                    </span>
-                  </p>
-                )}
-                {/* 入浴・昼食・バイタルの状態（文字だけ・押せない。記録は1人の画面・食事一括・バイタル一括） */}
-                <p className="flex flex-wrap gap-x-2 text-sm leading-tight text-ink">
-                  <span className={absentBathLeft ? 'rounded border-2 border-warn bg-warn-bg px-1 font-bold' : undefined}>
-                    {absentBathLeft ? <span aria-hidden="true">▲ </span> : null}入浴 {bathText}
-                  </span>
-                  <span>昼食 {attended || lunch !== null ? lunchShortLabel(lunch) : '—'}</span>
-                  <span className={vAbn ? 'rounded border-2 border-warn bg-warn-bg px-1 font-bold' : undefined}>
-                    バイタル {vAbn ? '▲ 要確認' : vDone ? '✓ 済' : attended ? '未' : '—'}
-                  </span>
+                  ))}
                 </p>
                 {pending ? (
                   <p className="text-sm leading-tight text-ink2" role="status">
@@ -873,7 +997,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         </ul>
       )}
 
-      <div className="flex flex-wrap gap-gap">
+      <div className="flex flex-wrap items-center gap-gap">
         <button
           type="button"
           onClick={() => setPickerOpen(true)}
@@ -882,6 +1006,10 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         >
           ＋ 予定にない方を追加
         </button>
+        {/* 印の説明（一覧の下に1行。上の段には足さない＝2026-11-09 計画B） */}
+        {board.rows.length > 0 ? (
+          <p className="text-sm text-ink2">印: VS バイタル・食 昼食・活 活動・訓 訓練・浴 入浴（実線＝済・点線＝未・枠なし＝対象外・太枠＝要確認・細い点線＝読めない）</p>
+        ) : null}
       </div>
 
       <ResidentPickerModal open={pickerOpen} residents={active} onPick={addExtra} onClose={() => setPickerOpen(false)} />

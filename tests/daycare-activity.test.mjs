@@ -222,9 +222,12 @@ if (A === null) {
       // （columnFillTargets＝activityDefaultChecked）。まだ来ていない方は表に出すが「（未到着）」の札を出す
       const b = read('../src/pages/DaycareActivityBulkPage.tsx')
       assert.match(b, /const fillTargets = \(l: string\) => columnFillTargets\(targetRows, \(rid\) => has\(rid, l\)\)/)
-      assert.match(b, /const late = !activityDefaultChecked\(rowOf\(rid\)\)/)
-      // 2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 札は氏名のリンクの中（押せる高さ 44px の中に2段）
-      assert.match(b, /\{late \? <span className="text-sm leading-tight text-ink2">（未到着）<\/span> : null\}/)
+      // 2026-11-09 計画B（固定し直し・意図は同じ）: まだ来ていない方の札は「（未到着）」から、食事一括・今日のカードと同じ「○ 来所前」に
+      // （来た方も「● 在席 9:32」「✓ 帰宅 15:28」を出す＝daycareCameMark）。札は氏名のリンクの中（押せる高さ 44px の中に2段）
+      assert.match(b, /const cm = daycareCameMark\(rowOf\(rid\)\)/)
+      assert.match(b, /<span className=\{`text-sm leading-tight \$\{cm\.textCls\}`\}>\s*<span aria-hidden="true">\{cm\.mark\} <\/span>\s*\{cm\.word\}\s*<\/span>\s*<\/Link>/)
+      // 来ていない方の枠を押すと確かめを挟むのは今までどおり（activityDefaultChecked）
+      assert.match(b, /const arrivalOk = \(rid: number, d: string\) => activityDefaultChecked\(rowOf\(rid\)\) \|\| lateOk\.current\.has\(`\$\{d\}:\$\{rid\}`\)/)
     })
     it('まとめて記録の結果の文は人数で出す（合流・送信待ち・先に違う度合い・失敗を分ける）', () => {
       assert.equal(A.bulkResultText('体操', ['saved', 'saved', 'merged']), '「体操」: 2人に入れました。1人は同じ記録が先にありました。')
@@ -560,8 +563,9 @@ if (A === null) {
       // 表の枠の幅は ResizeObserver で測る（バイタル一括と同じ）
       assert.match(b, /const ro = new ResizeObserver\(check\)\s+ro\.observe\(el\)\s+if \(el\.firstElementChild\) ro\.observe\(el\.firstElementChild\)/)
       // 氏名の列: 1人の画面への入口（44px）。2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 〔記録 ›〕のボタンは氏名のリンクにまとめた
-      // （読み上げは「〜さんの1日の記録を開く（活動の度合い・前回と同じ）」のまま・未到着の方は名前の後に「（未到着）」）
-      assert.match(body, /<Link\s+to=\{personPath\(rid, day, today\)\}\s+aria-label=\{`\$\{name\}さん\$\{late \? '（未到着）' : ''\}の1日の記録を開く（活動の度合い・前回と同じ）`\}\s+className="flex min-h-tap /)
+      // （読み上げは「〜さんの1日の記録を開く（活動の度合い・前回と同じ）」のまま）。2026-11-09 計画B（固定し直し・意図は同じ）: 名前の後は
+      // 「（未到着）」から、見えている来た・まだの言葉（（来所前）・（在席 9:32）・（帰宅 15:28））に
+      assert.match(body, /<Link\s+to=\{personPath\(rid, day, today\)\}\s+aria-label=\{`\$\{name\}さん（\$\{cm\.word\}）の1日の記録を開く（活動の度合い・前回と同じ）`\}\s+className="flex min-h-tap /)
       // 前の上の区画（チップで選ぶ・チェック）と下の「1人ずつの活動」の一覧は外した
       assert.doesNotMatch(b, /type="checkbox"|picked|チェックした|h-each|1人ずつの活動/)
     })

@@ -46,6 +46,7 @@ import {
 } from '../lib/db'
 import type { PendingActivityOp } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
+import { DaycareUnfilledCount } from '../components/DaycareUnfilledCount'
 import { ConfirmDialog, ErrorBlock, LoadingBlock, ModalShell, useToast } from '../components/ui'
 import { writeDaycareHandoffFor } from '../lib/daycareHandoff'
 import { buildDaycareBoard } from '../lib/daycare'
@@ -64,6 +65,7 @@ import {
 } from '../lib/daycareActivity'
 import type { ActivityAddOutcome, ActivityParticipation, DaycareActivity } from '../lib/daycareActivity'
 import { personPath, readPersonDay } from '../lib/daycarePerson'
+import { activityCellsFilled, activityShownCells, attendedUnfilledCount, daycareCameMark } from '../lib/daycareProgress'
 import { addDays, fmtDayLabel, todayIso } from '../lib/format'
 import type { DaycareAttendance, DaycareDay, DaycarePlanRow, DaycarePlanSource, Resident, Staff } from '../lib/types'
 import { useTableFit } from '../lib/useTableFit'
@@ -822,6 +824,14 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
   if (data === null) return null
 
   const readable = data.activities !== null
+  // 未入力の数（在席・帰宅の方だけ数える）。入力済み＝活動の枠のどれかに記録がある（画面に出している値＝送信待ちを含む・2026-11-09 計画B）。
+  // 重ね方は枠（cellOf）と同じ決まりの純関数 activityShownCells（今日の画面の印・切り替えの数と同じ関数＝反証 中1）
+  const unfilled = attendedUnfilledCount(
+    targets.map((rid) => ({
+      state: rowOf(rid)?.state ?? 'planned',
+      filled: activityCellsFilled(activityShownCells(data.activities ?? [], pending, rid, day)),
+    })),
+  )
   /** 枠1つ（定型の列は大きな枠・「その他」の列は項目つきの小さなボタン） */
   const cellButton = (rid: number, name: string, label: string, small: boolean) => {
     const c = cellOf(rid, label)
@@ -880,9 +890,14 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
       {header}
 
       <section aria-labelledby="h-bulk" className="min-w-0 space-y-2 rounded-lg border border-border bg-surface p-2">
-        <h2 id="h-bulk" className="text-lg font-bold leading-tight text-ink">
-          活動一括
-        </h2>
+        {/* 見出しと未入力の数を1段に並べる（2026-11-09 計画B。幅が足りない時は折り返す）。活動を読めない時は数を出さない
+            （下の「読み込めませんでした」の知らせのまま） */}
+        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+          <h2 id="h-bulk" className="text-lg font-bold leading-tight text-ink">
+            活動一括
+          </h2>
+          {readable && targets.length > 0 ? <DaycareUnfilledCount counts={unfilled} /> : null}
+        </div>
         <p className="text-sm leading-snug text-ink2">
           枠を押すたびに「参加 → 一部 → 見学 → 不参加 → 消す」と変わります（消した時は画面の下に出る〔元に戻す〕で戻せます）。列の見出しを押すと、来た方のうち記録の無い方にまとめて「参加」で入れます（まだ来ていない方・もう記録がある方は変えません）。
         </p>
@@ -966,7 +981,9 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                 <tbody>
                   {targets.map((rid) => {
                     const name = nameOf(rid)
-                    const late = !activityDefaultChecked(rowOf(rid))
+                    // 来た・まだ（○ 来所前／● 在席 9:32／✓ 帰宅 15:28）。2026-11-09 計画B で食事一括・今日のカードと同じ記号・言葉にそろえた
+                    // （それまでは来ていない方だけ「（未到着）」）。来ていない方の枠を押すと確かめを挟むのは今までどおり（arrivalOk）
+                    const cm = daycareCameMark(rowOf(rid))
                     const others = readable ? otherLabelsOf(rid) : []
                     const stoppedNotes = readable ? [...DAYCARE_ACTIVITY_CHIPS, ...others].flatMap((l) => cellOf(rid, l).stopped) : []
                     const m = msgs.get(`${rid}:${day}`)
@@ -982,15 +999,18 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                             <div className="dc-vital-name">
                               <Link
                                 to={personPath(rid, day, today)}
-                                aria-label={`${name}さん${late ? '（未到着）' : ''}の1日の記録を開く（活動の度合い・前回と同じ）`}
+                                aria-label={`${name}さん（${cm.word}）の1日の記録を開く（活動の度合い・前回と同じ）`}
                                 className="flex min-h-tap flex-col justify-center rounded underline-offset-2 hover:underline"
                               >
                                 <span className="text-base font-bold leading-tight text-link">
                                   {name}
                                   <span aria-hidden="true"> ›</span>
                                 </span>
-                                {/* まだ来ていない方は印を出す（親の検収 中2）。枠を押すと確かめを挟む */}
-                                {late ? <span className="text-sm leading-tight text-ink2">（未到着）</span> : null}
+                                {/* 来た・まだの印（まだ来ていない方は親の検収 中2 の印。枠を押すと確かめを挟む） */}
+                                <span className={`text-sm leading-tight ${cm.textCls}`}>
+                                  <span aria-hidden="true">{cm.mark} </span>
+                                  {cm.word}
+                                </span>
                               </Link>
                             </div>
                           </th>

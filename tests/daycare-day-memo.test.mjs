@@ -126,6 +126,36 @@ describe('食事・水分の控え（親の反証 中2・軽3・2026-10-25）', 
     assert.equal(M.mergeDaycareMemo({ ...prev, intakeOk: false }, next).intakeOk, false)
     assert.deepEqual(M.mergeDaycareMemo(null, next).fluids, [])
   })
+  it('入浴・バイタルを読めなかった一覧も同じ守り（2026-11-09 計画B の確認の反証 中1）: 同じ日の前の値を残す・前も無ければ「読めない」と控える', () => {
+    const bath = { id: 7, resident_id: 3, bath_on: '2026-10-25' }
+    const vital = { id: 8, resident_id: 3, client_key: 'dc:2026-10-25:3:1', temp: 36.5 }
+    const prev = memoOf('2026-10-25', { baths: [bath], vitals: [vital], bathsOk: true, vitalsOk: true })
+    const next = memoOf('2026-10-25', { baths: [], vitals: [], bathsOk: false, vitalsOk: false, savedAt: 9 })
+    const merged = M.mergeDaycareMemo(prev, next)
+    assert.deepEqual(merged.baths, [bath])
+    assert.deepEqual(merged.vitals, [vital])
+    assert.equal(merged.bathsOk, true)
+    assert.equal(merged.vitalsOk, true)
+    assert.equal(merged.savedAt, 9, '出欠などは新しい一覧')
+    // 片方だけ読めなかった時は、その片方だけ前の値
+    const onlyBath = M.mergeDaycareMemo(prev, memoOf('2026-10-25', { baths: [], vitals: [], bathsOk: false, vitalsOk: true }))
+    assert.deepEqual([onlyBath.baths.length, onlyBath.vitals.length], [1, 0])
+    // 前の控えが無い・別の日・前も読めていない → 読めないまま控える（開いた時に「未」に見せない）
+    for (const p of [null, memoOf('2026-10-24', { baths: [bath], vitals: [vital] }), { ...prev, bathsOk: false, vitalsOk: false }]) {
+      const m = M.mergeDaycareMemo(p, next)
+      assert.equal(m.bathsOk, false)
+      assert.equal(m.vitalsOk, false)
+      assert.equal(M.memoBathsOk(m), false)
+      assert.equal(M.memoVitalsOk(m), false)
+    }
+    // 省いた控え（1人の画面）は読めた扱い（今までどおり）
+    assert.equal(M.memoBathsOk(memoOf('2026-10-25')), true)
+    assert.equal(M.memoVitalsOk(memoOf('2026-10-25')), true)
+    // 前の控えが省いた控え（1人の画面）なら、その値を残す
+    assert.deepEqual(M.mergeDaycareMemo(memoOf('2026-10-25', { baths: [bath] }), next).baths, [bath])
+    // 1人の画面の控え（省いた）は前の値を上書きする（今までどおり）
+    assert.deepEqual(M.mergeDaycareMemo(prev, memoOf('2026-10-25', { baths: [] })).baths, [])
+  })
 })
 
 describe('静的検査', () => {
@@ -143,6 +173,10 @@ describe('静的検査', () => {
     assert.match(code('../src/lib/daycareDayLoad.ts'), /const pIntake = r\.intake\(target\)\.catch\(\(\) => null\)/)
     assert.match(today, /intakeOk: intake !== null,/)
     assert.match(today, /intakeOk: data\.intakeOk,\s*residents,\s*savedAt: data\.readAt,/)
+    // 2026-11-09 計画B の確認の反証 中1: 入浴・バイタルを読めたかも控え、控えで開く時はそれを使う（決め打ちの true にしない）
+    assert.match(today, /vitals: data\.vitals,\s*bathsOk: data\.bathsOk,\s*vitalsOk: data\.vitalsOk,\s*meals: data\.meals,/)
+    assert.match(today, /bathsOk: memoBathsOk\(m\),\s*vitalsOk: memoVitalsOk\(m\),/)
+    assert.doesNotMatch(today, /bathsOk: true|vitalsOk: true/)
     // 親の反証 中1: 1人の画面は「今回サーバーから読めた」時だけ控えに入れる（前の値・控えの値を書き戻さない）
     assert.match(person, /if \(data === null \|\| data\.memoAt !== null \|\| !data\.intakeFresh \|\| data\.missing\) return\s*rememberDaycareDay\(/)
     assert.match(person, /intakeOk: m\.intakeOk,\s*intakeFresh: false,\s*memoAt: m\.savedAt,\s*readAt: m\.savedAt,/)
@@ -178,7 +212,8 @@ describe('静的検査', () => {
   })
   it('今日の画面も、読み込みの失敗の時だけ同じ日の控えで開き、同じ帯を出す・控えで開いた時は控えを書き直さない（親の確かめ 中1）', () => {
     assert.match(today, /const m = memoForDay\(daycareDayMemo\(\), target, e\)\s*if \(m !== null && target === dayRef\.current && !quiet\) \{/)
-    assert.match(today, /activities: null,\s*intakeOk: m\.intakeOk,\s*memoAt: m\.savedAt,/)
+    // 2026-11-09 計画B（固定し直し・意図は同じ）: 機能訓練の記録も控えに無い（読めない＝「読めない」の印）
+    assert.match(today, /activities: null,\s*training: null,\s*intakeOk: m\.intakeOk,\s*memoAt: m\.savedAt,/)
     assert.match(today, /サーバーに届かないため、今日の一覧で読んだ時点（/)
     assert.match(today, /if \(data === null \|\| data\.missing \|\| data\.memoAt !== null\) return\s*rememberDaycareDay\(/)
     assert.match(today, /if \(!onMemo\) return\s*const t = window\.setInterval\(\(\) => scheduleReload\(\), 30_000\)/)

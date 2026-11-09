@@ -47,10 +47,11 @@ import {
 } from '../lib/db'
 import type { CellConflict, CellEditInput, DaycareMealRow, MealCellField, MealTarget } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
+import { DaycareUnfilledCount } from '../components/DaycareUnfilledCount'
 import { ErrorBlock, LoadingBlock, useToast } from '../components/ui'
 import { writeDaycareHandoffFor } from '../lib/daycareHandoff'
-import { buildDaycareBoard, fmtPlanTimes, nowHm } from '../lib/daycare'
-import type { DaycareBoardRow } from '../lib/daycare'
+import { buildDaycareBoard, nowHm } from '../lib/daycare'
+import { daycareCameMark, lunchShownWith } from '../lib/daycareProgress'
 import {
   LUNCH_SELECT_OPTIONS,
   createFluidInputs,
@@ -119,21 +120,6 @@ const personKeyOf = (residentId: number, day: string) => `${residentId}:${day}`
 const fmtCc = (n: number) => `${n.toLocaleString('ja-JP')}cc`
 const AMOUNT_WORD: Record<LunchAmountField, string> = { main_amount: '主食', side_amount: '副食' }
 
-/**
- * 氏名の下の一言（在席 9:35／帰宅 15:30／未到着（予定 9:30〜15:30））。2026-10-24（§9.4 の4）に到着の前の方も並ぶように
- * なったので、到着の記録が無い方は「在席」と出さず「未到着」と出す（反証 中1）
- */
-function cameText(row: Pick<DaycareBoardRow, 'state' | 'attendance' | 'plans' | 'planned' | 'dup'>): string {
-  const a = row.attendance
-  const hm = (t: string | null | undefined) => {
-    const m = /^(\d{1,2}):(\d{2})/.exec(t ?? '')
-    return m === null ? '' : ` ${Number(m[1])}:${m[2]}`
-  }
-  if (row.state === 'left') return `帰宅${hm(a?.left_at)}`
-  if (row.state === 'present') return `在席${hm(a?.arrived_at)}`
-  if (row.planned && !row.dup && row.plans.length === 1) return `未到着（予定 ${fmtPlanTimes(row.plans)}）`
-  return '未到着'
-}
 
 export interface DaycareMealsPageProps {
   staff?: Staff[] | null
@@ -368,21 +354,11 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
   }
   /**
    * 画面に出す値: 送信待ち（まだ送っていない・送っている途中）の値だけ重ねる。止まった値（食い違い）・拒まれた値は重ねず、
-   * サーバーの値を出して行の下で知らせる（1人の画面・既存の食事一括と同じ）
+   * サーバーの値を出して行の下で知らせる（1人の画面・既存の食事一括と同じ）。順番待ちの値（後に押した方）→ 送信待ちの値 → サーバーの値。
+   * 2026-11-09 計画B: 今日の画面の印と同じ純関数（daycareProgress.ts の lunchShownWith。中身は前と同じ）
    */
-  const mealShownFor = (t: MealTarget): Pick<Meal, 'main_amount' | 'side_amount' | 'status'> | null => {
-    const cur = mealRowFor(t)?.meal ?? null
-    const p = pendingRow('meals', t)
-    const wait = waiting[mealKeyOf(t)] ?? []
-    if ((p === null || p.state !== 'pending') && wait.length === 0) return cur
-    const pick = <K extends MealField>(f: K): Meal[K] | null => {
-      // 順番待ちの値（後に押した方）→ 送信待ちの値 → サーバーの値
-      for (let i = wait.length - 1; i >= 0; i--) if (f in wait[i].values) return wait[i].values[f] as Meal[K] | null
-      if (p !== null && p.state === 'pending' && f in p.values) return p.values[f] as Meal[K] | null
-      return (cur?.[f] ?? null) as Meal[K] | null
-    }
-    return { main_amount: pick('main_amount'), side_amount: pick('side_amount'), status: pick('status') }
-  }
+  const mealShownFor = (t: MealTarget): Pick<Meal, 'main_amount' | 'side_amount' | 'status'> | null =>
+    lunchShownWith(mealRowFor(t)?.meal ?? null, pendingRow('meals', t), waiting[mealKeyOf(t)] ?? [])
   const setMealFor = (t: MealTarget, st: SaveState | null) =>
     setMealState((prev) => {
       const next = { ...prev }
@@ -849,23 +825,9 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
             昼食
           </h2>
           {came.length > 0 ? (
-            // 未入力の数（在席・帰宅の方だけ数える・拒食は入力済み・水分は数えない）。色だけに頼らず記号と文字を併記
-            <p className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-base">
-              {counts.unfilled > 0 ? (
-                <span className="font-bold text-danger">
-                  <span aria-hidden="true">▲ </span>未入力 <span className="font-num">{counts.unfilled}</span>名
-                </span>
-              ) : (
-                <span className="font-bold text-ok">
-                  <span aria-hidden="true">✓ </span>未入力なし
-                </span>
-              )}
-              {counts.notArrived > 0 ? (
-                <span className="text-ink2">
-                  未到着 <span className="font-num">{counts.notArrived}</span>名（数えていません）
-                </span>
-              ) : null}
-            </p>
+            // 未入力の数（在席・帰宅の方だけ数える・拒食は入力済み・水分は数えない）。色だけに頼らず記号と文字を併記。
+            // 2026-11-09 計画B: 一括の4画面で同じ部品（DaycareUnfilledCount）にした（見た目は今までと同じ）
+            <DaycareUnfilledCount counts={counts} />
           ) : null}
           <p className="ml-auto text-sm text-ink2">
             予定の方 <span className="font-num font-bold text-ink">{came.length}</span>人
@@ -920,6 +882,9 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
                   {came.map((row) => {
                     const rid = row.residentId
                     const name = nameOf(rid)
+                    // 氏名の下の来た・まだ（○ 来所前 9:30〜15:30／● 在席 9:35／✓ 帰宅 15:30）。2026-11-09 計画B で今日のカードと同じ記号・言葉に
+                    // そろえた（それまでの「未到着（予定 …）」）。到着の記録が無い方は「在席」と出さない（2026-10-24 反証 中1）
+                    const cm = daycareCameMark(row, true)
                     const lt = targetOf(rid)
                     const lunch = mealShownFor(lt)
                     const source = mealSourceLabel(mealRowFor(lt))
@@ -950,7 +915,10 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
                                   {name}
                                   <span className="sr-only">さんの1日の記録を開く</span>
                                 </span>
-                                <span className="text-sm leading-tight text-ink2">{cameText(row)}</span>
+                                <span className={`text-sm leading-tight ${cm.textCls}`}>
+                                  <span aria-hidden="true">{cm.mark} </span>
+                                  {cm.word}
+                                </span>
                               </Link>
                               {otherStatus !== null ? <span className="block text-sm text-ink2">昼食の記録: {otherStatus}</span> : null}
                               {source !== null && source !== '画面で入力' ? <span className="block text-sm text-ink2">{source}</span> : null}

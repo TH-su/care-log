@@ -1369,14 +1369,16 @@ if (DC === null) {
       // カードに残すボタンは2つだけ（到着・帰宅・時刻・理由・入浴はカードに出さない）
       assert.equal((list.slice(0, list.indexOf('</ul>')).match(/<button/g) ?? []).length, 2)
       assert.doesNotMatch(list, /onArrive|onLeave|openTime|askAbsent|openBath|onBathAsPlanned/)
-      // 入浴・昼食・バイタルは押せない文字だけ（▲ と枠で注意を示す＝色だけに頼らない）
-      assert.match(list, /入浴 \{bathText\}/)
-      assert.match(list, /昼食 \{attended \|\| lunch !== null \? lunchShortLabel\(lunch\) : '—'\}/)
-      assert.match(list, /バイタル \{vAbn \? '▲ 要確認' : vDone \? '✓ 済' : attended \? '未' : '—'\}/)
-      // 休みの方はその位置のまま薄く（地の色と文字の色。透明度は使わない）・「休み（理由）」
-      assert.match(list, /absent \? 'border-border bg-surface2' : 'border-border-strong bg-surface'/)
+      // 入浴・昼食・バイタルは押せない表示だけ（▲ と枠で注意を示す＝色だけに頼らない）。2026-11-09 計画B（固定し直し・意図は同じ）:
+      // 文字の段から進み具合の印（VS・食・活・訓・浴。形と文字でも分ける・押せない span）に（daycare-progress.test.mjs）
+      assert.match(list, /\{marks\.map\(\(mk\) => \(\s*<span\s+key=\{mk\.key\}/)
+      assert.doesNotMatch(list, /入浴 \{bathText\}|昼食 \{|バイタル \{vAbn/)
+      // 休みの方はその位置のまま薄く（地の色。透明度は使わない）・「✕ 休み（理由）」。2026-11-09 計画B（固定し直し・意図は同じ）:
+      // 地と枠は状態の4色の純関数（daycareStateTone）から・記号と言葉は状態の段に1つ
+      assert.match(list, /className=\{`dc-card relative flex min-w-0 flex-col rounded-lg border px-1\.5 py-1\.5 \$\{tone\.cardCls\}`\}/)
+      assert.match(read('../src/lib/daycareProgress.ts'), /muted: 'border-border bg-surface2'/)
       assert.doesNotMatch(list, /opacity-/)
-      assert.match(list, /<span aria-hidden="true">✕ <\/span>\s*\{stateLabel\(row\)\.text\}/)
+      assert.match(list, /<span aria-hidden="true">\{tone\.mark\} <\/span>\s*\{tone\.word\}/)
       // 角は 6px（rounded-full を使わない）・五十音の見出しは付けない
       assert.doesNotMatch(t, /rounded-full/)
       assert.doesNotMatch(list, /あ行|か行/)
@@ -1419,10 +1421,16 @@ if (DC === null) {
       assert.doesNotMatch(undo, /prevBath/)
     })
     it('予定が2件の方は「予定 要確認」と出す（代表者の回答 A2・定時の処理も入れない）', () => {
-      assert.match(list, /: row\.plans\.length > 1\s*\?[^']*'予定 要確認（週間計画にこの方の予定が同じ日に2件あります）'/)
+      // 2026-11-09 計画B（固定し直し・意図は同じ）: 文言は daycareProgress.ts の daycarePlanWarning。どの状態でも出す（反証 中3）:
+      // まだ来ていない方は状態の段そのもの、来た方・休みの方・入院中の方は状態の段の下に1行（tone.planWarn）。状態ごとの試験は daycare-progress.test.mjs
+      const pg = read('../src/lib/daycareProgress.ts')
+      assert.match(pg, /if \(row\.plans\.length > 1\) return '予定 要確認（週間計画にこの方の予定が同じ日に2件あります）'/)
+      assert.match(list, /const tone = daycareStateTone\(row\)/)
+      assert.match(list, /\{tone\.planWarn !== null \? \(\s*<p className="break-words text-sm font-bold leading-tight text-ink">\s*<span aria-hidden="true">▲ <\/span>\s*\{tone\.planWarn\}/)
     })
     it('休みの文言（ボタン・状態・件数の帯）。入浴の理由の「欠席」は変えない（B6）', () => {
-      assert.match(t, /text: `休み（\$\{reason\}）`/)
+      // 2026-11-09 計画B（固定し直し・意図は同じ）: カードの状態の文言は daycareProgress.ts の daycareStateTone
+      assert.match(read('../src/lib/daycareProgress.ts'), /word: `休み（\$\{reason\}）`/)
       assert.match(t, /\{ label: '休み', value: c\.absent \}/)
       assert.match(t, /label: '今日（到着・休み）'/)
       assert.match(person, /return `休み（\$\{a\?\.absent_reason/)
@@ -1496,11 +1504,15 @@ if (DC === null) {
       assert.match(t, /休みはカードの〔休み〕、入浴はカードを押した1人の画面で記録できます/)
     })
     it('反証の直し: 食事一括で到着の前の方を「在席」と出さない（中1）・1人の画面は予定も記録も無い方に〔休み〕を出さない（軽2）・画面に戻った時に今日を取り直す（軽4）・ボタンは 44px（軽5）', () => {
+      // 2026-11-09 計画B（固定し直し・意図は同じ）: 食事一括の来た・まだは daycareProgress.ts の daycareCameMark（○ 来所前 9:30〜15:30／
+      // ● 在席 9:35／✓ 帰宅 15:30）。到着の記録が無い方は「在席」と出さない
       const meals = code('../src/pages/DaycareMealsPage.tsx')
-      const ct = meals.slice(meals.indexOf('function cameText('), meals.indexOf('export interface DaycareMealsPageProps'))
-      assert.match(ct, /if \(row\.state === 'present'\) return `在席/)
-      assert.match(ct, /return `未到着（予定 \$\{fmtPlanTimes\(row\.plans\)\}）`/)
-      assert.match(ct, /return '未到着'/)
+      assert.match(meals, /const cm = daycareCameMark\(row, true\)/)
+      const ct = read('../src/lib/daycareProgress.ts')
+      const cm = ct.slice(ct.indexOf('export function daycareCameMark('), ct.indexOf('// ── 進み具合の印'))
+      assert.match(cm, /if \(row\?\.state === 'present'\) return \{ mark: '●', word: `在席/)
+      assert.match(cm, /return \{ mark: '○', word: `来所前 \$\{fmtPlanTimes\(row\.plans\)\}`, textCls: 'text-ink2' \}/)
+      assert.match(cm, /return \{ mark: '○', word: '来所前', textCls: 'text-ink2' \}/)
       assert.match(att, /\{extraNoRecord \? null : \(\s*<button type="button" onClick=\{\(\) => ops\.onRest\(row\)\}/)
       assert.match(person, /const vis = \(\) => \{\s*if \(document\.visibilityState === 'visible'\) tick\(\)\s*\}\s*document\.addEventListener\('visibilitychange', vis\)/)
       for (const k of ['opBtn', 'opPrimary', 'opDanger', 'opRest']) assert.match(person, new RegExp(`const ${k} =\\s*'min-h-tap min-w-`))

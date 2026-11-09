@@ -176,12 +176,14 @@ describe('静的検査（段階3b の規律）', () => {
     // 段階3c で後ろに dcTrainingReviewOpen が続く（固定し直し・意図は同じ＝UI 状態のキーを1つ足しただけ）
     assert.match(read('../src/lib/types.ts'), /\n {2}dcTrainingDueOpen: 'cl_dcTrainingDueOpen',\n/)
   })
-  it('機能訓練の画面: 区画を配置と対象者のあいだに置く・居宅訪問は過去の日の守りを受けない（旗と記録者だけ）', () => {
+  it('機能訓練の画面: 区画を配置の後に置く・居宅訪問は過去の日の守りを受けない（旗と記録者だけ）', () => {
     const p = code('../src/pages/DaycareTrainingPage.tsx')
     const a = p.indexOf('aria-labelledby="h-staffing"')
     const b = p.indexOf('<DaycareHomeVisitSection')
     const t = p.indexOf('aria-labelledby="h-targets"')
-    assert.ok(a > 0 && a < b && b < t)
+    // 2026-11-09 計画B（固定し直し・意図は同じ）: 対象者の表を画面の上へ（上の段 → 対象者 → 配置 → 計画の見直し → 居宅訪問）。
+    // 居宅訪問の区画は配置の後のまま
+    assert.ok(t > 0 && t < a && a < b)
     const blocked = p.slice(p.indexOf('const homeVisitBlocked'), p.indexOf('const errText'))
     assert.doesNotMatch(blocked, /pastLocked|MSG_PAST\b/)
     assert.match(p, /blockedReason=\{homeVisitBlocked\(\)\}/)

@@ -23,6 +23,12 @@ export interface DaycareDayMemo {
   attendance: DaycareAttendance[]
   baths: BathRecord[]
   vitals: KeyedVital[]
+  /**
+   * 入浴・バイタルを読めたか（2026-11-09 計画B の確認の反証 中1: 読めなかった時の空の一覧を、控えで開いた時に「記録なし」＝印の「未」として
+   * 使わない）。省いた時（1人の画面の控え）は今までどおり読めた扱い
+   */
+  bathsOk?: boolean
+  vitalsOk?: boolean
   meals: DaycareMealRow[]
   fluids: FluidIntake[]
   /** 食事・水分を読めたか（読めなかった時の空の一覧を「記録なし」として使わない＝確認の反証 中1） */
@@ -37,7 +43,8 @@ let memo: DaycareDayMemo | null = null
 
 /**
  * その日の一覧を控える（前の控えは捨てる＝1日分だけ）。名簿が空の時は前の控えの名簿を残す。
- * 食事・水分を読めなかった一覧（intakeOk=false）の時は、同じ日の前の控えの食事・水分（読めた値）を残す（親の反証 軽3・2026-10-25）
+ * 食事・水分を読めなかった一覧（intakeOk=false）の時は、同じ日の前の控えの食事・水分（読めた値）を残す（親の反証 軽3・2026-10-25）。
+ * 入浴・バイタル（bathsOk・vitalsOk=false）も同じ守り（2026-11-09 計画B の確認の反証 中1）。前に読めた値が無い時は「読めない」のまま控える
  */
 export function rememberDaycareDay(m: DaycareDayMemo): void {
   memo = mergeDaycareMemo(memo, m)
@@ -46,10 +53,23 @@ export function rememberDaycareDay(m: DaycareDayMemo): void {
 /** rememberDaycareDay の中身（純関数）: 前の控え prev に新しい一覧 next を重ねる */
 export function mergeDaycareMemo(prev: DaycareDayMemo | null, next: DaycareDayMemo): DaycareDayMemo {
   const residents = next.residents.length === 0 && prev !== null ? prev.residents : next.residents
-  const keepIntake = !next.intakeOk && prev !== null && prev.day === next.day && prev.intakeOk
-  return keepIntake
-    ? { ...next, residents, meals: prev.meals, fluids: prev.fluids, intakeOk: true }
-    : { ...next, residents }
+  const sameDay = prev !== null && prev.day === next.day
+  const keepIntake = !next.intakeOk && sameDay && prev.intakeOk
+  const keepBaths = next.bathsOk === false && sameDay && prev.bathsOk !== false
+  const keepVitals = next.vitalsOk === false && sameDay && prev.vitalsOk !== false
+  let out: DaycareDayMemo = { ...next, residents }
+  if (keepIntake) out = { ...out, meals: prev.meals, fluids: prev.fluids, intakeOk: true }
+  if (keepBaths) out = { ...out, baths: prev.baths, bathsOk: true }
+  if (keepVitals) out = { ...out, vitals: prev.vitals, vitalsOk: true }
+  return out
+}
+
+/** 控えの入浴・バイタルを読めた扱いにしてよいか（省いた時＝1人の画面の控えは読めた扱い） */
+export function memoBathsOk(m: Pick<DaycareDayMemo, 'bathsOk'>): boolean {
+  return m.bathsOk !== false
+}
+export function memoVitalsOk(m: Pick<DaycareDayMemo, 'vitalsOk'>): boolean {
+  return m.vitalsOk !== false
 }
 
 /** いまの控え（無ければ null） */

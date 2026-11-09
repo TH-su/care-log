@@ -96,8 +96,13 @@ if (DP === null) {
       assert.match(page, /\.\.\.\(cur === null \? \{ fill: \{ recorded_by: actorId \} \} : \{\}\),\s*editedBy: actorId,\s*rebase: opts\.rebase !== undefined,/)
     })
     it('送信待ちの値・順番待ちの値だけ重ねて出す（止まった値・拒まれた値は重ねない）', () => {
-      assert.match(page, /if \(\(p === null \|\| p\.state !== 'pending'\) && wait\.length === 0\) return cur/)
-      assert.match(page, /if \(p !== null && p\.state === 'pending' && f in p\.values\) return p\.values\[f\]/)
+      // 2026-11-09 計画B（固定し直し・意図は同じ）: 重ね方は今日の画面の印と同じ純関数 lunchShownWith（daycareProgress.ts）に移した
+      // （中身の試験は daycare-progress.test.mjs）
+      assert.match(page, /const mealShownFor = \(t: MealTarget\): Pick<Meal, 'main_amount' \| 'side_amount' \| 'status'> \| null =>\s*lunchShownWith\(mealRowFor\(t\)\?\.meal \?\? null, pendingRow\('meals', t\), waiting\[mealKeyOf\(t\)\] \?\? \[\]\)/)
+      const pg = read('../src/lib/daycareProgress.ts')
+      const fn = pg.slice(pg.indexOf('export function lunchShownWith('), pg.indexOf('export function daycareVitalSlotsWithPending('))
+      assert.match(fn, /const p = pending !== null && pending\.state === 'pending' \? pending : null\s*if \(p === null && wait\.length === 0\) return cur/)
+      assert.match(fn, /if \(p !== null && f in p\.values\) return p\.values\[f\]/)
     })
     it('同じ人・日・枠は順番待ち（前の応答を待ってから次を送る）・基準は送る時のいちばん新しい値（#45 の確認の反証 中）', () => {
       assert.match(page, /const tail = \(chainRef\.current\.get\(k\) \?\? Promise\.resolve\(\)\)\s*\.then\(\(\) => sendMeal\(t, patch, opts\)\)/)
@@ -309,7 +314,8 @@ if (DP === null) {
     it('氏名の列: 1人の画面へのリンク（44px）・在席／帰宅／未到着・保存の印（昼食だけ）・取り込みの印', () => {
       // 2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 来た・まだの文字は氏名のリンクの中（押せる高さ 44px の中に2段）
       assert.match(body, /<Link to=\{personPath\(rid, day, today\)\} className="flex min-h-tap flex-col justify-center/)
-      assert.match(body, /<span className="text-sm leading-tight text-ink2">\{cameText\(row\)\}<\/span>\s*<\/Link>/)
+      // 2026-11-09 計画B（固定し直し・意図は同じ）: 来た・まだは今日のカードと同じ記号＋言葉（daycareCameMark・色は文字だけ）
+      assert.match(body, /<span className=\{`text-sm leading-tight \$\{cm\.textCls\}`\}>\s*<span aria-hidden="true">\{cm\.mark\} <\/span>\s*\{cm\.word\}\s*<\/span>\s*<\/Link>/)
       assert.match(body, /const mark = mealBandMark\(\[kindOf\(lt, stL\)\]\)/)
       assert.match(body, /\{source !== null && source !== '画面で入力' \?/)
     })
@@ -322,11 +328,16 @@ if (DP === null) {
     })
     it('未入力の数は表の上に（画面に出している値で数える）。1名以上は「▲ 未入力 n名」（赤字）・0名は「✓ 未入力なし」・未到着は灰色で別に', () => {
       assert.match(page, /const counts = lunchUnfilledCount\(came\.map\(\(row\) => \(\{ state: row\.state, lunch: mealShownFor\(targetOf\(row\.residentId\)\) \}\)\)\)/)
-      assert.match(page, /<span className="font-bold text-danger">\s*<span aria-hidden="true">▲ <\/span>未入力 <span className="font-num">\{counts\.unfilled\}<\/span>名/)
-      assert.match(page, /<span className="font-bold text-ok">\s*<span aria-hidden="true">✓ <\/span>未入力なし/)
-      assert.match(page, /\{counts\.notArrived > 0 \? \(\s*<span className="text-ink2">\s*未到着 <span className="font-num">\{counts\.notArrived\}<\/span>名（数えていません）/)
+      // 2026-11-09 計画B（固定し直し・意図は同じ）: 表示は一括の4画面で同じ部品（DaycareUnfilledCount）にした（見た目は同じ）
+      const unf = code('../src/components/DaycareUnfilledCount.tsx')
+      assert.match(unf, /<span className="font-bold text-danger">\s*<span aria-hidden="true">▲ <\/span>未入力 <span className="font-num">\{counts\.unfilled\}<\/span>名/)
+      assert.match(unf, /<span className="font-bold text-ok">\s*<span aria-hidden="true">✓ <\/span>未入力なし/)
+      // 2026-11-09 計画B の確認の反証 軽1（固定し直し・意図は同じ）: バイタル一括だけ 1024px 未満で未到着を隠す指定を足した（食事一括は今のまま出す）
+      assert.match(unf, /\{counts\.notArrived > 0 \? \(\s*<span className=\{hideNotArrivedNarrow \? 'hidden text-ink2 lg:inline' : 'text-ink2'\}>\s*未到着 <span className="font-num">\{counts\.notArrived\}<\/span>名（数えていません）/)
+      assert.match(unf, /hideNotArrivedNarrow = false,/)
+      assert.match(page, /<DaycareUnfilledCount counts=\{counts\} \/>/)
       assert.ok(page.indexOf('const counts = lunchUnfilledCount') < page.indexOf('<table'), '表の上')
-      assert.ok(page.indexOf('未入力なし') < page.indexOf('<table'), '表の上')
+      assert.ok(page.indexOf('<DaycareUnfilledCount counts={counts} />') > 0 && page.indexOf('<DaycareUnfilledCount counts={counts} />') < page.indexOf('<table'), '表の上')
     })
     it('水分: form の submit（改行キー）でも〔＋〕でも足す・欄は inputMode numeric（44px・text-lg）・〔＋〕は 44px と「水分を足す」', () => {
       assert.match(body, /<form\s+onSubmit=\{\(e\) => \{\s*e\.preventDefault\(\)\s*submitFluid\(rid\)\s*\}\}/)
