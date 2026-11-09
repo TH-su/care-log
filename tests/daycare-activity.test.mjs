@@ -223,7 +223,8 @@ if (A === null) {
       const b = read('../src/pages/DaycareActivityBulkPage.tsx')
       assert.match(b, /const fillTargets = \(l: string\) => columnFillTargets\(targetRows, \(rid\) => has\(rid, l\)\)/)
       assert.match(b, /const late = !activityDefaultChecked\(rowOf\(rid\)\)/)
-      assert.match(b, /\{late \? <span className="block text-sm text-ink2">（未到着）<\/span> : null\}/)
+      // 2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 札は氏名のリンクの中（押せる高さ 44px の中に2段）
+      assert.match(b, /\{late \? <span className="text-sm leading-tight text-ink2">（未到着）<\/span> : null\}/)
     })
     it('まとめて記録の結果の文は人数で出す（合流・送信待ち・先に違う度合い・失敗を分ける）', () => {
       assert.equal(A.bulkResultText('体操', ['saved', 'saved', 'merged']), '「体操」: 2人に入れました。1人は同じ記録が先にありました。')
@@ -547,7 +548,8 @@ if (A === null) {
       // 見出しの行は sticky top-0（角の氏名は z-30・ほかの見出しは z-20）、氏名の列は z-10。枠は isolate でアプリの見出しの上に重ならない
       assert.match(head, /<th scope="col" className="sticky left-0 top-0 z-30 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">/)
       assert.equal((head.match(/className="sticky top-0 z-20 bg-surface2 px-1 py-1"/g) ?? []).length, 2, '列の見出し（定型の7つ・その他）は上に残す')
-      assert.match(b, /<th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">\s*(\{\}\s*)?<div className="dc-vital-name space-y-1">/)
+      // 2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 氏名の列の中の段の間（space-y-1）を外した
+      assert.match(b, /<th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">\s*(\{\}\s*)?<div className="dc-vital-name">/)
       assert.match(b, /role="region"\s+aria-label=\{`\$\{fmtDayLabel\(day\)\}の活動一括の表\$\{tableScrolls \? '（横にスクロールできます）' : ''\}`\}\s+tabIndex=\{tableScrolls \|\| tableScrollsY \? 0 : undefined\}\s+className="dc-table-fit relative isolate overflow-auto"/)
       assert.match(b, /useTableFit\(tableBox\)/)
       assert.match(b, /<table className="w-full min-w-max border-collapse text-base">\s*<caption className="sr-only">/)
@@ -557,8 +559,9 @@ if (A === null) {
       assert.match(body, /<td colSpan=\{DAYCARE_ACTIVITY_CHIPS\.length \+ 2\} className="p-0">\s*<div className="w-0 min-w-full">\s*<div className="sticky left-0 space-y-1 px-2 pb-2" style=\{\{ maxWidth: tableBoxWidth > 0 \? tableBoxWidth : undefined \}\}>/)
       // 表の枠の幅は ResizeObserver で測る（バイタル一括と同じ）
       assert.match(b, /const ro = new ResizeObserver\(check\)\s+ro\.observe\(el\)\s+if \(el\.firstElementChild\) ro\.observe\(el\.firstElementChild\)/)
-      // 氏名の列: 1人の画面への入口（44px）
-      assert.match(body, /<Link\s+to=\{personPath\(rid, day, today\)\}[^>]*className="inline-flex min-h-tap /)
+      // 氏名の列: 1人の画面への入口（44px）。2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 〔記録 ›〕のボタンは氏名のリンクにまとめた
+      // （読み上げは「〜さんの1日の記録を開く（活動の度合い・前回と同じ）」のまま・未到着の方は名前の後に「（未到着）」）
+      assert.match(body, /<Link\s+to=\{personPath\(rid, day, today\)\}\s+aria-label=\{`\$\{name\}さん\$\{late \? '（未到着）' : ''\}の1日の記録を開く（活動の度合い・前回と同じ）`\}\s+className="flex min-h-tap /)
       // 前の上の区画（チップで選ぶ・チェック）と下の「1人ずつの活動」の一覧は外した
       assert.doesNotMatch(b, /type="checkbox"|picked|チェックした|h-each|1人ずつの活動/)
     })
@@ -689,7 +692,8 @@ if (A === null) {
       assert.match(app, /<Route path="\/record\/daycare\/bulk" element=\{<DaycareActivityBulkPage actorId=\{actorId\} staff=\{staff\} \/>\} \/>/)
       assert.match(app, /if \(pathname === '\/record\/daycare\/bulk'\) return 'デイ 活動一括'/)
       const b = code('../src/pages/DaycareActivityBulkPage.tsx')
-      assert.match(b, /<h2 id="h-bulk" className="text-xl font-bold text-ink">\s*活動一括\s*<\/h2>/)
+      // 2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 見出しの文字を 22px から 18px に
+      assert.match(b, /<h2 id="h-bulk" className="text-lg font-bold leading-tight text-ink">\s*活動一括\s*<\/h2>/)
       for (const f of ['../src/App.tsx', '../src/pages/DaycarePage.tsx', '../src/pages/DaycareActivityBulkPage.tsx'])
         assert.equal(code(f).includes('活動をまとめて'), false, f)
     })

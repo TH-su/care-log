@@ -746,8 +746,9 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
 
   const goDay = (d: string) => navigate(bulkPath(d, today), { replace: true })
 
+  // 上の段・説明・凡例は詰める（2026-11-09 代表者の指示「一括入力の画面で、もっと多くの行が出るように」）
   const header = (
-    <div className="space-y-3">
+    <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-gap">
         <DaycareNav current="activity" handoff={() => writeDaycareHandoffFor({ rows: board?.rows ?? null, residents, boardDay: data?.day ?? null, today })} />
         <RecorderBar actorId={actorId} staff={staff ?? null} />
@@ -777,7 +778,7 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
         <button
           type="button"
           onClick={() => setReloadKey((n) => n + 1)}
-          className="min-h-tap rounded border border-border-strong bg-surface px-4 text-base text-ink"
+          className="min-h-tap rounded border border-border-strong bg-surface px-3 text-sm text-ink"
         >
           最新に更新
         </button>
@@ -788,7 +789,7 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
           {MSG_MISSING}
         </p>
       ) : gate !== null && !(gate.observed && gate.value === true) ? (
-        <p role="status" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">
+        <p role="status" className="rounded-lg border border-warn bg-warn-bg px-3 py-1.5 text-base text-ink">
           <span aria-hidden="true">▲ </span>
           {gate.forbidden
             ? FORBIDDEN_REASON
@@ -804,7 +805,7 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
 
   if ((loading && data === null) || (data !== null && data.day !== day && error === null)) {
     return (
-      <div className="mx-auto w-full max-w-6xl space-y-4 p-4">
+      <div className="mx-auto w-full max-w-6xl space-y-2">
         {header}
         <LoadingBlock label="その日の活動を読み込んでいます…" />
       </div>
@@ -812,7 +813,7 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
   }
   if (error !== null && (data === null || data.day !== day)) {
     return (
-      <div className="mx-auto w-full max-w-6xl space-y-4 p-4">
+      <div className="mx-auto w-full max-w-6xl space-y-2">
         {header}
         <ErrorBlock message={error} onRetry={() => setReloadKey((n) => n + 1)} />
       </div>
@@ -875,14 +876,14 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
   }
 
   return (
-    <div className="mx-auto w-full max-w-6xl space-y-4 p-4">
+    <div className="mx-auto w-full max-w-6xl space-y-2">
       {header}
 
-      <section aria-labelledby="h-bulk" className="min-w-0 space-y-3 rounded-lg border border-border bg-surface p-3">
-        <h2 id="h-bulk" className="text-xl font-bold text-ink">
+      <section aria-labelledby="h-bulk" className="min-w-0 space-y-2 rounded-lg border border-border bg-surface p-2">
+        <h2 id="h-bulk" className="text-lg font-bold leading-tight text-ink">
           活動一括
         </h2>
-        <p className="text-base text-ink2">
+        <p className="text-sm leading-snug text-ink2">
           枠を押すたびに「参加 → 一部 → 見学 → 不参加 → 消す」と変わります（消した時は画面の下に出る〔元に戻す〕で戻せます）。列の見出しを押すと、来た方のうち記録の無い方にまとめて「参加」で入れます（まだ来ていない方・もう記録がある方は変えません）。
         </p>
         {data.activities === null && !missing ? (
@@ -909,7 +910,7 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
         ) : (
           <>
             {/* 印の意味（色だけに頼らない）。表が画面より広い時だけ横スクロールの手がかりを出す（バイタル一括と同じ） */}
-            <p className="text-sm text-ink2">
+            <p className="text-sm leading-tight text-ink2">
               <span aria-hidden="true">↻</span>＝送信待ち・保存中（届くまで押せません）　<span aria-hidden="true">▲</span>＝送れずに止まっています（行の下の文を見てください）　取り消し線＝取り消しの送信待ち
             </p>
             {tableScrolls ? (
@@ -975,17 +976,21 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                         <tr className={`align-middle ${detail ? '' : 'border-b border-border'}`}>
                           {/* 氏名の列は横スクロールしても左に残す（sticky）。背景はページの地の色（下を流れる欄を透かさない） */}
                           <th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">
-                            {/* 氏名の列の幅は dc-vital-name で決める（札が長くても列を広げず、中で折り返す） */}
-                            <div className="dc-vital-name space-y-1">
-                              <span className="block text-base font-bold text-ink">{name}</span>
-                              {/* まだ来ていない方は印を出す（親の検収 中2）。枠を押すと確かめを挟む */}
-                              {late ? <span className="block text-sm text-ink2">（未到着）</span> : null}
+                            {/* 氏名の列の幅は dc-vital-name で決める（札が長くても列を広げず、中で折り返す）。
+                                氏名を押すと1人の記録へ（2026-11-09: 〔記録 ›〕のボタンを氏名のリンクにまとめ、行の高さを押せる下限の近くまで
+                                下げた＝代表者の指示「もっと多くの行が出るように」。押せる高さは 44px・食事一括の氏名と同じ形） */}
+                            <div className="dc-vital-name">
                               <Link
                                 to={personPath(rid, day, today)}
-                                aria-label={`${name}さんの1日の記録を開く（活動の度合い・前回と同じ）`}
-                                className="inline-flex min-h-tap items-center rounded border border-primary bg-surface px-2 text-base font-bold text-primary"
+                                aria-label={`${name}さん${late ? '（未到着）' : ''}の1日の記録を開く（活動の度合い・前回と同じ）`}
+                                className="flex min-h-tap flex-col justify-center rounded underline-offset-2 hover:underline"
                               >
-                                記録<span aria-hidden="true"> ›</span>
+                                <span className="text-base font-bold leading-tight text-link">
+                                  {name}
+                                  <span aria-hidden="true"> ›</span>
+                                </span>
+                                {/* まだ来ていない方は印を出す（親の検収 中2）。枠を押すと確かめを挟む */}
+                                {late ? <span className="text-sm leading-tight text-ink2">（未到着）</span> : null}
                               </Link>
                             </div>
                           </th>

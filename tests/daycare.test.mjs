@@ -1363,7 +1363,8 @@ if (DC === null) {
       assert.doesNotMatch(link, /<button/)
       assert.match(list, /<\/Link>[\s\S]*?onClick=\{\(\) => ops\.askCancelAbsent\(row\)\}[\s\S]*?className=\{`relative z-\[1\] shrink-0 \$\{DANGER_CELL_BTN\}`\}/)
       assert.match(list, /onClick=\{\(\) => ops\.onRest\(row\)\}\s*disabled=\{disabled \|\| \(rowHasTimes && !timesOk\)\}[\s\S]*?className=\{`relative z-\[1\] shrink-0 \$\{REST_BTN\}`\}/)
-      assert.match(t, /const REST_BTN =\s*'inline-flex min-h-tap min-w-\[5rem\]/)
+      // 2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 〔休み〕の幅は 5rem から押せる下限の 44px に（どのカードも同じ幅のまま・太い枠）
+      assert.match(t, /const REST_BTN =\s*'inline-flex min-h-tap min-w-tap items-center justify-center rounded border-2 border-border-strong/)
       assert.match(t, /const DANGER_CELL_BTN =\s*'inline-flex min-h-tap min-w-tap/)
       // カードに残すボタンは2つだけ（到着・帰宅・時刻・理由・入浴はカードに出さない）
       assert.equal((list.slice(0, list.indexOf('</ul>')).match(/<button/g) ?? []).length, 2)
@@ -1380,9 +1381,10 @@ if (DC === null) {
       assert.doesNotMatch(t, /rounded-full/)
       assert.doesNotMatch(list, /あ行|か行/)
       const css = read('../src/index.css')
-      // 最小幅はふつうの文字で 205px（入居者マスタの .rlist と同じ）。rem なので文字を大きくすると列が減る
-      assert.match(css, /\.dc-cards \{\s*display: grid;\s*grid-template-columns: repeat\(auto-fill, minmax\(min\(12\.8rem, 100%\), 1fr\)\);/)
-      // 氏名・ふりがな・予定は切らずに折り返す（ふりがなは〔休み〕の横に置かない）
+      // 最小幅は rem なので文字を大きくすると列が減る。2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 12.8rem（205px）から 10rem（160px）に
+      // （iPad 横 1180px で6列・縦 820px で4列・スマホ 375px で2列＝代表者の指示「より多くの利用者を１画面で」）
+      assert.match(css, /\.dc-cards \{\s*display: grid;\s*grid-template-columns: repeat\(auto-fill, minmax\(min\(10rem, 100%\), 1fr\)\);/)
+      // 氏名・ふりがな・予定は切らずに折り返す（2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: ふりがなは氏名の下・〔休み〕の横に置き、長い時は折り返す）
       assert.doesNotMatch(list.slice(0, list.indexOf('</ul>')), /\btruncate\b/)
       assert.match(css, /\.dc-card-link::after \{\s*content: '';\s*position: absolute;\s*inset: 0;/)
       assert.doesNotMatch(css, /\.dc-(row|row-head|cell-label|span2)\s*[,{]/, '1人1行の表は外した')

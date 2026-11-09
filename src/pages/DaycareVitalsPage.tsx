@@ -887,71 +887,74 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   }, [active, tableBox, kpBox, kpHeight])
 
   // ── 描画 ──
+  // 上の段は詰める（日付と「表示する方」を1段に・余白と文字を小さく＝2026-11-09 代表者の指示「一括入力の画面で、もっと多くの行が出るように」）
   const header = (
-    <div className="space-y-3">
+    <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-gap">
         <DaycareNav current="vitals" handoff={() => writeDaycareHandoffFor({ rows: board?.rows ?? null, residents, boardDay: data?.day ?? null, today })} />
         <RecorderBar actorId={actorId} staff={staff ?? null} />
       </div>
-      <div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">
-        <button
-          type="button"
-          onClick={() => afterRelease(() => setDay((d) => addDays(d, -1)))}
-          disabled={releasing}
-          className="min-h-tap min-w-tap rounded border border-border-strong bg-surface px-3 text-lg text-ink"
-          aria-label="前の日へ"
-        >
-          <span aria-hidden="true">‹</span>
-        </button>
-        <span className="min-w-28 text-center text-lg font-bold text-ink" aria-live="polite">
-          {fmtDayLabel(day)}
-          {day === today ? <span className="ml-2 text-base text-ok">今日</span> : null}
-        </span>
-        <button
-          type="button"
-          onClick={() => afterRelease(() => setDay((d) => (addDays(d, 1) > today ? d : addDays(d, 1))))}
-          disabled={day >= today || releasing}
-          className="min-h-tap min-w-tap rounded border border-border-strong bg-surface px-3 text-lg text-ink disabled:text-ink3"
-          aria-label="次の日へ"
-        >
-          <span aria-hidden="true">›</span>
-        </button>
-        {day !== today ? (
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">
           <button
             type="button"
-            onClick={() => afterRelease(() => setDay(today))}
+            onClick={() => afterRelease(() => setDay((d) => addDays(d, -1)))}
             disabled={releasing}
-            className="min-h-tap rounded border border-primary px-4 text-base font-bold text-primary"
+            className="min-h-tap min-w-tap rounded border border-border-strong bg-surface px-3 text-lg text-ink"
+            aria-label="前の日へ"
           >
-            今日を開く
+            <span aria-hidden="true">‹</span>
           </button>
-        ) : null}
-        <button
-          type="button"
-          onClick={() => afterRelease(() => setReloadKey((n) => n + 1))}
-          disabled={releasing}
-          className="min-h-tap rounded border border-border-strong bg-surface px-4 text-base text-ink"
-        >
-          最新に更新
-        </button>
-      </div>
-      <div className="flex flex-wrap gap-gap" role="group" aria-label="表示する方">
-        {DC_VITALS_FILTERS.map((f) => (
+          <span className="min-w-28 text-center text-lg font-bold text-ink" aria-live="polite">
+            {fmtDayLabel(day)}
+            {day === today ? <span className="ml-2 text-base text-ok">今日</span> : null}
+          </span>
           <button
-            key={f}
             type="button"
-            onClick={() => setFilter(f)}
-            aria-pressed={filter === f}
-            className={
-              filter === f
-                ? 'min-h-tap rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink'
-                : 'min-h-tap rounded border border-border-strong bg-surface px-4 text-base text-ink'
-            }
+            onClick={() => afterRelease(() => setDay((d) => (addDays(d, 1) > today ? d : addDays(d, 1))))}
+            disabled={day >= today || releasing}
+            className="min-h-tap min-w-tap rounded border border-border-strong bg-surface px-3 text-lg text-ink disabled:text-ink3"
+            aria-label="次の日へ"
           >
-            {filter === f ? <span aria-hidden="true">✓ </span> : null}
-            {FILTER_LABEL[f]}
+            <span aria-hidden="true">›</span>
           </button>
-        ))}
+          {day !== today ? (
+            <button
+              type="button"
+              onClick={() => afterRelease(() => setDay(today))}
+              disabled={releasing}
+              className="min-h-tap rounded border border-primary px-3 text-sm font-bold text-primary"
+            >
+              今日を開く
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => afterRelease(() => setReloadKey((n) => n + 1))}
+            disabled={releasing}
+            className="min-h-tap rounded border border-border-strong bg-surface px-3 text-sm text-ink"
+          >
+            最新に更新
+          </button>
+        </div>
+        <div className="flex flex-wrap gap-gap" role="group" aria-label="表示する方">
+          {DC_VITALS_FILTERS.map((f) => (
+            <button
+              key={f}
+              type="button"
+              onClick={() => setFilter(f)}
+              aria-pressed={filter === f}
+              className={
+                filter === f
+                  ? 'min-h-tap rounded border border-primary bg-primary px-3 text-sm font-bold text-primary-ink'
+                  : 'min-h-tap rounded border border-border-strong bg-surface px-3 text-sm text-ink'
+              }
+            >
+              {filter === f ? <span aria-hidden="true">✓ </span> : null}
+              {FILTER_LABEL[f]}
+            </button>
+          ))}
+        </div>
       </div>
       {releasing ? (
         <p role="status" className="text-base text-ink2">
@@ -983,11 +986,11 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
           </button>
         </div>
       ) : null}
-      <p className="text-sm text-ink2">
+      <p className="text-sm leading-tight text-ink2">
         記号: ↑↑ 危険（高い）・↑ 注意（高い）・↓ 注意（低い）・↓↓ 危険（低い）・— 未測定。範囲外と血圧の上下逆は保存しません。
       </p>
       {gate !== null && !(gate.observed && gate.value === true) ? (
-        <p role="status" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">
+        <p role="status" className="rounded-lg border border-warn bg-warn-bg px-3 py-1.5 text-base text-ink">
           <span aria-hidden="true">▲ </span>
           {gate.forbidden ? FORBIDDEN_REASON : gate.outdated ? OUTDATED_REASON : gate.observed ? `${kindBlockedMessage('daycare')}。記録の閲覧はできます。` : MSG_GATE_UNKNOWN}
         </p>
@@ -1007,7 +1010,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   // 前の日の行を出したまま新しい日を読む間は、行を出さない（押せる古い行を残さない＝3巡目 中1）
   if ((loading && data === null) || (data !== null && data.day !== day && error === null)) {
     return (
-      <div className="mx-auto w-full max-w-6xl space-y-4 p-4">
+      <div className="mx-auto w-full max-w-6xl space-y-2">
         {header}
         <LoadingBlock label="デイのバイタルを読み込んでいます…" />
       </div>
@@ -1015,7 +1018,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   }
   if (error !== null && (data === null || data.day !== day)) {
     return (
-      <div className="mx-auto w-full max-w-6xl space-y-4 p-4">
+      <div className="mx-auto w-full max-w-6xl space-y-2">
         {header}
         <ErrorBlock message={error} onRetry={() => setReloadKey((n) => n + 1)} />
       </div>
@@ -1106,7 +1109,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     ) : null
 
   return (
-    <div className="mx-auto w-full max-w-6xl space-y-4 p-4">
+    <div className="mx-auto w-full max-w-6xl space-y-2">
       {header}
       {limits.failed ? <VitalLimitsFailedNote className="" onRetry={() => void limits.refresh()} /> : null}
       <div className="min-w-0 space-y-2">
@@ -1197,14 +1200,14 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                               <div className="dc-vital-name">
                                 {si === 0 ? (
                                   <>
-                                    <span className="block text-base font-bold text-ink">{nameOf(row.residentId)}</span>
-                                    <span className="block text-sm text-ink2">{basis}</span>
+                                    <span className="block text-base font-bold leading-tight text-ink">{nameOf(row.residentId)}</span>
+                                    <span className="block text-sm leading-tight text-ink2">{basis}</span>
                                     {slots.length > 1 || time !== null ? (
-                                      <span className="block text-sm text-ink2">1回目{time !== null ? `（${time}）` : ''}</span>
+                                      <span className="block text-sm leading-tight text-ink2">1回目{time !== null ? `（${time}）` : ''}</span>
                                     ) : null}
                                   </>
                                 ) : (
-                                  <span className="block text-sm text-ink2">
+                                  <span className="block text-sm leading-tight text-ink2">
                                     <span aria-hidden="true">↳ </span>
                                     再測定 {si}
                                     {time !== null ? `（${time}）` : ''}
@@ -1227,7 +1230,8 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                                     disabled={!canWrite}
                                     data-dc-active={isActive ? '' : undefined}
                                     aria-label={`${nameOf(row.residentId)} ${DAYCARE_VITAL_LABEL[f]} ${v === null ? '未入力' : fmtVal(f, v)}${word ? ` ${word}` : ''}${pv ? `、前回 ${fmtVal(f, pv.value)}` : ''}${local ? '、未送信' : ''}`}
-                                    className={`flex min-h-14 w-full flex-col items-center justify-center rounded px-1 text-center ${
+                                    // 欄の高さは押せる下限の 44px（2026-11-09 に 56px から詰めた。行の高さは欄＋上下 4px ずつ＝隣の行の欄と 8px あく）
+                                    className={`flex min-h-tap w-full flex-col items-center justify-center rounded px-1 text-center ${
                                       isActive ? 'border-2 border-primary bg-accent-bg' : levelTone(lv)
                                     } disabled:opacity-100`}
                                   >
