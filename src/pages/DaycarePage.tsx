@@ -20,6 +20,9 @@
 // - 修正は rev 照合。他の端末が先に書いていたら（conflict）読み直して知らせる。通信できない時は送信待ち（'queued'）
 // - 日付は画面の中だけで持つ（業務データに紐づく状態は保存しない＝原則11の既定）。現在地は URL で復元
 // - 氏名・記録を localStorage・console に出さない。色だけで意味を伝えない（記号・文字を併記）。押す所は 44px 以上・主操作は 56px
+// 2026-11-10 計画D（仮置き）: カードの状態の段の右に「⚑n」（その方のその日の区分「デイ」の申し送りのうち取り消していない数＝印も手で書いた分も。
+//   0件は出さない・押せない表示・読み上げと title は「申し送り n件」）。件数の帯には足さない（見出しの段が折り返して iPad 横の30名が見えなくなるため）。
+//   読み込みは1本（fetchDaycareDayNotes）。1日の読み込みとは別に持ち、申し送りの変更の知らせ（今の subscribeChanges）ではこの数だけを読み直す
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -33,6 +36,7 @@ import {
   fetchBathDay,
   fetchDaycareAttendance,
   fetchDaycareDay,
+  fetchDaycareDayNotes,
   fetchDaycareIntake,
   fetchDaycarePlan,
   fetchDaycareVitalUnmeasured,
@@ -379,6 +383,12 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   /** ログインの役割（事務所・管理者だけ過去の日の到着・帰宅の時刻を入れられる。分からない間は現場と同じ扱い） */
   const [role, setRole] = useState<MyRole | null | undefined>(cachedMyRole())
   const [, setQueueTick] = useState(0)
+  /**
+   * その日の方ごとのデイの申し送りの数（2026-11-10 計画D・カードの「⚑n」）。取り消していない区分「デイ」の申し送り（印も手で書いた分も）。
+   * null＝読めない（印を出さない）。1日の読み込みとは別に持つ（施設の申し送りの変更のたびに、1日の全部を読み直さない）
+   */
+  const [noteCount, setNoteCount] = useState<{ day: string; byResident: ReadonlyMap<number, number> } | null>(null)
+  const noteGenRef = useRef(0)
   const genRef = useRef(0)
   const dayRef = useRef(day)
   dayRef.current = day
@@ -544,6 +554,28 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     void load(day, false)
   }, [day, reloadKey, load])
 
+  // ── その日のデイの申し送りの数（2026-11-10 計画D）。世代と日付の守りは1日の読み込みと同じ。静かな読み直しで読めない時は前の数を残す ──
+  const loadNoteCount = useCallback(async (target: string, quiet: boolean) => {
+    const gen = ++noteGenRef.current
+    try {
+      const rows = await fetchDaycareDayNotes(target)
+      if (gen !== noteGenRef.current || target !== dayRef.current) return
+      const byResident = new Map<number, number>()
+      for (const r of rows) {
+        const rid = r.note.resident_id
+        if (r.deleted || rid === null) continue
+        byResident.set(rid, (byResident.get(rid) ?? 0) + 1)
+      }
+      setNoteCount({ day: target, byResident })
+    } catch {
+      if (gen !== noteGenRef.current) return
+      setNoteCount((prev) => (quiet && prev !== null && prev.day === target ? prev : null))
+    }
+  }, [])
+  useEffect(() => {
+    void loadNoteCount(day, false)
+  }, [day, reloadKey, loadNoteCount])
+
   // ── 他の端末の変更（Realtime）と送信待ちの減り（送れた）で読み直す ──
   const reloadTimer = useRef<number | null>(null)
   const scheduleReload = useCallback(() => {
@@ -553,6 +585,15 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       void load(dayRef.current, true)
     }, 400)
   }, [load])
+  // 申し送りの数の静かな読み直し（2026-11-10 計画D・申し送りの変更と送信待ちの減りで。続けて来た知らせは 400ms でまとめる）
+  const noteTimer = useRef<number | null>(null)
+  const scheduleNoteCount = useCallback(() => {
+    if (noteTimer.current !== null) window.clearTimeout(noteTimer.current)
+    noteTimer.current = window.setTimeout(() => {
+      noteTimer.current = null
+      void loadNoteCount(dayRef.current, true)
+    }, 400)
+  }, [loadNoteCount])
   useEffect(() => {
     const onChange = (table: string, info?: { event: string; row: Record<string, unknown> | null }) => {
       if (info?.row && isSelfWrite(table, info.row)) return
@@ -562,12 +603,17 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     const offB = subscribeBathChanges(onChange)
     const offC = subscribeChanges((table, info) => {
       if (table === 'vitals' || table === 'meals' || table === 'fluid_intake') onChange(table, info)
+      // 申し送りの変更は数だけを読み直す（2026-11-10 計画D・今の購読を使う＝購読は足さない）
+      else if (table === 'notes') scheduleNoteCount()
     })
     const offD = subscribeDaycareActivityChanges(onChange)
     let last = queuePending()
     const offQ = queueSubscribe((n) => {
       setQueueTick((x) => x + 1)
-      if (n < last) scheduleReload()
+      if (n < last) {
+        scheduleReload()
+        scheduleNoteCount()
+      }
       last = n
     })
     return () => {
@@ -577,8 +623,9 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       offD()
       offQ()
       if (reloadTimer.current !== null) window.clearTimeout(reloadTimer.current)
+      if (noteTimer.current !== null) window.clearTimeout(noteTimer.current)
     }
-  }, [scheduleReload])
+  }, [scheduleReload, scheduleNoteCount])
 
   // ── その日の一覧の控え（画面のメモリだけ・端末には残さない＝daycareDayMemo）。電波の無い所でカードを押した時、1人の画面は
   // 通信の失敗の時だけこの控えで開く（到着・休み・入浴は送信待ちに積める＝親の検収 中1・2026-10-24） ──
@@ -924,6 +971,8 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       ? { label: '入浴 未確認', value: bathUnchecked, tone: bathUnchecked > 0 ? 'warn' : undefined }
       : { label: '入浴 未確認', value: null },
   ]
+  /** その方のその日のデイの申し送りの数（2026-11-10 計画D・カードの「⚑n」。読めない・別の日の数は 0＝出さない） */
+  const noteCountOf = (id: number): number => (noteCount !== null && noteCount.day === data.day ? (noteCount.byResident.get(id) ?? 0) : 0)
 
   return (
     // 幅の上限（max-w-5xl）と外側の余白（p-4）を外し、カードの列を画面の幅いっぱいに並べる（2026-11-09 代表者の指示・iPad 横で6列）
@@ -993,6 +1042,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
             /** 状態の段（記号＋言葉＋時刻）とカードの地と枠（状態の4色・色だけに頼らない） */
             const tone = daycareStateTone(row)
             const marks = marksOf.get(row.residentId) ?? []
+            const noteN = noteCountOf(row.residentId)
             return (
               <li key={row.residentId} className={`dc-card relative flex min-w-0 flex-col rounded-lg border px-1.5 py-1.5 ${tone.cardCls}`}>
                 <div className="flex flex-wrap items-center gap-2">
@@ -1037,6 +1087,14 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                 <p className="break-words text-sm font-bold leading-tight text-ink">
                   <span aria-hidden="true">{tone.mark} </span>
                   {tone.word}
+                  {/* 2026-11-10 計画D（仮置き）: その日のデイの申し送りの数（0件は出さない・押せない表示・枠なし）。iPad 横 6列でカードの高さを変えない
+                      （在席・帰宅の段の右に入る＝実測 115px のまま。長い段＝休みの理由・予定の誤りは折り返す） */}
+                  {noteN > 0 ? (
+                    <span title={`申し送り ${noteN}件`} className="ml-1 whitespace-nowrap">
+                      <span aria-hidden="true">⚑{noteN}</span>
+                      <span className="sr-only">・申し送り {noteN}件</span>
+                    </span>
+                  ) : null}
                 </p>
                 {/* 予定の誤りは、来た方・休みの方・入院中の方でも状態の段の下に1行出す（その方のカードだけ伸びる＝反証 中3） */}
                 {tone.planWarn !== null ? (
@@ -1102,7 +1160,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         </Link>
         {/* 印の説明（一覧の下に1行。上の段には足さない＝2026-11-09 計画B） */}
         {board.rows.length > 0 ? (
-          <p className="text-sm text-ink2">印: VS バイタル・食 昼食・活 活動・訓 訓練・浴 入浴（実線＝済・点線＝未・枠なし＝対象外・太枠＝要確認・細い点線＝読めない）</p>
+          <p className="text-sm text-ink2">印: VS バイタル・食 昼食・活 活動・訓 訓練・浴 入浴（実線＝済・点線＝未・枠なし＝対象外・太枠＝要確認・細い点線＝読めない）・⚑ 申し送り（数）</p>
         ) : null}
       </div>
 

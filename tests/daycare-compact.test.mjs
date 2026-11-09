@@ -55,7 +55,8 @@ describe('デイの今日のカードを小さく（2026-11-09）', () => {
     assert.doesNotMatch(today, /\btext-2xs\b/)
     assert.doesNotMatch(list, /\btruncate\b/)
     // 状態の段と進み具合の印は 15px（text-sm）の詰めた段
-    assert.match(list, /<p className="break-words text-sm font-bold leading-tight text-ink">\s*<span aria-hidden="true">\{tone\.mark\} <\/span>\s*\{tone\.word\}\s*<\/p>/)
+    // 2026-11-10 計画D（固定し直し・意図は同じ）: 状態の段の右に申し送りの数「⚑n」（0件は出さない・枠なし・押せない表示）を足した。段の作りは同じ
+    assert.match(list, /<p className="break-words text-sm font-bold leading-tight text-ink">\s*<span aria-hidden="true">\{tone\.mark\} <\/span>\s*\{tone\.word\}\s*(\{\}\s*)?\{noteN > 0 \? \([\s\S]*?\) : null\}\s*<\/p>/)
     // 2026-11-09 計画B3（固定し直し・意図は同じ）: 札の下に分類の色の細い線（progressCategoryLine・枠の形の区別はそのまま）
     assert.match(list, /className=\{`rounded px-1 text-sm leading-tight \$\{PROGRESS_MARK_CLS\[mk\.state\]\} \$\{progressCategoryLine\(mk\.key\)\}`\}/)
     // 入浴の予定は印の「浴」で分かるので、状態の段に「・入浴」を足さない

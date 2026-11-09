@@ -18,6 +18,8 @@
 // ・画面の名前は「活動一括」（2026-10-24 §9.4。それまでは「活動をまとめて」。ルートと切り替えの key は変えない）
 // ・入力解禁は活動だけの旗 input_enabled_daycare_activity。表が無い DB は「設定待ち」
 // ・端末に業務データを残さない（localStorage を使わない）。送り先（人・日・項目）は押した時に固定する
+// ・2026-11-10 計画D: 行の右に「⚐ 申し送り」（ワンタップ・DaycareNoteMarkDay.tsx）。その日の活動（サーバーの行）をまとめた文で区分「デイ」の
+//   申し送りを1件作る。印の読み込みはその日の全員分を1本（購読は足さない）。申し送りへの書き込みは印の部品の中だけ
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
@@ -48,6 +50,8 @@ import type { PendingActivityOp } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
 import { DaycareRowBlankMark, DaycareRowBlankSr, DaycareUnfilledCount } from '../components/DaycareUnfilledCount'
 import { ConfirmDialog, ErrorBlock, LoadingBlock, ModalShell, useToast } from '../components/ui'
+import { useDaycareNoteMarksDay } from '../components/DaycareNoteMarkDay'
+import { activityDayMarkText } from '../lib/daycareNoteMark'
 import { writeDaycareHandoffFor } from '../lib/daycareHandoff'
 import { buildDaycareBoard } from '../lib/daycare'
 import {
@@ -57,6 +61,8 @@ import {
   activityDefaultChecked,
   activityLabelError,
   activityTargets,
+  activitiesOf,
+  activityText,
   bulkResultText,
   columnFillTargets,
   nextParticipation,
@@ -436,6 +442,9 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
     if (actorRef.current === null) return MSG_NO_RECORDER
     return null
   }
+
+  // 申し送りの印（2026-11-10 計画D）。入力が使えるかと理由はこの画面の旗（活動だけの旗）のまま。記録者・17時のロックは部品が見る
+  const marks = useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason: canWrite ? null : precheck(), refreshKey: reloadKey, show })
 
   const say = (key: string, tone: Msg['tone'], text: string, queued = false) =>
     setMsgs((cur) => new Map(cur).set(key, queued ? { tone, text, queued: true } : { tone, text }))
@@ -988,6 +997,10 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                         その他
                       </button>
                     </th>
+                    {/* 2026-11-10 計画D: 申し送りの列（見出しの帯は今の灰＝分類の色の外。iPad 横 1180px で横に送らずに入る＝実測 847px／枠 1034px） */}
+                    <th scope="col" className="sticky top-0 z-20 bg-surface2 px-1 py-2 text-sm font-bold text-ink2">
+                      申し送り
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1001,7 +1014,10 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                     const others = readable ? otherLabelsOf(rid) : []
                     const stoppedNotes = readable ? [...DAYCARE_ACTIVITY_CHIPS, ...others].flatMap((l) => cellOf(rid, l).stopped) : []
                     const m = msgs.get(`${rid}:${day}`)
-                    const detail = stoppedNotes.length > 0 || m !== undefined
+                    // 申し送りの印（2026-11-10 計画D）: その日の活動（サーバーの行・表の並び）をまとめた文。送信待ちの活動は文に入れない
+                    const dayText = readable ? activityDayMarkText(activitiesOf(data.activities ?? [], rid, day).map((a) => activityText(a))) : null
+                    const markNote = marks.note(rid, { kind: 'activityDay' }, name)
+                    const detail = stoppedNotes.length > 0 || m !== undefined || markNote !== null
                     // 活動の記録が1つも無い行（読めている時だけ・2026-11-09 計画B2）
                     const rowBlank = readable && filledOf.get(rid) === false
                     return (
@@ -1052,12 +1068,26 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                               </button>
                             </div>
                           </td>
+                          <td className="px-1 py-1">
+                            {marks.button({
+                              residentId: rid,
+                              name,
+                              rec: { kind: 'activityDay' },
+                              text: dayText,
+                              why: !readable
+                                ? '活動の記録を読み込めていないため、申し送りにできません。'
+                                : dayText === null
+                                  ? '活動の記録が無いため、申し送りにできません（記録してから押してください）。'
+                                  : null,
+                            })}
+                          </td>
                         </tr>
                         {detail ? (
                           <tr className={`${rowBg} border-b border-border`}>
                             {/* 知らせの行は表の幅を広げない（バイタル一括と同じ形）。幅0＋最小100% の箱で表の幅の計算から外し、
                                 文は表の枠の幅で折り返して、横スクロールしても左に残す（sticky） */}
-                            <td colSpan={DAYCARE_ACTIVITY_CHIPS.length + 2} className="p-0">
+                            {/* 2026-11-10 計画D: 申し送りの列を足したので +3 */}
+                            <td colSpan={DAYCARE_ACTIVITY_CHIPS.length + 3} className="p-0">
                               <div className="w-0 min-w-full">
                                 <div className="sticky left-0 space-y-1 px-2 pb-2" style={{ maxWidth: tableBoxWidth > 0 ? tableBoxWidth : undefined }}>
                                   {stoppedNotes.map((t) => (
@@ -1074,6 +1104,7 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                                       {m.text}
                                     </p>
                                   ) : null}
+                                  {markNote}
                                 </div>
                               </div>
                             </td>
@@ -1156,6 +1187,7 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
         }}
         onCancel={() => setLateAsk(null)}
       />
+      {marks.dialogs}
       {toast}
     </div>
   )

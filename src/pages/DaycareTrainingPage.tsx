@@ -10,6 +10,8 @@
 // ・過去の日は事務所のログインだけが入力・修正できる（0046 のトリガと同じ決まり。現場は見るだけ）
 // ・入力解禁は機能訓練だけの旗 input_enabled_daycare_training。表が無い DB は「設定待ち」
 // ・端末に業務データを残さない（localStorage を使わない）。送り先（方・日）は押した時に固定する
+// ・2026-11-10 計画D: 対象者の表の右に「⚐ 申し送り」（ワンタップ・DaycareNoteMarkDay.tsx）。その日の記録（サーバーの行＝sessionText）の文で
+//   区分「デイ」の申し送りを1件作る（鍵の記録は tr<記録の id>・分類なし）。印の読み込みはその日の全員分を1本（購読は足さない）
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
@@ -51,6 +53,9 @@ import { DaycareReviewDueSection } from '../components/DaycareReviewDueSection'
 import { TARGET_NO_PLAN_LABEL, targetPlanTags, weekScope } from '../lib/trainingDue'
 import type { DueCopyLoad, WeekScope } from '../lib/trainingDue'
 import { ConfirmDialog, ErrorBlock, LoadingBlock, ModalShell, useToast } from '../components/ui'
+import { useDaycareNoteMarksDay } from '../components/DaycareNoteMarkDay'
+import { trainingMarkText } from '../lib/daycareNoteMark'
+import type { MarkRecord } from '../lib/daycareNoteMark'
 import { writeDaycareHandoffFor } from '../lib/daycareHandoff'
 import { buildDaycareBoard, canEditPastDaycareTimes } from '../lib/daycare'
 import {
@@ -399,6 +404,17 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
     if (actorId === null) return MSG_NO_RECORDER
     return null
   }
+  // 申し送りの印（2026-11-10 計画D）。使えるかはこの画面の旗（機能訓練だけの旗）と設定待ちだけで見る（居宅訪問と同じ＝配置を読めない時・
+  // 過去の日でも止めない。現場のログインの過去の日は部品の 17時のロックで止まる）。記録者・17時のロックは部品が見る
+  const markWritable = gateOk && !missing
+  const marks = useDaycareNoteMarksDay({
+    day,
+    actorId,
+    canWrite: markWritable,
+    blockedReason: markWritable ? null : homeVisitBlocked(),
+    refreshKey: reloadKey,
+    show,
+  })
   const errText = (e: unknown, d: string) => {
     if (e instanceof DbError && e.kind === 'forbidden' && d < todayIso()) return MSG_PAST
     if (e instanceof DbError) return e.message
@@ -818,6 +834,10 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                     <th scope="col" className={`sticky top-0 z-20 ${DAYCARE_CATEGORY_CLS.training.band} px-2 py-2 text-sm font-bold text-ink`}>
                       結果
                     </th>
+                    {/* 2026-11-10 計画D: 申し送りの列（見出しの帯は今の灰＝分類の色の外。iPad 横 1180px で横に送らずに入る＝実測 1001px／枠 1034px） */}
+                    <th scope="col" className="sticky top-0 z-20 bg-surface2 px-1 py-2 text-sm font-bold text-ink2">
+                      申し送り
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -847,7 +867,12 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                             : null
                     const stoppedNote = add?.stopped === true || p?.stopped === true
                     const m = rowMsg !== null && rowMsg.rid === rid && rowMsg.day === day ? rowMsg.msg : null
-                    const detail = stoppedNote || m !== null
+                    // 申し送りの印（2026-11-10 計画D）: その日の記録（サーバーの行）の文。記録が無くなった（取り消した）方は、残っている印を外せるように
+                    // その印の記録で出す（文は null＝新しくは付けられない）
+                    const markRec: MarkRecord | null = s !== null ? { kind: 'training', id: s.id } : marks.liveRecord(rid, 'training')
+                    const markText = s !== null ? trainingMarkText(sessionText(s)) : null
+                    const markNote = marks.note(rid, markRec, name)
+                    const detail = stoppedNote || m !== null || markNote !== null
                     // その日の記録が無い方（読めている時だけ・送信待ちの追加は入力済み）。結果の欄を空の枠の見た目にする（2026-11-09 計画B2）
                     const blank = data.sessions !== null && !trainingFilled(sessions, pending, rid, day)
                     return (
@@ -953,16 +978,34 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                               </div>
                             </div>
                           </td>
+                          <td className="px-1 py-1">
+                            {marks.button({
+                              residentId: rid,
+                              name,
+                              rec: markRec,
+                              text: markText,
+                              why:
+                                data.sessions === null
+                                  ? '機能訓練の記録を読み込めていないため、申し送りにできません。'
+                                  : s !== null
+                                    ? null
+                                    : waiting
+                                      ? '機能訓練の記録がまだ送信待ちのため、申し送りにできません（届いてから押してください）。'
+                                      : '機能訓練の記録が無いため、申し送りにできません（記録してから押してください）。',
+                            })}
+                          </td>
                         </tr>
                         {detail ? (
                           <tr className={`${rowBg} border-b border-border`}>
                             {/* 知らせの行は表の幅を広げない（バイタル一括と同じ形）。幅0＋最小100% の箱で表の幅の計算から外し、
                                 文は表の枠の幅で折り返して、横スクロールしても左に残す（sticky） */}
-                            <td colSpan={5} className="p-0">
+                            {/* 2026-11-10 計画D: 申し送りの列を足したので 6 */}
+                            <td colSpan={6} className="p-0">
                               <div className="w-0 min-w-full">
                                 <div className="sticky left-0 space-y-1 px-2 pb-2" style={{ maxWidth: tableBoxWidth > 0 ? tableBoxWidth : undefined }}>
                                   {stoppedNote ? msgBox({ tone: 'warn', text: MSG_STOPPED }) : null}
                                   {m !== null ? msgBox(m) : null}
+                                  {markNote}
                                 </div>
                               </div>
                             </td>
@@ -1309,6 +1352,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
         onConfirm={() => void removeStaffing()}
         onCancel={() => setDelStaff(null)}
       />
+      {marks.dialogs}
       {toast}
     </div>
   )

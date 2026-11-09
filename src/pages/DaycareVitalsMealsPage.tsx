@@ -26,6 +26,11 @@
 //   値を入れて保存できたら、その欄の印を外す（外せなくても値は止めない＝値のある欄の印は表示で無視する）。送信待ちには積まない
 //   （通信できない時は理由を行の下に出し、欄は空のまま）。付けた時・外した時は〔元に戻す〕の知らせ（昼食と同じ部品）。
 //
+// 申し送り（2026-11-10 計画D・仮置き）: 行には旗のボタンを置かない（行の高さ 53px と 1180px で横に送らない幅を保つ）。テンキーの見出しの段に
+//   〔⚐ 申し送り〕（いま入れている方の数える回のバイタル＝サーバーの値の文で1タップ・鍵は 1人の画面と同じ 'vital'）。付いている時は
+//   〔⚑ 申し送り済み〕で、押すと〔外す〕の確認。印が付いた方は氏名と同じ段の右に「⚑」（読み上げは別に「申し送り済み」）。長い氏名は省略記号で
+//   切る（全文はテンキーの見出し）。印の読み込みはその日の全員分を1本（DaycareNoteMarkDay.tsx）。申し送りへの書き込みは印の部品の中だけ
+//
 // 規律: 取得・保存は db.ts の関数のみ／入力解禁は input_enabled_daycare（＋既存のバイタルの旗 native_input_enabled が
 //   saveVitalEdits の入口で効く）／氏名・値を localStorage・console に出さない（保存するのは絞り込みの既知値だけ）／
 //   色だけに頼らない（記号＋言葉）／押す所は 44px 以上・テンキーは 56px
@@ -64,6 +69,8 @@ import type { CellConflict, CellEditInput, VitalCellField, VitalTarget } from '.
 import { RecorderBar } from '../components/RecorderBar'
 import { DaycareBlankTag, DaycareRowBlankMark, DaycareUnfilledCount } from '../components/DaycareUnfilledCount'
 import { ConfirmDialog, ErrorBlock, LoadingBlock } from '../components/ui'
+import { useDaycareNoteMarksDay } from '../components/DaycareNoteMarkDay'
+import { vitalMarkText } from '../lib/daycareNoteMark'
 import { registerUnsaved } from '../lib/leaveGuard'
 import { useTableFit } from '../lib/useTableFit'
 import { DaycareNav } from './DaycarePage'
@@ -514,6 +521,26 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
   }
 
   const canWrite = gate !== null && gate.observed && gate.value === true && !(data?.missing ?? false) && day <= today
+  // 申し送りの印（2026-11-10 計画D・仮置き）。使えるかはこの画面の旗のまま（テンキーは使える時だけ開く）。〔元に戻す〕は昼食と同じ知らせの部品
+  // （テンキーを開いている間は見出しの下に出す決まりのまま）。記録者・17時のロックは部品が見る
+  const marks = useDaycareNoteMarksDay({
+    day,
+    actorId,
+    canWrite,
+    blockedReason: canWrite
+      ? null
+      : data?.missing
+        ? 'デイの記録はまだ使えません（サーバー側の設定待ち）。'
+        : gate?.forbidden
+          ? FORBIDDEN_REASON
+          : gate?.outdated
+            ? OUTDATED_REASON
+            : gate?.observed
+              ? `${kindBlockedMessage('daycare')}。`
+              : MSG_GATE_UNKNOWN,
+    refreshKey: reloadKey,
+    show: lunch.show,
+  })
 
   const setState = (key: string, st: SlotState | null) =>
     setSlotState((prev) => {
@@ -1008,6 +1035,8 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
       const t = e.target as HTMLElement | null
       // 主食・副食の選択肢（SELECT）で押したキーも横取りしない（2026-11-09 計画B3: 同じ表に昼食の選択肢と水分の欄がある）
       if (t !== null && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return
+      // 確認の小窓（テンキーの〔⚑ 申し送り済み〕から開く〔外す〕の確認など）の中で押したキーも横取りしない（2026-11-10 計画D: Enter・Esc を小窓に渡す）
+      if (t !== null && t.closest('[role="dialog"]') !== null) return
       const k = toHalfWidth(e.key)
       if (/^\d$/.test(k) || k === '.') {
         e.preventDefault()
@@ -1366,6 +1395,27 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
   const activeMarked =
     active !== null && activeSlot !== null && showsUnmeasured(valueOf(activeSlot, active.field).v, umRowOf(activeSlot, active.field) !== null)
   const prevOf = (id: number) => previousVitalOf(data.recent, id, data.day)
+  /**
+   * テンキーの〔⚐ 申し送り〕の文（2026-11-10 計画D・仮置き）: いま入れている方の数える回（空の枠を光らせる回と同じ）のバイタルのサーバーの値。
+   * 送っていない値・送信待ちの値がある間は押せない（申し送りの文が記録と食い違わないように）
+   */
+  const markOfActive = ((): { text: string | null; why: string | null } => {
+    if (active === null) return { text: null, why: null }
+    const slots = slotsOf(active.residentId)
+    const cs = countSeqOfRow.get(active.residentId) ?? null
+    const slot = slots.find((s) => s.seq === cs) ?? slots[0] ?? null
+    const v = slot?.vital ?? null
+    const text = v === null ? null : vitalMarkText({ temp: v.temp, sys_bp: v.sys_bp, dia_bp: v.dia_bp, pulse: v.pulse, spo2: v.spo2 })
+    const unsent = slot !== null && (Object.keys(drafts.get(slot.key) ?? {}).length > 0 || pendingRow('vitals', targetOf(slot)) !== null)
+    return {
+      text,
+      why: unsent
+        ? '入れた値が送れてから押してください（送っていない値・送信待ちの値があります。止まっている時は行の下の知らせから解いてください）。'
+        : text === null
+          ? 'バイタルの値が無いため、申し送りにできません（値を入れてから押してください）。'
+          : null,
+    }
+  })()
 
   const keypad =
     active !== null && activeSlot !== null ? (
@@ -1382,6 +1432,15 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                   {active.seq > 1 ? `（再測定 ${active.seq - 1}）` : ''}
                 </span>
               </p>
+              {/* 2026-11-10 計画D（仮置き）: 申し送り（1タップ・数える回のバイタル）。付いている時は〔⚑ 申し送り済み〕で、押すと〔外す〕の確認 */}
+              {marks.button({
+                residentId: active.residentId,
+                name: nameOf(active.residentId),
+                rec: { kind: 'vital' },
+                text: markOfActive.text,
+                why: markOfActive.why,
+                onLabel: '申し送り済み',
+              })}
               <p className="font-num text-2xl font-bold text-ink">
                 {buf === '' ? '—' : buf}
                 <span className="ml-1 text-base font-normal text-ink2">{DAYCARE_VITAL_UNIT[active.field]}</span>
@@ -1584,6 +1643,8 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                     // 来た・まだ（○ 来所前／● 在席／✓ 帰宅。それまでの食事一括の氏名の下の印）。2026-11-09 計画B3 の手直し: 氏名の列に積まず、
                     // 状態の列の1段目に短い形で出す（行の高さを欄の 44px に保つ）。休み・入院中の方（「全員」で出した方）には出さない
                     const cm = daycareCameShort(row)
+                    // 申し送りの印（2026-11-10 計画D・仮置き）: 付いている・送信待ち（氏名の段の右の「⚑」）
+                    const markMk = marks.markState(row.residentId, { kind: 'vital' })
                     return slots.map((slot, si) => {
                       const st = slotState.get(slot.key)
                       // 空の枠を目立たせるのは、数える方の最初の回だけ（数えた欄と光る欄をそろえる・2026-11-09 計画B2）
@@ -1611,7 +1672,9 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                       const lunchNotes = lunchRow ? lunch.notes(row.residentId) : null
                       // 〔未測定〕を付けられなかった・外せなかった理由（2026-11-10。欄は空のまま）
                       const umNote = DAYCARE_VITAL_FIELDS.flatMap((f) => umNotes.get(umKey(slot, f)) ?? []).join(' ') || null
-                      const below = detail || lunchNotes !== null || umNote !== null
+                      // 申し送りの印の知らせ（2026-11-10 計画D・送れなかった理由・送信待ちにした旨・止まった印）も1回目の行の下に出す
+                      const markNote = si === 0 ? marks.note(row.residentId, { kind: 'vital' }, nameOf(row.residentId)) : null
+                      const below = detail || lunchNotes !== null || umNote !== null || markNote !== null
                       const time = slot.vital?.measured_at ? slot.vital.measured_at.slice(0, 5) : null
                       // 状態の列の2段目（2026-11-09 計画B3 の確認の反証 中1・軽2）: 急ぐ印（要確認・未送信・送信中）→ 測った時刻（再測定の回が
                       // 無い方の1回目）→ ✓ 保存済み の順に1つ。保存済みは時刻に譲る（時刻が無い時だけ出す）
@@ -1632,9 +1695,18 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                                         氏名の横に置くと iPad 縦（氏名の列 112px）で折り返して行が伸びるため＝2026-11-09 計画B2 の反証 中1。
                                         読み上げは「未入力あり」・昼食の主食・副食の空も含む） */}
                                     <Link to={personPath(row.residentId, day, today)} className="flex min-h-tap flex-col justify-center underline-offset-2 hover:underline">
-                                      <span className="text-base font-bold leading-tight text-link">
-                                        {nameOf(row.residentId)}
-                                        <span className="sr-only">さんの1日の記録を開く</span>
+                                      {/* 2026-11-10 計画D（仮置き）: 申し送りの印が付いた方は氏名と同じ段の右に「⚑」（読み上げは別に「申し送り済み」）。
+                                          氏名は1段で、入らない時は省略記号で切る（行の高さ 53px を保つ。全文はテンキーの見出し） */}
+                                      <span className="flex min-w-0 items-baseline text-base font-bold leading-tight text-link">
+                                        <span className="min-w-0 truncate">{nameOf(row.residentId)}</span>
+                                        {markMk !== null ? (
+                                          <span aria-hidden="true" className="ml-0.5 shrink-0 font-normal text-ink">
+                                            ⚑
+                                          </span>
+                                        ) : null}
+                                        <span className="sr-only">
+                                          さんの1日の記録を開く{markMk === 'live' ? '（申し送り済み）' : markMk === 'pending' ? '（申し送りは送信待ち）' : ''}
+                                        </span>
                                       </span>
                                       <span className="text-sm leading-tight text-ink2">
                                         {(blankCount ?? 0) > 0 ? <DaycareRowBlankMark lead /> : null}
@@ -1809,6 +1881,7 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                                       </p>
                                     ) : null}
                                     {lunchNotes}
+                                    {markNote}
                                   </div>
                                 </div>
                               </td>
@@ -1833,6 +1906,7 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
       <div className="contents" style={kpOpen ? ({ '--toast-top': `${toastTop}px`, '--toast-bottom': 'auto' } as CSSProperties) : undefined}>
         {lunch.toast}
       </div>
+      {marks.dialogs}
       <ConfirmDialog
         open={discardAsk}
         title="保存せずに移りますか"

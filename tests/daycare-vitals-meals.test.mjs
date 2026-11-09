@@ -238,7 +238,8 @@ describe('静的検査: 行の高さ（計画B3 の手直し・ふつうの行�
   const body = screen.slice(screen.indexOf('<tbody>'), screen.indexOf('</tbody>'))
   it('氏名の列は活動一括と同じ形: 氏名のリンク（44px・2段）の2段目に基準の札・「1回目（時刻）」は再測定の回がある方だけ・ほかは積まない', () => {
     const name = body.slice(body.indexOf('{si === 0 ? ('), body.indexOf('↳ '))
-    assert.match(name, /<Link to=\{personPath\(row\.residentId, day, today\)\} className="flex min-h-tap flex-col justify-center underline-offset-2 hover:underline">\s*<span className="text-base font-bold leading-tight text-link">[\s\S]*?<\/span>\s*<span className="text-sm leading-tight text-ink2">\s*\{\(blankCount \?\? 0\) > 0 \? <DaycareRowBlankMark lead \/> : null\}\s*\{basis\}\s*<\/span>\s*<\/Link>/)
+    // 2026-11-10 計画D（固定し直し・意図は同じ）: 氏名は1段（入らない時は省略記号で切る・全文はテンキーの見出し）・同じ段の右に申し送りの印「⚑」。2段目は基準の札のまま
+    assert.match(name, /<Link to=\{personPath\(row\.residentId, day, today\)\} className="flex min-h-tap flex-col justify-center underline-offset-2 hover:underline">\s*(\{\}\s*)?<span className="flex min-w-0 items-baseline text-base font-bold leading-tight text-link">\s*<span className="min-w-0 truncate">\{nameOf\(row\.residentId\)\}<\/span>\s*\{markMk !== null \? \([\s\S]*?\) : null\}\s*<span className="sr-only">\s*さんの1日の記録を開く\{markMk === 'live' \? '（申し送り済み）' : markMk === 'pending' \? '（申し送りは送信待ち）' : ''\}\s*<\/span>\s*<\/span>\s*<span className="text-sm leading-tight text-ink2">\s*\{\(blankCount \?\? 0\) > 0 \? <DaycareRowBlankMark lead \/> : null\}\s*\{basis\}\s*<\/span>\s*<\/Link>/)
     assert.match(name, /\{slots\.length > 1 \? \(/)
     assert.doesNotMatch(name, /time !== null \? \(|nameNotes|cm\.word|mark\.text/)
     // 昼食の保存の印は状態の列（mergeSaveMarks）・取り込みの印と外出／入院の記録は行の下の知らせ（フックの notes）
