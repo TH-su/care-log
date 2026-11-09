@@ -176,7 +176,9 @@ describe('静的検査: 統合した画面（計画B3）', () => {
     // 「未測定」（skip）で KT を飛ばした時も同じ advance を通る
     assert.match(screen, /if \(skip \|\| text === ''\) \{[\s\S]{0,200}advance\(cur\)/)
     // 物理キーボードの数字は、選択肢（SELECT）・水分の欄（INPUT）で押した時は横取りしない
-    assert.match(screen, /if \(t !== null && \(t\.tagName === 'INPUT' \|\| t\.tagName === 'TEXTAREA' \|\| t\.tagName === 'SELECT'\)\) return/)
+    // 2026-11-10 計画D の反証の確認（固定し直し・意図は同じ）: 受け取るかの判断を純関数 keypadKeyAction に出した（INPUT・TEXTAREA・SELECT と確認の小窓の中では
+    // 受け取らない・動きは tests/daycare-note-mark-day.test.mjs で確かめる）。キーの処理の前に判断する
+    assert.match(screen, /const act = keypadKeyAction\(e\.key, \{ tag: t\?\.tagName \?\? null, inDialog: t instanceof Element && t\.closest\('\[role="dialog"\]'\) !== null \}\)\s+if \(act === null\) return\s+e\.preventDefault\(\)\s+press\(act\)/)
   })
   it('iPad 横 1180×820 で横に送らずに全部の列が入る作り（幅の勘定。2026-11-09 にヘッドレス Chrome で自然な表の幅 1041px・枠 1052px を実測）', () => {
     // 画面の幅: 左のメニュー（lg:pl-24＝96px）・本文の左右の余白（px-4＝16px×2）
@@ -239,7 +241,8 @@ describe('静的検査: 行の高さ（計画B3 の手直し・ふつうの行�
   it('氏名の列は活動一括と同じ形: 氏名のリンク（44px・2段）の2段目に基準の札・「1回目（時刻）」は再測定の回がある方だけ・ほかは積まない', () => {
     const name = body.slice(body.indexOf('{si === 0 ? ('), body.indexOf('↳ '))
     // 2026-11-10 計画D（固定し直し・意図は同じ）: 氏名は1段（入らない時は省略記号で切る・全文はテンキーの見出し）・同じ段の右に申し送りの印「⚑」。2段目は基準の札のまま
-    assert.match(name, /<Link to=\{personPath\(row\.residentId, day, today\)\} className="flex min-h-tap flex-col justify-center underline-offset-2 hover:underline">\s*(\{\}\s*)?<span className="flex min-w-0 items-baseline text-base font-bold leading-tight text-link">\s*<span className="min-w-0 truncate">\{nameOf\(row\.residentId\)\}<\/span>\s*\{markMk !== null \? \([\s\S]*?\) : null\}\s*<span className="sr-only">\s*さんの1日の記録を開く\{markMk === 'live' \? '（申し送り済み）' : markMk === 'pending' \? '（申し送りは送信待ち）' : ''\}\s*<\/span>\s*<\/span>\s*<span className="text-sm leading-tight text-ink2">\s*\{\(blankCount \?\? 0\) > 0 \? <DaycareRowBlankMark lead \/> : null\}\s*\{basis\}\s*<\/span>\s*<\/Link>/)
+    // 2026-11-10 計画D の反証の確認（固定し直し・意図は同じ）: 止まった印の読み上げ「申し送りは止まっています」（⚑▲）を足した
+    assert.match(name, /<Link to=\{personPath\(row\.residentId, day, today\)\} className="flex min-h-tap flex-col justify-center underline-offset-2 hover:underline">\s*(\{\}\s*)?<span className="flex min-w-0 items-baseline text-base font-bold leading-tight text-link">\s*<span className="min-w-0 truncate">\{nameOf\(row\.residentId\)\}<\/span>\s*\{markMk !== null \? \([\s\S]*?\) : null\}\s*<span className="sr-only">\s*さんの1日の記録を開く\s*\{markMk === 'live' \? '（申し送り済み）' : markMk === 'pending' \? '（申し送りは送信待ち）' : markMk === 'stopped' \? '（申し送りは止まっています）' : ''\}\s*<\/span>\s*<\/span>\s*<span className="text-sm leading-tight text-ink2">\s*\{\(blankCount \?\? 0\) > 0 \? <DaycareRowBlankMark lead \/> : null\}\s*\{basis\}\s*<\/span>\s*<\/Link>/)
     assert.match(name, /\{slots\.length > 1 \? \(/)
     assert.doesNotMatch(name, /time !== null \? \(|nameNotes|cm\.word|mark\.text/)
     // 昼食の保存の印は状態の列（mergeSaveMarks）・取り込みの印と外出／入院の記録は行の下の知らせ（フックの notes）

@@ -74,6 +74,7 @@ import { DaycareBlankTag, DaycareRowBlankMark, DaycareUnfilledCount } from '../c
 import { ConfirmDialog, ErrorBlock, LoadingBlock } from '../components/ui'
 import { useDaycareNoteMarksDay } from '../components/DaycareNoteMarkDay'
 import { latestVitalValues, vitalMarkText } from '../lib/daycareNoteMark'
+import { keypadKeyAction, keypadMarkLine, keypadNoteKey, keypadOpKey } from '../lib/daycareNoteMarkDay'
 import { registerUnsaved } from '../lib/leaveGuard'
 import { useTableFit } from '../lib/useTableFit'
 import { DaycareNav } from './DaycarePage'
@@ -137,7 +138,7 @@ import type { DaycareBoardRow, DaycareReleaseIssue, DaycareVitalField, DaycareVi
 import { useVitalLimits } from '../hooks/useVitalLimits'
 import { vitalThresholds } from '../lib/vitalThresholds'
 import { VitalLimitsFailedNote } from '../components/VitalLimitsFailedNote'
-import { addDays, fmtDayLabel, todayIso, toHalfWidth } from '../lib/format'
+import { addDays, fmtDayLabel, todayIso } from '../lib/format'
 import { LEVEL_MARK, LS } from '../lib/types'
 import type { DaycareAttendance, DaycarePlanRow, DaycarePlanSource, Level, Resident, Staff } from '../lib/types'
 import type { ResidentTargets } from '../lib/vitalAlerts'
@@ -268,8 +269,13 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
   const [active, setActive] = useState<Active | null>(null)
   const [buf, setBuf] = useState('')
   const [kpError, setKpError] = useState<string | null>(null)
-  /** テンキーの〔⚐ 申し送り〕を押せなかった理由（テンキーの1行に出す。欄・打ちかけの値が変わったら消す＝2026-11-10 計画D の反証 軽5） */
-  const [kpNote, setKpNote] = useState<string | null>(null)
+  /**
+   * テンキーの〔⚐ 申し送り〕を押せなかった理由（テンキーの1行に出す・2026-11-10 計画D の反証 軽5）。at＝出した場の鍵（keypadNoteKey）。欄・打ちかけの値・
+   * その方の印の状態のどれかが変わると鍵が変わって出さなくなる（反証の確認 軽2）
+   */
+  const [kpNote, setKpNote] = useState<{ text: string; at: string } | null>(null)
+  /** テンキーを開いている間に〔⚐〕〔⚑〕で始めた操作（since＝その時の知らせの番号・at＝欄の鍵）。結果の知らせを欄を移るまでテンキーの1行に出す */
+  const [kpOp, setKpOp] = useState<{ since: number; at: string } | null>(null)
   /** 日付の切り替え・読み直しを止めた理由（送れなかった・捨てた測定と、押した操作） */
   const [pageMsg, setPageMsg] = useState<{ issues: DaycareReleaseIssue[]; go: () => void } | null>(null)
   /** 〔保存せずに移る〕の確認を開いているか */
@@ -301,7 +307,6 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
   dayRef.current = day
   dataRef.current = data
   const opening = useRef(false)
-  useEffect(() => setKpNote(null), [active?.key, active?.field, buf])
 
   useEffect(() => {
     const tick = () => setToday(todayIso())
@@ -1039,24 +1044,12 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
     if (active === null) return
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null
-      // 主食・副食の選択肢（SELECT）で押したキーも横取りしない（2026-11-09 計画B3: 同じ表に昼食の選択肢と水分の欄がある）
-      if (t !== null && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return
-      // 確認の小窓（テンキーの〔⚑ 申し送り済み〕から開く〔外す〕の確認など）の中で押したキーも横取りしない（2026-11-10 計画D: Enter・Esc を小窓に渡す）
-      if (t !== null && t.closest('[role="dialog"]') !== null) return
-      const k = toHalfWidth(e.key)
-      if (/^\d$/.test(k) || k === '.') {
-        e.preventDefault()
-        press(k)
-      } else if (e.key === 'Backspace') {
-        e.preventDefault()
-        press('back')
-      } else if (e.key === 'Enter') {
-        e.preventDefault()
-        press('next')
-      } else if (e.key === 'Escape') {
-        e.preventDefault()
-        press('close')
-      }
+      // 受け取るかの判断はキーの処理の前（keypadKeyAction・2026-11-10 計画D の反証の確認）: 入れる欄（INPUT・TEXTAREA）・主食・副食の選択肢（SELECT
+      // ＝2026-11-09 計画B3）・確認の小窓（〔⚑ 申し送り済み〕から開く〔外す〕の確認など＝Enter・Esc を小窓に渡す）の中で押したキーは横取りしない
+      const act = keypadKeyAction(e.key, { tag: t?.tagName ?? null, inDialog: t instanceof Element && t.closest('[role="dialog"]') !== null })
+      if (act === null) return
+      e.preventDefault()
+      press(act)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -1426,8 +1419,15 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
               : null,
     }
   })()
-  // テンキーの1行に出す申し送りの知らせ（押せなかった理由 → 送れなかった理由・送信待ちにした旨・止まった印）
-  const kpMarkLine = active === null ? null : (kpNote ?? marks.messageOf(active.residentId, { kind: 'vital' }))
+  // テンキーの1行に出す申し送りの知らせ（2026-11-10 計画D の反証の確認 軽2・選び方は keypadMarkLine）: 押せなかった理由（欄・打ちかけの値・その方の印の
+  // 状態が変わるまで）→ テンキーを開いている間にその方の印の操作で出た結果（欄を移るまで）→ 無ければ案内の行
+  const kpInfo = active === null ? null : marks.keypadInfo(active.residentId, { kind: 'vital' })
+  const kpNoteKey = keypadNoteKey({ key: active?.key ?? null, field: active?.field ?? null, buf, mark: kpInfo?.sig ?? '' })
+  const kpOpKey = keypadOpKey({ key: active?.key ?? null, field: active?.field ?? null })
+  const kpMarkLine =
+    kpInfo === null
+      ? null
+      : keypadMarkLine({ note: kpNote, op: kpOp, noteKey: kpNoteKey, opKey: kpOpKey, msgs: kpInfo.msgs, stillQueued: kpInfo.stillQueued, stopped: kpInfo.stopped })
 
   const keypad =
     active !== null && activeSlot !== null ? (
@@ -1454,7 +1454,8 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                 text: markOfActive.text,
                 why: markOfActive.why,
                 onLabel: '申し送り済み',
-                onBlocked: setKpNote,
+                onBlocked: (r) => setKpNote({ text: r, at: kpNoteKey }),
+                onAction: (since) => setKpOp({ since, at: kpOpKey }),
                 widthCls: 'w-40 shrink-0 justify-center',
               })}
               <p className="min-w-28 shrink-0 text-right font-num text-2xl font-bold text-ink">
@@ -1722,13 +1723,14 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                                       <span className="flex min-w-0 items-baseline text-base font-bold leading-tight text-link">
                                         <span className="min-w-0 truncate">{nameOf(row.residentId)}</span>
                                         {markMk !== null ? (
-                                          // 送信待ちは「⚑↻」（2026-11-10 計画D の反証 軽7）
+                                          // 送信待ちは「⚑↻」（2026-11-10 計画D の反証 軽7）・止まった印は「⚑▲」（反証の確認 軽3）
                                           <span aria-hidden="true" className="ml-0.5 shrink-0 font-normal text-ink">
-                                            {markMk === 'pending' ? '⚑↻' : '⚑'}
+                                            {markMk === 'pending' ? '⚑↻' : markMk === 'stopped' ? '⚑▲' : '⚑'}
                                           </span>
                                         ) : null}
                                         <span className="sr-only">
-                                          さんの1日の記録を開く{markMk === 'live' ? '（申し送り済み）' : markMk === 'pending' ? '（申し送りは送信待ち）' : ''}
+                                          さんの1日の記録を開く
+                                          {markMk === 'live' ? '（申し送り済み）' : markMk === 'pending' ? '（申し送りは送信待ち）' : markMk === 'stopped' ? '（申し送りは止まっています）' : ''}
                                         </span>
                                       </span>
                                       <span className="text-sm leading-tight text-ink2">

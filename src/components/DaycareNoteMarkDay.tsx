@@ -3,14 +3,16 @@
 // ・押すと1タップで、その行の記録から文を組み立てた区分「デイ」の申し送りを1件作る（小窓・ひと言なし＝文は markBody(記録の文, '')）。
 //   送れたら「⚑ 申し送り」（注意の淡地＋塗りの旗＋文字）に変わり、〔元に戻す〕の知らせ（8秒・画面の useToast）。〔元に戻す〕は〔外す〕と同じ deleteNote
 // ・「⚑ 申し送り」をもう一度押すと〔外す〕の確認（1人の画面と同じ確認の小窓）
-// ・付いている印の本文が、いまの記録の文（同じ組み立て）と違う時は「⚑ 申し送り ⓘ」（1人の画面の「記録と違う」と同じ記号・isStale）。行の下の
-//   知らせに〔申し送りを直す〕（確認の小窓のあと saveNoteEdits で本文をいまの文に直す。ひと言は1人の画面と同じ fixProposal で引き継ぐ）。
+// ・付いている印の本文が、いまの記録の文（同じ組み立て）と食い違う時は「⚑ 申し送り ⓘ」（1人の画面の「記録と違う」と同じ記号・文）。比べ方と
+//   直した後の本文の案は daycareNoteMarkDay.ts（その日の活動・機能訓練は完全一致・いまの文そのもの／バイタルは isStale・fixProposal）。
+//   行の下の知らせに〔申し送りを直す〕（確認の小窓のあと、送る直前に読み直して本文が見た時のままなら saveNoteEdits で直す）。
 //   ひと言を足す・全文を手で直すのは1人の画面の〔申し送りを直す〕（今のまま）
 // ・書き込みは既存の insertNote（冪等キー dcn:<日>:<利用者id>:<記録>:<世代>-<送るたびの印>・鍵の作りは daycareNoteMark.ts）・deleteNote・
 //   saveNoteEdits だけ。送る直前に読み直して世代を決め、生きている印があれば2件目を作らない（1人の画面の部品 DaycareNoteMark.tsx と同じ手順）。
-//   機能訓練は1人1日1件として扱う（markFamilyPrefix: 記録を入れ直して id が替わっても、生きている tr＊ の印があれば作らない＝反証 中3）
-// ・17時のロック（0033）・送信待ち・止まった時・記録者の扱いは1人の画面と同じ（現場のログインは記録日の 17:00 から付け外し・直しができない）
-// ・送れた・外した・直した行は、読み直しが失敗しても画面の印に持つ（⚐ に戻して2件目を作れる状態にしない＝反証 軽1）
+//   機能訓練は1人1日1件として扱う（markTaken: 記録を入れ直して id が替わっても、生きている tr＊ の印があれば作らない）
+// ・17時のロック（0033）・送信待ち・止まった時・記録者の扱いは1人の画面と同じ（現場のログインは記録日の 17:00 から付け外し・直しができない）。
+//   押せない時は disabled にせず aria-disabled にし、押すと理由を出す（一括の画面は行の下・バイタル・食事のテンキーはテンキーの1行）
+// ・送れた・外した・直した行は、読み直しが失敗しても・古い読み込みが後から届いても画面の印に持つ（mergeKeptRows）
 // ・印の読み込みは、その日の全員分を1本（fetchDaycareDayNotes）。Realtime の購読は足さない（他の端末の印は〔最新に更新〕・送信待ちが
 //   送れて減った時・送る直前に読み直す）。端末に業務データを残さない
 // 1人の画面の useDaycareNoteMarks は変えていない（1人・1日ごとの読み込みと2タップの小窓のまま）。
@@ -40,8 +42,6 @@ import {
 import type { CellSaveResult, DaycareNoteMarkRow, MyRole, NoteMeta, Queued } from '../lib/db'
 import {
   MARK_KIND_LABEL,
-  fixProposal,
-  isStale,
   markBody,
   markCategories,
   markDayAllPrefix,
@@ -54,6 +54,8 @@ import {
   parseMarkKey,
 } from '../lib/daycareNoteMark'
 import type { MarkKind, MarkRecord } from '../lib/daycareNoteMark'
+import { fixTargetUnchanged, markDiffers, markFixProposal, markStateOf, markTaken, mergeKeptRows } from '../lib/daycareNoteMarkDay'
+import type { KeptRow, MarkMsgLike } from '../lib/daycareNoteMarkDay'
 import { lockState } from '../lib/noteLock'
 import { noteTimeFor } from '../lib/nextMorning'
 import type { Note } from '../lib/types'
@@ -71,12 +73,17 @@ const MSG_LOADING = '申し送りの印を読み込んでいます。'
 const MSG_STOPPED_ADD = '申し送りが止まっています。設定の「送れていない申し送り」で確かめてください。'
 const MSG_STOPPED_ADD_LOCKED = '申し送りは 17:00 のロックで止まっています。設定の「送れていない申し送り」で確かめてください。'
 const MSG_STOPPED_EDIT = 'この申し送りへの変更が止まっています。設定の「送れていない申し送り」で確かめてください。'
+/** 付いている印へ直す・外す操作が送信待ち・止まっている間は、〔⚑〕〔申し送りを直す〕を押せない（反証の確認 軽5） */
+const MSG_CHANGE_PENDING = 'この申し送りへの変更（直す・外す）が送信待ちです。届いてから押してください。'
+const MSG_CHANGE_STOPPED = 'この申し送りへの変更（直す・外す）が止まっています。設定の「送れていない申し送り」で確かめてください。'
+/** 〔申し送りを直す〕を送る直前に読み直したら、本文が見た時から変わっていた（反証の確認 軽6） */
+const MSG_FIX_CHANGED = 'ほかの端末で申し送りが変わりました。もう一度確かめてください。'
 /** 1人の画面の「記録と違う」と同じ文（読み上げも同じ） */
 const MSG_STALE = '申し送りの文が、いまの記録と違います（申し送りは前の内容のまま。元の記録か申し送りが直されました）。'
 const MSG_STALE_GONE = '申し送りの文が、いまの記録と違います（元の記録が無くなりました。申し送りは前の内容のまま）。'
 
-/** 行の下に出す一言。queued＝送信待ちにした旨（その記録の送信待ちが無くなったら出さない） */
-type Msg = { tone: 'info' | 'warn' | 'danger'; text: string; queued?: true }
+/** 行の下に出す一言。seq＝出した順・result＝操作の結果（送れなかった・送信待ちにした）・queued＝送信待ちにした旨（送信待ちが無くなったら出さない） */
+type Msg = MarkMsgLike & { tone: 'info' | 'warn' | 'danger' }
 /** 知らせの1件（stop＝止まった印・stale＝記録と違う） */
 type Item = { key: string; tone: Msg['tone'] | 'stop' | 'stale'; text: string }
 
@@ -101,16 +108,18 @@ export interface DayMarkInput {
   rec: MarkRecord | null
   /** いまの記録の文（サーバーの値から。null＝記録なし） */
   text: string | null
-  /** 記録が無い・読めない・送っていない変更がある時の理由（押せない。title と読み上げに出す） */
+  /** 記録が無い・読めない・送っていない変更がある時の理由（押せない。title と読み上げに出し、押すと理由を出す） */
   why: string | null
   /** いまの記録の中身が分かるか（読めていない時は false＝「記録と違う」を出さない）。既定は true */
   known?: boolean
   /** 付けた印の文字（既定は「申し送り」。バイタル・食事のテンキーは「申し送り済み」） */
   onLabel?: string
   /**
-   * 渡すと、押せない時も disabled にせず aria-disabled にし、押した時に理由をこの関数へ渡す（バイタル・食事のテンキー＝テンキーの1行に出す・反証 軽5）
+   * 押せない時に押した理由の渡し先（バイタル・食事のテンキー＝テンキーの1行に出す）。渡さない時は行の下の知らせに出す（反証の確認 軽4）
    */
   onBlocked?: (reason: string) => void
+  /** 付ける・外す操作を始めた時に、その時の知らせの番号を渡す（テンキーの1行に、その操作の結果だけを出すため） */
+  onAction?: (since: number) => void
   /** ボタンの幅（状態が変わっても幅を変えない時。例: テンキーの見出しの段） */
   widthCls?: string
 }
@@ -134,14 +143,14 @@ const hasOwn = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o,
  */
 export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, refreshKey, show }: Options): {
   button: (m: DayMarkInput) => ReactNode
-  /** 行の下の知らせ（送れなかった理由・送信待ちにした旨・止まった印・記録と違う＋〔申し送りを直す〕）。無ければ null */
+  /** 行の下の知らせ（送れなかった理由・押せなかった理由・送信待ちにした旨・止まった印・記録と違う＋〔申し送りを直す〕）。無ければ null */
   note: (residentId: number, rec: MarkRecord | null, name: string, text: string | null, known?: boolean) => ReactNode
-  /** テンキーの1行に出す知らせ（送れなかった理由・送信待ちにした旨・止まった印。記録と違うは出さない）。無ければ null */
-  messageOf: (residentId: number, rec: MarkRecord) => string | null
+  /** テンキーの1行の材料（その記録の知らせ・送信待ちが残るか・止まった印の文・印の状態の鍵）。選び方は daycareNoteMarkDay.ts の keypadMarkLine */
+  keypadInfo: (residentId: number, rec: MarkRecord) => { msgs: MarkMsgLike[]; stillQueued: boolean; stopped: string | null; sig: string }
   /** その方・その日の、その種類の印（生きている印か、この端末の送信待ちの印）の記録（元の記録が無くなった・入れ直した印を出すため。無ければ null） */
   liveRecord: (residentId: number, kind: MarkKind) => MarkRecord | null
-  /** その記録の印の様子（live＝付いている・pending＝この端末の送信待ち・止まり／null＝無い）。行の小さな印に使う */
-  markState: (residentId: number, rec: MarkRecord) => 'live' | 'pending' | null
+  /** その記録の印の様子（live・pending＝この端末の送信待ち・stopped＝止まった・null＝無い）。行の小さな印に使う */
+  markState: (residentId: number, rec: MarkRecord) => 'live' | 'pending' | 'stopped' | null
   dialogs: ReactNode
 } {
   /** 読めた印（day＝読んだ日。違う日の分は使わない） */
@@ -151,6 +160,8 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
   const [loadFailed, setLoadFailed] = useState(false)
   const [role, setRole] = useState<MyRole | null | undefined>(cachedMyRole())
   const [msgs, setMsgs] = useState<Record<string, Msg>>({})
+  /** 知らせの番号（出した順） */
+  const seqRef = useRef(0)
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set())
   /** 送っている最中の記録（描画を待たずに止める＝続けて2回押しても2件にしない） */
   const busyRef = useRef(new Set<string>())
@@ -163,6 +174,8 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
   const genRef = useRef(0)
   /** 画面に入れた読み込みの番号（これより古い読み込みは入れない） */
   const appliedRef = useRef(0)
+  /** 書けた行の控え（note の id → 行・控えた時の読み込みの番号）。表示中の日の分だけ */
+  const keptRef = useRef(new Map<number, KeptRow<DaycareNoteMarkRow>>())
   const dayRef = useRef(day)
   dayRef.current = day
   /** いまの記録者（〔元に戻す〕は送った時の関数で走るので、押した時の値を ref から読む） */
@@ -171,36 +184,41 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
 
   /**
    * その日の印を読む（読めた行を返す。読めなければ null）。画面に入れるのは表示中の日の読み込みで、入れた読み込みより新しい時だけ
-   * （行き違った古い読み込みで新しい印を消さない。日を替えた後に届いた前の日の送信の読み直しで、表示中の日の印を外さない）
+   * （行き違った古い読み込みで新しい印を消さない。日を替えた後に届いた前の日の送信の読み直しで、表示中の日の印を外さない）。
+   * 書けた行の控えは、この読み込みより後に書いた分だけ重ねる（mergeKeptRows）
    */
   const load = useCallback(async (d: string): Promise<DaycareNoteMarkRow[] | null> => {
     const gen = ++genRef.current
     try {
       const all = await fetchDaycareDayNotes(d)
       const head = markDayAllPrefix(d)
-      const rows: DaycareNoteMarkRow[] = []
-      for (const r of all) if (r.clientKey !== null && r.clientKey.startsWith(head)) rows.push({ note: r.note, clientKey: r.clientKey, deleted: r.deleted })
-      if (d === dayRef.current && gen > appliedRef.current) {
+      const read: DaycareNoteMarkRow[] = []
+      for (const r of all) if (r.clientKey !== null && r.clientKey.startsWith(head)) read.push({ note: r.note, clientKey: r.clientKey, deleted: r.deleted })
+      if (d !== dayRef.current) return read
+      const merged = mergeKeptRows(read, keptRef.current, gen)
+      keptRef.current = merged.kept
+      if (gen > appliedRef.current) {
         appliedRef.current = gen
-        setMarks({ day: d, rows })
+        setMarks({ day: d, rows: merged.rows })
         setLoadFailed(false)
       }
-      return rows
+      return merged.rows
     } catch {
       if (d === dayRef.current && gen > appliedRef.current) setLoadFailed(true)
       return null
     }
   }, [])
 
-  /**
-   * 書けた行を画面の印に入れる（読み直しが失敗しても持つ＝反証 軽1）。それより前に始めた読み込みは入れない（書けた行を古い読み込みで消さない）
-   */
+  /** 書けた行を画面の印に入れ、控える（読み直しが失敗しても・古い読み込みが後から届いても持つ） */
   const keepRow = (d: string, row: DaycareNoteMarkRow) => {
-    appliedRef.current = genRef.current
-    setMarks((prev) => (prev !== null && prev.day === d ? { day: d, rows: [...prev.rows.filter((r) => r.note.id !== row.note.id), row] } : prev))
+    if (d !== dayRef.current) return
+    const k: KeptRow<DaycareNoteMarkRow> = { row, gen: genRef.current }
+    keptRef.current.set(row.note.id, k)
+    setMarks((prev) => (prev !== null && prev.day === d ? { day: d, rows: mergeKeptRows(prev.rows, new Map([[row.note.id, k]]), k.gen).rows } : prev))
   }
 
   useEffect(() => {
+    keptRef.current = new Map()
     setMsgs({})
     setDelRow(null)
     setFixRow(null)
@@ -247,11 +265,12 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
   const pendAll = pendingDaycareNoteMarks(markDayAllPrefix(day))
   const lockedForMe = lockState(day, 'daycare', false, now).locked && !canUnlockNotes(role)
   const keyOf = (rid: number, d: string, rec: MarkRecord) => `${rid}:${d}:${markPrefix(d, rid, rec)}`
-  const say = (k: string, m: Msg | null) =>
+  /** 知らせを出す（m＝null で消す）。result＝操作の結果（送れなかった・送信待ちにした） */
+  const say = (k: string, m: { tone: Msg['tone']; text: string; result?: true; queued?: true } | null) =>
     setMsgs((prev) => {
       const next = { ...prev }
       if (m === null) delete next[k]
-      else next[k] = m
+      else next[k] = { ...m, seq: ++seqRef.current }
       return next
     })
   const setBusyKey = (k: string, on: boolean) => {
@@ -282,7 +301,7 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
     const k = keyOf(rid, d, rec)
     const why = precheck()
     if (why !== null) {
-      say(k, { tone: 'warn', text: why })
+      say(k, { tone: 'warn', text: why, result: true })
       return
     }
     if (busyRef.current.has(k)) return
@@ -292,11 +311,11 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
       if (res === 'queued') {
         setTick((x) => x + 1)
         // 届いたら出さない（反証 軽3）
-        say(k, { tone: isQueuePersisted() ? 'info' : 'danger', text: `印を外す：${queuedText()}`, queued: true })
+        say(k, { tone: isQueuePersisted() ? 'info' : 'danger', text: `印を外す：${queuedText()}`, result: true, queued: true })
         return
       }
       if (!noteDeleted(res)) {
-        say(k, { tone: 'warn', text: MSG_HELD })
+        say(k, { tone: 'warn', text: MSG_HELD, result: true })
         return
       }
       say(k, null)
@@ -304,24 +323,34 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
       await load(d)
       if (dayRef.current === d) show(`${name}さんの申し送りの印を外しました（申し送りを取り消しました）`)
     } catch (e) {
-      say(k, { tone: 'danger', text: errText(e, '外せませんでした。通信状態を確認して、もう一度押してください。') })
+      say(k, { tone: 'danger', text: errText(e, '外せませんでした。通信状態を確認して、もう一度押してください。'), result: true })
     } finally {
       setBusyKey(k, false)
     }
   }
 
-  /** 〔申し送りを直す〕: 確認した全文で本文を直す（基準は見た本文＝1人の画面と同じ書き方）。rid・d は押した時の人・日 */
+  /**
+   * 〔申し送りを直す〕: 確認した全文で本文を直す（基準は見た本文＝1人の画面と同じ書き方）。送る直前にその日の印を読み直し、本文が見た時から
+   * 変わっていたら送らない（反証の確認 軽6・sendAdd と同じ考え）。rid・d は押した時の人・日
+   */
   const sendFix = async (rid: number, d: string, rec: MarkRecord, row: DaycareNoteMarkRow, full: string, name: string) => {
     setFixRow(null)
     const k = keyOf(rid, d, rec)
     const why = precheck()
     if (why !== null) {
-      say(k, { tone: 'warn', text: why })
+      say(k, { tone: 'warn', text: why, result: true })
       return
     }
     if (busyRef.current.has(k)) return
     setBusyKey(k, true)
     try {
+      const fresh = await load(d)
+      const prev = marksRef.current
+      const known = fresh ?? (prev !== null && prev.day === d ? prev.rows : null)
+      if (known !== null && !fixTargetUnchanged(known, row.note.id, row.note.body)) {
+        say(k, { tone: 'warn', text: MSG_FIX_CHANGED, result: true })
+        return
+      }
       const res: CellSaveResult<Note> | Queued = await saveNoteEdits(
         { id: row.note.id },
         { body: { value: full.trim(), base: row.note.body } },
@@ -329,11 +358,11 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
       )
       if (res === 'queued') {
         setTick((x) => x + 1)
-        say(k, { tone: isQueuePersisted() ? 'info' : 'danger', text: `申し送りを直す：${queuedText()}`, queued: true })
+        say(k, { tone: isQueuePersisted() ? 'info' : 'danger', text: `申し送りを直す：${queuedText()}`, result: true, queued: true })
         return
       }
       if (res.conflicts.length > 0 || res.held === true) {
-        say(k, { tone: 'warn', text: MSG_HELD })
+        say(k, { tone: 'warn', text: MSG_HELD, result: true })
         return
       }
       say(k, null)
@@ -341,7 +370,7 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
       await load(d)
       if (dayRef.current === d) show(`${name}さんの申し送りを直しました`)
     } catch (e) {
-      say(k, { tone: 'danger', text: errText(e, '直せませんでした。通信状態を確認して、もう一度押してください。') })
+      say(k, { tone: 'danger', text: errText(e, '直せませんでした。通信状態を確認して、もう一度押してください。'), result: true })
     } finally {
       setBusyKey(k, false)
     }
@@ -352,24 +381,23 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
     const k = keyOf(rid, d, rec)
     const why = precheck()
     if (why !== null) {
-      say(k, { tone: 'warn', text: why })
+      say(k, { tone: 'warn', text: why, result: true })
       return
     }
     if (busyRef.current.has(k)) return
     setBusyKey(k, true)
     try {
       const prefix = markPrefix(d, rid, rec)
-      const family = markFamilyPrefix(d, rid, rec)
       const fresh = await load(d)
       // 読み直せない時は、同じ日に前に読めた印があればそれで数える。一度も読めていなければ付けない
       const prev = marksRef.current
       const known = fresh ?? (prev !== null && prev.day === d ? prev.rows : null)
       if (known === null) {
-        say(k, { tone: 'warn', text: MSG_NOT_READ })
+        say(k, { tone: 'warn', text: MSG_NOT_READ, result: true })
         return
       }
       // 読み直したら、その記録にもう生きている印・送信待ちの印がある（別の端末が先に申し送りにした・機能訓練は入れ直した記録の印）: 2件目を作らない
-      if (known.some((r) => !r.deleted && r.clientKey.startsWith(family)) || pendingDaycareNoteMarks(family).length > 0) {
+      if (markTaken(known, pendingDaycareNoteMarks(markDayPrefix(d, rid)).map((p) => p.clientKey), d, rid, rec)) {
         say(k, { tone: 'info', text: '別の端末が先に申し送りにしていました（申し送りは1件のままです）。' })
         return
       }
@@ -402,28 +430,29 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
       if (res === 'queued') {
         // 送信待ちの間は〔元に戻す〕を出さない（送れたら出す＝仕様）。印は「⚑ 申し送り ↻」（送信待ち）で出す
         setTick((x) => x + 1)
-        say(k, { tone: isQueuePersisted() ? 'info' : 'danger', text: `申し送り：${queuedText()}`, queued: true })
+        say(k, { tone: isQueuePersisted() ? 'info' : 'danger', text: `申し送り：${queuedText()}`, result: true, queued: true })
         return
       }
       say(k, null)
       const landed: DaycareNoteMarkRow = { note: res, clientKey, deleted: false }
-      // 送れた行は読み直しが失敗しても印として持つ（⚐ に戻して2件目を作れる状態にしない＝反証 軽1）
+      // 送れた行は読み直しが失敗しても印として持つ（⚐ に戻して2件目を作れる状態にしない）
       keepRow(d, landed)
       await load(d)
       if (dayRef.current === d) {
         show(`${name}さんの${MARK_KIND_LABEL[rec.kind]}を申し送りにしました`, () => void sendRemove(rid, d, rec, landed, name))
       }
     } catch (e) {
-      say(k, { tone: 'danger', text: errText(e, '申し送りにできませんでした。通信状態を確認して、もう一度押してください。') })
+      say(k, { tone: 'danger', text: errText(e, '申し送りにできませんでした。通信状態を確認して、もう一度押してください。'), result: true })
     } finally {
       setBusyKey(k, false)
     }
   }
 
-  // 押す所は 44px・文字は 15px（text-sm）。旗の記号と文字で示す（色だけに頼らない）。付けた印は注意の淡地＋塗りの旗＋太字
+  // 押す所は 44px・文字は 15px（text-sm）。旗の記号と文字で示す（色だけに頼らない）。付けた印は注意の淡地＋塗りの旗＋太字。
+  // 押せない時はどちらも aria-disabled＋文字を ink3（⚐ と同じ決まり＝反証の確認 軽4。ink3 は surface で 5.4・warn-bg で 4.7）
   const offCls =
-    'inline-flex min-h-tap items-center whitespace-nowrap rounded border border-border-strong bg-surface px-2 text-sm text-ink disabled:text-ink3 aria-disabled:text-ink3'
-  const onCls = 'inline-flex min-h-tap items-center whitespace-nowrap rounded border-2 border-warn bg-warn-bg px-2 text-sm font-bold text-ink'
+    'inline-flex min-h-tap items-center whitespace-nowrap rounded border border-border-strong bg-surface px-2 text-sm text-ink aria-disabled:text-ink3'
+  const onCls = 'inline-flex min-h-tap items-center whitespace-nowrap rounded border-2 border-warn bg-warn-bg px-2 text-sm font-bold text-ink aria-disabled:text-ink3'
   const toneCls: Record<Msg['tone'], string> = {
     info: 'border-primary bg-surface',
     warn: 'border-warn bg-warn-bg',
@@ -431,31 +460,35 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
   }
 
   /**
-   * 押せない時の出し方。onBlocked が無い時は disabled（理由は title と読み上げ）。ある時は disabled にせず aria-disabled にし、押すと理由を渡す
+   * 押せない時の出し方（反証の確認 軽4・軽5）: disabled にせず aria-disabled にし、押すと理由を出す（onBlocked があればそこへ、無ければ行の下の
+   * 知らせ＝その記録の鍵 k に出す）
    */
-  const blockProps = (reason: string | null, onBlocked: ((r: string) => void) | undefined, onPress: () => void) =>
+  const blockProps = (reason: string | null, k: string, onBlocked: ((r: string) => void) | undefined, onPress: () => void) =>
     reason === null
       ? { onClick: onPress }
-      : onBlocked === undefined
-        ? { disabled: true }
-        : { 'aria-disabled': true as const, onClick: () => onBlocked(reason) }
+      : { 'aria-disabled': true as const, onClick: () => (onBlocked !== undefined ? onBlocked(reason) : say(k, { tone: 'warn', text: reason })) }
 
-  const button = ({ residentId: rid, name, rec, text, why, known = true, onLabel = '申し送り', onBlocked, widthCls = '' }: DayMarkInput): ReactNode => {
+  /** 付いている印への直す・外す操作の送信待ち・止まり（あれば〔⚑〕〔申し送りを直す〕を押せない理由） */
+  const changeHold = (live: DaycareNoteMarkRow | null): { reason: string | null; removing: boolean; stopped: boolean } => {
+    const p = live === null ? null : pendingNoteRow({ id: live.note.id })
+    if (p === null) return { reason: null, removing: false, stopped: false }
+    const stopped = p.state !== 'pending'
+    return { reason: stopped ? MSG_CHANGE_STOPPED : MSG_CHANGE_PENDING, removing: hasOwn(p.values, 'deleted_at'), stopped }
+  }
+
+  const button = ({ residentId: rid, name, rec, text, why, known = true, onLabel = '申し送り', onBlocked, onAction, widthCls = '' }: DayMarkInput): ReactNode => {
     const what = rec === null ? '記録' : MARK_KIND_LABEL[rec.kind]
-    const k = rec === null ? null : keyOf(rid, day, rec)
-    const isBusy = k !== null && busy.has(k)
+    const k = rec === null ? `${rid}:${day}:-` : keyOf(rid, day, rec)
+    const isBusy = rec !== null && busy.has(k)
     const lives = rec === null ? [] : livesOf(rid, rec)
     const live = lives[0] ?? null
     const pend = rec === null ? null : pendOf(rid, rec)
-    const pendDel = live === null ? null : pendingNoteRow({ id: live.note.id })
-    const removing = pendDel !== null && hasOwn(pendDel.values, 'deleted_at')
     const w = widthCls === '' ? '' : ` ${widthCls}`
     if (rec !== null && live !== null) {
-      // 付けた印（もう一度押すと〔外す〕の確認）。外す操作が送信待ち・止まった時・付け外しできない時（17時のロック・記録者なし 等）は押せない（反証 軽2）
-      const stopped = pendDel !== null && pendDel.state !== 'pending'
-      const stale = known && isStale(live.note.body, text)
-      const blocked = precheck()
-      const reason = removing ? (stopped ? '外す操作が止まっています（行の下の文を見てください）。' : '外す操作は送信待ちです。') : isBusy ? '送信中です。' : blocked
+      // 付けた印（もう一度押すと〔外す〕の確認）。直す・外す操作が送信待ち・止まった時・付け外しできない時（17時のロック・記録者なし 等）は押せない
+      const hold = changeHold(live)
+      const stale = known && markDiffers(rec.kind, live.note.body, text)
+      const reason = hold.reason ?? (isBusy ? '送信中です。' : precheck())
       const label = `${name}さんの${what}は申し送り済み${lives.length > 1 ? `（${lives.length}件）` : ''}（「${live.note.body}」）。${stale ? `${text === null ? MSG_STALE_GONE : MSG_STALE}` : ''}${
         reason !== null ? `押せません。${reason}` : '押すと印を外します（確認があります）'
       }`
@@ -463,7 +496,10 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
         <button
           type="button"
           aria-pressed="true"
-          {...blockProps(reason, onBlocked, () => setDelRow({ rid, d: day, rec, row: live, name }))}
+          {...blockProps(reason, k, onBlocked, () => {
+            onAction?.(seqRef.current)
+            setDelRow({ rid, d: day, rec, row: live, name })
+          })}
           title={label}
           aria-label={label}
           className={`${onCls}${w}`}
@@ -472,7 +508,7 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
           {onLabel}
           {lives.length > 1 ? <span className="font-num"> {lives.length}</span> : null}
           {stale ? <span aria-hidden="true"> ⓘ</span> : null}
-          {removing || isBusy ? <span aria-hidden="true">{stopped ? ' ▲' : ' ↻'}</span> : null}
+          {hold.reason !== null || isBusy ? <span aria-hidden="true">{hold.stopped ? ' ▲' : ' ↻'}</span> : null}
         </button>
       )
     }
@@ -484,21 +520,14 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
           : `${what}の申し送りは止まっています（行の下の文を見てください）。`
       const label = `${name}さんの${reason}`
       return (
-        <button
-          type="button"
-          aria-pressed="true"
-          {...blockProps(reason, onBlocked, () => {})}
-          title={label}
-          aria-label={label}
-          className={`${onCls} disabled:opacity-100${w}`}
-        >
+        <button type="button" aria-pressed="true" {...blockProps(reason, k, onBlocked, () => {})} title={label} aria-label={label} className={`${onCls}${w}`}>
           <span aria-hidden="true">⚑ </span>
           {onLabel}
           <span aria-hidden="true">{pend.state === 'pending' ? ' ↻' : ' ▲'}</span>
         </button>
       )
     }
-    // まだ印の無い記録: 記録が無い・読めない・送っていない変更がある・印を読めていない時は押せない（理由を title と読み上げで）
+    // まだ印の無い記録: 記録が無い・読めない・送っていない変更がある・印を読めていない時は押せない（理由を title と読み上げで・押すと理由）
     const off =
       why ??
       (rec === null || text === null ? `${what}が無いため、申し送りにできません。` : rows === null ? (loadFailed ? MSG_NOT_READ : MSG_LOADING) : isBusy ? '送信中です。' : null)
@@ -507,8 +536,10 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
       <button
         type="button"
         aria-pressed="false"
-        {...blockProps(off, onBlocked, () => {
-          if (rec !== null && text !== null) void sendAdd(rid, day, rec, text, name)
+        {...blockProps(off, k, onBlocked, () => {
+          if (rec === null || text === null) return
+          onAction?.(seqRef.current)
+          void sendAdd(rid, day, rec, text, name)
         })}
         title={label}
         aria-label={isBusy ? `${name}さんの${what}を申し送りにしています（送信中）` : label}
@@ -520,8 +551,8 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
     )
   }
 
-  /** その記録の知らせ（送れなかった理由・送信待ちにした旨・止まった印・記録と違う） */
-  const itemsOf = (rid: number, rec: MarkRecord | null, text: string | null, known: boolean): { items: Item[]; live: DaycareNoteMarkRow | null } => {
+  /** その記録の知らせ（送れなかった理由・押せなかった理由・送信待ちにした旨・止まった印・記録と違う） */
+  const itemsOf = (rid: number, rec: MarkRecord | null, text: string | null, known: boolean) => {
     const items: Item[] = []
     const pend = rec === null ? null : pendOf(rid, rec)
     const live = rec === null ? null : (livesOf(rid, rec)[0] ?? null)
@@ -529,26 +560,25 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
     // 送信待ちにした旨は、その記録の送信待ち（登録・外す・直す）が無くなったら（届いた・止まった）出さない（反証 軽3）
     const stillQueued = (pend !== null && pend.state === 'pending') || (pendDel !== null && pendDel.state === 'pending')
     const head = `${rid}:${day}:`
+    const mine: Msg[] = []
     for (const [k, m] of Object.entries(msgs)) {
       if (!k.startsWith(head)) continue
+      mine.push(m)
       if (m.queued === true && !stillQueued) continue
       items.push({ key: k, tone: m.tone, text: m.text })
     }
-    if (pend !== null && pend.state !== 'pending') items.push({ key: 'stop-add', tone: 'stop', text: pend.locked ? MSG_STOPPED_ADD_LOCKED : MSG_STOPPED_ADD })
-    if (pendDel !== null && pendDel.state !== 'pending') items.push({ key: 'stop-edit', tone: 'stop', text: MSG_STOPPED_EDIT })
-    if (live !== null && known && isStale(live.note.body, text)) items.push({ key: 'stale', tone: 'stale', text: text === null ? MSG_STALE_GONE : MSG_STALE })
-    return { items, live }
+    const stopped = pend !== null && pend.state !== 'pending' ? (pend.locked ? MSG_STOPPED_ADD_LOCKED : MSG_STOPPED_ADD) : pendDel !== null && pendDel.state !== 'pending' ? MSG_STOPPED_EDIT : null
+    if (stopped !== null) items.push({ key: 'stop', tone: 'stop', text: stopped })
+    if (live !== null && rec !== null && known && markDiffers(rec.kind, live.note.body, text)) items.push({ key: 'stale', tone: 'stale', text: text === null ? MSG_STALE_GONE : MSG_STALE })
+    return { items, live, mine, stillQueued, stopped }
   }
 
   const note = (rid: number, rec: MarkRecord | null, name: string, text: string | null, known = true): ReactNode => {
     const { items, live } = itemsOf(rid, rec, text, known)
     if (items.length === 0) return null
-    const k = rec === null ? null : keyOf(rid, day, rec)
-    const removing = live !== null && (() => {
-      const p = pendingNoteRow({ id: live.note.id })
-      return p !== null && hasOwn(p.values, 'deleted_at')
-    })()
-    const blocked = precheck()
+    const k = rec === null ? `${rid}:${day}:-` : keyOf(rid, day, rec)
+    // 〔申し送りを直す〕も、直す・外す操作の送信待ち・止まり・付け外しできない時は押せない（押すと理由をこの行に＝反証の確認 軽5）
+    const fixWhy = changeHold(live).reason ?? (busy.has(k) ? '送信中です。' : precheck())
     return (
       <>
         {items.map((it) =>
@@ -563,11 +593,10 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
               {text !== null && live !== null && rec !== null ? (
                 <button
                   type="button"
-                  disabled={blocked !== null || removing || (k !== null && busy.has(k))}
-                  title={blocked ?? undefined}
-                  onClick={() => setFixRow({ rid, d: day, rec, row: live, name, full: fixProposal(live.note.body, text) })}
-                  aria-label={`${name}さんの申し送りを直す（いまの記録の文にします）`}
-                  className="min-h-tap rounded border border-border-strong bg-surface px-3 text-base text-ink disabled:text-ink3"
+                  {...blockProps(fixWhy, k, undefined, () => setFixRow({ rid, d: day, rec, row: live, name, full: markFixProposal(rec.kind, live.note.body, text) }))}
+                  title={fixWhy ?? undefined}
+                  aria-label={fixWhy === null ? `${name}さんの申し送りを直す（いまの記録の文にします）` : `${name}さんの申し送りを直せません。${fixWhy}`}
+                  className="min-h-tap rounded border border-border-strong bg-surface px-3 text-base text-ink aria-disabled:text-ink3"
                 >
                   申し送りを直す
                 </button>
@@ -591,9 +620,19 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
     )
   }
 
-  const messageOf = (rid: number, rec: MarkRecord): string | null => {
-    const it = itemsOf(rid, rec, null, false).items.find((x) => x.tone !== 'stale')
-    return it === undefined ? null : it.text
+  const markState = (rid: number, rec: MarkRecord): 'live' | 'pending' | 'stopped' | null => {
+    const live = livesOf(rid, rec)[0] ?? null
+    const change = live === null ? null : pendingNoteRow({ id: live.note.id })
+    const pend = pendOf(rid, rec)
+    return markStateOf({ live: live !== null, liveChange: change === null ? null : change.state, pend: pend === null ? null : pend.state })
+  }
+
+  const keypadInfo = (rid: number, rec: MarkRecord) => {
+    const { mine, stillQueued, stopped, live } = itemsOf(rid, rec, null, false)
+    const k = keyOf(rid, day, rec)
+    // 印の状態の鍵（送り終えた・付いた・外れた・直した で変わる）。テンキーの1行の「押せなかった理由」を消すきっかけ
+    const sig = `${markState(rid, rec) ?? '-'}:${live?.note.id ?? 0}:${live?.note.body.length ?? 0}:${busy.has(k) ? 1 : 0}`
+    return { msgs: mine, stillQueued, stopped, sig }
   }
 
   const liveRecord = (rid: number, kind: MarkKind): MarkRecord | null => {
@@ -612,11 +651,6 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
     // 送信待ちの印（届く前に記録を入れ直した時も、作った印で出す）
     const pend = pendAll.filter((p) => p.clientKey.startsWith(head)).map((p) => recOf(p.clientKey)).find((r) => r !== null)
     return pend ?? null
-  }
-
-  const markState = (rid: number, rec: MarkRecord): 'live' | 'pending' | null => {
-    if (livesOf(rid, rec).length > 0) return 'live'
-    return pendOf(rid, rec) !== null ? 'pending' : null
   }
 
   const dialogs = (
@@ -641,5 +675,5 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
     </>
   )
 
-  return { button, note, messageOf, liveRecord, markState, dialogs }
+  return { button, note, keypadInfo, liveRecord, markState, dialogs }
 }
