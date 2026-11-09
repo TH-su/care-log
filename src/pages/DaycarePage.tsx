@@ -67,7 +67,17 @@ import { RecorderBar } from '../components/RecorderBar'
 import { ErrorBlock, LoadingBlock, ResidentPickerModal, useToast } from '../components/ui'
 import { hasTimes, useDaycareAttendanceOps } from '../components/DaycareAttendanceOps'
 import { HAIBEN_DAYCARE_HREF, writeDaycareHandoffFor } from '../lib/daycareHandoff'
-import { daycareDayMemo, memoForDay, memoWithAttendance, memoWithBath, memoWithoutAttendance, rememberDaycareDay, updateDaycareDayMemo } from '../lib/daycareDayMemo'
+import {
+  daycareDayMemo,
+  memoBathsOk,
+  memoForDay,
+  memoVitalsOk,
+  memoWithAttendance,
+  memoWithBath,
+  memoWithoutAttendance,
+  rememberDaycareDay,
+  updateDaycareDayMemo,
+} from '../lib/daycareDayMemo'
 import {
   DAYCARE_VITAL_FIELDS,
   bathCountsUnchecked,
@@ -133,7 +143,7 @@ interface DayData {
   vitals: KeyedVital[]
   /**
    * 入浴・バイタルを読めたか（2026-11-09 反証 中6: 読めない時の空の一覧で印を「未」に見せない＝「読めない」の印）。
-   * 控えで開いた時は控えの値（読んだ時点の値）を出すので true
+   * 控えで開いた時は、控えに残した「読めたか」を使う（daycareDayMemo の bathsOk・vitalsOk＝確認の反証 中1）
    */
   bathsOk: boolean
   vitalsOk: boolean
@@ -467,8 +477,9 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
           attendance: m.attendance,
           baths: m.baths,
           vitals: m.vitals,
-          bathsOk: true,
-          vitalsOk: true,
+          // 控えに「読めなかった」と残っている時は、控えで開いても「読めない」の印（空の一覧を「未」に見せない＝確認の反証 中1）
+          bathsOk: memoBathsOk(m),
+          vitalsOk: memoVitalsOk(m),
           meals: m.meals,
           fluids: m.fluids,
           // 活動・機能訓練は控えに無い（読めない＝印を出さない／「読めない」の印）
@@ -544,6 +555,9 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       attendance: data.attendance,
       baths: data.baths,
       vitals: data.vitals,
+      // 入浴・バイタルを読めなかった一覧の時も、控えの値を前の値のまま残す（前に読めた値が無ければ「読めない」と控える＝確認の反証 中1）
+      bathsOk: data.bathsOk,
+      vitalsOk: data.vitalsOk,
       meals: data.meals,
       fluids: data.fluids,
       // 食事・水分を読めなかった一覧の時は、控えの食事・水分を前の値のまま残す（rememberDaycareDay の中＝親の反証 軽3）
@@ -810,14 +824,19 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   const navPending =
     data.day === today ? daycareNavPending(board.rows.map((r) => ({ state: r.state, marks: marksOf.get(r.residentId) ?? [] }))) : undefined
 
-  const tiles: { label: string; value: number; tone?: 'warn' }[] = [
+  // value=null＝読めない（バイタル・入浴を読めなかった日は数を「—」にし、▲ の注意の形にしない＝確認の反証 軽2）
+  const tiles: { label: string; value: number | null; tone?: 'warn' }[] = [
     { label: '予定', value: c.planned },
     { label: '在席', value: c.present },
     { label: '帰宅', value: c.left },
     { label: '休み', value: c.absent },
     { label: '未到着', value: c.waiting },
-    { label: 'バイタル未', value: vitalsWaiting, tone: vitalsWaiting > 0 ? 'warn' : undefined },
-    { label: '入浴 未確認', value: bathUnchecked, tone: bathUnchecked > 0 ? 'warn' : undefined },
+    data.vitalsOk
+      ? { label: 'バイタル未', value: vitalsWaiting, tone: vitalsWaiting > 0 ? 'warn' : undefined }
+      : { label: 'バイタル未', value: null },
+    data.bathsOk
+      ? { label: '入浴 未確認', value: bathUnchecked, tone: bathUnchecked > 0 ? 'warn' : undefined }
+      : { label: '入浴 未確認', value: null },
   ]
 
   return (
@@ -833,7 +852,16 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
             >
               {t.tone === 'warn' ? <span aria-hidden="true">▲</span> : null}
               <span>{t.label}</span>
-              <span className="font-num text-lg font-bold text-ink">{t.value}</span>
+              <span className="font-num text-lg font-bold text-ink">
+                {t.value === null ? (
+                  <>
+                    <span aria-hidden="true">—</span>
+                    <span className="sr-only">読み込めません</span>
+                  </>
+                ) : (
+                  t.value
+                )}
+              </span>
             </li>
           ))}
         </ul>,

@@ -961,11 +961,12 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
             </button>
           ))}
         </div>
-        {/* 未入力の数は日付と「表示する方」の段の右（新しい段を足さない）。残りの幅が 16rem 以上あれば同じ段に置き、その幅に収まらない分
-            （未到着の数）は数の中で折り返す（反証 軽1・iPad 横 1180px で残りは約 340px）。16rem も無い時だけ次の段へ回る */}
+        {/* 未入力の数は日付と「表示する方」の段の右（新しい段を足さない）。1024px 以上は、残りの幅が 16rem 以上あれば同じ段に置き、その幅に
+            収まらない分（未到着の数）は数の中で折り返す（反証 軽1・iPad 横 1180px で残りは約 340px）。1024px 未満は未到着の数を出さず、
+            未入力の数だけを同じ段に入れる（確認の反証 軽1）。どちらも入らない時だけ次の段へ回る */}
         {countRows.length > 0 ? (
-          <div className="min-w-0 grow basis-64">
-            <DaycareUnfilledCount counts={unfilled} />
+          <div className="min-w-0 grow lg:basis-64">
+            <DaycareUnfilledCount counts={unfilled} hideNotArrivedNarrow />
           </div>
         ) : null}
       </div>

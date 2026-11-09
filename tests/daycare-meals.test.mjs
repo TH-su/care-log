@@ -332,7 +332,10 @@ if (DP === null) {
       const unf = code('../src/components/DaycareUnfilledCount.tsx')
       assert.match(unf, /<span className="font-bold text-danger">\s*<span aria-hidden="true">▲ <\/span>未入力 <span className="font-num">\{counts\.unfilled\}<\/span>名/)
       assert.match(unf, /<span className="font-bold text-ok">\s*<span aria-hidden="true">✓ <\/span>未入力なし/)
-      assert.match(unf, /\{counts\.notArrived > 0 \? \(\s*<span className="text-ink2">\s*未到着 <span className="font-num">\{counts\.notArrived\}<\/span>名（数えていません）/)
+      // 2026-11-09 計画B の確認の反証 軽1（固定し直し・意図は同じ）: バイタル一括だけ 1024px 未満で未到着を隠す指定を足した（食事一括は今のまま出す）
+      assert.match(unf, /\{counts\.notArrived > 0 \? \(\s*<span className=\{hideNotArrivedNarrow \? 'hidden text-ink2 lg:inline' : 'text-ink2'\}>\s*未到着 <span className="font-num">\{counts\.notArrived\}<\/span>名（数えていません）/)
+      assert.match(unf, /hideNotArrivedNarrow = false,/)
+      assert.match(page, /<DaycareUnfilledCount counts=\{counts\} \/>/)
       assert.ok(page.indexOf('const counts = lunchUnfilledCount') < page.indexOf('<table'), '表の上')
       assert.ok(page.indexOf('<DaycareUnfilledCount counts={counts} />') > 0 && page.indexOf('<DaycareUnfilledCount counts={counts} />') < page.indexOf('<table'), '表の上')
     })

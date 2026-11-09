@@ -443,6 +443,12 @@ describe('静的検査（計画B）', () => {
     assert.match(today, /\{unreadNotice !== null && board\.rows\.length > 0 \? \(\s*<p role="status" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">\s*<span aria-hidden="true">▲ <\/span>\s*\{unreadNotice\}\s*<\/p>/)
     assert.match(today, /unreadProgressLabels\(\{\s*vitalsOk: data\.vitalsOk,\s*intakeOk: data\.intakeOk,\s*activitiesOk: data\.activities !== null,\s*trainingOk: data\.training !== null,\s*bathsOk: data\.bathsOk,\s*\}\)/)
   })
+  it('件数の帯: バイタル・入浴を読めない日は「バイタル未」「入浴 未確認」を「—」にし、▲ の注意の形にしない（確認の反証 軽2）', () => {
+    assert.match(today, /const tiles: \{ label: string; value: number \| null; tone\?: 'warn' \}\[\] = \[/)
+    assert.match(today, /data\.vitalsOk\s*\? \{ label: 'バイタル未', value: vitalsWaiting, tone: vitalsWaiting > 0 \? 'warn' : undefined \}\s*: \{ label: 'バイタル未', value: null \}/)
+    assert.match(today, /data\.bathsOk\s*\? \{ label: '入浴 未確認', value: bathUnchecked, tone: bathUnchecked > 0 \? 'warn' : undefined \}\s*: \{ label: '入浴 未確認', value: null \}/)
+    assert.match(today, /\{t\.value === null \? \(\s*<>\s*<span aria-hidden="true">—<\/span>\s*<span className="sr-only">読み込めません<\/span>\s*<\/>\s*\) : \(\s*t\.value\s*\)\}/)
+  })
   it('切り替えの数は今日を見ている時だけ渡す（リンクの先は今日を開く＝反証 中2）', () => {
     assert.match(today, /const navPending =\s*data\.day === today \? daycareNavPending\(board\.rows\.map\([\s\S]*?\) : undefined/)
   })
@@ -461,9 +467,10 @@ describe('静的検査（計画B）', () => {
   it('一括の4画面: 未入力の数は同じ部品（DaycareUnfilledCount）・新しい段を足さない場所に置く', () => {
     // バイタル一括: 日付と「表示する方」の段の右
     const v = BULK.vitals
-    assert.ok(v.indexOf('aria-label="表示する方"') < v.indexOf('<DaycareUnfilledCount counts={unfilled} />'))
-    // 2026-11-09 反証 軽1（固定し直し・意図は同じ）: 残りの幅が 16rem 以上あれば同じ段に置き、収まらない分は数の中で折り返す（段の間は 12px）
-    assert.match(v, /<\/div>\s*(\{\}\s*)?\{countRows\.length > 0 \? \(\s*<div className="min-w-0 grow basis-64">\s*<DaycareUnfilledCount counts=\{unfilled\} \/>\s*<\/div>\s*\) : null\}\s*<\/div>\s*\{releasing \? \(/)
+    assert.ok(v.indexOf('aria-label="表示する方"') < v.indexOf('<DaycareUnfilledCount counts={unfilled} hideNotArrivedNarrow />'))
+    // 2026-11-09 反証 軽1（固定し直し・意図は同じ）: 1024px 以上は残りの幅が 16rem 以上あれば同じ段に置き、収まらない分は数の中で折り返す（段の間は 12px）。
+    // 確認の反証 軽1: 1024px 未満は未到着の数を隠して未入力の数だけにし、その幅で同じ段に入れる（basis は 1024px 以上だけ）
+    assert.match(v, /<\/div>\s*(\{\}\s*)?\{countRows\.length > 0 \? \(\s*<div className="min-w-0 grow lg:basis-64">\s*<DaycareUnfilledCount counts=\{unfilled\} hideNotArrivedNarrow \/>\s*<\/div>\s*\) : null\}\s*<\/div>\s*\{releasing \? \(/)
     assert.match(v, /<div className="flex flex-wrap items-center gap-x-3 gap-y-2">\s*<div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">/)
     assert.match(v, /const countRows = board === null \|\| data === null \|\| data\.day !== day \? \[\] : daycareBulkRows\(board\.rows\)/)
     assert.match(v, /filled: vitalSlotsFilled\(slotsOf\(r\.residentId\)\.map\(\(slot\) => DAYCARE_VITAL_FIELDS\.map\(\(f\) => valueOf\(slot, f\)\.v\)\)\)/)
@@ -483,7 +490,14 @@ describe('静的検査（計画B）', () => {
     for (const [k, p] of Object.entries(BULK)) {
       assert.match(p, /import \{ DaycareUnfilledCount \} from '\.\.\/components\/DaycareUnfilledCount'/, k)
       assert.equal((p.match(/<DaycareUnfilledCount /g) ?? []).length, 1, `${k}: 1か所だけ`)
+      // 1024px 未満で未到着を隠す指定はバイタル一括だけ（ほかの3画面は今のまま＝確認の反証 軽1）
+      if (k !== 'vitals') assert.doesNotMatch(p, /hideNotArrivedNarrow/, k)
     }
+    const unfCmp = code('../src/components/DaycareUnfilledCount.tsx')
+    assert.match(unfCmp, /hideNotArrivedNarrow\?: boolean/)
+    assert.match(unfCmp, /<span className=\{hideNotArrivedNarrow \? 'hidden text-ink2 lg:inline' : 'text-ink2'\}>\s*未到着/)
+    // 未入力の数（▲ 未入力 n名・✓ 未入力なし）は隠さない
+    assert.doesNotMatch(unfCmp.slice(0, unfCmp.indexOf('{counts.notArrived > 0 ? (')), /(?<![-\w])hidden(?![-\w=])/)
     // 4画面とも数えるのは在席・帰宅の方だけ（attendedUnfilledCount。食事一括は lunchUnfilledCount がこれを使う）
     for (const k of ['vitals', 'activity', 'training']) assert.match(BULK[k], /attendedUnfilledCount\(/, k)
     assert.match(read('../src/lib/daycarePerson.ts'), /return attendedUnfilledCount\(rows\.map\(\(r\) => \(\{ state: r\.state, filled: lunchFilled\(r\.lunch\) \}\)\)\)/)
