@@ -127,6 +127,9 @@ const DaycareActivityBulkPage = lazy(() => loadDaycareActivityBulkPage().then((m
 // デイ 段階3a（2026-10-23）: 個別機能訓練の画面（配置と実施記録）
 const loadDaycareTrainingPage = () => import('./pages/DaycareTrainingPage')
 const DaycareTrainingPage = lazy(() => loadDaycareTrainingPage().then((m) => ({ default: m.DaycareTrainingPage })))
+// デイ 段階4（2026-11-09 計画C）: 連絡帳（全員共通の一文・個別のひと言・A5 印刷）。入口は今日の画面の一番下の〔連絡帳〕
+const loadDaycareContactPage = () => import('./pages/DaycareContactPage')
+const DaycareContactPage = lazy(() => loadDaycareContactPage().then((m) => ({ default: m.DaycareContactPage })))
 // 与薬チェック（2026-09-26 追加）。記録は記録ハブから、服薬の時間帯・月次表は「その他」から入る
 const loadMedRecordPage = () => import('./pages/MedRecordPage')
 const MedRecordPage = lazy(() => loadMedRecordPage().then((m) => ({ default: m.MedRecordPage })))
@@ -623,6 +626,7 @@ function screenTitle(pathname: string): string {
   if (pathname.startsWith('/record/daycare/person/')) return 'デイ 1人の記録'
   if (pathname === '/record/daycare/bulk') return 'デイ 活動一括'
   if (pathname === '/record/daycare/training') return 'デイ 機能訓練'
+  if (pathname === '/record/daycare/contact') return 'デイ 連絡帳'
   if (pathname === '/bath/month') return '入浴 月次表'
   if (pathname === '/record/med') return '与薬チェック'
   if (pathname === '/med/slots') return '服薬の時間帯'
@@ -1739,6 +1743,8 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
             <Route path="/record/daycare/bulk" element={<DaycareActivityBulkPage actorId={actorId} staff={staff} />} />
             {/* デイ 段階3a（2026-10-23）: 個別機能訓練（入力解禁は input_enabled_daycare_training）。業務日は ?day= */}
             <Route path="/record/daycare/training" element={<DaycareTrainingPage actorId={actorId} staff={staff} />} />
+            {/* デイ 段階4（2026-11-09 計画C）: 連絡帳（入力解禁は input_enabled_daycare）。業務日は ?day= */}
+            <Route path="/record/daycare/contact" element={<DaycareContactPage actorId={actorId} staff={staff} />} />
             <Route path="/bath/month" element={<BathMonthPage />} />
             {/* 与薬チェック。入力解禁は input_enabled_med（画面が自前で取り直す） */}
             <Route path="/record/med" element={<MedRecordPage actorId={actorId} staff={staff} />} />

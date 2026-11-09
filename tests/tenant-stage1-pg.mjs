@@ -4,7 +4,8 @@
 //   CARELOG_PG_URL=postgres://postgres@127.0.0.1:<port>/<db> node tests/tenant-stage1-pg.mjs
 //
 // 確かめること:
-//   1. 27表すべてに tenant_id の列と、印を入れるトリガ（carelog_fill_tenant）がある。27表以外の public の表は試験の真似だけ
+//   1. 27表すべてに tenant_id の列と、印を入れるトリガ（carelog_fill_tenant）がある。27表以外の public の表は、後から施設の印と
+//      トリガを最初から持って作った表（LATER_TENANT_TABLES・0061）と試験の真似だけ
 //   2. ログインした人（authenticated）が印を付けずに足すと、その人の施設（my_tenant()）の印が入る
 //   3. サーバーの接続（自動の記録・取込）が印を付けずに足すと、施設がちょうど1つの時はその施設の印が入る
 //   4. 施設が2つになると、サーバーの接続の行には印を勝手に付けない（どの施設か分からない行を作らない。段階③（0053）で
@@ -26,6 +27,11 @@ export const TENANT_TABLES = ['residents', 'staff', 'vitals', 'meals', 'fluid_in
   'daycare_training_sessions', 'daycare_home_visits', 'daycare_training_due', 'daycare_training_due_settings', 'daycare_staffing']
 /** 試験の真似（care-backend の表の代わり）。本番では care-backend の表で、施設の列を元から持つ */
 const STUB_TABLES = ['kv_entries', 'master_residents', 'tenants']
+/**
+ * 段階4の後に、施設の印・印を入れるトリガを最初から持って作った表（0051 の27表には入れない）。
+ * 2026-11-09 計画C（固定し直し・意図は同じ）: 0061 の連絡帳の2表。27表の確かめは27表のまま、この表も同じ印と同じトリガを持つことを確かめる
+ */
+export const LATER_TENANT_TABLES = ['daycare_day_notes', 'daycare_contact_notes']
 const A = '00000000-0000-0000-0000-0000000000aa'
 const B = '00000000-0000-0000-0000-0000000000bb'
 
@@ -45,11 +51,14 @@ const ok = (label, cond, detail) => {
   ok('27表すべてに施設の列がある', missing.length === 0, missing)
   const trg = (await client.query(
     `select c.relname from pg_trigger g join pg_class c on c.oid = g.tgrelid where g.tgname = 'carelog_fill_tenant' and not g.tgisinternal order by 1`)).rows.map((r) => r.relname)
-  ok('27表すべてに印を入れるトリガがある', TENANT_TABLES.every((t) => trg.includes(t)) && trg.length === 27, trg)
+  // 2026-11-09 計画C（固定し直し・意図は同じ）: トリガの数は27表で数え、後から最初から印を持って作った表は別に確かめる
+  const trg27 = trg.filter((t) => !LATER_TENANT_TABLES.includes(t))
+  ok('27表すべてに印を入れるトリガがある', TENANT_TABLES.every((t) => trg.includes(t)) && trg27.length === 27, trg)
+  ok('後から作った表（0061）にも施設の列と印を入れるトリガがある', LATER_TENANT_TABLES.every((t) => cols.includes(t) && trg.includes(t)), { cols, trg })
   const all = (await client.query(
     `select c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relkind = 'r' order by 1`)).rows.map((r) => r.relname)
-  const other = all.filter((t) => !TENANT_TABLES.includes(t) && !STUB_TABLES.includes(t))
-  ok('public の表は27表と試験の真似だけ（表を足したら TENANT_TABLES と 0051 に足す）', other.length === 0, other)
+  const other = all.filter((t) => !TENANT_TABLES.includes(t) && !LATER_TENANT_TABLES.includes(t) && !STUB_TABLES.includes(t))
+  ok('public の表は27表・後から印を持って作った表・試験の真似だけ（表を足したら、施設の印とトリガを持たせて LATER_TENANT_TABLES に足す）', other.length === 0, other)
 }
 
 async function inTx(fn) {

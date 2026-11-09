@@ -114,6 +114,9 @@ import type { DaycareStaffing, DaycareTrainingSession, StaffingRole, trainingPay
 import { normalizeReporterName } from './reporterName'
 import { EXPLAINED_TOS, HOME_VISIT_PURPOSES, HOME_VISIT_TEXT_MAX } from './daycareHomeVisit'
 import type { DaycareHomeVisit, ExplainedTo, HomeVisitPurpose, homeVisitPayload } from './daycareHomeVisit'
+// デイの連絡帳（段階4・2026-11-09 計画C・0061）
+import { DAY_NOTE_MAX, contactFieldMax, noteLengthError, normalizeNoteText } from './daycareContact'
+import type { ContactNoteField, DaycareContactNote, DaycareDayNote } from './daycareContact'
 import type { DueCopyRow, DueCopySettings } from './trainingDue'
 import type { TrainingDueCopyInput, TrainingDueSettingsInput, TrainingDueSyncResult } from './trainingPlanClient'
 import { clearWeightCache, setWeightDbReader } from './weightClient'
@@ -9632,6 +9635,318 @@ export async function recordAbsentBath(p: {
     }
   }
   return { status: 'conflict' }
+}
+
+// ── デイ（せせらぎ）の記録 段階4: 連絡帳（2026-11-09 計画C・0061_daycare_contact.sql） ─────────────
+// その日の全員共通の一文（daycare_day_notes）と、1人1日の連絡帳のひと言（daycare_contact_notes）を読む・書く。ここに足すのはこの2表の
+// 関数だけ（既存の関数・送信待ちの経路は変えない）。
+// ・入力解禁は input_enabled_daycare（assertKindWritable('daycare')）。未来の日は書かない
+// ・書き込みは変えた欄だけ（共通の一文 body／個別のひと言 body／看護職のひと言 nurse_note／印刷した時刻 printed_at を別々に送る＝
+//   多端末同期の規約 原則3。行の丸ごとの上書きをしない）。rev 照合の部分更新で、0行（他の端末が先に書いた）の時は読み直し、
+//   書こうとした欄がこの端末の読んだ時の値のまま（もう片方の欄・印刷した時刻だけが書き換わっていた）なら、読み直した版でもう1回だけ送る。
+//   その欄が書き換わっていたら上書きせず 'conflict'（読み直した行つき）を返す。同じ値が既に載っていれば成功（応答を失った押し直し）
+// ・送信待ち（圏外の保存）は作らない（2026-11-09 計画C の仮置き）。通信できない時は DbError('network', CONTACT_MSG.offline) を投げ、
+//   画面は入れた文を欄に残す（消さない）
+// ・印刷した時刻（printed_at）は失敗しても例外にしない（印刷は止めない）
+
+const CONTACT_MSG = {
+  missing: 'デイの連絡帳はまだ使えません（サーバー側の設定待ち）。管理者に連絡してください。',
+  offline: '保存できませんでした。通信状態を確認して、もう一度押してください。',
+} as const
+
+const DAY_NOTE_COLS = 'id,day,body,rev'
+const CONTACT_NOTE_COLS = 'id,resident_id,day,body,nurse_note,printed_at,rev'
+/** 1日の連絡帳のひと言の取得上限（1日の利用者数がこれを超える運用は無い） */
+const DAYCARE_CONTACT_ROWS = DAY_ROWS
+
+function normalizeDayNote(row: unknown): DaycareDayNote | null {
+  const r = asRecord(row)
+  if (!r) return null
+  const id = idNum(r.id)
+  const day = dateStr(r.day)
+  const rev = num(r.rev)
+  if (id === null || day === null || rev === null) return null
+  return { id, day, body: str(r.body), rev }
+}
+
+function normalizeContactNote(row: unknown): DaycareContactNote | null {
+  const r = asRecord(row)
+  if (!r) return null
+  const id = idNum(r.id)
+  const resident_id = idNum(r.resident_id)
+  const day = dateStr(r.day)
+  const rev = num(r.rev)
+  if (id === null || resident_id === null || day === null || rev === null) return null
+  return { id, resident_id, day, body: str(r.body), nurse_note: str(r.nurse_note), printed_at: str(r.printed_at), rev }
+}
+
+/** 連絡帳の読み書きが「表が無い（0061 未適用）」で止まったか（画面はひと言の欄だけ「設定待ち」にする） */
+export function isContactMissingError(e: unknown): boolean {
+  return e instanceof DbError && e.message === CONTACT_MSG.missing
+}
+
+function contactReadError(res: Res<unknown>): DbError {
+  if (isMissingTable(res)) return new DbError('server', CONTACT_MSG.missing)
+  return readError(res)
+}
+
+/** 連絡帳の書き込み（と書き込みの中の読み直し）の失敗。送信待ちには積まない */
+function contactWriteError(res: Res<unknown>): DbError {
+  if (isMissingTable(res)) return new DbError('server', CONTACT_MSG.missing)
+  if (isAuthFail(res)) {
+    fireAuthExpired()
+    return new DbError('auth', MSG.authWrite)
+  }
+  if (isTransient(res)) return new DbError('network', CONTACT_MSG.offline)
+  return rejectError('保存でき', errCode(res), res.status)
+}
+
+/** その日の全員共通の一文（生きている行・無ければ null） */
+export async function fetchDaycareDayNote(dayIso: string): Promise<DaycareDayNote | null> {
+  assertDay(dayIso)
+  const sb = await getClient()
+  const res = (await sb
+    .from('daycare_day_notes')
+    .select(DAY_NOTE_COLS)
+    .eq('day', dayIso)
+    .is('deleted_at', null)
+    .order('id', { ascending: false })
+    .limit(1)
+    .maybeSingle()) as Res<unknown>
+  if (res.error !== null) throw contactReadError(res)
+  return res.data === null ? null : normalizeDayNote(res.data)
+}
+
+/** その日の連絡帳のひと言（全員分・削除済みを除く） */
+export async function fetchDaycareContactNotes(dayIso: string): Promise<DaycareContactNote[]> {
+  assertDay(dayIso)
+  const sb = await getClient()
+  const res = (await sb
+    .from('daycare_contact_notes')
+    .select(CONTACT_NOTE_COLS)
+    .eq('day', dayIso)
+    .is('deleted_at', null)
+    .order('id', { ascending: true })
+    .limit(DAYCARE_CONTACT_ROWS)) as Res<unknown>
+  if (res.error !== null) throw contactReadError(res)
+  return list(res.data, normalizeContactNote, DAYCARE_CONTACT_ROWS)
+}
+
+/** 書き込みの中で、いまの生きている行を読み直す（通信できない時は保存できなかった扱い） */
+async function readDayNoteLive(sb: SupabaseClient, dayIso: string): Promise<DaycareDayNote | null> {
+  const res = await bounded(
+    sb.from('daycare_day_notes').select(DAY_NOTE_COLS).eq('day', dayIso).is('deleted_at', null).order('id', { ascending: false }).limit(1).maybeSingle(),
+  )
+  if (res.error !== null) throw contactWriteError(res)
+  return res.data === null ? null : normalizeDayNote(res.data)
+}
+
+async function readContactNoteLive(sb: SupabaseClient, residentId: number, dayIso: string): Promise<DaycareContactNote | null> {
+  const res = await bounded(
+    sb
+      .from('daycare_contact_notes')
+      .select(CONTACT_NOTE_COLS)
+      .eq('resident_id', residentId)
+      .eq('day', dayIso)
+      .is('deleted_at', null)
+      .order('id', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+  )
+  if (res.error !== null) throw contactWriteError(res)
+  return res.data === null ? null : normalizeContactNote(res.data)
+}
+
+/**
+ * ひと言の保存の結果。saved＝載った（row＝載っている行。空を空にした時など書かなかった時は null）／
+ * conflict＝他の端末がその欄を先に書き換えていた（上書きしていない。row＝読み直した行・無ければ null）
+ */
+export type ContactSave<T> = { kind: 'saved'; row: T | null } | { kind: 'conflict'; row: T | null }
+
+/** 1つの欄だけを書く（行が無ければ足す）。上の「書き込みは変えた欄だけ」の手順 */
+async function writeNoteField<T extends { id: number; rev: number }>(o: {
+  sb: SupabaseClient
+  table: 'daycare_day_notes' | 'daycare_contact_notes'
+  cols: string
+  /** 行を足す時の自然キー（{ day } か { resident_id, day }） */
+  insertKey: Record<string, unknown>
+  field: 'body' | 'nurse_note'
+  want: string | null
+  base: T | null
+  valueOf: (row: T) => string | null
+  readLive: () => Promise<T | null>
+  normalize: (row: unknown) => T | null
+  recordedBy: number | null
+  editedBy?: number | null
+}): Promise<ContactSave<T>> {
+  let base = o.base
+  /** この端末が読んだ時のその欄の値（行が無ければ null） */
+  const baseVal = base === null ? null : o.valueOf(base)
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (base === null) {
+      if (o.want === null) return { kind: 'saved', row: null } // 行が無い欄を空にする＝何も書かない
+      const payload = { ...o.insertKey, [o.field]: o.want, recorded_by: idNum(o.recordedBy) }
+      const res = await bounded(o.sb.from(o.table).insert(payload).select(o.cols).maybeSingle())
+      if (res.error === null) {
+        kickAfterDelivered()
+        const row = o.normalize(res.data)
+        if (row === null) throw new DbError('server', MSG.broken)
+        return { kind: 'saved', row }
+      }
+      // 他の端末が先にその日の行を作った（自然キーの一意）→ 下で読み直す
+      if (!isUniqueViolation(res)) throw contactWriteError(res)
+    } else {
+      if (o.valueOf(base) === o.want) return { kind: 'saved', row: base } // 変えていない欄は送らない
+      const cur: T = base
+      const sent = withEditor({ [o.field]: o.want }, o.editedBy)
+      const res = await sendWithEditor(sent, (p) =>
+        bounded(o.sb.from(o.table).update(p).eq('id', cur.id).eq('rev', cur.rev).is('deleted_at', null).select(o.cols).maybeSingle()),
+      )
+      if (res.error !== null) throw contactWriteError(res)
+      if (res.data !== null) {
+        kickAfterDelivered()
+        const row = o.normalize(res.data)
+        if (row === null) throw new DbError('server', MSG.broken)
+        return { kind: 'saved', row }
+      }
+      // ログインの控えが無い間（anon キーで出た）の0行は競合ではない（F58）。保存できなかった扱い（押し直してもらう）
+      if (await sessionMissing(o.sb)) throw new DbError('network', CONTACT_MSG.offline)
+    }
+    // 0行・先に行があった: 読み直して決める
+    const live = await o.readLive()
+    // 同じ値が既に載っている（応答を失った押し直し・他の端末が同じ文を入れた）
+    if (live !== null && o.valueOf(live) === o.want) return { kind: 'saved', row: live }
+    // その欄が、この端末が読んだ時から書き換わっている → 上書きしない
+    if (attempt > 0 || (live === null ? baseVal !== null : o.valueOf(live) !== baseVal)) return { kind: 'conflict', row: live }
+    // その欄は読んだ時のまま（もう片方の欄・印刷した時刻だけが書き換わった／行ができただけ）→ 読み直した版でもう1回だけ送る
+    base = live
+  }
+  return { kind: 'conflict', row: null }
+}
+
+/**
+ * その日の全員共通の一文を保存する（変えた時だけ body を送る）。base＝画面が読んだ時の行（無ければ null）。
+ * 200字を超える・未来の日は送らない。通信できない時は DbError('network')（画面は入れた文を残す）
+ */
+export async function saveDaycareDayNote(p: {
+  day: string
+  text: string
+  base: DaycareDayNote | null
+  recordedBy: number | null
+  editedBy?: number | null
+}): Promise<ContactSave<DaycareDayNote>> {
+  assertDay(p.day)
+  if (p.day > localToday()) throw new DbError('server', DAYCARE_MSG.future)
+  const why = noteLengthError(p.text, DAY_NOTE_MAX)
+  if (why !== null) throw new DbError('server', why)
+  await assertKindWritable('daycare')
+  const sb = await getClient()
+  return writeNoteField<DaycareDayNote>({
+    sb,
+    table: 'daycare_day_notes',
+    cols: DAY_NOTE_COLS,
+    insertKey: { day: p.day },
+    field: 'body',
+    want: normalizeNoteText(p.text),
+    base: p.base,
+    valueOf: (r) => r.body,
+    readLive: () => readDayNoteLive(sb, p.day),
+    normalize: normalizeDayNote,
+    recordedBy: p.recordedBy,
+    editedBy: p.editedBy,
+  })
+}
+
+/**
+ * 1人のひと言の1つの欄（個別のひと言 body・看護職のひと言 nurse_note）を保存する（その欄だけを送る）。
+ * base＝画面が読んだ時のその方の行（無ければ null）。上限を超える・未来の日は送らない
+ */
+export async function saveDaycareContactField(p: {
+  residentId: number
+  day: string
+  field: ContactNoteField
+  text: string
+  base: DaycareContactNote | null
+  recordedBy: number | null
+  editedBy?: number | null
+}): Promise<ContactSave<DaycareContactNote>> {
+  assertDay(p.day)
+  if (p.day > localToday()) throw new DbError('server', DAYCARE_MSG.future)
+  const why = noteLengthError(p.text, contactFieldMax(p.field))
+  if (why !== null) throw new DbError('server', why)
+  await assertKindWritable('daycare')
+  const sb = await getClient()
+  const field = p.field
+  return writeNoteField<DaycareContactNote>({
+    sb,
+    table: 'daycare_contact_notes',
+    cols: CONTACT_NOTE_COLS,
+    insertKey: { resident_id: p.residentId, day: p.day },
+    field,
+    want: normalizeNoteText(p.text),
+    base: p.base,
+    valueOf: (r) => (field === 'body' ? r.body : r.nurse_note),
+    readLive: () => readContactNoteLive(sb, p.residentId, p.day),
+    normalize: normalizeContactNote,
+    recordedBy: p.recordedBy,
+    editedBy: p.editedBy,
+  })
+}
+
+/**
+ * 印刷した時刻（printed_at）を、印刷した方の行に書く（その列だけ。行が無ければ足す）。最後に印刷した時刻なので rev は照合しない
+ * （後から印刷した方の時刻が残ればよい・ひと言の欄には触れない）。失敗しても例外にしない（印刷は止めない）。戻り値は書けた行
+ */
+export async function markDaycareContactPrinted(p: {
+  day: string
+  residentIds: readonly number[]
+  /** 画面が読んだその日の行（行のある方は更新・無い方は足す） */
+  current: readonly DaycareContactNote[]
+  recordedBy: number | null
+  editedBy?: number | null
+}): Promise<DaycareContactNote[]> {
+  try {
+    assertDay(p.day)
+    if (p.day > localToday()) return []
+    await assertKindWritable('daycare')
+    const sb = await getClient()
+    const at = new Date().toISOString()
+    const update = async (id: number): Promise<DaycareContactNote | null> => {
+      const sent = withEditor({ printed_at: at }, p.editedBy)
+      const res = await sendWithEditor(sent, (x) =>
+        bounded(sb.from('daycare_contact_notes').update(x).eq('id', id).is('deleted_at', null).select(CONTACT_NOTE_COLS).maybeSingle()),
+      )
+      return res.error === null && res.data !== null ? normalizeContactNote(res.data) : null
+    }
+    const one = async (residentId: number): Promise<DaycareContactNote | null> => {
+      const cur = p.current.find((n) => n.resident_id === residentId && n.day === p.day) ?? null
+      if (cur !== null) {
+        const r = await update(cur.id)
+        if (r !== null) return r
+      } else {
+        const res = await bounded(
+          sb
+            .from('daycare_contact_notes')
+            .insert({ resident_id: residentId, day: p.day, printed_at: at, recorded_by: idNum(p.recordedBy) })
+            .select(CONTACT_NOTE_COLS)
+            .maybeSingle(),
+        )
+        if (res.error === null) return normalizeContactNote(res.data)
+        if (!isUniqueViolation(res)) return null
+      }
+      // 読んだ行が取り消された・他の端末が先に行を作った: いまの行に書く（1回だけ）
+      const live = await readContactNoteLive(sb, residentId, p.day)
+      return live === null ? null : update(live.id)
+    }
+    const ids = [...new Set(p.residentIds.filter((x) => Number.isSafeInteger(x) && x > 0))]
+    const got = await Promise.allSettled(ids.map(one))
+    const out: DaycareContactNote[] = []
+    for (const g of got) if (g.status === 'fulfilled' && g.value !== null) out.push(g.value)
+    if (out.length > 0) kickAfterDelivered()
+    return out
+  } catch {
+    return []
+  }
 }
 
 // ── 与薬チェック（服薬介助・2026-09-26 追加・0013_med_admin.sql） ─────────────────

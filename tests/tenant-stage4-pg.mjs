@@ -37,6 +37,13 @@ const TABLES = ['residents', 'staff', 'vitals', 'meals', 'fluid_intake', 'notes'
   'app_settings', 'import_days', 'master_sync_log', 'record_history', 'bath_records', 'med_slots', 'med_admin', 'incidents',
   'resident_targets', 'resident_vital_limits', 'daycare_days', 'daycare_attendance', 'daycare_activity_log',
   'daycare_training_sessions', 'daycare_home_visits', 'daycare_training_due', 'daycare_training_due_settings', 'daycare_staffing']
+/**
+ * 0054 の後に、自分の施設の行だけの守り（tenant_only）を自分の移行で最初から持って作った表（0054 の27表・戻す SQL の対象には入れない）。
+ * 2026-11-09 計画C（固定し直し・意図は同じ）: 0061 の連絡帳の2表。0054 の守りの本数は27表で数え、この表は同じ守りを持つことを別に確かめる
+ */
+const LATER_TABLES = ['daycare_day_notes', 'daycare_contact_notes']
+/** 27表の tenant_only の本数（0054 が足す・戻す本数） */
+const N27_SQL = `select count(*)::int n from pg_policies where schemaname = 'public' and policyname = 'tenant_only' and tablename = any($1)`
 const QUAL = '(tenant_id = ( SELECT private.my_tenant() AS my_tenant))'
 const CELL_SRC_SQL = `select prosrc as src from pg_proc where oid = 'public.apply_cell_edits(text, jsonb, jsonb, jsonb, bigint, text)'::regprocedure`
 /** 0054 の前の欄ごとの保存の本文（2か所の衝突の先から施設の印を外した形）。今の本文から作る＝置き換えが2か所だけかを確かめる */
@@ -145,7 +152,12 @@ async function visibleByTenant() {
 await inTx('形: 27表に自分の施設の行だけの守りが1本ずつ・今の守りはそのまま', async () => {
   const pol = await q(`select tablename, permissive, cmd, roles::text roles, qual, with_check from pg_policies
                         where schemaname = 'public' and policyname = 'tenant_only' order by tablename`)
-  ok('tenant_only は27表とも1本ずつ（ほかの表には無い）', pol.length === 27 && TABLES.every((t) => pol.some((p) => p.tablename === t)), pol.map((p) => p.tablename))
+  // 2026-11-09 計画C（固定し直し・意図は同じ）: 後から作った表（0061）は自分の移行で同じ守りを持つ（下の3行の確かめにも入る）
+  const pol27 = pol.filter((p) => TABLES.includes(p.tablename))
+  ok('tenant_only は27表とも1本ずつ（ほかの表には無い）',
+    pol27.length === 27 && TABLES.every((t) => pol27.some((p) => p.tablename === t))
+      && pol.filter((p) => !TABLES.includes(p.tablename)).map((p) => p.tablename).sort().join(',') === [...LATER_TABLES].sort().join(','),
+    pol.map((p) => p.tablename))
   ok('restrictive・全部の操作・ログインした人（authenticated）だけ',
     pol.every((p) => p.permissive === 'RESTRICTIVE' && p.cmd === 'ALL' && p.roles === '{authenticated}'), pol)
   ok('読む・書くとも「施設の印 = ログインした人の施設」（1回だけ調べる形）', pol.every((p) => p.qual === QUAL && p.with_check === QUAL), pol.map((p) => [p.qual, p.with_check]))
@@ -284,11 +296,16 @@ const MIG_BODY = MIG.replace(/^begin;$/m, '-- begin').replace(/^commit;$/m, '-- 
 const BACK_BODY = BACK.replace(/^begin;$/m, '-- begin').replace(/^commit;$/m, '-- commit')
 const BACK55_BODY = BACK55.replace(/^begin;$/gm, '-- begin').replace(/^commit;$/gm, '-- commit')
 await inTx('移行の先の確かめ・冪等・戻す SQL', async () => {
+  // 2026-11-09 計画C（固定し直し・意図は同じ）: 戻すのは新しい移行から順（0061 → 0055 → 0054）。0061 の2表を先に戻した形で
+  // 0054 の冪等と戻す SQL を確かめる（2表は自分の tenant_only を持ち、0054 を戻す SQL の確かめ「残っていない」は全部の表で数えるため）。
+  // 取引の終わりで元に戻る
+  await q(`drop table if exists ${LATER_TABLES.map((t) => `public.${t}`).join(', ')}`)
   ok('移行と戻す SQL は begin … commit で包んでいる', /^begin;$/m.test(MIG) && /^commit;$/m.test(MIG) && /^begin;$/m.test(BACK) && /^commit;$/m.test(BACK))
   ok('移行と戻す SQL は do $$ を使わない', !/^\s*do\s+\$\$/im.test(MIG) && !/^\s*do\s+\$\$/im.test(BACK))
   const first = await q(UQ_DEFS_SQL)
   const again = await tryq(MIG_BODY)
-  const n1 = (await q(`select count(*)::int n from pg_policies where schemaname = 'public' and policyname = 'tenant_only'`))[0].n
+  // 2026-11-09 計画C（固定し直し・意図は同じ）: 本数は27表で数える（後から作った表の守りは 0054 の外）
+  const n1 = (await q(N27_SQL, [TABLES]))[0].n
   ok('もう一度流しても通り、守りは27本のまま（冪等）', again.code === null && n1 === 27, { again, n1 })
   ok('最後の確かめの6行が全部 ok・7行目は知らせ（施設の数・利用者のいない施設の数＝許可リストの表の無い土台では -）',
     again.rows?.length === 7 && again.rows.slice(0, 6).every((r) => r.result === 'ok') && again.rows[6].result === '1・-', again.rows)
@@ -296,7 +313,7 @@ await inTx('移行の先の確かめ・冪等・戻す SQL', async () => {
   const guard = await tryq(BACK_BODY)
   ok('0055 が入っている間は、0054 を戻す SQL は何も変えずに止まる（先に 0055 を戻す）',
     guard.code === 'P0001' && /0055 が入っています/.test(guard.message)
-    && (await q(`select count(*)::int n from pg_policies where policyname = 'tenant_only'`))[0].n === 27, guard)
+    && (await q(N27_SQL, [TABLES]))[0].n === 27, guard)
   const b55 = await tryq(BACK55_BODY)
   ok('（前提）0055 を戻す', b55.code === null && b55.rows?.every((r) => r.result === 'ok'), b55)
   const back = await tryq(BACK_BODY)
@@ -310,7 +327,7 @@ await inTx('移行の先の確かめ・冪等・戻す SQL', async () => {
   ok('戻すと一意15本は 0053 の後の形（施設の印の無い形・名前と条件は同じ）', after.every((r) => !/USING btree \(tenant_id, /.test(r.def)) && after.length === 15, after)
   const re = await tryq(MIG_BODY)
   ok('もう一度入れた後の一意15本は、最初に入れた時と一字一句同じ', JSON.stringify(await q(UQ_DEFS_SQL)) === JSON.stringify(first), { first })
-  ok('戻した後にもう一度入る', re.code === null && (await q(`select count(*)::int n from pg_policies where policyname = 'tenant_only'`))[0].n === 27, re)
+  ok('戻した後にもう一度入る', re.code === null && (await q(N27_SQL, [TABLES]))[0].n === 27, re)
 
   await q(`create policy stage4_extra on public.notes for select to authenticated using (true)`)
   const e0 = await tryq(MIG_BODY)
