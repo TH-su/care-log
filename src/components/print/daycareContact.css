@@ -1,0 +1,182 @@
+/* ══════════════════════════════════════════════════════════════
+   デイの連絡帳（A5 縦・1人1枚・src/components/print/DaycareContactSheet.tsx）の紙面の組み方。2026-11-09 計画C。
+
+   ・紙面（.dcc-sheet）は画面の見本と印刷で同じ部品。大きさは全部 em で決め、見本は枠の幅に合わせて文字の大きさごと縮める
+     （zoom・transform は使わない）。印刷は 1枚に収まる文字の大きさを DaycareContactPrint が測って --dcc-font に書く（最大 15px＝約11pt）
+   ・色: 紙に出すものなので、画面の表示モード（ダーク等）に関係なく白い紙に黒い文字（print.css の --cl-print-ink・--cl-print-paper を使う。
+     新しい色は足さない）。色なしで、白黒でも意味が変わらない
+   ・用紙（@page A5・余白 8mm）はこのファイルに書かない。DaycareContactPrint が印刷の直前だけ <style> を差し込み、afterprint で外す
+     （ほかの画面の印刷の用紙を変えない）。印刷で隠す規則も、印刷の間だけ html に付く data-dcc-print の時だけ効く
+   ・写真の欄は持たない
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── 紙面（見本・印刷で共通） ── */
+.dcc-sheet {
+  color: var(--cl-print-ink);
+  background: var(--cl-print-paper);
+  font-family: var(--font-sans);
+  line-height: 1.4;
+  text-align: start;
+}
+.dcc-sheet * {
+  color: inherit;
+  border-color: currentColor;
+}
+.dcc-sheet .dcc-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  column-gap: 0.6em;
+  border-bottom: 2px solid currentColor;
+  padding-bottom: 0.15em;
+}
+.dcc-sheet .dcc-office {
+  margin: 0;
+  font-size: 0.9em;
+}
+.dcc-sheet .dcc-title {
+  margin: 0;
+  font-size: 1.3em;
+  font-weight: 700;
+}
+.dcc-sheet .dcc-date {
+  margin: 0;
+  font-size: 0.95em;
+}
+.dcc-sheet .dcc-name {
+  margin: 0.3em 0 0;
+  font-size: 1.25em;
+  font-weight: 700;
+}
+.dcc-sheet .dcc-sec {
+  margin-top: 0.4em;
+}
+.dcc-sheet .dcc-h {
+  margin: 0 0 0.1em;
+  padding-left: 0.3em;
+  border-left: 0.25em solid currentColor;
+  font-size: 1em;
+  font-weight: 700;
+}
+.dcc-sheet table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+.dcc-sheet th,
+.dcc-sheet td {
+  border: 1px solid currentColor;
+  padding: 0.05em 0.3em;
+  font-weight: 400;
+  text-align: start;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.dcc-sheet .dcc-vitals th,
+.dcc-sheet .dcc-vitals td {
+  text-align: center;
+}
+.dcc-sheet .dcc-items th {
+  width: 5em;
+}
+.dcc-sheet .dcc-text {
+  margin: 0;
+  /* 改行は詰める（上限の字数で1枚に収まる版面のため。見本と紙で同じ） */
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.dcc-sheet .dcc-text + .dcc-text {
+  margin-top: 0.15em;
+}
+.dcc-sheet .dcc-small {
+  margin: 0.1em 0 0;
+  font-size: 0.85em;
+}
+/* ご家族より: 手書きの罫線4本 */
+.dcc-sheet .dcc-rule {
+  display: block;
+  height: 1.8em;
+  border-bottom: 1px solid currentColor;
+}
+.dcc-sheet .dcc-foot {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.3em 1em;
+  margin-top: 0.6em;
+}
+.dcc-sheet .dcc-blank {
+  display: inline-block;
+  min-width: 8em;
+  border-bottom: 1px solid currentColor;
+}
+
+/* ── 画面の見本（枠の幅に合わせて紙面を文字の大きさごと縮める） ──
+   紙は A5（148mm × 210mm）・余白 8mm。紙面の大きさは 15px の時の em で決めてある（148mm＝37.3em・8mm＝2.02em・210mm＝52.9em）ので、
+   枠の幅の 1/37.3 を文字の大きさにすれば、紙と同じ割合で縮む。枠の幅で決める単位（cqw）が使えない端末は 8px のまま */
+.dcc-preview {
+  container-type: inline-size;
+}
+.dcc-preview .dcc-sheet {
+  font-size: 0.5rem;
+  min-height: 52.9em;
+  padding: 2.02em;
+  border: 1px solid var(--c-border-strong);
+}
+@supports (width: 1cqw) {
+  .dcc-preview .dcc-sheet {
+    font-size: calc(100cqw / 37.3);
+  }
+}
+
+/* ── 印刷する中身の置き場（body の直下・画面では隠す） ── */
+.dcc-print-area {
+  display: none;
+}
+/* 1枚に収まる文字の大きさを測る間だけ、印刷と同じ幅（A5 縦 148mm − 左右の余白 8mm×2＝132mm）で、見えない位置に組む */
+.dcc-print-area[data-dcc-measure] {
+  display: block;
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 132mm;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: -1;
+}
+.dcc-print-area .dcc-sheet {
+  font-size: var(--dcc-font, 0.9375rem);
+}
+/* ご家族の手書きの欄は、文字を小さくしても書ける高さ（1行 7mm）を保つ */
+.dcc-print-area .dcc-rule {
+  height: 7mm;
+}
+
+@media print {
+  html[data-dcc-print],
+  html[data-dcc-print] body {
+    background: var(--cl-print-paper) !important;
+  }
+  /* ダーク表示のまま刷っても、用紙の余白をダークの地色で塗らない */
+  html[data-dcc-print] {
+    color-scheme: light !important;
+  }
+  /* 印刷する中身以外（アプリの画面全体＝見出し帯・切り替え・ボタン・欄・見本）を紙に出さない */
+  html[data-dcc-print] body > *:not(.dcc-print-area) {
+    display: none !important;
+  }
+  html[data-dcc-print] .dcc-print-area {
+    display: block !important;
+  }
+  /* 1人1枚（各紙面の後で改ページ。最後の紙面の後ろでは改ページしない） */
+  html[data-dcc-print] .dcc-print-area .dcc-sheet {
+    break-after: page;
+    page-break-after: always;
+    break-inside: avoid;
+  }
+  html[data-dcc-print] .dcc-print-area .dcc-sheet:last-child {
+    break-after: auto;
+    page-break-after: auto;
+  }
+}

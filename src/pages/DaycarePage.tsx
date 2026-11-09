@@ -60,6 +60,7 @@ import type { DaycareMealRow, MyRole, VitalTarget } from '../lib/db'
 // 名簿は読み込みの控えを通し、在籍者は全員の名簿から切り出す（同じ取得に相乗り＝residents 表を1回だけ読む・2026-10-29）
 import { fetchAllResidents, fetchResidentsFromAll } from '../lib/cachedReads'
 import { personPath } from '../lib/daycarePerson'
+import { contactPath } from '../lib/daycareContact'
 import type { DaycareActivity } from '../lib/daycareActivity'
 import { loadDaycareDayParts } from '../lib/daycareDayLoad'
 import type { DaycareDayReaders } from '../lib/daycareDayLoad'
@@ -1027,6 +1028,13 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         >
           ＋ 予定にない方を追加
         </button>
+        {/* 連絡帳（2026-11-09 計画C・段階4）: この日を開く。上の切り替え（DaycareNav）には足さない（1180px で1段に収めるため） */}
+        <Link
+          to={contactPath(day, today)}
+          className="inline-flex min-h-tap items-center rounded border border-primary px-4 text-base font-bold text-primary"
+        >
+          連絡帳
+        </Link>
         {/* 印の説明（一覧の下に1行。上の段には足さない＝2026-11-09 計画B） */}
         {board.rows.length > 0 ? (
           <p className="text-sm text-ink2">印: VS バイタル・食 昼食・活 活動・訓 訓練・浴 入浴（実線＝済・点線＝未・枠なし＝対象外・太枠＝要確認・細い点線＝読めない）</p>

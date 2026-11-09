@@ -11,7 +11,8 @@
 //   2. 0021 以降（本人回答 4: 新しい移行は何度流しても同じ）は、当てたすぐ後にもう一度当て、2回目でも失敗しないことを
 //      確かめる（その移行が当たる時点の形で流し直す）。さらに、最後の形（0001〜最新）の上で 0021 以降をもう一度当てる。
 //      最後の形の上で流せない移行は FINAL_RERUN_SKIP に理由つきで書いたものだけ（0053 で一意を施設ごとにしたため、それより前の移行の
-//      on conflict (key) が最後の形では衝突の先を見つけられない＝流すと誤りで止まり、1回の取引なので何も変わらない）
+//      on conflict (key) が最後の形では衝突の先を見つけられない＝流すと誤りで止まり、1回の取引なので何も変わらない）と、
+//      FINAL_RERUN_SKIP_FK に書いたもの（後の移行が足した外部キーで、その移行の先の確かめが止まる。2026-11-09 計画C の 0053）
 //   3. tests/*-pg.mjs（実行器）を1本ずつ、上の DB を写した新しい DB で流す（実行器どうしが残した行に左右されない）
 // 終了コード: すべて成功で 0・どれか失敗で 1・接続先が使い捨てでない時は 2。
 // 個人情報は扱わない（実行器は合成の 利用者01・職員01 と数値IDだけを使う）。
@@ -47,6 +48,22 @@ export const FINAL_RERUN_SKIP = new Map([
 ])
 /** 施設を含まない衝突の先（0053 で施設ごとにした一意）を名指す on conflict */
 export const FINAL_RERUN_SKIP_RE = /on\s+conflict\s*\(\s*(key|day|id|source\s*,\s*day|source_id|name|import_key)\s*\)/i
+
+/**
+ * 最後の形の上で流し直せない移行のうち、「後の移行が足した外部キー」で、その移行の先の確かめが止まるものと、その理由
+ * （2026-11-09 計画C（固定し直し・意図は同じ）: 上の一覧と同じ考え＝流すと何も変えずに誤りで止まる・1回の取引なので何も変わらない）。
+ * 0053 は「利用者・職員・申し送りを指す外部キーが決まった76本だけ」を確かめてから付け直す。0061（連絡帳の2表）は
+ * （施設の印, 番号）の組の外部キーを最初から持って作るので、最後の形ではその本数が増え、0053 の確かめで止まる。
+ * ★一覧に書いた移行が本当にその確かめ（FINAL_RERUN_SKIP_FK_RE）を持ち、それより後の移行が組の外部キー（LATER_FK_RE）を
+ *   足していることを下で確かめる（理由の無い除外を置かない）
+ */
+export const FINAL_RERUN_SKIP_FK = new Map([
+  ['0053_tenant_stage3.sql', '利用者・職員・申し送りを指す外部キーが決まった76本かの確かめ（0061 が組の外部キーを足した）'],
+])
+/** 利用者・職員・申し送りを指す外部キーを全部の表で数える確かめ */
+export const FINAL_RERUN_SKIP_FK_RE = /k\.confrelid\s+in\s+\('public\.residents'::regclass,\s*'public\.staff'::regclass,\s*'public\.notes'::regclass\)/
+/** 利用者・職員・申し送りを指す（施設の印, 番号）の組の外部キー */
+export const LATER_FK_RE = /foreign\s+key\s*\(\s*tenant_id\s*,\s*\w+\s*\)\s*references\s+public\.(residents|staff|notes)\s*\(\s*tenant_id\s*,\s*id\s*\)/i
 
 /** 使い捨てのローカル DB だけを受け付ける（本番の Supabase に向けない） */
 export function isLocalPgUrl(url) {
@@ -146,8 +163,17 @@ async function main() {
         console.log(`NG 流し直しの除外: ${f} は施設を含まない衝突の先を持たない（除外の理由「${why}」が成り立たない）`)
       }
     }
+    for (const [f, why] of FINAL_RERUN_SKIP_FK) {
+      const body = migrations.includes(f) ? readFileSync(path.join(MIGRATIONS_DIR, f), 'utf8') : ''
+      const later = migrations.filter((m) => m > f).some((m) => LATER_FK_RE.test(readFileSync(path.join(MIGRATIONS_DIR, m), 'utf8')))
+      if (!FINAL_RERUN_SKIP_FK_RE.test(body) || !later) {
+        failed += 1
+        console.log(`NG 流し直しの除外: ${f} は外部キーの数の確かめを持たないか、後の移行が組の外部キーを足していない（除外の理由「${why}」が成り立たない）`)
+      }
+    }
     for (const f of migrations.filter((m) => Number(m.slice(0, 4)) >= IDEMPOTENT_FROM)) {
       if (FINAL_RERUN_SKIP.has(f)) { console.log(`skip 流し直し（最後の形）: ${f}（${FINAL_RERUN_SKIP.get(f)}）`); continue }
+      if (FINAL_RERUN_SKIP_FK.has(f)) { console.log(`skip 流し直し（最後の形）: ${f}（${FINAL_RERUN_SKIP_FK.get(f)}）`); continue }
       await rerun('流し直し（冪等・最後の形）', f)
     }
   } catch (e) {
