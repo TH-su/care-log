@@ -944,17 +944,26 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
     ro.observe(el)
     return () => ro.disconnect()
   }, [kpBox])
-  // テンキーの下端から画面の下端までの高さ（狭い画面は下部タブの 3.5rem・広い画面は 0）。〔元に戻す〕の知らせをテンキーの上に出すため
-  // （2026-11-09 計画B3 の反証 中2: 知らせ（fixed bottom-20 z-50）がテンキー（z-40）のキー・〔閉じる〕の真上に重なった）
-  const [kpBottom, setKpBottom] = useState(0)
+  // テンキーを開いている間の〔元に戻す〕の知らせの位置＝アプリの見出しの下（上に貼り付く sticky・fixed の header の下端を測る）。
+  // 2026-11-09 計画B3 の反証 中2: 下の位置（fixed bottom-20 z-50）ではテンキー（z-40）のキー・〔閉じる〕の真上に重なった。
+  // 確認の反証 軽1: テンキーの上に移すと、テンキーのすぐ上に送った入れている行に重なったので、画面の上の方へ出す。閉じたら元の位置
+  const kpOpen = active !== null
+  const [toastTop, setToastTop] = useState(0)
   useEffect(() => {
-    const el = kpBox
-    if (!el) return
-    const check = () => setKpBottom(Number.parseFloat(window.getComputedStyle(el).bottom) || 0)
+    if (!kpOpen) return
+    const check = () => {
+      let h = 0
+      for (const el of document.querySelectorAll<HTMLElement>('header')) {
+        const cs = window.getComputedStyle(el)
+        if (cs.display === 'none' || (cs.position !== 'sticky' && cs.position !== 'fixed')) continue
+        h = Math.max(h, el.getBoundingClientRect().bottom)
+      }
+      setToastTop(Math.max(0, Math.ceil(h)))
+    }
     check()
     window.addEventListener('resize', check)
     return () => window.removeEventListener('resize', check)
-  }, [kpBox])
+  }, [kpOpen])
   // 枠の高さの上限（画面の高さ − アプリの見出し − 下部タブ − テンキー）を実測して書き戻す（見出しの行を枠の上に残す・2026-10-28）
   useTableFit(tableBox, active !== null ? kpHeight : 0)
   // 入れている欄を見せる（2026-10-28: 枠に高さの上限を付け、テンキーが開くと枠が縮むので、押した欄・〔次へ〕で移った欄がテンキーの下や
@@ -1372,6 +1381,11 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                       const lunchNotes = lunchRow ? lunch.notes(row.residentId) : null
                       const below = detail || lunchNotes !== null
                       const time = slot.vital?.measured_at ? slot.vital.measured_at.slice(0, 5) : null
+                      // 状態の列の2段目（2026-11-09 計画B3 の確認の反証 中1・軽2）: 急ぐ印（要確認・未送信・送信中）→ 測った時刻（再測定の回が
+                      // 無い方の1回目）→ ✓ 保存済み の順に1つ。保存済みは時刻に譲る（時刻が無い時だけ出す）
+                      const urgent = mark !== null && mark.tone !== 'ok' ? mark : null
+                      const showTime = si === 0 && slots.length === 1 && time !== null
+                      const line2 = urgent ?? (showTime ? null : mark)
                       return (
                         <Fragment key={slot.key}>
                           <tr className={`align-middle ${rowBg} ${below || !isLast ? '' : 'border-b border-border'}`}>
@@ -1472,6 +1486,8 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                               )
                             })}
                             <td className="px-1 py-1">
+                              {/* 1段目＝来た・まだ（いつも。〔＋再測定〕を出す行はボタン）・2段目＝急ぐ印か測った時刻か保存済み（line2）。
+                                  どの行も2つまで＝ふつうの行 53px・〔＋再測定〕の行 76px（2026-11-09 計画B3 の確認の反証 中1・軽2） */}
                               <div className="flex flex-col items-stretch gap-1">
                                 {abnormal && isLast ? (
                                   <button
@@ -1483,25 +1499,29 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                                   >
                                     ＋再測定
                                   </button>
-                                ) : null}
-                                {mark !== null ? (
-                                  // 送信中・保存済みも読み上げで知らせる（前の SlotStatus の role="status" と同じ＝#45 の反証 軽3）
-                                  <span role="status" className={`whitespace-nowrap text-sm font-bold leading-tight ${mark.tone === 'ok' ? 'text-ok' : mark.tone === 'warn' ? 'text-warn' : 'text-ink2'}`}>
-                                    <span aria-hidden="true">{mark.mark} </span>
-                                    {mark.text}
-                                  </span>
-                                ) : si === 0 && inBulk && !(abnormal && isLast) ? (
-                                  // 来た・まだ（1回目の行。保存の印がある間は印を先に出す・〔＋再測定〕を出す行は出さない＝行を高くしない）
+                                ) : si === 0 && inBulk ? (
+                                  // 来た・まだ（1回目の行はいつも出す。保存の印に置き換えない＝確認の反証 中1）
                                   <span className={`whitespace-nowrap text-sm leading-tight ${cm.textCls}`}>
                                     <span aria-hidden="true">{cm.mark} </span>
                                     {cm.word}
                                   </span>
                                 ) : null}
-                                {si === 0 && slots.length === 1 && time !== null && !(abnormal && isLast) ? (
-                                  // 測った時刻（2026-11-09 計画B3 の反証 中3: 再測定の回が無い方は氏名の列の「1回目（時刻）」を出さないので、ここに短く出す。
-                                  // 再測定の回がある方は氏名の列の「1回目（時刻）」と「↳ 再測定 n（時刻）」で見る）
+                                {line2 !== null ? (
+                                  // 送信中・保存済みも読み上げで知らせる（前の SlotStatus の role="status" と同じ＝#45 の反証 軽3）
+                                  <span role="status" className={`whitespace-nowrap text-sm font-bold leading-tight ${line2.tone === 'ok' ? 'text-ok' : line2.tone === 'warn' ? 'text-warn' : 'text-ink2'}`}>
+                                    <span aria-hidden="true">{line2.mark} </span>
+                                    {line2.text}
+                                  </span>
+                                ) : showTime ? (
+                                  // 測った時刻（2026-11-09 計画B3 の反証 中3・確認の反証 軽2: 〔＋再測定〕を出す行も出す）。再測定の回がある方は
+                                  // 氏名の列の「1回目（時刻）」と「↳ 再測定 n（時刻）」で見る。保存済みは見た目では時刻に譲り、読み上げでは知らせる
                                   <span className="whitespace-nowrap text-sm leading-tight text-ink2">
                                     測定 <span className="font-num">{time}</span>
+                                    {mark !== null ? (
+                                      <span role="status" className="sr-only">
+                                        ・{mark.text}
+                                      </span>
+                                    ) : null}
                                   </span>
                                 ) : null}
                               </div>
@@ -1563,9 +1583,10 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
       {/* テンキーを出している間は、テンキーと同じ高さの余白をとる（最後の行もテンキーに隠れない） */}
       {active !== null ? <div aria-hidden="true" style={{ height: kpHeight }} /> : null}
       {keypad}
-      {/* 昼食・水分の〔元に戻す〕の知らせ（それまでの食事一括と同じ）。テンキーを出している間は、テンキーの上に出す（キーと〔閉じる〕に
-          重ねない・知らせは消さない＝2026-11-09 計画B3 の反証 中2）。位置は ui.tsx の useToast が読む --toast-bottom（ほかの画面は付けない） */}
-      <div className="contents" style={active !== null && kpHeight > 0 ? ({ '--toast-bottom': `${kpHeight + kpBottom}px` } as CSSProperties) : undefined}>
+      {/* 昼食・水分の〔元に戻す〕の知らせ（それまでの食事一括と同じ）。テンキーを開いている間は、アプリの見出しの下に出す（テンキーのキー・
+          〔閉じる〕と、テンキーのすぐ上の入れている行に重ねない。知らせは消さない＝2026-11-09 計画B3 の反証 中2・確認の反証 軽1）。
+          位置は ui.tsx の useToast が読む --toast-top・--toast-bottom（ほかの画面は付けない＝今までどおり下） */}
+      <div className="contents" style={kpOpen ? ({ '--toast-top': `${toastTop}px`, '--toast-bottom': 'auto' } as CSSProperties) : undefined}>
         {lunch.toast}
       </div>
       <ConfirmDialog

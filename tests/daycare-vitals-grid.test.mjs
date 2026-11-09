@@ -141,7 +141,8 @@ if (DC === null) {
     it('送信中・保存済みも読み上げる（role="status"）・保存済みでも送信待ちが動けば詳しい文を出す（#45 の反証 軽3・軽4）', () => {
       // 2026-11-09 計画B3（固定し直し・意図は同じ）: 状態の列は〔＋再測定〕の下に印を並べるので、行の高さを増やさないよう leading-tight。
       // 列の幅を中身で決めるので折り返さない（whitespace-nowrap）
-      assert.match(page, /<span role="status" className=\{`whitespace-nowrap text-sm font-bold leading-tight \$\{mark\.tone/)
+      // 2026-11-09 計画B3 の確認の反証の直し（固定し直し・意図は同じ）（中1）: 2段目に出す印は line2（急ぐ印 → 測った時刻 → 保存済み）
+      assert.match(page, /<span role="status" className=\{`whitespace-nowrap text-sm font-bold leading-tight \$\{line2\.tone/)
       assert.match(page, /const detail = shown\?\.kind === 'saving' \? false : \(shown !== undefined && shown\.kind !== 'saved'\) \|\| pend !== null/)
     })
     it('状態の列は短い印（dcVitalSlotMark）・詳しい文と解き方は行の下（SlotStatus のまま）', () => {

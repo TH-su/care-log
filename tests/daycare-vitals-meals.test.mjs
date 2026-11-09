@@ -247,7 +247,8 @@ describe('静的検査: 行の高さ（計画B3 の手直し・ふつうの行�
   })
   it('状態の列は2段まで（1段目＝来た・まだの短い形か〔＋再測定〕・2段目＝保存の印）。水分の合計は欄の横（上に積まない）', () => {
     // 2026-11-09 計画B3 の反証の直し（固定し直し・意図は同じ）（中3）: 1段目＝保存の印か来た・まだ、2段目＝測った時刻（再測定の回が無い方）
-    assert.match(body, /\) : si === 0 && inBulk && !\(abnormal && isLast\) \? \(\s*<span className=\{`whitespace-nowrap text-sm leading-tight \$\{cm\.textCls\}`\}>/)
+    // 2026-11-09 計画B3 の確認の反証の直し（固定し直し・意図は同じ）（中1）
+    assert.match(body, /\) : si === 0 && inBulk \? \(\s*<span className=\{`whitespace-nowrap text-sm leading-tight \$\{cm\.textCls\}`\}>/)
     assert.match(body, /const cm = daycareCameShort\(row\)/)
     const cells = lunch.slice(lunch.indexOf('const cells = (rid: number)'), lunch.indexOf('const notes = (rid: number)'))
     assert.doesNotMatch(cells, /flex-col/)
@@ -460,17 +461,26 @@ describe('反証の直し（計画B3）', () => {
   })
   it('中2: テンキーを出している間は〔元に戻す〕の知らせをテンキーの上に出す（--toast-bottom）。ほかの画面の知らせの位置は今のまま', () => {
     const ui = code('../src/components/ui.tsx')
-    assert.match(ui, /<div className="pointer-events-none fixed inset-x-0 bottom-20 z-50 flex justify-center p-4" style=\{\{ bottom: 'var\(--toast-bottom, 5rem\)' \}\}>/)
-    assert.match(screen, /<div className="contents" style=\{active !== null && kpHeight > 0 \? \(\{ '--toast-bottom': `\$\{kpHeight \+ kpBottom\}px` \} as CSSProperties\) : undefined\}>\s*\{lunch\.toast\}\s*<\/div>/)
-    assert.match(screen, /const check = \(\) => setKpBottom\(Number\.parseFloat\(window\.getComputedStyle\(el\)\.bottom\) \|\| 0\)/)
+    // 2026-11-09 計画B3 の確認の反証の直し（固定し直し・意図は同じ）（軽1）: テンキーを開いている間は、アプリの見出しの下（上に貼り付く header の下端）に出す。閉じたら元の位置（下）
+    assert.match(ui, /<div\s+className="pointer-events-none fixed inset-x-0 bottom-20 z-50 flex justify-center p-4"\s+style=\{\{ top: 'var\(--toast-top, auto\)', bottom: 'var\(--toast-bottom, 5rem\)' \}\}\s*>/)
+    assert.match(screen, /<div className="contents" style=\{kpOpen \? \(\{ '--toast-top': `\$\{toastTop\}px`, '--toast-bottom': 'auto' \} as CSSProperties\) : undefined\}>\s*\{lunch\.toast\}\s*<\/div>/)
+    assert.match(screen, /const kpOpen = active !== null/)
+    assert.match(screen, /if \(cs\.display === 'none' \|\| \(cs\.position !== 'sticky' && cs\.position !== 'fixed'\)\) continue\s*h = Math\.max\(h, el\.getBoundingClientRect\(\)\.bottom\)/)
+    assert.doesNotMatch(screen, /kpBottom/)
     // --toast-bottom を付けるのはこの画面だけ
     const files = ['App.tsx', 'pages/DaycarePage.tsx', 'pages/DaycarePersonPage.tsx', 'pages/DaycareActivityBulkPage.tsx', 'pages/DaycareTrainingPage.tsx', 'pages/MealsGridPage.tsx', 'pages/VitalsGridPage.tsx']
     for (const f of files) assert.doesNotMatch(code(`../src/${f}`), /--toast-bottom/, f)
   })
   it('中3: 再測定の回が無い方の測った時刻は、状態の列の2段目に「測定 10:05」（行の高さ 53px のまま・幅は「✓ 保存済み」以下）', () => {
-    assert.match(body, /\{si === 0 && slots\.length === 1 && time !== null && !\(abnormal && isLast\) \? \(\s*<span className="whitespace-nowrap text-sm leading-tight text-ink2">\s*測定 <span className="font-num">\{time\}<\/span>\s*<\/span>\s*\) : null\}/)
-    // 1段目は保存の印か来た・まだ（どちらか1つ）・2段目は時刻＝2段で欄の 44px に収まる
-    assert.match(body, /\{mark !== null \? \(\s*<span role="status"[\s\S]*?\) : si === 0 && inBulk && !\(abnormal && isLast\) \? \(/)
+    // 2026-11-09 計画B3 の確認の反証の直し（固定し直し・意図は同じ）（中1・軽2）: 1段目はいつも来た・まだ（〔＋再測定〕の行はボタン）。2段目は急ぐ印 → 測った時刻 → 保存済み の順に1つ
+    // （〔＋再測定〕の行にも時刻を出す）。どの行も2つまで＝ふつうの行 53px・〔＋再測定〕の行 76px
+    assert.match(body, /const urgent = mark !== null && mark\.tone !== 'ok' \? mark : null\s*const showTime = si === 0 && slots\.length === 1 && time !== null\s*const line2 = urgent \?\? \(showTime \? null : mark\)/)
+    assert.match(body, /\{abnormal && isLast \? \(\s*<button[\s\S]*?<\/button>\s*\) : si === 0 && inBulk \? \(\s*<span className=\{`whitespace-nowrap text-sm leading-tight \$\{cm\.textCls\}`\}>[\s\S]*?<\/span>\s*\) : null\}\s*\{line2 !== null \? \(\s*<span role="status"[\s\S]*?\) : showTime \? \(\s*<span className="whitespace-nowrap text-sm leading-tight text-ink2">\s*測定 <span className="font-num">\{time\}<\/span>/)
+    // 保存済みは見た目では時刻に譲り、読み上げでは知らせる
+    assert.match(body, /\{mark !== null \? \(\s*<span role="status" className="sr-only">\s*・\{mark\.text\}\s*<\/span>\s*\) : null\}/)
+    // 状態の列の中は2つまで（1段目の式と2段目の式の2つの JSX 式だけ）
+    const cell = body.slice(body.indexOf('<div className="flex flex-col items-stretch gap-1">'), body.indexOf('{lunchRow ? ('))
+    assert.equal((cell.match(/^\s{32}\{/gm) ?? []).length, 2)
     // 幅: 「測定 10:05」（15px×2＋間 4px＋数字 9px×5）は「✓ 保存済み」（15px×5＋間 4px）以下
     assert.ok(15 * 2 + 4 + 9 * 5 <= 15 * 5 + 4)
   })
@@ -567,5 +577,31 @@ describe('反証の直し（計画B3）', () => {
   it('軽5: 古い試験の名前・欄送りの古いコメントを残さない', () => {
     assert.doesNotMatch(read('../src/styles/tokens.css'), /daycare-colors\.test/)
     assert.doesNotMatch(read('../src/pages/DaycareVitalsMealsPage.tsx'), /KT の次は次の方の血圧の上＝/)
+  })
+})
+
+describe('状態の列の2段目の決め方（計画B3 の確認の反証 中1・軽2）', () => {
+  it('急ぐ印（要確認・未送信・送信中）→ 測った時刻（再測定の回が無い方の1回目）→ ✓ 保存済み の順に1つ。来た・まだは1段目に残る', () => {
+    // 画面の式をそのまま抜き出して評価する（型の無い式）
+    const body = screen.slice(screen.indexOf('<tbody>'), screen.indexOf('</tbody>'))
+    const expr = /const urgent = (mark !== null && mark\.tone !== 'ok' \? mark : null)\s*const showTime = (si === 0 && slots\.length === 1 && time !== null)\s*const line2 = (urgent \?\? \(showTime \? null : mark\))/.exec(body)
+    assert.ok(expr, '式が見つからない')
+    const decide = new Function('mark', 'si', 'slots', 'time', `const urgent = ${expr[1]}; const showTime = ${expr[2]}; const line2 = ${expr[3]}; return line2 !== null ? line2.text : showTime ? '測定 ' + time : null`)
+    const m = (text, tone) => ({ mark: '', text, tone })
+    const one = [{}]
+    const two = [{}, {}]
+    // 保存済みは時刻に譲る
+    assert.equal(decide(m('保存済み', 'ok'), 0, one, '10:05'), '測定 10:05')
+    // 急ぐ印は時刻より先
+    assert.equal(decide(m('要確認', 'warn'), 0, one, '10:05'), '要確認')
+    assert.equal(decide(m('未送信', 'warn'), 0, one, '10:05'), '未送信')
+    assert.equal(decide(m('送信中', 'info'), 0, one, '10:05'), '送信中')
+    // 時刻が無い（まだ測っていない）時は保存済み・印も無ければ空
+    assert.equal(decide(m('保存済み', 'ok'), 0, one, null), '保存済み')
+    assert.equal(decide(null, 0, one, null), null)
+    assert.equal(decide(null, 0, one, '9:40'), '測定 9:40')
+    // 再測定の回がある方の1回目・再測定の行は時刻を出さない（氏名の列の「1回目（時刻）」「↳ 再測定 n（時刻）」で見る）
+    assert.equal(decide(m('保存済み', 'ok'), 0, two, '10:05'), '保存済み')
+    assert.equal(decide(null, 1, two, '10:20'), null)
   })
 })

@@ -353,7 +353,8 @@ if (DP === null) {
       // 取り込みの印・外出／入院の記録は氏名の列に積まず、行の下の知らせ（フックの notes）へ
       assert.match(screenBody, /const cm = daycareCameShort\(row\)/)
       // 2026-11-09 計画B3 の反証の直し（固定し直し・意図は同じ）（中3）: 1段目は保存の印があれば印、無ければ来た・まだ（〔＋再測定〕を出す行は出さない）
-      assert.match(screenBody, /\) : si === 0 && inBulk && !\(abnormal && isLast\) \? \(\s*<span className=\{`whitespace-nowrap text-sm leading-tight \$\{cm\.textCls\}`\}>\s*<span aria-hidden="true">\{cm\.mark\} <\/span>\s*\{cm\.word\}\s*<\/span>\s*\) : null\}/)
+      // 2026-11-09 計画B3 の確認の反証の直し（固定し直し・意図は同じ）（中1）: 1段目はいつも来た・まだ（〔＋再測定〕を出す行はボタン）。保存の印に置き換えない
+      assert.match(screenBody, /\) : si === 0 && inBulk \? \(\s*<span className=\{`whitespace-nowrap text-sm leading-tight \$\{cm\.textCls\}`\}>\s*<span aria-hidden="true">\{cm\.mark\} <\/span>\s*\{cm\.word\}\s*<\/span>\s*\) : null\}/)
       assert.match(page, /return mealBandMark\(\[kindOf\(lt, mealState\[mealKeyOf\(lt\)\]\)\]\)/)
       assert.match(screenBody, /const mark = lunchRow \? mergeSaveMarks\(vitalMark, lunch\.markOf\(row\.residentId\)\) : vitalMark/)
       assert.match(page, /const showSource = source !== null && source !== '画面で入力'/)

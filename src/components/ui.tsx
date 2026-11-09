@@ -472,9 +472,12 @@ export function useToast(): { toast: ReactNode; show: (msg: string, undo?: () =>
     () => (
       // ライブリージョンは常設し、中身だけ差し替える（読み上げの取りこぼし防止）。
       // bottom-20 は下タブ（56px）を避ける位置。pointer-events-none で背面操作を妨げない。
-      // --toast-bottom は、下に別の部品（デイのバイタル・食事のテンキー）を出している画面だけが付ける（2026-11-09 計画B3 の反証 中2）。
-      // 付けない画面は今までどおり bottom-20（5rem）
-      <div className="pointer-events-none fixed inset-x-0 bottom-20 z-50 flex justify-center p-4" style={{ bottom: 'var(--toast-bottom, 5rem)' }}>
+      // --toast-top・--toast-bottom は、下に別の部品（デイのバイタル・食事のテンキー）を出している間だけ、その画面が付ける（知らせを
+      // 画面の上の方へ出す＝2026-11-09 計画B3 の反証 中2・確認の反証 軽1）。付けない画面は今までどおり bottom-20（5rem）
+      <div
+        className="pointer-events-none fixed inset-x-0 bottom-20 z-50 flex justify-center p-4"
+        style={{ top: 'var(--toast-top, auto)', bottom: 'var(--toast-bottom, 5rem)' }}
+      >
         <div
           role="status"
           aria-live="polite"
