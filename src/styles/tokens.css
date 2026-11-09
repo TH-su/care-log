@@ -384,3 +384,68 @@
     --cl-shade-hatch-line: #4d4d4d;
   }
 }
+
+/* ── デイの分類の色と一括の表の行の地（2026-11-09 計画B3）──────────
+   代表者の指示「全体的に色がなく、使って楽しい感じがないため、不自然でなく目立つ色を配色し、楽しいイメージを持たせて」
+   「１名ずつ行のバックの色を少し変えて変化を持たせて」。design/miro.md（白地に淡いティール・イエロー・コーラル・ローズの色面）の考え方を借りた。
+   分類: バイタル＝ティール・食事＝イエロー・活動＝コーラル・機能訓練＝ローズ。
+     --c-cat-<分類>-bg … 淡い色面（一括の表の見出しの帯）。帯の上の文字は --c-ink（ライト・ダークとも 10:1 以上）
+     --c-cat-<分類>    … 細い帯・印の色（見出しの帯の下の線・今日の画面の切り替えの印・カードの進み具合の札の下の線）。文字には使わない
+   状態の4色（来所前＝点線・在席＝ok・帰宅＝info・休み＝surface2）・危険（danger）・注意（warn）の代わりには使わない
+   （カードの地・欄の地・知らせの地に塗らない。意味は文字と記号で伝え、分類の色は飾りの手がかりに留める）。
+   --c-row-alt … 一括の表で1人おきに敷く行の地（寒色の灰。空の枠の注意の地 warn-bg＝琥珀とは色味で分ける）。もう1人は --c-bg のまま。
+   コントラスト（計算値・tests/daycare-colors.test.mjs が実値から検算する。最小の組）:
+     ライト 見出しの帯 × ink: 最小 13.53（ローズ）／行の地 × ink 14.86・ink2 7.17・link 8.14・ok 6.02・danger 6.67・warn 6.23
+     ダーク 見出しの帯 × ink: 最小 10.63（イエロー）／行の地 × ink 13.75・ink2 8.37・link 8.60・ok 8.65・danger 7.19・warn 8.79
+   ダークは :root[data-mode='dark']（設定で選んだ時）と prefers-color-scheme（OS 追従の時）の両方で定義する（摂取量の濃淡と同じ3か所）。
+   印刷は表示モードに関係なくライトの値（白い紙）。グラデーションは使わない（色面と線だけ） */
+:root {
+  --c-row-alt: #e6ecf3;
+  --c-cat-vitals-bg: #cdefea;
+  --c-cat-vitals: #0e8a80;
+  --c-cat-meals-bg: #fff3a6;
+  --c-cat-meals: #b08600;
+  --c-cat-activity-bg: #ffdccf;
+  --c-cat-activity: #d9573b;
+  --c-cat-training-bg: #f6d9ee;
+  --c-cat-training: #b84d96;
+}
+:root[data-mode='dark'] {
+  --c-row-alt: #1a222b;
+  --c-cat-vitals-bg: #123a38;
+  --c-cat-vitals: #4fd1c5;
+  --c-cat-meals-bg: #36360f;
+  --c-cat-meals: #e8c547;
+  --c-cat-activity-bg: #43261a;
+  --c-cat-activity: #f28e74;
+  --c-cat-training-bg: #38203f;
+  --c-cat-training: #e68bcb;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-mode='light']) {
+    --c-row-alt: #1a222b;
+    --c-cat-vitals-bg: #123a38;
+    --c-cat-vitals: #4fd1c5;
+    --c-cat-meals-bg: #36360f;
+    --c-cat-meals: #e8c547;
+    --c-cat-activity-bg: #43261a;
+    --c-cat-activity: #f28e74;
+    --c-cat-training-bg: #38203f;
+    --c-cat-training: #e68bcb;
+  }
+}
+@media print {
+  :root,
+  :root[data-mode],
+  :root:not([data-mode='light']) {
+    --c-row-alt: #e6ecf3;
+    --c-cat-vitals-bg: #cdefea;
+    --c-cat-vitals: #0e8a80;
+    --c-cat-meals-bg: #fff3a6;
+    --c-cat-meals: #b08600;
+    --c-cat-activity-bg: #ffdccf;
+    --c-cat-activity: #d9573b;
+    --c-cat-training-bg: #f6d9ee;
+    --c-cat-training: #b84d96;
+  }
+}

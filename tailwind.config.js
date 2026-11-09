@@ -39,6 +39,16 @@ export default {
       info: 'var(--c-info)',
       'info-bg': 'var(--c-info-bg)',
       focus: 'var(--c-focus)',
+      // デイの一括の表の1人おきの行の地と、分類の色（2026-11-09 計画B3・src/styles/tokens.css の末尾）
+      'row-alt': 'var(--c-row-alt)',
+      'cat-vitals': 'var(--c-cat-vitals)',
+      'cat-vitals-bg': 'var(--c-cat-vitals-bg)',
+      'cat-meals': 'var(--c-cat-meals)',
+      'cat-meals-bg': 'var(--c-cat-meals-bg)',
+      'cat-activity': 'var(--c-cat-activity)',
+      'cat-activity-bg': 'var(--c-cat-activity-bg)',
+      'cat-training': 'var(--c-cat-training)',
+      'cat-training-bg': 'var(--c-cat-training-bg)',
     },
     fontSize: {
       '2xs': ['var(--fs-2xs)', { lineHeight: 'var(--lh-tight)' }],

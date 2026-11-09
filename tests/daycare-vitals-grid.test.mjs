@@ -61,7 +61,7 @@ if (DC === null) {
   })
 
   describe('静的検査（表の形）', () => {
-    const page = code('../src/pages/DaycareVitalsPage.tsx')
+    const page = code('../src/pages/DaycareVitalsMealsPage.tsx')
     // 2026-11-09 計画B2（固定し直し・代表者の指示で列の並びを変えた）: 列は 氏名｜血圧（上 / 下）｜P｜SpO2｜KT｜再測定｜状態（daycare-vitals-blank.test.mjs）
     it('1行1人の表（横スクロールは枠の中だけ・氏名の列は左に残す・列は 氏名｜血圧（上 / 下）｜P｜SpO2｜KT｜再測定｜状態）', () => {
       assert.match(page, /<table className="w-full min-w-max border-collapse text-base">/)
@@ -70,8 +70,9 @@ if (DC === null) {
       assert.match(page, /tabIndex=\{tableScrolls \|\| tableScrollsY \? 0 : undefined\}\s+className="dc-table-fit relative isolate overflow-auto"/)
       // テンキーが開いている間は、その高さも下に貼り付く部品として引く
       assert.match(page, /useTableFit\(tableBox, active !== null \? kpHeight : 0\)/)
-      assert.match(page, /<th key=\{f\} scope="col" className="sticky top-0 z-20 w-24 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">/)
-      assert.equal((page.match(/<th scope="col" className="sticky top-0 z-20 w-28 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">/g) ?? []).length, 2, '再測定・状態の見出しも上に残す')
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: バイタルの見出しの地は分類の色の帯（帯の上の文字は text-ink）。再測定と状態は1つの列に詰めた（iPad 横で横に送らずに収める）
+      assert.match(page, /<th key=\{f\} scope="col" className=\{`sticky top-0 z-20 w-24 \$\{DAYCARE_CATEGORY_CLS\.vitals\.band\} px-2 py-2 text-sm font-bold text-ink`\}>/)
+      assert.equal((page.match(/<th scope="col" className="sticky top-0 z-20 bg-surface2 px-1 py-2 text-sm font-bold text-ink2">\s*状態<span className="sr-only">・再測定<\/span>/g) ?? []).length, 1, '再測定・状態の見出しも上に残す')
       // 入れている欄は枠の中に見せる（テンキーで枠が縮んでも隠れない）
       assert.match(page, /data-dc-active=\{isActive \? '' : undefined\}/)
       assert.match(page, /if \(active === null \|\| tableBox === null \|\| kpHeight === 0\) return\s+const cell = tableBox\.querySelector<HTMLElement>\('\[data-dc-active\]'\)/)
@@ -87,11 +88,13 @@ if (DC === null) {
       // 氏名の列の幅は札の長さで広げない（7rem と画面幅の35% の小さい方・中で折り返す＝#45 の確認の反証 重）
       assert.match(page, /<div className="dc-vital-name">/)
       assert.match(read('../src/index.css'), /\.dc-vital-name \{\s*width: min\(7rem, 35vw\);\s*(\/\*[\s\S]*?\*\/\s*)?min-width: 100%;\s*overflow-wrap: anywhere;/)
-      assert.match(page, /<th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">/)
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 氏名の列（sticky）の地は行と同じ1人ずつ交互の地
+      assert.match(page, /<th scope="row" className=\{`sticky left-0 z-10 \$\{rowBg\} px-2 py-1 text-left font-normal`\}>/)
       assert.match(page, /\{DC_BULK_VITAL_ORDER\.filter\(\(f\) => f !== 'sys_bp' && f !== 'dia_bp'\)\.map\(\(f\) => \(\s*<th key=\{f\} scope="col"/)
       const head = page.slice(page.indexOf('<thead>'), page.indexOf('</thead>'))
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 再測定と状態は1つの列（見出しは「状態」・読み上げは「状態・再測定」）。その右に昼食の3列
       assert.ok(
-        head.indexOf('氏名') < head.indexOf('血圧') && head.indexOf('血圧') < head.indexOf('DC_BULK_VITAL_ORDER') && head.indexOf('DC_BULK_VITAL_ORDER') < head.indexOf('再測定') && head.indexOf('再測定') < head.indexOf('状態'),
+        head.indexOf('氏名') < head.indexOf('血圧') && head.indexOf('血圧') < head.indexOf('DC_BULK_VITAL_ORDER') && head.indexOf('DC_BULK_VITAL_ORDER') < head.indexOf('状態') && head.indexOf('状態') < head.indexOf('再測定') && head.indexOf('再測定') < head.indexOf('主食'),
       )
       // 表が枠より広い時だけ手がかりを出す（定時バイタルと同じ）
       assert.match(page, /const check = \(\) => \{\s*setTableScrolls\(el\.scrollWidth > el\.clientWidth \+ 1\)\s*setTableScrollsY\(el\.scrollHeight > el\.clientHeight \+ 1\)\s*setTableBoxWidth\(el\.clientWidth\)/)
@@ -105,9 +108,10 @@ if (DC === null) {
       // 2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 氏名と札の行の間を詰めた（leading-tight）
       // 2026-11-09 計画B2（固定し直し・意図は同じ）: 空の欄がある行は小さな印（▲未）。反証 中1 で氏名の横から札の行の頭へ移した
       // （iPad 縦で氏名の横の印が折り返して行が伸びたため）
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 氏名は1人の画面へのリンク（来た・まだの文字もリンクの中＝それまでの食事一括と同じ）。基準の札はその下のまま
       assert.match(
         page,
-        /<span className="block text-base font-bold leading-tight text-ink">\{nameOf\(row\.residentId\)\}<\/span>\s*(\{\}\s*)?<span className="block text-sm leading-tight text-ink2">\s*\{\(blankCount \?\? 0\) > 0 \? <DaycareRowBlankMark lead \/> : null\}\s*\{basis\}\s*<\/span>/,
+        /<span className="text-base font-bold leading-tight text-link">\s*\{nameOf\(row\.residentId\)\}\s*<span className="sr-only">さんの1日の記録を開く<\/span>\s*<\/span>[\s\S]{0,600}<\/Link>\s*(\{\}\s*)?<span className="block text-sm leading-tight text-ink2">\s*\{\(blankCount \?\? 0\) > 0 \? <DaycareRowBlankMark lead \/> : null\}\s*\{basis\}\s*<\/span>/,
       )
       assert.match(page, /\{abnormal && isLast \? \(\s*<button[\s\S]{0,200}onClick=\{\(\) => addRecheck\(row, slot\)\}/)
       assert.match(page, /＋再測定/)
@@ -125,17 +129,22 @@ if (DC === null) {
       assert.match(page, /\$\{pv \? `、前回 \$\{fmtVal\(f, pv\.value\)\}` : ''\}\$\{local \? '、未送信' : ''\}/)
     })
     it('行の下の詳しい文は表の幅を広げない（幅0＋最小100% の箱・枠の幅で折り返して左に残す＝定時バイタルの F01 と同じ・#45 の反証 重1）', () => {
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 列は10（昼食の3列を足した）。同じ行に昼食・水分の知らせも出す（縦に並べる space-y-1）
       assert.match(
         page,
-        /<td colSpan=\{DAYCARE_VITAL_FIELDS\.length \+ 3\} className="p-0">\s*<div className="w-0 min-w-full">\s*<div className="sticky left-0 px-2 pb-2" style=\{\{ maxWidth: tableBoxWidth > 0 \? tableBoxWidth : undefined \}\}>\s*<SlotStatus /,
+        /<td colSpan=\{DAYCARE_VITAL_FIELDS\.length \+ 5\} className="p-0">\s*<div className="w-0 min-w-full">\s*<div className="sticky left-0 space-y-1 px-2 pb-2" style=\{\{ maxWidth: tableBoxWidth > 0 \? tableBoxWidth : undefined \}\}>\s*\{detail \? \(\s*<SlotStatus /,
       )
     })
     it('送信中・保存済みも読み上げる（role="status"）・保存済みでも送信待ちが動けば詳しい文を出す（#45 の反証 軽3・軽4）', () => {
-      assert.match(page, /<span role="status" className=\{`text-sm font-bold \$\{mark\.tone/)
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 状態の列は〔＋再測定〕の下に印を並べるので、行の高さを増やさないよう leading-tight。
+      // 列の幅を中身で決めるので折り返さない（whitespace-nowrap）
+      assert.match(page, /<span role="status" className=\{`whitespace-nowrap text-sm font-bold leading-tight \$\{mark\.tone/)
       assert.match(page, /const detail = shown\?\.kind === 'saving' \? false : \(shown !== undefined && shown\.kind !== 'saved'\) \|\| pend !== null/)
     })
     it('状態の列は短い印（dcVitalSlotMark）・詳しい文と解き方は行の下（SlotStatus のまま）', () => {
-      assert.match(page, /const mark = dcVitalSlotMark\(shown\?\.kind, pend\?\.state \?\? null\)/)
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 1回目の行はバイタルの印と昼食の印のうち手当ての要る方（mergeSaveMarks）。再測定の行はその回のバイタルの印だけ
+      assert.match(page, /const vitalMark = dcVitalSlotMark\(shown\?\.kind, pend\?\.state \?\? null\)/)
+      assert.match(page, /const mark = lunchRow \? mergeSaveMarks\(vitalMark, lunch\.markOf\(row\.residentId\)\) : vitalMark/)
       assert.match(page, /<SlotStatus st=\{shown\} pend=\{pend\?\.state \?\? null\} onTake=\{\(c\) => void resolveTake\(slot, c\)\} onMine=\{\(c\) => void resolveMine\(slot, c\)\} \/>/)
       assert.match(page, /conflicts: withCurrentMine\(slot, pend\.conflicts\)/)
       assert.match(page, /conflicts: withCurrentMine\(slot, st\.conflicts\)/)
@@ -143,7 +152,7 @@ if (DC === null) {
   })
 
   describe('静的検査（テンキーと、変えていない動き）', () => {
-    const page = code('../src/pages/DaycareVitalsPage.tsx')
+    const page = code('../src/pages/DaycareVitalsMealsPage.tsx')
     it('テンキーはどの幅でも画面の下（右に常に出す置き方は無い）・数字3列（1 2 3 が上）＋右にボタン', () => {
       assert.match(page, /<section ref=\{setKpBox\} aria-label="テンキー" className="dc-keypad fixed inset-x-0 bottom-14 z-40 border-t border-border-strong bg-surface p-3 lg:bottom-0">/)
       // 文字を大きくしても画面の上へはみ出さない（収まらない分はテンキーの中でスクロール）

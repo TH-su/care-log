@@ -292,11 +292,22 @@ export function bulkBlankSummary(blanks: readonly number[]): BlankSummary {
   return { people, fields }
 }
 
-/** 切り替えの key（DaycareNav の項目） */
-export type DaycareNavPendingKey = 'vitals' | 'meals' | 'activity' | 'training'
+/**
+ * 切り替えの key（DaycareNav の項目）。2026-11-09 計画B3: バイタル一括と食事一括を1つの画面（バイタル・食事＝vitalsMeals）にした
+ */
+export type DaycareNavPendingKey = 'vitalsMeals' | 'activity' | 'training'
 export type DaycareNavPending = Partial<Record<DaycareNavPendingKey, number>>
 
-const NAV_KEYS: readonly DaycareNavPendingKey[] = ['vitals', 'meals', 'activity', 'training']
+const NAV_KEYS: readonly DaycareNavPendingKey[] = ['vitalsMeals', 'activity', 'training']
+
+/**
+ * バイタル・食事の画面の1人の空の欄の数（2026-11-09 計画B3: 1人7欄＝バイタルの最初の回の5欄＋昼食の主食・副食）。
+ * 画面の上の「未入力 n名（m欄）」と今日の画面の切り替えの数で同じ数え方にする。どちらかを読めない時（null）は数えない（null を返す）
+ */
+export function vitalsMealsBlankFields(vitalBlank: number | null, lunchBlank: number | null): number | null {
+  if (vitalBlank === null || lunchBlank === null) return null
+  return vitalBlank + lunchBlank
+}
 
 /**
  * 今日の画面の切り替えに添える未入力の数（2026-11-09 計画B2: 一括の画面の n と同じ数え方＝bulkBlankSummary の people）。
@@ -317,6 +328,64 @@ export function daycareNavPending(blanks: Readonly<Record<DaycareNavPendingKey, 
 export function navPendingOf(pending: DaycareNavPending | undefined, key: string): number | null {
   const n = pending?.[key as DaycareNavPendingKey]
   return typeof n === 'number' && Number.isInteger(n) && n > 0 ? n : null
+}
+
+// ── 2026-11-09 計画B3: 一括の表の行の地（1人ずつ交互）・分類の色・状態の列の印 ──
+
+/**
+ * 一括の表の行の地（代表者の指示「１名ずつ行のバックの色を少し変えて変化を持たせて」）。index は表の中の何人目か（0 始まり。
+ * その方の再測定の行・知らせの行にも同じ index を渡す）。行（tr）と氏名の列（sticky の th）の両方にこの地を付けて色をそろえる
+ * （氏名の列は下を流れる欄を透かさないよう、どちらの方も地を塗る）。1人おきの地は寒色の灰（--c-row-alt）で、空の枠の注意の地
+ * （warn-bg・琥珀）とは色味で分ける
+ */
+export function daycareRowTone(index: number): 'bg-bg' | 'bg-row-alt' {
+  return Number.isInteger(index) && index % 2 === 1 ? 'bg-row-alt' : 'bg-bg'
+}
+
+/** 分類（tokens.css の --c-cat-*）: バイタル＝ティール・食事＝イエロー・活動＝コーラル・機能訓練＝ローズ */
+export type DaycareCategory = 'vitals' | 'meals' | 'activity' | 'training'
+
+/**
+ * 分類の色のクラス。band＝一括の表の見出しの帯（淡い色面＋下の細い線。帯の上の文字は text-ink）・line＝細い線だけ（カードの進み具合の札）・
+ * dot＝今日の画面の切り替えの印（縦の短い棒）。状態の4色・危険・注意の代わりには使わない（意味は文字と記号で伝える）
+ */
+export const DAYCARE_CATEGORY_CLS: Record<DaycareCategory, { band: string; line: string; dot: string }> = {
+  vitals: { band: 'bg-cat-vitals-bg dc-cat-line-vitals', line: 'dc-cat-line-vitals', dot: 'bg-cat-vitals' },
+  meals: { band: 'bg-cat-meals-bg dc-cat-line-meals', line: 'dc-cat-line-meals', dot: 'bg-cat-meals' },
+  activity: { band: 'bg-cat-activity-bg dc-cat-line-activity', line: 'dc-cat-line-activity', dot: 'bg-cat-activity' },
+  training: { band: 'bg-cat-training-bg dc-cat-line-training', line: 'dc-cat-line-training', dot: 'bg-cat-training' },
+}
+
+/** 進み具合の札の分類（入浴は4つの分類に入らないので色を付けない） */
+export const PROGRESS_CATEGORY: Record<ProgressKey, DaycareCategory | null> = {
+  vitals: 'vitals',
+  lunch: 'meals',
+  activity: 'activity',
+  training: 'training',
+  bath: null,
+}
+
+/** 進み具合の札の下に付ける分類の色の細い線のクラス（分類の無い入浴は ''） */
+export function progressCategoryLine(key: ProgressKey): string {
+  const c = PROGRESS_CATEGORY[key]
+  return c === null ? '' : DAYCARE_CATEGORY_CLS[c].line
+}
+
+/** 保存の印の急ぎの順（dcVitalSlotMark・mealBandMark と同じ順: 要確認 → 送信中 → 未送信 → 保存済み） */
+const SAVE_MARK_RANK: Record<string, number> = { 要確認: 4, 送信中: 3, 未送信: 2, 保存済み: 1 }
+
+/**
+ * バイタル・食事の画面の「状態」の列の印（2026-11-09 計画B3）: バイタルの回の印（dcVitalSlotMark）と昼食の印（mealBandMark）のうち、
+ * 手当ての要る方を1つ出す（同じ急ぎなら先に渡した方）。詳しい文は行の下に出す（バイタル＝その回の知らせ・昼食＝「昼食:」で始まる知らせ）。
+ * どれも無ければ null
+ */
+export function mergeSaveMarks<T extends { text: string }>(...marks: readonly (T | null | undefined)[]): T | null {
+  let best: T | null = null
+  for (const m of marks) {
+    if (m === null || m === undefined) continue
+    if (best === null || (SAVE_MARK_RANK[m.text] ?? 0) > (SAVE_MARK_RANK[best.text] ?? 0)) best = m
+  }
+  return best
 }
 
 // ── 各画面の「入力済み」 ──

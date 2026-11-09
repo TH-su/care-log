@@ -1,12 +1,14 @@
-// デイ せせらぎ 今日の画面の改善 2回目: 昼食をまとめて入れる画面（/record/daycare/meals・業務日は ?day=）。
-// 2026-10-24 代表承認（決定 6・親の回答 1〜2）。2026-10-28（代表者の依頼・親の回答 A1〜A9）に「昼食だけの1行1人の表」にした。
+// デイ せせらぎ 計画B3（2026-11-09 代表者の指示「バイタル一括と食事一括画面は、それぞれだと余白が多く無駄で見づらいため、一つの画面に統合せよ」）:
+// バイタル・食事の画面（DaycareVitalsMealsPage・/record/daycare/vitals-meals）の昼食と水分の列（主食｜副食｜水分（cc））。
+// それまでの食事一括の画面（/record/daycare/meals）の読み込み・保存・知らせを、そのままフック useDaycareLunchColumns にした
+// （処理は変えない。業務日・入力解禁・名簿・〔最新に更新〕は画面から受け取る。日付の切り替えと表の枠・見出しの段は画面が持つ）。
+// 食事一括の画面の来歴: 今日の画面の改善 2回目。2026-10-24 代表承認（決定 6・親の回答 1〜2）。2026-10-28（代表者の依頼・親の回答 A1〜A9）に
+// 「昼食だけの1行1人の表」にした。
 //
 // ・並べるのは、一括の画面と同じ方（予定の方のうち休み・入院中を除く全員と、予定外で来た方＝mealBulkRows）。到着の前でも入れられる
 //   （2026-10-24 代表者の決定 §9.4 の4。それまでは在席・帰宅だけ）。今日の一覧の並び（五十音）のまま1人1行
-// ・表はバイタル一括・活動一括と同じ作り（列は 氏名｜主食｜副食｜水分（cc）。枠の中で縦横に送り、見出しの行は上・氏名の列は左に残す）。
-//   主食・副食は端末の選択肢（—・0〜10・拒食）で、選ぶとすぐ保存する。氏名の列に保存の印（✓ 保存済み・⚠ 未送信・▲ 要確認）を出す
-//   （care-log の食事一括と同じ操作感。MealsGridPage そのものは変えない）。表の上に「未入力 ○名（○欄）」（2026-11-09 計画B2: 到着を問わず
-//   主食・副食の空の欄を数える・拒食は入力済み）。空の選択肢（—（未入力））は注意の地＋太い点線で目立たせる
+// ・主食・副食は端末の選択肢（未入力・0〜10・拒食）で、選ぶとすぐ保存する。保存の印（✓ 保存済み・⚠ 未送信・▲ 要確認）は画面の「状態」の列に、
+//   バイタルの印と合わせて出す（2026-11-09 計画B3）。空の選択肢（未入力）は注意の地＋太い点線で目立たせる（2026-11-09 計画B2）
 // ・おやつ（meals の snack）は2026-10-28にこの画面から外した（記録・1人の画面・care-log のおやつはそのまま）
 // ・決まりはデイの1人の画面（DaycarePersonPage）の昼食と同じ:
 //   - 保存は既存の saveMealEdits（meals の lunch＝care-log の昼食と同じ行）。基準は読んだ時のサーバーの値。
@@ -19,21 +21,19 @@
 //   〔元に戻す〕は softDeleteFluid（1人の画面の水分と同じ記録・同じ決まり）。表示の単位はこの画面だけ「cc」（記録は ml の列・換算しない）。
 //   消す・直すは1人の画面の一覧で行う（この画面には一覧を出さない）
 // ・取り込みとの関係は既存のまま（画面で入れた行は edited_by が付き、取り込みが上書きしない）。取り込みの印は氏名の列に小さく出す
-// ・端末に業務データを残さない（localStorage を使わない。日付は URL の ?day= で、再読み込みでも同じ日に戻る）
+// ・端末に業務データを残さない（localStorage を使わない。日付は画面の URL の ?day= で、再読み込みでも同じ日に戻る）
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import {
   DbError,
   FORBIDDEN_REASON,
   OUTDATED_REASON,
   discardPendingRow,
-  fetchAllResidents,
   fetchDaycareAttendance,
   fetchDaycareDay,
   fetchDaycareIntake,
   fetchDaycarePlan,
-  getKindInputGate,
   insertFluid,
   isQueuePersisted,
   isSelfWrite,
@@ -47,12 +47,9 @@ import {
   subscribeDaycareChanges,
 } from '../lib/db'
 import type { CellConflict, CellEditInput, DaycareMealRow, MealCellField, MealTarget } from '../lib/db'
-import { RecorderBar } from '../components/RecorderBar'
-import { DaycareRowBlankMark, DaycareUnfilledCount } from '../components/DaycareUnfilledCount'
-import { ErrorBlock, LoadingBlock, useToast } from '../components/ui'
-import { writeDaycareHandoffFor } from '../lib/daycareHandoff'
+import { useToast } from '../components/ui'
 import { buildDaycareBoard, nowHm } from '../lib/daycare'
-import { DAYCARE_BLANK_CELL_CLS, bulkBlankSummary, daycareCameMark, lunchBlankFields, lunchShownWith } from '../lib/daycareProgress'
+import { DAYCARE_BLANK_CELL_CLS, lunchBlankFields, lunchShownWith } from '../lib/daycareProgress'
 import {
   LUNCH_SELECT_OPTIONS,
   createFluidInputs,
@@ -60,18 +57,13 @@ import {
   lunchSelectPatch,
   lunchSelectValue,
   mealBandMark,
-  mealBulkPath,
   mealBulkRows,
   mealSourceLabel,
-  personPath,
-  readPersonDay,
   settleQueuedFluid,
 } from '../lib/daycarePerson'
 import type { LunchAmountField, MealSaveKind } from '../lib/daycarePerson'
-import { addDays, fmtDayLabel, todayIso } from '../lib/format'
-import { useTableFit } from '../lib/useTableFit'
-import type { DaycareAttendance, DaycareDay, DaycarePlanRow, DaycarePlanSource, FluidIntake, Meal, Resident, Staff } from '../lib/types'
-import { DaycareNav } from './DaycarePage'
+import { todayIso } from '../lib/format'
+import type { DaycareAttendance, DaycareDay, DaycarePlanRow, DaycarePlanSource, FluidIntake, Meal, Resident } from '../lib/types'
 
 const ERR_LOAD = 'デイの記録を読み込めませんでした。通信状態を確認して、再試行してください。'
 const MSG_NO_RECORDER = '記録者が選ばれていません。上の「記録者」で選んでから入れてください。'
@@ -82,7 +74,7 @@ const MSG_GATE_UNKNOWN =
   'デイの記録を使える期間かどうかを確認できませんでした（通信エラー）。電波状態を確認して、再試行してください。記録の閲覧はこのままできます。'
 const MSG_MISSING = 'デイの記録はまだ使えません（サーバー側の設定待ち）。管理者に連絡してください。'
 
-interface MealsData {
+export interface MealsData {
   day: string
   planRows: DaycarePlanRow[]
   planSource: DaycarePlanSource
@@ -120,23 +112,42 @@ const personKeyOf = (residentId: number, day: string) => `${residentId}:${day}`
 const fmtCc = (n: number) => `${n.toLocaleString('ja-JP')}cc`
 const AMOUNT_WORD: Record<LunchAmountField, string> = { main_amount: '主食', side_amount: '副食' }
 
-
-export interface DaycareMealsPageProps {
-  staff?: Staff[] | null
-  actorId?: number | null
+/** 画面から受け取るもの（業務日・今日・記録者・名簿・入力解禁・〔最新に更新〕の回数）。それまでの食事一括の画面が自前で持っていたもの */
+export interface DaycareLunchColumnsInput {
+  /** 業務日（画面の URL の ?day=） */
+  day: string
+  today: string
+  actorId: number | null
+  residents: Resident[]
+  /** 入力解禁（input_enabled_daycare）。画面が getKindInputGate('daycare') で読んだもの */
+  gate: { value: boolean; observed: boolean; forbidden?: true; outdated?: true } | null
+  /** 〔最新に更新〕で増える（読み直す） */
+  reloadKey: number
 }
 
-export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareMealsPageProps = {}) {
-  const [search] = useSearchParams()
-  const navigate = useNavigate()
-  const [today, setToday] = useState(todayIso())
-  const day = readPersonDay(search.get('day'), today)
+/** 画面に返すもの（行ごとの列・知らせ・空の欄の数と、読み込みの状態） */
+export interface DaycareLunchColumns {
+  data: MealsData | null
+  loading: boolean
+  error: string | null
+  /** 1人の空の欄の数（主食・副食の2欄。拒食は入力済み・水分は数えない） */
+  blankOf: (residentId: number) => number
+  /** 状態の列に出す昼食の保存の印（無ければ null） */
+  markOf: (residentId: number) => { mark: string; text: string; tone: 'ok' | 'info' | 'warn' } | null
+  /** 氏名の列に足す小さな文（外出・入院の記録、取り込みの印）。無ければ null */
+  nameNotes: (residentId: number) => ReactNode
+  /** 主食｜副食｜水分（cc）の3つの欄（td） */
+  cells: (residentId: number) => ReactNode
+  /** 行の下の知らせ（昼食の送信待ち・失敗・止まり・食い違いと水分の知らせ）。無ければ null */
+  notes: (residentId: number) => ReactNode
+  /** 昼食の〔元に戻す〕・水分の〔元に戻す〕の知らせ（画面の最後に置く） */
+  toast: ReactNode
+}
+
+export function useDaycareLunchColumns({ day, today, actorId, residents, gate, reloadKey }: DaycareLunchColumnsInput): DaycareLunchColumns {
   const [data, setData] = useState<MealsData | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-  const [reloadKey, setReloadKey] = useState(0)
-  const [residents, setResidents] = useState<Resident[]>([])
-  const [gate, setGate] = useState<{ value: boolean; observed: boolean; forbidden?: true; outdated?: true } | null>(null)
   const [mealState, setMealState] = useState<Record<string, SaveState>>({})
   /** 順番待ちの保存（人・日・枠ごと・押した順）。送り終わるまで画面に重ねて出す */
   const [waiting, setWaiting] = useState<Record<string, { id: number; values: Partial<Record<MealField, number | string | null>> }[]>>({})
@@ -178,25 +189,6 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
     dataRef.current = next
     setData(next)
   }, [])
-
-  useEffect(() => {
-    const t = window.setInterval(() => setToday(todayIso()), 60_000)
-    return () => window.clearInterval(t)
-  }, [])
-
-  useEffect(() => {
-    let alive = true
-    setGate(null)
-    getKindInputGate('daycare')
-      .then((g) => alive && setGate(g))
-      .catch(() => alive && setGate({ value: false, observed: false }))
-    fetchAllResidents()
-      .then((all) => alive && setResidents(all))
-      .catch(() => {})
-    return () => {
-      alive = false
-    }
-  }, [reloadKey])
 
   const load = useCallback(async (target: string, quiet: boolean) => {
     const gen = ++genRef.current
@@ -304,35 +296,6 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
       if (reloadTimer.current !== null) window.clearTimeout(reloadTimer.current)
     }
   }, [scheduleReload])
-
-  // ── 表の枠（バイタル一括・活動一括と同じ）。表が枠より広い（横にスクロールできる）時だけ手がかりを出す ──
-  const [tableBox, setTableBox] = useState<HTMLDivElement | null>(null)
-  const [tableScrolls, setTableScrolls] = useState(false)
-  /** 表の枠の中で縦に送れるか（送れる時は枠をキーボードで選べるようにする） */
-  const [tableScrollsY, setTableScrollsY] = useState(false)
-  /** 表の枠の幅（行の下の知らせを、この幅で折り返して左に残すため） */
-  const [tableBoxWidth, setTableBoxWidth] = useState(0)
-  useEffect(() => {
-    const el = tableBox
-    if (!el) return
-    const check = () => {
-      setTableScrolls(el.scrollWidth > el.clientWidth + 1)
-      setTableScrollsY(el.scrollHeight > el.clientHeight + 1)
-      setTableBoxWidth(el.clientWidth)
-    }
-    check()
-    if (typeof ResizeObserver === 'undefined') {
-      window.addEventListener('resize', check)
-      return () => window.removeEventListener('resize', check)
-    }
-    // 枠（画面幅・文字の大きさ）と表（行の増減）の両方の大きさの変化で測り直す
-    const ro = new ResizeObserver(check)
-    ro.observe(el)
-    if (el.firstElementChild) ro.observe(el.firstElementChild)
-    return () => ro.disconnect()
-  }, [tableBox])
-  // 枠の高さの上限（画面の高さ − 上と下の部品）を実測して書き戻す（見出しの行を枠の上に残す・2026-10-28）
-  useTableFit(tableBox)
 
   const board = useMemo(
     () => (data === null ? null : buildDaycareBoard({ planRows: data.planRows, source: data.planSource, residents, attendance: data.attendance })),
@@ -728,334 +691,164 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
     })
   }
 
-  const goDay = (d: string) => navigate(mealBulkPath(d, today), { replace: true })
-
-  // 上の段・見出し・説明は詰める（2026-11-09 代表者の指示「一括入力の画面で、もっと多くの行が出るように」）
-  const header = (
-    <div className="space-y-2">
-      <div className="flex flex-wrap items-center justify-between gap-gap">
-        <DaycareNav current="meals" handoff={() => writeDaycareHandoffFor({ rows: board?.rows ?? null, residents, boardDay: data?.day ?? null, today })} />
-        <RecorderBar actorId={actorId} staff={staff ?? null} />
-      </div>
-      <div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">
-        <button
-          type="button"
-          onClick={() => goDay(addDays(day, -1))}
-          className="min-h-tap min-w-tap rounded border border-border-strong bg-surface px-3 text-lg text-ink"
-          aria-label="前の日へ"
-        >
-          <span aria-hidden="true">‹</span>
-        </button>
-        <span className="min-w-28 text-center text-lg font-bold text-ink" aria-live="polite">
-          {fmtDayLabel(day)}
-          {day === today ? <span className="ml-2 text-base text-ok">今日</span> : null}
-        </span>
-        <button
-          type="button"
-          onClick={() => goDay(addDays(day, 1) > today ? day : addDays(day, 1))}
-          disabled={day >= today}
-          className="min-h-tap min-w-tap rounded border border-border-strong bg-surface px-3 text-lg text-ink disabled:text-ink3"
-          aria-label="次の日へ"
-        >
-          <span aria-hidden="true">›</span>
-        </button>
-        {day !== today ? (
-          <button type="button" onClick={() => goDay(today)} className="min-h-tap rounded border border-border-strong bg-surface px-3 text-sm text-ink">
-            今日を開く
-          </button>
-        ) : null}
-        <button
-          type="button"
-          onClick={() => setReloadKey((n) => n + 1)}
-          className="min-h-tap rounded border border-border-strong bg-surface px-3 text-sm text-ink"
-        >
-          最新に更新
-        </button>
-      </div>
-      {missing ? (
-        <p role="alert" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">
-          <span aria-hidden="true">▲ </span>
-          {MSG_MISSING}
-        </p>
-      ) : gate !== null && !(gate.observed && gate.value === true) ? (
-        <p role="status" className="rounded-lg border border-warn bg-warn-bg px-3 py-1.5 text-base text-ink">
-          <span aria-hidden="true">▲ </span>
-          {gate.forbidden
-            ? FORBIDDEN_REASON
-            : gate.outdated
-              ? OUTDATED_REASON
-              : gate.observed
-                ? `${kindBlockedMessage('daycare')}。記録の閲覧はできます。`
-                : MSG_GATE_UNKNOWN}
-        </p>
-      ) : null}
-    </div>
-  )
-
-  if ((loading && data === null) || (data !== null && data.day !== day && error === null)) {
-    return (
-      <div className="mx-auto w-full max-w-6xl space-y-2">
-        {header}
-        <LoadingBlock label="その日の昼食を読み込んでいます…" />
-      </div>
-    )
-  }
-  if (error !== null && (data === null || data.day !== day)) {
-    return (
-      <div className="mx-auto w-full max-w-6xl space-y-2">
-        {header}
-        <ErrorBlock message={error} onRetry={() => setReloadKey((n) => n + 1)} />
-      </div>
-    )
-  }
-  if (data === null) return null
-
+  // ── 画面に返すもの（2026-11-09 計画B3: それまでの食事一括の画面の表の行の中身。見出しの段・表の枠・氏名の列は画面が持つ） ──
   // 未入力の数は画面に出している値（送信待ち・順番待ちを重ねた値）で数える。2026-11-09 計画B2: 到着を問わず、1人2欄（主食・副食。
-  // 拒食はどちらも入力済み・水分は数えない）の空の欄を数える（一括の4画面で同じ bulkBlankSummary）
-  const blankOf = new Map<number, number>(came.map((row) => [row.residentId, lunchBlankFields(mealShownFor(targetOf(row.residentId)))]))
-  const counts = bulkBlankSummary([...blankOf.values()])
+  // 拒食はどちらも入力済み・水分は数えない）の空の欄を数える（画面がバイタルの5欄と合わせて bulkBlankSummary に渡す）
+  const blankOf = (rid: number) => lunchBlankFields(mealShownFor(targetOf(rid)))
   const selectCls = 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-2 text-lg text-ink disabled:text-ink3'
-  // 空の選択肢（—（未入力））の見た目（2026-11-09 計画B2）。枠と地は selectCls と排他（重ねない）。「未入力」の字は選択肢の文字で出る
+  // 空の選択肢（未入力）の見た目（2026-11-09 計画B2）。枠と地は selectCls と排他（重ねない）。「未入力」の字は選択肢の文字で出る
   const selectBlankCls = `min-h-tap min-w-tap rounded ${DAYCARE_BLANK_CELL_CLS} px-2 text-lg text-ink disabled:text-ink3`
-
-  return (
-    <div className="mx-auto w-full max-w-6xl space-y-2">
-      {header}
-
-      <section aria-labelledby="h-meals" className="min-w-0 space-y-2">
-        {/* 見出し・未入力の数・予定の人数を1段に並べる（2026-11-09 代表者の指示「見出し・説明文を詰める」。幅が足りない時は折り返す） */}
-        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
-          <h2 id="h-meals" className="text-lg font-bold leading-tight text-ink">
-            昼食
-          </h2>
-          {came.length > 0 ? (
-            // 未入力の数（到着を問わず主食・副食の空の欄を数える＝2026-11-09 計画B2・拒食は入力済み・水分は数えない）。色だけに頼らず記号と文字を併記。
-            // 2026-11-09 計画B: 一括の4画面で同じ部品（DaycareUnfilledCount）にした
-            <DaycareUnfilledCount counts={counts} />
-          ) : null}
-          <p className="ml-auto text-sm text-ink2">
-            予定の方 <span className="font-num font-bold text-ink">{came.length}</span>人
-          </p>
-        </div>
-        <p className="text-sm leading-snug text-ink2">
-          選ぶとすぐ保存します。昼食は care-log の食事の昼食と同じ記録です。水分は数を入れて改行キー（または〔＋〕）で足します（1人の画面の水分と同じ記録）。
-        </p>
-
-        {came.length === 0 ? (
-          <p className="rounded-lg border border-border bg-surface p-3 text-base text-ink2">
-            この日の予定の方がいません（休み・入院中の方は出しません）。予定外で来た方は、今日の画面の〔予定にない方を追加〕で足したカードを押し、〔予定外で到着〕を押すと、ここに出ます。
-          </p>
-        ) : (
-          <>
-            {/* 表が画面より広い時だけ出す手がかり（バイタル一括・活動一括と同じ） */}
-            {tableScrolls ? (
-              <p className="text-sm text-ink2">
-                <span aria-hidden="true">⇆ </span>
-                表は横にスクロールできます（氏名の列は左に残ります）
-              </p>
-            ) : null}
-            {/* 2026-10-28: バイタル一括・活動一括と同じ1行1人の表。横・縦のスクロールはこの枠の中だけ（ページ全体を広げない）。
-                relative は表の中の読み上げ用の文字の基準をこの枠にするため */}
-            <div
-              ref={setTableBox}
-              role="region"
-              aria-label={`${fmtDayLabel(day)}の昼食の表${tableScrolls ? '（横にスクロールできます）' : ''}`}
-              tabIndex={tableScrolls || tableScrollsY ? 0 : undefined}
-              className="dc-table-fit relative isolate overflow-auto"
+  // 順番待ちが残っている枠は「送信中」（前の応答の「保存済み」を出したままにしない）
+  const kindOf = (t: MealTarget, st: SaveState | undefined): MealSaveKind | undefined =>
+    (waiting[mealKeyOf(t)]?.length ?? 0) > 0 ? 'saving' : (st?.kind as MealSaveKind | undefined)
+  const markOf = (rid: number) => {
+    const lt = targetOf(rid)
+    return mealBandMark([kindOf(lt, mealState[mealKeyOf(lt)])])
+  }
+  const nameNotes = (rid: number): ReactNode => {
+    const lt = targetOf(rid)
+    const lunch = mealShownFor(lt)
+    const source = mealSourceLabel(mealRowFor(lt))
+    // 外出・入院（care-log の食事の画面で入れた状態）は選択肢に無いので、氏名の列に文字で出す（選ぶと「食べた」に戻して送る）
+    const otherStatus = lunch?.status === 'out' ? '外出' : lunch?.status === 'hospital' ? '入院' : null
+    const showSource = source !== null && source !== '画面で入力'
+    if (otherStatus === null && !showSource) return null
+    return (
+      <>
+        {otherStatus !== null ? <span className="block text-sm text-ink2">昼食の記録: {otherStatus}</span> : null}
+        {showSource ? <span className="block text-sm text-ink2">{source}</span> : null}
+      </>
+    )
+  }
+  const cells = (rid: number): ReactNode => {
+    const name = nameOf(rid)
+    const lt = targetOf(rid)
+    const lunch = mealShownFor(lt)
+    const fkey = personKeyOf(rid, day)
+    const busy = fluidBusy.has(fkey)
+    const held = queuedFluids[fkey]
+    const fn = fluidNote[fkey]
+    const fluidSum = fluidTotalOf(visibleFluids, rid, data?.day ?? day)
+    return (
+      <>
+        {(['main_amount', 'side_amount'] as const).map((f) => {
+          const v = lunchSelectValue(lunch, f)
+          const now = v === '' ? '未入力' : v === 'refused' ? '拒食' : v
+          return (
+            <td key={f} className="px-1 py-1">
+              <select
+                value={v}
+                disabled={!canWrite}
+                aria-label={`${AMOUNT_WORD[f]}：${name}さん（いま: ${now}）`}
+                // テンキーの KT の次にフォーカスを移す先（主食だけ・2026-11-09 計画B3）
+                data-dc-lunch-main={f === 'main_amount' ? rid : undefined}
+                onChange={(e) => {
+                  const patch = lunchSelectPatch(f, e.target.value, lunch?.status)
+                  if (patch !== null) void saveMeal(lt, patch)
+                }}
+                className={v === '' ? selectBlankCls : selectCls}
+              >
+                {LUNCH_SELECT_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </td>
+          )
+        })}
+        <td className="px-1 py-1">
+          {/* 合計の下に入れる欄を置く（2026-11-09 計画B3: バイタルと同じ表に入れても iPad 横 1180px で横に送らずに収まるように。
+              欄の幅は 80px から 56px に詰めた（左右の余白 4px で、中は 4桁が入る 48px）） */}
+          <div className="flex flex-col items-start gap-1">
+            <p className="text-base text-ink">
+              計 <span className="font-num font-bold">{fluidSum > 0 ? fmtCc(fluidSum) : '—'}</span>
+              {held !== undefined ? <span className="text-sm text-ink2">（＋{fmtCc(held.ml)} 送信待ち）</span> : null}
+            </p>
+            {/* 数を入れて改行キー（form の submit）か〔＋〕で足す。書き込み中は欄を書き換えられず〔＋〕も押せない（二重に足さない）。
+                欄は disabled にせず readOnly にする（改行キーの後も欄に留まり、続けて入れられる） */}
+            <form
+              onSubmit={(e) => {
+                e.preventDefault()
+                submitFluid(rid)
+              }}
+              className="flex items-center gap-2"
             >
-              <table className="w-full min-w-max border-collapse text-base">
-                <caption className="sr-only">{fmtDayLabel(day)}の昼食の表（主食・副食は選ぶとすぐ保存・水分は数を入れて足す）</caption>
-                <thead>
-                  <tr className="border-b border-border-strong bg-surface2 text-left">
-                    {/* 氏名の列は横スクロールしても左に残す（sticky）。背景は見出し行と同じ色 */}
-                    <th scope="col" className="sticky left-0 top-0 z-30 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
-                      <span className="dc-vital-name dc-meal-name block">氏名</span>
-                    </th>
-                    <th scope="col" className="sticky top-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
-                      主食
-                    </th>
-                    <th scope="col" className="sticky top-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
-                      副食
-                    </th>
-                    <th scope="col" className="sticky top-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
-                      水分（cc）
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {came.map((row) => {
-                    const rid = row.residentId
-                    const name = nameOf(rid)
-                    // 氏名の下の来た・まだ（○ 来所前 9:30〜15:30／● 在席 9:35／✓ 帰宅 15:30）。2026-11-09 計画B で今日のカードと同じ記号・言葉に
-                    // そろえた（それまでの「未到着（予定 …）」）。到着の記録が無い方は「在席」と出さない（2026-10-24 反証 中1）
-                    const cm = daycareCameMark(row, true)
-                    const lt = targetOf(rid)
-                    const lunch = mealShownFor(lt)
-                    const source = mealSourceLabel(mealRowFor(lt))
-                    const stL = mealState[mealKeyOf(lt)]
-                    // 順番待ちが残っている枠は「送信中」（前の応答の「保存済み」を出したままにしない）
-                    const kindOf = (t: MealTarget, st: SaveState | undefined): MealSaveKind | undefined =>
-                      (waiting[mealKeyOf(t)]?.length ?? 0) > 0 ? 'saving' : (st?.kind as MealSaveKind | undefined)
-                    const mark = mealBandMark([kindOf(lt, stL)])
-                    // 外出・入院（care-log の食事の画面で入れた状態）は選択肢に無いので、氏名の列に文字で出す（選ぶと「食べた」に戻して送る）
-                    const otherStatus = lunch?.status === 'out' ? '外出' : lunch?.status === 'hospital' ? '入院' : null
-                    const fkey = personKeyOf(rid, day)
-                    const busy = fluidBusy.has(fkey)
-                    const held = queuedFluids[fkey]
-                    const fn = fluidNote[fkey]
-                    const fluidSum = fluidTotalOf(visibleFluids, rid, data.day)
-                    const lunchNote = stL !== undefined && stL.kind !== 'saving' && stL.kind !== 'saved'
-                    const detail = lunchNote || held !== undefined || fn !== undefined
-                    return (
-                      <Fragment key={rid}>
-                        <tr className={`align-middle ${detail ? '' : 'border-b border-border'}`}>
-                          {/* 氏名の列は横スクロールしても左に残す（sticky）。背景はページの地の色（下を流れる欄を透かさない） */}
-                          <th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">
-                            {/* 氏名の列の幅は dc-vital-name・dc-meal-name で決める（札が長くても列を広げず、中で折り返す）。
-                                来た・まだの文字は氏名のリンクの中（押せる高さ 44px の中に2段で収める＝2026-11-09 行の高さを詰めた） */}
-                            <div className="dc-vital-name dc-meal-name">
-                              <Link to={personPath(rid, day, today)} className="flex min-h-tap flex-col justify-center underline-offset-2 hover:underline">
-                                <span className="text-base font-bold leading-tight text-link">
-                                  {name}
-                                  <span className="sr-only">さんの1日の記録を開く</span>
-                                  {/* 空の欄がある行の印（2026-11-09 計画B2・読み上げは「未入力あり」） */}
-                                  {(blankOf.get(rid) ?? 0) > 0 ? <DaycareRowBlankMark /> : null}
-                                </span>
-                                <span className={`text-sm leading-tight ${cm.textCls}`}>
-                                  <span aria-hidden="true">{cm.mark} </span>
-                                  {cm.word}
-                                </span>
-                              </Link>
-                              {otherStatus !== null ? <span className="block text-sm text-ink2">昼食の記録: {otherStatus}</span> : null}
-                              {source !== null && source !== '画面で入力' ? <span className="block text-sm text-ink2">{source}</span> : null}
-                              {mark !== null ? (
-                                <span role="status" className={`block text-sm font-bold ${mark.tone === 'ok' ? 'text-ok' : mark.tone === 'warn' ? 'text-warn' : 'text-ink2'}`}>
-                                  <span aria-hidden="true">{mark.mark} </span>
-                                  {mark.text}
-                                </span>
-                              ) : null}
-                            </div>
-                          </th>
-                          {(['main_amount', 'side_amount'] as const).map((f) => {
-                            const v = lunchSelectValue(lunch, f)
-                            const now = v === '' ? '未入力' : v === 'refused' ? '拒食' : v
-                            return (
-                              <td key={f} className="px-2 py-1">
-                                <select
-                                  value={v}
-                                  disabled={!canWrite}
-                                  aria-label={`${AMOUNT_WORD[f]}：${name}さん（いま: ${now}）`}
-                                  onChange={(e) => {
-                                    const patch = lunchSelectPatch(f, e.target.value, lunch?.status)
-                                    if (patch !== null) void saveMeal(lt, patch)
-                                  }}
-                                  className={v === '' ? selectBlankCls : selectCls}
-                                >
-                                  {LUNCH_SELECT_OPTIONS.map((o) => (
-                                    <option key={o.value} value={o.value}>
-                                      {o.label}
-                                    </option>
-                                  ))}
-                                </select>
-                              </td>
-                            )
-                          })}
-                          <td className="px-2 py-1">
-                            {/* 合計と入れる欄は横に並べる（幅が足りない時は折り返す・2026-11-09 行の高さを詰めた） */}
-                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                              <p className="text-base text-ink">
-                                計 <span className="font-num font-bold">{fluidSum > 0 ? fmtCc(fluidSum) : '—'}</span>
-                                {held !== undefined ? <span className="text-sm text-ink2">（＋{fmtCc(held.ml)} 送信待ち）</span> : null}
-                              </p>
-                              {/* 数を入れて改行キー（form の submit）か〔＋〕で足す。書き込み中は欄を書き換えられず〔＋〕も押せない（二重に足さない）。
-                                  欄は disabled にせず readOnly にする（改行キーの後も欄に留まり、続けて入れられる） */}
-                              <form
-                                onSubmit={(e) => {
-                                  e.preventDefault()
-                                  submitFluid(rid)
-                                }}
-                                className="flex items-center gap-2"
-                              >
-                                <input
-                                  type="text"
-                                  inputMode="numeric"
-                                  autoComplete="off"
-                                  value={fluidText[rid] ?? ''}
-                                  onChange={(e) => {
-                                    fluidInputs.set(rid, e.target.value)
-                                    setFluidText(fluidInputs.all())
-                                    if (fn?.input === true) noteFluid(fkey, null)
-                                  }}
-                                  readOnly={busy}
-                                  disabled={!canWrite}
-                                  aria-label={`水分（cc）：${name}さんに足す量`}
-                                  aria-invalid={fn?.input === true ? true : undefined}
-                                  aria-describedby={fn !== undefined ? `dc-fluid-note-${rid}` : undefined}
-                                  className="block min-h-tap w-20 rounded border border-border-strong bg-surface px-2 text-lg text-ink disabled:text-ink3"
-                                />
-                                <button
-                                  type="submit"
-                                  disabled={!canWrite || busy}
-                                  aria-label={`水分を足す（${name}さん）`}
-                                  className="min-h-tap min-w-tap rounded border border-primary bg-surface px-2 text-lg font-bold text-primary disabled:border-border disabled:text-ink3"
-                                >
-                                  ＋
-                                </button>
-                              </form>
-                            </div>
-                          </td>
-                        </tr>
-                        {detail ? (
-                          <tr className="border-b border-border">
-                            {/* 知らせの行は表の幅を広げない（バイタル一括・活動一括と同じ形）。幅0＋最小100% の箱で表の幅の計算から外し、
-                                文は表の枠の幅で折り返して、横スクロールしても左に残す（sticky） */}
-                            <td colSpan={4} className="p-0">
-                              <div className="w-0 min-w-full">
-                                <div className="sticky left-0 space-y-1 px-2 pb-2" style={{ maxWidth: tableBoxWidth > 0 ? tableBoxWidth : undefined }}>
-                                  <MealNote
-                                    word="昼食"
-                                    name={name}
-                                    st={stL}
-                                    onTake={(t, fields) => void resolveTake(t, fields)}
-                                    onMine={(t, cs) => void resolveMine(t, cs)}
-                                  />
-                                  {held !== undefined ? (
-                                    <p role="status" className={`text-sm ${held.lost ? 'text-danger' : 'text-ink2'}`}>
-                                      <span aria-hidden="true">⚠ </span>
-                                      <span className="sr-only">{name}さん：</span>水分 ＋{fmtCc(held.ml)}: {held.lost ? MSG_NOT_PERSISTED : MSG_QUEUED}
-                                    </p>
-                                  ) : null}
-                                  {fn !== undefined ? (
-                                    <p
-                                      id={`dc-fluid-note-${rid}`}
-                                      role={fn.tone === 'danger' ? 'alert' : 'status'}
-                                      className={`text-sm ${fn.tone === 'danger' ? 'text-danger' : fn.tone === 'warn' ? 'text-warn' : 'text-ink2'}`}
-                                    >
-                                      <span aria-hidden="true">{fn.tone === 'info' ? '⚠ ' : '▲ '}</span>
-                                      <span className="sr-only">{name}さん：</span>水分: {fn.text}
-                                    </p>
-                                  ) : null}
-                                </div>
-                              </div>
-                            </td>
-                          </tr>
-                        ) : null}
-                      </Fragment>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
-      </section>
-      {toast}
-    </div>
-  )
+              <input
+                type="text"
+                inputMode="numeric"
+                autoComplete="off"
+                value={fluidText[rid] ?? ''}
+                onChange={(e) => {
+                  fluidInputs.set(rid, e.target.value)
+                  setFluidText(fluidInputs.all())
+                  if (fn?.input === true) noteFluid(fkey, null)
+                }}
+                readOnly={busy}
+                disabled={!canWrite}
+                aria-label={`水分（cc）：${name}さんに足す量`}
+                aria-invalid={fn?.input === true ? true : undefined}
+                aria-describedby={fn !== undefined ? `dc-fluid-note-${rid}` : undefined}
+                className="block min-h-tap w-14 rounded border border-border-strong bg-surface px-1 text-lg text-ink disabled:text-ink3"
+              />
+              <button
+                type="submit"
+                disabled={!canWrite || busy}
+                aria-label={`水分を足す（${name}さん）`}
+                className="min-h-tap min-w-tap rounded border border-primary bg-surface px-2 text-lg font-bold text-primary disabled:border-border disabled:text-ink3"
+              >
+                ＋
+              </button>
+            </form>
+          </div>
+        </td>
+      </>
+    )
+  }
+  const notes = (rid: number): ReactNode => {
+    const name = nameOf(rid)
+    const lt = targetOf(rid)
+    const stL = mealState[mealKeyOf(lt)]
+    const fkey = personKeyOf(rid, day)
+    const held = queuedFluids[fkey]
+    const fn = fluidNote[fkey]
+    const lunchNote = stL !== undefined && stL.kind !== 'saving' && stL.kind !== 'saved'
+    const detail = lunchNote || held !== undefined || fn !== undefined
+    if (!detail) return null
+    return (
+      <>
+        <MealNote
+          word="昼食"
+          name={name}
+          st={stL}
+          onTake={(t, fields) => void resolveTake(t, fields)}
+          onMine={(t, cs) => void resolveMine(t, cs)}
+        />
+        {held !== undefined ? (
+          <p role="status" className={`text-sm ${held.lost ? 'text-danger' : 'text-ink2'}`}>
+            <span aria-hidden="true">⚠ </span>
+            <span className="sr-only">{name}さん：</span>水分 ＋{fmtCc(held.ml)}: {held.lost ? MSG_NOT_PERSISTED : MSG_QUEUED}
+          </p>
+        ) : null}
+        {fn !== undefined ? (
+          <p
+            id={`dc-fluid-note-${rid}`}
+            role={fn.tone === 'danger' ? 'alert' : 'status'}
+            className={`text-sm ${fn.tone === 'danger' ? 'text-danger' : fn.tone === 'warn' ? 'text-warn' : 'text-ink2'}`}
+          >
+            <span aria-hidden="true">{fn.tone === 'info' ? '⚠ ' : '▲ '}</span>
+            <span className="sr-only">{name}さん：</span>水分: {fn.text}
+          </p>
+        ) : null}
+      </>
+    )
+  }
+
+  return { data, loading, error, blankOf, markOf, nameNotes, cells, notes, toast }
 }
 
 /**
- * 行の下の昼食の知らせ（送信待ち・失敗・止まり・拒否・食い違い）。送信中・保存できた時は氏名の列の印だけで、ここには出さない。
+ * 行の下の昼食の知らせ（送信待ち・失敗・止まり・拒否・食い違い）。送信中・保存できた時は状態の列の印だけで、ここには出さない。
  * 文と解き方は1人の画面の昼食と同じ
  */
 function MealNote({
@@ -1143,4 +936,3 @@ function MealNote({
   )
 }
 
-export default DaycareMealsPage

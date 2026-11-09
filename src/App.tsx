@@ -62,6 +62,7 @@ import {
 import { deviceTimeZoneWarning } from './lib/format'
 import { installUserActivity, waitUserQuiet } from './lib/userActivity'
 import { clearDaycareHandoff } from './lib/daycareHandoffKey'
+import { vitalsMealsRedirect } from './lib/daycareRoutes'
 
 // ── 接続設定（VITE_ 変数）──────────────────────────────────────────
 // 型は src/vite-env.d.ts（vite/client）で付くが、未設定・非 Vite 実行でも落ちないようキャスト経由で読む。
@@ -114,14 +115,12 @@ const BathMonthPage = lazy(() => loadBathMonthPage().then((m) => ({ default: m.B
 // デイ（せせらぎ）の今日（到着・在席・帰宅・欠席）とバイタル一括（2026-10-22 デイ段階1）。記録ハブから入る
 const loadDaycarePage = () => import('./pages/DaycarePage')
 const DaycarePage = lazy(() => loadDaycarePage().then((m) => ({ default: m.DaycarePage })))
-const loadDaycareVitalsPage = () => import('./pages/DaycareVitalsPage')
-const DaycareVitalsPage = lazy(() => loadDaycareVitalsPage().then((m) => ({ default: m.DaycareVitalsPage })))
+// 2026-11-09 計画B3: バイタル一括と食事一括を1つの画面（バイタル・食事）にした。古い2つの道はこの画面へ送る（DaycareVitalsMealsRedirect）
+const loadDaycareVitalsMealsPage = () => import('./pages/DaycareVitalsMealsPage')
+const DaycareVitalsMealsPage = lazy(() => loadDaycareVitalsMealsPage().then((m) => ({ default: m.DaycareVitalsMealsPage })))
 const loadDaycarePersonPage = () => import('./pages/DaycarePersonPage')
 const DaycarePersonPage = lazy(() => loadDaycarePersonPage().then((m) => ({ default: m.DaycarePersonPage })))
 // デイ 段階2b（2026-10-22）: 活動・レクをまとめて記録する画面
-// 今日の画面の改善 2回目（2026-10-24）: デイの昼食・おやつをまとめて入れる画面
-const loadDaycareMealsPage = () => import('./pages/DaycareMealsPage')
-const DaycareMealsPage = lazy(() => loadDaycareMealsPage().then((m) => ({ default: m.DaycareMealsPage })))
 const loadDaycareActivityBulkPage = () => import('./pages/DaycareActivityBulkPage')
 const DaycareActivityBulkPage = lazy(() => loadDaycareActivityBulkPage().then((m) => ({ default: m.DaycareActivityBulkPage })))
 // デイ 段階3a（2026-10-23）: 個別機能訓練の画面（配置と実施記録）
@@ -607,6 +606,15 @@ function isSheetPath(pathname: string): boolean {
  */
 const SHEET_HEADER_SLOT_PATHS = ['/sheet/meals']
 
+/**
+ * それまでのバイタル一括（/record/daycare/vitals）・食事一括（/record/daycare/meals）の道から、バイタル・食事の画面へ送る
+ * （2026-11-09 計画B3。業務日 ?day= を引き継ぐ。置き換えの移動なので、戻るで古い道に戻らない）
+ */
+function DaycareVitalsMealsRedirect() {
+  const location = useLocation()
+  return <Navigate to={vitalsMealsRedirect(location.search)} replace />
+}
+
 /** ヘッダに出す画面名 */
 function screenTitle(pathname: string): string {
   if (pathname === '/') return '申送'
@@ -621,8 +629,7 @@ function screenTitle(pathname: string): string {
   if (pathname === '/record/outing') return '外出・外泊'
   if (pathname === '/record/bath') return '入浴（デイ）'
   if (pathname === '/record/daycare') return 'デイ せせらぎ'
-  if (pathname === '/record/daycare/vitals') return 'デイ バイタル一括'
-  if (pathname === '/record/daycare/meals') return 'デイ 食事一括'
+  if (pathname === '/record/daycare/vitals-meals') return 'デイ バイタル・食事'
   if (pathname.startsWith('/record/daycare/person/')) return 'デイ 1人の記録'
   if (pathname === '/record/daycare/bulk') return 'デイ 活動一括'
   if (pathname === '/record/daycare/training') return 'デイ 機能訓練'
@@ -1734,9 +1741,11 @@ function Authenticated({ deps, returnTo }: { deps: Deps; returnTo: string }) {
             <Route path="/record/bath" element={<BathRecordPage actorId={actorId} staff={staff} />} />
             {/* デイ（せせらぎ）段階1（2026-10-22）。入力解禁は input_enabled_daycare（画面の中で確かめる） */}
             <Route path="/record/daycare" element={<DaycarePage actorId={actorId} staff={staff} />} />
-            <Route path="/record/daycare/vitals" element={<DaycareVitalsPage actorId={actorId} staff={staff} />} />
-            {/* 今日の画面の改善 2回目（2026-10-24）: 昼食・おやつをまとめて入れる（入力解禁は input_enabled_daycare）。業務日は ?day= */}
-            <Route path="/record/daycare/meals" element={<DaycareMealsPage actorId={actorId} staff={staff} />} />
+            {/* 2026-11-09 計画B3: バイタル一括と食事一括を1つの画面に（入力解禁は input_enabled_daycare）。業務日は ?day= */}
+            <Route path="/record/daycare/vitals-meals" element={<DaycareVitalsMealsPage actorId={actorId} staff={staff} />} />
+            {/* 古い2つの道（バイタル一括・食事一括）は新しい画面へ送る（?day= を引き継ぐ・置き換えの移動＝戻るで古い道に戻らない） */}
+            <Route path="/record/daycare/vitals" element={<DaycareVitalsMealsRedirect />} />
+            <Route path="/record/daycare/meals" element={<DaycareVitalsMealsRedirect />} />
             {/* デイ 段階2a（2026-10-22）: 1人の1日記録（昼食・おやつ・水分・排泄の表示と入口）。業務日は ?day= */}
             <Route path="/record/daycare/person/:residentId" element={<DaycarePersonPage actorId={actorId} staff={staff} />} />
             {/* デイ 段階2b（2026-10-22）: 活動・レクをまとめて記録（入力解禁は input_enabled_daycare_activity）。業務日は ?day= */}

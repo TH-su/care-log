@@ -182,9 +182,9 @@ describe('静的検査', () => {
     assert.match(nav, /onClick=\{\(\) => handoff\?\.\(\)\}\s*onAuxClick=\{\(\) => handoff\?\.\(\)\}\s*onContextMenu=\{\(\) => handoff\?\.\(\)\}/)
     assert.doesNotMatch(nav, /aria-label="排泄/)
     assert.match(nav, /排泄<span className="ml-1 text-sm">（別アプリ）<\/span>\s*<span className="sr-only">：排泄ケアアプリのデイの表示へ移ります<\/span>/)
+    // 2026-11-09 計画B3（固定し直し・意図は同じ）: バイタル一括と食事一括は1つの画面（バイタル・食事＝DaycareVitalsMealsPage・current="vitalsMeals"）にした
     for (const [f, cur] of [
-      ['DaycareVitalsPage', 'vitals'],
-      ['DaycareMealsPage', 'meals'],
+      ['DaycareVitalsMealsPage', 'vitalsMeals'],
       ['DaycareActivityBulkPage', 'activity'],
       ['DaycareTrainingPage', 'training'],
     ])

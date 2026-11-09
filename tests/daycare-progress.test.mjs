@@ -267,22 +267,29 @@ if (P === null) {
     it('切り替えの数（daycareNavPending）: 来た方で印が「未」の数だけ・読めない印は数えない・0 は入れない', () => {
       // 2026-11-09 計画B2（固定し直し・仕様の変更で数え方を変えた）: 一括の画面の「未入力 n名」の n と同じ数え方（到着を問わず、
       // 1人ずつの空の欄の数＝vitalBlankFields・lunchBlankFields・recordBlankFields から、空の欄がある方の数）。読めない項目（null）は数を出さない・0 は入れない
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: バイタル一括と食事一括は1つの画面（バイタル・食事＝vitalsMeals）にした。1人7欄（バイタル5欄＋主食・副食）の空の欄の数
+      // （vitalsMealsBlankFields）から、空の欄がある方の数
+      const v = [P.vitalBlankFields(null), P.vitalBlankFields({ temp: 36.5, sys_bp: 120, dia_bp: 70, pulse: 70, spo2: 97 }), P.vitalBlankFields({ temp: 36.5, sys_bp: 120, dia_bp: 70, pulse: 70, spo2: 97 })]
+      const m = [P.lunchBlankFields(null), P.lunchBlankFields({ main_amount: 5, side_amount: 5, status: 'eaten' }), P.lunchBlankFields({ main_amount: null, side_amount: null, status: 'refused' })]
       const blanks = {
-        // 在席で未測定（5欄）・帰宅で全部（0欄）・来所前で体温だけ（4欄）＝3名中2名
-        vitals: [P.vitalBlankFields(null), P.vitalBlankFields({ temp: 36.5, sys_bp: 120, dia_bp: 70, pulse: 70, spo2: 97 }), P.vitalBlankFields({ temp: 36.5 })],
-        meals: [P.lunchBlankFields(null), P.lunchBlankFields(null), P.lunchBlankFields({ main_amount: null, side_amount: null, status: 'refused' })],
+        // 在席で未測定・昼食も空（7欄）・帰宅で全部（0欄）・来所前でバイタル全部と拒食（0欄）＝3名中1名
+        vitalsMeals: v.map((x, i) => P.vitalsMealsBlankFields(x, m[i])),
         activity: [P.recordBlankFields(false), P.recordBlankFields(true), P.recordBlankFields(false)],
         training: [0, 0, 0],
       }
-      assert.deepEqual(P.daycareNavPending(blanks), { vitals: 2, meals: 2, activity: 2 })
-      // 反証 中6: 読めない項目（バイタル・昼食・活動・訓練）は数を出さない
-      assert.deepEqual(P.daycareNavPending({ vitals: null, meals: null, activity: null, training: null }), {})
-      assert.deepEqual(P.daycareNavPending({ vitals: [], meals: [], activity: [], training: [] }), {})
-      assert.equal(P.navPendingOf(undefined, 'vitals'), null)
-      assert.equal(P.navPendingOf({ vitals: 0 }, 'vitals'), null)
-      assert.equal(P.navPendingOf({ vitals: 1.5 }, 'vitals'), null)
-      assert.equal(P.navPendingOf({ vitals: 5 }, 'vitals'), 5)
-      assert.equal(P.navPendingOf({ vitals: 5 }, 'today'), null)
+      assert.deepEqual(blanks.vitalsMeals, [7, 0, 0])
+      assert.deepEqual(P.daycareNavPending(blanks), { vitalsMeals: 1, activity: 2 })
+      // 反証 中6: 読めない項目（バイタル・昼食・活動・訓練）は数を出さない（バイタルか昼食のどちらかを読めない時は、画面が null を渡す）
+      assert.deepEqual(P.daycareNavPending({ vitalsMeals: null, activity: null, training: null }), {})
+      assert.deepEqual(P.daycareNavPending({ vitalsMeals: [], activity: [], training: [] }), {})
+      assert.equal(P.vitalsMealsBlankFields(null, 2), null)
+      assert.equal(P.vitalsMealsBlankFields(3, null), null)
+      assert.equal(P.vitalsMealsBlankFields(3, 2), 5)
+      assert.equal(P.navPendingOf(undefined, 'vitalsMeals'), null)
+      assert.equal(P.navPendingOf({ vitalsMeals: 0 }, 'vitalsMeals'), null)
+      assert.equal(P.navPendingOf({ vitalsMeals: 1.5 }, 'vitalsMeals'), null)
+      assert.equal(P.navPendingOf({ vitalsMeals: 5 }, 'vitalsMeals'), 5)
+      assert.equal(P.navPendingOf({ vitalsMeals: 5 }, 'today'), null)
     })
   })
 
@@ -359,12 +366,13 @@ describe('静的検査（計画B）', () => {
   const today = code('../src/pages/DaycarePage.tsx')
   const list = today.slice(today.indexOf('<ul className="dc-cards"'), today.indexOf('</ul>', today.indexOf('<ul className="dc-cards"')))
   const nav = today.slice(today.indexOf('export function DaycareNav'), today.indexOf('function PlanBanners'))
+  // 2026-11-09 計画B3（固定し直し・意図は同じ）: バイタル一括と食事一括を1つの画面（バイタル・食事）にした。一括の画面は3つ（食事の欄はフック DaycareLunchColumns.tsx）
   const BULK = {
-    vitals: code('../src/pages/DaycareVitalsPage.tsx'),
+    vitals: code('../src/pages/DaycareVitalsMealsPage.tsx'),
     activity: code('../src/pages/DaycareActivityBulkPage.tsx'),
     training: code('../src/pages/DaycareTrainingPage.tsx'),
-    meals: code('../src/pages/DaycareMealsPage.tsx'),
   }
+  const LUNCH = code('../src/pages/DaycareLunchColumns.tsx')
 
   it('カードは4段（氏名と〔休み〕→ ふりがな → 状態の段 → 進み具合の印）・ふりがなは〔休み〕の横に無い・文字の段（入浴 {bathText}）は無い', () => {
     const iName = list.indexOf('<Link to={personPath(row.residentId, day, today)}')
@@ -418,7 +426,8 @@ describe('静的検査（計画B）', () => {
   it('今日の画面の印と切り替えの数は送信待ちを一括の画面と同じ純関数で重ねる（反証 中1）・読めない項目は「読めない」（中6）', () => {
     // 昼食: 食事一括の mealShownFor と同じ lunchShownWith（送っている途中の値だけ）
     assert.match(today, /lunch: lunchShownWith\(lunchOf\(id\), pendingRow\('meals', \{ residentId: id, day: data\.day, slot: 'lunch' \}\)\)/)
-    assert.match(BULK.meals, /lunchShownWith\(mealRowFor\(t\)\?\.meal \?\? null, pendingRow\('meals', t\), waiting\[mealKeyOf\(t\)\] \?\? \[\]\)/)
+    // 2026-11-09 計画B3（固定し直し・意図は同じ）: 食事一括の重ね方はバイタル・食事の画面の昼食の列（フック DaycareLunchColumns.tsx）
+    assert.match(LUNCH, /lunchShownWith\(mealRowFor\(t\)\?\.meal \?\? null, pendingRow\('meals', t\), waiting\[mealKeyOf\(t\)\] \?\? \[\]\)/)
     // バイタル: バイタル一括の slotsOf・valueOf と同じ daycareVitalSlotsWithPending・vitalShownValue(s)
     assert.match(today, /daycareVitalSlotsWithPending\(vitalsOf\(id\), vitalKeys, id, data\.day, \[\], \(key\) => pendingRow\('vitals', vitalTarget\(id, key\)\) !== null\)/)
     assert.match(today, /vals: vitalShownValues\(pendingRow\('vitals', vitalTarget\(id, slot\.key\)\), slot\.vital\)/)
@@ -474,12 +483,15 @@ describe('静的検査（計画B）', () => {
     // 2026-11-09 計画B2（固定し直し・意図は同じ）: 「未到着 n名」を出さなくなったので、1024px 未満で隠す指定（hideNotArrivedNarrow）は外した
     assert.ok(v.indexOf('aria-label="表示する方"') < v.indexOf('<DaycareUnfilledCount counts={unfilled} />'))
     // 2026-11-09 反証 軽1（固定し直し・意図は同じ）: 1024px 以上は残りの幅が 16rem 以上あれば同じ段に置く（段の間は 12px）
-    assert.match(v, /<\/div>\s*(\{\}\s*)?\{countRows\.length > 0 \? \(\s*<div className="min-w-0 grow lg:basis-64">\s*<DaycareUnfilledCount counts=\{unfilled\} \/>\s*<\/div>\s*\) : null\}\s*<\/div>\s*\{releasing \? \(/)
+    // 2026-11-09 計画B3（固定し直し・意図は同じ）: それまでの食事一括の「予定の方 n人」も同じ所に並べた（入らない時は折り返す）
+    assert.match(v, /<\/div>\s*(\{\}\s*)*\{countRows\.length > 0 \? \(\s*<div className="flex min-w-0 grow flex-wrap items-baseline gap-x-4 gap-y-1 lg:basis-64">\s*<DaycareUnfilledCount counts=\{unfilled\} \/>\s*<p className="text-sm text-ink2">\s*予定の方 <span className="font-num font-bold text-ink">\{countRows\.length\}<\/span>人\s*<\/p>\s*<\/div>\s*\) : null\}\s*<\/div>\s*\{releasing \? \(/)
     assert.match(v, /<div className="flex flex-wrap items-center gap-x-3 gap-y-2">\s*<div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">/)
-    assert.match(v, /const countRows = board === null \|\| data === null \|\| data\.day !== day \? \[\] : daycareBulkRows\(board\.rows\)/)
+    // 2026-11-09 計画B3（固定し直し・意図は同じ）: 数えるのはバイタルと昼食の両方をその日で読めた時だけ
+    assert.match(v, /const countRows = board === null \|\| data === null \|\| data\.day !== day \|\| !lunchReady \? \[\] : daycareBulkRows\(board\.rows\)/)
     // 2026-11-09 計画B2（固定し直し・仕様の変更で数え方を変えた）: 1人5欄＝最初の回の5欄の空き（vitalBlankFields）を到着を問わず数える
+    // 2026-11-09 計画B3（固定し直し・意図は同じ）: 1人7欄＝バイタルの5欄＋昼食の主食・副食（vitalsMealsBlankFields）
     assert.match(v, /const first = slotsOf\(r\.residentId\)\[0\]/)
-    assert.match(v, /return \[r\.residentId, vitalBlankFields\(first === undefined \? null : vals\)\]/)
+    assert.match(v, /return \[r\.residentId, vitalsMealsBlankFields\(vitalBlankFields\(first === undefined \? null : vals\), lunch\.blankOf\(r\.residentId\)\) \?\? 0\]/)
     assert.match(v, /const unfilled = bulkBlankSummary\(\[\.\.\.blankOf\.values\(\)\]\)/)
     // 活動一括: 見出しの段（読めない時は出さない）
     const a = BULK.activity
@@ -492,9 +504,8 @@ describe('静的検査（計画B）', () => {
     assert.match(t, /<div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">\s*<h2 id="h-targets" className="text-lg font-bold leading-tight text-ink">\s*\{day === today \? '今日' : 'この日'\}の対象者\s*<\/h2>\s*\{data\.sessions !== null && targets\.length > 0 \? <DaycareUnfilledCount counts=\{unfilled\} \/> : null\}\s*<\/div>/)
     assert.match(t, /const unfilled = bulkBlankSummary\(targets\.map\(\(rid\) => recordBlankFields\(trainingFilled\(sessions, pending, rid, day\)\)\)\)/)
     // 食事一括: 見出し「昼食」の段
-    const m = BULK.meals
-    const top = m.slice(m.indexOf('<section aria-labelledby="h-meals"'), m.indexOf('<table'))
-    assert.ok(top.indexOf('id="h-meals"') < top.indexOf('<DaycareUnfilledCount counts={counts} />'))
+    // 2026-11-09 計画B3（固定し直し・意図は同じ）: 食事一括の数はバイタル・食事の画面の数（上のバイタル一括と同じ所）に合わせた。フックは数を出さない
+    assert.doesNotMatch(LUNCH, /<DaycareUnfilledCount|bulkBlankSummary\(/)
     for (const [k, p] of Object.entries(BULK)) {
       assert.match(p, /import \{ [A-Za-z, ]*\bDaycareUnfilledCount \} from '\.\.\/components\/DaycareUnfilledCount'/, k)
       assert.equal((p.match(/<DaycareUnfilledCount /g) ?? []).length, 1, `${k}: 1か所だけ`)
@@ -510,9 +521,10 @@ describe('静的検査（計画B）', () => {
     assert.doesNotMatch(unfCmp, /(?<![-\w])hidden(?![-\w=])/)
   })
   it('状態をそろえる: 食事一括・活動一括の来た・まだは daycareCameMark（記号は読み上げない・色は文字だけ）', () => {
-    assert.match(BULK.meals, /const cm = daycareCameMark\(row, true\)/)
+    // 2026-11-09 計画B3（固定し直し・意図は同じ）: 食事一括の氏名の列は、バイタル・食事の画面の氏名の列（1回目の行）
+    assert.match(BULK.vitals, /const cm = daycareCameMark\(row, true\)/)
     assert.match(BULK.activity, /const cm = daycareCameMark\(rowOf\(rid\)\)/)
-    for (const k of ['meals', 'activity']) {
+    for (const k of ['vitals', 'activity']) {
       assert.match(BULK[k], /<span className=\{`text-sm leading-tight \$\{cm\.textCls\}`\}>\s*<span aria-hidden="true">\{cm\.mark\} <\/span>\s*\{cm\.word\}\s*<\/span>/, k)
       assert.doesNotMatch(BULK[k], /（未到着）|cameText/, k)
     }

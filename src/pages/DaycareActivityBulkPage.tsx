@@ -65,7 +65,16 @@ import {
 } from '../lib/daycareActivity'
 import type { ActivityAddOutcome, ActivityParticipation, DaycareActivity } from '../lib/daycareActivity'
 import { personPath, readPersonDay } from '../lib/daycarePerson'
-import { DAYCARE_BLANK_CELL_CLS, activityCellsFilled, activityShownCells, bulkBlankSummary, daycareCameMark, recordBlankFields } from '../lib/daycareProgress'
+import {
+  DAYCARE_BLANK_CELL_CLS,
+  DAYCARE_CATEGORY_CLS,
+  activityCellsFilled,
+  activityShownCells,
+  bulkBlankSummary,
+  daycareCameMark,
+  daycareRowTone,
+  recordBlankFields,
+} from '../lib/daycareProgress'
 import { addDays, fmtDayLabel, todayIso } from '../lib/format'
 import type { DaycareAttendance, DaycareDay, DaycarePlanRow, DaycarePlanSource, Resident, Staff } from '../lib/types'
 import { useTableFit } from '../lib/useTableFit'
@@ -953,9 +962,10 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                     <th scope="col" className="sticky left-0 top-0 z-30 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
                       <span className="dc-vital-name block">氏名</span>
                     </th>
-                    {/* 列の見出しはボタン: 来た方のうち記録の無い方にまとめて「参加」（確かめの小窓つき） */}
+                    {/* 列の見出しはボタン: 来た方のうち記録の無い方にまとめて「参加」（確かめの小窓つき）。
+                        2026-11-09 計画B3: 見出しの帯は分類の色（活動＝コーラル＝tokens.css の --c-cat-activity*）。氏名の列は今の灰のまま */}
                     {DAYCARE_ACTIVITY_CHIPS.map((c) => (
-                      <th key={c} scope="col" className="sticky top-0 z-20 bg-surface2 px-1 py-1">
+                      <th key={c} scope="col" className={`sticky top-0 z-20 ${DAYCARE_CATEGORY_CLS.activity.band} px-1 py-1`}>
                         <button
                           type="button"
                           disabled={!canWrite || running}
@@ -967,7 +977,7 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                         </button>
                       </th>
                     ))}
-                    <th scope="col" className="sticky top-0 z-20 bg-surface2 px-1 py-1">
+                    <th scope="col" className={`sticky top-0 z-20 ${DAYCARE_CATEGORY_CLS.activity.band} px-1 py-1`}>
                       <button
                         type="button"
                         disabled={!canWrite || running}
@@ -981,8 +991,10 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                   </tr>
                 </thead>
                 <tbody>
-                  {targets.map((rid) => {
+                  {targets.map((rid, pi) => {
                     const name = nameOf(rid)
+                    // 行の地は1人ずつ交互（2026-11-09 計画B3）。知らせの行と左に残る氏名の列（sticky）も同じ地
+                    const rowBg = daycareRowTone(pi)
                     // 来た・まだ（○ 来所前／● 在席 9:32／✓ 帰宅 15:28）。2026-11-09 計画B で食事一括・今日のカードと同じ記号・言葉にそろえた
                     // （それまでは来ていない方だけ「（未到着）」）。来ていない方の枠を押すと確かめを挟むのは今までどおり（arrivalOk）
                     const cm = daycareCameMark(rowOf(rid))
@@ -994,9 +1006,9 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                     const rowBlank = readable && filledOf.get(rid) === false
                     return (
                       <Fragment key={rid}>
-                        <tr className={`align-middle ${detail ? '' : 'border-b border-border'}`}>
-                          {/* 氏名の列は横スクロールしても左に残す（sticky）。背景はページの地の色（下を流れる欄を透かさない） */}
-                          <th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">
+                        <tr className={`align-middle ${rowBg} ${detail ? '' : 'border-b border-border'}`}>
+                          {/* 氏名の列は横スクロールしても左に残す（sticky）。背景は行と同じ地（下を流れる欄を透かさない） */}
+                          <th scope="row" className={`sticky left-0 z-10 ${rowBg} px-2 py-1 text-left font-normal`}>
                             {/* 氏名の列の幅は dc-vital-name で決める（札が長くても列を広げず、中で折り返す）。
                                 氏名を押すと1人の記録へ（2026-11-09: 〔記録 ›〕のボタンを氏名のリンクにまとめ、行の高さを押せる下限の近くまで
                                 下げた＝代表者の指示「もっと多くの行が出るように」。押せる高さは 44px・食事一括の氏名と同じ形） */}
@@ -1042,7 +1054,7 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                           </td>
                         </tr>
                         {detail ? (
-                          <tr className="border-b border-border">
+                          <tr className={`${rowBg} border-b border-border`}>
                             {/* 知らせの行は表の幅を広げない（バイタル一括と同じ形）。幅0＋最小100% の箱で表の幅の計算から外し、
                                 文は表の枠の幅で折り返して、横スクロールしても左に残す（sticky） */}
                             <td colSpan={DAYCARE_ACTIVITY_CHIPS.length + 2} className="p-0">
