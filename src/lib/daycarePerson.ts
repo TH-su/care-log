@@ -245,6 +245,15 @@ export const LUNCH_SELECT_OPTIONS: readonly { value: string; label: string }[] =
   { value: 'refused', label: '拒食' },
 ]
 
+/**
+ * 主食・副食の選択肢で止めるキー（2026-11-09 計画B3 の反証 中1）: 数字（半角・全角。テンキーの数字も key は '0'〜'9'）。
+ * 端末の選択肢は数字キーで頭文字の合う選択肢へ移り、すぐ保存してしまうため（バイタルの KT の後に主食へ移った時、物理キーボードで
+ * 打ち続けた数字が入る）。矢印・Enter・Space・Tab などの操作のキーは止めない
+ */
+export function lunchSelectKeyBlocked(key: string): boolean {
+  return /^[0-9０-９]$/.test(key)
+}
+
 /** 主食・副食の選択肢のいまの値: 拒食なら主食・副食の両方の欄が 'refused'。そうでなければその欄の値（null は ''） */
 export function lunchSelectValue(meal: Pick<Meal, 'main_amount' | 'side_amount' | 'status'> | null | undefined, f: LunchAmountField): string {
   if (meal === null || meal === undefined) return ''

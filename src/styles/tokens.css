@@ -394,7 +394,7 @@
    状態の4色（来所前＝点線・在席＝ok・帰宅＝info・休み＝surface2）・危険（danger）・注意（warn）の代わりには使わない
    （カードの地・欄の地・知らせの地に塗らない。意味は文字と記号で伝え、分類の色は飾りの手がかりに留める）。
    --c-row-alt … 一括の表で1人おきに敷く行の地（寒色の灰。空の枠の注意の地 warn-bg＝琥珀とは色味で分ける）。もう1人は --c-bg のまま。
-   コントラスト（計算値・tests/daycare-colors.test.mjs が実値から検算する。最小の組）:
+   コントラスト（計算値・tests/daycare-vitals-meals.test.mjs が実値から検算する。最小の組）:
      ライト 見出しの帯 × ink: 最小 13.53（ローズ）／行の地 × ink 14.86・ink2 7.17・link 8.14・ok 6.02・danger 6.67・warn 6.23
      ダーク 見出しの帯 × ink: 最小 10.63（イエロー）／行の地 × ink 13.75・ink2 8.37・link 8.60・ok 8.65・danger 7.19・warn 8.79
    ダークは :root[data-mode='dark']（設定で選んだ時）と prefers-color-scheme（OS 追従の時）の両方で定義する（摂取量の濃淡と同じ3か所）。

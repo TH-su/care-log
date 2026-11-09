@@ -27,6 +27,7 @@
 //   色だけに頼らない（記号＋言葉）／押す所は 44px 以上・テンキーは 56px
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   DbError,
@@ -121,6 +122,8 @@ const MSG_QUEUED = '電波が届かないため、この端末に保存しまし
 const MSG_NOT_PERSISTED =
   '送信できませんでした。この端末にも保存できていません（保存領域の空きが不足している可能性があります）。この画面を閉じずに、電波が戻ってからもう一度入れてください。'
 const MSG_NO_RECORDER = '記録者が選ばれていません。上の「記録者」で選んでから入れてください。'
+/** 昼食と水分だけ読めなかった時（2026-11-09 計画B3 の反証 軽3: 表全体は止めず、昼食の列だけ止める） */
+const MSG_LUNCH_UNREAD = '昼食と水分を読み込めませんでした。通信状態を確認して、〔最新に更新〕を押してください（バイタルはこのまま入れられます）。'
 const MSG_GATE_UNKNOWN =
   'デイの記録を使える期間かどうかを確認できませんでした（通信エラー）。電波状態を確認して、再試行してください。記録の閲覧はこのままできます。'
 
@@ -348,6 +351,11 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
       void load(dayRef.current, true)
     }, 400)
   }, [load])
+  /**
+   * 昼食と水分の列の読み直し（2026-11-09 計画B3 の反証 軽4: 変更の購読はこの画面の1組だけにし、食事・水分の変更と送信待ちが送れて
+   * 減った時に、ここから昼食の列も読み直す。それまでの食事一括が持っていた購読と同じ契機）。中身は昼食のフックの reload
+   */
+  const lunchReloadRef = useRef<() => void>(() => {})
   useEffect(() => {
     const onChange = (table: string, info?: { event: string; row: Record<string, unknown> | null }) => {
       if (info?.row && isSelfWrite(table, info.row)) return
@@ -355,12 +363,21 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
     }
     const offA = subscribeChanges((table, info) => {
       if (table === 'vitals') onChange(table, info)
+      // 水分の合計は1人の画面・他の端末で足した分も含むので、水分の変更でも読み直す（2026-10-28・それまでの食事一括と同じ）
+      else if (table === 'meals' || table === 'fluid_intake') {
+        if (info?.row && isSelfWrite(table, info.row)) return
+        lunchReloadRef.current()
+      }
     })
+    // 写し・出欠の変更はこの画面を読み直す（昼食の列は、その結果＝materials を受け取る）
     const offB = subscribeDaycareChanges(onChange)
     let last = queuePending()
     const offQ = queueSubscribe((n) => {
       setQueueTick((x) => x + 1)
-      if (n < last) scheduleReload()
+      if (n < last) {
+        scheduleReload()
+        lunchReloadRef.current()
+      }
       last = n
     })
     return () => {
@@ -378,8 +395,10 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
   /** 日付の切り替え（URL の ?day= を置き換える。2026-11-09 計画B3。入れた値の片づけは押した所の afterRelease が先にする） */
   const goDay = (d: string) => navigate(vitalsMealsPath(d, today), { replace: true })
 
-  // 昼食と水分の列（それまでの食事一括の処理のまま＝DaycareLunchColumns.tsx。業務日・入力解禁・名簿・〔最新に更新〕はこの画面のもの）
-  const lunch = useDaycareLunchColumns({ day, today, actorId, residents, gate, reloadKey })
+  // 昼食と水分の列（それまでの食事一括の処理のまま＝DaycareLunchColumns.tsx。業務日・入力解禁・名簿・〔最新に更新〕はこの画面のもの）。
+  // その日の写し・予定・出欠（materials）と送信待ちの増減（queueTick）もこの画面が読んだものを渡す（同じ物を2回読まない＝反証 軽4）
+  const lunch = useDaycareLunchColumns({ day, today, actorId, residents, gate, reloadKey, materials: data, queueTick })
+  lunchReloadRef.current = lunch.reload
 
   const board = useMemo(
     () => (data === null ? null : buildDaycareBoard({ planRows: data.planRows, source: data.planSource, residents, attendance: data.attendance })),
@@ -925,6 +944,17 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
     ro.observe(el)
     return () => ro.disconnect()
   }, [kpBox])
+  // テンキーの下端から画面の下端までの高さ（狭い画面は下部タブの 3.5rem・広い画面は 0）。〔元に戻す〕の知らせをテンキーの上に出すため
+  // （2026-11-09 計画B3 の反証 中2: 知らせ（fixed bottom-20 z-50）がテンキー（z-40）のキー・〔閉じる〕の真上に重なった）
+  const [kpBottom, setKpBottom] = useState(0)
+  useEffect(() => {
+    const el = kpBox
+    if (!el) return
+    const check = () => setKpBottom(Number.parseFloat(window.getComputedStyle(el).bottom) || 0)
+    check()
+    window.addEventListener('resize', check)
+    return () => window.removeEventListener('resize', check)
+  }, [kpBox])
   // 枠の高さの上限（画面の高さ − アプリの見出し − 下部タブ − テンキー）を実測して書き戻す（見出しの行を枠の上に残す・2026-10-28）
   useTableFit(tableBox, active !== null ? kpHeight : 0)
   // 入れている欄を見せる（2026-10-28: 枠に高さの上限を付け、テンキーが開くと枠が縮むので、押した欄・〔次へ〕で移った欄がテンキーの下や
@@ -950,15 +980,18 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
   // 除く・予定外で来た方を含む）で、到着の有無を問わない。1人5欄＝その方の最初の回の 上・下・P・SpO2・KT（再測定の回は数えない）。
   // 値は画面に出している値（端末の値・送信待ち・サーバーの値）。空の枠の見た目と行の印も、ここで数えた方の最初の回だけに出す。
   // 2026-11-09 計画B3: 1人7欄＝バイタルの5欄＋昼食の主食・副食（拒食は入力済み・水分は数えない＝食事一括と同じ lunchBlankFields）。
-  // 数えるのは、バイタルと昼食の両方をその日で読めた時だけ（片方が前の日のままの間は数を出さない）
+  // 上の数（n名・m欄）を出すのは、バイタルと昼食の両方をその日で読めた時だけ。昼食だけ読めない時（反証 軽3）は表を止めず、
+  // 行の印と空の枠はバイタルの5欄で出し、上の数は出さない（昼食の列は「読み込めません」）
   const lunchReady = lunch.data !== null && lunch.data.day === day
-  const countRows = board === null || data === null || data.day !== day || !lunchReady ? [] : daycareBulkRows(board.rows)
+  const lunchFailed = !lunchReady && lunch.error !== null
+  const countRows = board === null || data === null || data.day !== day ? [] : daycareBulkRows(board.rows)
   const blankOf = new Map<number, number>(
     countRows.map((r) => {
       const first = slotsOf(r.residentId)[0]
       const vals: Partial<Record<DaycareVitalField, number | null>> = {}
       if (first !== undefined) for (const f of DAYCARE_VITAL_FIELDS) vals[f] = valueOf(first, f).v
-      return [r.residentId, vitalsMealsBlankFields(vitalBlankFields(first === undefined ? null : vals), lunch.blankOf(r.residentId)) ?? 0]
+      const vitalBlank = vitalBlankFields(first === undefined ? null : vals)
+      return [r.residentId, lunchReady ? (vitalsMealsBlankFields(vitalBlank, lunch.blankOf(r.residentId)) ?? 0) : vitalBlank]
     }),
   )
   const unfilled = bulkBlankSummary([...blankOf.values()])
@@ -1037,7 +1070,7 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
         {/* 2026-11-09 計画B3: それまでの食事一括の「予定の方 n人」も同じ所に並べる（入らない時は折り返す） */}
         {countRows.length > 0 ? (
           <div className="flex min-w-0 grow flex-wrap items-baseline gap-x-4 gap-y-1 lg:basis-64">
-            <DaycareUnfilledCount counts={unfilled} />
+            {lunchReady ? <DaycareUnfilledCount counts={unfilled} /> : null}
             <p className="text-sm text-ink2">
               予定の方 <span className="font-num font-bold text-ink">{countRows.length}</span>人
             </p>
@@ -1118,14 +1151,6 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
       </div>
     )
   }
-  if (lunch.error !== null && (lunch.data === null || lunch.data.day !== day)) {
-    return (
-      <div className="mx-auto w-full max-w-6xl space-y-2">
-        {header}
-        <ErrorBlock message={lunch.error} onRetry={() => setReloadKey((n) => n + 1)} />
-      </div>
-    )
-  }
   if (data === null) return null
 
   const activeSlot = active === null ? null : (flatSlots.find((s) => s.key === active.key) ?? null)
@@ -1134,7 +1159,7 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
   const keypad =
     active !== null && activeSlot !== null ? (
       // 今日の画面の改善 2回目（2026-10-24）: どの幅でも画面の下に出す（定時バイタルと同じ置き場所と並び）。
-      // 押した時の動き（桁がそろうと次へ・KT の次は次の方の血圧の上＝2026-11-09 計画B2・血圧の上は下と組で送る）と文言は変えない
+      // 押した時の動き（桁がそろうと次へ・KT の次はテンキーを閉じて同じ方の主食へ＝2026-11-09 計画B3・血圧の上は下と組で送る）と文言は変えない
       <section ref={setKpBox} aria-label="テンキー" className="dc-keypad fixed inset-x-0 bottom-14 z-40 border-t border-border-strong bg-surface p-3 lg:bottom-0">
         <div className="mx-auto max-w-md">
           <div className="mb-2" aria-live="polite">
@@ -1220,10 +1245,27 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
             <p className="text-base text-ink">
               {filter === 'all' ? 'この日のデイの予定・記録はまだありません。' : 'この日の予定の方がいません（休み・入院中の方は「全員」で出せます）。'}
             </p>
-            <p className="mt-2 text-base text-ink2">予定外で来た方は「今日（到着・休み）」の〔予定にない方を追加〕で足したカードを押し、〔予定外で到着〕を押すと、ここに並びます。</p>
+            {/* 2026-11-09 計画B3 の反証 軽7: それまでの食事一括の案内の文に戻した（「今日（到着・休み）」は狭い画面では「今日」と出るため） */}
+            <p className="mt-2 text-base text-ink2">予定外で来た方は、今日の画面の〔予定にない方を追加〕で足したカードを押し、〔予定外で到着〕を押すと、ここに出ます。</p>
           </div>
         ) : (
           <>
+            {lunchFailed ? (
+              <div role="alert" className="flex flex-wrap items-center gap-gap rounded-lg border border-warn bg-warn-bg px-3 py-1.5 text-base text-ink">
+                <p className="min-w-0 flex-1">
+                  <span aria-hidden="true">▲ </span>
+                  {MSG_LUNCH_UNREAD}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => afterRelease(() => setReloadKey((n) => n + 1))}
+                  disabled={releasing}
+                  className="min-h-tap rounded border border-border-strong bg-surface px-3 text-sm text-ink"
+                >
+                  最新に更新
+                </button>
+              </div>
+            ) : null}
             {/* 表が画面より広い時だけ出す手がかり（広い画面では出ない＝定時バイタルと同じ） */}
             {tableScrolls ? (
               <p className="text-sm text-ink2">
@@ -1298,8 +1340,9 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                     // 空の欄の数（数える方だけ・最初の回。「全員」で出した休み・入院中の方は数えないので undefined）
                     const blankCount = blankOf.get(row.residentId)
                     // 昼食と水分の欄を出すのは、それまでの食事一括に出ていた方（予定の方・来た方＝daycareBulkRows）だけ。
-                    // 「全員」で出した休み・入院中の方は出さない（2026-11-09 計画B3）
-                    const lunchHere = blankCount !== undefined
+                    // 「全員」で出した休み・入院中の方は出さない（2026-11-09 計画B3）。昼食を読めない時は欄の代わりに「読み込めません」（反証 軽3）
+                    const inBulk = blankCount !== undefined
+                    const lunchHere = inBulk && lunchReady
                     // 来た・まだ（○ 来所前／● 在席／✓ 帰宅。それまでの食事一括の氏名の下の印）。2026-11-09 計画B3 の手直し: 氏名の列に積まず、
                     // 状態の列の1段目に短い形で出す（行の高さを欄の 44px に保つ）。休み・入院中の方（「全員」で出した方）には出さない
                     const cm = daycareCameShort(row)
@@ -1440,12 +1483,6 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                                   >
                                     ＋再測定
                                   </button>
-                                ) : lunchRow ? (
-                                  // 来た・まだ（1回目の行・〔＋再測定〕を出す行は出さない＝行を高くしない）
-                                  <span className={`whitespace-nowrap text-sm leading-tight ${cm.textCls}`}>
-                                    <span aria-hidden="true">{cm.mark} </span>
-                                    {cm.word}
-                                  </span>
                                 ) : null}
                                 {mark !== null ? (
                                   // 送信中・保存済みも読み上げで知らせる（前の SlotStatus の role="status" と同じ＝#45 の反証 軽3）
@@ -1453,11 +1490,30 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                                     <span aria-hidden="true">{mark.mark} </span>
                                     {mark.text}
                                   </span>
+                                ) : si === 0 && inBulk && !(abnormal && isLast) ? (
+                                  // 来た・まだ（1回目の行。保存の印がある間は印を先に出す・〔＋再測定〕を出す行は出さない＝行を高くしない）
+                                  <span className={`whitespace-nowrap text-sm leading-tight ${cm.textCls}`}>
+                                    <span aria-hidden="true">{cm.mark} </span>
+                                    {cm.word}
+                                  </span>
+                                ) : null}
+                                {si === 0 && slots.length === 1 && time !== null && !(abnormal && isLast) ? (
+                                  // 測った時刻（2026-11-09 計画B3 の反証 中3: 再測定の回が無い方は氏名の列の「1回目（時刻）」を出さないので、ここに短く出す。
+                                  // 再測定の回がある方は氏名の列の「1回目（時刻）」と「↳ 再測定 n（時刻）」で見る）
+                                  <span className="whitespace-nowrap text-sm leading-tight text-ink2">
+                                    測定 <span className="font-num">{time}</span>
+                                  </span>
                                 ) : null}
                               </div>
                             </td>
                             {lunchRow ? (
                               lunch.cells(row.residentId)
+                            ) : si === 0 && inBulk && lunchFailed ? (
+                              // 昼食を読めない時は、昼食の3列に「読み込めません」（押せない。理由と〔最新に更新〕は表の上＝反証 軽3）
+                              <td colSpan={3} className="px-2 py-1 text-sm text-ink2">
+                                <span aria-hidden="true">— </span>
+                                読み込めません
+                              </td>
                             ) : (
                               // 再測定の行と、昼食の欄を出さない方（「全員」で出した休み・入院中の方）の行は空の欄（列の数をそろえる）
                               <>
@@ -1507,8 +1563,11 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
       {/* テンキーを出している間は、テンキーと同じ高さの余白をとる（最後の行もテンキーに隠れない） */}
       {active !== null ? <div aria-hidden="true" style={{ height: kpHeight }} /> : null}
       {keypad}
-      {/* 昼食・水分の〔元に戻す〕の知らせ（それまでの食事一括と同じ） */}
-      {lunch.toast}
+      {/* 昼食・水分の〔元に戻す〕の知らせ（それまでの食事一括と同じ）。テンキーを出している間は、テンキーの上に出す（キーと〔閉じる〕に
+          重ねない・知らせは消さない＝2026-11-09 計画B3 の反証 中2）。位置は ui.tsx の useToast が読む --toast-bottom（ほかの画面は付けない） */}
+      <div className="contents" style={active !== null && kpHeight > 0 ? ({ '--toast-bottom': `${kpHeight + kpBottom}px` } as CSSProperties) : undefined}>
+        {lunch.toast}
+      </div>
       <ConfirmDialog
         open={discardAsk}
         title="保存せずに移りますか"

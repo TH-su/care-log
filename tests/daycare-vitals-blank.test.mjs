@@ -406,7 +406,9 @@ describe('静的検査: 全部の枠が埋まるまでの知らせ（計画B2）
     assert.match(BULK.vitals, /vitalBlankFields\(/)
     // 2026-11-09 計画B3（固定し直し・意図は同じ）: 昼食の空の欄はフックの blankOf（同じ lunchBlankFields）で、バイタル・食事の画面がバイタルの5欄と合わせて数える
     assert.match(LUNCH, /lunchBlankFields\(mealShownFor\(targetOf\(rid\)\)\)/)
-    assert.match(BULK.vitals, /vitalsMealsBlankFields\(vitalBlankFields\(first === undefined \? null : vals\), lunch\.blankOf\(r\.residentId\)\)/)
+    // 2026-11-09 計画B3 の反証の直し（固定し直し・意図は同じ）（軽3）: 昼食を読めない時はバイタルの5欄だけ
+    assert.match(BULK.vitals, /const vitalBlank = vitalBlankFields\(first === undefined \? null : vals\)/)
+    assert.match(BULK.vitals, /lunchReady \? \(vitalsMealsBlankFields\(vitalBlank, lunch\.blankOf\(r\.residentId\)\) \?\? 0\) : vitalBlank/)
     assert.match(BULK.activity, /recordBlankFields\(filledOf\.get\(rid\) \?\? false\)/)
     assert.match(BULK.training, /recordBlankFields\(trainingFilled\(sessions, pending, rid, day\)\)/)
     for (const [k, p] of Object.entries(BULK)) assert.match(p, /bulkBlankSummary\(/, k)

@@ -484,14 +484,15 @@ describe('静的検査（計画B）', () => {
     assert.ok(v.indexOf('aria-label="表示する方"') < v.indexOf('<DaycareUnfilledCount counts={unfilled} />'))
     // 2026-11-09 反証 軽1（固定し直し・意図は同じ）: 1024px 以上は残りの幅が 16rem 以上あれば同じ段に置く（段の間は 12px）
     // 2026-11-09 計画B3（固定し直し・意図は同じ）: それまでの食事一括の「予定の方 n人」も同じ所に並べた（入らない時は折り返す）
-    assert.match(v, /<\/div>\s*(\{\}\s*)*\{countRows\.length > 0 \? \(\s*<div className="flex min-w-0 grow flex-wrap items-baseline gap-x-4 gap-y-1 lg:basis-64">\s*<DaycareUnfilledCount counts=\{unfilled\} \/>\s*<p className="text-sm text-ink2">\s*予定の方 <span className="font-num font-bold text-ink">\{countRows\.length\}<\/span>人\s*<\/p>\s*<\/div>\s*\) : null\}\s*<\/div>\s*\{releasing \? \(/)
+    assert.match(v, /<\/div>\s*(\{\}\s*)*\{countRows\.length > 0 \? \(\s*<div className="flex min-w-0 grow flex-wrap items-baseline gap-x-4 gap-y-1 lg:basis-64">\s*\{lunchReady \? <DaycareUnfilledCount counts=\{unfilled\} \/> : null\}\s*<p className="text-sm text-ink2">\s*予定の方 <span className="font-num font-bold text-ink">\{countRows\.length\}<\/span>人\s*<\/p>\s*<\/div>\s*\) : null\}\s*<\/div>\s*\{releasing \? \(/)
     assert.match(v, /<div className="flex flex-wrap items-center gap-x-3 gap-y-2">\s*<div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">/)
     // 2026-11-09 計画B3（固定し直し・意図は同じ）: 数えるのはバイタルと昼食の両方をその日で読めた時だけ
-    assert.match(v, /const countRows = board === null \|\| data === null \|\| data\.day !== day \|\| !lunchReady \? \[\] : daycareBulkRows\(board\.rows\)/)
+    // 2026-11-09 計画B3 の反証の直し（固定し直し・意図は同じ）（軽3）: 数える方はバイタルの読み込みで決める（昼食を読めない時も行の印は出す。上の数は昼食も読めた時だけ）
+    assert.match(v, /const countRows = board === null \|\| data === null \|\| data\.day !== day \? \[\] : daycareBulkRows\(board\.rows\)/)
     // 2026-11-09 計画B2（固定し直し・仕様の変更で数え方を変えた）: 1人5欄＝最初の回の5欄の空き（vitalBlankFields）を到着を問わず数える
     // 2026-11-09 計画B3（固定し直し・意図は同じ）: 1人7欄＝バイタルの5欄＋昼食の主食・副食（vitalsMealsBlankFields）
     assert.match(v, /const first = slotsOf\(r\.residentId\)\[0\]/)
-    assert.match(v, /return \[r\.residentId, vitalsMealsBlankFields\(vitalBlankFields\(first === undefined \? null : vals\), lunch\.blankOf\(r\.residentId\)\) \?\? 0\]/)
+    assert.match(v, /return \[r\.residentId, lunchReady \? \(vitalsMealsBlankFields\(vitalBlank, lunch\.blankOf\(r\.residentId\)\) \?\? 0\) : vitalBlank\]/)
     assert.match(v, /const unfilled = bulkBlankSummary\(\[\.\.\.blankOf\.values\(\)\]\)/)
     // 活動一括: 見出しの段（読めない時は出さない）
     const a = BULK.activity

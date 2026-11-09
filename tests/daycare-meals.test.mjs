@@ -137,7 +137,8 @@ if (DP === null) {
     it('入力解禁は input_enabled_daycare・サーバーの設定待ちと未来の日は書かない・記録者が無ければ書かない', () => {
       // 2026-11-09 計画B3（固定し直し・意図は同じ）: 入力解禁は画面が読み、フックに渡す
       assert.match(screen, /getKindInputGate\('daycare'\)/)
-      assert.match(screen, /useDaycareLunchColumns\(\{ day, today, actorId, residents, gate, reloadKey \}\)/)
+      // 2026-11-09 計画B3 の反証の直し（固定し直し・意図は同じ）（軽4）: その日の材料（写し・予定・出欠）と送信待ちの増減も画面から渡す
+      assert.match(screen, /useDaycareLunchColumns\(\{ day, today, actorId, residents, gate, reloadKey, materials: data, queueTick \}\)/)
       assert.match(page, /const canWrite = gate !== null && gate\.observed && gate\.value === true && !missing && day <= today/)
       assert.match(page, /if \(actorId === null\) return MSG_NO_RECORDER/)
       assert.match(page, /disabled=\{!canWrite\}/)
@@ -186,7 +187,10 @@ if (DP === null) {
       // 予定の方がいない時の案内はバイタル一括の文（「全員」の絞り込みがある）
       assert.match(screen, /<LoadingBlock label="デイのバイタルと昼食を読み込んでいます…" \/>/)
       assert.match(screen, /const lunchLoading = \(lunch\.loading && lunch\.data === null\) \|\| \(lunch\.data !== null && lunch\.data\.day !== day && lunch\.error === null\)/)
-      assert.match(screen, /<ErrorBlock message=\{lunch\.error\} onRetry=\{\(\) => setReloadKey\(\(n\) => n \+ 1\)\} \/>/)
+      // 2026-11-09 計画B3 の反証の直し（固定し直し・意図は同じ）（軽3）: 昼食と水分だけ読めない時は表を止めず、昼食の列を「読み込めません」にして、表の上に理由と〔最新に更新〕
+      assert.doesNotMatch(screen, /<ErrorBlock message=\{lunch\.error\}/)
+      assert.match(screen, /const lunchFailed = !lunchReady && lunch\.error !== null/)
+      assert.match(screen, /\{lunchFailed \? \(\s*<div role="alert"[^>]*>\s*<p className="min-w-0 flex-1">\s*<span aria-hidden="true">▲ <\/span>\s*\{MSG_LUNCH_UNREAD\}/)
       assert.match(screen, /この日の予定の方がいません（休み・入院中の方は「全員」で出せます）。/)
       assert.doesNotMatch(page, /来た方（在席・帰宅）/)
     })
@@ -348,7 +352,8 @@ if (DP === null) {
       // 2026-11-09 計画B3 の手直し（固定し直し・意図は同じ）: 氏名のリンクの2段目は基準の札（活動一括と同じ形）。来た・まだは状態の列の1段目に短い形（daycareCameShort・時刻なし）。
       // 取り込みの印・外出／入院の記録は氏名の列に積まず、行の下の知らせ（フックの notes）へ
       assert.match(screenBody, /const cm = daycareCameShort\(row\)/)
-      assert.match(screenBody, /\) : lunchRow \? \(\s*<span className=\{`whitespace-nowrap text-sm leading-tight \$\{cm\.textCls\}`\}>\s*<span aria-hidden="true">\{cm\.mark\} <\/span>\s*\{cm\.word\}\s*<\/span>\s*\) : null\}/)
+      // 2026-11-09 計画B3 の反証の直し（固定し直し・意図は同じ）（中3）: 1段目は保存の印があれば印、無ければ来た・まだ（〔＋再測定〕を出す行は出さない）
+      assert.match(screenBody, /\) : si === 0 && inBulk && !\(abnormal && isLast\) \? \(\s*<span className=\{`whitespace-nowrap text-sm leading-tight \$\{cm\.textCls\}`\}>\s*<span aria-hidden="true">\{cm\.mark\} <\/span>\s*\{cm\.word\}\s*<\/span>\s*\) : null\}/)
       assert.match(page, /return mealBandMark\(\[kindOf\(lt, mealState\[mealKeyOf\(lt\)\]\)\]\)/)
       assert.match(screenBody, /const mark = lunchRow \? mergeSaveMarks\(vitalMark, lunch\.markOf\(row\.residentId\)\) : vitalMark/)
       assert.match(page, /const showSource = source !== null && source !== '画面で入力'/)
@@ -367,7 +372,9 @@ if (DP === null) {
       // （画面に出している値＝mealShownFor で数えるのは同じ）。表示は「▲ 未入力 n名（m欄）」・全部埋まった時だけ「✓ 全員入力済み」・未到着は出さない
       // 2026-11-09 計画B3（固定し直し・意図は同じ）: 1人の昼食の空の欄はフックの blankOf（同じ lunchBlankFields・画面に出している値）。画面がバイタルの5欄と合わせて数える
       assert.match(page, /const blankOf = \(rid: number\) => lunchBlankFields\(mealShownFor\(targetOf\(rid\)\)\)/)
-      assert.match(screen, /vitalsMealsBlankFields\(vitalBlankFields\(first === undefined \? null : vals\), lunch\.blankOf\(r\.residentId\)\)/)
+      // 2026-11-09 計画B3 の反証の直し（固定し直し・意図は同じ）（軽3）: 昼食を読めない時は行の印をバイタルの5欄で出す（上の数は出さない）
+      assert.match(screen, /return \[r\.residentId, lunchReady \? \(vitalsMealsBlankFields\(vitalBlank, lunch\.blankOf\(r\.residentId\)\) \?\? 0\) : vitalBlank\]/)
+      assert.match(screen, /\{lunchReady \? <DaycareUnfilledCount counts=\{unfilled\} \/> : null\}/)
       assert.match(screen, /const unfilled = bulkBlankSummary\(\[\.\.\.blankOf\.values\(\)\]\)/)
       // 2026-11-09 計画B（固定し直し・意図は同じ）: 表示は一括の4画面で同じ部品（DaycareUnfilledCount）にした
       const unf = code('../src/components/DaycareUnfilledCount.tsx')
@@ -471,7 +478,10 @@ if (DP === null) {
       assert.match(page, /return held === undefined \? q : \{ \.\.\.q, \[key\]: \{ \.\.\.held, base: held\.base \+ saved\.amount_ml \} \}/)
       // 合計は fetchDaycareIntake の fluids（その方・その日の全部）
       assert.match(page, /const fluids = intake\.fluids\.filter\(/)
-      assert.match(page, /if \(table === 'meals' \|\| table === 'fluid_intake'\) onChange\(table, info\)/)
+      // 2026-11-09 計画B3 の反証の直し（固定し直し・意図は同じ）（軽4）: 食事・水分の変更の購読は画面の1組（subscribeChanges）で、昼食の列を読み直す
+      const screen = code('../src/pages/DaycareVitalsMealsPage.tsx')
+      assert.match(screen, /else if \(table === 'meals' \|\| table === 'fluid_intake'\) \{\s*if \(info\?\.row && isSelfWrite\(table, info\.row\)\) return\s*lunchReloadRef\.current\(\)/)
+      assert.doesNotMatch(page, /subscribeChanges|subscribeDaycareChanges|queueSubscribe/)
     })
     it('水分の〔元に戻す〕は softDeleteFluid（1人の画面の removeFluid(fromUndo) と同じ扱い）・送信待ちの取り消しは合計から外す', () => {
       const u = page.slice(page.indexOf('const undoFluid = '), page.indexOf('const submitFluid = '))

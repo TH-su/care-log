@@ -31,21 +31,14 @@ import {
   FORBIDDEN_REASON,
   OUTDATED_REASON,
   discardPendingRow,
-  fetchDaycareAttendance,
-  fetchDaycareDay,
   fetchDaycareIntake,
-  fetchDaycarePlan,
   insertFluid,
   isQueuePersisted,
-  isSelfWrite,
   kindBlockedMessage,
   pendingRow,
   queuePending,
-  queueSubscribe,
   saveMealEdits,
   softDeleteFluid,
-  subscribeChanges,
-  subscribeDaycareChanges,
 } from '../lib/db'
 import type { CellConflict, CellEditInput, DaycareMealRow, MealCellField, MealTarget } from '../lib/db'
 import { useToast } from '../components/ui'
@@ -54,6 +47,7 @@ import { DAYCARE_BLANK_CELL_CLS, lunchBlankFields, lunchShownWith } from '../lib
 import {
   LUNCH_SELECT_OPTIONS,
   createFluidInputs,
+  lunchSelectKeyBlocked,
   fluidTotalOf,
   lunchSelectPatch,
   lunchSelectValue,
@@ -64,7 +58,7 @@ import {
 } from '../lib/daycarePerson'
 import type { LunchAmountField, MealSaveKind } from '../lib/daycarePerson'
 import { todayIso } from '../lib/format'
-import type { DaycareAttendance, DaycareDay, DaycarePlanRow, DaycarePlanSource, FluidIntake, Meal, Resident } from '../lib/types'
+import type { DaycareAttendance, DaycarePlanRow, DaycarePlanSource, FluidIntake, Meal, Resident } from '../lib/types'
 
 const ERR_LOAD = 'デイの記録を読み込めませんでした。通信状態を確認して、再試行してください。'
 const MSG_NO_RECORDER = '記録者が選ばれていません。上の「記録者」で選んでから入れてください。'
@@ -75,12 +69,9 @@ const MSG_GATE_UNKNOWN =
   'デイの記録を使える期間かどうかを確認できませんでした（通信エラー）。電波状態を確認して、再試行してください。記録の閲覧はこのままできます。'
 const MSG_MISSING = 'デイの記録はまだ使えません（サーバー側の設定待ち）。管理者に連絡してください。'
 
+/** 読んだ食事と水分（2026-11-09 計画B3 の手直し 軽4: その日の写し・予定・出欠は画面が読んだ materials を使う） */
 export interface MealsData {
   day: string
-  planRows: DaycarePlanRow[]
-  planSource: DaycarePlanSource
-  missing: boolean
-  attendance: DaycareAttendance[]
   meals: DaycareMealRow[]
   /** その日の水分の記録（全員分・1人の画面の分も含む）。合計に使う */
   fluids: FluidIntake[]
@@ -113,6 +104,18 @@ const personKeyOf = (residentId: number, day: string) => `${residentId}:${day}`
 const fmtCc = (n: number) => `${n.toLocaleString('ja-JP')}cc`
 const AMOUNT_WORD: Record<LunchAmountField, string> = { main_amount: '主食', side_amount: '副食' }
 
+/**
+ * 画面が読んだその日の材料（写しか週間計画の予定・出欠・サーバーの設定待ちか）。それまでの食事一括の画面は自前で読んでいた
+ * （2026-11-09 計画B3 の手直し 軽4: 同じ物を2回読まない・変更の購読も画面の1組だけ）。画面の読み込みの結果をそのまま渡す
+ */
+export interface DaycareLunchMaterials {
+  day: string
+  planRows: DaycarePlanRow[]
+  planSource: DaycarePlanSource
+  attendance: DaycareAttendance[]
+  missing: boolean
+}
+
 /** 画面から受け取るもの（業務日・今日・記録者・名簿・入力解禁・〔最新に更新〕の回数）。それまでの食事一括の画面が自前で持っていたもの */
 export interface DaycareLunchColumnsInput {
   /** 業務日（画面の URL の ?day=） */
@@ -124,6 +127,10 @@ export interface DaycareLunchColumnsInput {
   gate: { value: boolean; observed: boolean; forbidden?: true; outdated?: true } | null
   /** 〔最新に更新〕で増える（読み直す） */
   reloadKey: number
+  /** その日の材料（画面が読んだもの。読めていない間は null） */
+  materials: DaycareLunchMaterials | null
+  /** 送信待ちが増減した回数（画面の queueSubscribe の数。知らせの出し直しに使う） */
+  queueTick: number
 }
 
 /** 画面に返すもの（行ごとの列・知らせ・空の欄の数と、読み込みの状態） */
@@ -141,9 +148,20 @@ export interface DaycareLunchColumns {
   notes: (residentId: number) => ReactNode
   /** 昼食の〔元に戻す〕・水分の〔元に戻す〕の知らせ（画面の最後に置く） */
   toast: ReactNode
+  /** 静かに読み直す（画面の購読が食事・水分の変更と、送信待ちが送れて減った時に呼ぶ） */
+  reload: () => void
 }
 
-export function useDaycareLunchColumns({ day, today, actorId, residents, gate, reloadKey }: DaycareLunchColumnsInput): DaycareLunchColumns {
+export function useDaycareLunchColumns({
+  day,
+  today,
+  actorId,
+  residents,
+  gate,
+  reloadKey,
+  materials,
+  queueTick,
+}: DaycareLunchColumnsInput): DaycareLunchColumns {
   const [data, setData] = useState<MealsData | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -153,7 +171,6 @@ export function useDaycareLunchColumns({ day, today, actorId, residents, gate, r
   const waitSeqRef = useRef(0)
   /** 人・日・枠ごとの順番待ちの末尾 */
   const chainRef = useRef(new Map<string, Promise<void>>())
-  const [queueTick, setQueueTick] = useState(0)
   /** 水分の欄に入れている数（人ごと。日を切り替えたら空にする。端末には残さない）。読み書きは控え（fluidInputs）で行い、描画にはこの写しを使う */
   const [fluidText, setFluidText] = useState<Record<number, string>>({})
   /** 水分の欄の控え（描画を待たずに読み書きする。送る前に空にして、続けて届いた改行キーで同じ量を2回送らない＝2026-10-29 親の検収） */
@@ -197,20 +214,8 @@ export function useDaycareLunchColumns({ day, today, actorId, residents, gate, r
       setError(null)
     }
     try {
-      let snapshot: DaycareDay | null = null
-      let missing = false
-      try {
-        snapshot = await fetchDaycareDay(target)
-      } catch (e) {
-        if (e instanceof DbError && e.kind === 'server') missing = true
-        else throw e
-      }
-      const usable = snapshot !== null && snapshot.plan_source !== 'unknown'
-      const [plan, attendance, intake] = await Promise.all([
-        usable ? Promise.resolve(null) : fetchDaycarePlan(target),
-        missing ? Promise.resolve([] as DaycareAttendance[]) : fetchDaycareAttendance(target),
-        fetchDaycareIntake(target),
-      ])
+      // 2026-11-09 計画B3 の手直し（軽4）: その日の写し・予定・出欠は画面が読んだもの（materials）を使い、ここでは食事と水分だけを読む
+      const intake = await fetchDaycareIntake(target)
       if (gen !== genRef.current || target !== dayRef.current) return
       // 読み込みを始めた後に自分の保存の応答で受け取った行は、読んだ行より新しいことがある（版 rev の大きい方を残す）
       const prev = dataRef.current
@@ -226,15 +231,7 @@ export function useDaycareLunchColumns({ day, today, actorId, residents, gate, r
       if (prev !== null && prev.day === target)
         for (const mine of prev.fluids)
           if ((fluidAddedAtRef.current.get(mine.id) ?? 0) > startedAt && !fluids.some((f) => f.id === mine.id)) fluids.push(mine)
-      commitData({
-        day: target,
-        planRows: usable && snapshot !== null ? snapshot.plan_rows : (plan?.rows ?? []),
-        planSource: usable && snapshot !== null ? snapshot.plan_source : (plan?.source ?? 'unknown'),
-        missing: missing || plan?.missing === true,
-        attendance,
-        meals,
-        fluids,
-      })
+      commitData({ day: target, meals, fluids })
       setError(null)
     } catch {
       if (gen !== genRef.current) return
@@ -263,7 +260,8 @@ export function useDaycareLunchColumns({ day, today, actorId, residents, gate, r
     void load(day, false)
   }, [day, reloadKey, load])
 
-  // 他の端末の変更（Realtime）と送信待ちの減り（送れた）で静かに読み直す
+  // 他の端末の変更（Realtime）と送信待ちの減り（送れた）で静かに読み直す。2026-11-09 計画B3 の手直し（軽4）: 購読は画面の1組
+  // （subscribeChanges の meals・fluid_intake と queueSubscribe）で、画面がここの reload を呼ぶ（購読の数を増やさない）
   const reloadTimer = useRef<number | null>(null)
   const scheduleReload = useCallback(() => {
     if (reloadTimer.current !== null) window.clearTimeout(reloadTimer.current)
@@ -272,38 +270,23 @@ export function useDaycareLunchColumns({ day, today, actorId, residents, gate, r
       void load(dayRef.current, true)
     }, 400)
   }, [load])
-  useEffect(() => {
-    const onChange = (table: string, info?: { event: string; row: Record<string, unknown> | null }) => {
-      if (info?.row && isSelfWrite(table, info.row)) return
-      scheduleReload()
-    }
-    const offA = subscribeDaycareChanges(onChange)
-    // 水分の合計は1人の画面・他の端末で足した分も含むので、水分の変更でも読み直す（2026-10-28）
-    const offB = subscribeChanges((table, info) => {
-      if (table === 'meals' || table === 'fluid_intake') onChange(table, info)
-    })
-    let last = queuePending()
-    const offQ = queueSubscribe((n) => {
-      setQueueTick((x) => x + 1)
-      if (n < last) scheduleReload()
-      last = n
-    })
-    return () => {
-      offA()
-      offB()
-      offQ()
+  useEffect(
+    () => () => {
       if (reloadTimer.current !== null) window.clearTimeout(reloadTimer.current)
-    }
-  }, [scheduleReload])
+    },
+    [],
+  )
 
+  // その日の材料は画面が読んだもの（同じ日の時だけ使う）
+  const mat = materials !== null && materials.day === day ? materials : null
   const board = useMemo(
-    () => (data === null ? null : buildDaycareBoard({ planRows: data.planRows, source: data.planSource, residents, attendance: data.attendance })),
-    [data, residents],
+    () => (mat === null ? null : buildDaycareBoard({ planRows: mat.planRows, source: mat.planSource, residents, attendance: mat.attendance })),
+    [mat, residents],
   )
   const came = useMemo(() => (board === null ? [] : mealBulkRows(board.rows)), [board])
   const cameKey = came.map((r) => r.residentId).join(',')
   const nameOf = (id: number) => residents.find((r) => r.id === id)?.name ?? `利用者ID ${id}`
-  const missing = data?.missing ?? false
+  const missing = mat?.missing ?? false
   const canWrite = gate !== null && gate.observed && gate.value === true && !missing && day <= today
   /** 合計に入れる水分の記録（取り消しを送信待ちにした行を除く） */
   const visibleFluids = useMemo(() => (data === null ? [] : data.fluids.filter((f) => !hiddenFluidIds.has(f.id))), [data, hiddenFluidIds])
@@ -728,6 +711,11 @@ export function useDaycareLunchColumns({ day, today, actorId, residents, gate, r
                 aria-label={`${AMOUNT_WORD[f]}：${name}さん（いま: ${now}）`}
                 // テンキーの KT の次にフォーカスを移す先（主食だけ・2026-11-09 計画B3）
                 data-dc-lunch-main={f === 'main_amount' ? rid : undefined}
+                // 数字キー（0〜9・テンキーの数字・全角）は選択肢の頭文字選びに使わせない（KT の後に主食へ移った時、物理キーボードで打ち続けた
+                // 数字で主食が書き換わってすぐ保存されるのを防ぐ＝2026-11-09 計画B3 の反証 中1）。矢印・Enter・Space・Tab の操作はそのまま
+                onKeyDown={(e) => {
+                  if (lunchSelectKeyBlocked(e.key)) e.preventDefault()
+                }}
                 onChange={(e) => {
                   const patch = lunchSelectPatch(f, e.target.value, lunch?.status)
                   if (patch !== null) void saveMeal(lt, patch)
@@ -846,7 +834,7 @@ export function useDaycareLunchColumns({ day, today, actorId, residents, gate, r
     )
   }
 
-  return { data, loading, error, blankOf, markOf, cells, notes, toast }
+  return { data, loading, error, blankOf, markOf, cells, notes, toast, reload: scheduleReload }
 }
 
 /**

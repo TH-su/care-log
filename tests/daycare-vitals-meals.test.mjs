@@ -24,6 +24,7 @@ const code = (p) =>
 
 let R = null
 let P = null
+let DP = null
 let loadError = null
 try {
   const { registerHooks } = await import('node:module')
@@ -42,10 +43,12 @@ try {
   })
   R = await import('../src/lib/daycareRoutes.ts?daycare-vitals-meals')
   P = await import('../src/lib/daycareProgress.ts?daycare-vitals-meals')
+  DP = await import('../src/lib/daycarePerson.ts?daycare-vitals-meals')
 } catch (e) {
   loadError = e
   R = null
   P = null
+  DP = null
 }
 
 const screen = code('../src/pages/DaycareVitalsMealsPage.tsx')
@@ -53,7 +56,7 @@ const lunch = code('../src/pages/DaycareLunchColumns.tsx')
 const today = code('../src/pages/DaycarePage.tsx')
 const app = code('../src/App.tsx')
 
-if (R === null || P === null) {
+if (R === null || P === null || DP === null) {
   registerLoadFailure('デイ 計画B3 の試験', loadError, 'この Node は型の除去か解決フックを持たない（古い Node）', { hooks: true })
 } else {
   describe('純ロジック（計画B3）', () => {
@@ -155,9 +158,10 @@ describe('静的検査: 統合した画面（計画B3）', () => {
     assert.match(cells, /\{\(\['main_amount', 'side_amount'\] as const\)\.map\(\(f\) => \{/)
     assert.ok(cells.indexOf('<select') > 0 && cells.indexOf('<select') < cells.indexOf('<form'))
     // 再測定の行と、昼食の欄を出さない方（「全員」で出した休み・入院中の方）は空の欄で列の数をそろえる
-    assert.match(body, /\{lunchRow \? \(\s*lunch\.cells\(row\.residentId\)\s*\) : \(/)
+    // 2026-11-09 計画B3 の反証の直し（固定し直し・意図は同じ）（軽3）: 昼食を読めない時は、昼食の3列に「読み込めません」（押せない）
+    assert.match(body, /\{lunchRow \? \(\s*lunch\.cells\(row\.residentId\)\s*\) : si === 0 && inBulk && lunchFailed \? \(\s*<td colSpan=\{3\} className="px-2 py-1 text-sm text-ink2">\s*<span aria-hidden="true">— <\/span>\s*読み込めません\s*<\/td>\s*\) : \(/)
     assert.match(body, /const lunchRow = si === 0 && lunchHere/)
-    assert.match(body, /const lunchHere = blankCount !== undefined/)
+    assert.match(body, /const inBulk = blankCount !== undefined\s*const lunchHere = inBulk && lunchReady/)
     assert.match(body, /<span className="sr-only">昼食は対象外（休み・入院中）<\/span>/)
     // 行の下の知らせ（バイタル・昼食・水分）は10列にまたがる1行
     assert.match(body, /<td colSpan=\{DAYCARE_VITAL_FIELDS\.length \+ 5\} className="p-0">/)
@@ -215,8 +219,9 @@ describe('静的検査: 統合した画面（計画B3）', () => {
     assert.doesNotMatch(screen + lunch, /console\./)
   })
   it('昼食と水分は、それまでの食事一括の処理のまま（フックに移しただけ・入力解禁・名簿・〔最新に更新〕は画面から渡す）', () => {
-    assert.match(screen, /const lunch = useDaycareLunchColumns\(\{ day, today, actorId, residents, gate, reloadKey \}\)/)
-    assert.match(lunch, /export function useDaycareLunchColumns\(\{ day, today, actorId, residents, gate, reloadKey \}: DaycareLunchColumnsInput\): DaycareLunchColumns \{/)
+    // 2026-11-09 計画B3 の反証の直し（固定し直し・意図は同じ）（軽4）: その日の材料（写し・予定・出欠）と送信待ちの増減は画面から渡す
+    assert.match(screen, /const lunch = useDaycareLunchColumns\(\{ day, today, actorId, residents, gate, reloadKey, materials: data, queueTick \}\)/)
+    assert.match(lunch, /export function useDaycareLunchColumns\(\{\s*day,\s*today,\s*actorId,\s*residents,\s*gate,\s*reloadKey,\s*materials,\s*queueTick,\s*\}: DaycareLunchColumnsInput\): DaycareLunchColumns \{/)
     // 保存・送信待ち・水分の二重登録の防止（#56 の createFluidInputs）・〔元に戻す〕はそのまま
     assert.match(lunch, /const \[fluidInputs\] = useState\(\(\) => createFluidInputs\('cc'\)\)/)
     assert.match(lunch, /await saveMealEdits\(t, send as CellEditInput<MealCellField>, \{/)
@@ -241,7 +246,8 @@ describe('静的検査: 行の高さ（計画B3 の手直し・ふつうの行�
     assert.match(notes, /\{otherStatus !== null \|\| showSource \? \(\s*<p className="text-sm text-ink2">/)
   })
   it('状態の列は2段まで（1段目＝来た・まだの短い形か〔＋再測定〕・2段目＝保存の印）。水分の合計は欄の横（上に積まない）', () => {
-    assert.match(body, /\) : lunchRow \? \(\s*<span className=\{`whitespace-nowrap text-sm leading-tight \$\{cm\.textCls\}`\}>/)
+    // 2026-11-09 計画B3 の反証の直し（固定し直し・意図は同じ）（中3）: 1段目＝保存の印か来た・まだ、2段目＝測った時刻（再測定の回が無い方）
+    assert.match(body, /\) : si === 0 && inBulk && !\(abnormal && isLast\) \? \(\s*<span className=\{`whitespace-nowrap text-sm leading-tight \$\{cm\.textCls\}`\}>/)
     assert.match(body, /const cm = daycareCameShort\(row\)/)
     const cells = lunch.slice(lunch.indexOf('const cells = (rid: number)'), lunch.indexOf('const notes = (rid: number)'))
     assert.doesNotMatch(cells, /flex-col/)
@@ -279,7 +285,8 @@ describe('静的検査: 古い道・切り替え（計画B3）', () => {
     assert.match(nav, /\{ key: 'vitalsMeals', to: DAYCARE_VITALS_MEALS_PATH, label: 'バイタル・食事', cats: \['vitals', 'meals'\] \}/)
     assert.doesNotMatch(nav, /'バイタル一括'|'食事一括'|key: 'vitals'|key: 'meals'/)
     assert.match(nav, /\.\.\.\(it\.key === 'vitalsMeals' \? \[excretion\] : \[\]\)/)
-    assert.match(nav, /<span aria-hidden="true" className="mr-1\.5 inline-flex gap-0\.5">\s*\{it\.cats\.map\(\(c\) => \(\s*<span key=\{c\} className=\{`inline-block h-4 w-1 rounded-sm \$\{DAYCARE_CATEGORY_CLS\[c\]\.dot\}`\} \/>/)
+    // 2026-11-09 計画B3 の反証の直し（固定し直し・意図は同じ）（軽6）: 今いる画面（primary の塗り）の上では、印に地の色（surface）の細い縁を付ける
+    assert.match(nav, /<span aria-hidden="true" className=\{`mr-1\.5 inline-flex \$\{current === it\.key \? 'gap-1' : 'gap-0\.5'\}`\}>\s*\{it\.cats\.map\(\(c\) => \(\s*<span key=\{c\} className=\{`inline-block h-4 w-1 rounded-sm \$\{DAYCARE_CATEGORY_CLS\[c\]\.dot\}\$\{current === it\.key \? ' ring-1 ring-surface' : ''\}`\} \/>/)
     // 未入力の数（今日の画面だけ）は1人7欄・バイタルか昼食を読めない日は出さない
     const np = today.slice(today.indexOf('const navPending ='), today.indexOf(': undefined', today.indexOf('const navPending =')))
     assert.match(np, /vitalsMeals:\s*data\.vitalsOk && data\.intakeOk\s*\?/)
@@ -434,5 +441,131 @@ describe('色（tokens.css・tailwind.config.js・計画B3）', () => {
       assert.doesNotMatch(body, /cat-[a-z]+-bg|DAYCARE_CATEGORY_CLS/, `${f}: 表の行（欄・知らせ）に分類の色を塗らない`)
       assert.doesNotMatch(c, /#[0-9A-Fa-f]{3,6}\b/, `${f}: 色を直書きしない`)
     }
+  })
+})
+
+// ── 2026-11-09 計画B3 の反証の直し（中1・中2・中3・軽3・軽4・軽6・軽7） ──
+describe('反証の直し（計画B3）', () => {
+  const body = screen.slice(screen.indexOf('<tbody>'), screen.indexOf('</tbody>'))
+  const db = read('../src/lib/db.ts')
+  it('中1: 主食・副食の選択肢は数字キー（半角・全角・テンキーの数字）を止める。矢印・Enter・Space・Tab などは止めない', () => {
+    if (DP !== null) {
+      for (const k of ['0', '1', '5', '9', '０', '９']) assert.equal(DP.lunchSelectKeyBlocked(k), true, k)
+      for (const k of ['ArrowDown', 'ArrowUp', 'Enter', ' ', 'Tab', 'Escape', 'Backspace', 'a', '.', '10', '']) assert.equal(DP.lunchSelectKeyBlocked(k), false, k)
+    }
+    const cells = lunch.slice(lunch.indexOf('const cells = (rid: number)'), lunch.indexOf('const notes = (rid: number)'))
+    assert.match(cells, /<select[\s\S]*?onKeyDown=\{\(e\) => \{\s*if \(lunchSelectKeyBlocked\(e\.key\)\) e\.preventDefault\(\)\s*\}\}[\s\S]*?onChange=/)
+    // 主食・副食の両方（同じ map の中の1つの select）
+    assert.equal((cells.match(/<select/g) ?? []).length, 1)
+  })
+  it('中2: テンキーを出している間は〔元に戻す〕の知らせをテンキーの上に出す（--toast-bottom）。ほかの画面の知らせの位置は今のまま', () => {
+    const ui = code('../src/components/ui.tsx')
+    assert.match(ui, /<div className="pointer-events-none fixed inset-x-0 bottom-20 z-50 flex justify-center p-4" style=\{\{ bottom: 'var\(--toast-bottom, 5rem\)' \}\}>/)
+    assert.match(screen, /<div className="contents" style=\{active !== null && kpHeight > 0 \? \(\{ '--toast-bottom': `\$\{kpHeight \+ kpBottom\}px` \} as CSSProperties\) : undefined\}>\s*\{lunch\.toast\}\s*<\/div>/)
+    assert.match(screen, /const check = \(\) => setKpBottom\(Number\.parseFloat\(window\.getComputedStyle\(el\)\.bottom\) \|\| 0\)/)
+    // --toast-bottom を付けるのはこの画面だけ
+    const files = ['App.tsx', 'pages/DaycarePage.tsx', 'pages/DaycarePersonPage.tsx', 'pages/DaycareActivityBulkPage.tsx', 'pages/DaycareTrainingPage.tsx', 'pages/MealsGridPage.tsx', 'pages/VitalsGridPage.tsx']
+    for (const f of files) assert.doesNotMatch(code(`../src/${f}`), /--toast-bottom/, f)
+  })
+  it('中3: 再測定の回が無い方の測った時刻は、状態の列の2段目に「測定 10:05」（行の高さ 53px のまま・幅は「✓ 保存済み」以下）', () => {
+    assert.match(body, /\{si === 0 && slots\.length === 1 && time !== null && !\(abnormal && isLast\) \? \(\s*<span className="whitespace-nowrap text-sm leading-tight text-ink2">\s*測定 <span className="font-num">\{time\}<\/span>\s*<\/span>\s*\) : null\}/)
+    // 1段目は保存の印か来た・まだ（どちらか1つ）・2段目は時刻＝2段で欄の 44px に収まる
+    assert.match(body, /\{mark !== null \? \(\s*<span role="status"[\s\S]*?\) : si === 0 && inBulk && !\(abnormal && isLast\) \? \(/)
+    // 幅: 「測定 10:05」（15px×2＋間 4px＋数字 9px×5）は「✓ 保存済み」（15px×5＋間 4px）以下
+    assert.ok(15 * 2 + 4 + 9 * 5 <= 15 * 5 + 4)
+  })
+  it('軽3: 昼食と水分だけ読めない時は表を止めない（昼食の列は「読み込めません」・理由と〔最新に更新〕は表の上）。バイタルを読めない時は今までどおり止める', () => {
+    assert.match(screen, /const MSG_LUNCH_UNREAD = '昼食と水分を読み込めませんでした。通信状態を確認して、〔最新に更新〕を押してください（バイタルはこのまま入れられます）。'/)
+    assert.match(screen, /if \(error !== null && \(data === null \|\| data\.day !== day\)\) \{\s*return \(\s*<div className="mx-auto w-full max-w-6xl space-y-2">\s*\{header\}\s*<ErrorBlock message=\{error\}/)
+    assert.doesNotMatch(screen, /ErrorBlock message=\{lunch\.error\}/)
+    // 読み込み中の待ちは、昼食が読めなかった時は外れる（lunch.error があれば待たない）
+    assert.match(screen, /const lunchLoading = \(lunch\.loading && lunch\.data === null\) \|\| \(lunch\.data !== null && lunch\.data\.day !== day && lunch\.error === null\)/)
+    assert.match(screen, /onClick=\{\(\) => afterRelease\(\(\) => setReloadKey\(\(n\) => n \+ 1\)\)\}\s*disabled=\{releasing\}\s*className="min-h-tap rounded border border-border-strong bg-surface px-3 text-sm text-ink"\s*>\s*最新に更新/)
+  })
+  it('軽4: 1回の読み込みの問い合わせの数と購読の数（その日の写し・予定・出欠と購読は画面の1組だけ。昼食のフックは食事と水分だけ読む）', () => {
+    /** db.ts の関数1つが出す問い合わせの数（.from( と .rpc( の数。出欠の古い DB 向けの読み直しは数えない＝同じ read の2回目） */
+    const queries = (name) => {
+      const at = db.indexOf(`export async function ${name}(`)
+      assert.ok(at >= 0, name)
+      // 関数の終わり＝行頭の } （次の関数を数えない）
+      const end = db.indexOf('\n}\n', at)
+      const fn = db.slice(at, end)
+      return (fn.match(/\.from\('|\.rpc\('/g) ?? []).length
+    }
+    const loadOf = (src) => {
+      const at = src.indexOf('const load = useCallback(async (target')
+      assert.ok(at >= 0)
+      const fn = src.slice(at, src.indexOf('}, [', at))
+      return [...new Set([...fn.matchAll(/\b(fetch[A-Za-z]+)\(/g)].map((m) => m[1]))]
+    }
+    const pageReads = loadOf(screen)
+    const hookReads = loadOf(lunch)
+    assert.deepEqual(hookReads, ['fetchDaycareIntake'], '昼食のフックは食事と水分だけ読む')
+    for (const f of ['fetchDaycareDay', 'fetchDaycarePlan', 'fetchDaycareAttendance']) assert.ok(pageReads.includes(f) && !hookReads.includes(f), f)
+    // それまでの2画面（バイタル一括＝今の画面の読み込み・食事一括＝写し・予定・出欠・食事と水分）
+    const oldVitals = pageReads
+    const oldMeals = ['fetchDaycareDay', 'fetchDaycarePlan', 'fetchDaycareAttendance', 'fetchDaycareIntake']
+    const sum = (names) => names.reduce((n, f) => n + queries(f), 0)
+    const combined = sum([...pageReads, ...hookReads])
+    const vit = sum(oldVitals)
+    const meals = sum(oldMeals)
+    // 写しが使える日（予定の rpc を呼ばない日）の数: バイタル一括 5・食事一括 4・統合 7（直す前の統合 9）
+    const noPlan = (n, names) => n - (names.includes('fetchDaycarePlan') ? queries('fetchDaycarePlan') : 0)
+    assert.equal(noPlan(vit, oldVitals), 5)
+    assert.equal(noPlan(meals, oldMeals), 4)
+    assert.equal(noPlan(combined, [...pageReads, ...hookReads]), 7)
+    // 統合の数＝バイタル一括＋食事一括だけにある分（食事と水分の2本）。共通の材料（写し・予定・出欠）は1回ずつ
+    assert.equal(combined, vit + queries('fetchDaycareIntake'))
+    assert.ok(combined < vit + meals)
+    // 購読（Realtime の channel）: 画面の subscribeChanges・subscribeDaycareChanges の2つだけ＝それまでの2画面のどちらとも同じ数
+    const subs = (src) => (src.match(/\b(subscribeChanges|subscribeDaycareChanges)\(/g) ?? []).length
+    assert.equal(subs(screen), 2)
+    assert.equal(subs(lunch), 0)
+    assert.equal((screen.match(/\bqueueSubscribe\(/g) ?? []).length, 1)
+    assert.doesNotMatch(lunch, /queueSubscribe\(/)
+    // 食事・水分の変更と、送信待ちが送れて減った時は、画面の購読から昼食の列を読み直す
+    assert.match(screen, /lunchReloadRef\.current = lunch\.reload/)
+    assert.match(screen, /if \(n < last\) \{\s*scheduleReload\(\)\s*lunchReloadRef\.current\(\)\s*\}/)
+    // 昼食のフックの材料は画面の読み込みの結果（同じ日の時だけ使う）
+    assert.match(lunch, /const mat = materials !== null && materials\.day === day \? materials : null/)
+    assert.match(lunch, /const missing = mat\?\.missing \?\? false/)
+  })
+  it('軽6: 今いる画面の切り替えの上では、分類の色の印に地の色の細い縁（縁×primary・印×縁が明暗とも 3 以上）', () => {
+    const tokens = read('../src/styles/tokens.css')
+    const ruleBody = (sel) => {
+      const at = tokens.indexOf(`${sel} {`)
+      return tokens.slice(tokens.indexOf('{', at) + 1, tokens.indexOf('}', at))
+    }
+    const hex = (b, n) => new RegExp(`${n}:\\s*(#[0-9A-Fa-f]{6})`, 'i').exec(b)[1]
+    const lin = (c) => {
+      const x = c / 255
+      return x <= 0.04045 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4
+    }
+    const lum = (h) => {
+      const [r, g, b] = [0, 2, 4].map((i) => parseInt(h.replace('#', '').slice(i, i + 2), 16))
+      return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    }
+    const cr = (a, b) => (Math.max(lum(a), lum(b)) + 0.05) / (Math.min(lum(a), lum(b)) + 0.05)
+    const part = tokens.slice(tokens.indexOf('/* ── デイの分類の色と一括の表の行の地'))
+    const partRule = (sel) => {
+      const at = part.indexOf(`${sel} {`)
+      return part.slice(part.indexOf('{', at) + 1, part.indexOf('}', at))
+    }
+    for (const [ops, cat] of [
+      [ruleBody('[data-ds="ops"], [data-ds="ops"][data-mode="light"]'), partRule(':root')],
+      [ruleBody('[data-ds="ops"][data-mode="dark"]'), partRule(":root[data-mode='dark']")],
+    ]) {
+      const surface = hex(ops, '--c-surface')
+      const primary = hex(ops, '--c-primary')
+      assert.ok(cr(surface, primary) >= 3, '縁 × primary')
+      for (const c of ['vitals', 'meals', 'activity', 'training']) assert.ok(cr(hex(cat, `--c-cat-${c}`), surface) >= 3, `${c} の印 × 縁`)
+    }
+  })
+  it('軽7: 予定の方がいない時の案内は、それまでの食事一括の文（今日の画面の〔予定にない方を追加〕…ここに出ます）', () => {
+    assert.match(screen, /予定外で来た方は、今日の画面の〔予定にない方を追加〕で足したカードを押し、〔予定外で到着〕を押すと、ここに出ます。/)
+  })
+  it('軽5: 古い試験の名前・欄送りの古いコメントを残さない', () => {
+    assert.doesNotMatch(read('../src/styles/tokens.css'), /daycare-colors\.test/)
+    assert.doesNotMatch(read('../src/pages/DaycareVitalsMealsPage.tsx'), /KT の次は次の方の血圧の上＝/)
   })
 })

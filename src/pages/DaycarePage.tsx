@@ -255,11 +255,12 @@ export function DaycareNav({
           }
         >
           {current === it.key ? <span aria-hidden="true">✓ </span> : null}
-          {/* 分類の色の印（2026-11-09 計画B3・読み上げない）。バイタル・食事は2本 */}
+          {/* 分類の色の印（2026-11-09 計画B3・読み上げない）。バイタル・食事は2本。今いる画面（primary の塗り）の上では印が溶けるので、
+              地の色（surface）の細い縁を付ける（反証 軽6: 縁と primary は明 8.6・暗 7.9、印と縁は 3.3 以上） */}
           {it.cats.length > 0 ? (
-            <span aria-hidden="true" className="mr-1.5 inline-flex gap-0.5">
+            <span aria-hidden="true" className={`mr-1.5 inline-flex ${current === it.key ? 'gap-1' : 'gap-0.5'}`}>
               {it.cats.map((c) => (
-                <span key={c} className={`inline-block h-4 w-1 rounded-sm ${DAYCARE_CATEGORY_CLS[c].dot}`} />
+                <span key={c} className={`inline-block h-4 w-1 rounded-sm ${DAYCARE_CATEGORY_CLS[c].dot}${current === it.key ? ' ring-1 ring-surface' : ''}`} />
               ))}
             </span>
           ) : null}
