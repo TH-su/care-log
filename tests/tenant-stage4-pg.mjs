@@ -40,8 +40,9 @@ const TABLES = ['residents', 'staff', 'vitals', 'meals', 'fluid_intake', 'notes'
 /**
  * 0054 の後に、自分の施設の行だけの守り（tenant_only）を自分の移行で最初から持って作った表（0054 の27表・戻す SQL の対象には入れない）。
  * 2026-11-09 計画C（固定し直し・意図は同じ）: 0061 の連絡帳の2表。0054 の守りの本数は27表で数え、この表は同じ守りを持つことを別に確かめる
+ * 2026-11-10 未測定（固定し直し・意図は同じ）: 0062 の〔未測定〕の印の表も同じ
  */
-const LATER_TABLES = ['daycare_day_notes', 'daycare_contact_notes']
+const LATER_TABLES = ['daycare_day_notes', 'daycare_contact_notes', 'daycare_vital_unmeasured']
 /** 27表の tenant_only の本数（0054 が足す・戻す本数） */
 const N27_SQL = `select count(*)::int n from pg_policies where schemaname = 'public' and policyname = 'tenant_only' and tablename = any($1)`
 const QUAL = '(tenant_id = ( SELECT private.my_tenant() AS my_tenant))'
@@ -296,6 +297,7 @@ const MIG_BODY = MIG.replace(/^begin;$/m, '-- begin').replace(/^commit;$/m, '-- 
 const BACK_BODY = BACK.replace(/^begin;$/m, '-- begin').replace(/^commit;$/m, '-- commit')
 const BACK55_BODY = BACK55.replace(/^begin;$/gm, '-- begin').replace(/^commit;$/gm, '-- commit')
 await inTx('移行の先の確かめ・冪等・戻す SQL', async () => {
+  // 2026-11-10 未測定（固定し直し・意図は同じ）: 0062 の表も同じく先に戻す（0062 → 0061 → 0055 → 0054）。
   // 2026-11-09 計画C（固定し直し・意図は同じ）: 戻すのは新しい移行から順（0061 → 0055 → 0054）。0061 の2表を先に戻した形で
   // 0054 の冪等と戻す SQL を確かめる（2表は自分の tenant_only を持ち、0054 を戻す SQL の確かめ「残っていない」は全部の表で数えるため）。
   // 取引の終わりで元に戻る

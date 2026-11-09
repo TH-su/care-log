@@ -35,6 +35,7 @@ import {
   fetchDaycareDay,
   fetchDaycareIntake,
   fetchDaycarePlan,
+  fetchDaycareVitalUnmeasured,
   fetchDaycareVitalsLive,
   fetchMyRole,
   fetchResidentTargets,
@@ -88,6 +89,7 @@ import {
   canEditPastDaycareTimes,
   daycareBathStatus,
   daycareBulkRows,
+  daycareVitalKey,
   nowHm,
   vitalNeedsRecheck,
 } from '../lib/daycare'
@@ -98,6 +100,7 @@ import {
   PROGRESS_STATE_WORD,
   activityCellsFilled,
   activityShownCells,
+  daycareCountSeq,
   daycareNavPending,
   daycareProgressMarks,
   daycareStateTone,
@@ -110,12 +113,16 @@ import {
   unreadProgressLabels,
   unreadProgressNotice,
   trainingFilled,
+  unmeasuredFieldsOf,
+  unmeasuredSeqsOf,
+  unmeasuredSlotSeqs,
   vitalBlankFields,
   vitalShownValues,
   vitalSlotsFilled,
   vitalsMealsBlankFields,
+  vitalsTileDone,
 } from '../lib/daycareProgress'
-import type { DaycareCategory, DaycareNavPending, ProgressMark } from '../lib/daycareProgress'
+import type { DaycareCategory, DaycareNavPending, DaycareVitalUnmeasured, ProgressMark } from '../lib/daycareProgress'
 import type { DaycareTrainingSession } from '../lib/daycareTraining'
 import { useVitalLimits } from '../hooks/useVitalLimits'
 import { VitalLimitsFailedNote } from '../components/VitalLimitsFailedNote'
@@ -166,6 +173,11 @@ interface DayData {
    * 印を「読めない」にするだけで、画面の他の部分は止めない
    */
   training: DaycareTrainingSession[] | null
+  /**
+   * その日の〔未測定〕の印（2026-11-10・0062。切り替えの未入力の数で、印のある欄を入力済みにする）。null＝読めない（表が無い・通信エラー・
+   * 控えで開いた）＝印なしで数える（未入力を多めに出す側）。件数の帯「バイタル未」とカードの VS の印も、5欄が値か印で埋まった方を済にする（2026-11-10 確認の反証 軽5）
+   */
+  unmeasured: DaycareVitalUnmeasured[] | null
   /** 昼食・おやつ・水分を読めたか（読めない時の空の一覧を控えに「読めた」として入れない＝確認の反証 中1） */
   intakeOk: boolean
   /** サーバーに届かず、控え（daycareDayMemo）で開いた時の控えの「読んだ時点」。サーバーから読めた時は null（親の確かめ 中1・2026-10-25） */
@@ -455,9 +467,13 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       // 写しが「読めなかった」（unknown）の日は、いまの週間計画も読む（読めれば表示に使い、次のタップで写し直す＝反証レビュー中2）
       // 機能訓練の記録も同時に読む（2026-11-09 計画B）。読めない時は null（印を「読めない」にするだけ）。この読み込みの中に置くので、
       // 日の切り替え後の古い応答は入れず（世代と日付の守り）、送信待ちが届いた時・〔最新に更新〕の読み直しでも一緒に読み直す
-      const [{ snapshot, missing, plan, attendance, baths, vitals, bathsOk, vitalsOk, intake, activities }, training] = await Promise.all([
+      // 〔未測定〕の印（2026-11-10・0062）も同じ回で読む（1本）。読めない時は null（印なしで数えるだけ）
+      const [{ snapshot, missing, plan, attendance, baths, vitals, bathsOk, vitalsOk, intake, activities }, training, unmeasured] = await Promise.all([
         loadDaycareDayParts(target, DAY_READERS),
         fetchTrainingSessions(target).catch((): DaycareTrainingSession[] | null => null),
+        fetchDaycareVitalUnmeasured(target)
+          .then((r) => r.rows)
+          .catch((): DaycareVitalUnmeasured[] | null => null),
       ])
       const usable = snapshot !== null && snapshot.plan_source !== 'unknown'
       if (gen !== genRef.current || target !== dayRef.current) return
@@ -476,6 +492,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         fluids: intake?.fluids ?? [],
         activities,
         training,
+        unmeasured,
         intakeOk: intake !== null,
         memoAt: null,
         readAt: Date.now(),
@@ -508,6 +525,8 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
           intakeOk: m.intakeOk,
           memoAt: m.savedAt,
           readAt: m.savedAt,
+          // 〔未測定〕の印も控えに無い（2026-11-10。印なしで数える）
+          unmeasured: null,
         })
         // 名簿が読めていない（電波が無い）時は控えの名簿で氏名を出す（控えは画面のメモリだけ）
         if (m.residents.length > 0) setResidents((prev) => (prev.length > 0 ? prev : m.residents))
@@ -786,7 +805,10 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   const vitalShown = new Map(
     board.rows.map((r) => {
       const id = r.residentId
-      const slots = daycareVitalSlotsWithPending(vitalsOf(id), vitalKeys, id, data.day, [], (key) => pendingRow('vitals', vitalTarget(id, key)) !== null)
+      // 2026-11-10 確認の反証 軽1: 〔未測定〕の印だけの回も回に入れる（バイタル・食事の画面と同じ。この画面は取り消した測定の行のキーを
+      // 読まないので、生きている行のキーだけで取り消した回を見分ける＝その回に印だけが残った稀な時は一括の画面とずれる）
+      const markSeqs = unmeasuredSlotSeqs(data.unmeasured, id, data.day, vitalKeys, vitalKeys)
+      const slots = daycareVitalSlotsWithPending(vitalsOf(id), vitalKeys, id, data.day, markSeqs, (key) => pendingRow('vitals', vitalTarget(id, key)) !== null)
       return [id, slots.map((slot) => ({ seq: slot.seq, vals: vitalShownValues(pendingRow('vitals', vitalTarget(id, slot.key)), slot.vital) }))]
     }),
   )
@@ -798,7 +820,24 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     const latest = withVal.length === 0 ? null : withVal.reduce((a, b) => (b.seq > a.seq ? b : a))
     return latest !== null && vitalNeedsRecheck(latest.vals, targets.get(id), limits.lookup(id, data.day))
   }
-  const vitalsWaiting = board.rows.filter((r) => r.state === 'present' && !vitalsDone(r.residentId)).length
+  /**
+   * 数える回の空の欄の数（2026-11-10 反証 軽2: バイタル・食事の画面と同じ純関数 daycareCountSeq で数える回を決める＝取り消した
+   * 測定の行のキーを読まないこの画面でも、同じ回の〔未測定〕の印を数える）。印のある欄は入力済み
+   */
+  const countBlankOf = (id: number): number => {
+    const shown = vitalShown.get(id) ?? []
+    const keyOf = (seq: number) => daycareVitalKey(data.day, id, seq)
+    const live = new Set(vitalsOf(id).map((v) => v.client_key))
+    const cs = daycareCountSeq(
+      shown.filter((s) => live.has(keyOf(s.seq)) || pendingRow('vitals', vitalTarget(id, keyOf(s.seq))) !== null).map((s) => s.seq),
+      unmeasuredSeqsOf(data.unmeasured, id, data.day),
+      shown.map((s) => s.seq),
+    )
+    const first = shown.find((s) => s.seq === cs) ?? shown[0]
+    return vitalBlankFields(first?.vals ?? null, unmeasuredFieldsOf(data.unmeasured, id, data.day, first?.seq ?? cs ?? 1))
+  }
+  // 2026-11-10 反証 軽7: 来所者で5欄とも値か〔未測定〕の印で埋まった方は「バイタル未」に入れない（確認の反証 軽5: カードの VS も同じ・仮置き）
+  const vitalsWaiting = board.rows.filter((r) => r.state === 'present' && !vitalsTileDone(vitalsDone(r.residentId), countBlankOf(r.residentId))).length
   // 入浴を確かめていない方（代表者の決定 2026-10-23 の 3: 自動の行は「済」で数えない。12:30 を過ぎても行が無い方と、
   // 休みの方に自動の行が残っている方だけ＝daycare.ts の bathCountsUnchecked）
   const bathClock = { pastDay: data.day < today, nowHm: nowHm() }
@@ -820,7 +859,9 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         daycareProgressMarks({
           state: r.state,
           hospitalized: r.hospitalized,
-          vitals: data.vitalsOk ? { done: vDone, abnormal: vDone && vitalsAbnormal(id) } : null,
+          // 2026-11-10 確認の反証 軽5（仮置き）: VS の済も件数の帯と同じ vitalsTileDone（値が1つでもあるか、5欄が値か〔未測定〕で埋まった）。
+          // 要確認（基準外）は値のある時だけ
+          vitals: data.vitalsOk ? { done: vitalsTileDone(vDone, countBlankOf(id)), abnormal: vDone && vitalsAbnormal(id) } : null,
           lunch: lunchShownWith(lunchOf(id), pendingRow('meals', { residentId: id, day: data.day, slot: 'lunch' })),
           lunchRead: data.intakeOk,
           activity: activityRead === null ? null : activityCellsFilled(activityShownCells(activityRead, activityPending, id, data.day)),
@@ -854,7 +895,8 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
               ? bulk.map(
                   (r) =>
                     vitalsMealsBlankFields(
-                      vitalBlankFields(vitalShown.get(r.residentId)?.[0]?.vals ?? null),
+                      // 2026-11-10 未測定: 数える回の〔未測定〕の印のある欄は入力済み（バイタル・食事の画面と同じ回・同じ純関数）
+                      countBlankOf(r.residentId),
                       lunchBlankFields(lunchShownWith(lunchOf(r.residentId), pendingRow('meals', { residentId: r.residentId, day: data.day, slot: 'lunch' }))),
                     ) ?? 0,
                 )

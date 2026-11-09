@@ -41,9 +41,10 @@ const TABLES = ['residents', 'staff', 'vitals', 'meals', 'fluid_intake', 'notes'
 /**
  * 0053 の後に、施設の印と（施設の印, 番号）の組の外部キーを最初から持って作った表と、その外部キーの数
  * （2026-11-09 計画C（固定し直し・意図は同じ）: 0061 の連絡帳の2表。0053 が付け直す76本は27表のまま数える）
+ * （2026-11-10 未測定（固定し直し・意図は同じ）: 0062 の〔未測定〕の印の表。組の外部キーは 0061 の7本＋0062 の4本＝11本）
  */
-const LATER_TABLES = ['daycare_day_notes', 'daycare_contact_notes']
-const LATER_FKS = 7
+const LATER_TABLES = ['daycare_day_notes', 'daycare_contact_notes', 'daycare_vital_unmeasured']
+const LATER_FKS = 11
 
 const client = new pg.Client({ connectionString: url })
 await client.connect()
@@ -126,7 +127,7 @@ await inTx('形: 印が必須・トリガ・76本の組の外部キー・施設�
   ok('印を入れるトリガは27表のまま', trg === 27, trg)
   const trgLater = (await q(`select count(*)::int n from pg_trigger g join pg_class c on c.oid = g.tgrelid
                               where g.tgname = 'carelog_fill_tenant' and not g.tgisinternal and c.relname = any($1)`, [LATER_TABLES]))[0].n
-  ok('後から作った表（0061）にも印を入れるトリガがあり、施設の印が必須', trgLater === LATER_TABLES.length
+  ok('後から作った表（0061・0062）にも印を入れるトリガがあり、施設の印が必須', trgLater === LATER_TABLES.length
     && LATER_TABLES.every((t) => nn.some((r) => r.table_name === t)), { trgLater })
   const fks = await q(`select k.conname, k.conrelid::regclass::text as child, pg_get_constraintdef(k.oid) as def,
                               k.confupdtype, k.confdeltype, k.confmatchtype, k.condeferrable
@@ -136,7 +137,7 @@ await inTx('形: 印が必須・トリガ・76本の組の外部キー・施設�
   // 下の「組・NO ACTION・名前」の確かめに入れる（同じ形で作ってあること）
   const fks27 = fks.filter((f) => TABLES.includes(f.child))
   ok('利用者・職員・申し送りを指す外部キーは76本', fks27.length === 76, fks27.length)
-  ok('後から作った表（0061）の外部キーは決まった本数で、27表と後の表のほかに利用者・職員・申し送りを指す表は無い',
+  ok('後から作った表（0061・0062）の外部キーは決まった本数で、27表と後の表のほかに利用者・職員・申し送りを指す表は無い',
     fks.filter((f) => LATER_TABLES.includes(f.child)).length === LATER_FKS && fks.length === 76 + LATER_FKS, fks.length)
   ok('76本とも（施設の印, 番号）→（施設の印, id）の組', fks.every((f) => /^FOREIGN KEY \(tenant_id, [a-z_]+\) REFERENCES (residents|staff|notes)\(tenant_id, id\)$/.test(f.def)),
     fks.filter((f) => !/^FOREIGN KEY \(tenant_id, /.test(f.def)).map((f) => f.def))
@@ -342,6 +343,7 @@ const MIG_BODY = MIG.replace(/^begin;$/m, '-- begin').replace(/^commit;$/m, '-- 
 await inTx('移行の先の確かめ: 印の無い行・よその施設を指す行・名前の違う外部キーがあると、何も変えずに止まる', async () => {
   ok('移行は begin … commit で包んでいる', /^begin;$/m.test(MIG) && /^commit;$/m.test(MIG))
   // 2026-11-09 計画C（固定し直し・意図は同じ）: 0053 が当たる時点の形（後から作った 0061 の2表が無い形）で確かめる。
+  // 2026-11-10 未測定（固定し直し・意図は同じ）: 0062 の表も同じく外す（LATER_TABLES に入れた）
   // 2表は組の外部キーを持つので、あると 0053 の「決まった76本」の確かめが先に止まる（取引の終わりで元に戻る）
   await q(`drop table if exists ${LATER_TABLES.map((t) => `public.${t}`).join(', ')}`)
   const again = await tryq(MIG_BODY)

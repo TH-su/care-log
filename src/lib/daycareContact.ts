@@ -19,6 +19,10 @@
 //   中身を読めないので紙は「記録なし」のままにし、見本の「送信待ちを含む」と印刷の前の確かめにだけ出す（2026-11-09 親の決定）
 // ・来ていない方（休み・入院中・まだ到着していない方）の紙は作れるが、本文は「本日はお休みでした」などの1文で、記録の欄を出さない
 // ・紙面には判定の記号（↑↓）を載せない。基準を外れたかは今の vitalNeedsRecheck（利用者ごとの基準が優先）で判定し、値は数値で出す
+// ・〔未測定〕の印（2026-11-10・0062）のある欄は、紙と見本に「未測定」と出す（「記録なし」と分ける）。値がある欄は値（印は無視）。
+//   どの回の印かは問わない（値が無く、どれかの回に印がある欄）。
+//   2026-11-10 反証 軽3: 印を読めなかった時（unmeasured＝null）は、値の無い欄を「読み込めませんでした」にし（「記録なし」と刷らない）、
+//   読めなかった項目（UNMEASURED_UNREAD_LABEL）に足す（画面の帯と印刷の前の確かめに出る）
 // 個人情報は扱わない（数値と記録の言葉だけ。氏名は画面が渡し、ここでは並べるだけ）。
 
 import { BATH_CANCEL_REASON_LABEL, BATH_RESULT_LABEL, MEAL_STATUS_LABEL } from './types.ts'
@@ -30,8 +34,8 @@ import type { DaycareActivity } from './daycareActivity.ts'
 import { TRAINING_CANCEL_REASON_LABEL, sessionOf } from './daycareTraining.ts'
 import type { DaycareTrainingSession } from './daycareTraining.ts'
 import { fluidTotalOf } from './daycarePerson.ts'
-import { activityShownCells, daycareVitalSlotsWithPending, lunchShownWith, vitalShownValues } from './daycareProgress.ts'
-import type { ActivityPendingLike } from './daycareProgress.ts'
+import { activityShownCells, daycareVitalSlotsWithPending, lunchShownWith, unmeasuredFieldsOf, vitalShownValues } from './daycareProgress.ts'
+import type { ActivityPendingLike, DaycareVitalUnmeasured } from './daycareProgress.ts'
 import type { ResidentTargets } from './vitalAlerts.ts'
 import type { VitalThresholds } from './vitalThresholds.ts'
 
@@ -120,6 +124,10 @@ export function draftAgainstSaved(draft: string, base: string | null, saved: str
 
 /** 記録が無い項目の言葉（記録の項目にだけ使う。空の欄・「—」・「異常なし」にしない） */
 export const NO_RECORD = '記録なし'
+/** 〔未測定〕の印のある、値の無いバイタルの欄の言葉（2026-11-10・「記録なし」と分ける） */
+export const UNMEASURED = '未測定'
+/** 〔未測定〕の印を読めなかった時の、読めなかった項目の名前（2026-11-10 反証 軽3） */
+export const UNMEASURED_UNREAD_LABEL = 'バイタルの未測定'
 /** 読めなかった項目の言葉（記録が無いことと取り違えない） */
 export const UNREAD = '読み込めませんでした'
 /** 入浴の予定が無い日 */
@@ -237,6 +245,11 @@ export interface ContactSheetInput {
   note: Pick<DaycareContactNote, 'body' | 'nurse_note'> | null
   /** ひと言（共通の一文・1人のひと言）を読めたか（省くと読めた） */
   notesOk?: boolean
+  /**
+   * その日の〔未測定〕の印（全員分でよい。2026-11-10・0062）。省く＝印なし。null＝読めなかった（2026-11-10 反証 軽3: 値の無い欄は
+   * 「読み込めませんでした」・読めなかった項目に足す）
+   */
+  unmeasured?: readonly Pick<DaycareVitalUnmeasured, 'resident_id' | 'day' | 'seq' | 'field'>[] | null
 }
 
 /** 来た方（在席・帰宅）か。印刷する方の既定もこれ */
@@ -329,20 +342,32 @@ export function sheetVitalValues(
   }
 }
 
-/** 紙面のバイタルの4欄（体温・血圧・脈拍・SpO2）。値が無い欄は「記録なし」。判定の記号は付けない */
-export function sheetVitalCells(values: Record<DaycareVitalField, number | null> | null): SheetVitalCell[] {
+/**
+ * 紙面のバイタルの4欄（体温・血圧・脈拍・SpO2）。値が無い欄は「記録なし」。判定の記号は付けない。
+ * 2026-11-10 未測定: unmeasured＝〔未測定〕の印のある欄（省くと印なし）。値が無く印のある欄は「未測定」（値があれば値＝印は無視）。
+ * 血圧は上と下を別々に見て、両方とも同じ言葉ならその言葉だけ。unmeasuredUnread＝印を読めなかった（値の無い欄は「読み込めませんでした」＝
+ * 「記録なし」か「未測定」か分からないため。2026-11-10 反証 軽3）
+ */
+export function sheetVitalCells(
+  values: Record<DaycareVitalField, number | null> | null,
+  unmeasured?: ReadonlySet<DaycareVitalField> | null,
+  unmeasuredUnread = false,
+): SheetVitalCell[] {
   const v = values ?? { temp: null, sys_bp: null, dia_bp: null, pulse: null, spo2: null }
+  const none = (f: DaycareVitalField): string => (unmeasuredUnread ? UNREAD : unmeasured?.has(f) === true ? UNMEASURED : NO_RECORD)
   const bp =
     v.sys_bp === null && v.dia_bp === null
-      ? NO_RECORD
+      ? none('sys_bp') === none('dia_bp')
+        ? none('sys_bp')
+        : `上 ${none('sys_bp')}／下 ${none('dia_bp')}`
       : v.sys_bp !== null && v.dia_bp !== null
         ? `${v.sys_bp}/${v.dia_bp} mmHg`
-        : `上 ${v.sys_bp === null ? NO_RECORD : v.sys_bp}／下 ${v.dia_bp === null ? NO_RECORD : v.dia_bp}`
+        : `上 ${v.sys_bp === null ? none('sys_bp') : v.sys_bp}／下 ${v.dia_bp === null ? none('dia_bp') : v.dia_bp}`
   return [
-    { label: '体温', value: v.temp === null ? NO_RECORD : `${v.temp.toFixed(1)}℃` },
+    { label: '体温', value: v.temp === null ? none('temp') : `${v.temp.toFixed(1)}℃` },
     { label: '血圧', value: bp },
-    { label: '脈拍', value: v.pulse === null ? NO_RECORD : `${v.pulse} 回/分` },
-    { label: 'SpO2', value: v.spo2 === null ? NO_RECORD : `${v.spo2}%` },
+    { label: '脈拍', value: v.pulse === null ? none('pulse') : `${v.pulse} 回/分` },
+    { label: 'SpO2', value: v.spo2 === null ? none('spo2') : `${v.spo2}%` },
   ]
 }
 
@@ -508,6 +533,10 @@ export function buildContactSheet(p: ContactSheetInput): ContactSheet {
   if (tr.queued) pendingLabels.push('機能訓練')
   const unreadLabels: string[] = []
   if (!p.vitalsOk) unreadLabels.push('バイタル')
+  // 2026-11-10 反証 軽3: 〔未測定〕の印を読めなかった（バイタルを読めた時だけ。読めない時は「バイタル」に含まれる）。
+  // 確認の反証 軽4: 紙に載せる5欄の値がそろった方は印に左右されないので足さない（値の無い欄が1つでもある方だけ）
+  const unmeasuredUnread = p.vitalsOk && p.unmeasured === null && DAYCARE_VITAL_FIELDS.some((f) => typeof v.values?.[f] !== 'number')
+  if (unmeasuredUnread) unreadLabels.push(UNMEASURED_UNREAD_LABEL)
   if (!p.bathsOk) unreadLabels.push('入浴')
   if (!p.intakeOk) unreadLabels.push('お食事・水分')
   if (p.activities === null) unreadLabels.push('活動')
@@ -517,7 +546,9 @@ export function buildContactSheet(p: ContactSheetInput): ContactSheet {
     ...base,
     attended: true,
     absentText: null,
-    vitals: p.vitalsOk ? { kind: 'ok', cells: sheetVitalCells(v.values), recheck: v.recheck } : { kind: 'unread' },
+    vitals: p.vitalsOk
+      ? { kind: 'ok', cells: sheetVitalCells(v.values, unmeasuredFieldsOf(p.unmeasured, p.residentId, p.day), unmeasuredUnread), recheck: v.recheck }
+      : { kind: 'unread' },
     items: [
       { label: '入浴', value: sheetBathText(p.bath, p.bathingPlanned, p.bathsOk) },
       { label: 'お食事', value: sheetLunchText(lunch.lunch, p.intakeOk) },

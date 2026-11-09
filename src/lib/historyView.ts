@@ -66,6 +66,8 @@ export const HISTORY_TABLE_LABEL: Record<string, string> = {
   // デイの連絡帳（2026-11-09 計画C・0061）
   daycare_day_notes: 'デイの連絡帳（共通の一文）',
   daycare_contact_notes: 'デイの連絡帳のひと言',
+  // デイのバイタルの〔未測定〕の印（2026-11-10・0062。取り消すと変更の記録に残る）
+  daycare_vital_unmeasured: 'デイのバイタルの未測定',
 }
 
 const VITAL_KIND_NAME: Record<string, string> = {
@@ -179,6 +181,12 @@ const TABLE_LABEL: Record<string, Record<string, string>> = {
     body: '個別のひと言',
     nurse_note: '看護職のひと言',
     printed_at: '印刷した時刻',
+  },
+  // デイのバイタルの〔未測定〕の印（2026-11-10・0062）。seq はデイの測定の回・field は欄（temp など）
+  daycare_vital_unmeasured: {
+    day: '日付',
+    seq: '測定の回',
+    field: '欄',
   },
   incidents: {
     kind: '区分',

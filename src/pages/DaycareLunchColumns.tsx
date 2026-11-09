@@ -148,6 +148,11 @@ export interface DaycareLunchColumns {
   notes: (residentId: number) => ReactNode
   /** 昼食の〔元に戻す〕・水分の〔元に戻す〕の知らせ（画面の最後に置く） */
   toast: ReactNode
+  /**
+   * 同じ知らせの部品に出す（2026-11-10 未測定: バイタルの〔未測定〕の〔元に戻す〕も同じ所に出す＝知らせを2つ重ねない）。
+   * undo を渡すと〔元に戻す〕つき（8秒）
+   */
+  show: (msg: string, undo?: () => void) => void
   /** 静かに読み直す（画面の購読が食事・水分の変更と、送信待ちが送れて減った時に呼ぶ） */
   reload: () => void
 }
@@ -834,7 +839,7 @@ export function useDaycareLunchColumns({
     )
   }
 
-  return { data, loading, error, blankOf, markOf, cells, notes, toast, reload: scheduleReload }
+  return { data, loading, error, blankOf, markOf, cells, notes, toast, show, reload: scheduleReload }
 }
 
 /**
