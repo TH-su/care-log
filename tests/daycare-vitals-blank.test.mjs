@@ -338,12 +338,13 @@ describe('静的検査: 空の枠の見た目（一括の4画面・計画B2）',
     assert.doesNotMatch(open, /focus\(/)
   })
   it('食事一括: 選択肢が「—（未入力）」の時だけ空の見た目（枠と地は排他・selectCls は今のまま）。拒食は入力済み', () => {
-    assert.match(M, /const selectCls = 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-2 text-lg text-ink disabled:text-ink3'/)
-    assert.match(M, /const selectBlankCls = `min-h-tap min-w-tap rounded \$\{DAYCARE_BLANK_CELL_CLS\} px-2 text-lg text-ink disabled:text-ink3`/)
+    // 2026-11-09 計画B3 の手直し（固定し直し・意図は同じ）: 左右の余白は 4px（1180px に収める）。枠と地の排他・押せる範囲・文字の大きさは同じ
+    assert.match(M, /const selectCls = 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-1 text-lg text-ink disabled:text-ink3'/)
+    assert.match(M, /const selectBlankCls = `min-h-tap min-w-tap rounded \$\{DAYCARE_BLANK_CELL_CLS\} px-1 text-lg text-ink disabled:text-ink3`/)
     assert.match(M, /className=\{v === '' \? selectBlankCls : selectCls\}/)
     // 「未入力」の字は選択肢の文字（—（未入力））で出る
-    // 2026-11-09 計画B3（固定し直し・意図は同じ）: 選択肢の文字は「未入力」（バイタルと同じ表で iPad 横 1180px に収める幅にした）
-    assert.match(read('../src/lib/daycarePerson.ts'), /\{ value: '', label: '未入力' \}/)
+    // 2026-11-09 計画B3 の手直し（固定し直し・意図は同じ）: 選択肢の文字は「未」（バイタルの空の枠と同じ字・凡例の「未＝未入力」）
+    assert.match(read('../src/lib/daycarePerson.ts'), /\{ value: '', label: '未' \}/)
   })
   it('活動一括: 記録が1つも無い方（読めている時だけ）の定型の7つの枠を空の見た目＋「未」。その他の列は変えない', () => {
     assert.match(A, /const rowBlank = readable && filledOf\.get\(rid\) === false/)
@@ -387,7 +388,8 @@ describe('静的検査: 全部の枠が埋まるまでの知らせ（計画B2）
     assert.doesNotMatch(cmp, /\btext-(2xs|xs)\b/)
     // バイタル一括（氏名は文字）・食事一括（リンクに aria-label が無い）は印の中で読む。
     // 反証 中1: バイタル一括は札の行の頭（「▲未 施設の基準」）。氏名の横は iPad 縦（氏名の列 112px）で折り返して行が伸びたため
-    assert.match(BULK.vitals, /<span className="block text-sm leading-tight text-ink2">\s*\{\(blankCount \?\? 0\) > 0 \? <DaycareRowBlankMark lead \/> : null\}\s*\{basis\}\s*<\/span>/)
+    // 2026-11-09 計画B3 の手直し（固定し直し・意図は同じ）: 札の行は氏名のリンクの2段目（活動一括と同じ形）。印は札の行の頭のまま
+    assert.match(BULK.vitals, /<span className="text-sm leading-tight text-ink2">\s*\{\(blankCount \?\? 0\) > 0 \? <DaycareRowBlankMark lead \/> : null\}\s*\{basis\}\s*<\/span>\s*<\/Link>/)
     // 2026-11-09 計画B3（固定し直し・意図は同じ）: 氏名は1人の画面へのリンク（それまでの食事一括と同じ）。行の印は札の行の頭の1つだけ（7欄のどれかが空なら出す）。
     // 食事一括の氏名の横の印は、この1つにまとめた（フックは印を出さない）
     assert.match(BULK.vitals, /<span className="text-base font-bold leading-tight text-link">\s*\{nameOf\(row\.residentId\)\}\s*<span className="sr-only">さんの1日の記録を開く<\/span>/)

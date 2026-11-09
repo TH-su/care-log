@@ -174,7 +174,7 @@ describe('静的検査: 統合した画面（計画B3）', () => {
     // 物理キーボードの数字は、選択肢（SELECT）・水分の欄（INPUT）で押した時は横取りしない
     assert.match(screen, /if \(t !== null && \(t\.tagName === 'INPUT' \|\| t\.tagName === 'TEXTAREA' \|\| t\.tagName === 'SELECT'\)\) return/)
   })
-  it('iPad 横 1180×820 で横に送らずに全部の列が入る作り（幅の勘定。2026-11-09 にヘッドレス Chrome で表の幅 1052px＝枠の幅を実測）', () => {
+  it('iPad 横 1180×820 で横に送らずに全部の列が入る作り（幅の勘定。2026-11-09 にヘッドレス Chrome で自然な表の幅 1041px・枠 1052px を実測）', () => {
     // 画面の幅: 左のメニュー（lg:pl-24＝96px）・本文の左右の余白（px-4＝16px×2）
     assert.match(app, /<div className="min-h-screen bg-bg text-ink lg:pl-24">/)
     assert.match(app, /<main className="px-4 pb-24 pt-4 lg:pb-8">/)
@@ -187,15 +187,16 @@ describe('静的検査: 統合した画面（計画B3）', () => {
     assert.match(body, /<span role="status" className=\{`whitespace-nowrap text-sm font-bold leading-tight /)
     const state = Math.max(16 * 4 + 8 + 4, 15 * 5 + 4) + 8
     const fixed = 112 + 16 + 96 + 112 + 96 * 3 + state
-    // 昼食の3列: 選択肢は空の時「未入力」（3文字・18px）＋左右 8px＋端末の矢印（約 22px）＋欄の左右 4px。水分は 56px の欄＋8px＋〔＋〕44px＋左右 4px
+    // 昼食の3列（2026-11-09 計画B3 の手直し（固定し直し・意図は同じ））: 選択肢は空の時「未」・いちばん広い「拒食」（2文字・18px）＋左右 4px＋端末の矢印（約 24px）＋欄の左右 4px。
+    // 水分は合計（64px 以上・15px の「計 1,200」）＋6px＋56px の欄＋8px＋〔＋〕44px＋左右 4px（合計と欄は横に並べる＝行の高さ 53px）
     const options = read('../src/lib/daycarePerson.ts')
-    assert.match(options, /\{ value: '', label: '未入力' \}/)
-    const longest = Math.max(...['未入力', '10', '拒食'].map((t) => t.length * 18))
-    const select = longest + 16 + 22 + 8
+    assert.match(options, /\{ value: '', label: '未' \}/)
+    assert.match(lunch, /const selectCls = 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-1 text-lg/)
+    const longest = Math.max(...['未', '10', '拒食'].map((t) => t.length * 18))
+    const select = longest + 8 + 24 + 8
     assert.match(lunch, /className="block min-h-tap w-14 rounded border/)
-    const fluid = 56 + 8 + 44 + 8
-    // 水分の合計は欄の上（横に並べない）
-    assert.match(lunch, /<div className="flex flex-col items-start gap-1">\s*<p className="text-base text-ink">\s*計 /)
+    assert.match(lunch, /<div className="flex items-center gap-x-1\.5">\s*<p className="min-w-16 whitespace-nowrap text-sm text-ink">\s*計 /)
+    const fluid = Math.max(64, 15 + 4 + 5 * 9) + 6 + 56 + 8 + 44 + 8
     const total = fixed + select * 2 + fluid
     assert.ok(total <= box, `表の幅 ${total}px が枠 ${box}px に入る`)
     // 入らない時（文字を大きくした時・iPad 縦）は今までどおり枠の中で横に送り、手がかりを出す
@@ -224,6 +225,36 @@ describe('静的検査: 統合した画面（計画B3）', () => {
     assert.match(screen, /\{lunch\.toast\}/)
     // 昼食の知らせは1回目の行の下（バイタルの知らせと同じ行）
     assert.match(body, /\{detail \? \(\s*<SlotStatus [\s\S]{0,200}\) : null\}\s*\{lunchNotes\}/)
+  })
+})
+
+describe('静的検査: 行の高さ（計画B3 の手直し・ふつうの行は 53px＝欄 44px＋上下 4px）', () => {
+  const body = screen.slice(screen.indexOf('<tbody>'), screen.indexOf('</tbody>'))
+  it('氏名の列は活動一括と同じ形: 氏名のリンク（44px・2段）の2段目に基準の札・「1回目（時刻）」は再測定の回がある方だけ・ほかは積まない', () => {
+    const name = body.slice(body.indexOf('{si === 0 ? ('), body.indexOf('↳ '))
+    assert.match(name, /<Link to=\{personPath\(row\.residentId, day, today\)\} className="flex min-h-tap flex-col justify-center underline-offset-2 hover:underline">\s*<span className="text-base font-bold leading-tight text-link">[\s\S]*?<\/span>\s*<span className="text-sm leading-tight text-ink2">\s*\{\(blankCount \?\? 0\) > 0 \? <DaycareRowBlankMark lead \/> : null\}\s*\{basis\}\s*<\/span>\s*<\/Link>/)
+    assert.match(name, /\{slots\.length > 1 \? \(/)
+    assert.doesNotMatch(name, /time !== null \? \(|nameNotes|cm\.word|mark\.text/)
+    // 昼食の保存の印は状態の列（mergeSaveMarks）・取り込みの印と外出／入院の記録は行の下の知らせ（フックの notes）
+    assert.doesNotMatch(lunch, /nameNotes/)
+    const notes = lunch.slice(lunch.indexOf('const notes = (rid: number)'), lunch.indexOf('return { data, loading'))
+    assert.match(notes, /\{otherStatus !== null \|\| showSource \? \(\s*<p className="text-sm text-ink2">/)
+  })
+  it('状態の列は2段まで（1段目＝来た・まだの短い形か〔＋再測定〕・2段目＝保存の印）。水分の合計は欄の横（上に積まない）', () => {
+    assert.match(body, /\) : lunchRow \? \(\s*<span className=\{`whitespace-nowrap text-sm leading-tight \$\{cm\.textCls\}`\}>/)
+    assert.match(body, /const cm = daycareCameShort\(row\)/)
+    const cells = lunch.slice(lunch.indexOf('const cells = (rid: number)'), lunch.indexOf('const notes = (rid: number)'))
+    assert.doesNotMatch(cells, /flex-col/)
+    assert.match(cells, /<div className="flex items-center gap-x-1\.5">/)
+    // 欄の高さは 44px・行の上下は 4px ずつ（py-1）のまま
+    for (const m of (body + cells).matchAll(/<td [^>]*className="([^"]+)"/g)) assert.match(m[1], /\bpy-1\b|\bp-0\b/, m[1])
+  })
+  it('来た・まだの短い形（daycareCameShort）: 記号と色は daycareCameMark と同じ・時刻は出さない・到着の記録が無い方は「在席」と出さない', () => {
+    if (P === null) return
+    assert.deepEqual(P.daycareCameShort({ state: 'present' }), { mark: '●', word: '在席', textCls: 'text-ok' })
+    assert.deepEqual(P.daycareCameShort({ state: 'left' }), { mark: '✓', word: '帰宅', textCls: 'text-info' })
+    assert.deepEqual(P.daycareCameShort({ state: 'planned' }), { mark: '○', word: '来所前', textCls: 'text-ink2' })
+    assert.deepEqual(P.daycareCameShort(undefined), { mark: '○', word: '来所前', textCls: 'text-ink2' })
   })
 })
 

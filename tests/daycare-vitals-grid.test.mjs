@@ -109,10 +109,13 @@ if (DC === null) {
       // 2026-11-09 計画B2（固定し直し・意図は同じ）: 空の欄がある行は小さな印（▲未）。反証 中1 で氏名の横から札の行の頭へ移した
       // （iPad 縦で氏名の横の印が折り返して行が伸びたため）
       // 2026-11-09 計画B3（固定し直し・意図は同じ）: 氏名は1人の画面へのリンク（来た・まだの文字もリンクの中＝それまでの食事一括と同じ）。基準の札はその下のまま
+      // 2026-11-09 計画B3 の手直し（固定し直し・意図は同じ）: 基準の札は氏名のリンクの2段目（押せる高さ 44px の中に2段＝活動一括と同じ形・行の高さ 53px）
       assert.match(
         page,
-        /<span className="text-base font-bold leading-tight text-link">\s*\{nameOf\(row\.residentId\)\}\s*<span className="sr-only">さんの1日の記録を開く<\/span>\s*<\/span>[\s\S]{0,600}<\/Link>\s*(\{\}\s*)?<span className="block text-sm leading-tight text-ink2">\s*\{\(blankCount \?\? 0\) > 0 \? <DaycareRowBlankMark lead \/> : null\}\s*\{basis\}\s*<\/span>/,
+        /<span className="text-base font-bold leading-tight text-link">\s*\{nameOf\(row\.residentId\)\}\s*<span className="sr-only">さんの1日の記録を開く<\/span>\s*<\/span>\s*<span className="text-sm leading-tight text-ink2">\s*\{\(blankCount \?\? 0\) > 0 \? <DaycareRowBlankMark lead \/> : null\}\s*\{basis\}\s*<\/span>\s*<\/Link>/,
       )
+      // 「1回目（時刻）」は再測定の回がある方だけ
+      assert.match(page, /\{slots\.length > 1 \? \(\s*<span className="block text-sm leading-tight text-ink2">1回目/)
       assert.match(page, /\{abnormal && isLast \? \(\s*<button[\s\S]{0,200}onClick=\{\(\) => addRecheck\(row, slot\)\}/)
       assert.match(page, /＋再測定/)
     })

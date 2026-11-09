@@ -522,10 +522,11 @@ describe('静的検査（計画B）', () => {
   })
   it('状態をそろえる: 食事一括・活動一括の来た・まだは daycareCameMark（記号は読み上げない・色は文字だけ）', () => {
     // 2026-11-09 計画B3（固定し直し・意図は同じ）: 食事一括の氏名の列は、バイタル・食事の画面の氏名の列（1回目の行）
-    assert.match(BULK.vitals, /const cm = daycareCameMark\(row, true\)/)
+    // 2026-11-09 計画B3 の手直し（固定し直し・意図は同じ）: バイタル・食事の画面は状態の列の1段目に短い形（daycareCameShort・記号と色は daycareCameMark と同じ・時刻なし）
+    assert.match(BULK.vitals, /const cm = daycareCameShort\(row\)/)
     assert.match(BULK.activity, /const cm = daycareCameMark\(rowOf\(rid\)\)/)
     for (const k of ['vitals', 'activity']) {
-      assert.match(BULK[k], /<span className=\{`text-sm leading-tight \$\{cm\.textCls\}`\}>\s*<span aria-hidden="true">\{cm\.mark\} <\/span>\s*\{cm\.word\}\s*<\/span>/, k)
+      assert.match(BULK[k], /<span className=\{`(whitespace-nowrap )?text-sm leading-tight \$\{cm\.textCls\}`\}>\s*<span aria-hidden="true">\{cm\.mark\} <\/span>\s*\{cm\.word\}\s*<\/span>/, k)
       assert.doesNotMatch(BULK[k], /（未到着）|cameText/, k)
     }
   })

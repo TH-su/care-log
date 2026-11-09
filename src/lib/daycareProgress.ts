@@ -104,6 +104,18 @@ export function daycareCameMark(
   return { mark: '○', word: '来所前', textCls: 'text-ink2' }
 }
 
+/**
+ * バイタル・食事の画面の状態の列に出す来た・まだの短い形（2026-11-09 計画B3 の手直し: ○ 来所前／● 在席／✓ 帰宅。時刻は出さない＝
+ * 列の幅を「✓ 保存済み」の幅に収め、行の高さを欄の 44px に保つ。時刻は今日の画面・1人の画面で見る）。記号と色は daycareCameMark と同じ
+ */
+export function daycareCameShort(
+  row: Pick<DaycareBoardRow, 'state'> | undefined,
+): { mark: string; word: string; textCls: string } {
+  if (row?.state === 'left') return { mark: '✓', word: '帰宅', textCls: 'text-info' }
+  if (row?.state === 'present') return { mark: '●', word: '在席', textCls: 'text-ok' }
+  return { mark: '○', word: '来所前', textCls: 'text-ink2' }
+}
+
 // ── 進み具合の印（今日のカードの段4） ──
 
 export type ProgressKey = 'vitals' | 'lunch' | 'activity' | 'training' | 'bath'

@@ -152,7 +152,8 @@ if (DP === null) {
     })
     it('押せる範囲 44px（min-h-tap・min-w-tap）・角は rounded（6px）・rounded-full を使わない・文字は text-lg（選択肢・水分の欄）', () => {
       // 2026-10-28 昼食だけの表にした（固定し直し・意図は同じ）: ボタン列の帯（.dc-meal-row）は表になったので CSS ごと外した
-      assert.match(page, /const selectCls = 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-2 text-lg text-ink disabled:text-ink3'/)
+      // 2026-11-09 計画B3 の手直し（固定し直し・意図は同じ）: 選択肢の左右の余白は 4px（1180px に収める）。押せる範囲・角・文字の大きさは同じ
+      assert.match(page, /const selectCls = 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-1 text-lg text-ink disabled:text-ink3'/)
       // 2026-11-09 計画B3（固定し直し・意図は同じ）: 水分の欄の幅は 80px から 56px に（左右の余白 4px・バイタルと同じ表で iPad 横 1180px に横に送らずに収める）
       assert.match(page, /className="block min-h-tap w-14 rounded border border-border-strong bg-surface px-1 text-lg text-ink disabled:text-ink3"/)
       assert.match(page, /className="min-h-tap min-w-tap rounded border border-primary bg-surface px-2 text-lg font-bold text-primary disabled:border-border disabled:text-ink3"/)
@@ -201,7 +202,8 @@ if (DP === null) {
       assert.deepEqual(
         DP.LUNCH_SELECT_OPTIONS.map((o) => o.label),
         // 2026-11-09 計画B3（固定し直し・意図は同じ）: 空の選択肢の文字を「—（未入力）」から「未入力」に（バイタルと同じ表で iPad 横 1180px に収める幅にする）
-        ['未入力', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '拒食'],
+        // 2026-11-09 計画B3 の手直し（固定し直し・意図は同じ）: 「未」（バイタルの空の枠と同じ字・凡例の「未＝未入力」）
+        ['未', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '拒食'],
       )
     })
     it('いまの値: 拒食なら主食・副食の両方が「拒食」・そうでなければその欄の値（null は「—」）・記録なしは「—」', () => {
@@ -335,18 +337,23 @@ if (DP === null) {
       // 昼食の知らせ（食い違い・止まり・拒否・送信待ち・失敗）と水分の知らせ（送信待ち・失敗・数の誤り）
       assert.match(body, /<MealNote\s+word="昼食"/)
       assert.match(body, /\{held\.lost \? MSG_NOT_PERSISTED : MSG_QUEUED\}/)
-      assert.match(body, /const detail = lunchNote \|\| held !== undefined \|\| fn !== undefined/)
+      // 2026-11-09 計画B3 の手直し（固定し直し・意図は同じ）: 取り込みの印・外出／入院の記録も同じ行の下に出す
+      assert.match(page, /const detail = lunchNote \|\| held !== undefined \|\| fn !== undefined \|\| otherStatus !== null \|\| showSource/)
     })
     it('氏名の列: 1人の画面へのリンク（44px）・在席／帰宅／未到着・保存の印（昼食だけ）・取り込みの印', () => {
       // 2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 来た・まだの文字は氏名のリンクの中（押せる高さ 44px の中に2段）
       // 2026-11-09 計画B3（固定し直し・意図は同じ）: 氏名の列はバイタル・食事の画面（1回目の行）。昼食の保存の印は状態の列へ（バイタルの印と合わせて手当ての要る方）
       assert.match(screenBody, /<Link to=\{personPath\(row\.residentId, day, today\)\} className="flex min-h-tap flex-col justify-center/)
       // 2026-11-09 計画B（固定し直し・意図は同じ）: 来た・まだは今日のカードと同じ記号＋言葉（daycareCameMark・色は文字だけ）
-      assert.match(screenBody, /<span className=\{`text-sm leading-tight \$\{cm\.textCls\}`\}>\s*<span aria-hidden="true">\{cm\.mark\} <\/span>\s*\{cm\.word\}\s*<\/span>\s*<\/Link>/)
+      // 2026-11-09 計画B3 の手直し（固定し直し・意図は同じ）: 氏名のリンクの2段目は基準の札（活動一括と同じ形）。来た・まだは状態の列の1段目に短い形（daycareCameShort・時刻なし）。
+      // 取り込みの印・外出／入院の記録は氏名の列に積まず、行の下の知らせ（フックの notes）へ
+      assert.match(screenBody, /const cm = daycareCameShort\(row\)/)
+      assert.match(screenBody, /\) : lunchRow \? \(\s*<span className=\{`whitespace-nowrap text-sm leading-tight \$\{cm\.textCls\}`\}>\s*<span aria-hidden="true">\{cm\.mark\} <\/span>\s*\{cm\.word\}\s*<\/span>\s*\) : null\}/)
       assert.match(page, /return mealBandMark\(\[kindOf\(lt, mealState\[mealKeyOf\(lt\)\]\)\]\)/)
       assert.match(screenBody, /const mark = lunchRow \? mergeSaveMarks\(vitalMark, lunch\.markOf\(row\.residentId\)\) : vitalMark/)
       assert.match(page, /const showSource = source !== null && source !== '画面で入力'/)
-      assert.match(screenBody, /\{lunchHere \? lunch\.nameNotes\(row\.residentId\) : null\}/)
+      assert.match(page, /const detail = lunchNote \|\| held !== undefined \|\| fn !== undefined \|\| otherStatus !== null \|\| showSource/)
+      assert.doesNotMatch(page + screen, /nameNotes/)
     })
     it('主食・副食は端末の選択肢（44px・text-lg）。読み上げは見えている列の名前で始まる・押せない時（旗・未来の日）は disabled', () => {
       assert.match(body, /<select\s+value=\{v\}\s+disabled=\{!canWrite\}\s+aria-label=\{`\$\{AMOUNT_WORD\[f\]\}：\$\{name\}さん（いま: \$\{now\}）`\}/)
@@ -453,8 +460,11 @@ if (DP === null) {
     })
     it('水分: 送信待ちは合計に「（＋n cc 送信待ち）」を重ね、取り直した合計で載った分だけ減らす（1人の画面の queuedFluids と同じ）', () => {
       assert.match(page, /const r = nothingQueued \? null : settleQueuedFluid\(held, fluidTotalOf\(visibleFluids, Number\(ridText\), d\)\)/)
-      assert.match(body, /計 <span className="font-num font-bold">\{fluidSum > 0 \? fmtCc\(fluidSum\) : '—'\}<\/span>/)
-      assert.match(body, /\{held !== undefined \? <span className="text-sm text-ink2">（＋\{fmtCc\(held\.ml\)\} 送信待ち）<\/span> : null\}/)
+      // 2026-11-09 計画B3 の手直し（固定し直し・意図は同じ）: 合計は欄の横に数だけ（単位は見出しの「水分（cc）」）。送信待ちの量は行の下の知らせ（「水分 ＋n cc: …」）で見せ、合計の横は
+      // 読み上げだけにする（横に並べた欄の幅を変えない）
+      assert.match(body, /計 <span className="font-num font-bold">\{fluidSum > 0 \? fluidSum\.toLocaleString\('ja-JP'\) : '—'\}<\/span>/)
+      assert.match(body, /\{held !== undefined \? <span className="sr-only">（＋\{fmtCc\(held\.ml\)\} 送信待ち）<\/span> : null\}/)
+      assert.match(page, /<span className="sr-only">\{name\}さん：<\/span>水分 ＋\{fmtCc\(held\.ml\)\}: \{held\.lost \? MSG_NOT_PERSISTED : MSG_QUEUED\}/)
       // 2026-11-09 計画B3（固定し直し・意図は同じ）: 欄はフックの cells で描く（data が無い間はその画面の日）
       assert.match(body, /const fluidSum = fluidTotalOf\(visibleFluids, rid, data\?\.day \?\? day\)/)
       // 送信待ちの間にオンラインで足した分は、基準も上げる（「送信待ちが載った」と見て減らさない）

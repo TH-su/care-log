@@ -7,7 +7,7 @@
 //
 // ・並べるのは、一括の画面と同じ方（予定の方のうち休み・入院中を除く全員と、予定外で来た方＝mealBulkRows）。到着の前でも入れられる
 //   （2026-10-24 代表者の決定 §9.4 の4。それまでは在席・帰宅だけ）。今日の一覧の並び（五十音）のまま1人1行
-// ・主食・副食は端末の選択肢（未入力・0〜10・拒食）で、選ぶとすぐ保存する。保存の印（✓ 保存済み・⚠ 未送信・▲ 要確認）は画面の「状態」の列に、
+// ・主食・副食は端末の選択肢（未・0〜10・拒食）で、選ぶとすぐ保存する。保存の印（✓ 保存済み・⚠ 未送信・▲ 要確認）は画面の「状態」の列に、
 //   バイタルの印と合わせて出す（2026-11-09 計画B3）。空の選択肢（未入力）は注意の地＋太い点線で目立たせる（2026-11-09 計画B2）
 // ・おやつ（meals の snack）は2026-10-28にこの画面から外した（記録・1人の画面・care-log のおやつはそのまま）
 // ・決まりはデイの1人の画面（DaycarePersonPage）の昼食と同じ:
@@ -20,7 +20,8 @@
 // ・水分（2026-10-28）: その方・その日の fluid_intake の合計（1人の画面の分も含む）と、数を入れて足す欄。足すのは既存の insertFluid、
 //   〔元に戻す〕は softDeleteFluid（1人の画面の水分と同じ記録・同じ決まり）。表示の単位はこの画面だけ「cc」（記録は ml の列・換算しない）。
 //   消す・直すは1人の画面の一覧で行う（この画面には一覧を出さない）
-// ・取り込みとの関係は既存のまま（画面で入れた行は edited_by が付き、取り込みが上書きしない）。取り込みの印は氏名の列に小さく出す
+// ・取り込みとの関係は既存のまま（画面で入れた行は edited_by が付き、取り込みが上書きしない）。取り込みの印は行の下に小さく出す
+//   （2026-11-09 計画B3 の手直しで氏名の列から移した）
 // ・端末に業務データを残さない（localStorage を使わない。日付は画面の URL の ?day= で、再読み込みでも同じ日に戻る）
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -134,11 +135,9 @@ export interface DaycareLunchColumns {
   blankOf: (residentId: number) => number
   /** 状態の列に出す昼食の保存の印（無ければ null） */
   markOf: (residentId: number) => { mark: string; text: string; tone: 'ok' | 'info' | 'warn' } | null
-  /** 氏名の列に足す小さな文（外出・入院の記録、取り込みの印）。無ければ null */
-  nameNotes: (residentId: number) => ReactNode
   /** 主食｜副食｜水分（cc）の3つの欄（td） */
   cells: (residentId: number) => ReactNode
-  /** 行の下の知らせ（昼食の送信待ち・失敗・止まり・食い違いと水分の知らせ）。無ければ null */
+  /** 行の下の知らせ（昼食の外出・入院の記録と取り込みの印、昼食の送信待ち・失敗・止まり・食い違いと水分の知らせ）。無ければ null */
   notes: (residentId: number) => ReactNode
   /** 昼食の〔元に戻す〕・水分の〔元に戻す〕の知らせ（画面の最後に置く） */
   toast: ReactNode
@@ -695,30 +694,17 @@ export function useDaycareLunchColumns({ day, today, actorId, residents, gate, r
   // 未入力の数は画面に出している値（送信待ち・順番待ちを重ねた値）で数える。2026-11-09 計画B2: 到着を問わず、1人2欄（主食・副食。
   // 拒食はどちらも入力済み・水分は数えない）の空の欄を数える（画面がバイタルの5欄と合わせて bulkBlankSummary に渡す）
   const blankOf = (rid: number) => lunchBlankFields(mealShownFor(targetOf(rid)))
-  const selectCls = 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-2 text-lg text-ink disabled:text-ink3'
-  // 空の選択肢（未入力）の見た目（2026-11-09 計画B2）。枠と地は selectCls と排他（重ねない）。「未入力」の字は選択肢の文字で出る
-  const selectBlankCls = `min-h-tap min-w-tap rounded ${DAYCARE_BLANK_CELL_CLS} px-2 text-lg text-ink disabled:text-ink3`
+  // 左右の余白は 4px（2026-11-09 計画B3 の手直し: 行の高さを欄の 44px に保ったまま、iPad 横 1180px で横に送らずに収めるため 8px から詰めた）
+  const selectCls = 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-1 text-lg text-ink disabled:text-ink3'
+  // 空の選択肢（未入力）の見た目（2026-11-09 計画B2）。枠と地は selectCls と排他（重ねない）。「未」の字は選択肢の文字で出る
+  // （バイタルの空の枠と同じ「未」・凡例の「未＝未入力」。読み上げは「いま: 未入力」）
+  const selectBlankCls = `min-h-tap min-w-tap rounded ${DAYCARE_BLANK_CELL_CLS} px-1 text-lg text-ink disabled:text-ink3`
   // 順番待ちが残っている枠は「送信中」（前の応答の「保存済み」を出したままにしない）
   const kindOf = (t: MealTarget, st: SaveState | undefined): MealSaveKind | undefined =>
     (waiting[mealKeyOf(t)]?.length ?? 0) > 0 ? 'saving' : (st?.kind as MealSaveKind | undefined)
   const markOf = (rid: number) => {
     const lt = targetOf(rid)
     return mealBandMark([kindOf(lt, mealState[mealKeyOf(lt)])])
-  }
-  const nameNotes = (rid: number): ReactNode => {
-    const lt = targetOf(rid)
-    const lunch = mealShownFor(lt)
-    const source = mealSourceLabel(mealRowFor(lt))
-    // 外出・入院（care-log の食事の画面で入れた状態）は選択肢に無いので、氏名の列に文字で出す（選ぶと「食べた」に戻して送る）
-    const otherStatus = lunch?.status === 'out' ? '外出' : lunch?.status === 'hospital' ? '入院' : null
-    const showSource = source !== null && source !== '画面で入力'
-    if (otherStatus === null && !showSource) return null
-    return (
-      <>
-        {otherStatus !== null ? <span className="block text-sm text-ink2">昼食の記録: {otherStatus}</span> : null}
-        {showSource ? <span className="block text-sm text-ink2">{source}</span> : null}
-      </>
-    )
   }
   const cells = (rid: number): ReactNode => {
     const name = nameOf(rid)
@@ -758,12 +744,14 @@ export function useDaycareLunchColumns({ day, today, actorId, residents, gate, r
           )
         })}
         <td className="px-1 py-1">
-          {/* 合計の下に入れる欄を置く（2026-11-09 計画B3: バイタルと同じ表に入れても iPad 横 1180px で横に送らずに収まるように。
-              欄の幅は 80px から 56px に詰めた（左右の余白 4px で、中は 4桁が入る 48px）） */}
-          <div className="flex flex-col items-start gap-1">
-            <p className="text-base text-ink">
-              計 <span className="font-num font-bold">{fluidSum > 0 ? fmtCc(fluidSum) : '—'}</span>
-              {held !== undefined ? <span className="text-sm text-ink2">（＋{fmtCc(held.ml)} 送信待ち）</span> : null}
+          {/* 合計は入れる欄の横（2026-11-09 計画B3 の手直し: #104 の食事一括と同じ並び・行の高さを欄の 44px に保つ）。
+              単位は見出しの「水分（cc）」で示し、欄には数だけを出す（iPad 横 1180px で横に送らずに収める幅）。合計の幅は 64px 以上で
+              そろえる（「計 —」の行でも入れる欄の位置がそろう）。送信待ちの量は行の下の知らせ（水分 ＋n cc: …）で出す。
+              入れる欄は 80px から 56px に詰めた（左右の余白 4px で、中は 4桁が入る 48px） */}
+          <div className="flex items-center gap-x-1.5">
+            <p className="min-w-16 whitespace-nowrap text-sm text-ink">
+              計 <span className="font-num font-bold">{fluidSum > 0 ? fluidSum.toLocaleString('ja-JP') : '—'}</span>
+              {held !== undefined ? <span className="sr-only">（＋{fmtCc(held.ml)} 送信待ち）</span> : null}
             </p>
             {/* 数を入れて改行キー（form の submit）か〔＋〕で足す。書き込み中は欄を書き換えられず〔＋〕も押せない（二重に足さない）。
                 欄は disabled にせず readOnly にする（改行キーの後も欄に留まり、続けて入れられる） */}
@@ -812,11 +800,25 @@ export function useDaycareLunchColumns({ day, today, actorId, residents, gate, r
     const fkey = personKeyOf(rid, day)
     const held = queuedFluids[fkey]
     const fn = fluidNote[fkey]
+    const lunch = mealShownFor(lt)
+    const source = mealSourceLabel(mealRowFor(lt))
+    // 外出・入院（care-log の食事の画面で入れた状態）は選択肢に無いので、文字で出す（選ぶと「食べた」に戻して送る）。
+    // 取り込みの印も同じ行に出す（2026-11-09 計画B3 の手直し: 氏名の列に積まず、行の下の知らせへ＝行の高さを 53px に保つ）
+    const otherStatus = lunch?.status === 'out' ? '外出' : lunch?.status === 'hospital' ? '入院' : null
+    const showSource = source !== null && source !== '画面で入力'
     const lunchNote = stL !== undefined && stL.kind !== 'saving' && stL.kind !== 'saved'
-    const detail = lunchNote || held !== undefined || fn !== undefined
+    const detail = lunchNote || held !== undefined || fn !== undefined || otherStatus !== null || showSource
     if (!detail) return null
     return (
       <>
+        {otherStatus !== null || showSource ? (
+          <p className="text-sm text-ink2">
+            <span className="sr-only">{name}さん：</span>
+            {otherStatus !== null ? `昼食の記録: ${otherStatus}` : ''}
+            {otherStatus !== null && showSource ? '・' : ''}
+            {showSource ? source : ''}
+          </p>
+        ) : null}
         <MealNote
           word="昼食"
           name={name}
@@ -844,7 +846,7 @@ export function useDaycareLunchColumns({ day, today, actorId, residents, gate, r
     )
   }
 
-  return { data, loading, error, blankOf, markOf, nameNotes, cells, notes, toast }
+  return { data, loading, error, blankOf, markOf, cells, notes, toast }
 }
 
 /**

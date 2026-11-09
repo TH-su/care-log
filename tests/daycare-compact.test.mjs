@@ -133,8 +133,8 @@ describe('一括の4画面で行を増やす（2026-11-09）', () => {
     const v = BULK.vitals
     const top = v.slice(v.indexOf('role="group" aria-label="表示する方"'), v.indexOf('{releasing ?'))
     assert.ok(top.indexOf('<DaycareUnfilledCount') > 0 && top.indexOf('<DaycareUnfilledCount') < top.indexOf('予定の方'), '未入力の数 → 予定の人数')
-    // 2026-11-09 計画B3（固定し直し・意図は同じ）: 水分は合計の下に入れる欄（バイタルと同じ表で iPad 横 1180px に横に送らずに収める）。押せる高さ・文字は同じ
-    assert.match(LUNCH_CELLS, /<div className="flex flex-col items-start gap-1">\s*<p className="text-base text-ink">\s*計 /)
+    // 2026-11-09 計画B3 の手直し（固定し直し・意図は同じ）: 合計と水分の欄は横に並べる（#104 と同じ・行の高さを欄の 44px に保つ）。合計の幅は 64px 以上でそろえる。単位は見出し
+    assert.match(LUNCH_CELLS, /<div className="flex items-center gap-x-1\.5">\s*<p className="min-w-16 whitespace-nowrap text-sm text-ink">\s*計 /)
     assert.match(LUNCH_CELLS, /className="flex items-center gap-2"\s*>\s*<input/)
   })
   it('食事一括の氏名の列を広げるのは 1024px 以上だけ（iPad 縦で表が横にはみ出さない・反証 中3）。欄へ送る時の逃げも同じ幅', () => {

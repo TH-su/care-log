@@ -238,8 +238,9 @@ export type LunchAmountField = 'main_amount' | 'side_amount'
 
 /** 主食・副食の選択肢（端末の選択肢）の並び。value は ''＝未入力・'0'〜'10'＝割合・'refused'＝拒食 */
 export const LUNCH_SELECT_OPTIONS: readonly { value: string; label: string }[] = [
-  // 2026-11-09 計画B3: 「—（未入力）」→「未入力」（バイタルと同じ表に入れても iPad 横 1180px で横に送らずに収まる幅にする。空の見た目は計画B2 のまま）
-  { value: '', label: '未入力' },
+  // 2026-11-09 計画B3: 「—（未入力）」→「未」（バイタルと同じ表に入れて、行の高さを欄の 44px に保ったまま iPad 横 1180px で横に送らずに
+  // 収まる幅にする。バイタルの空の枠と同じ「未」・凡例の「未＝未入力」。空の見た目は計画B2 のまま・読み上げは「いま: 未入力」）
+  { value: '', label: '未' },
   ...DAYCARE_MEAL_AMOUNTS.map((n) => ({ value: String(n), label: String(n) })),
   { value: 'refused', label: '拒食' },
 ]

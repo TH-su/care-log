@@ -1,7 +1,7 @@
 // デイ（せせらぎ）のバイタル・食事（ルート /record/daycare/vitals-meals・業務日は ?day=）。
 // 2026-11-09 計画B3（代表者の指示「バイタル一括と食事一括画面は、それぞれだと余白が多く無駄で見づらいため、一つの画面に統合せよ」）:
 // それまでのバイタル一括（/record/daycare/vitals・2026-10-22 デイ段階1・代表承認）と食事一括（/record/daycare/meals）を1つの表にした。
-// 1行1人で、列は 氏名｜血圧（上 / 下）｜P｜SpO2｜KT｜状態（〔＋再測定〕と保存の印）‖ 主食｜副食｜水分（cc）。バイタルと食事の境目は
+// 1行1人で、列は 氏名｜血圧（上 / 下）｜P｜SpO2｜KT｜状態（来た・まだ・〔＋再測定〕と保存の印）‖ 主食｜副食｜水分（cc）。バイタルと食事の境目は
 // 見出しの行の色の帯（分類の色＝tokens.css の --c-cat-*）。昼食と水分の列の中身は DaycareLunchColumns.tsx（それまでの食事一括の処理のまま）。
 // 古い2つの道は App.tsx でこの画面へ送る（?day= を引き継ぐ）。行の地は1人ずつ交互に変える（--c-row-alt）。
 // 業務日は URL の ?day=（再読み込みでも同じ日に戻る＝原則11・端末に業務データを残さない。それまでのバイタル一括は画面の中だけで持っていた）。
@@ -96,7 +96,7 @@ import {
   DAYCARE_BLANK_CELL_CLS,
   DAYCARE_CATEGORY_CLS,
   bulkBlankSummary,
-  daycareCameMark,
+  daycareCameShort,
   daycareRowTone,
   daycareVitalSlotsWithPending,
   mergeSaveMarks,
@@ -1263,8 +1263,8 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                       </th>
                     ))}
                     {/* 再測定と状態は1つの列に詰めた（2026-11-09 計画B3: iPad 横 1180px で横に送らずに全部の列が入るように。どちらも消さない）。
-                        〔＋再測定〕の下に保存の印（1回目の行はバイタルと昼食のうち手当ての要る方＝mergeSaveMarks）を出す。列の幅は中身
-                        （〔＋再測定〕・「✓ 保存済み」を折り返さない幅＝約 88px） */}
+                        1段目は来た・まだ（短い形）か〔＋再測定〕、2段目は保存の印（1回目の行はバイタルと昼食のうち手当ての要る方＝mergeSaveMarks）。
+                        列の幅は中身（〔＋再測定〕・「✓ 保存済み」を折り返さない幅＝約 88px）。2段で欄の 44px に収まる（行の高さ 53px） */}
                     <th scope="col" className="sticky top-0 z-20 bg-surface2 px-1 py-2 text-sm font-bold text-ink2">
                       状態<span className="sr-only">・再測定</span>
                     </th>
@@ -1300,8 +1300,9 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                     // 昼食と水分の欄を出すのは、それまでの食事一括に出ていた方（予定の方・来た方＝daycareBulkRows）だけ。
                     // 「全員」で出した休み・入院中の方は出さない（2026-11-09 計画B3）
                     const lunchHere = blankCount !== undefined
-                    // 氏名の下の来た・まだ（○ 来所前 9:30〜15:30／● 在席 9:35／✓ 帰宅 15:30。それまでの食事一括と同じ）
-                    const cm = daycareCameMark(row, true)
+                    // 来た・まだ（○ 来所前／● 在席／✓ 帰宅。それまでの食事一括の氏名の下の印）。2026-11-09 計画B3 の手直し: 氏名の列に積まず、
+                    // 状態の列の1段目に短い形で出す（行の高さを欄の 44px に保つ）。休み・入院中の方（「全員」で出した方）には出さない
+                    const cm = daycareCameShort(row)
                     return slots.map((slot, si) => {
                       const st = slotState.get(slot.key)
                       // 空の枠を目立たせるのは、数える方の最初の回だけ（数えた欄と光る欄をそろえる・2026-11-09 計画B2）
@@ -1337,27 +1338,24 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                               <div className="dc-vital-name">
                                 {si === 0 ? (
                                   <>
-                                    {/* 氏名は1人の画面へのリンク・来た・まだの文字もリンクの中（押せる高さ 44px の中に2段。それまでの食事一括と同じ） */}
+                                    {/* 2026-11-09 計画B3 の手直し（行の高さを欄の 44px に保つ＝活動一括と同じ形）: 氏名は1人の画面へのリンク
+                                        （押せる高さ 44px）。2段目は基準の札（施設の基準など）。空の欄がある行の印は札の行の頭（「▲未 施設の基準」。
+                                        氏名の横に置くと iPad 縦（氏名の列 112px）で折り返して行が伸びるため＝2026-11-09 計画B2 の反証 中1。
+                                        読み上げは「未入力あり」・昼食の主食・副食の空も含む） */}
                                     <Link to={personPath(row.residentId, day, today)} className="flex min-h-tap flex-col justify-center underline-offset-2 hover:underline">
                                       <span className="text-base font-bold leading-tight text-link">
                                         {nameOf(row.residentId)}
                                         <span className="sr-only">さんの1日の記録を開く</span>
                                       </span>
-                                      <span className={`text-sm leading-tight ${cm.textCls}`}>
-                                        <span aria-hidden="true">{cm.mark} </span>
-                                        {cm.word}
+                                      <span className="text-sm leading-tight text-ink2">
+                                        {(blankCount ?? 0) > 0 ? <DaycareRowBlankMark lead /> : null}
+                                        {basis}
                                       </span>
                                     </Link>
-                                    {/* 空の欄がある行の印は札の行の頭（「▲未 施設の基準」）。氏名の横に置くと iPad 縦（氏名の列 112px）で折り返して
-                                        行が伸びるため（2026-11-09 計画B2 の反証 中1。読み上げは「未入力あり」）。計画B3: 昼食の主食・副食の空も含む */}
-                                    <span className="block text-sm leading-tight text-ink2">
-                                      {(blankCount ?? 0) > 0 ? <DaycareRowBlankMark lead /> : null}
-                                      {basis}
-                                    </span>
-                                    {slots.length > 1 || time !== null ? (
+                                    {/* 「1回目（時刻）」は再測定の回がある方だけ（再測定の行の「↳ 再測定 n（時刻）」と見比べるため） */}
+                                    {slots.length > 1 ? (
                                       <span className="block text-sm leading-tight text-ink2">1回目{time !== null ? `（${time}）` : ''}</span>
                                     ) : null}
-                                    {lunchHere ? lunch.nameNotes(row.residentId) : null}
                                   </>
                                 ) : (
                                   <span className="block text-sm leading-tight text-ink2">
@@ -1442,6 +1440,12 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                                   >
                                     ＋再測定
                                   </button>
+                                ) : lunchRow ? (
+                                  // 来た・まだ（1回目の行・〔＋再測定〕を出す行は出さない＝行を高くしない）
+                                  <span className={`whitespace-nowrap text-sm leading-tight ${cm.textCls}`}>
+                                    <span aria-hidden="true">{cm.mark} </span>
+                                    {cm.word}
+                                  </span>
                                 ) : null}
                                 {mark !== null ? (
                                   // 送信中・保存済みも読み上げで知らせる（前の SlotStatus の role="status" と同じ＝#45 の反証 軽3）

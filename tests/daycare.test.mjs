@@ -1508,7 +1508,12 @@ if (DC === null) {
       // ● 在席 9:35／✓ 帰宅 15:30）。到着の記録が無い方は「在席」と出さない
       // 2026-11-09 計画B3（固定し直し・意図は同じ）: 食事一括の氏名の列は、バイタル・食事の画面の氏名の列（同じ daycareCameMark(row, true)）
       const meals = code('../src/pages/DaycareVitalsMealsPage.tsx')
-      assert.match(meals, /const cm = daycareCameMark\(row, true\)/)
+      // 2026-11-09 計画B3 の手直し（固定し直し・意図は同じ）: バイタル・食事の画面は短い形（daycareCameShort）。在席は到着の記録がある方だけ（同じ決まり）
+      assert.match(meals, /const cm = daycareCameShort\(row\)/)
+      const ct0 = read('../src/lib/daycareProgress.ts')
+      const short = ct0.slice(ct0.indexOf('export function daycareCameShort('), ct0.indexOf('// ── 進み具合の印'))
+      assert.match(short, /if \(row\?\.state === 'present'\) return \{ mark: '●', word: '在席'/)
+      assert.match(short, /return \{ mark: '○', word: '来所前', textCls: 'text-ink2' \}/)
       const ct = read('../src/lib/daycareProgress.ts')
       const cm = ct.slice(ct.indexOf('export function daycareCameMark('), ct.indexOf('// ── 進み具合の印'))
       assert.match(cm, /if \(row\?\.state === 'present'\) return \{ mark: '●', word: `在席/)
