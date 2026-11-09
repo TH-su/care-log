@@ -104,7 +104,14 @@ describe('一括の4画面で行を増やす（2026-11-09）', () => {
     }
   })
   it('文字は 15px 以上（4画面とも text-xs・text-2xs を使わない）', () => {
-    for (const [k, p] of Object.entries(BULK)) assert.doesNotMatch(p, /\btext-(2xs|xs)\b/, k)
+    // 2026-11-09 計画B2（固定し直し・意図は同じ）: バイタル一括の空の欄の「前回…」だけ 14px（text-xs）にした（入れた値と見分けるため・仕様の例外）。
+    // 14px はその1か所だけで、中身は「前回」の付いた値か「—」。13px（text-2xs）は4画面とも使わない
+    for (const [k, p] of Object.entries(BULK)) {
+      assert.doesNotMatch(p, /\btext-2xs\b/, k)
+      if (k !== 'vitals') assert.doesNotMatch(p, /\btext-xs\b/, k)
+    }
+    assert.equal((BULK.vitals.match(/\btext-xs\b/g) ?? []).length, 1, 'バイタル一括の 14px は1か所だけ')
+    assert.match(BULK.vitals, /<span className="font-num text-xs leading-tight text-ink3" aria-hidden="true">\s*\{pv \? `前回\$\{fmtVal\(f, pv\.value\)\}` : '—'\}\s*<\/span>/)
   })
   it('バイタル一括: 日付と「表示する方」を1段に。食事一括: 見出し・未入力の数・予定の人数を1段に、合計と水分の欄を横に', () => {
     // 2026-11-09 計画B（固定し直し・意図は同じ）: 未入力の数を同じ段に入れるため、段の間を 16px から 12px に詰めた（押す所どうしは 8px 以上）

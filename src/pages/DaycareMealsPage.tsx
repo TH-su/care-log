@@ -5,7 +5,8 @@
 //   （2026-10-24 代表者の決定 §9.4 の4。それまでは在席・帰宅だけ）。今日の一覧の並び（五十音）のまま1人1行
 // ・表はバイタル一括・活動一括と同じ作り（列は 氏名｜主食｜副食｜水分（cc）。枠の中で縦横に送り、見出しの行は上・氏名の列は左に残す）。
 //   主食・副食は端末の選択肢（—・0〜10・拒食）で、選ぶとすぐ保存する。氏名の列に保存の印（✓ 保存済み・⚠ 未送信・▲ 要確認）を出す
-//   （care-log の食事一括と同じ操作感。MealsGridPage そのものは変えない）。表の上に「未入力 ○名」（在席・帰宅の方だけ数える）
+//   （care-log の食事一括と同じ操作感。MealsGridPage そのものは変えない）。表の上に「未入力 ○名（○欄）」（2026-11-09 計画B2: 到着を問わず
+//   主食・副食の空の欄を数える・拒食は入力済み）。空の選択肢（—（未入力））は注意の地＋太い点線で目立たせる
 // ・おやつ（meals の snack）は2026-10-28にこの画面から外した（記録・1人の画面・care-log のおやつはそのまま）
 // ・決まりはデイの1人の画面（DaycarePersonPage）の昼食と同じ:
 //   - 保存は既存の saveMealEdits（meals の lunch＝care-log の昼食と同じ行）。基準は読んだ時のサーバーの値。
@@ -47,18 +48,17 @@ import {
 } from '../lib/db'
 import type { CellConflict, CellEditInput, DaycareMealRow, MealCellField, MealTarget } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
-import { DaycareUnfilledCount } from '../components/DaycareUnfilledCount'
+import { DaycareRowBlankMark, DaycareUnfilledCount } from '../components/DaycareUnfilledCount'
 import { ErrorBlock, LoadingBlock, useToast } from '../components/ui'
 import { writeDaycareHandoffFor } from '../lib/daycareHandoff'
 import { buildDaycareBoard, nowHm } from '../lib/daycare'
-import { daycareCameMark, lunchShownWith } from '../lib/daycareProgress'
+import { DAYCARE_BLANK_CELL_CLS, bulkBlankSummary, daycareCameMark, lunchBlankFields, lunchShownWith } from '../lib/daycareProgress'
 import {
   LUNCH_SELECT_OPTIONS,
   createFluidInputs,
   fluidTotalOf,
   lunchSelectPatch,
   lunchSelectValue,
-  lunchUnfilledCount,
   mealBandMark,
   mealBulkPath,
   mealBulkRows,
@@ -810,9 +810,13 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
   }
   if (data === null) return null
 
-  // 未入力の数は画面に出している値（送信待ち・順番待ちを重ねた値）で数える。在席・帰宅でない方は別に数える
-  const counts = lunchUnfilledCount(came.map((row) => ({ state: row.state, lunch: mealShownFor(targetOf(row.residentId)) })))
+  // 未入力の数は画面に出している値（送信待ち・順番待ちを重ねた値）で数える。2026-11-09 計画B2: 到着を問わず、1人2欄（主食・副食。
+  // 拒食はどちらも入力済み・水分は数えない）の空の欄を数える（一括の4画面で同じ bulkBlankSummary）
+  const blankOf = new Map<number, number>(came.map((row) => [row.residentId, lunchBlankFields(mealShownFor(targetOf(row.residentId)))]))
+  const counts = bulkBlankSummary([...blankOf.values()])
   const selectCls = 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-2 text-lg text-ink disabled:text-ink3'
+  // 空の選択肢（—（未入力））の見た目（2026-11-09 計画B2）。枠と地は selectCls と排他（重ねない）。「未入力」の字は選択肢の文字で出る
+  const selectBlankCls = `min-h-tap min-w-tap rounded ${DAYCARE_BLANK_CELL_CLS} px-2 text-lg text-ink disabled:text-ink3`
 
   return (
     <div className="mx-auto w-full max-w-6xl space-y-2">
@@ -825,8 +829,8 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
             昼食
           </h2>
           {came.length > 0 ? (
-            // 未入力の数（在席・帰宅の方だけ数える・拒食は入力済み・水分は数えない）。色だけに頼らず記号と文字を併記。
-            // 2026-11-09 計画B: 一括の4画面で同じ部品（DaycareUnfilledCount）にした（見た目は今までと同じ）
+            // 未入力の数（到着を問わず主食・副食の空の欄を数える＝2026-11-09 計画B2・拒食は入力済み・水分は数えない）。色だけに頼らず記号と文字を併記。
+            // 2026-11-09 計画B: 一括の4画面で同じ部品（DaycareUnfilledCount）にした
             <DaycareUnfilledCount counts={counts} />
           ) : null}
           <p className="ml-auto text-sm text-ink2">
@@ -914,6 +918,8 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
                                 <span className="text-base font-bold leading-tight text-link">
                                   {name}
                                   <span className="sr-only">さんの1日の記録を開く</span>
+                                  {/* 空の欄がある行の印（2026-11-09 計画B2・読み上げは「未入力あり」） */}
+                                  {(blankOf.get(rid) ?? 0) > 0 ? <DaycareRowBlankMark /> : null}
                                 </span>
                                 <span className={`text-sm leading-tight ${cm.textCls}`}>
                                   <span aria-hidden="true">{cm.mark} </span>
@@ -943,7 +949,7 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
                                     const patch = lunchSelectPatch(f, e.target.value, lunch?.status)
                                     if (patch !== null) void saveMeal(lt, patch)
                                   }}
-                                  className={selectCls}
+                                  className={v === '' ? selectBlankCls : selectCls}
                                 >
                                   {LUNCH_SELECT_OPTIONS.map((o) => (
                                     <option key={o.value} value={o.value}>

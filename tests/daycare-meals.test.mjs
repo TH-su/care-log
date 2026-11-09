@@ -327,16 +327,17 @@ if (DP === null) {
       assert.match(body, /const lunch = mealShownFor\(lt\)/)
     })
     it('未入力の数は表の上に（画面に出している値で数える）。1名以上は「▲ 未入力 n名」（赤字）・0名は「✓ 未入力なし」・未到着は灰色で別に', () => {
-      assert.match(page, /const counts = lunchUnfilledCount\(came\.map\(\(row\) => \(\{ state: row\.state, lunch: mealShownFor\(targetOf\(row\.residentId\)\) \}\)\)\)/)
-      // 2026-11-09 計画B（固定し直し・意図は同じ）: 表示は一括の4画面で同じ部品（DaycareUnfilledCount）にした（見た目は同じ）
+      // 2026-11-09 計画B2（固定し直し・仕様の変更で数え方を変えた）: 到着を問わず、1人2欄（主食・副食・拒食は入力済み）の空の欄を数える
+      // （画面に出している値＝mealShownFor で数えるのは同じ）。表示は「▲ 未入力 n名（m欄）」・全部埋まった時だけ「✓ 全員入力済み」・未到着は出さない
+      assert.match(page, /const blankOf = new Map<number, number>\(came\.map\(\(row\) => \[row\.residentId, lunchBlankFields\(mealShownFor\(targetOf\(row\.residentId\)\)\)\]\)\)/)
+      assert.match(page, /const counts = bulkBlankSummary\(\[\.\.\.blankOf\.values\(\)\]\)/)
+      // 2026-11-09 計画B（固定し直し・意図は同じ）: 表示は一括の4画面で同じ部品（DaycareUnfilledCount）にした
       const unf = code('../src/components/DaycareUnfilledCount.tsx')
-      assert.match(unf, /<span className="font-bold text-danger">\s*<span aria-hidden="true">▲ <\/span>未入力 <span className="font-num">\{counts\.unfilled\}<\/span>名/)
-      assert.match(unf, /<span className="font-bold text-ok">\s*<span aria-hidden="true">✓ <\/span>未入力なし/)
-      // 2026-11-09 計画B の確認の反証 軽1（固定し直し・意図は同じ）: バイタル一括だけ 1024px 未満で未到着を隠す指定を足した（食事一括は今のまま出す）
-      assert.match(unf, /\{counts\.notArrived > 0 \? \(\s*<span className=\{hideNotArrivedNarrow \? 'hidden text-ink2 lg:inline' : 'text-ink2'\}>\s*未到着 <span className="font-num">\{counts\.notArrived\}<\/span>名（数えていません）/)
-      assert.match(unf, /hideNotArrivedNarrow = false,/)
+      assert.match(unf, /<span className="font-bold text-danger">\s*<span aria-hidden="true">▲ <\/span>未入力 <span className="font-num">\{counts\.people\}<\/span>名（<span className="font-num">\{counts\.fields\}<\/span>欄）/)
+      assert.match(unf, /<span className="font-bold text-ok">\s*<span aria-hidden="true">✓ <\/span>全員入力済み/)
+      assert.doesNotMatch(unf, /未到着|未入力なし|hideNotArrivedNarrow/)
       assert.match(page, /<DaycareUnfilledCount counts=\{counts\} \/>/)
-      assert.ok(page.indexOf('const counts = lunchUnfilledCount') < page.indexOf('<table'), '表の上')
+      assert.ok(page.indexOf('const counts = bulkBlankSummary') < page.indexOf('<table'), '表の上')
       assert.ok(page.indexOf('<DaycareUnfilledCount counts={counts} />') > 0 && page.indexOf('<DaycareUnfilledCount counts={counts} />') < page.indexOf('<table'), '表の上')
     })
     it('水分: form の submit（改行キー）でも〔＋〕でも足す・欄は inputMode numeric（44px・text-lg）・〔＋〕は 44px と「水分を足す」', () => {

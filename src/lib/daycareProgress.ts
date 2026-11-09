@@ -4,6 +4,8 @@
 // ・状態の4色（カードの地と枠）: 来所前・予定外＝点線の枠／在席＝緑／帰宅＝青／休み・入院中＝灰。色だけに頼らず記号と言葉を併記する
 // ・進み具合の印: バイタル・昼食・活動・訓練・入浴の5つ。済・未・対象外・要確認・読めない を枠の形と文字でも分ける（押せない表示）
 // ・未入力の数: 在席・帰宅の方だけ数える（送信待ち・順番待ち・端末の値は入力済み）。まだ来ていない方は別に数える
+//   （2026-11-09 計画B2: 一括の4画面と切り替えの数は、到着を問わず空の欄を数える形 bulkBlankSummary に移した）
+// ・空の欄（計画B2）: 一括の4画面の空の枠の見た目・1人の空の欄の数・合計（n名・m欄）・切り替えの数
 // 個人情報は扱わない（数値と記号だけ。氏名は画面が持つ）。
 
 import { DAYCARE_VITAL_FIELDS, daycareVitalKey, daycareVitalSlots, fmtPlanTimes, nextDaycareSeq } from './daycare.ts'
@@ -227,7 +229,8 @@ export function daycareProgressMarks(input: ProgressInput): ProgressMark[] {
 
 /**
  * 在席・帰宅の方のうち、入力済みでない方の数（unfilled）。在席・帰宅でない方（まだ来ていない方）は数えず、別に数を返す（notArrived）。
- * filled は画面に出している値（送信待ち・順番待ち・端末の値を重ねた値）で決める
+ * filled は画面に出している値（送信待ち・順番待ち・端末の値を重ねた値）で決める。
+ * 2026-11-09 計画B2: 一括の4画面の上の数と切り替えの数は、到着を問わず空の欄を数える bulkBlankSummary に移した（これは消さずに残す）
  */
 export function attendedUnfilledCount(rows: readonly { state: AttendanceState; filled: boolean }[]): { unfilled: number; notArrived: number } {
   let unfilled = 0
@@ -239,25 +242,73 @@ export function attendedUnfilledCount(rows: readonly { state: AttendanceState; f
   return { unfilled, notArrived }
 }
 
-/** 切り替えの key（DaycareNav の項目）と印の対応 */
+// ── 空の欄（2026-11-09 計画B2・代表者の指示「記載していない枠が目立つように」「全枠が埋まるまでは何かしらのアラートが出るように」） ──
+
+/**
+ * 記入していない枠の見た目（一括の4画面で共通）: 注意の地＋太い点線の枠。色だけに頼らず、枠の形（点線）と「未」の字
+ * （DaycareBlankTag）でも分かる。入った枠は各画面の今の見た目（白い地 bg-surface など）に戻る。
+ * 枠の線・地は排他で選ぶ（ほかの border・bg のクラスと重ねない＝重ねるとどちらが効くかは CSS の順で決まるため）
+ */
+export const DAYCARE_BLANK_CELL_CLS = 'border-2 border-dashed border-warn bg-warn-bg'
+
+/**
+ * バイタル一括の1人の空の欄の数: その方の最初の回の5欄（血圧の上・下・脈・SpO2・体温）のうち値の無い欄。再測定の回は数えない。
+ * 値は画面に出している値（端末の値・送信待ち・サーバーの値）。回が無い時（null）は5欄とも空
+ */
+export function vitalBlankFields(first: Partial<Record<DaycareVitalField, number | null | undefined>> | null | undefined): number {
+  return DAYCARE_VITAL_FIELDS.filter((f) => typeof first?.[f] !== 'number').length
+}
+
+/** 食事一括の1人の空の欄の数（主食・副食の2欄）: 拒食はどちらも入力済み（0）。lunchFilled と同じ考え（0 の時だけ入力済み） */
+export function lunchBlankFields(meal: Pick<Meal, 'main_amount' | 'side_amount' | 'status'> | null | undefined): number {
+  if (meal === null || meal === undefined) return 2
+  if (meal.status === 'refused') return 0
+  return (meal.main_amount === null ? 1 : 0) + (meal.side_amount === null ? 1 : 0)
+}
+
+/** 活動一括・機能訓練の1人の空の欄の数（1人1欄）: 記録があれば 0・無ければ 1 */
+export function recordBlankFields(filled: boolean): number {
+  return filled ? 0 : 1
+}
+
+/** 一括の画面の上の数（people＝空の欄がある方の数・fields＝空の欄の合計） */
+export interface BlankSummary {
+  people: number
+  fields: number
+}
+
+/**
+ * 一括の画面の上の「▲ 未入力 n名（m欄）」（2026-11-09 計画B2）。数える相手は画面に出ている予定の方（daycareBulkRows＝休み・入院中を除く・
+ * 予定外で来た方を含む）で、到着の有無を問わない（仮置き）。blanks は1人ずつの空の欄の数（vitalBlankFields・lunchBlankFields・recordBlankFields）
+ */
+export function bulkBlankSummary(blanks: readonly number[]): BlankSummary {
+  let people = 0
+  let fields = 0
+  for (const b of blanks) {
+    if (!Number.isInteger(b) || b <= 0) continue
+    people += 1
+    fields += b
+  }
+  return { people, fields }
+}
+
+/** 切り替えの key（DaycareNav の項目） */
 export type DaycareNavPendingKey = 'vitals' | 'meals' | 'activity' | 'training'
 export type DaycareNavPending = Partial<Record<DaycareNavPendingKey, number>>
 
-const NAV_OF: readonly [DaycareNavPendingKey, ProgressKey][] = [
-  ['vitals', 'vitals'],
-  ['meals', 'lunch'],
-  ['activity', 'activity'],
-  ['training', 'training'],
-]
+const NAV_KEYS: readonly DaycareNavPendingKey[] = ['vitals', 'meals', 'activity', 'training']
 
 /**
- * 今日の画面の切り替えに添える未入力の数: 来た方で印が「未」の数（一括の画面と同じ数え方・読めない印は数えない）。0 の項目は入れない
+ * 今日の画面の切り替えに添える未入力の数（2026-11-09 計画B2: 一括の画面の n と同じ数え方＝bulkBlankSummary の people）。
+ * 項目ごとに、一括の画面に出る方（daycareBulkRows）の1人ずつの空の欄の数を渡す。null＝その日の記録を読めない（数を出さない）。0 の項目は入れない
  */
-export function daycareNavPending(rows: readonly { state: AttendanceState; marks: readonly ProgressMark[] }[]): DaycareNavPending {
+export function daycareNavPending(blanks: Readonly<Record<DaycareNavPendingKey, readonly number[] | null>>): DaycareNavPending {
   const out: DaycareNavPending = {}
-  for (const [nav, key] of NAV_OF) {
-    const n = rows.filter((r) => hasCome(r.state) && r.marks.some((m) => m.key === key && m.state === 'todo')).length
-    if (n > 0) out[nav] = n
+  for (const key of NAV_KEYS) {
+    const b = blanks[key]
+    if (b === null || b === undefined) continue
+    const n = bulkBlankSummary(b).people
+    if (n > 0) out[key] = n
   }
   return out
 }

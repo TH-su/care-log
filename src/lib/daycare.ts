@@ -446,8 +446,21 @@ export function fmtPlanTimes(plans: readonly DaycarePlanEntry[]): string {
 // ══════════════════════════════════════════════════════════════
 
 export type DaycareVitalField = 'temp' | 'sys_bp' | 'dia_bp' | 'pulse' | 'spo2'
-/** 欄送りの順（体温 → 血圧の上 → 下 → 脈 → SpO2） */
+/**
+ * 5つの欄の順（体温 → 血圧の上 → 下 → 脈 → SpO2）。1人の画面の並び・送る値の並びはこの順のまま。
+ * バイタル一括の列の並びと欄送りの順は DC_BULK_VITAL_ORDER（2026-11-09 計画B2）
+ */
 export const DAYCARE_VITAL_FIELDS: readonly DaycareVitalField[] = ['temp', 'sys_bp', 'dia_bp', 'pulse', 'spo2']
+/**
+ * バイタル一括の列の並びと欄送りの順（2026-11-09 計画B2・代表者の指示「KT は SpO2 の右側に」）:
+ * 血圧の上 → 下 → 脈 → SpO2 → 体温。体温の次は次の方の血圧の上
+ */
+export const DC_BULK_VITAL_ORDER: readonly DaycareVitalField[] = ['sys_bp', 'dia_bp', 'pulse', 'spo2', 'temp']
+/** バイタル一括の次の欄（DC_BULK_VITAL_ORDER の次）。体温（最後の欄）の次は null（次の方へ） */
+export function nextBulkVitalField(f: DaycareVitalField): DaycareVitalField | null {
+  const i = DC_BULK_VITAL_ORDER.indexOf(f)
+  return i < 0 || i >= DC_BULK_VITAL_ORDER.length - 1 ? null : DC_BULK_VITAL_ORDER[i + 1]
+}
 export const DAYCARE_VITAL_LABEL: Record<DaycareVitalField, string> = {
   temp: '体温',
   sys_bp: '血圧の上',
@@ -578,9 +591,17 @@ export function vitalNeedsRecheck(v: Partial<Record<DaycareVitalField, number | 
   return DAYCARE_VITAL_FIELDS.some((f) => vitalLevel(f, v[f] ?? null, target, t) !== null)
 }
 
-/** 最初に基準を外れた欄（再測定はそこから入れ始める）。無ければ体温。t＝その方のその日の基準（段階2d-2・省くと施設の基準） */
-export function firstAbnormalField(v: Partial<Record<DaycareVitalField, number | null>>, target?: ResidentTargets | null, t: VitalThresholds = vitalThresholds()): DaycareVitalField {
-  return DAYCARE_VITAL_FIELDS.find((f) => vitalLevel(f, v[f] ?? null, target, t) !== null) ?? 'temp'
+/**
+ * 最初に基準を外れた欄（再測定はそこから入れ始める）。無ければ並びの先頭（省くと体温）。t＝その方のその日の基準（段階2d-2・省くと施設の基準）。
+ * order＝欄の並び（2026-11-09 計画B2: バイタル一括は DC_BULK_VITAL_ORDER を渡す。省くと今までと同じ DAYCARE_VITAL_FIELDS）
+ */
+export function firstAbnormalField(
+  v: Partial<Record<DaycareVitalField, number | null>>,
+  target?: ResidentTargets | null,
+  t: VitalThresholds = vitalThresholds(),
+  order: readonly DaycareVitalField[] = DAYCARE_VITAL_FIELDS,
+): DaycareVitalField {
+  return order.find((f) => vitalLevel(f, v[f] ?? null, target, t) !== null) ?? order[0] ?? 'temp'
 }
 
 // ══════════════════════════════════════════════════════════════
