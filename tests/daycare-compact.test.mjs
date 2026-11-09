@@ -109,7 +109,7 @@ describe('一括の4画面で行を増やす（2026-11-09）', () => {
     assert.match(body, /className="flex items-center gap-2"\s*>\s*<input/)
   })
   it('食事一括の氏名の列を広げるのは 1024px 以上だけ（iPad 縦で表が横にはみ出さない・反証 中3）。欄へ送る時の逃げも同じ幅', () => {
-    assert.match(css, /@media \(min-width: 1024px\) \{\s*\.dc-meal-name \{\s*width: min\(14rem, 35vw\);\s*\}\s*\.dc-table-fit:has\(\.dc-meal-name\) \{\s*scroll-padding-left: calc\(min\(14rem, 35vw\) \+ 1rem\);/)
+    assert.match(css, /@media \(min-width: 1024px\) \{\s*\.dc-meal-name \{\s*width: min\(14rem, 22vw\);\s*\}\s*\.dc-table-fit:has\(\.dc-meal-name\) \{\s*scroll-padding-left: calc\(min\(14rem, 22vw\) \+ 1rem\);/)
     // 1024px 未満で効く .dc-meal-name の幅の指定は無い（.dc-vital-name のまま）
     const outside = css.replace(/@media \(min-width: 1024px\) \{[\s\S]*?\n\}/g, '')
     assert.doesNotMatch(outside, /\.dc-meal-name \{/)
