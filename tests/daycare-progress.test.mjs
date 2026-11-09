@@ -431,7 +431,8 @@ describe('静的検査（計画B）', () => {
     // バイタル: バイタル一括の slotsOf・valueOf と同じ daycareVitalSlotsWithPending・vitalShownValue(s)
     assert.match(today, /daycareVitalSlotsWithPending\(vitalsOf\(id\), vitalKeys, id, data\.day, \[\], \(key\) => pendingRow\('vitals', vitalTarget\(id, key\)\) !== null\)/)
     assert.match(today, /vals: vitalShownValues\(pendingRow\('vitals', vitalTarget\(id, slot\.key\)\), slot\.vital\)/)
-    assert.match(BULK.vitals, /return daycareVitalSlotsWithPending\(\s*data\.live,\s*data\.keys,\s*residentId,\s*data\.day,\s*extraSeqs\.get\(residentId\) \?\? \[\],/)
+    // 2026-11-10 未測定の反証（固定し直し・意図は同じ）（中1）: 足した回に〔未測定〕の印だけがある回を足す（取り消した測定の行のキーの回は除く）
+    assert.match(BULK.vitals, /return daycareVitalSlotsWithPending\(\s*data\.live,\s*data\.keys,\s*residentId,\s*data\.day,\s*\[\.\.\.\(extraSeqs\.get\(residentId\) \?\? \[\]\), \.\.\.markSeqs\],/)
     assert.match(BULK.vitals, /return vitalShownValue\(pendingRow\('vitals', targetOf\(slot\)\), slot\.vital, f\)/)
     // 血圧の下も「測った」に入れる（反証 軽4）＝5つの欄（DAYCARE_VITAL_FIELDS）のどれか
     assert.match(today, /const vitalsDone = \(id: number\) => vitalSlotsFilled\(\(vitalShown\.get\(id\) \?\? \[\]\)\.map\(\(s\) => DAYCARE_VITAL_FIELDS\.map\(\(f\) => s\.vals\[f\]\)\)\)/)
@@ -491,7 +492,8 @@ describe('静的検査（計画B）', () => {
     assert.match(v, /const countRows = board === null \|\| data === null \|\| data\.day !== day \? \[\] : daycareBulkRows\(board\.rows\)/)
     // 2026-11-09 計画B2（固定し直し・仕様の変更で数え方を変えた）: 1人5欄＝最初の回の5欄の空き（vitalBlankFields）を到着を問わず数える
     // 2026-11-09 計画B3（固定し直し・意図は同じ）: 1人7欄＝バイタルの5欄＋昼食の主食・副食（vitalsMealsBlankFields）
-    assert.match(v, /const first = slotsOf\(r\.residentId\)\[0\]/)
+    // 2026-11-10 未測定の反証（固定し直し・意図は同じ）（軽2）: 数える回は今日の画面と同じ純関数（daycareCountSeq）で決める（ふつうは最初の回）
+    assert.match(v, /const first = cs === null \? slots\[0\] : slots\.find\(\(s\) => s\.seq === cs\)/)
     assert.match(v, /return \[r\.residentId, lunchReady \? \(vitalsMealsBlankFields\(vitalBlank, lunch\.blankOf\(r\.residentId\)\) \?\? 0\) : vitalBlank\]/)
     assert.match(v, /const unfilled = bulkBlankSummary\(\[\.\.\.blankOf\.values\(\)\]\)/)
     // 活動一括: 見出しの段（読めない時は出さない）

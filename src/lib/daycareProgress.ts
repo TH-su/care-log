@@ -590,6 +590,57 @@ export function unmeasuredRowOf<T extends Pick<DaycareVitalUnmeasured, 'resident
   return (rows ?? []).find((r) => r.resident_id === residentId && r.day === day && r.seq === seq && r.field === field) ?? null
 }
 
+/** その方のその日の印のある回（小さい順・重なりなし） */
+export function unmeasuredSeqsOf(
+  rows: readonly Pick<DaycareVitalUnmeasured, 'resident_id' | 'day' | 'seq'>[] | null | undefined,
+  residentId: number,
+  day: string,
+): number[] {
+  const out = new Set<number>()
+  for (const r of rows ?? []) if (r.resident_id === residentId && r.day === day) out.add(r.seq)
+  return [...out].sort((a, b) => a - b)
+}
+
+/**
+ * バイタル・食事の画面の行に出す〔未測定〕の印の回（2026-11-10 反証 中1: 〔＋再測定〕の回に印だけを残した時も、読み直しで行を消さない）。
+ * 取り消した測定の行のキーの回は出さない（そのキーには値を入れられない＝0011 が「取り消した行への編集」で止める）。
+ * liveKeys＝生きている測定の行のキー・allKeys＝その日の測定のキーの全部（取り消した行も含む）
+ */
+export function unmeasuredSlotSeqs(
+  rows: readonly Pick<DaycareVitalUnmeasured, 'resident_id' | 'day' | 'seq'>[] | null | undefined,
+  residentId: number,
+  day: string,
+  liveKeys: readonly (string | null)[],
+  allKeys: readonly string[],
+): number[] {
+  const live = new Set(liveKeys)
+  return unmeasuredSeqsOf(rows, residentId, day).filter((seq) => {
+    const key = daycareVitalKey(day, residentId, seq)
+    return live.has(key) || !allKeys.includes(key)
+  })
+}
+
+/**
+ * 数える最初の回（2026-11-10 反証 軽2: バイタル・食事の画面と今日の画面で同じ決まり。取り消した測定の行のキーを見るかどうかに
+ * 左右されない）: 測定の行のある回（生きている行・送信待ちの回）があれば、その一番小さい回。無ければ〔未測定〕の印の一番小さい回。
+ * どちらも無ければ null（画面の最初の回で数える。印が無いので、どの回でも数は同じ）
+ */
+export function daycareCountSeq(rowSeqs: readonly number[], markSeqs: readonly number[]): number | null {
+  const pick = (xs: readonly number[]): number | null => {
+    const ok = xs.filter((x) => Number.isInteger(x) && x > 0)
+    return ok.length === 0 ? null : Math.min(...ok)
+  }
+  return pick(rowSeqs) ?? pick(markSeqs)
+}
+
+/**
+ * 今日の画面の件数の帯「バイタル未」の「済」（2026-11-10 反証 軽7）: どれかの回のどれかの欄に値がある（今の決まり）か、数える回の5欄が
+ * 値か〔未測定〕の印で全部埋まっている（来所者で5欄とも〔未測定〕なら「バイタル未」に入れない）。カードの VS の印は今のまま（値だけ）
+ */
+export function vitalsTileDone(anyValue: boolean, countBlankFields: number): boolean {
+  return anyValue || countBlankFields === 0
+}
+
 /** 欄に「未測定」と出すか（値が無く印がある時だけ。値があれば印は無視する＝値が優先） */
 export function showsUnmeasured(value: number | null | undefined, marked: boolean): boolean {
   return marked && typeof value !== 'number'

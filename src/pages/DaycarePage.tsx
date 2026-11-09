@@ -89,6 +89,7 @@ import {
   canEditPastDaycareTimes,
   daycareBathStatus,
   daycareBulkRows,
+  daycareVitalKey,
   nowHm,
   vitalNeedsRecheck,
 } from '../lib/daycare'
@@ -99,6 +100,7 @@ import {
   PROGRESS_STATE_WORD,
   activityCellsFilled,
   activityShownCells,
+  daycareCountSeq,
   daycareNavPending,
   daycareProgressMarks,
   daycareStateTone,
@@ -112,10 +114,12 @@ import {
   unreadProgressNotice,
   trainingFilled,
   unmeasuredFieldsOf,
+  unmeasuredSeqsOf,
   vitalBlankFields,
   vitalShownValues,
   vitalSlotsFilled,
   vitalsMealsBlankFields,
+  vitalsTileDone,
 } from '../lib/daycareProgress'
 import type { DaycareCategory, DaycareNavPending, DaycareVitalUnmeasured, ProgressMark } from '../lib/daycareProgress'
 import type { DaycareTrainingSession } from '../lib/daycareTraining'
@@ -812,7 +816,23 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     const latest = withVal.length === 0 ? null : withVal.reduce((a, b) => (b.seq > a.seq ? b : a))
     return latest !== null && vitalNeedsRecheck(latest.vals, targets.get(id), limits.lookup(id, data.day))
   }
-  const vitalsWaiting = board.rows.filter((r) => r.state === 'present' && !vitalsDone(r.residentId)).length
+  /**
+   * 数える回の空の欄の数（2026-11-10 反証 軽2: バイタル・食事の画面と同じ純関数 daycareCountSeq で数える回を決める＝取り消した
+   * 測定の行のキーを読まないこの画面でも、同じ回の〔未測定〕の印を数える）。印のある欄は入力済み
+   */
+  const countBlankOf = (id: number): number => {
+    const shown = vitalShown.get(id) ?? []
+    const keyOf = (seq: number) => daycareVitalKey(data.day, id, seq)
+    const live = new Set(vitalsOf(id).map((v) => v.client_key))
+    const cs = daycareCountSeq(
+      shown.filter((s) => live.has(keyOf(s.seq)) || pendingRow('vitals', vitalTarget(id, keyOf(s.seq))) !== null).map((s) => s.seq),
+      unmeasuredSeqsOf(data.unmeasured, id, data.day),
+    )
+    const first = cs === null ? shown[0] : shown.find((s) => s.seq === cs)
+    return vitalBlankFields(first?.vals ?? null, unmeasuredFieldsOf(data.unmeasured, id, data.day, cs ?? first?.seq ?? 1))
+  }
+  // 2026-11-10 反証 軽7: 来所者で5欄とも値か〔未測定〕の印で埋まった方は「バイタル未」に入れない（カードの VS の印は今のまま＝値だけ）
+  const vitalsWaiting = board.rows.filter((r) => r.state === 'present' && !vitalsTileDone(vitalsDone(r.residentId), countBlankOf(r.residentId))).length
   // 入浴を確かめていない方（代表者の決定 2026-10-23 の 3: 自動の行は「済」で数えない。12:30 を過ぎても行が無い方と、
   // 休みの方に自動の行が残っている方だけ＝daycare.ts の bathCountsUnchecked）
   const bathClock = { pastDay: data.day < today, nowHm: nowHm() }
@@ -868,11 +888,8 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
               ? bulk.map(
                   (r) =>
                     vitalsMealsBlankFields(
-                      // 2026-11-10 未測定: 最初の回の〔未測定〕の印のある欄は入力済み（バイタル・食事の画面と同じ）
-                      vitalBlankFields(
-                        vitalShown.get(r.residentId)?.[0]?.vals ?? null,
-                        unmeasuredFieldsOf(data.unmeasured, r.residentId, data.day, vitalShown.get(r.residentId)?.[0]?.seq ?? 1),
-                      ),
+                      // 2026-11-10 未測定: 数える回の〔未測定〕の印のある欄は入力済み（バイタル・食事の画面と同じ回・同じ純関数）
+                      countBlankOf(r.residentId),
                       lunchBlankFields(lunchShownWith(lunchOf(r.residentId), pendingRow('meals', { residentId: r.residentId, day: data.day, slot: 'lunch' }))),
                     ) ?? 0,
                 )

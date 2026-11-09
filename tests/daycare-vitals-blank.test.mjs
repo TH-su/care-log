@@ -281,7 +281,8 @@ describe('静的検査: 空の枠の見た目（一括の4画面・計画B2）',
     }
   })
   it('バイタル一括: 数える方の最初の回の空の欄だけ（入れている欄の色が先）・「未」と小さく薄い「前回…」', () => {
-    assert.match(V, /const countedSlot = si === 0 && blankCount !== undefined/)
+    // 2026-11-10 未測定の反証（固定し直し・意図は同じ）（軽2）: 数える回（countSeqOfRow＝daycareCountSeq・今日の画面と同じ決まり）。ふつうは最初の回
+    assert.match(V, /const countedSlot = slot\.seq === countSeqOfRow\.get\(row\.residentId\) && blankCount !== undefined/)
     // 反証 重1: 入れている（押している）欄は空の枠にしない（「未」を出さない）
     assert.match(V, /const blank = countedSlot && v === null && !isActive/)
     assert.match(V, /isActive \? ACTIVE_CELL_CLS : blank \? DAYCARE_BLANK_CELL_CLS : levelTone\(lv\)/)
@@ -315,9 +316,9 @@ describe('静的検査: 空の枠の見た目（一括の4画面・計画B2）',
     assert.doesNotMatch(V, /'border-2 border-primary bg-accent-bg'/)
   })
   it('凡例（反証 軽3）: 「— 未測定」はそのまま、「未＝未入力」を足した（確認の反証 軽1: 1180px で1行に収めるため「（点線の枠）」は付けない）', () => {
-    // 2026-11-10 未測定（固定し直し・意図は同じ）（仮置き）: 「未測定＝測らなかった記録」を足した。1180px（枠 1052px）で1行に収めるため、意味の変わった「— 未測定」を
-    // 置き換え、（高い）（低い）を対ごとにまとめた（15px で 988.7px・前は 978.7px）。記号と「未＝未入力」は残す
-    assert.match(V, /記号: ↑↑ 危険・↑ 注意（高い）・↓ 注意・↓↓ 危険（低い）・未測定＝測らなかった記録・未＝未入力。範囲外と血圧の上下逆は保存しません。/)
+    // 2026-11-10 未測定（固定し直し・意図は同じ）・2026-11-10 未測定の反証（固定し直し・意図は同じ）（軽6）: 記号の4語は元のまま、「—＝記録なし（数えない回）」「未測定＝測らなかった記録」
+    // 「未＝未入力」を足した。凡例だけで 1296px になり、1180px（枠 1052px）で2段に収めるため、食事の説明を短くして同じ段落の続きに置いた
+    assert.match(V, /記号: ↑↑ 危険（高い）・↑ 注意（高い）・↓ 注意（低い）・↓↓ 危険（低い）・—＝記録なし（数えない回）・未測定＝測らなかった記録・未＝未入力。範囲外と血圧の上下逆は保存しません。\{' '\}\s*<span>主食・副食は/)
     assert.doesNotMatch(V, /（点線の枠）/)
   })
   it('横に送った後も押している欄の外側の線を氏名の列の下に隠さない（確認の反証 軽3）: 枠の scroll-padding-left は氏名の列の幅＋4px', () => {
@@ -411,7 +412,8 @@ describe('静的検査: 全部の枠が埋まるまでの知らせ（計画B2）
     assert.match(LUNCH, /lunchBlankFields\(mealShownFor\(targetOf\(rid\)\)\)/)
     // 2026-11-09 計画B3 の反証の直し（固定し直し・意図は同じ）（軽3）: 昼食を読めない時はバイタルの5欄だけ
     // 2026-11-10 未測定（固定し直し・意図は同じ）: 最初の回の〔未測定〕の印のある欄は入力済み（同じ純関数の2つ目の引数）
-    assert.match(BULK.vitals, /const vitalBlank = vitalBlankFields\(first === undefined \? null : vals, unmeasuredFieldsOf\(data\?\.unmeasured, r\.residentId, day, first\?\.seq \?\? 1\)\)/)
+    // 2026-11-10 未測定の反証（固定し直し・意図は同じ）（軽2）: 印は数える回（daycareCountSeq の cs）のもの
+    assert.match(BULK.vitals, /const vitalBlank = vitalBlankFields\(first === undefined \? null : vals, unmeasuredFieldsOf\(data\?\.unmeasured, r\.residentId, day, cs \?\? first\?\.seq \?\? 1\)\)/)
     assert.match(BULK.vitals, /lunchReady \? \(vitalsMealsBlankFields\(vitalBlank, lunch\.blankOf\(r\.residentId\)\) \?\? 0\) : vitalBlank/)
     assert.match(BULK.activity, /recordBlankFields\(filledOf\.get\(rid\) \?\? false\)/)
     assert.match(BULK.training, /recordBlankFields\(trainingFilled\(sessions, pending, rid, day\)\)/)
@@ -425,7 +427,8 @@ describe('静的検査: 全部の枠が埋まるまでの知らせ（計画B2）
     assert.ok(nav.length > 100)
     // 2026-11-09 計画B3（固定し直し・意図は同じ）: バイタル・食事の1つの数（1人7欄＝vitalsMealsBlankFields・画面と同じ純関数）。どちらかを読めない日は数を出さない
     // 2026-11-10 未測定（固定し直し・意図は同じ）: 最初の回の〔未測定〕の印のある欄は入力済み（一括の画面と同じ純関数の2つ目の引数）
-    assert.match(nav, /vitalsMeals:\s*data\.vitalsOk && data\.intakeOk\s*\? bulk\.map\(\s*\(r\) =>\s*vitalsMealsBlankFields\(\s*vitalBlankFields\(\s*vitalShown\.get\(r\.residentId\)\?\.\[0\]\?\.vals \?\? null,\s*unmeasuredFieldsOf\(data\.unmeasured, r\.residentId, data\.day, vitalShown\.get\(r\.residentId\)\?\.\[0\]\?\.seq \?\? 1\),\s*\),\s*lunchBlankFields\(lunchShownWith\(lunchOf\(r\.residentId\), pendingRow\('meals', \{ residentId: r\.residentId, day: data\.day, slot: 'lunch' \}\)\)\),\s*\) \?\? 0,\s*\)\s*: null/)
+    // 2026-11-10 未測定の反証（固定し直し・意図は同じ）（軽2）: バイタルの空の欄は countBlankOf（数える回＝daycareCountSeq・一括の画面と同じ純関数）
+    assert.match(nav, /vitalsMeals:\s*data\.vitalsOk && data\.intakeOk\s*\? bulk\.map\(\s*\(r\) =>\s*vitalsMealsBlankFields\(\s*countBlankOf\(r\.residentId\),\s*lunchBlankFields\(lunchShownWith\(lunchOf\(r\.residentId\), pendingRow\('meals', \{ residentId: r\.residentId, day: data\.day, slot: 'lunch' \}\)\)\),\s*\) \?\? 0,\s*\)\s*: null/)
     assert.match(nav, /activityRead === null\s*\? null\s*: bulk\.map\(\(r\) => recordBlankFields\(activityCellsFilled\(activityShownCells\(activityRead, activityPending, r\.residentId, data\.day\)\)\)\)/)
     assert.match(nav, /trainingRead === null \? null : bulk\.map\(\(r\) => recordBlankFields\(trainingFilled\(trainingRead, trainingPending, r\.residentId, data\.day\)\)\)/)
     // バイタル一括の slotsOf の最初の回と同じ（daycareVitalSlotsWithPending の並び＝回の小さい順）

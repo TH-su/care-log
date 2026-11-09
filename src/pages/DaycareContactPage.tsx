@@ -80,6 +80,7 @@ import {
   CONTACT_BODY_MAX,
   CONTACT_NURSE_MAX,
   DAY_NOTE_MAX,
+  UNMEASURED_UNREAD_LABEL,
   autoBathPicked,
   buildContactSheet,
   contactNoteOf,
@@ -633,13 +634,17 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
   const unreadDay =
     data === null
       ? []
-      : unreadProgressLabels({
-          vitalsOk: data.vitalsOk,
-          intakeOk: data.intakeOk,
-          activitiesOk: data.activities !== null,
-          trainingOk: data.training !== null,
-          bathsOk: data.bathsOk,
-        })
+      : [
+          ...unreadProgressLabels({
+            vitalsOk: data.vitalsOk,
+            intakeOk: data.intakeOk,
+            activitiesOk: data.activities !== null,
+            trainingOk: data.training !== null,
+            bathsOk: data.bathsOk,
+          }),
+          // 2026-11-10 反証 軽3: 〔未測定〕の印を読めなかった（紙の値の無い欄は「読み込めませんでした」）
+          ...(data.vitalsOk && data.unmeasured === null ? [UNMEASURED_UNREAD_LABEL] : []),
+        ]
 
   // ── 描画 ──
   const header = (

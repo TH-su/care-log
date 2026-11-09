@@ -106,12 +106,15 @@ import {
   applyUnmeasuredOps,
   bulkBlankSummary,
   daycareCameShort,
+  daycareCountSeq,
   daycareRowTone,
   daycareVitalSlotsWithPending,
   mergeSaveMarks,
   showsUnmeasured,
   unmeasuredFieldsOf,
   unmeasuredRowOf,
+  unmeasuredSeqsOf,
+  unmeasuredSlotSeqs,
   vitalBlankFields,
   vitalShownValue,
   vitalsMealsBlankFields,
@@ -136,6 +139,13 @@ const MSG_NOT_PERSISTED =
 const MSG_NO_RECORDER = '記録者が選ばれていません。上の「記録者」で選んでから入れてください。'
 /** 〔未測定〕を付けられなかった・外せなかった時（db.ts の文が無い時の控え） */
 const MSG_UM_FAILED = '〔未測定〕を記録できませんでした。通信状態を確認して、もう一度押してください。'
+/** 〔未測定〕の印を読めなかった時（2026-11-10 反証 軽3。前に読んだ印か、印なしで出している） */
+const MSG_UM_UNREAD: Record<'prev' | 'none', string> = {
+  prev: '〔未測定〕の記録を読み込めませんでした。前に読んだ記録で表示しています。通信状態を確認して、〔最新に更新〕を押してください。',
+  none: '〔未測定〕の記録を読み込めませんでした。〔未測定〕は無いものとして表示・数えています。通信状態を確認して、〔最新に更新〕を押してください。',
+}
+/** 送っている最中の欄で〔未測定〕を押した時（2026-11-10 反証 軽5。欄は進めない） */
+const MSG_UM_BUSY = '〔未測定〕を送信中です。終わるまでお待ちください。'
 /** 昼食と水分だけ読めなかった時（2026-11-09 計画B3 の反証 軽3: 表全体は止めず、昼食の列だけ止める） */
 const MSG_LUNCH_UNREAD = '昼食と水分を読み込めませんでした。通信状態を確認して、〔最新に更新〕を押してください（バイタルはこのまま入れられます）。'
 const MSG_GATE_UNKNOWN =
@@ -173,6 +183,8 @@ interface VData {
   recent: KeyedVital[]
   /** その日の〔未測定〕の印（2026-11-10・0062。読めない時は前に読んだ同じ日の印・無ければ空＝印なしで数える） */
   unmeasured: DaycareVitalUnmeasured[]
+  /** 印を読めなかった（2026-11-10 反証 軽3）: 'prev'＝前に読んだ同じ日の印で出している・'none'＝印なしで出している・null＝読めた */
+  unmeasuredUnread: 'prev' | 'none' | null
 }
 
 /** 1回の測定の保存の状態（画面だけ） */
@@ -267,9 +279,10 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
    * （行き違った古い読み込みで、付けた印を消さない・外した印を戻さない）。読み込みの始まりより前の操作は、その読み込みに載っているので外す
    */
   const umOpsRef = useRef(new Map<string, UnmeasuredOp>())
-  /** 送っている最中の〔未測定〕（測定のキー|欄）。同じ欄を2回続けて送らない */
+  /** 送っている最中の〔未測定〕（測定のキー|欄）。同じ欄を2回続けて送らない。umBusy は描画用の写し（テンキーの案内に「送信中」） */
   const umBusyRef = useRef(new Set<string>())
-  /** 〔未測定〕を付けられなかった・外せなかった理由（測定のキー → 文。行の下に出す） */
+  const [umBusy, setUmBusy] = useState<ReadonlySet<string>>(new Set())
+  /** 〔未測定〕を付けられなかった・外せなかった理由（測定のキー|欄 → 文。行の下に出す。値を保存できた欄の文は消す＝反証 軽4） */
   const [umNotes, setUmNotes] = useState<Map<string, string>>(new Map())
   const genRef = useRef(0)
   const dayRef = useRef(day)
@@ -345,7 +358,8 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
       for (const a of attendance) ids.add(a.resident_id)
       const recent = await fetchRecentVitals([...ids], addDays(target, -14), target).catch(() => [] as KeyedVital[])
       if (gen !== genRef.current || target !== dayRef.current) return
-      const umRead = um ?? (dataRef.current !== null && dataRef.current.day === target ? dataRef.current.unmeasured : [])
+      const umPrev = dataRef.current !== null && dataRef.current.day === target ? dataRef.current.unmeasured : null
+      const umRead = um ?? umPrev ?? []
       const unmeasured = applyUnmeasuredOps(umRead, umOpsRef.current.values(), startedAt)
       // 読んだ印に載っている操作（読み込みの始まりより前）は外す（読めなかった時は残す＝次の読み込みでも重ねる）
       if (um !== null) for (const [k, o] of umOpsRef.current) if (o.at < startedAt) umOpsRef.current.delete(k)
@@ -360,6 +374,7 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
         keys: dv.keys,
         recent,
         unmeasured,
+        unmeasuredUnread: um !== null ? null : umPrev !== null ? 'prev' : 'none',
       })
       setError(null)
     } catch {
@@ -457,12 +472,21 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
     (residentId: number): DaycareVitalSlot[] => {
       if (data === null) return []
       // 2026-11-09 計画B: 今日の画面の印と同じ純関数（daycareProgress.ts の daycareVitalSlotsWithPending。中身は前と同じ）
+      // 2026-11-10 反証 中1: 〔未測定〕の印だけがある回（〔＋再測定〕の回に印だけを残した時など）も行に出す（読み直しで行が消えて、
+      // 次の〔＋再測定〕に前の「未測定」が出ないように）。ただし取り消した測定の行のキーの回は出さない（そのキーには値を入れられないため）
+      const markSeqs = unmeasuredSlotSeqs(
+        data.unmeasured,
+        residentId,
+        data.day,
+        data.live.map((v) => v.client_key),
+        data.keys,
+      )
       return daycareVitalSlotsWithPending(
         data.live,
         data.keys,
         residentId,
         data.day,
-        extraSeqs.get(residentId) ?? [],
+        [...(extraSeqs.get(residentId) ?? []), ...markSeqs],
         (key) => pendingRow('vitals', { routine: false, clientKey: key, residentId, day: data.day, kind: 'observation' }) !== null,
       )
     },
@@ -633,6 +657,13 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
     if (k === null || cur === null || cur.day !== k.day) return null
     return unmeasuredRowOf(cur.unmeasured, k.residentId, k.day, k.seq, f)
   }
+  /** 印の知らせ・送信中の控えの鍵（測定のキー|欄） */
+  const umKey = (slot: DaycareVitalSlot, f: DaycareVitalField) => `${slot.key}|${f}`
+  const setUmBusyOf = (key: string, on: boolean) => {
+    if (on) umBusyRef.current.add(key)
+    else umBusyRef.current.delete(key)
+    setUmBusy(new Set(umBusyRef.current))
+  }
   const setUmNote = (key: string, text: string | null) =>
     setUmNotes((prev) => {
       if (text === null && !prev.has(key)) return prev
@@ -662,14 +693,14 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
   /** 印を付ける（undoable＝〔元に戻す〕の知らせを出す。〔元に戻す〕から呼ぶ時は出さない）。値のある欄には付けない（値が優先） */
   const markUnmeasured = async (slot: DaycareVitalSlot, field: DaycareVitalField, undoable: boolean) => {
     const k = parseDaycareVitalKey(slot.key)
-    const busy = `${slot.key}|${field}`
+    const busy = umKey(slot, field)
     if (k === null || umBusyRef.current.has(busy) || hasValueNow(slot, field)) return
     if (actorId === null) {
-      setUmNote(slot.key, `${DAYCARE_VITAL_LABEL[field]}: ${MSG_NO_RECORDER}`)
+      setUmNote(busy, `${DAYCARE_VITAL_LABEL[field]}: ${MSG_NO_RECORDER}`)
       return
     }
-    umBusyRef.current.add(busy)
-    setUmNote(slot.key, null)
+    setUmBusyOf(busy, true)
+    setUmNote(busy, null)
     try {
       const row = await markDaycareVitalUnmeasured({ residentId: k.residentId, day: k.day, seq: k.seq, field, recordedBy: actorId })
       applyUm({ residentId: k.residentId, day: k.day, seq: k.seq, field, row })
@@ -677,17 +708,17 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
         lunch.show(`${nameOf(k.residentId)}さんの${DAYCARE_VITAL_LABEL[field]}を未測定にしました`, () => void clearUnmeasured(slot, field, row, false))
       }
     } catch (e) {
-      setUmNote(slot.key, `${DAYCARE_VITAL_LABEL[field]}: ${e instanceof DbError ? e.message : MSG_UM_FAILED}`)
+      setUmNote(busy, `${DAYCARE_VITAL_LABEL[field]}: ${e instanceof DbError ? e.message : MSG_UM_FAILED}`)
     } finally {
-      umBusyRef.current.delete(busy)
+      setUmBusyOf(busy, false)
     }
   }
   /** 印を外す（quiet＝値を保存した後の片づけ。失敗を出さない） */
   const clearUnmeasured = async (slot: DaycareVitalSlot, field: DaycareVitalField, row: DaycareVitalUnmeasured, undoable: boolean, quiet = false) => {
-    const busy = `${slot.key}|${field}`
+    const busy = umKey(slot, field)
     if (umBusyRef.current.has(busy)) return
-    umBusyRef.current.add(busy)
-    if (!quiet) setUmNote(slot.key, null)
+    setUmBusyOf(busy, true)
+    if (!quiet) setUmNote(busy, null)
     try {
       await clearDaycareVitalUnmeasured(row, { editedBy: actorId })
       applyUm({ residentId: row.resident_id, day: row.day, seq: row.seq, field, row: null })
@@ -695,15 +726,16 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
         lunch.show(`${nameOf(row.resident_id)}さんの${DAYCARE_VITAL_LABEL[field]}の未測定を取り消しました`, () => void markUnmeasured(slot, field, false))
       }
     } catch (e) {
-      if (!quiet) setUmNote(slot.key, `${DAYCARE_VITAL_LABEL[field]}: ${e instanceof DbError ? e.message : MSG_UM_FAILED}`)
+      if (!quiet) setUmNote(busy, `${DAYCARE_VITAL_LABEL[field]}: ${e instanceof DbError ? e.message : MSG_UM_FAILED}`)
     } finally {
-      umBusyRef.current.delete(busy)
+      setUmBusyOf(busy, false)
     }
   }
-  /** 値を保存できた欄の印を外す（値が優先・失敗は出さない） */
+  /** 値を保存できた欄の印を外す（値が優先・失敗は出さない）。その欄の〔未測定〕の失敗の知らせも消す（反証 軽4） */
   const clearUnmeasuredOfSaved = (slot: DaycareVitalSlot, edits: Partial<Record<DaycareVitalField, number | null>>) => {
     for (const [f, v] of Object.entries(edits)) {
       if (typeof v !== 'number') continue
+      setUmNote(umKey(slot, f as DaycareVitalField), null)
       const row = umRowOf(slot, f as DaycareVitalField)
       if (row !== null) void clearUnmeasured(slot, f as DaycareVitalField, row, false, true)
     }
@@ -714,6 +746,12 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
    */
   const toggleUnmeasured = (cur: Active, slot: DaycareVitalSlot): boolean => {
     if (valueOf(slot, cur.field).v !== null) return false
+    // 送っている最中の欄は、黙って捨てて進めない（その欄に残り、テンキーの案内に「送信中」＝反証 軽5）
+    if (umBusyRef.current.has(umKey(slot, cur.field))) {
+      setBuf('')
+      setKpError(null)
+      return true
+    }
     const row = umRowOf(slot, cur.field)
     if (row === null) {
       void markUnmeasured(slot, cur.field, true)
@@ -986,7 +1024,9 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
   const addRecheck = (row: DaycareBoardRow, last: DaycareVitalSlot) => {
     if (!canWrite || data === null || releasingRef.current) return
     const local = (extraSeqs.get(row.residentId) ?? []).map((s) => daycareVitalKey(data.day, row.residentId, s))
-    let seq = nextDaycareSeq([...data.keys, ...local, ...slotsOf(row.residentId).map((s) => s.key)], data.day, row.residentId)
+    // 2026-11-10 反証 中1: 〔未測定〕の印のある回も使わない（前の回の「未測定」を新しい回に出さない）
+    const marked = unmeasuredSeqsOf(data.unmeasured, row.residentId, data.day).map((s) => daycareVitalKey(data.day, row.residentId, s))
+    let seq = nextDaycareSeq([...data.keys, ...local, ...marked, ...slotsOf(row.residentId).map((s) => s.key)], data.day, row.residentId)
     // 送信待ちにだけある回は使わない（上書きしない）
     for (let i = 0; i < 50; i += 1) {
       const key = daycareVitalKey(data.day, row.residentId, seq)
@@ -1134,13 +1174,22 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
   const lunchReady = lunch.data !== null && lunch.data.day === day
   const lunchFailed = !lunchReady && lunch.error !== null
   const countRows = board === null || data === null || data.day !== day ? [] : daycareBulkRows(board.rows)
+  // 2026-11-10 反証 軽2: 数える回は今日の画面と同じ純関数（daycareCountSeq＝測定の行のある一番小さい回・無ければ印の一番小さい回）。
+  // countSeqOfRow＝その方の数える回（空の枠を光らせる回。null＝最初の回）
+  const countSeqOfRow = new Map<number, number | null>()
   const blankOf = new Map<number, number>(
     countRows.map((r) => {
-      const first = slotsOf(r.residentId)[0]
+      const slots = slotsOf(r.residentId)
+      const cs = daycareCountSeq(
+        slots.filter((s) => s.vital !== null || pendingRow('vitals', targetOf(s)) !== null).map((s) => s.seq),
+        unmeasuredSeqsOf(data?.unmeasured, r.residentId, day),
+      )
+      const first = cs === null ? slots[0] : slots.find((s) => s.seq === cs)
+      countSeqOfRow.set(r.residentId, cs ?? first?.seq ?? null)
       const vals: Partial<Record<DaycareVitalField, number | null>> = {}
       if (first !== undefined) for (const f of DAYCARE_VITAL_FIELDS) vals[f] = valueOf(first, f).v
-      // 2026-11-10 未測定: 最初の回の〔未測定〕の印のある欄は入力済み（昼食の拒食と同じ）
-      const vitalBlank = vitalBlankFields(first === undefined ? null : vals, unmeasuredFieldsOf(data?.unmeasured, r.residentId, day, first?.seq ?? 1))
+      // 2026-11-10 未測定: 数える回の〔未測定〕の印のある欄は入力済み（昼食の拒食と同じ）
+      const vitalBlank = vitalBlankFields(first === undefined ? null : vals, unmeasuredFieldsOf(data?.unmeasured, r.residentId, day, cs ?? first?.seq ?? 1))
       return [r.residentId, lunchReady ? (vitalsMealsBlankFields(vitalBlank, lunch.blankOf(r.residentId)) ?? 0) : vitalBlank]
     }),
   )
@@ -1257,14 +1306,12 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
           </button>
         </div>
       ) : null}
+      {/* 2026-11-10 反証 軽6: 凡例の記号の4語は元のまま、「—＝記録なし（数えない回）」「未測定＝測らなかった記録」「未＝未入力」を足した。
+          凡例だけで 1296px（15px・ヘッドレス Chrome）になり、iPad 横 1180px（枠 1052px）で今の2段（凡例・食事の説明）に収まらないので、
+          食事の説明（2026-11-09 計画B3 のそれまでの食事一括の説明）を短くして同じ段落の続きに置いた（2段・2段目の余り約 54px） */}
       <p className="text-sm leading-tight text-ink2">
-        {/* 2026-11-10 未測定（仮置き）: 「未測定＝測らなかった記録」を足した。iPad 横 1180px（枠 1052px）で1行に収めるため、
-            意味が変わった「— 未測定」を置き換え、（高い）（低い）を対ごとにまとめた（ヘッドレス Chrome・15px で 988.7px。前は 978.7px） */}
-        記号: ↑↑ 危険・↑ 注意（高い）・↓ 注意・↓↓ 危険（低い）・未測定＝測らなかった記録・未＝未入力。範囲外と血圧の上下逆は保存しません。
-      </p>
-      {/* 2026-11-09 計画B3: それまでの食事一括の説明を1行に詰めて足した */}
-      <p className="text-sm leading-tight text-ink2">
-        主食・副食は選ぶとすぐ保存します（care-log の食事の昼食と同じ記録）。水分は数を入れて改行キーか〔＋〕で足します（1人の画面の水分と同じ記録）。
+        記号: ↑↑ 危険（高い）・↑ 注意（高い）・↓ 注意（低い）・↓↓ 危険（低い）・—＝記録なし（数えない回）・未測定＝測らなかった記録・未＝未入力。範囲外と血圧の上下逆は保存しません。{' '}
+        <span>主食・副食は選ぶとすぐ保存します。水分は数を入れて改行キーか〔＋〕で足します（1人の画面と同じ記録）。</span>
       </p>
       {gate !== null && !(gate.observed && gate.value === true) ? (
         <p role="status" className="rounded-lg border border-warn bg-warn-bg px-3 py-1.5 text-base text-ink">
@@ -1342,6 +1389,8 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                   const cur = valueOf(activeSlot, active.field).v
                   const pv = prevOf(active.residentId)[active.field]
                   const parts: string[] = []
+                  // 2026-11-10 反証 軽5: 〔未測定〕を送っている最中の欄は「送信中」（その欄に残る）
+                  if (umBusy.has(umKey(activeSlot, active.field))) parts.push(MSG_UM_BUSY)
                   if (cur !== null) parts.push(`いまの値 ${fmtVal(active.field, cur)}`)
                   else if (activeMarked) parts.push('未測定と記録済み')
                   if (pv !== undefined) parts.push(`前回 ${fmtVal(active.field, pv.value)}`)
@@ -1417,6 +1466,23 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                 <p className="min-w-0 flex-1">
                   <span aria-hidden="true">▲ </span>
                   {MSG_LUNCH_UNREAD}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => afterRelease(() => setReloadKey((n) => n + 1))}
+                  disabled={releasing}
+                  className="min-h-tap rounded border border-border-strong bg-surface px-3 text-sm text-ink"
+                >
+                  最新に更新
+                </button>
+              </div>
+            ) : null}
+            {/* 2026-11-10 反証 軽3: 〔未測定〕の印を読めなかった時（前に読んだ印か、印なしで出している）。表は止めない */}
+            {data.unmeasuredUnread !== null ? (
+              <div role="status" className="flex flex-wrap items-center gap-gap rounded-lg border border-warn bg-warn-bg px-3 py-1.5 text-base text-ink">
+                <p className="min-w-0 flex-1">
+                  <span aria-hidden="true">▲ </span>
+                  {MSG_UM_UNREAD[data.unmeasuredUnread]}
                 </p>
                 <button
                   type="button"
@@ -1511,7 +1577,8 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                     return slots.map((slot, si) => {
                       const st = slotState.get(slot.key)
                       // 空の枠を目立たせるのは、数える方の最初の回だけ（数えた欄と光る欄をそろえる・2026-11-09 計画B2）
-                      const countedSlot = si === 0 && blankCount !== undefined
+                      // 2026-11-10 反証 軽2: 数える回（上の countSeqOfRow・今日の画面と同じ決まり）。ふつうは最初の回
+                      const countedSlot = slot.seq === countSeqOfRow.get(row.residentId) && blankCount !== undefined
                       const pend = pendingRow('vitals', targetOf(slot))
                       const vals: Partial<Record<DaycareVitalField, number | null>> = {}
                       for (const f of DAYCARE_VITAL_FIELDS) vals[f] = valueOf(slot, f).v
@@ -1533,7 +1600,7 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                       // 昼食と水分の知らせ（それまでの食事一括の行の下の知らせ）も、1回目の行の下の同じ行に出す
                       const lunchNotes = lunchRow ? lunch.notes(row.residentId) : null
                       // 〔未測定〕を付けられなかった・外せなかった理由（2026-11-10。欄は空のまま）
-                      const umNote = umNotes.get(slot.key) ?? null
+                      const umNote = DAYCARE_VITAL_FIELDS.flatMap((f) => umNotes.get(umKey(slot, f)) ?? []).join(' ') || null
                       const below = detail || lunchNotes !== null || umNote !== null
                       const time = slot.vital?.measured_at ? slot.vital.measured_at.slice(0, 5) : null
                       // 状態の列の2段目（2026-11-09 計画B3 の確認の反証 中1・軽2）: 急ぐ印（要確認・未送信・送信中）→ 測った時刻（再測定の回が
