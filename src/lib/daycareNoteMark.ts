@@ -44,6 +44,14 @@ export function markDayPrefix(day: string, residentId: number): string {
   return `dcn:${day}:${residentId}:`
 }
 
+/**
+ * 1人1日1件として扱う印の頭（2026-11-10 計画D の反証 中3）。機能訓練は記録を取り消して入れ直すと id が替わるので、その方・その日の tr＊ を
+ * 1つの印として扱う（dcn:<日>:<利用者id>:tr）。ほかの記録は markPrefix と同じ
+ */
+export function markFamilyPrefix(day: string, residentId: number, r: MarkRecord): string {
+  return r.kind === 'training' ? `dcn:${day}:${residentId}:tr` : markPrefix(day, residentId, r)
+}
+
 /** その日の全員の印の鍵の頭（一括の画面の送信待ちの絞り込み・2026-11-10 計画D） */
 export function markDayAllPrefix(day: string): string {
   return `dcn:${day}:`
@@ -166,6 +174,32 @@ export function vitalMarkText(v: { temp: number | null; sys_bp: number | null; d
   if (v.pulse !== null) parts.push(`脈 ${v.pulse}`)
   if (v.spo2 !== null) parts.push(`SpO2 ${v.spo2}%`)
   return parts.length === 0 ? null : `バイタル ${parts.join('・')}`
+}
+
+/** バイタルの5項目の値 */
+export interface VitalValues {
+  temp: number | null
+  sys_bp: number | null
+  dia_bp: number | null
+  pulse: number | null
+  spo2: number | null
+}
+
+/**
+ * その方・その日のバイタルの行から、項目ごとにいちばん新しい値（測った時刻 → id の順に並べて、後ろから値のある行）。
+ * 1人の画面の申し送りの文と、バイタル・食事のテンキーの〔⚐ 申し送り〕の文の共通の元（2026-11-10 計画D の反証 中1: 全部の回から項目ごとの最新）。
+ * 送信待ち・打ちかけの値は渡さない（サーバーの行だけ）
+ */
+export function latestVitalValues(rows: readonly (VitalValues & { id: number; measured_at: string | null })[]): VitalValues {
+  const sorted = [...rows].sort((a, b) => (a.measured_at ?? '').localeCompare(b.measured_at ?? '') || a.id - b.id)
+  const pick = (f: keyof VitalValues): number | null => {
+    for (let i = sorted.length - 1; i >= 0; i -= 1) {
+      const v = sorted[i][f]
+      if (typeof v === 'number') return v
+    }
+    return null
+  }
+  return { temp: pick('temp'), sys_bp: pick('sys_bp'), dia_bp: pick('dia_bp'), pulse: pick('pulse'), spo2: pick('spo2') }
 }
 
 /** 昼食・おやつの文（表示の言葉＝lunchLabel・snackLabel をそのまま渡す）。記録なしは null */

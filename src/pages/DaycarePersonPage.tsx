@@ -71,7 +71,7 @@ import {
 } from '../lib/daycareDayMemo'
 import { useDaycareNoteMarks } from '../components/DaycareNoteMark'
 import { activityText } from '../lib/daycareActivity'
-import { activityMarkText, excretionMarkText, fluidMarkText, mealMarkText, vitalMarkText } from '../lib/daycareNoteMark'
+import { activityMarkText, excretionMarkText, fluidMarkText, latestVitalValues, mealMarkText, vitalMarkText } from '../lib/daycareNoteMark'
 import { ConfirmDialog, ErrorBlock, LoadingBlock, useToast } from '../components/ui'
 import {
   DAYCARE_VITAL_FIELDS,
@@ -979,16 +979,10 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   if (data === null) return null
 
   const name = resident?.name ?? nameOf(residentId)
-  const myVitals = data.vitals
-    .filter((v) => v.resident_id === residentId)
-    .sort((a, b) => (a.measured_at ?? '').localeCompare(b.measured_at ?? '') || a.id - b.id)
-  const latestOf = (f: DaycareVitalField): number | null => {
-    for (let i = myVitals.length - 1; i >= 0; i -= 1) {
-      const v = myVitals[i][f]
-      if (typeof v === 'number') return v
-    }
-    return null
-  }
+  // 項目ごとのいちばん新しい値（測った時刻 → id の順で後ろから）。2026-11-10 計画D の反証 中1: バイタル・食事のテンキーの〔⚐ 申し送り〕と同じ
+  // 純関数（latestVitalValues）にした（結果は前と同じ＝申し送りの文も変わらない）
+  const latestVals = latestVitalValues(data.vitals.filter((v) => v.resident_id === residentId))
+  const latestOf = (f: DaycareVitalField): number | null => latestVals[f]
   const bath = data.baths.find((b) => b.resident_id === residentId) ?? null
   const bst = daycareBathStatus(bath, row?.bathingPlanned ?? false)
   const bathText = daycareBathLabel(bst)

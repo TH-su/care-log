@@ -1014,9 +1014,16 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                     const others = readable ? otherLabelsOf(rid) : []
                     const stoppedNotes = readable ? [...DAYCARE_ACTIVITY_CHIPS, ...others].flatMap((l) => cellOf(rid, l).stopped) : []
                     const m = msgs.get(`${rid}:${day}`)
-                    // 申し送りの印（2026-11-10 計画D）: その日の活動（サーバーの行・表の並び）をまとめた文。送信待ちの活動は文に入れない
+                    // 申し送りの印（2026-11-10 計画D）: その日の活動（サーバーの行・表の並び）をまとめた文。文はサーバーの行だけで作るので、その方の
+                    // 活動に保存中・送信待ち・止まった変更・まとめて入れている最中がある間は押せない（文が記録と食い違わないように＝反証 軽4。バイタルと同じ決まり）
                     const dayText = readable ? activityDayMarkText(activitiesOf(data.activities ?? [], rid, day).map((a) => activityText(a))) : null
-                    const markNote = marks.note(rid, { kind: 'activityDay' }, name)
+                    const actUnsent =
+                      readable &&
+                      [...DAYCARE_ACTIVITY_CHIPS, ...others].some((l) => {
+                        const c = cellOf(rid, l)
+                        return c.waiting || c.deleting || c.stopped.length > 0 || busy.has(`${day}:${rid}:${l}`)
+                      })
+                    const markNote = marks.note(rid, { kind: 'activityDay' }, name, dayText, readable)
                     const detail = stoppedNotes.length > 0 || m !== undefined || markNote !== null
                     // 活動の記録が1つも無い行（読めている時だけ・2026-11-09 計画B2）
                     const rowBlank = readable && filledOf.get(rid) === false
@@ -1074,11 +1081,16 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                               name,
                               rec: { kind: 'activityDay' },
                               text: dayText,
+                              known: readable,
                               why: !readable
                                 ? '活動の記録を読み込めていないため、申し送りにできません。'
-                                : dayText === null
-                                  ? '活動の記録が無いため、申し送りにできません（記録してから押してください）。'
-                                  : null,
+                                : running
+                                  ? 'まとめて入れている間は、申し送りにできません。'
+                                  : actUnsent
+                                    ? '活動に保存中・送信待ち・止まった変更があるため、申し送りにできません（届いてから押してください）。'
+                                    : dayText === null
+                                      ? '活動の記録が無いため、申し送りにできません（記録してから押してください）。'
+                                      : null,
                             })}
                           </td>
                         </tr>

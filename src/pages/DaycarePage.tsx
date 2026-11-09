@@ -603,8 +603,9 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     const offB = subscribeBathChanges(onChange)
     const offC = subscribeChanges((table, info) => {
       if (table === 'vitals' || table === 'meals' || table === 'fluid_intake') onChange(table, info)
-      // 申し送りの変更は数だけを読み直す（2026-11-10 計画D・今の購読を使う＝購読は足さない）
-      else if (table === 'notes') scheduleNoteCount()
+      // 申し送りの変更は数だけを読み直す（2026-11-10 計画D・今の購読を使う＝購読は足さない）。届いた行が分かる時は、区分「デイ」でその日の行の
+      // 時だけ（施設の申し送りの変更のたびに読まない＝反証 軽6）。行の分からない知らせ（つながり直し等）は今のまま読み直す
+      else if (table === 'notes' && (!info?.row || (info.row.shift === 'daycare' && info.row.note_on === dayRef.current))) scheduleNoteCount()
     })
     const offD = subscribeDaycareActivityChanges(onChange)
     let last = queuePending()

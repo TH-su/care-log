@@ -95,6 +95,55 @@ if (M === null) {
     })
   })
 
+  describe('純ロジック: 反証の直し（2026-11-10 計画D の反証）', () => {
+    it('中1: バイタルの文は全部の回から項目ごとに最新の値（latestVitalValues）。1人の画面の前の latestOf と同じ結果（並べ替え: 測った時刻 → id）', () => {
+      // 1人の画面の前の作り（DaycarePersonPage.tsx の myVitals＋latestOf をそのまま写したもの）
+      const oldLatest = (rows) => {
+        const my = [...rows].sort((a, b) => (a.measured_at ?? '').localeCompare(b.measured_at ?? '') || a.id - b.id)
+        const of = (f) => {
+          for (let i = my.length - 1; i >= 0; i -= 1) if (typeof my[i][f] === 'number') return my[i][f]
+          return null
+        }
+        return { temp: of('temp'), sys_bp: of('sys_bp'), dia_bp: of('dia_bp'), pulse: of('pulse'), spo2: of('spo2') }
+      }
+      let seed = 7
+      const rnd = (n) => {
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        return seed % n
+      }
+      const val = (base) => (rnd(3) === 0 ? null : base + rnd(20))
+      for (let t = 0; t < 300; t += 1) {
+        const rows = Array.from({ length: rnd(5) }, (_, i) => ({
+          id: rnd(50) + 1 + i * 100,
+          measured_at: rnd(4) === 0 ? null : `${String(9 + rnd(6)).padStart(2, '0')}:${rnd(2) === 0 ? '00' : '30'}:00`,
+          temp: rnd(3) === 0 ? null : 36 + rnd(20) / 10,
+          sys_bp: val(110),
+          dia_bp: val(60),
+          pulse: val(60),
+          spo2: val(85),
+        }))
+        assert.deepEqual(M.latestVitalValues(rows), oldLatest(rows))
+        assert.equal(M.vitalMarkText(M.latestVitalValues(rows)), M.vitalMarkText(oldLatest(rows)), '1人の画面の申し送りの文は変わらない')
+      }
+      // 再測定の後は、項目ごとにいちばん新しい値（1回目の体温・再測定の血圧）
+      const rows = [
+        { id: 1, measured_at: '09:30:00', temp: 37.8, sys_bp: 168, dia_bp: 92, pulse: 80, spo2: 96 },
+        { id: 2, measured_at: '09:50:00', temp: null, sys_bp: 142, dia_bp: 84, pulse: null, spo2: null },
+      ]
+      assert.equal(M.vitalMarkText(M.latestVitalValues(rows)), 'バイタル 体温 37.8℃・血圧 142/84・脈 80・SpO2 96%')
+    })
+    it('中3: 機能訓練の印は1人1日1件（markFamilyPrefix＝tr＊）。ほかの記録は markPrefix のまま', () => {
+      const fam = M.markFamilyPrefix('2026-11-10', 7, { kind: 'training', id: 42 })
+      assert.equal(fam, 'dcn:2026-11-10:7:tr')
+      assert.ok('dcn:2026-11-10:7:tr43:1-aa'.startsWith(fam), '入れ直して id が替わった記録の印も同じ組')
+      assert.ok(!'dcn:2026-11-10:8:tr42:1-aa'.startsWith(fam), 'ほかの方の印は別')
+      assert.equal(M.markFamilyPrefix('2026-11-10', 7, { kind: 'activityDay' }), M.markPrefix('2026-11-10', 7, { kind: 'activityDay' }))
+      assert.equal(M.markFamilyPrefix('2026-11-10', 7, { kind: 'vital' }), 'dcn:2026-11-10:7:vital:')
+      // tr で始まる記録の部分はほかに無い（組が別の記録を巻き込まない）
+      for (const w of ['vital', 'lunch', 'snack', 'ex', 'acday', 'fl3', 'ac4']) assert.ok(!w.startsWith('tr'))
+    })
+  })
+
   describe('fetchDaycareDayNotes（偽の Supabase・通信しない）', () => {
     it('日・区分「デイ」で絞り、鍵では絞らない（手で書いたデイの申し送りも読む）。取り消した行も読む・日と区分の違う行は捨てる・書き込みはしない', async () => {
       const calls = []
@@ -193,8 +242,10 @@ if (M === null) {
   describe('静的検査（計画D の規律）', () => {
     const day = code('../src/components/DaycareNoteMarkDay.tsx')
     const person = code('../src/components/DaycareNoteMark.tsx')
-    it('一括の印の部品: 申し送りへの書き込みは既存の insertNote・deleteNote だけ（直すのは1人の画面＝saveNoteEdits を使わない）・supabase・端末の保存・console を使わない', () => {
-      assert.deepEqual(writesOf(day), ['deleteNote', 'insertNote'])
+    it('一括の印の部品: 申し送りへの書き込みは既存の insertNote・deleteNote・saveNoteEdits だけ（1人の画面と同じ3つ）・supabase・端末の保存・console を使わない', () => {
+      // 2026-11-10 計画D の反証 中2（固定し直し・意図は同じ）: 〔申し送りを直す〕を足したので saveNoteEdits も（1人の画面の部品と同じ3つ）
+      assert.deepEqual(writesOf(day), ['deleteNote', 'insertNote', 'saveNoteEdits'])
+      assert.deepEqual(writesOf(day), writesOf(person))
       assert.doesNotMatch(day, /supabase|\.from\(|\.rpc\(|localStorage|console\./)
       // 1人の画面と同じ申し送りの形（区分デイ・「16時以降」は付けない・分類は記録の種類から・記録日が今日の時だけ今の時刻・ひと言なし）
       assert.match(day, /shift: 'daycare' as const,/)
@@ -204,50 +255,92 @@ if (M === null) {
       assert.match(day, /const body = markBody\(text, ''\)/)
       assert.match(day, /const clientKey = markKey\(d, rid, rec, gen, token\)\s+const res = await insertNote\(payload, \{ clientKey \}\)/)
       assert.match(day, /const token = Math\.random\(\)\.toString\(36\)\.slice\(2, 10\) \|\| '0'/)
-      // 〔外す〕・〔元に戻す〕は見た行（F09）
+      // 〔外す〕・〔元に戻す〕は見た行（F09）。〔申し送りを直す〕は見た本文を基準に（1人の画面と同じ書き方）
       assert.match(day, /deleteNote\(\{ id: row\.note\.id \}, row\.note, \{ meta: noteMetaOf\(row\.note\), editedBy: actorRef\.current \}\)/)
-      // 1人の画面の部品と同じ申し送りの形（片方だけ変えない）
+      assert.match(day, /\{ body: \{ value: full\.trim\(\), base: row\.note\.body \} \}/)
+      assert.match(person, /\{ body: \{ value: full\.trim\(\), base: row\.note\.body \} \}/)
       for (const re of [/shift: 'daycare' as const,/, /after16: false,/, /occurred_at: noteTimeFor\(d, 'daycare', new Date\(\)\),/]) assert.match(person, re)
     })
-    it('送る直前に読み直して世代を決める・生きている印があれば2件目を作らない・読めていなければ付けない・続けて2回押しても1件', () => {
+    it('送る直前に読み直して世代を決める・生きている印（機能訓練は tr＊ の組）か送信待ちの印があれば2件目を作らない・読めていなければ付けない・続けて2回押しても1件', () => {
       const add = day.slice(day.indexOf('const sendAdd'), day.indexOf('const offCls'))
       assert.match(add, /const fresh = await load\(d\)/)
       assert.match(add, /if \(known === null\) \{\s+say\(k, \{ tone: 'warn', text: MSG_NOT_READ \}\)/)
-      assert.match(add, /if \(known\.some\(\(r\) => !r\.deleted && r\.clientKey\.startsWith\(prefix\)\)\) \{/)
+      // 2026-11-10 計画D の反証 中3（固定し直し・意図は同じ）: 組の頭（markFamilyPrefix）で、生きている印と送信待ちの印の両方を見る
+      assert.match(add, /const family = markFamilyPrefix\(d, rid, rec\)/)
+      assert.match(add, /if \(known\.some\(\(r\) => !r\.deleted && r\.clientKey\.startsWith\(family\)\) \|\| pendingDaycareNoteMarks\(family\)\.length > 0\) \{/)
       assert.match(add, /const gen = nextGen\(prefix, keys\)/)
       assert.match(add, /pendingDaycareNoteMarks\(markDayPrefix\(d, rid\)\)/)
       assert.match(add, /if \(busyRef\.current\.has\(k\)\) return\s+setBusyKey\(k, true\)/)
+      // 行の印も組で見る（入れ直した記録の印を出す）
+      assert.match(day, /const prefix = markFamilyPrefix\(day, rid, rec\)\s+return rows\.filter/)
+      assert.match(day, /const pendOf = \(rid: number, rec: MarkRecord\) => pendAll\.find\(\(p\) => p\.clientKey\.startsWith\(markFamilyPrefix\(day, rid, rec\)\)\) \?\? null/)
       // 送り先は押した時の人・日（表示中の日を後から読まない）
       assert.match(day, /void sendAdd\(rid, day, rec, text, name\)/)
       assert.doesNotMatch(add, /const rid = |const d = /)
     })
-    it('送れた時だけ〔元に戻す〕（8秒・画面の知らせ）。送信待ちの間は出さない。〔元に戻す〕は〔外す〕と同じ取り消し', () => {
+    it('送れた時だけ〔元に戻す〕（8秒）。送信待ちの間は出さない。〔元に戻す〕は〔外す〕と同じ取り消し。送れた・外した・直した行は読み直しが失敗しても持つ（反証 軽1）', () => {
       const add = day.slice(day.indexOf('const sendAdd'), day.indexOf('const offCls'))
       const iQueued = add.indexOf("if (res === 'queued') {")
       const iShow = add.indexOf('show(')
       assert.ok(iQueued > 0 && iShow > iQueued, '送信待ちの分岐で返してから知らせる')
       assert.doesNotMatch(add.slice(iQueued, add.indexOf('return', iQueued)), /show\(/)
       assert.match(add, /show\(`\$\{name\}さんの\$\{MARK_KIND_LABEL\[rec\.kind\]\}を申し送りにしました`, \(\) => void sendRemove\(rid, d, rec, landed, name\)\)/)
+      // 送れた行は読み直しの前に画面の印へ入れる（読み直しが失敗しても ⚐ に戻らない）。それより前に始めた読み込みは入れない
+      assert.match(add, /keepRow\(d, landed\)\s+await load\(d\)/)
+      assert.match(day, /const keepRow = \(d: string, row: DaycareNoteMarkRow\) => \{\s+appliedRef\.current = genRef\.current/)
+      assert.match(day, /keepRow\(d, \{ \.\.\.row, deleted: true \}\)\s+await load\(d\)/)
+      assert.match(day, /keepRow\(d, \{ \.\.\.row, note: res\.row \?\? \{ \.\.\.row\.note, body: full\.trim\(\) \} \}\)/)
       // 「⚑ 申し送り」をもう一度押すと〔外す〕の確認（1人の画面と同じ題・ボタン）
-      assert.match(day, /onClick=\{\(\) => setDelRow\(\{ rid, d: day, rec, row: live, name \}\)\}/)
+      assert.match(day, /blockProps\(reason, onBlocked, \(\) => setDelRow\(\{ rid, d: day, rec, row: live, name \}\)\)/)
       assert.match(day, /<ConfirmDialog\s+open=\{delRow !== null\}\s+title="申し送りの印を外しますか"/)
       assert.match(person, /title="申し送りの印を外しますか"/)
     })
-    it('17時のロック・記録者・旗は1人の画面と同じ（現場のログインは記録日の 17:00 から付け外しできない）', () => {
+    it('外す・直す操作を送信待ちにした時の知らせは queued（届いたら消える・反証 軽3）', () => {
+      assert.match(day, /text: `印を外す：\$\{queuedText\(\)\}`, queued: true \}/)
+      assert.match(day, /text: `申し送りを直す：\$\{queuedText\(\)\}`, queued: true \}/)
+      assert.match(day, /text: `申し送り：\$\{queuedText\(\)\}`, queued: true \}/)
+      // 登録・外す・直すのどれかの送信待ちが残る間だけ出す
+      assert.match(day, /const stillQueued = \(pend !== null && pend\.state === 'pending'\) \|\| \(pendDel !== null && pendDel\.state === 'pending'\)/)
+      assert.match(day, /if \(m\.queued === true && !stillQueued\) continue/)
+    })
+    it('17時のロック・記録者・旗は1人の画面と同じ。付いた印のボタンも付け外しできない時は押せない（反証 軽2）', () => {
       assert.match(day, /const lockedForMe = lockState\(day, 'daycare', false, now\)\.locked && !canUnlockNotes\(role\)/)
       assert.match(day, /if \(lockedForMe\) return MSG_LOCKED_FIELD/)
       assert.match(day, /if \(actorRef\.current === null\) return MSG_NO_RECORDER/)
       assert.match(day, /if \(!canWrite\) return blockedReason \?\? '入力できない状態です。'/)
       assert.match(day, /isNoteLockedError\(e\) \? NOTE_LOCKED_MESSAGE/)
+      const on = day.slice(day.indexOf('if (rec !== null && live !== null) {'), day.indexOf('if (rec !== null && pend !== null) {'))
+      assert.match(on, /const blocked = precheck\(\)/)
+      assert.match(on, /: isBusy \? '送信中です。' : blocked/)
+      // 〔申し送りを直す〕も止める
+      assert.match(day, /disabled=\{blocked !== null \|\| removing \|\| \(k !== null && busy\.has\(k\)\)\}/)
     })
-    it('見た目: 押す所 44px・文字 15px・旗の記号と文字（⚐ 申し送り → ⚑ 申し送り＝注意の淡地＋太字）。押せない時は理由を title と読み上げで', () => {
-      assert.match(day, /const offCls =\s+'inline-flex min-h-tap items-center whitespace-nowrap rounded border border-border-strong bg-surface px-2 text-sm text-ink disabled:text-ink3'/)
+    it('記録と違う（反証 中2）: 付いている印の本文といまの文（同じ組み立て）を isStale で比べ、「⚑ 申し送り ⓘ」と行の下に〔申し送りを直す〕（確認のあと saveNoteEdits）', () => {
+      assert.match(day, /const stale = known && isStale\(live\.note\.body, text\)/)
+      assert.match(day, /\{stale \? <span aria-hidden="true"> ⓘ<\/span> : null\}/)
+      assert.match(day, /const MSG_STALE = '申し送りの文が、いまの記録と違います（申し送りは前の内容のまま。元の記録か申し送りが直されました）。'/)
+      // 1人の画面と同じ文
+      assert.match(read('../src/components/DaycareNoteMark.tsx'), /申し送りの文が、いまの記録と違います（申し送りは前の内容のまま。元の記録か申し送りが直されました）。/)
+      assert.match(day, /if \(live !== null && known && isStale\(live\.note\.body, text\)\) items\.push\(\{ key: 'stale', tone: 'stale'/)
+      // 直した後の本文は1人の画面の案と同じ fixProposal（ひと言を引き継ぐ）・確認の小窓のあと送る
+      assert.match(day, /setFixRow\(\{ rid, d: day, rec, row: live, name, full: fixProposal\(live\.note\.body, text\) \}\)/)
+      assert.match(day, /<ConfirmDialog\s+open=\{fixRow !== null\}\s+title="申し送りを直しますか"/)
+      assert.match(day, /void sendFix\(fixRow\.rid, fixRow\.d, fixRow\.rec, fixRow\.row, fixRow\.full, fixRow\.name\)/)
+      // 各画面はいまの文を行の下の知らせにも渡す（同じ組み立て）
+      assert.match(code('../src/pages/DaycareActivityBulkPage.tsx'), /marks\.note\(rid, \{ kind: 'activityDay' \}, name, dayText, readable\)/)
+      assert.match(code('../src/pages/DaycareTrainingPage.tsx'), /marks\.note\(rid, markRec, name, markText, data\.sessions !== null\)/)
+      assert.match(code('../src/pages/DaycareVitalsMealsPage.tsx'), /marks\.note\(row\.residentId, \{ kind: 'vital' \}, nameOf\(row\.residentId\), vitalTextOf\(row\.residentId\)\)/)
+    })
+    it('見た目: 押す所 44px・文字 15px・旗の記号と文字（⚐ 申し送り → ⚑ 申し送り＝注意の淡地＋太字）。押せない時は理由を title と読み上げで（テンキーは aria-disabled＋押して理由）', () => {
+      assert.match(day, /const offCls =\s+'inline-flex min-h-tap items-center whitespace-nowrap rounded border border-border-strong bg-surface px-2 text-sm text-ink disabled:text-ink3 aria-disabled:text-ink3'/)
       assert.match(day, /const onCls = 'inline-flex min-h-tap items-center whitespace-nowrap rounded border-2 border-warn bg-warn-bg px-2 text-sm font-bold text-ink'/)
       assert.match(day, /<span aria-hidden="true">⚐ <\/span>申し送り/)
       assert.match(day, /<span aria-hidden="true">⚑ <\/span>\s*\{onLabel\}/)
-      assert.match(day, /onLabel = '申し送り' \}: DayMarkInput/)
-      assert.match(day, /disabled=\{off !== null \|\| isBusy\}[\s\S]{0,200}title=\{label\}/)
+      assert.match(day, /onLabel = '申し送り'/)
+      // 押せない時: onBlocked が無ければ disabled、あれば aria-disabled にして押した時に理由を渡す（反証 軽5）
+      assert.match(day, /reason === null\s+\? \{ onClick: onPress \}\s+: onBlocked === undefined\s+\? \{ disabled: true \}\s+: \{ 'aria-disabled': true as const, onClick: \(\) => onBlocked\(reason\) \}/)
       assert.match(day, /const label = off !== null \? `\$\{name\}さんの\$\{what\}を申し送りにできません。\$\{off\}`/)
+      assert.match(day, /title=\{label\}\s+aria-label=\{isBusy \?/)
     })
     it('印の読み込みはその日の全員分を1本（fetchDaycareDayNotes）・Realtime の購読は足さない・端末に残さない', () => {
       assert.equal((day.match(/fetchDaycareDayNotes\(/g) ?? []).length, 1)
@@ -278,58 +371,70 @@ if (M === null) {
       assert.match(act, /const dayText = readable \? activityDayMarkText\(activitiesOf\(data\.activities \?\? \[\], rid, day\)\.map\(\(a\) => activityText\(a\)\)\) : null/)
       assert.match(act, /blockedReason: canWrite \? null : precheck\(\)/)
       const tr = code('../src/pages/DaycareTrainingPage.tsx')
-      assert.match(tr, /const markRec: MarkRecord \| null = s !== null \? \{ kind: 'training', id: s\.id \} : marks\.liveRecord\(rid, 'training'\)/)
+      // 2026-11-10 計画D の反証 中3（固定し直し・意図は同じ）: 生きている（か送信待ちの）tr の印があれば、記録の id が違ってもそれを行の印に
+      assert.match(tr, /const markRec: MarkRecord \| null = marks\.liveRecord\(rid, 'training'\) \?\? \(s !== null \? \{ kind: 'training', id: s\.id \} : null\)/)
       assert.match(tr, /const markText = s !== null \? trainingMarkText\(sessionText\(s\)\) : null/)
       assert.match(tr, /const markWritable = gateOk && !missing/)
     })
-    it('今日の画面: カードの状態の段の右に「⚑n」（その方の取り消していないデイの申し送りの数・0件は出さない・押せない表示）。帯には足さない。読み込みは1本・今の購読の notes で数だけ読み直す', () => {
+    it('反証 軽4: 活動一括・機能訓練も、その方のその日の記録に保存中・送信待ち・止まった変更がある間は⚐を押せない（理由は title・読み上げ）', () => {
+      const act = code('../src/pages/DaycareActivityBulkPage.tsx')
+      assert.match(act, /return c\.waiting \|\| c\.deleting \|\| c\.stopped\.length > 0 \|\| busy\.has\(`\$\{day\}:\$\{rid\}:\$\{l\}`\)/)
+      assert.match(act, /: running\s+\? 'まとめて入れている間は、申し送りにできません。'\s+: actUnsent\s+\? '活動に保存中・送信待ち・止まった変更があるため、申し送りにできません（届いてから押してください）。'/)
+      assert.doesNotMatch(act, /送信待ちの活動は文に入れない/, '前のコメントの意図は新しい決まりに書き直した')
+      const tr = code('../src/pages/DaycareTrainingPage.tsx')
+      assert.match(tr, /: p !== undefined\s+\? '機能訓練の記録の変更が送信待ち・止まっているため、申し送りにできません（届いてから押してください）。'\s+: busy\s+\? '保存している間は、申し送りにできません。'/)
+    })
+    it('今日の画面: カードの状態の段の右に「⚑n」（その方の取り消していないデイの申し送りの数・0件は出さない・押せない表示）。帯には足さない。読み込みは1本・今の購読の notes で数だけ読み直す（その日のデイの行の時だけ）', () => {
       const today = code('../src/pages/DaycarePage.tsx')
       assert.doesNotMatch(today, /\b(insertNote|deleteNote|saveNoteEdits)\(/)
       assert.equal((today.match(/fetchDaycareDayNotes\(/g) ?? []).length, 1)
-      // 方ごとの数（取り消した行・利用者の無い行は数えない）
       assert.match(today, /if \(r\.deleted \|\| rid === null\) continue\s+byResident\.set\(rid, \(byResident\.get\(rid\) \?\? 0\) \+ 1\)/)
-      // カード: 状態の段の右・枠なし・記号と数は読み上げず「申し送り n件」と読む・title も同じ・押せない（ボタン・リンクにしない）
       const list = today.slice(today.indexOf('<ul className="dc-cards"'), today.indexOf('</ul>', today.indexOf('<ul className="dc-cards"')))
       assert.match(list, /\{tone\.word\}\s*(\{\}\s*)?\{noteN > 0 \? \(\s*<span title=\{`申し送り \$\{noteN\}件`\} className="ml-1 whitespace-nowrap">\s*<span aria-hidden="true">⚑\{noteN\}<\/span>\s*<span className="sr-only">・申し送り \{noteN\}件<\/span>\s*<\/span>\s*\) : null\}\s*<\/p>/)
       assert.equal((list.match(/<button/g) ?? []).length, 2, 'カードのボタンは〔休み〕〔取消〕のまま')
       assert.match(today, /・⚑ 申し送り（数）<\/p>/)
-      // 件数の帯には足さない（見出しの段が折り返して iPad 横の30名が見えなくなるため・親の決定 2026-11-10）
       const tiles = today.slice(today.indexOf('const tiles: '), today.indexOf('const noteCountOf'))
       assert.doesNotMatch(tiles, /申し送り/)
-      assert.match(today, /else if \(table === 'notes'\) scheduleNoteCount\(\)/)
-      // 購読の数は今のまま（Realtime を足さない）
+      // 2026-11-10 計画D の反証 軽6（固定し直し・意図は同じ）: 届いた行が分かる時は、区分「デイ」でその日の行の時だけ読み直す。行の無い知らせは読み直す
+      assert.match(today, /else if \(table === 'notes' && \(!info\?\.row \|\| \(info\.row\.shift === 'daycare' && info\.row\.note_on === dayRef\.current\)\)\) scheduleNoteCount\(\)/)
       assert.equal((today.match(/\bsubscribe(Changes|DaycareChanges|BathChanges|DaycareActivityChanges)\(/g) ?? []).length, 4)
-      // 1日の読み込み（load）の中には入れない（申し送りの変更で1日の全部を読み直さない）
       const load = today.slice(today.indexOf('const load = useCallback'), today.indexOf('const loadNoteCount'))
       assert.doesNotMatch(load, /fetchDaycareDayNotes/)
     })
-    it('バイタル・食事の画面: 行には旗のボタンを置かず、テンキーの見出しの段に〔⚐ 申し送り〕（数える回のバイタル・鍵は vital）。氏名の段の右に「⚑」・氏名は1段で省略記号', () => {
+    it('バイタル・食事の画面: テンキーの見出しの段に〔⚐ 申し送り〕（全部の回から項目ごとに最新の値＝1人の画面と同じ文・鍵は vital）。氏名の段の右に「⚑」（送信待ちは「⚑↻」）・氏名は1段で省略記号', () => {
       const vm = code('../src/pages/DaycareVitalsMealsPage.tsx')
       assert.doesNotMatch(vm, /\b(insertNote|deleteNote|saveNoteEdits)\(/)
       assert.match(vm, /const marks = useDaycareNoteMarksDay\(\{/)
-      // 〔元に戻す〕は昼食と同じ知らせの部品（テンキーを開いている間の知らせの位置の決まりのまま）
       assert.match(vm, /refreshKey: reloadKey,\s+show: lunch\.show,\s+\}\)/)
       assert.match(vm, /\{marks\.dialogs\}/)
-      // テンキーの見出しの段（入れている方の名前・欄の段）に置く。付いている時は「申し送り済み」
+      // 反証 中1: 文は1人の画面と同じ純関数（全部の回から項目ごとに最新のサーバーの値）。1人の画面もこの純関数を使う
+      assert.match(vm, /const vitalTextOf = \(rid: number\): string \| null => vitalMarkText\(latestVitalValues\(data\.live\.filter\(\(v\) => v\.resident_id === rid\)\)\)/)
+      const pp = code('../src/pages/DaycarePersonPage.tsx')
+      assert.match(pp, /const latestVals = latestVitalValues\(data\.vitals\.filter\(\(v\) => v\.resident_id === residentId\)\)\s+const latestOf = \(f: DaycareVitalField\): number \| null => latestVals\[f\]/)
+      assert.match(pp, /vitalMarkText\(\{ temp: latestOf\('temp'\), sys_bp: latestOf\('sys_bp'\), dia_bp: latestOf\('dia_bp'\), pulse: latestOf\('pulse'\), spo2: latestOf\('spo2'\) \}\)/)
+      // テンキーの見出しの段（名前は全文のまま）。押せない時は aria-disabled で、押すと理由をテンキーの1行に（反証 軽5）
       const kp = vm.slice(vm.indexOf('const keypad ='), vm.indexOf('<div className="flex gap-gap">', vm.indexOf('const keypad =')))
       assert.match(kp, /<span className="font-bold">\{nameOf\(active\.residentId\)\}<\/span>/, '全文の氏名はテンキーの見出し')
-      assert.match(kp, /\{marks\.button\(\{\s+residentId: active\.residentId,\s+name: nameOf\(active\.residentId\),\s+rec: \{ kind: 'vital' \},\s+text: markOfActive\.text,\s+why: markOfActive\.why,\s+onLabel: '申し送り済み',\s+\}\)\}/)
-      // 文は数える回（空の枠を光らせる回と同じ countSeqOfRow）のサーバーの値。送っていない値・送信待ちの値がある間は押せない
-      const mk = vm.slice(vm.indexOf('const markOfActive'), vm.indexOf('const keypad ='))
-      assert.match(mk, /const cs = countSeqOfRow\.get\(active\.residentId\) \?\? null/)
-      assert.match(mk, /const v = slot\?\.vital \?\? null/)
-      assert.match(mk, /vitalMarkText\(\{ temp: v\.temp, sys_bp: v\.sys_bp, dia_bp: v\.dia_bp, pulse: v\.pulse, spo2: v\.spo2 \}\)/)
-      assert.match(mk, /Object\.keys\(drafts\.get\(slot\.key\) \?\? \{\}\)\.length > 0 \|\| pendingRow\('vitals', targetOf\(slot\)\) !== null/)
-      // 行には旗のボタンを置かない（表の中の marks.button は無い）。氏名の段の右の「⚑」は読み上げず、別に「申し送り済み」と読む
+      assert.match(kp, /\{marks\.button\(\{\s+residentId: active\.residentId,\s+name: nameOf\(active\.residentId\),\s+rec: \{ kind: 'vital' \},\s+text: markOfActive\.text,\s+why: markOfActive\.why,\s+onLabel: '申し送り済み',\s+onBlocked: setKpNote,\s+widthCls: 'w-40 shrink-0 justify-center',\s+\}\)\}/)
+      // 反証 推測: 見出しの段は折り返さない1段の並び（名前は残りの幅で折り返す）・ボタンと値の幅を決めておく（状態・打った値で段の高さが動かない）
+      assert.match(kp, /<div className="flex items-center justify-between gap-gap">\s*<p className="min-w-0 flex-1 text-base text-ink">/)
+      assert.match(kp, /<p className="min-w-28 shrink-0 text-right font-num text-2xl font-bold text-ink">/)
+      // 申し送りの知らせ・押せなかった理由はテンキーの1行（省略記号＝行を増やさない）
+      assert.match(kp, /kpMarkLine !== null && !umBusy\.has\(umKey\(activeSlot, active\.field\)\) \? \(\s*<p className="truncate text-sm text-ink" title=\{kpMarkLine\}>/)
+      assert.match(vm, /const kpMarkLine = active === null \? null : \(kpNote \?\? marks\.messageOf\(active\.residentId, \{ kind: 'vital' \}\)\)/)
+      assert.match(vm, /useEffect\(\(\) => setKpNote\(null\), \[active\?\.key, active\?\.field, buf\]\)/)
+      // 押せない理由: 打ちかけの値 → 送っていない値・送信待ち（どの回でも）→ 値が無い
+      const mk = vm.slice(vm.indexOf('const markOfActive'), vm.indexOf('const kpMarkLine'))
+      assert.match(mk, /buf !== ''\s+\? '打ちかけの値を確定してから押してください。'/)
+      assert.match(mk, /slotsOf\(active\.residentId\)\.some\(\(s\) => Object\.keys\(drafts\.get\(s\.key\) \?\? \{\}\)\.length > 0 \|\| pendingRow\('vitals', targetOf\(s\)\) !== null\)/)
+      // 行には旗のボタンを置かない。氏名の段の右の「⚑」（送信待ちは「⚑↻」＝反証 軽7）は読み上げず、別に「申し送り済み」と読む
       const body = vm.slice(vm.indexOf('<tbody>'), vm.indexOf('</tbody>'))
       assert.doesNotMatch(body, /marks\.button\(/)
-      assert.match(body, /<span className="min-w-0 truncate">\{nameOf\(row\.residentId\)\}<\/span>\s*\{markMk !== null \? \(\s*<span aria-hidden="true" className="ml-0\.5 shrink-0 font-normal text-ink">\s*⚑\s*<\/span>\s*\) : null\}/)
+      assert.match(body, /<span className="min-w-0 truncate">\{nameOf\(row\.residentId\)\}<\/span>\s*\{markMk !== null \? \(\s*(\{\}\s*)?<span aria-hidden="true" className="ml-0\.5 shrink-0 font-normal text-ink">\s*\{markMk === 'pending' \? '⚑↻' : '⚑'\}\s*<\/span>\s*\) : null\}/)
       assert.match(body, /markMk === 'live' \? '（申し送り済み）'/)
       assert.match(body, /const markMk = marks\.markState\(row\.residentId, \{ kind: 'vital' \}\)/)
-      // 印の知らせは1回目の行の下の知らせの行
-      assert.match(body, /const markNote = si === 0 \? marks\.note\(row\.residentId, \{ kind: 'vital' \}, nameOf\(row\.residentId\)\) : null/)
       assert.match(body, /\{lunchNotes\}\s*\{markNote\}/)
-      // 〔外す〕の確認の小窓の中で押したキー（Enter・Esc）は、テンキーが横取りしない
+      // 〔外す〕・〔申し送りを直す〕の確認の小窓の中で押したキー（Enter・Esc）は、テンキーが横取りしない
       assert.match(vm, /if \(t !== null && t\.closest\('\[role="dialog"\]'\) !== null\) return/)
     })
   })

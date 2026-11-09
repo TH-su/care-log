@@ -867,11 +867,12 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                             : null
                     const stoppedNote = add?.stopped === true || p?.stopped === true
                     const m = rowMsg !== null && rowMsg.rid === rid && rowMsg.day === day ? rowMsg.msg : null
-                    // 申し送りの印（2026-11-10 計画D）: その日の記録（サーバーの行）の文。記録が無くなった（取り消した）方は、残っている印を外せるように
-                    // その印の記録で出す（文は null＝新しくは付けられない）
-                    const markRec: MarkRecord | null = s !== null ? { kind: 'training', id: s.id } : marks.liveRecord(rid, 'training')
+                    // 申し送りの印（2026-11-10 計画D）: その日の記録（サーバーの行）の文。機能訓練の印は1人1日1件として扱う（反証 中3）: その方のその日に
+                    // 生きている（か送信待ちの）tr の印があれば、記録の id が違っても（取り消して入れ直した時も）その印を出す（文が違えば ⓘ と〔申し送りを直す〕）。
+                    // 新しく作るのは、その印が無い時だけ（部品の markFamilyPrefix でも2件目を作らない）
+                    const markRec: MarkRecord | null = marks.liveRecord(rid, 'training') ?? (s !== null ? { kind: 'training', id: s.id } : null)
                     const markText = s !== null ? trainingMarkText(sessionText(s)) : null
-                    const markNote = marks.note(rid, markRec, name)
+                    const markNote = marks.note(rid, markRec, name, markText, data.sessions !== null)
                     const detail = stoppedNote || m !== null || markNote !== null
                     // その日の記録が無い方（読めている時だけ・送信待ちの追加は入力済み）。結果の欄を空の枠の見た目にする（2026-11-09 計画B2）
                     const blank = data.sessions !== null && !trainingFilled(sessions, pending, rid, day)
@@ -984,14 +985,20 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                               name,
                               rec: markRec,
                               text: markText,
+                              known: data.sessions !== null,
+                              // 記録に保存中・送信待ち・止まった変更がある間は押せない（文が記録と食い違わないように＝反証 軽4。バイタルと同じ決まり）
                               why:
                                 data.sessions === null
                                   ? '機能訓練の記録を読み込めていないため、申し送りにできません。'
-                                  : s !== null
-                                    ? null
-                                    : waiting
-                                      ? '機能訓練の記録がまだ送信待ちのため、申し送りにできません（届いてから押してください）。'
-                                      : '機能訓練の記録が無いため、申し送りにできません（記録してから押してください）。',
+                                  : waiting
+                                    ? '機能訓練の記録がまだ送信待ちのため、申し送りにできません（届いてから押してください）。'
+                                    : s === null
+                                      ? '機能訓練の記録が無いため、申し送りにできません（記録してから押してください）。'
+                                      : p !== undefined
+                                        ? '機能訓練の記録の変更が送信待ち・止まっているため、申し送りにできません（届いてから押してください）。'
+                                        : busy
+                                          ? '保存している間は、申し送りにできません。'
+                                          : null,
                             })}
                           </td>
                         </tr>

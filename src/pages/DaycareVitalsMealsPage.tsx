@@ -27,9 +27,12 @@
 //   （通信できない時は理由を行の下に出し、欄は空のまま）。付けた時・外した時は〔元に戻す〕の知らせ（昼食と同じ部品）。
 //
 // 申し送り（2026-11-10 計画D・仮置き）: 行には旗のボタンを置かない（行の高さ 53px と 1180px で横に送らない幅を保つ）。テンキーの見出しの段に
-//   〔⚐ 申し送り〕（いま入れている方の数える回のバイタル＝サーバーの値の文で1タップ・鍵は 1人の画面と同じ 'vital'）。付いている時は
-//   〔⚑ 申し送り済み〕で、押すと〔外す〕の確認。印が付いた方は氏名と同じ段の右に「⚑」（読み上げは別に「申し送り済み」）。長い氏名は省略記号で
-//   切る（全文はテンキーの見出し）。印の読み込みはその日の全員分を1本（DaycareNoteMarkDay.tsx）。申し送りへの書き込みは印の部品の中だけ
+//   〔⚐ 申し送り〕（いま入れている方の全部の回から項目ごとに最新の値＝1人の画面と同じ文 latestVitalValues で1タップ・鍵は 1人の画面と同じ 'vital'
+//   ＝反証 中1）。付いている時は〔⚑ 申し送り済み〕で、押すと〔外す〕の確認。文が記録と違う時は「ⓘ」と、行の下に〔申し送りを直す〕（反証 中2）。
+//   押せない時（値が無い・打ちかけの値・送っていない値・送信待ち・17時のロック 等）は disabled にせず、押すと理由をテンキーの1行に出す（反証 軽5）。
+//   ボタンの幅はいちばん長い形（⚑ 申し送り済み ⓘ ↻）にそろえ、状態が変わっても見出しの段が折り返したり戻ったりしない。
+//   印が付いた方は氏名と同じ段の右に「⚑」（送信待ちは「⚑↻」・読み上げは別に「申し送り済み」）。長い氏名は省略記号で切る（全文はテンキーの見出し）。
+//   印の読み込みはその日の全員分を1本（DaycareNoteMarkDay.tsx）。申し送りへの書き込みは印の部品の中だけ
 //
 // 規律: 取得・保存は db.ts の関数のみ／入力解禁は input_enabled_daycare（＋既存のバイタルの旗 native_input_enabled が
 //   saveVitalEdits の入口で効く）／氏名・値を localStorage・console に出さない（保存するのは絞り込みの既知値だけ）／
@@ -70,7 +73,7 @@ import { RecorderBar } from '../components/RecorderBar'
 import { DaycareBlankTag, DaycareRowBlankMark, DaycareUnfilledCount } from '../components/DaycareUnfilledCount'
 import { ConfirmDialog, ErrorBlock, LoadingBlock } from '../components/ui'
 import { useDaycareNoteMarksDay } from '../components/DaycareNoteMarkDay'
-import { vitalMarkText } from '../lib/daycareNoteMark'
+import { latestVitalValues, vitalMarkText } from '../lib/daycareNoteMark'
 import { registerUnsaved } from '../lib/leaveGuard'
 import { useTableFit } from '../lib/useTableFit'
 import { DaycareNav } from './DaycarePage'
@@ -265,6 +268,8 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
   const [active, setActive] = useState<Active | null>(null)
   const [buf, setBuf] = useState('')
   const [kpError, setKpError] = useState<string | null>(null)
+  /** テンキーの〔⚐ 申し送り〕を押せなかった理由（テンキーの1行に出す。欄・打ちかけの値が変わったら消す＝2026-11-10 計画D の反証 軽5） */
+  const [kpNote, setKpNote] = useState<string | null>(null)
   /** 日付の切り替え・読み直しを止めた理由（送れなかった・捨てた測定と、押した操作） */
   const [pageMsg, setPageMsg] = useState<{ issues: DaycareReleaseIssue[]; go: () => void } | null>(null)
   /** 〔保存せずに移る〕の確認を開いているか */
@@ -296,6 +301,7 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
   dayRef.current = day
   dataRef.current = data
   const opening = useRef(false)
+  useEffect(() => setKpNote(null), [active?.key, active?.field, buf])
 
   useEffect(() => {
     const tick = () => setToday(todayIso())
@@ -1396,26 +1402,32 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
     active !== null && activeSlot !== null && showsUnmeasured(valueOf(activeSlot, active.field).v, umRowOf(activeSlot, active.field) !== null)
   const prevOf = (id: number) => previousVitalOf(data.recent, id, data.day)
   /**
-   * テンキーの〔⚐ 申し送り〕の文（2026-11-10 計画D・仮置き）: いま入れている方の数える回（空の枠を光らせる回と同じ）のバイタルのサーバーの値。
-   * 送っていない値・送信待ちの値がある間は押せない（申し送りの文が記録と食い違わないように）
+   * その方の申し送りの文（2026-11-10 計画D の反証 中1）: 全部の回から項目ごとに最新のサーバーの値（1人の画面と同じ純関数 latestVitalValues・同じ文）。
+   * 付けた直後に1人の画面で「記録と違う」が出ないように、行の下の比べ方・テンキーの文とも同じ
+   */
+  const vitalTextOf = (rid: number): string | null => vitalMarkText(latestVitalValues(data.live.filter((v) => v.resident_id === rid)))
+  /**
+   * テンキーの〔⚐ 申し送り〕の文と押せない理由（2026-11-10 計画D・仮置き）。打ちかけの値（buf）・送っていない値・送信待ち（止まりを含む）の回がある間は
+   * 押せない（申し送りの文が記録と食い違わないように＝反証 軽5）。理由はテンキーの1行に出すので短くする（行を増やさない）
    */
   const markOfActive = ((): { text: string | null; why: string | null } => {
     if (active === null) return { text: null, why: null }
-    const slots = slotsOf(active.residentId)
-    const cs = countSeqOfRow.get(active.residentId) ?? null
-    const slot = slots.find((s) => s.seq === cs) ?? slots[0] ?? null
-    const v = slot?.vital ?? null
-    const text = v === null ? null : vitalMarkText({ temp: v.temp, sys_bp: v.sys_bp, dia_bp: v.dia_bp, pulse: v.pulse, spo2: v.spo2 })
-    const unsent = slot !== null && (Object.keys(drafts.get(slot.key) ?? {}).length > 0 || pendingRow('vitals', targetOf(slot)) !== null)
+    const text = vitalTextOf(active.residentId)
+    const unsent = slotsOf(active.residentId).some((s) => Object.keys(drafts.get(s.key) ?? {}).length > 0 || pendingRow('vitals', targetOf(s)) !== null)
     return {
       text,
-      why: unsent
-        ? '入れた値が送れてから押してください（送っていない値・送信待ちの値があります。止まっている時は行の下の知らせから解いてください）。'
-        : text === null
-          ? 'バイタルの値が無いため、申し送りにできません（値を入れてから押してください）。'
-          : null,
+      why:
+        buf !== ''
+          ? '打ちかけの値を確定してから押してください。'
+          : unsent
+            ? '入れた値が送れてから押してください（送信待ち・止まりを含む）。'
+            : text === null
+              ? 'バイタルの値が無いため、申し送りにできません。'
+              : null,
     }
   })()
+  // テンキーの1行に出す申し送りの知らせ（押せなかった理由 → 送れなかった理由・送信待ちにした旨・止まった印）
+  const kpMarkLine = active === null ? null : (kpNote ?? marks.messageOf(active.residentId, { kind: 'vital' }))
 
   const keypad =
     active !== null && activeSlot !== null ? (
@@ -1424,15 +1436,17 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
       <section ref={setKpBox} aria-label="テンキー" className="dc-keypad fixed inset-x-0 bottom-14 z-40 border-t border-border-strong bg-surface p-3 lg:bottom-0">
         <div className="mx-auto max-w-md">
           <div className="mb-2" aria-live="polite">
-            <div className="flex flex-wrap items-baseline justify-between gap-gap">
-              <p className="text-base text-ink">
+            {/* 2026-11-10 計画D（仮置き）: 見出しの段は1段の並び（名前と欄の名前は残りの幅で折り返す・全文のまま）。〔⚐ 申し送り〕の幅と値の幅を
+                決めておき、状態が変わっても・値を打っても、同じ欄の間で段の高さが動かないようにする（反証 推測） */}
+            <div className="flex items-center justify-between gap-gap">
+              <p className="min-w-0 flex-1 text-base text-ink">
                 <span className="font-bold">{nameOf(active.residentId)}</span>
                 <span className="ml-2">
                   {DAYCARE_VITAL_LABEL[active.field]}
                   {active.seq > 1 ? `（再測定 ${active.seq - 1}）` : ''}
                 </span>
               </p>
-              {/* 2026-11-10 計画D（仮置き）: 申し送り（1タップ・数える回のバイタル）。付いている時は〔⚑ 申し送り済み〕で、押すと〔外す〕の確認 */}
+              {/* 申し送り（1タップ・全部の回から項目ごとに最新の値）。付いている時は〔⚑ 申し送り済み〕で、押すと〔外す〕の確認 */}
               {marks.button({
                 residentId: active.residentId,
                 name: nameOf(active.residentId),
@@ -1440,8 +1454,10 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                 text: markOfActive.text,
                 why: markOfActive.why,
                 onLabel: '申し送り済み',
+                onBlocked: setKpNote,
+                widthCls: 'w-40 shrink-0 justify-center',
               })}
-              <p className="font-num text-2xl font-bold text-ink">
+              <p className="min-w-28 shrink-0 text-right font-num text-2xl font-bold text-ink">
                 {buf === '' ? '—' : buf}
                 <span className="ml-1 text-base font-normal text-ink2">{DAYCARE_VITAL_UNIT[active.field]}</span>
               </p>
@@ -1450,6 +1466,12 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
               <p role="alert" className="mt-1 rounded border border-danger bg-danger-bg p-2 text-sm text-ink">
                 <span aria-hidden="true">▲ </span>
                 {kpError}
+              </p>
+            ) : kpMarkLine !== null && !umBusy.has(umKey(activeSlot, active.field)) ? (
+              // 申し送りの知らせ（2026-11-10 計画D の反証 軽5）: 1行だけ（収まらない分は省略記号・読み上げは全文）＝テンキーの高さを変えない
+              <p className="truncate text-sm text-ink" title={kpMarkLine}>
+                <span aria-hidden="true">⚑ </span>
+                {kpMarkLine}
               </p>
             ) : (
               <p className="text-sm text-ink2">
@@ -1673,7 +1695,7 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                       // 〔未測定〕を付けられなかった・外せなかった理由（2026-11-10。欄は空のまま）
                       const umNote = DAYCARE_VITAL_FIELDS.flatMap((f) => umNotes.get(umKey(slot, f)) ?? []).join(' ') || null
                       // 申し送りの印の知らせ（2026-11-10 計画D・送れなかった理由・送信待ちにした旨・止まった印）も1回目の行の下に出す
-                      const markNote = si === 0 ? marks.note(row.residentId, { kind: 'vital' }, nameOf(row.residentId)) : null
+                      const markNote = si === 0 ? marks.note(row.residentId, { kind: 'vital' }, nameOf(row.residentId), vitalTextOf(row.residentId)) : null
                       const below = detail || lunchNotes !== null || umNote !== null || markNote !== null
                       const time = slot.vital?.measured_at ? slot.vital.measured_at.slice(0, 5) : null
                       // 状態の列の2段目（2026-11-09 計画B3 の確認の反証 中1・軽2）: 急ぐ印（要確認・未送信・送信中）→ 測った時刻（再測定の回が
@@ -1700,8 +1722,9 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                                       <span className="flex min-w-0 items-baseline text-base font-bold leading-tight text-link">
                                         <span className="min-w-0 truncate">{nameOf(row.residentId)}</span>
                                         {markMk !== null ? (
+                                          // 送信待ちは「⚑↻」（2026-11-10 計画D の反証 軽7）
                                           <span aria-hidden="true" className="ml-0.5 shrink-0 font-normal text-ink">
-                                            ⚑
+                                            {markMk === 'pending' ? '⚑↻' : '⚑'}
                                           </span>
                                         ) : null}
                                         <span className="sr-only">
