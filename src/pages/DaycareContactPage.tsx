@@ -15,6 +15,7 @@
 // ・名簿が読めない（氏名を引けない方がいる）時は印刷を止めて理由を出す（「利用者ID 12 様」と刷らない）
 // ・〔印刷する〕で印刷に送ったら、印刷した方の printed_at を書く（失敗しても印刷は止めない。Ctrl+P・⌘P では書かない）
 // ・材料は今日の画面と同じ読み手（loadDaycareDayParts）＋機能訓練（fetchTrainingSessions）＋連絡帳の2表（0061）。新しい RPC は作らない。
+//   2026-11-10 未測定: ＋〔未測定〕の印（0062・fetchDaycareVitalUnmeasured）。印のある値の無い欄は紙と見本に「未測定」（「記録なし」と分ける）
 //   送信待ち（この端末で入れて、まだ届いていない記録）は今日の画面と同じ決まりで紙面に重ねる。
 //   紙面の組み立ては src/lib/daycareContact.ts（純関数）・紙は src/components/print/DaycareContactSheet.tsx（A5・1人1枚）
 //
@@ -45,6 +46,7 @@ import {
   fetchDaycareDayNote,
   fetchDaycareIntake,
   fetchDaycarePlan,
+  fetchDaycareVitalUnmeasured,
   fetchDaycareVitalsLive,
   fetchMyRole,
   fetchResidentTargets,
@@ -72,6 +74,7 @@ import type { KeyedVital } from '../lib/daycare'
 import type { DaycareActivity } from '../lib/daycareActivity'
 import type { DaycareTrainingSession } from '../lib/daycareTraining'
 import { daycareStateTone, unreadProgressLabels } from '../lib/daycareProgress'
+import type { DaycareVitalUnmeasured } from '../lib/daycareProgress'
 import { readPersonDay } from '../lib/daycarePerson'
 import {
   CONTACT_BODY_MAX,
@@ -138,6 +141,8 @@ interface ContactData {
   notesOk: boolean
   /** 連絡帳の表が無い（0061 未適用） */
   notesMissing: boolean
+  /** その日の〔未測定〕の印（2026-11-10・0062。紙と見本に「未測定」と出す）。null＝読めない（印なし＝今までどおり「記録なし」） */
+  unmeasured: DaycareVitalUnmeasured[] | null
 }
 
 /** 1日の読み込みに使う読み取り（今日の画面と同じ db.ts の関数） */
@@ -285,12 +290,16 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
       setError(null)
     }
     try {
-      const [parts, training, notes] = await Promise.all([
+      // 〔未測定〕の印（2026-11-10・0062）も同じ回で読む（1本）。読めない時は null（印なし）
+      const [parts, training, notes, unmeasured] = await Promise.all([
         loadDaycareDayParts(target, DAY_READERS),
         fetchTrainingSessions(target).catch((): DaycareTrainingSession[] | null => null),
         Promise.all([fetchDaycareDayNote(target), fetchDaycareContactNotes(target)])
           .then(([dayNote, contacts]) => ({ dayNote, contacts, notesOk: true, notesMissing: false }))
           .catch((e: unknown) => ({ dayNote: null, contacts: [] as DaycareContactNote[], notesOk: false, notesMissing: isContactMissingError(e) })),
+        fetchDaycareVitalUnmeasured(target)
+          .then((r) => r.rows)
+          .catch((): DaycareVitalUnmeasured[] | null => null),
       ])
       if (gen !== genRef.current || target !== dayRef.current) return
       const usable = parts.snapshot !== null && parts.snapshot.plan_source !== 'unknown'
@@ -310,6 +319,7 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
         activities: parts.activities,
         training,
         ...notes,
+        unmeasured,
       })
       setError(null)
     } catch {
@@ -401,6 +411,7 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
         dayNote: data.dayNote?.body ?? null,
         note: contactNoteOf(data.contacts, id, data.day),
         notesOk: data.notesOk,
+        unmeasured: data.unmeasured,
       })
     })
     // 基準の引き方（limits.lookup）は個人の基準の行が変わった時だけ作り直される

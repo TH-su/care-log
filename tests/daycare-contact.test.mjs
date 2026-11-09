@@ -563,10 +563,11 @@ describe('移行 0061_daycare_contact.sql（静的検査）', () => {
   })
   it('素の Postgres の契約（pg-run-all）: 0053 の流し直しの除外は理由つき・0061 の2表は施設の印の試験の一覧に入っている', () => {
     const all = read('./pg-run-all.mjs')
-    assert.match(all, /\['0053_tenant_stage3\.sql', '利用者・職員・申し送りを指す外部キーが決まった76本かの確かめ（0061 が組の外部キーを足した）'\]/)
-    assert.match(read('./tenant-stage1-pg.mjs'), /export const LATER_TENANT_TABLES = \['daycare_day_notes', 'daycare_contact_notes'\]/)
-    assert.match(read('./tenant-stage3-pg.mjs'), /const LATER_TABLES = \['daycare_day_notes', 'daycare_contact_notes'\]/)
-    assert.match(read('./tenant-stage4-pg.mjs'), /const LATER_TABLES = \['daycare_day_notes', 'daycare_contact_notes'\]/)
+    // 2026-11-10 未測定（固定し直し・意図は同じ）: 0062（〔未測定〕の印の表）も同じく組の外部キーを持って作るので、理由と施設の印の試験の一覧に足した（0061 の2表は残る）
+    assert.match(all, /\['0053_tenant_stage3\.sql', '利用者・職員・申し送りを指す外部キーが決まった76本かの確かめ（0061・0062 が組の外部キーを足した）'\]/)
+    assert.match(read('./tenant-stage1-pg.mjs'), /export const LATER_TENANT_TABLES = \['daycare_day_notes', 'daycare_contact_notes', 'daycare_vital_unmeasured'\]/)
+    assert.match(read('./tenant-stage3-pg.mjs'), /const LATER_TABLES = \['daycare_day_notes', 'daycare_contact_notes', 'daycare_vital_unmeasured'\]/)
+    assert.match(read('./tenant-stage4-pg.mjs'), /const LATER_TABLES = \['daycare_day_notes', 'daycare_contact_notes', 'daycare_vital_unmeasured'\]/)
     assert.match(read('./daycare-contact-pg.mjs'), /daycare_contact_notes/)
   })
 })
@@ -734,7 +735,8 @@ if (C !== null) {
       // 送信待ちの数が変われば描き直し、減ったら静かに読み直す
       assert.match(page, /const off = queueSubscribe\(\(n\) => \{\s*setQueueTick\(\(x\) => x \+ 1\)\s*if \(n < last\)/)
       const pure = code('../src/lib/daycareContact.ts')
-      assert.match(pure, /import \{ activityShownCells, daycareVitalSlotsWithPending, lunchShownWith, vitalShownValues \} from '\.\/daycareProgress\.ts'/)
+      // 2026-11-10 未測定（固定し直し・意図は同じ）: 〔未測定〕の印の欄（unmeasuredFieldsOf）も同じ所から読む
+      assert.match(pure, /import \{ activityShownCells, daycareVitalSlotsWithPending, lunchShownWith, unmeasuredFieldsOf, vitalShownValues \} from '\.\/daycareProgress\.ts'/)
       assert.doesNotMatch(code('../src/components/print/DaycareContactSheet.tsx'), /pendingLabels|送信待ち/)
     })
   })

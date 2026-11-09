@@ -6,6 +6,7 @@
 // ・未入力の数: 在席・帰宅の方だけ数える（送信待ち・順番待ち・端末の値は入力済み）。まだ来ていない方は別に数える
 //   （2026-11-09 計画B2: 一括の4画面と切り替えの数は、到着を問わず空の欄を数える形 bulkBlankSummary に移した）
 // ・空の欄（計画B2）: 一括の4画面の空の枠の見た目・1人の空の欄の数・合計（n名・m欄）・切り替えの数
+// ・〔未測定〕の印（2026-11-10・0062）: 印のある欄は入力済みに数える・値のある欄の印は無視する（値が優先）
 // 個人情報は扱わない（数値と記号だけ。氏名は画面が持つ）。
 
 import { DAYCARE_VITAL_FIELDS, daycareVitalKey, daycareVitalSlots, fmtPlanTimes, nextDaycareSeq } from './daycare.ts'
@@ -265,10 +266,14 @@ export const DAYCARE_BLANK_CELL_CLS = 'border-2 border-dashed border-warn bg-war
 
 /**
  * バイタル一括の1人の空の欄の数: その方の最初の回の5欄（血圧の上・下・脈・SpO2・体温）のうち値の無い欄。再測定の回は数えない。
- * 値は画面に出している値（端末の値・送信待ち・サーバーの値）。回が無い時（null）は5欄とも空
+ * 値は画面に出している値（端末の値・送信待ち・サーバーの値）。回が無い時（null）は5欄とも空。
+ * 2026-11-10 未測定: unmeasured＝その回の〔未測定〕の印のある欄（0062）。印のある欄は入力済みに数える（昼食の拒食と同じ考え）。省くと印なし
  */
-export function vitalBlankFields(first: Partial<Record<DaycareVitalField, number | null | undefined>> | null | undefined): number {
-  return DAYCARE_VITAL_FIELDS.filter((f) => typeof first?.[f] !== 'number').length
+export function vitalBlankFields(
+  first: Partial<Record<DaycareVitalField, number | null | undefined>> | null | undefined,
+  unmeasured?: ReadonlySet<DaycareVitalField> | null,
+): number {
+  return DAYCARE_VITAL_FIELDS.filter((f) => typeof first?.[f] !== 'number' && unmeasured?.has(f) !== true).length
 }
 
 /** 食事一括の1人の空の欄の数（主食・副食の2欄）: 拒食はどちらも入力済み（0）。lunchFilled と同じ考え（0 の時だけ入力済み） */
@@ -542,4 +547,78 @@ export function activityShownCells(
     if (stoppedAdd !== undefined) return { label, shown: stoppedAdd.participation, deleting: false }
     return { label, shown: null, deleting: false }
   })
+}
+
+// ── 〔未測定〕の印（2026-11-10 親の決定・0062_daycare_vital_unmeasured） ──
+// 職員が〔未測定〕を押した欄は入力済みに数える（昼食の拒食と同じく、測らなかったことを記録した意思のある入力）。
+// 印は測定の回（vitals.client_key 'dc:<日>:<利用者id>:<回>' の <回>）と欄ごと。値のある欄の印は無視する（値が優先）。
+
+/** 〔未測定〕の印の1行（0062 の daycare_vital_unmeasured・生きている行） */
+export interface DaycareVitalUnmeasured {
+  id: number
+  resident_id: number
+  day: string
+  seq: number
+  field: DaycareVitalField
+  rev: number
+}
+
+/** その方のその日のその回で、印のある欄（seq を省くと、どれかの回に印のある欄＝連絡帳の紙面） */
+export function unmeasuredFieldsOf(
+  rows: readonly Pick<DaycareVitalUnmeasured, 'resident_id' | 'day' | 'seq' | 'field'>[] | null | undefined,
+  residentId: number,
+  day: string,
+  seq?: number,
+): Set<DaycareVitalField> {
+  const out = new Set<DaycareVitalField>()
+  for (const r of rows ?? []) {
+    if (r.resident_id !== residentId || r.day !== day) continue
+    if (seq !== undefined && r.seq !== seq) continue
+    out.add(r.field)
+  }
+  return out
+}
+
+/** その欄の印の行（無ければ null） */
+export function unmeasuredRowOf<T extends Pick<DaycareVitalUnmeasured, 'resident_id' | 'day' | 'seq' | 'field'>>(
+  rows: readonly T[] | null | undefined,
+  residentId: number,
+  day: string,
+  seq: number,
+  field: DaycareVitalField,
+): T | null {
+  return (rows ?? []).find((r) => r.resident_id === residentId && r.day === day && r.seq === seq && r.field === field) ?? null
+}
+
+/** 欄に「未測定」と出すか（値が無く印がある時だけ。値があれば印は無視する＝値が優先） */
+export function showsUnmeasured(value: number | null | undefined, marked: boolean): boolean {
+  return marked && typeof value !== 'number'
+}
+
+/** この端末で付けた（row＝付けた行）・外した（row＝null）印。at＝サーバーの応答を受けた時刻 */
+export interface UnmeasuredOp {
+  at: number
+  residentId: number
+  day: string
+  seq: number
+  field: DaycareVitalField
+  row: DaycareVitalUnmeasured | null
+}
+
+/**
+ * 読んだ印に、この端末の since 以後の操作を重ねる（読み込みの最中に付けた・外した印を、行き違った古い読み込みで消さない・戻さない）。
+ * 同じ欄の操作は後の方を使う
+ */
+export function applyUnmeasuredOps(
+  rows: readonly DaycareVitalUnmeasured[],
+  ops: Iterable<UnmeasuredOp>,
+  since: number,
+): DaycareVitalUnmeasured[] {
+  let out = [...rows]
+  const later = [...ops].filter((o) => o.at >= since).sort((a, b) => a.at - b.at)
+  for (const o of later) {
+    out = out.filter((r) => !(r.resident_id === o.residentId && r.day === o.day && r.seq === o.seq && r.field === o.field))
+    if (o.row !== null) out.push(o.row)
+  }
+  return out
 }

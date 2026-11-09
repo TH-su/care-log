@@ -122,9 +122,10 @@ if (DC === null) {
     it('前回の値は空の欄にだけ薄く出す（値が入った欄は値＋印と判定語）', () => {
       // 2026-11-09 計画B2（固定し直し・意図は同じ）: 前回の値は 14px（text-xs・leading-tight）で「前回」を付けて出す。空の枠には「未」の字を添え、
       // 前回が無い空の枠は「未」だけ。反証 軽2: 「未」と「前回…」は横に並べる（左右の余白の分だけ中身を広げる -mx-1）
+      // 2026-11-10 未測定（固定し直し・意図は同じ）: 〔未測定〕の印のある欄は先に「未測定」の字（値の無い欄の中身は同じ）
       assert.match(
         page,
-        /\{v === null \? \(\s*(\{\}\s*)?<span className="-mx-1 flex items-center gap-1 whitespace-nowrap">\s*\{blank \? <DaycareBlankTag \/> : null\}\s*\{pv \|\| !blank \? \(\s*<span className="font-num text-xs leading-tight text-ink3" aria-hidden="true">\s*\{pv \? `前回\$\{fmtVal\(f, pv\.value\)\}` : '—'\}/,
+        /\) : v === null \? \(\s*(\{\}\s*)?<span className="-mx-1 flex items-center gap-1 whitespace-nowrap">\s*\{blank \? <DaycareBlankTag \/> : null\}\s*\{pv \|\| !blank \? \(\s*<span className="font-num text-xs leading-tight text-ink3" aria-hidden="true">\s*\{pv \? `前回\$\{fmtVal\(f, pv\.value\)\}` : '—'\}/,
       )
       assert.match(page, /\{lv !== null \? <span aria-hidden="true">\{LEVEL_MARK\[lv\]\}<\/span> : null\}/)
       assert.match(page, /\{lv !== null \? <span className="text-sm font-bold leading-tight text-ink">\{word\.split\('・'\)\[0\]\}<\/span> : null\}/)
@@ -171,7 +172,8 @@ if (DC === null) {
     })
     it('右のボタンの文言と動きは今のまま（次へ・未測定・閉じる＝press の next・skip・close）', () => {
       assert.match(page, /onClick=\{\(\) => press\('next'\)\}[\s\S]{0,200}>\s*次へ\s*<\/button>/)
-      assert.match(page, /onClick=\{\(\) => press\('skip'\)\}\s*aria-label="未測定（空欄のまま次の欄へ）"[\s\S]{0,200}>\s*未測定\s*<\/button>/)
+      // 2026-11-10 未測定（固定し直し・意図は同じ）: 〔未測定〕は値の無い欄に印を付けて次の欄へ・印のある欄では取り消し（押した状態＝aria-pressed と ✓）。見える文言は「未測定」のまま
+      assert.match(page, /onClick=\{\(\) => press\('skip'\)\}\s*aria-pressed=\{activeMarked\}\s*aria-label=\{activeMarked \? '未測定（記録済み・押すと取り消します）' : '未測定（測らなかったと記録して次の欄へ）'\}[\s\S]{0,400}\{activeMarked \? <span aria-hidden="true">✓ <\/span> : null\}未測定\s*<\/button>/)
       assert.match(page, /onClick=\{\(\) => press\('close'\)\}[\s\S]{0,200}>\s*閉じる\s*<\/button>/)
       assert.match(page, /disabled=\{k === '\.' && active\.field !== 'temp'\}/)
       assert.doesNotMatch(page, /確定して次へ|未測定のまま次へ|閉じて保存する/)

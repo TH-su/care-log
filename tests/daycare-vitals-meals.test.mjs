@@ -229,7 +229,8 @@ describe('静的検査: 統合した画面（計画B3）', () => {
     // 〔元に戻す〕の知らせは画面の最後に置く
     assert.match(screen, /\{lunch\.toast\}/)
     // 昼食の知らせは1回目の行の下（バイタルの知らせと同じ行）
-    assert.match(body, /\{detail \? \(\s*<SlotStatus [\s\S]{0,200}\) : null\}\s*\{lunchNotes\}/)
+    // 2026-11-10 未測定（固定し直し・意図は同じ）: 〔未測定〕を付けられなかった理由（umNote）も同じ行に出す（バイタルの知らせと昼食の知らせの間）
+    assert.match(body, /\{detail \? \(\s*<SlotStatus [\s\S]{0,200}\) : null\}\s*\{umNote !== null \? \(\s*<p role=\"alert\"[\s\S]{0,600}?\{umNote\}\s*<\/p>\s*\) : null\}\s*\{lunchNotes\}/)
   })
 })
 
@@ -513,7 +514,10 @@ describe('反証の直し（計画B3）', () => {
     assert.deepEqual(hookReads, ['fetchDaycareIntake'], '昼食のフックは食事と水分だけ読む')
     for (const f of ['fetchDaycareDay', 'fetchDaycarePlan', 'fetchDaycareAttendance']) assert.ok(pageReads.includes(f) && !hookReads.includes(f), f)
     // それまでの2画面（バイタル一括＝今の画面の読み込み・食事一括＝写し・予定・出欠・食事と水分）
-    const oldVitals = pageReads
+    // 2026-11-10 未測定（固定し直し・意図は同じ）: 〔未測定〕の印（fetchDaycareVitalUnmeasured・1本）を画面の読み込みの回に足した。それまでの2画面には無いので外して数える
+    const oldVitals = pageReads.filter((f) => f !== 'fetchDaycareVitalUnmeasured')
+    assert.ok(pageReads.includes('fetchDaycareVitalUnmeasured') && !hookReads.includes('fetchDaycareVitalUnmeasured'))
+    assert.equal(queries('fetchDaycareVitalUnmeasured'), 1)
     const oldMeals = ['fetchDaycareDay', 'fetchDaycarePlan', 'fetchDaycareAttendance', 'fetchDaycareIntake']
     const sum = (names) => names.reduce((n, f) => n + queries(f), 0)
     const combined = sum([...pageReads, ...hookReads])
@@ -523,9 +527,9 @@ describe('反証の直し（計画B3）', () => {
     const noPlan = (n, names) => n - (names.includes('fetchDaycarePlan') ? queries('fetchDaycarePlan') : 0)
     assert.equal(noPlan(vit, oldVitals), 5)
     assert.equal(noPlan(meals, oldMeals), 4)
-    assert.equal(noPlan(combined, [...pageReads, ...hookReads]), 7)
-    // 統合の数＝バイタル一括＋食事一括だけにある分（食事と水分の2本）。共通の材料（写し・予定・出欠）は1回ずつ
-    assert.equal(combined, vit + queries('fetchDaycareIntake'))
+    assert.equal(noPlan(combined, [...pageReads, ...hookReads]), 8)
+    // 統合の数＝バイタル一括＋食事一括だけにある分（食事と水分の2本）＋〔未測定〕の印の1本。共通の材料（写し・予定・出欠）は1回ずつ
+    assert.equal(combined, vit + queries('fetchDaycareIntake') + queries('fetchDaycareVitalUnmeasured'))
     assert.ok(combined < vit + meals)
     // 購読（Realtime の channel）: 画面の subscribeChanges・subscribeDaycareChanges の2つだけ＝それまでの2画面のどちらとも同じ数
     const subs = (src) => (src.match(/\b(subscribeChanges|subscribeDaycareChanges)\(/g) ?? []).length

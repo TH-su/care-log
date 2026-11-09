@@ -35,6 +35,7 @@ import {
   fetchDaycareDay,
   fetchDaycareIntake,
   fetchDaycarePlan,
+  fetchDaycareVitalUnmeasured,
   fetchDaycareVitalsLive,
   fetchMyRole,
   fetchResidentTargets,
@@ -110,12 +111,13 @@ import {
   unreadProgressLabels,
   unreadProgressNotice,
   trainingFilled,
+  unmeasuredFieldsOf,
   vitalBlankFields,
   vitalShownValues,
   vitalSlotsFilled,
   vitalsMealsBlankFields,
 } from '../lib/daycareProgress'
-import type { DaycareCategory, DaycareNavPending, ProgressMark } from '../lib/daycareProgress'
+import type { DaycareCategory, DaycareNavPending, DaycareVitalUnmeasured, ProgressMark } from '../lib/daycareProgress'
 import type { DaycareTrainingSession } from '../lib/daycareTraining'
 import { useVitalLimits } from '../hooks/useVitalLimits'
 import { VitalLimitsFailedNote } from '../components/VitalLimitsFailedNote'
@@ -166,6 +168,11 @@ interface DayData {
    * 印を「読めない」にするだけで、画面の他の部分は止めない
    */
   training: DaycareTrainingSession[] | null
+  /**
+   * その日の〔未測定〕の印（2026-11-10・0062。切り替えの未入力の数で、印のある欄を入力済みにする）。null＝読めない（表が無い・通信エラー・
+   * 控えで開いた）＝印なしで数える（未入力を多めに出す側）。カードの VS の印は今のまま（値が1つでもあれば済）
+   */
+  unmeasured: DaycareVitalUnmeasured[] | null
   /** 昼食・おやつ・水分を読めたか（読めない時の空の一覧を控えに「読めた」として入れない＝確認の反証 中1） */
   intakeOk: boolean
   /** サーバーに届かず、控え（daycareDayMemo）で開いた時の控えの「読んだ時点」。サーバーから読めた時は null（親の確かめ 中1・2026-10-25） */
@@ -455,9 +462,13 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       // 写しが「読めなかった」（unknown）の日は、いまの週間計画も読む（読めれば表示に使い、次のタップで写し直す＝反証レビュー中2）
       // 機能訓練の記録も同時に読む（2026-11-09 計画B）。読めない時は null（印を「読めない」にするだけ）。この読み込みの中に置くので、
       // 日の切り替え後の古い応答は入れず（世代と日付の守り）、送信待ちが届いた時・〔最新に更新〕の読み直しでも一緒に読み直す
-      const [{ snapshot, missing, plan, attendance, baths, vitals, bathsOk, vitalsOk, intake, activities }, training] = await Promise.all([
+      // 〔未測定〕の印（2026-11-10・0062）も同じ回で読む（1本）。読めない時は null（印なしで数えるだけ）
+      const [{ snapshot, missing, plan, attendance, baths, vitals, bathsOk, vitalsOk, intake, activities }, training, unmeasured] = await Promise.all([
         loadDaycareDayParts(target, DAY_READERS),
         fetchTrainingSessions(target).catch((): DaycareTrainingSession[] | null => null),
+        fetchDaycareVitalUnmeasured(target)
+          .then((r) => r.rows)
+          .catch((): DaycareVitalUnmeasured[] | null => null),
       ])
       const usable = snapshot !== null && snapshot.plan_source !== 'unknown'
       if (gen !== genRef.current || target !== dayRef.current) return
@@ -476,6 +487,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         fluids: intake?.fluids ?? [],
         activities,
         training,
+        unmeasured,
         intakeOk: intake !== null,
         memoAt: null,
         readAt: Date.now(),
@@ -508,6 +520,8 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
           intakeOk: m.intakeOk,
           memoAt: m.savedAt,
           readAt: m.savedAt,
+          // 〔未測定〕の印も控えに無い（2026-11-10。印なしで数える）
+          unmeasured: null,
         })
         // 名簿が読めていない（電波が無い）時は控えの名簿で氏名を出す（控えは画面のメモリだけ）
         if (m.residents.length > 0) setResidents((prev) => (prev.length > 0 ? prev : m.residents))
@@ -854,7 +868,11 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
               ? bulk.map(
                   (r) =>
                     vitalsMealsBlankFields(
-                      vitalBlankFields(vitalShown.get(r.residentId)?.[0]?.vals ?? null),
+                      // 2026-11-10 未測定: 最初の回の〔未測定〕の印のある欄は入力済み（バイタル・食事の画面と同じ）
+                      vitalBlankFields(
+                        vitalShown.get(r.residentId)?.[0]?.vals ?? null,
+                        unmeasuredFieldsOf(data.unmeasured, r.residentId, data.day, vitalShown.get(r.residentId)?.[0]?.seq ?? 1),
+                      ),
                       lunchBlankFields(lunchShownWith(lunchOf(r.residentId), pendingRow('meals', { residentId: r.residentId, day: data.day, slot: 'lunch' }))),
                     ) ?? 0,
                 )

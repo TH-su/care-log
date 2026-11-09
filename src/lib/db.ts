@@ -97,8 +97,9 @@ import { matchBathPlan, monthDays, monthRange, validateBathInput } from './bath'
 import type { BathPlanEntry, BathPlanRow } from './bath'
 import { normalizeMedSlots, validateMedAdminInput } from './med'
 // デイ（せせらぎ）の記録 段階1（2026-10-22・0041）。純ロジックは daycare.ts
-import { absentBathAction, daycareArrivalKeys, hmOf, isAutoOnlyAttendance, isDaycareVitalKey, validateAttendance } from './daycare'
-import type { KeyedVital } from './daycare'
+import { DAYCARE_VITAL_FIELDS, absentBathAction, daycareArrivalKeys, hmOf, isAutoOnlyAttendance, isDaycareVitalKey, validateAttendance } from './daycare'
+import type { DaycareVitalField, KeyedVital } from './daycare'
+import type { DaycareVitalUnmeasured } from './daycareProgress'
 import { activityLabelError, normalizeActivityLabel, participationOf } from './daycareActivity'
 import type { ActivityParticipation, DaycareActivity } from './daycareActivity'
 import {
@@ -9635,6 +9636,183 @@ export async function recordAbsentBath(p: {
     }
   }
   return { status: 'conflict' }
+}
+
+// ── デイ（せせらぎ）のバイタル・食事の〔未測定〕の印（2026-11-10 親の決定・0062_daycare_vital_unmeasured.sql） ─────────────
+// 職員が〔未測定〕を押した欄の印（daycare_vital_unmeasured）を読む・付ける・外す。ここに足すのはこの表の関数だけ
+// （既存の関数・vitals とその保存の関数・送信待ちの経路は変えない）。
+// ・入力解禁は input_enabled_daycare（assertKindWritable('daycare')＝今のバイタルと同じ旗）。未来の日は書かない
+// ・付ける: insert。同じ欄に生きている行があれば何もしない（その行を返す）。2台が同時に付けた 23505 は読み直して今ある行を返す
+// ・外す: 論理削除（deleted_at・rev 照合）。0行（他の端末が先に変えた）の時は読み直し、もう無ければ外せた扱い・まだあればその版で1回だけ
+// ・送信待ち（圏外の保存）は作らない（2026-11-10 の仮置き）。通信できない時は DbError('network', UNMEASURED_MSG.offline) を投げ、
+//   画面は欄を空のまま（入力済みに数えない）にする
+// ・過去の日の守り（0062 の daycare_vital_unmeasured_day_guard）で止まった時は理由の文（現場の端末は当日だけ）
+
+const UNMEASURED_MSG = {
+  missing: '〔未測定〕はまだ記録できません（サーバー側の設定待ち）。管理者に連絡してください。',
+  offline: '〔未測定〕を記録できませんでした。通信状態を確認して、もう一度押してください。',
+  offlineClear: '〔未測定〕を取り消せませんでした。通信状態を確認して、もう一度押してください。',
+  pastOffice: '過去の日の〔未測定〕は、事務所のログインでだけ記録・取り消しできます（現場の端末は当日だけ）。',
+} as const
+
+const UNMEASURED_COLS = 'id,resident_id,day,seq,field,rev'
+/** 1日の〔未測定〕の印の取得上限（1日の利用者×5欄×回がこれを超える運用は無い） */
+const DAYCARE_UNMEASURED_ROWS = MAX_ROWS
+
+function normalizeUnmeasured(row: unknown): DaycareVitalUnmeasured | null {
+  const r = asRecord(row)
+  if (!r) return null
+  const id = idNum(r.id)
+  const resident_id = idNum(r.resident_id)
+  const day = dateStr(r.day)
+  const seq = idNum(r.seq)
+  const rev = num(r.rev)
+  const field = DAYCARE_VITAL_FIELDS.find((f) => f === r.field) ?? null
+  if (id === null || resident_id === null || day === null || seq === null || rev === null || field === null) return null
+  return { id, resident_id, day, seq, field, rev }
+}
+
+/** 印の書き込み（と書き込みの中の読み直し）の失敗。送信待ちには積まない */
+function unmeasuredWriteError(res: Res<unknown>, offline: string = UNMEASURED_MSG.offline): DbError {
+  if (isMissingTable(res)) return new DbError('server', UNMEASURED_MSG.missing)
+  // 過去の日の守り（現場のログイン）・未来の日の守り（0062）は、許可リスト外・サーバーエラーと別の案内にする
+  const message = typeof res.error?.message === 'string' ? res.error.message : ''
+  if (errCode(res) === '42501' && message.startsWith('daycare_unmeasured_past_office_only:')) return new DbError('server', UNMEASURED_MSG.pastOffice)
+  if (errCode(res) === '22023' && message.startsWith('daycare_unmeasured_future:')) return new DbError('server', DAYCARE_MSG.future)
+  if (isAuthFail(res)) {
+    fireAuthExpired()
+    return new DbError('auth', MSG.authWrite)
+  }
+  if (isTransient(res)) return new DbError('network', offline)
+  return rejectError('保存でき', errCode(res), res.status)
+}
+
+/**
+ * その日の〔未測定〕の印（全員分・取り消した行を除く）。表が無い DB（0062 未適用）では missing=true・行は空
+ * （＝印なしで数える。画面は止めない）。読めない時は例外（DbError）
+ */
+export async function fetchDaycareVitalUnmeasured(dayIso: string): Promise<{ rows: DaycareVitalUnmeasured[]; missing: boolean }> {
+  assertDay(dayIso)
+  const sb = await getClient()
+  const res = (await sb
+    .from('daycare_vital_unmeasured')
+    .select(UNMEASURED_COLS)
+    .eq('day', dayIso)
+    .is('deleted_at', null)
+    .order('id', { ascending: true })
+    .limit(DAYCARE_UNMEASURED_ROWS)) as Res<unknown>
+  if (res.error !== null) {
+    if (isMissingTable(res)) return { rows: [], missing: true }
+    throw readError(res)
+  }
+  return { rows: list(res.data, normalizeUnmeasured, DAYCARE_UNMEASURED_ROWS), missing: false }
+}
+
+/** 書き込みの中で、その欄のいまの生きている印を読み直す（通信できない時は保存できなかった扱い） */
+async function readUnmeasuredLive(
+  sb: SupabaseClient,
+  k: { residentId: number; day: string; seq: number; field: DaycareVitalField },
+  offline: string,
+): Promise<DaycareVitalUnmeasured | null> {
+  const res = await bounded(
+    sb
+      .from('daycare_vital_unmeasured')
+      .select(UNMEASURED_COLS)
+      .eq('resident_id', k.residentId)
+      .eq('day', k.day)
+      .eq('seq', k.seq)
+      .eq('field', k.field)
+      .is('deleted_at', null)
+      .order('id', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+  )
+  if (res.error !== null) throw unmeasuredWriteError(res, offline)
+  return res.data === null ? null : normalizeUnmeasured(res.data)
+}
+
+/** 印の在りか（利用者・日・回・欄）を確かめる。形が違えば送らない */
+function assertUnmeasuredKey(k: { residentId: number; day: string; seq: number; field: DaycareVitalField }): void {
+  assertDay(k.day)
+  if (idNum(k.residentId) === null || idNum(k.seq) === null || k.seq > 9999 || !DAYCARE_VITAL_FIELDS.includes(k.field)) {
+    throw new DbError('server', MSG.broken)
+  }
+}
+
+/**
+ * 〔未測定〕の印を付ける。同じ欄に生きている印があれば足さずにその行を返す（2台が同時に付けた 23505 も読み直して返す）。
+ * 未来の日は送らない。通信できない時は DbError('network')（画面は欄を空のままにする）
+ */
+export async function markDaycareVitalUnmeasured(p: {
+  residentId: number
+  day: string
+  seq: number
+  field: DaycareVitalField
+  recordedBy: number | null
+}): Promise<DaycareVitalUnmeasured> {
+  assertUnmeasuredKey(p)
+  if (p.day > localToday()) throw new DbError('server', DAYCARE_MSG.future)
+  await assertKindWritable('daycare')
+  const sb = await getClient()
+  const res = await bounded(
+    sb
+      .from('daycare_vital_unmeasured')
+      .insert({ resident_id: p.residentId, day: p.day, seq: p.seq, field: p.field, recorded_by: idNum(p.recordedBy) })
+      .select(UNMEASURED_COLS)
+      .maybeSingle(),
+  )
+  if (res.error === null) {
+    kickAfterDelivered()
+    const row = normalizeUnmeasured(res.data)
+    if (row === null) throw new DbError('server', MSG.broken)
+    return row
+  }
+  // 他の端末が先に同じ欄に印を付けた（自然キーの一意）→ 今ある印を使う
+  if (!isUniqueViolation(res)) throw unmeasuredWriteError(res)
+  const live = await readUnmeasuredLive(sb, p, UNMEASURED_MSG.offline)
+  if (live === null) throw new DbError('network', UNMEASURED_MSG.offline) // 読み直した時には外されていた＝押し直してもらう
+  return live
+}
+
+/**
+ * 〔未測定〕の印を外す（論理削除・rev 照合）。0行の時は読み直し、もう無ければ外せた扱い・まだあればその版で1回だけ送る。
+ * 戻り値: true（外せた・もう無かった）。通信できない時は DbError('network')
+ */
+export async function clearDaycareVitalUnmeasured(row: DaycareVitalUnmeasured, opts?: WriteOpts): Promise<true> {
+  const key = { residentId: row.resident_id, day: row.day, seq: row.seq, field: row.field }
+  assertUnmeasuredKey(key)
+  if (row.day > localToday()) throw new DbError('server', DAYCARE_MSG.future)
+  await assertKindWritable('daycare')
+  const sb = await getClient()
+  let cur: DaycareVitalUnmeasured | null = row
+  for (let attempt = 0; attempt < 2 && cur !== null; attempt++) {
+    const target: DaycareVitalUnmeasured = cur
+    const sent = withEditor({ deleted_at: new Date().toISOString() }, opts?.editedBy)
+    sent.deleted_by = idNum(sent.edited_by ?? opts?.editedBy)
+    const res = await sendWithEditor(sent, (x) =>
+      bounded(
+        sb
+          .from('daycare_vital_unmeasured')
+          .update(x)
+          .eq('id', target.id)
+          .eq('rev', target.rev)
+          .is('deleted_at', null)
+          .select('id')
+          .maybeSingle(),
+      ),
+    )
+    if (res.error !== null) throw unmeasuredWriteError(res, UNMEASURED_MSG.offlineClear)
+    if (res.data !== null) {
+      kickAfterDelivered()
+      return true
+    }
+    // ログインの控えが無い間（anon キーで出た）の0行は競合ではない（F58）。外せなかった扱い（押し直してもらう）
+    if (await sessionMissing(sb)) throw new DbError('network', UNMEASURED_MSG.offlineClear)
+    // 0行: 他の端末が先に外した・付け直した → 読み直す（もう無ければ外せた扱い）
+    cur = await readUnmeasuredLive(sb, key, UNMEASURED_MSG.offlineClear)
+  }
+  if (cur === null) return true
+  throw new DbError('network', UNMEASURED_MSG.offlineClear)
 }
 
 // ── デイ（せせらぎ）の記録 段階4: 連絡帳（2026-11-09 計画C・0061_daycare_contact.sql） ─────────────

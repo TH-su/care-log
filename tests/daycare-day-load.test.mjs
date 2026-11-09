@@ -302,7 +302,8 @@ describe('今日の画面の読み込みの配線', () => {
   it('1日の読み込みは loadDaycareDayParts を通し、バイタルは生きている行だけを読む', () => {
     // 2026-11-09 計画B（固定し直し・意図は同じ）: 機能訓練の記録（カードの「訓」の印）も同時に出す（loadDaycareDayParts と並べて待つ・
     // 読めない時は null＝画面の他の部分を止めない）
-    assert.match(t, /await Promise\.all\(\[\s*loadDaycareDayParts\(target, DAY_READERS\),\s*fetchTrainingSessions\(target\)\.catch\(\(\): DaycareTrainingSession\[\] \| null => null\),\s*\]\)/)
+    // 2026-11-10 未測定（固定し直し・意図は同じ）: 〔未測定〕の印（fetchDaycareVitalUnmeasured）も同じ回で並べて待つ（読めない時は null＝印なしで数える）
+    assert.match(t, /await Promise\.all\(\[\s*loadDaycareDayParts\(target, DAY_READERS\),\s*fetchTrainingSessions\(target\)\.catch\(\(\): DaycareTrainingSession\[\] \| null => null\),\s*fetchDaycareVitalUnmeasured\(target\)\s*\.then\(\(r\) => r\.rows\)\s*\.catch\(\(\): DaycareVitalUnmeasured\[\] \| null => null\),\s*\]\)/)
     assert.match(t, /vitals: fetchDaycareVitalsLive,/)
     assert.doesNotMatch(t, /fetchDaycareVitals\(/)
     // 活動・機能訓練を出欠などの後に別に待たない
