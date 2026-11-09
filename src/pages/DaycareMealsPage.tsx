@@ -754,8 +754,9 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
 
   const goDay = (d: string) => navigate(mealBulkPath(d, today), { replace: true })
 
+  // 上の段・見出し・説明は詰める（2026-11-09 代表者の指示「一括入力の画面で、もっと多くの行が出るように」）
   const header = (
-    <div className="space-y-3">
+    <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-gap">
         <DaycareNav current="meals" handoff={() => writeDaycareHandoffFor({ rows: board?.rows ?? null, residents, boardDay: data?.day ?? null, today })} />
         <RecorderBar actorId={actorId} staff={staff ?? null} />
@@ -783,14 +784,14 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
           <span aria-hidden="true">›</span>
         </button>
         {day !== today ? (
-          <button type="button" onClick={() => goDay(today)} className="min-h-tap rounded border border-border-strong bg-surface px-4 text-base text-ink">
+          <button type="button" onClick={() => goDay(today)} className="min-h-tap rounded border border-border-strong bg-surface px-3 text-sm text-ink">
             今日を開く
           </button>
         ) : null}
         <button
           type="button"
           onClick={() => setReloadKey((n) => n + 1)}
-          className="min-h-tap rounded border border-border-strong bg-surface px-4 text-base text-ink"
+          className="min-h-tap rounded border border-border-strong bg-surface px-3 text-sm text-ink"
         >
           最新に更新
         </button>
@@ -801,7 +802,7 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
           {MSG_MISSING}
         </p>
       ) : gate !== null && !(gate.observed && gate.value === true) ? (
-        <p role="status" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">
+        <p role="status" className="rounded-lg border border-warn bg-warn-bg px-3 py-1.5 text-base text-ink">
           <span aria-hidden="true">▲ </span>
           {gate.forbidden
             ? FORBIDDEN_REASON
@@ -817,7 +818,7 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
 
   if ((loading && data === null) || (data !== null && data.day !== day && error === null)) {
     return (
-      <div className="mx-auto w-full max-w-5xl space-y-4 p-4">
+      <div className="mx-auto w-full max-w-6xl space-y-2">
         {header}
         <LoadingBlock label="その日の昼食を読み込んでいます…" />
       </div>
@@ -825,7 +826,7 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
   }
   if (error !== null && (data === null || data.day !== day)) {
     return (
-      <div className="mx-auto w-full max-w-5xl space-y-4 p-4">
+      <div className="mx-auto w-full max-w-6xl space-y-2">
         {header}
         <ErrorBlock message={error} onRetry={() => setReloadKey((n) => n + 1)} />
       </div>
@@ -838,29 +839,17 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
   const selectCls = 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-2 text-lg text-ink disabled:text-ink3'
 
   return (
-    <div className="mx-auto w-full max-w-5xl space-y-4 p-4">
+    <div className="mx-auto w-full max-w-6xl space-y-2">
       {header}
 
-      <section aria-labelledby="h-meals" className="min-w-0 space-y-3">
-        <div className="flex flex-wrap items-baseline justify-between gap-gap">
-          <h2 id="h-meals" className="text-xl font-bold text-ink">
+      <section aria-labelledby="h-meals" className="min-w-0 space-y-2">
+        {/* 見出し・未入力の数・予定の人数を1段に並べる（2026-11-09 代表者の指示「見出し・説明文を詰める」。幅が足りない時は折り返す） */}
+        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+          <h2 id="h-meals" className="text-lg font-bold leading-tight text-ink">
             昼食
           </h2>
-          <p className="text-base text-ink2">
-            予定の方 <span className="font-num font-bold text-ink">{came.length}</span>人
-          </p>
-        </div>
-        <p className="text-base text-ink2">
-          選ぶとすぐ保存します。昼食は care-log の食事の昼食と同じ記録です。水分は数を入れて改行キー（または〔＋〕）で足します（1人の画面の水分と同じ記録）。
-        </p>
-
-        {came.length === 0 ? (
-          <p className="rounded-lg border border-border bg-surface p-3 text-base text-ink2">
-            この日の予定の方がいません（休み・入院中の方は出しません）。予定外で来た方は、今日の画面の〔予定にない方を追加〕で足したカードを押し、〔予定外で到着〕を押すと、ここに出ます。
-          </p>
-        ) : (
-          <>
-            {/* 未入力の数（在席・帰宅の方だけ数える・拒食は入力済み・水分は数えない）。色だけに頼らず記号と文字を併記 */}
+          {came.length > 0 ? (
+            // 未入力の数（在席・帰宅の方だけ数える・拒食は入力済み・水分は数えない）。色だけに頼らず記号と文字を併記
             <p className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-base">
               {counts.unfilled > 0 ? (
                 <span className="font-bold text-danger">
@@ -877,6 +866,21 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
                 </span>
               ) : null}
             </p>
+          ) : null}
+          <p className="ml-auto text-sm text-ink2">
+            予定の方 <span className="font-num font-bold text-ink">{came.length}</span>人
+          </p>
+        </div>
+        <p className="text-sm leading-snug text-ink2">
+          選ぶとすぐ保存します。昼食は care-log の食事の昼食と同じ記録です。水分は数を入れて改行キー（または〔＋〕）で足します（1人の画面の水分と同じ記録）。
+        </p>
+
+        {came.length === 0 ? (
+          <p className="rounded-lg border border-border bg-surface p-3 text-base text-ink2">
+            この日の予定の方がいません（休み・入院中の方は出しません）。予定外で来た方は、今日の画面の〔予定にない方を追加〕で足したカードを押し、〔予定外で到着〕を押すと、ここに出ます。
+          </p>
+        ) : (
+          <>
             {/* 表が画面より広い時だけ出す手がかり（バイタル一括・活動一括と同じ） */}
             {tableScrolls ? (
               <p className="text-sm text-ink2">
@@ -899,7 +903,7 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
                   <tr className="border-b border-border-strong bg-surface2 text-left">
                     {/* 氏名の列は横スクロールしても左に残す（sticky）。背景は見出し行と同じ色 */}
                     <th scope="col" className="sticky left-0 top-0 z-30 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
-                      <span className="dc-vital-name block">氏名</span>
+                      <span className="dc-vital-name dc-meal-name block">氏名</span>
                     </th>
                     <th scope="col" className="sticky top-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
                       主食
@@ -938,16 +942,16 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
                         <tr className={`align-middle ${detail ? '' : 'border-b border-border'}`}>
                           {/* 氏名の列は横スクロールしても左に残す（sticky）。背景はページの地の色（下を流れる欄を透かさない） */}
                           <th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">
-                            {/* 氏名の列の幅は dc-vital-name で決める（札が長くても列を広げず、中で折り返す） */}
-                            <div className="dc-vital-name">
-                              <Link
-                                to={personPath(rid, day, today)}
-                                className="inline-flex min-h-tap items-center text-lg font-bold text-link underline-offset-2 hover:underline"
-                              >
-                                {name}
-                                <span className="sr-only">さんの1日の記録を開く</span>
+                            {/* 氏名の列の幅は dc-vital-name・dc-meal-name で決める（札が長くても列を広げず、中で折り返す）。
+                                来た・まだの文字は氏名のリンクの中（押せる高さ 44px の中に2段で収める＝2026-11-09 行の高さを詰めた） */}
+                            <div className="dc-vital-name dc-meal-name">
+                              <Link to={personPath(rid, day, today)} className="flex min-h-tap flex-col justify-center underline-offset-2 hover:underline">
+                                <span className="text-base font-bold leading-tight text-link">
+                                  {name}
+                                  <span className="sr-only">さんの1日の記録を開く</span>
+                                </span>
+                                <span className="text-sm leading-tight text-ink2">{cameText(row)}</span>
                               </Link>
-                              <span className="block text-sm text-ink2">{cameText(row)}</span>
                               {otherStatus !== null ? <span className="block text-sm text-ink2">昼食の記録: {otherStatus}</span> : null}
                               {source !== null && source !== '画面で入力' ? <span className="block text-sm text-ink2">{source}</span> : null}
                               {mark !== null ? (
@@ -983,45 +987,48 @@ export function DaycareMealsPage({ staff = undefined, actorId = null }: DaycareM
                             )
                           })}
                           <td className="px-2 py-1">
-                            <p className="text-base text-ink">
-                              計 <span className="font-num font-bold">{fluidSum > 0 ? fmtCc(fluidSum) : '—'}</span>
-                              {held !== undefined ? <span className="text-sm text-ink2">（＋{fmtCc(held.ml)} 送信待ち）</span> : null}
-                            </p>
-                            {/* 数を入れて改行キー（form の submit）か〔＋〕で足す。書き込み中は欄を書き換えられず〔＋〕も押せない（二重に足さない）。
-                                欄は disabled にせず readOnly にする（改行キーの後も欄に留まり、続けて入れられる） */}
-                            <form
-                              onSubmit={(e) => {
-                                e.preventDefault()
-                                submitFluid(rid)
-                              }}
-                              className="mt-1 flex items-center gap-2"
-                            >
-                              <input
-                                type="text"
-                                inputMode="numeric"
-                                autoComplete="off"
-                                value={fluidText[rid] ?? ''}
-                                onChange={(e) => {
-                                  fluidInputs.set(rid, e.target.value)
-                                  setFluidText(fluidInputs.all())
-                                  if (fn?.input === true) noteFluid(fkey, null)
+                            {/* 合計と入れる欄は横に並べる（幅が足りない時は折り返す・2026-11-09 行の高さを詰めた） */}
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                              <p className="text-base text-ink">
+                                計 <span className="font-num font-bold">{fluidSum > 0 ? fmtCc(fluidSum) : '—'}</span>
+                                {held !== undefined ? <span className="text-sm text-ink2">（＋{fmtCc(held.ml)} 送信待ち）</span> : null}
+                              </p>
+                              {/* 数を入れて改行キー（form の submit）か〔＋〕で足す。書き込み中は欄を書き換えられず〔＋〕も押せない（二重に足さない）。
+                                  欄は disabled にせず readOnly にする（改行キーの後も欄に留まり、続けて入れられる） */}
+                              <form
+                                onSubmit={(e) => {
+                                  e.preventDefault()
+                                  submitFluid(rid)
                                 }}
-                                readOnly={busy}
-                                disabled={!canWrite}
-                                aria-label={`水分（cc）：${name}さんに足す量`}
-                                aria-invalid={fn?.input === true ? true : undefined}
-                                aria-describedby={fn !== undefined ? `dc-fluid-note-${rid}` : undefined}
-                                className="block min-h-tap w-20 rounded border border-border-strong bg-surface px-2 text-lg text-ink disabled:text-ink3"
-                              />
-                              <button
-                                type="submit"
-                                disabled={!canWrite || busy}
-                                aria-label={`水分を足す（${name}さん）`}
-                                className="min-h-tap min-w-tap rounded border border-primary bg-surface px-2 text-lg font-bold text-primary disabled:border-border disabled:text-ink3"
+                                className="flex items-center gap-2"
                               >
-                                ＋
-                              </button>
-                            </form>
+                                <input
+                                  type="text"
+                                  inputMode="numeric"
+                                  autoComplete="off"
+                                  value={fluidText[rid] ?? ''}
+                                  onChange={(e) => {
+                                    fluidInputs.set(rid, e.target.value)
+                                    setFluidText(fluidInputs.all())
+                                    if (fn?.input === true) noteFluid(fkey, null)
+                                  }}
+                                  readOnly={busy}
+                                  disabled={!canWrite}
+                                  aria-label={`水分（cc）：${name}さんに足す量`}
+                                  aria-invalid={fn?.input === true ? true : undefined}
+                                  aria-describedby={fn !== undefined ? `dc-fluid-note-${rid}` : undefined}
+                                  className="block min-h-tap w-20 rounded border border-border-strong bg-surface px-2 text-lg text-ink disabled:text-ink3"
+                                />
+                                <button
+                                  type="submit"
+                                  disabled={!canWrite || busy}
+                                  aria-label={`水分を足す（${name}さん）`}
+                                  className="min-h-tap min-w-tap rounded border border-primary bg-surface px-2 text-lg font-bold text-primary disabled:border-border disabled:text-ink3"
+                                >
+                                  ＋
+                                </button>
+                              </form>
+                            </div>
                           </td>
                         </tr>
                         {detail ? (

@@ -274,7 +274,8 @@ if (DP === null) {
     const head = table.slice(table.indexOf('<thead>'), table.indexOf('</thead>'))
     const body = table.slice(table.indexOf('<tbody>'), table.indexOf('</tbody>'))
     it('見出しは「昼食」・説明の1行は新しい操作に合わせる', () => {
-      assert.match(page, /<h2 id="h-meals" className="text-xl font-bold text-ink">\s*昼食\s*<\/h2>/)
+      // 2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 見出しの文字を 22px から 18px に（未入力の数・予定の人数と同じ段）
+      assert.match(page, /<h2 id="h-meals" className="text-lg font-bold leading-tight text-ink">\s*昼食\s*<\/h2>/)
       assert.match(page, /選ぶとすぐ保存します。昼食は care-log の食事の昼食と同じ記録です。水分は数を入れて改行キー（または〔＋〕）で足します（1人の画面の水分と同じ記録）。/)
     })
     it('表の枠はバイタル一括・活動一括と同じ（dc-table-fit・isolate・縦横に送る・useTableFit・キーボードで選べる）', () => {
@@ -285,11 +286,12 @@ if (DP === null) {
       assert.match(page, /<table className="w-full min-w-max border-collapse text-base">\s*<caption className="sr-only">/)
     })
     it('列は 氏名｜主食｜副食｜水分（cc）。見出しの行は上に残す（角の氏名は z-30・ほかは z-20）・氏名の列は左に残す（z-10）', () => {
-      const cols = [...head.matchAll(/<th scope="col" className="([^"]+)">\s*(?:<span className="dc-vital-name block">)?([^<\s]+)/g)].map((m) => [m[2], m[1]])
+      // 2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 氏名の列は dc-meal-name で「未到着（予定 …）」が1行に入る幅に
+      const cols = [...head.matchAll(/<th scope="col" className="([^"]+)">\s*(?:<span className="dc-vital-name dc-meal-name block">)?([^<\s]+)/g)].map((m) => [m[2], m[1]])
       assert.deepEqual(cols.map((c) => c[0]), ['氏名', '主食', '副食', '水分（cc）'])
       assert.equal(cols[0][1], 'sticky left-0 top-0 z-30 bg-surface2 px-2 py-2 text-sm font-bold text-ink2')
       for (const c of cols.slice(1)) assert.equal(c[1], 'sticky top-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2', c[0])
-      assert.match(body, /<th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">\s*(\{\}\s*)?<div className="dc-vital-name">/)
+      assert.match(body, /<th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">\s*(\{\}\s*)?<div className="dc-vital-name dc-meal-name">/)
       // 行の列は見出しと同じ並び（氏名 → 主食・副食の選択肢 → 水分）
       const iName = body.indexOf('<th scope="row"')
       const iSel = body.indexOf('<select')
@@ -305,8 +307,9 @@ if (DP === null) {
       assert.match(body, /const detail = lunchNote \|\| held !== undefined \|\| fn !== undefined/)
     })
     it('氏名の列: 1人の画面へのリンク（44px）・在席／帰宅／未到着・保存の印（昼食だけ）・取り込みの印', () => {
-      assert.match(body, /<Link\s+to=\{personPath\(rid, day, today\)\}\s+className="inline-flex min-h-tap items-center/)
-      assert.match(body, /\{cameText\(row\)\}/)
+      // 2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 来た・まだの文字は氏名のリンクの中（押せる高さ 44px の中に2段）
+      assert.match(body, /<Link to=\{personPath\(rid, day, today\)\} className="flex min-h-tap flex-col justify-center/)
+      assert.match(body, /<span className="text-sm leading-tight text-ink2">\{cameText\(row\)\}<\/span>\s*<\/Link>/)
       assert.match(body, /const mark = mealBandMark\(\[kindOf\(lt, stL\)\]\)/)
       assert.match(body, /\{source !== null && source !== '画面で入力' \?/)
     })

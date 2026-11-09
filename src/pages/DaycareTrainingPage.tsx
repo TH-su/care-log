@@ -646,8 +646,9 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
     </p>
   )
 
+  // 上の段は詰める（2026-11-09 代表者の指示「一括入力の画面で、もっと多くの行が出るように」）
   const header = (
-    <div className="space-y-3">
+    <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-gap">
         <DaycareNav current="training" handoff={() => writeDaycareHandoffFor({ rows: board?.rows ?? null, residents, boardDay: data?.day ?? null, today })} />
         <RecorderBar actorId={actorId} staff={staff ?? null} />
@@ -669,7 +670,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
         >
           <span aria-hidden="true">›</span>
         </button>
-        <button type="button" onClick={() => setReloadKey((n) => n + 1)} className={btn}>
+        <button type="button" onClick={() => setReloadKey((n) => n + 1)} className="min-h-tap rounded border border-border-strong bg-surface px-3 text-sm text-ink disabled:text-ink3">
           最新に更新
         </button>
       </div>
@@ -679,7 +680,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
           {MSG_MISSING}
         </p>
       ) : gate !== null && !gateOk ? (
-        <p role="status" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">
+        <p role="status" className="rounded-lg border border-warn bg-warn-bg px-3 py-1.5 text-base text-ink">
           <span aria-hidden="true">▲ </span>
           {gate.forbidden
             ? FORBIDDEN_REASON
@@ -690,7 +691,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                 : MSG_GATE_UNKNOWN}
         </p>
       ) : pastLocked ? (
-        <p role="status" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">
+        <p role="status" className="rounded-lg border border-warn bg-warn-bg px-3 py-1.5 text-base text-ink">
           <span aria-hidden="true">ⓘ </span>
           {MSG_PAST}
         </p>
@@ -700,7 +701,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
 
   if ((loading && data === null) || (data !== null && data.day !== day && error === null)) {
     return (
-      <div className="mx-auto w-full max-w-3xl space-y-4 p-4">
+      <div className="mx-auto w-full max-w-6xl space-y-2">
         {header}
         <LoadingBlock label="その日の機能訓練を読み込んでいます…" />
       </div>
@@ -708,7 +709,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
   }
   if (error !== null && (data === null || data.day !== day)) {
     return (
-      <div className="mx-auto w-full max-w-3xl space-y-4 p-4">
+      <div className="mx-auto w-full max-w-6xl space-y-2">
         {header}
         <ErrorBlock message={error} onRetry={() => setReloadKey((n) => n + 1)} />
       </div>
@@ -728,11 +729,13 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
     )
 
   return (
-    <div className="mx-auto w-full max-w-3xl space-y-4 p-4">
+    // 幅を広げ（max-w-3xl → 6xl）、区画の余白と見出しを詰める（2026-11-09 代表者の指示「一括入力の画面で、もっと多くの行が出るように」。
+    // 配置・計画の見直し・居宅訪問の区画は今までどおり表の上に出す）
+    <div className="mx-auto w-full max-w-6xl space-y-2">
       {header}
 
-      <section aria-labelledby="h-staffing" className="space-y-3 rounded-lg border border-border bg-surface p-3">
-        <h2 id="h-staffing" className="text-xl font-bold text-ink">
+      <section aria-labelledby="h-staffing" className="space-y-2 rounded-lg border border-border bg-surface p-2">
+        <h2 id="h-staffing" className="text-lg font-bold leading-tight text-ink">
           その日の配置
         </h2>
         {data.staffing === null && !missing ? (
@@ -837,11 +840,11 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
         scope={week}
       />
 
-      <section aria-labelledby="h-targets" className="space-y-2 rounded-lg border border-border bg-surface p-3">
-        <h2 id="h-targets" className="text-xl font-bold text-ink">
+      <section aria-labelledby="h-targets" className="space-y-2 rounded-lg border border-border bg-surface p-2">
+        <h2 id="h-targets" className="text-lg font-bold leading-tight text-ink">
           {day === today ? '今日' : 'この日'}の対象者
         </h2>
-        <p className="text-base text-ink2">
+        <p className="text-sm leading-snug text-ink2">
           予定の方（休み・入院中を除く）と予定外で来た方です（五十音順）。〔完了〕は前回と同じ内容・{TRAINING_DEFAULT_MIN}分・配置の機能訓練指導員で記録します（違う時は〔一部〕か、記録の後に〔記録を開く〕で直してください）。
         </p>
         {data.sessions === null && !missing ? (
@@ -932,89 +935,97 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                         <tr className={`align-middle ${detail ? '' : 'border-b border-border'}`}>
                           {/* 氏名の列は横スクロールしても左に残す（sticky）。背景はページの地の色（下を流れる欄を透かさない） */}
                           <th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">
-                            {/* 氏名の列の幅は dc-vital-name で決める（札が長くても列を広げず、中で折り返す） */}
-                            <div className="dc-vital-name space-y-1">
-                              <span className="block text-base font-bold text-ink">{name}</span>
-                              {planTags?.noPlan.has(rid) ? <span className="block text-sm text-ink2">{TARGET_NO_PLAN_LABEL[planTags.noPlan.get(rid) ?? 'nocopy']}</span> : null}
+                            {/* 氏名の列の幅は dc-vital-name で決める（札が長くても列を広げず、中で折り返す）。
+                                氏名を押すと1人の記録へ（2026-11-09: 〔1日の記録 ›〕のボタンを氏名のリンクにまとめ、行の高さを押せる下限の近くまで
+                                下げた＝代表者の指示「もっと多くの行が出るように」。押せる高さは 44px・活動一括と同じ形） */}
+                            <div className="dc-vital-name">
                               <Link
                                 to={personPath(rid, day, today)}
                                 aria-label={`${name}さんの1日の記録を開く`}
-                                className="inline-flex min-h-tap items-center rounded border border-primary bg-surface px-2 text-base font-bold text-primary"
+                                className="flex min-h-tap items-center rounded underline-offset-2 hover:underline"
                               >
-                                1日の記録<span aria-hidden="true"> ›</span>
+                                <span className="text-base font-bold leading-tight text-link">
+                                  {name}
+                                  <span aria-hidden="true"> ›</span>
+                                </span>
                               </Link>
+                              {planTags?.noPlan.has(rid) ? <span className="block text-sm leading-tight text-ink2">{TARGET_NO_PLAN_LABEL[planTags.noPlan.get(rid) ?? 'nocopy']}</span> : null}
                             </div>
                           </th>
                           <td className="px-2 py-1">
-                            {/* 内容と指導員の列は上限の幅で折り返す（ふつうの文字の大きさで、結果のボタンまで横スクロールなしで見えるように） */}
-                            <div className="max-w-36">
+                            {/* 内容と指導員の列は上限の幅で折り返す（ふつうの文字の大きさで、結果のボタンまで横スクロールなしで見えるように）。
+                                折り返した2行が押せる高さ（44px）に収まるよう行の間を詰める（2026-11-09） */}
+                            <div className="max-w-36 leading-tight">
                               {s !== null ? (
-                                <span className="text-base text-ink">{s.program}</span>
+                                <span className="text-base leading-tight text-ink">{s.program}</span>
                               ) : fresh === null ? (
-                                <span className="text-base text-ink2">—</span>
+                                <span className="text-base leading-tight text-ink2">—</span>
                               ) : prev !== null ? (
-                                <span className="text-base text-ink2">前回: {prev}</span>
+                                <span className="text-base leading-tight text-ink2">前回: {prev}</span>
                               ) : (
-                                <span className="text-base text-ink2">—（前回の記録なし）</span>
+                                <span className="text-base leading-tight text-ink2">—（前回の記録なし）</span>
                               )}
                             </div>
                           </td>
                           <td className="px-2 py-1">
                             {s !== null ? (
-                              <span className="text-base text-ink">
+                              <span className="text-base leading-tight text-ink">
                                 {s.started_at.replace(/^0(\d)/, '$1')}
                                 {s.result === 'cancelled' ? '' : `〜 ${s.duration_min ?? '—'}分`}
                               </span>
                             ) : fresh === null ? (
-                              <span className="text-base text-ink2">—</span>
+                              <span className="text-base leading-tight text-ink2">—</span>
                             ) : (
                               // 〔完了〕で入る既定の時間（薄く）。記録した時間は「開始の時刻〜 分」なので文字の形で分かる（色だけに頼らない）
-                              <span className="text-base text-ink2">{TRAINING_DEFAULT_MIN}分</span>
+                              <span className="text-base leading-tight text-ink2">{TRAINING_DEFAULT_MIN}分</span>
                             )}
                           </td>
                           <td className="px-2 py-1">
-                            <div className="max-w-32">
+                            <div className="max-w-32 leading-tight">
                               {s !== null ? (
-                                <span className="text-base text-ink">{staffName(s.instructor_id)}</span>
+                                <span className="text-base leading-tight text-ink">{staffName(s.instructor_id)}</span>
                               ) : fresh === null ? (
-                                <span className="text-base text-ink2">—</span>
+                                <span className="text-base leading-tight text-ink2">—</span>
                               ) : fresh.instructor_id !== null ? (
-                                <span className="text-base text-ink2">予定: {staffName(fresh.instructor_id)}</span>
+                                <span className="text-base leading-tight text-ink2">予定: {staffName(fresh.instructor_id)}</span>
                               ) : (
-                                <span className="text-base text-ink2">—（〔完了〕で選ぶ）</span>
+                                <span className="text-base leading-tight text-ink2">—（〔完了〕で選ぶ）</span>
                               )}
                             </div>
                           </td>
-                          <td className="space-y-1 px-2 py-1">
-                            {s !== null ? (
-                              <p className="text-base font-bold text-ink">
-                                {TRAINING_RESULT_LABEL[s.result]}
-                                {s.result === 'cancelled' && s.cancel_reason !== null
-                                  ? `（${TRAINING_CANCEL_REASON_LABEL[s.cancel_reason]}${s.cancel_reason === 'other' && s.cancel_note ? `・${s.cancel_note}` : ''}）`
-                                  : ''}
-                                {p !== undefined ? <span className="font-normal text-ink2">（{p.stopped ? '止まっています' : '送信待ち'}）</span> : null}
-                              </p>
-                            ) : status !== null ? (
-                              <p className="text-base text-ink2">{status}</p>
-                            ) : null}
-                            <div className="flex flex-wrap gap-gap">
+                          {/* 結果の文字とボタンは横に並べる（幅が足りない時は折り返す・2026-11-09 行の高さを詰めた） */}
+                          <td className="px-2 py-1">
+                            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                               {s !== null ? (
-                                <button type="button" disabled={busy} onClick={() => openRow(s)} className={btn} aria-label={`${name}さんの機能訓練の記録を開く`}>
-                                  記録を開く
-                                </button>
-                              ) : (
-                                <>
-                                  <button type="button" disabled={!canWrite || busy || waiting} onClick={() => void quickDone(rid)} className={primaryBtn} aria-label={`${name}さんの機能訓練を完了で記録する`}>
-                                    完了
+                                <p className="text-base font-bold text-ink">
+                                  {TRAINING_RESULT_LABEL[s.result]}
+                                  {s.result === 'cancelled' && s.cancel_reason !== null
+                                    ? `（${TRAINING_CANCEL_REASON_LABEL[s.cancel_reason]}${s.cancel_reason === 'other' && s.cancel_note ? `・${s.cancel_note}` : ''}）`
+                                    : ''}
+                                  {p !== undefined ? <span className="font-normal text-ink2">（{p.stopped ? '止まっています' : '送信待ち'}）</span> : null}
+                                </p>
+                              ) : status !== null ? (
+                                <p className="text-base text-ink2">{status}</p>
+                              ) : null}
+                              <div className="flex flex-wrap gap-gap">
+                                {s !== null ? (
+                                  <button type="button" disabled={busy} onClick={() => openRow(s)} className={btn} aria-label={`${name}さんの機能訓練の記録を開く`}>
+                                    記録を開く
                                   </button>
-                                  <button type="button" disabled={!canWrite || busy || waiting} onClick={() => openNew(rid, 'partial')} className={btn} aria-label={`${name}さんの機能訓練を一部で記録する`}>
-                                    一部
-                                  </button>
-                                  <button type="button" disabled={!canWrite || busy || waiting} onClick={() => openNew(rid, 'cancelled')} className={btn} aria-label={`${name}さんの機能訓練を中止で記録する`}>
-                                    中止
-                                  </button>
-                                </>
-                              )}
+                                ) : (
+                                  <>
+                                    <button type="button" disabled={!canWrite || busy || waiting} onClick={() => void quickDone(rid)} className={primaryBtn} aria-label={`${name}さんの機能訓練を完了で記録する`}>
+                                      完了
+                                    </button>
+                                    <button type="button" disabled={!canWrite || busy || waiting} onClick={() => openNew(rid, 'partial')} className={btn} aria-label={`${name}さんの機能訓練を一部で記録する`}>
+                                      一部
+                                    </button>
+                                    <button type="button" disabled={!canWrite || busy || waiting} onClick={() => openNew(rid, 'cancelled')} className={btn} aria-label={`${name}さんの機能訓練を中止で記録する`}>
+                                      中止
+                                    </button>
+                                  </>
+                                )}
+                              </div>
                             </div>
                           </td>
                         </tr>

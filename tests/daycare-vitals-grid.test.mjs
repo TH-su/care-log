@@ -99,7 +99,8 @@ if (DC === null) {
     it('再測定はその方の行のすぐ下に「↳ 再測定 n」の行・基準の札は氏名の下・〔＋再測定〕は再測定の列', () => {
       assert.match(page, /return slots\.map\(\(slot, si\) => \{/)
       assert.match(page, /<span aria-hidden="true">↳ <\/span>\s*再測定 \{si\}/)
-      assert.match(page, /<span className="block text-base font-bold text-ink">\{nameOf\(row\.residentId\)\}<\/span>\s*<span className="block text-sm text-ink2">\{basis\}<\/span>/)
+      // 2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 氏名と札の行の間を詰めた（leading-tight）
+      assert.match(page, /<span className="block text-base font-bold leading-tight text-ink">\{nameOf\(row\.residentId\)\}<\/span>\s*<span className="block text-sm leading-tight text-ink2">\{basis\}<\/span>/)
       assert.match(page, /\{abnormal && isLast \? \(\s*<button[\s\S]{0,200}onClick=\{\(\) => addRecheck\(row, slot\)\}/)
       assert.match(page, /＋再測定/)
     })

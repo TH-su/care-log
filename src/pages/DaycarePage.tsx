@@ -135,10 +135,13 @@ const DAY_READERS: DaycareDayReaders = {
 
 /** カードの〔取消〕（押せる範囲 44px・角は 6px） */
 const DANGER_CELL_BTN =
-  'inline-flex min-h-tap min-w-tap items-center justify-center rounded border border-danger bg-surface px-2 text-base text-danger disabled:border-border disabled:text-ink3'
-/** 〔休み〕は押しやすく（カードの右上にそろえ、幅をそろえる＝代表者の要望） */
+  'inline-flex min-h-tap min-w-tap items-center justify-center rounded border border-danger bg-surface px-1.5 text-sm text-danger disabled:border-border disabled:text-ink3'
+/**
+ * 〔休み〕は押しやすく（カードの右上にそろえ、幅をそろえる＝代表者の要望）。2026-11-09 代表者の指示「ボタン自体を小さくし、
+ * より多くの利用者を１画面で」で、幅は 5rem から押せる下限の 44px に（どのカードも同じ幅のまま・太い枠で押し間違えない）
+ */
 const REST_BTN =
-  'inline-flex min-h-tap min-w-[5rem] items-center justify-center rounded border-2 border-border-strong bg-surface px-3 text-base font-bold text-ink disabled:border-border disabled:text-ink3'
+  'inline-flex min-h-tap min-w-tap items-center justify-center rounded border-2 border-border-strong bg-surface px-1.5 text-sm font-bold text-ink disabled:border-border disabled:text-ink3'
 
 /** 状態の表示（記号＋文字＋時刻。色だけに頼らない） */
 function stateLabel(row: DaycareBoardRow): { mark: string; text: string; tone: 'plain' | 'ok' | 'info' | 'muted' } {
@@ -169,7 +172,8 @@ export function DaycareNav({ current, handoff }: { current: 'today' | 'vitals' |
     // 段階3a（2026-10-23）: 個別機能訓練（配置と実施記録）
     { key: 'training', to: '/record/daycare/training', label: '機能訓練' },
   ]
-  const navCls = 'flex min-h-tap items-center rounded border border-border-strong bg-surface px-4 text-base text-ink'
+  // 2026-11-09 代表者の指示（1画面に多く）: 押せる高さ 44px は保ち、文字と左右の余白を詰める（どの画面でも上の段が1段で収まるように）
+  const navCls = 'flex min-h-tap items-center rounded border border-border-strong bg-surface px-3 text-sm text-ink'
   const excretion = (
     <a
       key="excretion"
@@ -194,12 +198,20 @@ export function DaycareNav({ current, handoff }: { current: 'today' | 'vitals' |
           aria-current={current === it.key ? 'page' : undefined}
           className={
             current === it.key
-              ? 'flex min-h-tap items-center rounded border border-primary bg-primary px-4 text-base font-bold text-primary-ink'
-              : 'flex min-h-tap items-center rounded border border-border-strong bg-surface px-4 text-base text-ink'
+              ? 'flex min-h-tap items-center rounded border border-primary bg-primary px-3 text-sm font-bold text-primary-ink'
+              : navCls
           }
         >
           {current === it.key ? <span aria-hidden="true">✓ </span> : null}
-          {it.label}
+          {/* 狭い画面（640px 未満）では括弧の補足を出さない（「今日（到着・休み）」→「今日」。切り替えが2段に収まる） */}
+          {it.label.indexOf('（') > 0 ? (
+            <>
+              {it.label.slice(0, it.label.indexOf('（'))}
+              <span className="hidden sm:inline">{it.label.slice(it.label.indexOf('（'))}</span>
+            </>
+          ) : (
+            it.label
+          )}
         </Link>,
         // 記録の順（バイタル → 食事 → 排泄）に、食事一括の次へ置く
         ...(it.key === 'meals' ? [excretion] : []),
@@ -593,63 +605,68 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   }
 
   // ── 描画 ──
-  const header = (
-    <div className="space-y-3">
+  // 上の段は2段（切り替え＋記録者／日付＋件数）に詰める（2026-11-09 代表者の指示「タイトル帯やその他表示が小さくなってもよい」）。
+  // 件数（counts）は読み込めた後だけ、日付の右に並べる（幅が足りない時は次の行へ回る）
+  const header = (counts: ReactNode = null) => (
+    <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-gap">
         <DaycareNav current="today" handoff={() => writeDaycareHandoffFor({ rows: board?.rows ?? null, residents, boardDay: data?.day ?? null, today })} />
         <RecorderBar actorId={actorId} staff={staff ?? null} />
       </div>
-      <div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">
-        <button
-          type="button"
-          onClick={() => setDay((d) => addDays(d, -1))}
-          className="min-h-tap min-w-tap rounded border border-border-strong bg-surface px-3 text-lg text-ink"
-          aria-label="前の日へ"
-        >
-          <span aria-hidden="true">‹</span>
-        </button>
-        <span className="min-w-28 text-center text-lg font-bold text-ink" aria-live="polite">
-          {fmtDayLabel(day)}
-          {day === today ? <span className="ml-2 text-base text-ok">今日</span> : null}
-        </span>
-        <button
-          type="button"
-          onClick={() => setDay((d) => (addDays(d, 1) > today ? d : addDays(d, 1)))}
-          disabled={day >= today}
-          className="min-h-tap min-w-tap rounded border border-border-strong bg-surface px-3 text-lg text-ink disabled:text-ink3"
-          aria-label="次の日へ"
-        >
-          <span aria-hidden="true">›</span>
-        </button>
-        {day !== today ? (
-          <button type="button" onClick={() => setDay(today)} className="min-h-tap rounded border border-primary px-4 text-base font-bold text-primary">
-            今日を開く
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">
+          <button
+            type="button"
+            onClick={() => setDay((d) => addDays(d, -1))}
+            className="min-h-tap min-w-tap rounded border border-border-strong bg-surface px-3 text-lg text-ink"
+            aria-label="前の日へ"
+          >
+            <span aria-hidden="true">‹</span>
           </button>
-        ) : null}
-        <button
-          type="button"
-          onClick={() => setReloadKey((n) => n + 1)}
-          className="min-h-tap rounded border border-border-strong bg-surface px-4 text-base text-ink"
-        >
-          最新に更新
-        </button>
+          <span className="min-w-28 text-center text-lg font-bold text-ink" aria-live="polite">
+            {fmtDayLabel(day)}
+            {day === today ? <span className="ml-2 text-base text-ok">今日</span> : null}
+          </span>
+          <button
+            type="button"
+            onClick={() => setDay((d) => (addDays(d, 1) > today ? d : addDays(d, 1)))}
+            disabled={day >= today}
+            className="min-h-tap min-w-tap rounded border border-border-strong bg-surface px-3 text-lg text-ink disabled:text-ink3"
+            aria-label="次の日へ"
+          >
+            <span aria-hidden="true">›</span>
+          </button>
+          {day !== today ? (
+            <button type="button" onClick={() => setDay(today)} className="min-h-tap rounded border border-primary px-3 text-sm font-bold text-primary">
+              今日を開く
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => setReloadKey((n) => n + 1)}
+            className="min-h-tap rounded border border-border-strong bg-surface px-3 text-sm text-ink"
+          >
+            最新に更新
+          </button>
+        </div>
+        {counts}
       </div>
       {day < today ? (
-        <p role="status" className="rounded-lg border border-border bg-surface2 p-3 text-sm text-ink2">
+        <p role="status" className="rounded-lg border border-border bg-surface2 px-3 py-1.5 text-sm text-ink2">
           {canEditPastDaycareTimes(role)
             ? '過去の日を表示しています。到着・帰宅は、カードを押した1人の画面で時刻を入れて記録・修正します（事務所のログイン）。'
             : '過去の日を表示しています。到着・帰宅の時刻は事務所のログインで入力・修正します。休みはカードの〔休み〕、入浴はカードを押した1人の画面で記録できます（時刻が入っている方の休み・帰宅の取り消しは事務所）。'}
         </p>
       ) : null}
       {gate !== null && !(gate.observed && gate.value === true) ? (
-        <p role="status" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">
+        <p role="status" className="rounded-lg border border-warn bg-warn-bg px-3 py-1.5 text-base text-ink">
           <span aria-hidden="true">▲ </span>
           {gate.forbidden ? FORBIDDEN_REASON : gate.outdated ? OUTDATED_REASON : gate.observed ? `${kindBlockedMessage('daycare')}。記録の閲覧はできます。` : MSG_GATE_UNKNOWN}
         </p>
       ) : null}
       {data !== null && data.day === day && data.memoAt !== null ? (
         // 電波が無く、控えで開いた（1人の画面と同じ帯＝親の確かめ 中1）。押した記録は送信待ちに積み、電波が戻ると送って読み直す
-        <p role="status" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">
+        <p role="status" className="rounded-lg border border-warn bg-warn-bg px-3 py-1.5 text-base text-ink">
           <span aria-hidden="true">▲ </span>
           サーバーに届かないため、今日の一覧で読んだ時点（{new Date(data.memoAt).toTimeString().slice(0, 5)}）の内容です。押した記録は送信待ちに積みます（つながると自動で送信します）。
         </p>
@@ -659,16 +676,16 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
 
   if (loading && data === null) {
     return (
-      <div className="mx-auto w-full max-w-5xl space-y-4 p-4">
-        {header}
+      <div className="w-full space-y-2">
+        {header()}
         <LoadingBlock label="デイの予定と記録を読み込んでいます…" />
       </div>
     )
   }
   if (error !== null && (data === null || data.day !== day)) {
     return (
-      <div className="mx-auto w-full max-w-5xl space-y-4 p-4">
-        {header}
+      <div className="w-full space-y-2">
+        {header()}
         <ErrorBlock message={error} onRetry={() => setReloadKey((n) => n + 1)} />
       </div>
     )
@@ -699,24 +716,25 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   ]
 
   return (
-    <div className="mx-auto w-full max-w-5xl space-y-4 p-4">
-      {header}
+    // 幅の上限（max-w-5xl）と外側の余白（p-4）を外し、カードの列を画面の幅いっぱいに並べる（2026-11-09 代表者の指示・iPad 横で6列）
+    <div className="w-full space-y-2">
+      {header(
+        // 件数の帯（1行に詰める＝代表者の要望 2026-10-23。注意の数は ▲ と太字と枠で示す＝色だけに頼らない）。日付の右に並べる（2026-11-09）
+        <ul className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-border bg-surface px-3 py-1" aria-label="件数">
+          {tiles.map((t) => (
+            <li
+              key={t.label}
+              className={`inline-flex items-baseline gap-1 text-sm ${t.tone === 'warn' ? 'rounded border border-warn bg-warn-bg px-1 font-bold text-ink' : 'text-ink2'}`}
+            >
+              {t.tone === 'warn' ? <span aria-hidden="true">▲</span> : null}
+              <span>{t.label}</span>
+              <span className="font-num text-lg font-bold text-ink">{t.value}</span>
+            </li>
+          ))}
+        </ul>,
+      )}
       {limits.failed ? <VitalLimitsFailedNote className="" onRetry={() => void limits.refresh()} /> : null}
       <PlanBanners data={data} notInRoster={board.notInRoster} unconfirmed={board.unconfirmed} today={today} />
-
-      {/* 件数の帯（1行に詰める＝代表者の要望 2026-10-23。注意の数は ▲ と太字と枠で示す＝色だけに頼らない） */}
-      <ul className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border bg-surface px-3 py-2" aria-label="件数">
-        {tiles.map((t) => (
-          <li
-            key={t.label}
-            className={`inline-flex items-baseline gap-1 text-sm ${t.tone === 'warn' ? 'rounded border border-warn bg-warn-bg px-1 font-bold text-ink' : 'text-ink2'}`}
-          >
-            {t.tone === 'warn' ? <span aria-hidden="true">▲</span> : null}
-            <span>{t.label}</span>
-            <span className="font-num text-lg font-bold text-ink">{t.value}</span>
-          </li>
-        ))}
-      </ul>
 
       {board.rows.length === 0 ? (
         <div className="rounded-lg border border-border bg-surface p-4">
@@ -730,7 +748,8 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       ) : (
         // カード（2026-10-24 代表者の決定 §9.4 の1〜3）: 五十音の通しの並び（見出しなし）。カードを押すと1人の画面へ
         // （到着・帰宅・時刻の直し・休みの理由・入浴はそこで）。〔休み〕〔取消〕はリンクの外の別のボタン（入れ子にしない）。
-        // 列の数は幅で自動（src/index.css の .dc-cards・タブレット横で4列）
+        // 列の数は幅で自動（src/index.css の .dc-cards・iPad 横で6列・縦で4列・スマホで2列＝2026-11-09 代表者の指示）。
+        // カードの中は詰めて並べる（氏名とふりがなを〔休み〕の横に・行の間をあけない）
         <ul className="dc-cards" aria-label="利用者の一覧">
           {board.rows.map((row) => {
             const pending = hasPendingDaycareAttendance(row.residentId, day, row.attendance?.id ?? null)
@@ -764,17 +783,22 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
             return (
               <li
                 key={row.residentId}
-                className={`dc-card relative flex min-w-0 flex-col gap-0.5 rounded-lg border p-3 ${absent ? 'border-border bg-surface2' : 'border-border-strong bg-surface'}`}
+                className={`dc-card relative flex min-w-0 flex-col rounded-lg border px-1.5 py-1.5 ${absent ? 'border-border bg-surface2' : 'border-border-strong bg-surface'}`}
               >
                 <div className="flex flex-wrap items-start gap-2">
                   {/* 氏名（押すと1人の記録へ。カード全体を押せる＝.dc-card-link の ::after）。長い氏名は切らずに折り返す。
-                      カードが狭い時（拡大表示・大きな文字）は〔休み〕を氏名の下へ回す（氏名の幅を 5 文字分は残す） */}
-                  <Link to={personPath(row.residentId, day, today)} className="dc-card-link min-w-[5em] flex-1 rounded">
-                    <span className={`block break-words text-lg font-bold ${absent ? 'text-ink2' : 'text-ink'}`}>
-                      {name}
-                      <span className="sr-only">さんの1日の記録を開く</span>
-                    </span>
-                  </Link>
+                      カードが狭い時（拡大表示・大きな文字）は〔休み〕を氏名の下へ回す（氏名の幅を 5 文字分は残す）。
+                      ふりがなは氏名の下・〔休み〕の横に置く（〔休み〕の高さの中に収まり、行が1つ減る＝2026-11-09。長い時は切らずに折り返す）。
+                      ふりがなの文字は 14px（入居者マスタの決まり＝0.875rem 未満を使わない・2026-10-24 の A4 と同じ下限） */}
+                  <div className="min-w-[5em] flex-1">
+                    <Link to={personPath(row.residentId, day, today)} className="dc-card-link block rounded">
+                      <span className={`block break-words text-base font-bold leading-tight ${absent ? 'text-ink2' : 'text-ink'}`}>
+                        {name}
+                        <span className="sr-only">さんの1日の記録を開く</span>
+                      </span>
+                    </Link>
+                    {kana !== null && kana !== '' ? <p className="break-words text-xs leading-tight text-ink2">{kana}</p> : null}
+                  </div>
                   {/* 休み（リンクの外の別のボタン。休みの方は〔取消〕だけ・理由は1人の画面で選ぶ） */}
                   {absent ? (
                     <button
@@ -798,21 +822,17 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                     </button>
                   )}
                 </div>
-                {/* ふりがなは〔休み〕の下の幅いっぱいに出す（ボタンの横だと 1024px の4列で切れた） */}
-                {kana !== null && kana !== '' ? <p className="break-words text-sm text-ink2">{kana}</p> : null}
-                <p className="break-words text-sm text-ink2">
-                  {planText}
-                  {row.bathingPlanned ? '・入浴' : ''}
-                </p>
+                {/* 入浴の予定は下の「入浴 予定」で分かるので、予定の行には「・入浴」を付けない（6列の幅で行が折り返して1段減ったため・2026-11-09） */}
+                <p className="break-words text-sm leading-tight text-ink2">{planText}</p>
                 {absent ? (
-                  <p className="text-base font-bold text-ink2">
+                  <p className="text-sm font-bold leading-tight text-ink2">
                     <span aria-hidden="true">✕ </span>
                     {stateLabel(row).text}
                   </p>
                 ) : row.hospitalized && row.state === 'planned' ? (
-                  <p className="text-base text-ink2">入院中</p>
+                  <p className="text-sm leading-tight text-ink2">入院中</p>
                 ) : (
-                  <p className="flex flex-wrap gap-x-3 text-base text-ink">
+                  <p className="flex flex-wrap gap-x-2 text-sm leading-tight text-ink">
                     <span className="whitespace-nowrap">
                       到着 <span className="font-num font-bold">{a?.arrived_at ? hmShort(a.arrived_at) : '—'}</span>
                     </span>
@@ -822,7 +842,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                   </p>
                 )}
                 {/* 入浴・昼食・バイタルの状態（文字だけ・押せない。記録は1人の画面・食事一括・バイタル一括） */}
-                <p className="flex flex-wrap gap-x-3 text-sm text-ink">
+                <p className="flex flex-wrap gap-x-2 text-sm leading-tight text-ink">
                   <span className={absentBathLeft ? 'rounded border-2 border-warn bg-warn-bg px-1 font-bold' : undefined}>
                     {absentBathLeft ? <span aria-hidden="true">▲ </span> : null}入浴 {bathText}
                   </span>
@@ -832,7 +852,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                   </span>
                 </p>
                 {pending ? (
-                  <p className="text-sm text-ink2" role="status">
+                  <p className="text-sm leading-tight text-ink2" role="status">
                     <span aria-hidden="true">↻ </span>未送信の記録があります（電波が戻ると自動で送信します）
                   </p>
                 ) : null}

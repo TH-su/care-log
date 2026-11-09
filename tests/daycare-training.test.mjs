@@ -367,20 +367,23 @@ describe('静的検査（段階3a の規律）', () => {
     // 見出しの行は sticky top-0（角の氏名は z-30・ほかの見出しは z-20）、氏名の列は z-10。枠は isolate でアプリの見出しの上に重ならない
     assert.match(head, /<th scope="col" className="sticky left-0 top-0 z-30 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">/)
     assert.equal((head.match(/<th scope="col" className="sticky top-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">/g) ?? []).length, 4, '内容・時間・指導員・結果の見出しも上に残す')
-    assert.match(sec, /<th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">\s*(\{\}\s*)?<div className="dc-vital-name space-y-1">/)
+    // 2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 氏名の列の中の段の間（space-y-1）を外した
+    assert.match(sec, /<th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">\s*(\{\}\s*)?<div className="dc-vital-name">/)
     assert.match(sec, /role="region"[\s\S]*?className="dc-table-fit relative isolate overflow-auto"[\s\S]*?<table className="w-full min-w-max border-collapse text-base">\s*<caption className="sr-only">/)
     assert.doesNotMatch(sec, /<ul className="divide-y divide-border">\s*\{targets\.map/, '1人1行の一覧は表にした')
-    // 氏名の列: 札（planTags のまま）と〔1日の記録 ›〕
-    assert.match(sec, /\{planTags\?\.noPlan\.has\(rid\) \? <span className="block text-sm text-ink2">\{TARGET_NO_PLAN_LABEL\[planTags\.noPlan\.get\(rid\) \?\? 'nocopy'\]\}<\/span> : null\}/)
-    assert.match(sec, /<Link\s+to=\{personPath\(rid, day, today\)\}[\s\S]*?1日の記録<span aria-hidden="true"> ›<\/span>/)
+    // 氏名の列: 札（planTags のまま）と1人の記録への入口。2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 〔1日の記録 ›〕のボタンは
+    // 氏名のリンク（押せる高さ 44px・読み上げは「〜さんの1日の記録を開く」のまま）にまとめた
+    assert.match(sec, /\{planTags\?\.noPlan\.has\(rid\) \? <span className="block text-sm leading-tight text-ink2">\{TARGET_NO_PLAN_LABEL\[planTags\.noPlan\.get\(rid\) \?\? 'nocopy'\]\}<\/span> : null\}/)
+    assert.match(sec, /<Link\s+to=\{personPath\(rid, day, today\)\}\s+aria-label=\{`\$\{name\}さんの1日の記録を開く`\}\s+className="flex min-h-tap items-center rounded[^"]*"\s*>\s*<span className="text-base font-bold leading-tight text-link">\s*\{name\}\s*<span aria-hidden="true"> ›<\/span>/)
     // 記録の無い方は〔完了〕で入る値を薄く出す（内容は前回・時間は既定・指導員は〔完了〕で入る予定の方）
     assert.match(sec, /const fresh = s === null && !waiting && data\.sessions !== null \? freshInput\(rid, day, 'done'\) : null/)
     assert.match(sec, /前回: \{prev\}/)
     assert.match(sec, /—（前回の記録なし）/)
     // 予定の指導員は「予定:」を付けて記録した指導員と分ける（色の濃さだけに頼らない・2026-10-26 反証 軽10）。
     // 時間は記録なら「開始の時刻〜 分」なので文字の形で分かる（「予定:」を付けると 1180 の幅で結果の列が切れる）
-    assert.match(sec, /<span className="text-base text-ink2">\{TRAINING_DEFAULT_MIN\}分<\/span>/)
-    assert.match(sec, /fresh\.instructor_id !== null \? \(\s*<span className="text-base text-ink2">予定: \{staffName\(fresh\.instructor_id\)\}<\/span>/)
+    // 2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 折り返した2行が 44px に収まるよう行の間を詰めた（leading-tight）
+    assert.match(sec, /<span className="text-base leading-tight text-ink2">\{TRAINING_DEFAULT_MIN\}分<\/span>/)
+    assert.match(sec, /fresh\.instructor_id !== null \? \(\s*<span className="text-base leading-tight text-ink2">予定: \{staffName\(fresh\.instructor_id\)\}<\/span>/)
     // 予定の指導員は描いた時刻の時間帯で決まるので、1分ごとに描き直す（昼をまたいでも〔完了〕で入る方と同じ・反証 軽9）
     assert.match(p, /setMinuteTick\(\(n\) => n \+ 1\)/)
     assert.match(sec, /—（〔完了〕で選ぶ）/)
