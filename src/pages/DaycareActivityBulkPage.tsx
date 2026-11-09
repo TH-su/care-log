@@ -46,7 +46,7 @@ import {
 } from '../lib/db'
 import type { PendingActivityOp } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
-import { DaycareUnfilledCount } from '../components/DaycareUnfilledCount'
+import { DaycareRowBlankMark, DaycareRowBlankSr, DaycareUnfilledCount } from '../components/DaycareUnfilledCount'
 import { ConfirmDialog, ErrorBlock, LoadingBlock, ModalShell, useToast } from '../components/ui'
 import { writeDaycareHandoffFor } from '../lib/daycareHandoff'
 import { buildDaycareBoard } from '../lib/daycare'
@@ -65,7 +65,7 @@ import {
 } from '../lib/daycareActivity'
 import type { ActivityAddOutcome, ActivityParticipation, DaycareActivity } from '../lib/daycareActivity'
 import { personPath, readPersonDay } from '../lib/daycarePerson'
-import { activityCellsFilled, activityShownCells, attendedUnfilledCount, daycareCameMark } from '../lib/daycareProgress'
+import { DAYCARE_BLANK_CELL_CLS, activityCellsFilled, activityShownCells, bulkBlankSummary, daycareCameMark, recordBlankFields } from '../lib/daycareProgress'
 import { addDays, fmtDayLabel, todayIso } from '../lib/format'
 import type { DaycareAttendance, DaycareDay, DaycarePlanRow, DaycarePlanSource, Resident, Staff } from '../lib/types'
 import { useTableFit } from '../lib/useTableFit'
@@ -824,19 +824,19 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
   if (data === null) return null
 
   const readable = data.activities !== null
-  // 未入力の数（在席・帰宅の方だけ数える）。入力済み＝活動の枠のどれかに記録がある（画面に出している値＝送信待ちを含む・2026-11-09 計画B）。
-  // 重ね方は枠（cellOf）と同じ決まりの純関数 activityShownCells（今日の画面の印・切り替えの数と同じ関数＝反証 中1）
-  const unfilled = attendedUnfilledCount(
-    targets.map((rid) => ({
-      state: rowOf(rid)?.state ?? 'planned',
-      filled: activityCellsFilled(activityShownCells(data.activities ?? [], pending, rid, day)),
-    })),
-  )
-  /** 枠1つ（定型の列は大きな枠・「その他」の列は項目つきの小さなボタン） */
-  const cellButton = (rid: number, name: string, label: string, small: boolean) => {
+  // 未入力の数（2026-11-09 計画B2: 到着を問わず1人1欄で数える）。入力済み＝活動の枠のどれかに記録がある（画面に出している値＝送信待ちを含む・
+  // 2026-11-09 計画B）。重ね方は枠（cellOf）と同じ決まりの純関数 activityShownCells（今日の画面の印・切り替えの数と同じ関数＝反証 中1）
+  const filledOf = new Map<number, boolean>(targets.map((rid) => [rid, activityCellsFilled(activityShownCells(data.activities ?? [], pending, rid, day))]))
+  const unfilled = bulkBlankSummary(targets.map((rid) => recordBlankFields(filledOf.get(rid) ?? false)))
+  /**
+   * 枠1つ（定型の列は大きな枠・「その他」の列は項目つきの小さなボタン）。blank＝その方の活動の記録が1つも無い（読めている時だけ）:
+   * 定型の枠を空の枠の見た目にし、「—」を「未」にする（2026-11-09 計画B2。どれか1つでも記録があれば行全体を今の見た目に戻す）
+   */
+  const cellButton = (rid: number, name: string, label: string, small: boolean, blank = false) => {
     const c = cellOf(rid, label)
     const saving = busy.has(`${day}:${rid}:${label}`)
-    const word = !readable ? '？' : c.shown === null ? '—' : ACTIVITY_PARTICIPATION_LABEL[c.shown]
+    const blankWord = blank && c.shown === null
+    const word = !readable ? '？' : blankWord ? '未' : c.shown === null ? '—' : ACTIVITY_PARTICIPATION_LABEL[c.shown]
     const stopped = c.stopped.length > 0
     const mark = saving || c.waiting || c.deleting ? '↻' : stopped ? '▲' : ''
     const after = nextParticipation(c.row?.participation ?? null)
@@ -858,12 +858,14 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
     const tone =
       stopped
         ? 'border-2 border-warn bg-warn-bg'
-        : c.shown !== null && readable
-          ? 'border-2 border-primary bg-accent-bg'
-          : 'border border-border-strong bg-surface'
+        : blank && readable
+          ? DAYCARE_BLANK_CELL_CLS
+          : c.shown !== null && readable
+            ? 'border-2 border-primary bg-accent-bg'
+            : 'border border-border-strong bg-surface'
     const text = (
       <span aria-hidden="true">
-        <span className={`font-bold ${c.deleting ? 'line-through' : ''} ${c.shown === null ? 'text-ink2' : 'text-ink'}`}>{small ? `${label}：${word}` : word}</span>
+        <span className={`font-bold ${c.deleting ? 'line-through' : ''} ${blankWord ? 'text-warn' : c.shown === null ? 'text-ink2' : 'text-ink'}`}>{small ? `${label}：${word}` : word}</span>
         {mark !== '' ? <span className="ml-1 text-ink">{mark}</span> : null}
       </span>
     )
@@ -988,6 +990,8 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                     const stoppedNotes = readable ? [...DAYCARE_ACTIVITY_CHIPS, ...others].flatMap((l) => cellOf(rid, l).stopped) : []
                     const m = msgs.get(`${rid}:${day}`)
                     const detail = stoppedNotes.length > 0 || m !== undefined
+                    // 活動の記録が1つも無い行（読めている時だけ・2026-11-09 計画B2）
+                    const rowBlank = readable && filledOf.get(rid) === false
                     return (
                       <Fragment key={rid}>
                         <tr className={`align-middle ${detail ? '' : 'border-b border-border'}`}>
@@ -1005,6 +1009,8 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                                 <span className="text-base font-bold leading-tight text-link">
                                   {name}
                                   <span aria-hidden="true"> ›</span>
+                                  {/* 空の欄がある行の印（2026-11-09 計画B2）。リンクは aria-label で読むので、読み上げの文はリンクの外に置く */}
+                                  {rowBlank ? <DaycareRowBlankMark sr={false} /> : null}
                                 </span>
                                 {/* 来た・まだの印（まだ来ていない方は親の検収 中2 の印。枠を押すと確かめを挟む） */}
                                 <span className={`text-sm leading-tight ${cm.textCls}`}>
@@ -1012,11 +1018,12 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                                   {cm.word}
                                 </span>
                               </Link>
+                              {rowBlank ? <DaycareRowBlankSr /> : null}
                             </div>
                           </th>
                           {DAYCARE_ACTIVITY_CHIPS.map((c) => (
                             <td key={c} className="px-1 py-1">
-                              {cellButton(rid, name, c, false)}
+                              {cellButton(rid, name, c, false, rowBlank)}
                             </td>
                           ))}
                           <td className="px-1 py-1">

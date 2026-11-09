@@ -98,13 +98,15 @@
    付け、枠の中で縦にも送る。見出しの行（sticky top-0）が枠の上に、氏名の列（sticky left-0）が左に残り、下の行だけが送られる。上と下の
    高さは useTableFit（src/lib/useTableFit.ts）が実測して書き戻す（ここの値は実測が入るまでの暫定）。
    max-height は単位ごとに分けて書く（dvh が使えない端末で計算が無効になった時に、前の宣言へ戻すため）。
-   scroll-padding は、欄へ送る時（フォーカス・scrollIntoView）に上の見出しと左の氏名の列の下に隠さないための逃げ */
+   scroll-padding は、欄へ送る時（フォーカス・scrollIntoView）に上の見出しと左の氏名の列の下に隠さないための逃げ。
+   左は氏名の列の幅（min(7rem, 35vw)＋左右の余白 1rem）に 4px を足す（バイタル一括の押している欄の外側の線 2px が、横に送った後に
+   氏名の列の下に隠れないように＝2026-11-09 計画B2 の確認の反証 軽3） */
 .dc-table-fit {
   --dc-fit-top: 4rem;
   --dc-fit-below: 4.5rem;
   max-height: max(10rem, calc(100vh - var(--dc-fit-top) - var(--dc-fit-below)));
   scroll-padding-top: 3.5rem;
-  scroll-padding-left: calc(min(7rem, 35vw) + 1rem);
+  scroll-padding-left: calc(min(7rem, 35vw) + 1rem + 4px);
 }
 @supports (height: 100dvh) {
   .dc-table-fit {
