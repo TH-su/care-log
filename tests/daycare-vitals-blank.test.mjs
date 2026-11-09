@@ -226,16 +226,20 @@ describe('静的検査: バイタル一括の列と欄送り（計画B2）', () 
     const gapDiaP = dia.r + other.l
     const gapOther = other.r + other.l
     assert.equal(gapOther, 8, 'ほかの欄の間 8px')
-    assert.equal(gapSysDia, 12, '上と下の間 12px（「/」を置く）')
+    // 確認の反証 軽2（固定し直し・意図は同じ）: 上と下の間は 12px から 14px に（押している欄の外側の線 2px が「/」に触れたため）。
+    // 下の列の左の余白を広げると 88px を保つ列の幅（114px）が Tailwind の目盛りに無いので、上の列の右の余白を 6px にした
+    assert.equal(gapSysDia, 14, '上と下の間 14px（「/」を置く）')
     assert.equal(gapDiaP, 20, '下と P の間 20px')
     assert.ok(gapDiaP > gapSysDia && gapDiaP >= gapOther * 2, '下と P の間がほかより目に見えて広い')
-    // 「/」: 下の列の左の端から 2px（上と下の間 12px のまん中）に、読み上げない・押すのを妨げない形で置く
+    // 「/」: 下の列の左の端から 1px（上と下の間 14px のまん中）に、読み上げない・押すのを妨げない形で置く
     assert.match(diaCls, /\brelative\b/)
     assert.match(
       body,
-      /\{f === 'dia_bp' \? \(\s*<span aria-hidden="true" className="pointer-events-none absolute left-0\.5 top-1\/2 -translate-x-1\/2 -translate-y-1\/2 text-lg font-bold text-ink2">\s*\/\s*<\/span>\s*\) : null\}/,
+      /\{f === 'dia_bp' \? \(\s*<span aria-hidden="true" className="pointer-events-none absolute left-px top-1\/2 -translate-x-1\/2 -translate-y-1\/2 text-lg font-bold text-ink2">\s*\/\s*<\/span>\s*\) : null\}/,
     )
-    assert.equal(sys.r + 2, (sys.r + dia.l) / 2, '「/」は間のまん中（left-0.5＝2px）')
+    assert.equal((dia.l - sys.r) / 2, 1, '「/」は間のまん中（下の列の左の端から left-px＝1px）')
+    // 押している欄の外側の線（2px）と「/」の箱（text-lg の太字で幅 約9.4px・Chrome で実測）が触れない: 間の半分 − 線 ≧ 箱の半分
+    assert.ok(gapSysDia / 2 - 2 >= 9.4 / 2, '外側の線が「/」に触れない')
   })
   it('テンキーの欄送り: 次の欄は nextBulkVitalField・KT の次は次の方の DC_BULK_VITAL_ORDER[0]（血圧の上）・再測定は一括の並びで探す', () => {
     const adv = page.slice(page.indexOf('const advance = (cur: Active) => {'), page.indexOf('const commit = '))
@@ -299,8 +303,29 @@ describe('静的検査: 空の枠の見た目（一括の4画面・計画B2）',
     // 前は accent-bg（空の枠の warn-bg とほぼ同じ色）だった
     assert.doesNotMatch(V, /'border-2 border-primary bg-accent-bg'/)
   })
-  it('凡例（反証 軽3）: 「— 未測定」はそのまま、「未＝未入力（点線の枠）」を足した', () => {
-    assert.match(V, /記号: ↑↑ 危険（高い）・↑ 注意（高い）・↓ 注意（低い）・↓↓ 危険（低い）・— 未測定・未＝未入力（点線の枠）。範囲外と血圧の上下逆は保存しません。/)
+  it('凡例（反証 軽3）: 「— 未測定」はそのまま、「未＝未入力」を足した（確認の反証 軽1: 1180px で1行に収めるため「（点線の枠）」は付けない）', () => {
+    assert.match(V, /記号: ↑↑ 危険（高い）・↑ 注意（高い）・↓ 注意（低い）・↓↓ 危険（低い）・— 未測定・未＝未入力。範囲外と血圧の上下逆は保存しません。/)
+    assert.doesNotMatch(V, /（点線の枠）/)
+  })
+  it('横に送った後も押している欄の外側の線を氏名の列の下に隠さない（確認の反証 軽3）: 枠の scroll-padding-left は氏名の列の幅＋4px', () => {
+    // #56（見出しの行を上に残す作り）の .dc-table-fit はそのまま。左の逃げに外側の線 2px の分（＋余り）を足しただけ
+    assert.match(read('../src/index.css'), /\.dc-table-fit \{\s*--dc-fit-top: 4rem;\s*--dc-fit-below: 4\.5rem;\s*max-height: [^;]+;\s*scroll-padding-top: 3\.5rem;\s*scroll-padding-left: calc\(min\(7rem, 35vw\) \+ 1rem \+ 4px\);\s*\}/)
+    // 欄へ送るのは今のまま（scrollIntoView の nearest）
+    assert.match(V, /cell\.scrollIntoView\(\{ block: 'nearest', inline: 'nearest' \}\)/)
+  })
+  it('物理キーボードで欄を送った時は、フォーカスも移った先の欄へ（確認の反証 軽4）。フォーカスが表の中の欄にある時だけ・指で押した時は変えない', () => {
+    const eff = V.slice(V.indexOf("const cell = tableBox.querySelector<HTMLElement>('[data-dc-active]')"), V.indexOf('}, [active, tableBox, kpBox, kpHeight])'))
+    assert.ok(eff.length > 100)
+    assert.match(
+      eff,
+      /cell\.scrollIntoView\(\{ block: 'nearest', inline: 'nearest' \}\)\s*const focused = document\.activeElement\s*if \(focused instanceof HTMLElement && focused !== cell && focused\.hasAttribute\('data-dc-cell'\) && tableBox\.contains\(focused\)\) cell\.focus\(\{ preventScroll: true \}\)/,
+    )
+    // 欄の印（data-dc-cell）は欄のボタンだけ（〔＋再測定〕・テンキーのボタンには付けない）
+    assert.equal((V.match(/data-dc-cell=""/g) ?? []).length, 1)
+    assert.match(V, /data-dc-cell=""\s*data-dc-active=\{isActive \? '' : undefined\}/)
+    // 押した時の動き（openCell）はフォーカスに触れない
+    const open = V.slice(V.indexOf('const openCell = '), V.indexOf('const flushHeldSys = '))
+    assert.doesNotMatch(open, /focus\(/)
   })
   it('食事一括: 選択肢が「—（未入力）」の時だけ空の見た目（枠と地は排他・selectCls は今のまま）。拒食は入力済み', () => {
     assert.match(M, /const selectCls = 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-2 text-lg text-ink disabled:text-ink3'/)

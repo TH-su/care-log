@@ -895,6 +895,10 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     const over = tableBox.getBoundingClientRect().bottom - (kpBox !== null ? kpBox.getBoundingClientRect().top : window.innerHeight)
     if (over > 0) window.scrollBy(0, over)
     cell.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    // 物理キーボードで欄を送った時は、フォーカスも移った先の欄へ移す（フォーカスの輪が前の欄に残らない＝確認の反証 軽4）。
+    // フォーカスが表の中の欄（data-dc-cell）にある時だけ。指で押した時（フォーカスが欄に無い・押した欄そのもの）とテンキーのボタンからの送りは変えない
+    const focused = document.activeElement
+    if (focused instanceof HTMLElement && focused !== cell && focused.hasAttribute('data-dc-cell') && tableBox.contains(focused)) cell.focus({ preventScroll: true })
   }, [active, tableBox, kpBox, kpHeight])
 
   // ── 描画 ──
@@ -1020,7 +1024,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
         </div>
       ) : null}
       <p className="text-sm leading-tight text-ink2">
-        記号: ↑↑ 危険（高い）・↑ 注意（高い）・↓ 注意（低い）・↓↓ 危険（低い）・— 未測定・未＝未入力（点線の枠）。範囲外と血圧の上下逆は保存しません。
+        記号: ↑↑ 危険（高い）・↑ 注意（高い）・↓ 注意（低い）・↓↓ 危険（低い）・— 未測定・未＝未入力。範囲外と血圧の上下逆は保存しません。
       </p>
       {gate !== null && !(gate.observed && gate.value === true) ? (
         <p role="status" className="rounded-lg border border-warn bg-warn-bg px-3 py-1.5 text-base text-ink">
@@ -1272,13 +1276,15 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                               // 入れている欄は空の枠にしない（「未」を出さない＝反証 重1）
                               const blank = countedSlot && v === null && !isActive
                               // 欄の間（2026-11-09 計画B2）: 欄の幅はどれも 88px（列の幅 − 左右の余白）。ほかの欄の間は 8px（4px＋4px）、
-                              // 血圧の上と下の間は 12px（4px＋8px・間に「/」）、血圧の下と P の間は 20px（16px＋4px）
-                              const tdCls = f === 'sys_bp' ? 'w-24 px-1 py-1' : f === 'dia_bp' ? 'relative w-28 py-1 pl-2 pr-4' : 'px-1 py-1'
+                              // 血圧の上と下の間は 14px（6px＋8px・間に「/」）、血圧の下と P の間は 20px（16px＋4px）。
+                              // 確認の反証 軽2: 12px では押している欄の外側の線（2px）が「/」に触れたので 14px にした。下の列の左の余白を広げると
+                              // 欄の幅 88px を保つ列の幅（114px）が Tailwind の目盛りに無いので、上の列の右の余白を 6px に広げた（上の欄の幅は 88px のまま）
+                              const tdCls = f === 'sys_bp' ? 'w-24 py-1 pl-0.5 pr-1.5' : f === 'dia_bp' ? 'relative w-28 py-1 pl-2 pr-4' : 'px-1 py-1'
                               return (
                                 <td key={f} className={tdCls}>
                                   {f === 'dia_bp' ? (
-                                    // 上の枠と下の枠の間の「/」（読み上げない・押すのを妨げない）。上と下の間 12px のまん中（下の列の左の端から 2px）
-                                    <span aria-hidden="true" className="pointer-events-none absolute left-0.5 top-1/2 -translate-x-1/2 -translate-y-1/2 text-lg font-bold text-ink2">
+                                    // 上の枠と下の枠の間の「/」（読み上げない・押すのを妨げない）。上と下の間 14px のまん中（下の列の左の端から 1px）
+                                    <span aria-hidden="true" className="pointer-events-none absolute left-px top-1/2 -translate-x-1/2 -translate-y-1/2 text-lg font-bold text-ink2">
                                       /
                                     </span>
                                   ) : null}
@@ -1286,6 +1292,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                                     type="button"
                                     onClick={() => openCell(slot, f)}
                                     disabled={!canWrite}
+                                    data-dc-cell=""
                                     data-dc-active={isActive ? '' : undefined}
                                     aria-label={`${nameOf(row.residentId)} ${DAYCARE_VITAL_LABEL[f]} ${v === null ? '未入力' : fmtVal(f, v)}${word ? ` ${word}` : ''}${pv ? `、前回 ${fmtVal(f, pv.value)}` : ''}${local ? '、未送信' : ''}`}
                                     // 欄の高さは押せる下限の 44px（2026-11-09 に 56px から詰めた。行の高さは欄＋上下 4px ずつ＝隣の行の欄と 8px あく）
