@@ -242,10 +242,12 @@ if (C === null) {
       ]
       assert.deepEqual(C.nurseNoteMissing(sheets, new Set([1, 2, 3, 4])), [1, 4])
       assert.deepEqual(C.nurseNoteMissing(sheets, new Set()), [])
-      // ひと言を読めなかった方も入れる（空かどうかを確かめられない）
+      // 2026-11-09 確認の反証 軽1（固定し直し・意図は同じ）: ひと言を読めなかった方は入れない（空か分からない）。
+      // その方は「読めなかった項目がある方」（ひと言）の側にだけ並ぶ
       const unread = C.buildContactSheet(input({ vitals: [vital({ temp: 38.2 })], notesOk: false, note: { body: null, nurse_note: '書いてある' } }))
       assert.equal(unread.notesUnread, true)
-      assert.deepEqual(C.nurseNoteMissing([unread], new Set([1])), [1])
+      assert.deepEqual(C.nurseNoteMissing([unread], new Set([1])), [])
+      assert.deepEqual(C.unreadPicked([unread], new Set([1])), [{ residentId: 1, labels: ['ひと言'] }])
     })
     it('来ていない方の紙は作れるが、本文は1文で記録の欄を出さない（休み・入院中・まだ来ていない）', () => {
       const absent = C.buildContactSheet(input({ state: 'absent', vitals: [vital({ temp: 39.0 })], bath: bath(), dayNote: 'みんなで歌いました' }))
@@ -655,7 +657,8 @@ if (C !== null) {
 
   describe('反証 中2: 送信待ちの記録を紙面に重ねる（今日の画面と同じ決まり）・重ねた方は見本に「送信待ちを含む」', () => {
     it('バイタル: 送信待ちにだけある回・サーバーの回に重ねた値（キーごとの pendingRow）', () => {
-      const pend = { [`dc:${DAY}:1:2`]: { values: { temp: 37.9 } } }
+      // 2026-11-09 確認の反証 中2（固定し直し・意図は同じ）: pendingRow の形どおり state を持つ。紙に重ねるのは送信中（'pending'）だけ
+      const pend = { [`dc:${DAY}:1:2`]: { state: 'pending', values: { temp: 37.9 } } }
       const s = C.buildContactSheet(
         input({ vitals: [vital({ id: 61, temp: 36.5, pulse: 70, client_key: `dc:${DAY}:1:1` })], vitalPending: (k) => pend[k] ?? null }),
       )
@@ -665,7 +668,7 @@ if (C !== null) {
       assert.equal(s.abnormal, true)
       assert.deepEqual(s.pendingLabels, ['バイタル'])
       // サーバーの回の値を送信待ちで直した時も、その値
-      const over = C.buildContactSheet(input({ vitals: [vital({ temp: 36.5 })], vitalPending: (k) => (k === `dc:${DAY}:1:1` ? { values: { temp: 36.9 } } : null) }))
+      const over = C.buildContactSheet(input({ vitals: [vital({ temp: 36.5 })], vitalPending: (k) => (k === `dc:${DAY}:1:1` ? { state: 'pending', values: { temp: 36.9 } } : null) }))
       assert.equal(over.vitals.cells[0].value, '36.9℃')
       assert.deepEqual(over.pendingLabels, ['バイタル'])
       // 送信待ちが無ければ印も無い
@@ -826,6 +829,107 @@ if (C !== null) {
       assert.equal(HV.historyColumnLabel('daycare_contact_notes', 'day'), '日付')
       // 申し送りの本文の呼び名は変えない
       assert.equal(HV.historyColumnLabel('notes', 'body'), '本文')
+    })
+  })
+}
+
+// ══════════════════════════════════════════════════════════════
+// 2026-11-09 確認の反証（連絡帳 6b812f6 の直し）
+// ══════════════════════════════════════════════════════════════
+
+if (C !== null) {
+  describe('確認の反証 中2: バイタルは送信中（pending）の値だけ紙に重ね、競合・拒否で止まった値は確かめに並べる', () => {
+    it('競合（conflict）・拒否（rejected）の値は紙に載せない（サーバーの値のまま）・止まっている方として印を付ける', () => {
+      for (const state of ['conflict', 'rejected']) {
+        const s = C.buildContactSheet(
+          input({ vitals: [vital({ temp: 36.5 })], vitalPending: (k) => (k === `dc:${DAY}:1:1` ? { state, values: { temp: 38.9 } } : null) }),
+        )
+        assert.equal(s.vitals.cells[0].value, '36.5℃', state)
+        assert.equal(s.abnormal, false, state)
+        assert.deepEqual(s.pendingLabels, [], state)
+        assert.equal(s.vitalsStopped, true, state)
+        assert.deepEqual(C.vitalsStoppedPicked([s], new Set([1])), [1])
+      }
+      // 送信待ちにだけある回が止まっている時も、紙には載せない（記録なし）
+      const onlyStopped = C.buildContactSheet(input({ vitals: [], vitalPending: (k) => (k === `dc:${DAY}:1:1` ? { state: 'conflict', values: { temp: 38.0 } } : null) }))
+      assert.equal(onlyStopped.vitals.cells[0].value, '記録なし')
+      assert.equal(onlyStopped.vitalsStopped, true)
+      // 送信中の値は今までどおり重ね、止まっている印は付けない
+      const sending = C.buildContactSheet(input({ vitals: [vital({ temp: 36.5 })], vitalPending: (k) => (k === `dc:${DAY}:1:1` ? { state: 'pending', values: { temp: 37.9 } } : null) }))
+      assert.equal(sending.vitals.cells[0].value, '37.9℃')
+      assert.equal(sending.vitalsStopped, false)
+      assert.deepEqual(C.vitalsStoppedPicked([sending], new Set([1])), [])
+      // 来ていない方・バイタルを読めなかった方は数えない
+      assert.equal(C.buildContactSheet(input({ state: 'absent', vitalPending: () => ({ state: 'conflict', values: { temp: 38.0 } }) })).vitalsStopped, false)
+      assert.equal(C.buildContactSheet(input({ vitalsOk: false, vitalPending: () => ({ state: 'conflict', values: { temp: 38.0 } }) })).vitalsStopped, false)
+    })
+    it('今日の画面・一括の画面の重ね方（daycareProgress.ts の vitalShownValues）は変えない（紙だけの決まり）', () => {
+      const progress = code('../src/lib/daycareProgress.ts')
+      assert.match(progress, /export function vitalShownValue\(\s*pending: \{ values: Record<string, unknown> \} \| null,/)
+      assert.doesNotMatch(progress, /sendingOnly/)
+      const pure = code('../src/lib/daycareContact.ts')
+      assert.match(pure, /function sendingOnly\(p: VitalPendingLike\): VitalPendingLike \{\s*return p !== null && p\.state === 'pending' \? p : null/)
+      assert.match(pure, /vals: vitalShownValues\(p, slot\.vital\)/)
+    })
+    it('画面: 確かめの小窓に「送れずに止まっているバイタルがある方」を並べる', () => {
+      const page = read('../src/pages/DaycareContactPage.tsx')
+      assert.match(page, /vitalsStopped: vitalsStoppedPicked\(printable, set\)/)
+      assert.match(page, /check\.vitalsStopped\.length > 0 \|\|/)
+      assert.match(page, /送れずに止まっているバイタルがある方（/)
+      assert.match(page, /\{confirm\.vitalsStopped\.map\(\(rid\) => \(/)
+    })
+  })
+
+  describe('確認の反証 中3: 入浴・水分の送信待ちは重ねず、この端末の送信待ちの件数を確かめの小窓に1行出す', () => {
+    it('queuePending() が 0 より大きい時だけ「この端末に送信待ちが n 件あります（届く前の記録は紙に載らないことがあります）」', () => {
+      const page = read('../src/pages/DaycareContactPage.tsx')
+      assert.match(page, /queued: queuePending\(\),/)
+      assert.match(page, /check\.queued > 0 \|\|/)
+      assert.match(page, /\{confirm !== null && confirm\.queued > 0 \? \(/)
+      assert.match(page, /この端末に送信待ちが \{confirm\.queued\} 件あります（届く前の記録は紙に載らないことがあります）。/)
+      // 入浴・水分の送信待ちは紙に重ねない（入浴・水分の送信待ちを読む関数を使わない）
+      assert.doesNotMatch(code('../src/pages/DaycareContactPage.tsx'), /hasPendingBath|pendingRow\('fluid|pendingFluid/)
+    })
+  })
+
+  describe('確認の反証 中1: ひと言の2表を読めなかった読み直しでは、入れかけの文と比べない', () => {
+    it('notesOk が false の時は比べる処理を何もしないで抜ける（誤って「他の端末が空にした」と知らせない・入れかけを捨てない）', () => {
+      const page = code('../src/pages/DaycareContactPage.tsx')
+      const at = page.indexOf('const rel = draftAgainstSaved(')
+      const effect = page.slice(page.lastIndexOf('useEffect(() => {', at), at)
+      assert.match(effect, /if \(data === null \|\| data\.day !== day \|\| !data\.notesOk\) return/)
+    })
+    it('（純関数の側）ひと言を読めない時の保存値は空に見えるので、比べると drop・changed になってしまう＝比べてはいけない', () => {
+      // 入れ始めた時の保存値「もと」・入れかけ「もと」→ 読めずに空に見えると drop（入れかけを捨てる）になる
+      assert.equal(C.draftAgainstSaved('もと', 'もと', ''), 'drop')
+      // 入れかけ「私の文」→ changed（「他の端末が空にした」と誤って知らせる）になる
+      assert.equal(C.draftAgainstSaved('私の文', 'もと', ''), 'changed')
+    })
+  })
+
+  describe('確認の反証 軽2: 機能訓練の送信待ちの直し・取り消し（中止への変更など）がある方も確かめに並べる', () => {
+    it('サーバーの記録への update の送信待ちがあれば queued（紙はサーバーの記録のまま）', () => {
+      const upd = C.buildContactSheet(input({ training: [session({ id: 9 })], trainingPending: [{ kind: 'update', table: 'daycare_training_sessions', rowId: 9, deleted: false, stopped: false }] }))
+      assert.equal(itemOf(upd, '機能訓練'), '実施（立ち上がり・20分）')
+      assert.equal(upd.trainingQueued, true)
+      assert.deepEqual(upd.pendingLabels, ['機能訓練'])
+      assert.deepEqual(C.trainingQueuedPicked([upd], new Set([1])), [1])
+      // 取り消しの送信待ちも同じ・中止の記録への直しも同じ
+      const del = C.buildContactSheet(input({ training: [session({ id: 9 })], trainingPending: [{ kind: 'update', table: 'daycare_training_sessions', rowId: 9, deleted: true, stopped: false }] }))
+      assert.equal(del.trainingQueued, true)
+      const cancelled = C.buildContactSheet(
+        input({
+          training: [session({ id: 9, result: 'cancelled', duration_min: null, cancel_reason: 'condition' })],
+          trainingPending: [{ kind: 'update', table: 'daycare_training_sessions', rowId: 9, deleted: false, stopped: true }],
+        }),
+      )
+      assert.equal(itemOf(cancelled, '機能訓練'), '中止（体調不良）')
+      assert.equal(cancelled.trainingQueued, true)
+      // ほかの行・配置の update は数えない
+      const other = C.buildContactSheet(input({ training: [session({ id: 9 })], trainingPending: [{ kind: 'update', table: 'daycare_training_sessions', rowId: 10, deleted: false, stopped: false }] }))
+      assert.equal(other.trainingQueued, false)
+      const staffing = C.buildContactSheet(input({ training: [session({ id: 9 })], trainingPending: [{ kind: 'update', table: 'daycare_staffing', rowId: 9, deleted: false, stopped: false }] }))
+      assert.equal(staffing.trainingQueued, false)
     })
   })
 }

@@ -14,7 +14,8 @@
 // ・バイタルは欄ごとに「値のある一番後の回」の値を合わせて載せ、その合わせた値で基準外を判定する（血圧は上と下を組で同じ回から。
 //   2026-11-09 反証 重1）。再測定の注記は値のある回が2つ以上の時
 // ・送信待ちの記録（この端末で入れて、まだ届いていない値）は、今日の画面と同じ決まり（daycareProgress.ts の lunchShownWith・
-//   daycareVitalSlotsWithPending・vitalShownValues・activityShownCells）で紙面に重ねる（2026-11-09 反証 中2）。訓練の送信待ちの追加は
+//   daycareVitalSlotsWithPending・vitalShownValues・activityShownCells）で紙面に重ねる（2026-11-09 反証 中2）。バイタルは紙だけ、
+//   送信中（state 'pending'）の値に限って重ねる（競合・拒否で止まった値は載せず、印刷の前の確かめに並べる＝確認の反証 中2）。訓練の送信待ちの追加は
 //   中身を読めないので紙は「記録なし」のままにし、見本の「送信待ちを含む」と印刷の前の確かめにだけ出す（2026-11-09 親の決定）
 // ・来ていない方（休み・入院中・まだ到着していない方）の紙は作れるが、本文は「本日はお休みでした」などの1文で、記録の欄を出さない
 // ・紙面には判定の記号（↑↓）を載せない。基準を外れたかは今の vitalNeedsRecheck（利用者ごとの基準が優先）で判定し、値は数値で出す
@@ -178,18 +179,20 @@ export interface ContactSheet {
   /** 入浴が自動の記録（12:30 の自動の行・まだ人が確かめていない）のまま（印刷の前の確かめに並べる。紙の文言は変えない） */
   autoBath: boolean
   /**
-   * 機能訓練の記録がサーバーに無く、この端末の送信待ちの追加だけがある（紙は「記録なし」のまま＝送信待ちの中身は読めないため。
-   * 印刷の前の確かめに「送信待ちの機能訓練がある方」として並べる＝2026-11-09 親の決定）
+   * 機能訓練にこの端末の送信待ちがある（サーバーに記録が無い時の追加・サーバーの記録への直し／取り消し）。紙はサーバーの記録のまま
+   * （送信待ちの中身は読めないため）。印刷の前の確かめに「送信待ちの機能訓練がある方」として並べる＝2026-11-09 親の決定・確認の反証 軽2
    */
   trainingQueued: boolean
+  /** バイタルの送信待ちのうち、競合・拒否で送れずに止まっている値がある（紙には載せない。印刷の前の確かめに並べる） */
+  vitalsStopped: boolean
 }
 
 /** 昼食の送信待ち（db.ts の pendingRow('meals', …) の形） */
 export type LunchPendingLike = { state: string; values: Record<string, unknown> } | null
-/** 測定の回の送信待ち（db.ts の pendingRow('vitals', …) の形） */
-export type VitalPendingLike = { values: Record<string, unknown> } | null
-/** 機能訓練の送信待ち（db.ts の PendingTrainingOp の形の一部） */
-export type TrainingPendingLike = { kind: string; table: string; residentId?: number; day?: string }
+/** 測定の回の送信待ち（db.ts の pendingRow('vitals', …) の形。state＝'pending'（送信中）・'conflict'・'rejected'） */
+export type VitalPendingLike = { state: string; values: Record<string, unknown> } | null
+/** 機能訓練の送信待ち（db.ts の PendingTrainingOp の形の一部。追加は人と日・直し／取り消しは行の番号） */
+export type TrainingPendingLike = { kind: string; table: string; residentId?: number; day?: string; rowId?: number }
 
 /** 紙面の材料（1人分）。一覧の読み込みをそのまま渡す（ほかの方の行が混ざってもその方の分だけ使う） */
 export interface ContactSheetInput {
@@ -248,17 +251,25 @@ export function absentTextOf(state: AttendanceState, hospitalized: boolean): str
   return '本日のご利用の記録はありません。'
 }
 
-/** 紙面に出す測定の1回（サーバーの値に送信待ちを重ねた値） */
+/** 紙面に出す測定の1回（サーバーの値に送信中の値を重ねた値） */
 export interface ShownVitalSlot {
   seq: number
   vals: Record<DaycareVitalField, number | null>
-  /** この回に送信待ちの値を重ねた */
+  /** この回に送信中の値を重ねた */
   pending: boolean
+  /** この回に、競合・拒否で送れずに止まっている値がある（紙には重ねていない） */
+  stopped: boolean
+}
+
+/** 紙に重ねてよい送信待ち（送信中＝state 'pending' だけ。昼食の lunchShownWith と同じ範囲） */
+function sendingOnly(p: VitalPendingLike): VitalPendingLike {
+  return p !== null && p.state === 'pending' ? p : null
 }
 
 /**
  * 1人のその日の測定の回（今日の画面と同じ決まり: サーバーの行＋送信待ちにだけある回。値は送信待ち → サーバーの順）。
- * pendingOf＝その回のキーの送信待ち（db.ts の pendingRow('vitals', …)）
+ * pendingOf＝その回のキーの送信待ち（db.ts の pendingRow('vitals', …)）。紙だけの決まりとして、重ねるのは送信中（'pending'）の値だけ
+ * （競合・拒否で止まった値は重ねず stopped で知らせる＝2026-11-09 確認の反証 中2。今日の画面・一括の画面の重ね方は変えない）
  */
 export function contactVitalSlots(
   live: readonly KeyedVital[],
@@ -268,11 +279,13 @@ export function contactVitalSlots(
 ): ShownVitalSlot[] {
   const keys = live.flatMap((v) => (typeof v.client_key === 'string' ? [v.client_key] : []))
   return daycareVitalSlotsWithPending(live, keys, residentId, day, [], (key) => pendingOf(key) !== null).map((slot) => {
-    const p = pendingOf(slot.key)
+    const raw = pendingOf(slot.key)
+    const p = sendingOnly(raw)
     return {
       seq: slot.seq,
       vals: vitalShownValues(p, slot.vital),
       pending: p !== null && DAYCARE_VITAL_FIELDS.some((f) => f in p.values),
+      stopped: raw !== null && p === null && DAYCARE_VITAL_FIELDS.some((f) => f in raw.values),
     }
   })
 }
@@ -306,10 +319,14 @@ export function sheetVitalValues(
   residentId: number,
   day: string,
   pendingOf?: (key: string) => VitalPendingLike,
-): { values: Record<DaycareVitalField, number | null> | null; recheck: boolean; pending: boolean } {
+): { values: Record<DaycareVitalField, number | null> | null; recheck: boolean; pending: boolean; stopped: boolean } {
   const slots = contactVitalSlots(vitals, residentId, day, pendingOf)
   const m = mergeVitalSlots(slots)
-  return { ...m, pending: slots.some((s) => s.pending && DAYCARE_VITAL_FIELDS.some((f) => s.vals[f] !== null)) }
+  return {
+    ...m,
+    pending: slots.some((s) => s.pending && DAYCARE_VITAL_FIELDS.some((f) => s.vals[f] !== null)),
+    stopped: slots.some((s) => s.stopped),
+  }
 }
 
 /** 紙面のバイタルの4欄（体温・血圧・脈拍・SpO2）。値が無い欄は「記録なし」。判定の記号は付けない */
@@ -425,9 +442,10 @@ export function sheetTrainingText(
 }
 
 /**
- * 機能訓練の欄と、送信待ちの追加だけがあるか（今日の画面の trainingFilled と同じ見方）。送信待ちの追加は人と日しか読めない
- * （db.ts の pendingTrainingOps）ので、紙は「記録なし」のまま（2026-11-09 親の決定）。queued＝見本の「送信待ちを含む」と
- * 印刷の前の確かめに使う
+ * 機能訓練の欄と、送信待ちがあるか。送信待ちの中身は読めない（db.ts の pendingTrainingOps は追加なら人と日・直し／取り消しなら
+ * 行の番号だけ）ので、紙はサーバーの記録のまま（無ければ「記録なし」＝2026-11-09 親の決定）。queued＝その方の送信待ちの追加
+ * （サーバーに記録が無い時）か、サーバーの記録への直し・取り消し（中止への変更など＝確認の反証 軽2）がある。見本の
+ * 「送信待ちを含む」と印刷の前の確かめに使う
  */
 export function sheetTrainingShown(
   training: readonly DaycareTrainingSession[] | null,
@@ -441,9 +459,10 @@ export function sheetTrainingShown(
     const queued = pending.some((p) => p.kind === 'add' && p.table === 'daycare_training_sessions' && p.residentId === residentId && p.day === day)
     return { text: NO_RECORD, queued }
   }
-  if (s.result === 'cancelled') return { text: s.cancel_reason === null ? '中止' : `中止（${TRAINING_CANCEL_REASON_LABEL[s.cancel_reason]}）`, queued: false }
+  const updating = pending.some((p) => p.kind === 'update' && p.table === 'daycare_training_sessions' && p.rowId === s.id)
+  if (s.result === 'cancelled') return { text: s.cancel_reason === null ? '中止' : `中止（${TRAINING_CANCEL_REASON_LABEL[s.cancel_reason]}）`, queued: updating }
   const head = s.result === 'partial' ? '一部実施' : '実施'
-  return { text: `${head}（${s.program}${s.duration_min === null ? '' : `・${s.duration_min}分`}）`, queued: false }
+  return { text: `${head}（${s.program}${s.duration_min === null ? '' : `・${s.duration_min}分`}）`, queued: updating }
 }
 
 /** 1人の紙面を組む */
@@ -473,6 +492,7 @@ export function buildContactSheet(p: ContactSheetInput): ContactSheet {
       unreadLabels: notesUnread ? ['ひと言'] : [],
       autoBath: false,
       trainingQueued: false,
+      vitalsStopped: false,
     }
   }
   const v = sheetVitalValues(p.vitals, p.residentId, p.day, p.vitalPending)
@@ -513,6 +533,7 @@ export function buildContactSheet(p: ContactSheetInput): ContactSheet {
     unreadLabels,
     autoBath: p.bathsOk && bathIsAuto(p.bath),
     trainingQueued: tr.queued,
+    vitalsStopped: p.vitalsOk && v.stopped,
   }
 }
 
@@ -528,13 +549,18 @@ export function nurseSectionShown(sheet: Pick<ContactSheet, 'abnormal' | 'nurse'
 
 /**
  * 印刷の前に確かめる方: 選んだ方のうち「基準を外れたバイタルがあるのに看護職のひと言が空」の方（並びは渡した順）。
- * ひと言を読めなかった方も入れる（空かどうかを確かめられない）
+ * ひと言を読めなかった方は入れない（空かどうか分からない。その方は「読めなかった項目がある方」の側にだけ並ぶ＝確認の反証 軽1）
  */
 export function nurseNoteMissing(
   sheets: readonly Pick<ContactSheet, 'residentId' | 'abnormal' | 'nurse' | 'notesUnread'>[],
   picked: ReadonlySet<number>,
 ): number[] {
-  return sheets.filter((s) => picked.has(s.residentId) && s.abnormal && s.nurse === null).map((s) => s.residentId)
+  return sheets.filter((s) => picked.has(s.residentId) && s.abnormal && s.nurse === null && !s.notesUnread).map((s) => s.residentId)
+}
+
+/** 印刷の前に確かめる方: 選んだ方のうち、バイタルの送信待ちが競合・拒否で送れずに止まっている方（その値は紙に載らない） */
+export function vitalsStoppedPicked(sheets: readonly Pick<ContactSheet, 'residentId' | 'vitalsStopped'>[], picked: ReadonlySet<number>): number[] {
+  return sheets.filter((s) => picked.has(s.residentId) && s.vitalsStopped).map((s) => s.residentId)
 }
 
 /** 印刷の前に確かめる方: 選んだ方のうち読めなかった項目がある方（並びは渡した順・項目の名前つき） */

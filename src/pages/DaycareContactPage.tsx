@@ -9,7 +9,8 @@
 // ・印刷の前の確かめの小窓（〔戻って書く〕〔このまま印刷する〕）に、選んだ方のうち次の方を並べる:
 //   基準を外れたのに看護職のひと言が空の方（そのまま刷ると看護職の欄は載らない）・バイタルを読めず基準外かを確かめられない方・
 //   読めなかった項目がある方（〔最新に更新〕をすすめる）・入浴が自動の記録のままの方・送信待ちの機能訓練がある方（紙は「記録なし」の
-//   まま。送信が済んでから刷ると載る）・保存していない文がある方。
+//   まま。送信が済んでから刷ると載る）・送れずに止まっているバイタルがある方（紙に載らない）・保存していない文がある方。
+//   この端末に送信待ちがあれば件数も1行出す（入浴・水分の送信待ちは中身を重ねないので、届く前の記録は紙に載らないことがある）
 //   紙に載るのは保存したひと言（見本も同じ）
 // ・名簿が読めない（氏名を引けない方がいる）時は印刷を止めて理由を出す（「利用者ID 12 様」と刷らない）
 // ・〔印刷する〕で印刷に送ったら、印刷した方の printed_at を書く（失敗しても印刷は止めない。Ctrl+P・⌘P では書かない）
@@ -87,6 +88,7 @@ import {
   nurseNoteMissing,
   trainingQueuedPicked,
   unreadPicked,
+  vitalsStoppedPicked,
   vitalsUnreadPicked,
 } from '../lib/daycareContact'
 import type { ContactNoteField, ContactSheet, DaycareContactNote, DaycareDayNote } from '../lib/daycareContact'
@@ -168,6 +170,10 @@ interface PrintCheck {
   unread: { residentId: number; labels: string[] }[]
   autoBath: number[]
   trainingQueued: number[]
+  /** バイタルの送信待ちが競合・拒否で止まっている方（その値は紙に載らない） */
+  vitalsStopped: number[]
+  /** この端末の送信待ちの件数（queuePending。入浴・水分は中身を重ねないので、0 でなければ1行で知らせる） */
+  queued: number
   unsaved: number[]
   dayUnsaved: boolean
 }
@@ -461,7 +467,9 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
   // 新しい保存値を出す。違う文を入れている（changed）なら、欄の下に知らせを出し、保存の基準を新しい行にする（知らせを見て
   // もう一度〔保存〕を押した時だけ上書きする＝保存の時の食い違いの知らせと同じ考え）
   useEffect(() => {
-    if (data === null || data.day !== day) return
+    // ひと言の2表を読めなかった読み直し（notesOk が false）では比べない（保存値が空に見えるだけで、他の端末が空にしたのではない＝
+    // 確認の反証 中1。入れかけの文と基準はそのまま残す）
+    if (data === null || data.day !== day || !data.notesOk) return
     for (const [key, base] of Object.entries(draftBase)) {
       if (!(key in drafts)) continue
       const saved = normalizeNoteText(savedOf(key))
@@ -587,6 +595,8 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
       unread: unreadPicked(printable, set),
       autoBath: autoBathPicked(printable, set),
       trainingQueued: trainingQueuedPicked(printable, set),
+      vitalsStopped: vitalsStoppedPicked(printable, set),
+      queued: queuePending(),
       unsaved: printable
         .map((s) => s.residentId)
         .filter((id) => isDirty(fieldKeyOf(id, 'body')) || (sheets.find((s) => s.residentId === id)?.abnormal === true && isDirty(fieldKeyOf(id, 'nurse_note')))),
@@ -598,6 +608,8 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
       check.unread.length > 0 ||
       check.autoBath.length > 0 ||
       check.trainingQueued.length > 0 ||
+      check.vitalsStopped.length > 0 ||
+      check.queued > 0 ||
       check.unsaved.length > 0 ||
       check.dayUnsaved
     if (any) setConfirm(check)
@@ -908,7 +920,7 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
       <DaycareContactPrint ref={printRef} sheets={printable} />
 
       {/* 印刷の前の確かめ（基準外なのに看護職のひと言が空・バイタルが読めない・読めない項目・入浴が自動のまま・送信待ちの機能訓練・
-          保存していない文） */}
+          送れずに止まっているバイタル・この端末の送信待ちの件数・保存していない文） */}
       <ModalShell open={confirm !== null} label="印刷の前に確かめてください" onClose={() => setConfirm(null)} initialFocus={backRef}>
         <div className="max-h-[60vh] space-y-3 overflow-y-auto p-4">
           <h2 className="text-lg font-bold text-ink">印刷の前に確かめてください</h2>
@@ -973,6 +985,23 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
                 ))}
               </ul>
             </div>
+          ) : null}
+          {confirm !== null && confirm.vitalsStopped.length > 0 ? (
+            <div>
+              <p className="text-base text-ink">
+                <span aria-hidden="true">▲ </span>送れずに止まっているバイタルがある方（他の端末の値との食い違い・送れない状態。その値は紙に載りません。送信待ちの一覧で確かめてください）:
+              </p>
+              <ul className="ml-5 list-disc text-base text-ink">
+                {confirm.vitalsStopped.map((rid) => (
+                  <li key={rid}>{nameOf(rid)} 様</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {confirm !== null && confirm.queued > 0 ? (
+            <p className="text-base text-ink">
+              <span aria-hidden="true">▲ </span>この端末に送信待ちが {confirm.queued} 件あります（届く前の記録は紙に載らないことがあります）。
+            </p>
           ) : null}
           {confirm !== null && (confirm.unsaved.length > 0 || confirm.dayUnsaved) ? (
             <div>
