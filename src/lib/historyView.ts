@@ -63,6 +63,9 @@ export const HISTORY_TABLE_LABEL: Record<string, string> = {
   daycare_training_sessions: 'デイの機能訓練',
   daycare_home_visits: 'デイの居宅訪問',
   daycare_staffing: 'デイの配置',
+  // デイの連絡帳（2026-11-09 計画C・0061）
+  daycare_day_notes: 'デイの連絡帳（共通の一文）',
+  daycare_contact_notes: 'デイの連絡帳のひと言',
 }
 
 const VITAL_KIND_NAME: Record<string, string> = {
@@ -165,6 +168,17 @@ const TABLE_LABEL: Record<string, Record<string, string>> = {
     prn_effect: '頓服の効果',
     note: '備考',
     auto: '記録の方法',
+  },
+  // デイの連絡帳（2026-11-09 計画C・0061）。printed_at は〔印刷する〕で印刷に送った時刻
+  daycare_day_notes: {
+    day: '日付',
+    body: '全員共通の一文',
+  },
+  daycare_contact_notes: {
+    day: '日付',
+    body: '個別のひと言',
+    nurse_note: '看護職のひと言',
+    printed_at: '印刷した時刻',
   },
   incidents: {
     kind: '区分',

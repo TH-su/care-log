@@ -10,6 +10,10 @@
 //   4. 長さの上限（共通 200字・個別 200字・看護職 150字）は 23514
 //   5. よその施設の利用者・職員を指す行は 23503・よその施設の行は見えない・書けない・許可リストに無い人は何も見えない・anon は読めない
 //   6. 物理削除はできない（delete の権限なし）・冪等（もう一度流しても通り、最後の確かめが ok）
+//   7. 過去の日の守り（2026-11-09 反証 軽3）: 現場（field）のログインは今日だけ書ける・過去の日は 42501・事務所と役割の分からない
+//      接続は過去の日も書ける・未来の日は誰も書けない（22023）・トリガ関数は誰も実行できない
+// 日付: 1〜6 は過去の決まった日（2026-11-01〜03）を使い、役割の分からない接続（test.role 未設定＝my_role() が null）で書く
+//   （過去の日の守りは役割が null なら止めない＝どの日に流しても同じ結果）。7 の今日・未来の日は SQL の now() から作る
 // 1件ずつトランザクションを張り、最後に必ず rollback する（表に何も残さない）。個人情報は置かない（利用者01・職員01 と数値IDだけ）。
 
 import { readFileSync } from 'node:fs'
@@ -108,7 +112,8 @@ await inTx('形: 施設の印・トリガ・守り・権限', async () => {
                         where not g.tgisinternal and c.relname = any($1) order by 1, 2`, [TABLES])
   for (const t of TABLES) {
     const names = trg.filter((x) => x.relname === t).map((x) => x.tgname)
-    ok(`${t}: 印・版・変更の記録のトリガ`, ['carelog_fill_tenant', `trg_history_${t}`, `trg_updated_${t}`].every((n) => names.includes(n)) && names.length === 3, names)
+    ok(`${t}: 印・版・変更の記録・過去の日の守りのトリガ`,
+      ['carelog_fill_tenant', `trg_history_${t}`, `trg_updated_${t}`, `trg_${t}_day_guard`].every((n) => names.includes(n)) && names.length === 4, names)
   }
   const pol = await q(`select tablename, policyname, permissive, cmd, roles::text roles, qual, with_check from pg_policies
                         where schemaname = 'public' and tablename = any($1) order by 1, 2`, [TABLES])
@@ -137,56 +142,56 @@ await inTx('形: 施設の印・トリガ・守り・権限', async () => {
 // ── 2. 足す・直す・変更の記録 ──
 await inTx('足す・直す: 施設の印が入る・rev と updated_at が進む・変更の記録', async () => {
   await seedTwo()
-  const ins = await asUser(A, () => q(`insert into public.daycare_contact_notes (resident_id, day, body, recorded_by) values (1101, '2026-11-09', '笑顔で過ごされました', 1201) returning id, tenant_id, rev, updated_at`))
+  const ins = await asUser(A, () => q(`insert into public.daycare_contact_notes (resident_id, day, body, recorded_by) values (1101, '2026-11-02', '笑顔で過ごされました', 1201) returning id, tenant_id, rev, updated_at`))
   ok('ログインした人が足すと、その人の施設の印が入る', !ins.error && ins[0]?.tenant_id === A && ins[0].rev === 1, ins)
   const up = await asUser(A, () => q(`update public.daycare_contact_notes set nurse_note = '様子を見ています', edited_by = 1201 where id = $1 and rev = 1 returning rev, body, nurse_note, updated_at`, [ins[0].id]))
   ok('1つの欄だけを直すと、もう片方の欄はそのまま・rev が進む', !up.error && up[0]?.rev === 2 && up[0].body === '笑顔で過ごされました' && up[0].nurse_note === '様子を見ています', up)
   const stale = await asUser(A, () => q(`update public.daycare_contact_notes set body = '別の文' where id = $1 and rev = 1 returning id`, [ins[0].id]))
   ok('古い rev での更新は0行（上書きしない）', Array.isArray(stale) && stale.length === 0, stale)
   const hist = await q(`select table_name, record_day::text d, op, tenant_id, changed_by_staff from public.record_history where table_name = 'daycare_contact_notes' and row_id = $1`, [ins[0].id])
-  ok('変更の記録に施設の印・業務日・直した職員が残る', hist.length === 1 && hist[0].tenant_id === A && hist[0].d === '2026-11-09' && hist[0].op === 'update' && Number(hist[0].changed_by_staff) === 1201, hist)
-  const dn = await asUser(A, () => q(`insert into public.daycare_day_notes (day, body) values ('2026-11-09', '秋の歌を歌いました') returning tenant_id`))
+  ok('変更の記録に施設の印・業務日・直した職員が残る', hist.length === 1 && hist[0].tenant_id === A && hist[0].d === '2026-11-02' && hist[0].op === 'update' && Number(hist[0].changed_by_staff) === 1201, hist)
+  const dn = await asUser(A, () => q(`insert into public.daycare_day_notes (day, body) values ('2026-11-02', '秋の歌を歌いました') returning tenant_id`))
   ok('全員共通の一文も、その人の施設の印が入る', !dn.error && dn[0]?.tenant_id === A, dn)
 })
 
 // ── 3. 一意 ──
 await inTx('一意: 1日1行・1人1日1行（生きている行だけ）・施設ごと', async () => {
   await seedTwo()
-  await q(`insert into public.daycare_day_notes (day, body, tenant_id) values ('2026-11-09', '一文', $1)`, [A])
-  const d2 = await tryq(`insert into public.daycare_day_notes (day, body, tenant_id) values ('2026-11-09', '二つ目', $1)`, [A])
+  await q(`insert into public.daycare_day_notes (day, body, tenant_id) values ('2026-11-02', '一文', $1)`, [A])
+  const d2 = await tryq(`insert into public.daycare_day_notes (day, body, tenant_id) values ('2026-11-02', '二つ目', $1)`, [A])
   ok('同じ施設・同じ日の共通の一文の2行目は 23505', d2.code === '23505' && d2.constraint === 'uq_daycare_day_notes', d2)
-  const dB = await tryq(`insert into public.daycare_day_notes (day, body, tenant_id) values ('2026-11-09', '施設Bの一文', $1)`, [B])
+  const dB = await tryq(`insert into public.daycare_day_notes (day, body, tenant_id) values ('2026-11-02', '施設Bの一文', $1)`, [B])
   ok('施設 B は同じ日に並べて足せる', dB.code === null, dB)
-  await q(`insert into public.daycare_contact_notes (resident_id, day, body, tenant_id) values (1101, '2026-11-09', 'ひと言', $1)`, [A])
-  const c2 = await tryq(`insert into public.daycare_contact_notes (resident_id, day, nurse_note, tenant_id) values (1101, '2026-11-09', '二つ目', $1)`, [A])
+  await q(`insert into public.daycare_contact_notes (resident_id, day, body, tenant_id) values (1101, '2026-11-02', 'ひと言', $1)`, [A])
+  const c2 = await tryq(`insert into public.daycare_contact_notes (resident_id, day, nurse_note, tenant_id) values (1101, '2026-11-02', '二つ目', $1)`, [A])
   ok('同じ方・同じ日のひと言の2行目は 23505', c2.code === '23505' && c2.constraint === 'uq_daycare_contact_notes', c2)
-  await q(`update public.daycare_contact_notes set deleted_at = now() where resident_id = 1101 and day = '2026-11-09'`)
-  const c3 = await tryq(`insert into public.daycare_contact_notes (resident_id, day, body, tenant_id) values (1101, '2026-11-09', '取り消した後', $1)`, [A])
+  await q(`update public.daycare_contact_notes set deleted_at = now() where resident_id = 1101 and day = '2026-11-02'`)
+  const c3 = await tryq(`insert into public.daycare_contact_notes (resident_id, day, body, tenant_id) values (1101, '2026-11-02', '取り消した後', $1)`, [A])
   ok('取り消した行の後には足せる（生きている行だけで一意）', c3.code === null, c3)
 })
 
 // ── 4. 長さ ──
 await inTx('長さの上限: 共通 200字・個別 200字・看護職 150字', async () => {
   await seedTwo()
-  const okBody = await tryq(`insert into public.daycare_contact_notes (resident_id, day, body, nurse_note, tenant_id) values (1101, '2026-11-08', repeat('あ', 200), repeat('い', 150), $1)`, [A])
+  const okBody = await tryq(`insert into public.daycare_contact_notes (resident_id, day, body, nurse_note, tenant_id) values (1101, '2026-11-01', repeat('あ', 200), repeat('い', 150), $1)`, [A])
   ok('上限ちょうどは入る', okBody.code === null, okBody)
-  const longBody = await tryq(`insert into public.daycare_contact_notes (resident_id, day, body, tenant_id) values (1102, '2026-11-08', repeat('あ', 201), $1)`, [A])
+  const longBody = await tryq(`insert into public.daycare_contact_notes (resident_id, day, body, tenant_id) values (1102, '2026-11-01', repeat('あ', 201), $1)`, [A])
   ok('個別のひと言 201字は 23514', longBody.code === '23514' && longBody.constraint === 'daycare_contact_notes_body_check', longBody)
-  const longNurse = await tryq(`insert into public.daycare_contact_notes (resident_id, day, nurse_note, tenant_id) values (1102, '2026-11-08', repeat('い', 151), $1)`, [A])
+  const longNurse = await tryq(`insert into public.daycare_contact_notes (resident_id, day, nurse_note, tenant_id) values (1102, '2026-11-01', repeat('い', 151), $1)`, [A])
   ok('看護職のひと言 151字は 23514', longNurse.code === '23514' && longNurse.constraint === 'daycare_contact_notes_nurse_note_check', longNurse)
-  const longDay = await tryq(`insert into public.daycare_day_notes (day, body, tenant_id) values ('2026-11-08', repeat('う', 201), $1)`, [A])
+  const longDay = await tryq(`insert into public.daycare_day_notes (day, body, tenant_id) values ('2026-11-01', repeat('う', 201), $1)`, [A])
   ok('共通の一文 201字は 23514', longDay.code === '23514' && longDay.constraint === 'daycare_day_notes_body_check', longDay)
 })
 
 // ── 5. 施設をまたがない・許可リスト・anon ──
 await inTx('施設をまたがない: よその施設の利用者・職員は 23503・よその施設の行は見えない・書けない', async () => {
   await seedTwo()
-  const fkR = await asUser(A, () => q(`insert into public.daycare_contact_notes (resident_id, day, body) values (2101, '2026-11-09', 'ひと言')`))
+  const fkR = await asUser(A, () => q(`insert into public.daycare_contact_notes (resident_id, day, body) values (2101, '2026-11-02', 'ひと言')`))
   ok('よその施設の利用者を指すひと言は 23503', fkR.error === '23503', fkR)
-  const fkS = await asUser(A, () => q(`insert into public.daycare_day_notes (day, body, recorded_by) values ('2026-11-09', '一文', 2201)`))
+  const fkS = await asUser(A, () => q(`insert into public.daycare_day_notes (day, body, recorded_by) values ('2026-11-02', '一文', 2201)`))
   ok('よその施設の職員を記録者にすると 23503', fkS.error === '23503', fkS)
-  await q(`insert into public.daycare_contact_notes (resident_id, day, body, tenant_id) values (2101, '2026-11-09', '施設Bのひと言', $1)`, [B])
-  await q(`insert into public.daycare_day_notes (day, body, tenant_id) values ('2026-11-09', '施設Bの一文', $1)`, [B])
+  await q(`insert into public.daycare_contact_notes (resident_id, day, body, tenant_id) values (2101, '2026-11-02', '施設Bのひと言', $1)`, [B])
+  await q(`insert into public.daycare_day_notes (day, body, tenant_id) values ('2026-11-02', '施設Bの一文', $1)`, [B])
   const seenA = await asUser(A, async () => ({
     c: (await q(`select count(*)::int n from public.daycare_contact_notes`))[0].n,
     d: (await q(`select count(*)::int n from public.daycare_day_notes`))[0].n,
@@ -196,7 +201,7 @@ await inTx('施設をまたがない: よその施設の利用者・職員は 23
   ok('施設 B の人には自分の行が見える', seenB === 1, seenB)
   const upB = await asUser(A, () => q(`update public.daycare_contact_notes set body = '書き換え' where resident_id = 2101 returning id`))
   ok('施設 A の人は施設 B の行を書き換えられない（0行）', Array.isArray(upB) && upB.length === 0, upB)
-  const move = await asUser(A, () => q(`insert into public.daycare_day_notes (day, body, tenant_id) values ('2026-11-10', '一文', $1)`, [B]))
+  const move = await asUser(A, () => q(`insert into public.daycare_day_notes (day, body, tenant_id) values ('2026-11-03', '一文', $1)`, [B]))
   ok('よその施設の印を付けて足すと 42501', move.error === '42501', move)
   const nonMember = await asUser(A, async () => (await q(`select count(*)::int n from public.daycare_contact_notes`))[0].n, { member: false })
   ok('許可リストに無い人は何も見えない', nonMember === 0, nonMember)
@@ -207,7 +212,7 @@ await inTx('施設をまたがない: よその施設の利用者・職員は 23
 // ── 6. 物理削除・冪等 ──
 await inTx('物理削除はできない・冪等', async () => {
   await seedTwo()
-  await q(`insert into public.daycare_contact_notes (resident_id, day, body, tenant_id) values (1101, '2026-11-09', 'ひと言', $1)`, [A])
+  await q(`insert into public.daycare_contact_notes (resident_id, day, body, tenant_id) values (1101, '2026-11-02', 'ひと言', $1)`, [A])
   const del = await asUser(A, () => q(`delete from public.daycare_contact_notes`))
   ok('ログインした人の delete は 42501（取り消しは deleted_at）', del.error === '42501', del)
   ok('移行は begin … commit で包んでいる', /^begin;$/m.test(MIG) && /^commit;$/m.test(MIG))
@@ -216,6 +221,48 @@ await inTx('物理削除はできない・冪等', async () => {
   ok('もう一度流しても通り、最後の確かめが ok', again.code === null && last.length === 1 && last[0].result === 'ok', again)
   const kept = (await q(`select count(*)::int n from public.daycare_contact_notes where resident_id = 1101`))[0].n
   ok('流し直しても記録は消えない', kept === 1, kept)
+})
+
+// ── 7. 過去の日の守り ──
+/** 役割を決めてログインした人として fn を流す（test.role＝'field'・'office'・'admin'） */
+async function asRole(tenant, role, fn) {
+  await client.query(`select set_config('test.role', $1, true)`, [role])
+  try {
+    return await asUser(tenant, fn)
+  } finally {
+    await client.query(`select set_config('test.role', '', true)`)
+  }
+}
+await inTx('過去の日の守り: 現場は今日だけ・過去の日は事務所・未来の日は誰も書けない', async () => {
+  await seedTwo()
+  const today = (await q(`select ((now() at time zone 'Asia/Tokyo')::date)::text d`))[0].d
+  const tomorrow = (await q(`select ((now() at time zone 'Asia/Tokyo')::date + 1)::text d`))[0].d
+  const past = '2026-11-02'
+  const fToday = await asRole(A, 'field', () => q(`insert into public.daycare_contact_notes (resident_id, day, body) values (1101, $1, '今日のひと言') returning id`, [today]))
+  ok('現場のログインは今日の行を書ける', Array.isArray(fToday) && fToday.length === 1, fToday)
+  const fPast = await asRole(A, 'field', () => q(`insert into public.daycare_contact_notes (resident_id, day, body) values (1102, $1, '過去のひと言')`, [past]))
+  ok('現場のログインは過去の日の行を書けない（42501）', fPast.error === '42501', fPast)
+  const fPastDay = await asRole(A, 'field', () => q(`insert into public.daycare_day_notes (day, body) values ($1, '過去の一文')`, [past]))
+  ok('現場のログインは過去の日の共通の一文も書けない（42501）', fPastDay.error === '42501', fPastDay)
+  const oPast = await asRole(A, 'office', () => q(`insert into public.daycare_contact_notes (resident_id, day, body) values (1102, $1, '過去のひと言') returning id`, [past]))
+  ok('事務所のログインは過去の日の行を書ける', Array.isArray(oPast) && oPast.length === 1, oPast)
+  const fUpd = await asRole(A, 'field', () => q(`update public.daycare_contact_notes set nurse_note = '直し' where id = $1 returning id`, [oPast[0].id]))
+  ok('現場のログインは過去の日の行を直せない（印刷した時刻も同じ・42501）', fUpd.error === '42501', fUpd)
+  const fPrinted = await asRole(A, 'field', () => q(`update public.daycare_contact_notes set printed_at = now() where id = $1 returning id`, [oPast[0].id]))
+  ok('現場のログインは過去の日の印刷した時刻も書けない（画面は失敗を黙って印刷を止めない）', fPrinted.error === '42501', fPrinted)
+  const aPast = await asRole(A, 'admin', () => q(`update public.daycare_contact_notes set nurse_note = '管理者の直し' where id = $1 returning id`, [oPast[0].id]))
+  ok('管理者のログインは過去の日の行を直せる', Array.isArray(aPast) && aPast.length === 1, aPast)
+  const fMove = await asRole(A, 'field', () => q(`update public.daycare_contact_notes set day = $2 where id = $1 returning id`, [fToday[0].id, past]))
+  ok('現場のログインは今日の行を過去の日へ移せない（42501）', fMove.error === '42501', fMove)
+  const futOffice = await asRole(A, 'office', () => q(`insert into public.daycare_day_notes (day, body) values ($1, '明日の一文')`, [tomorrow]))
+  ok('未来の日は事務所でも書けない（22023）', futOffice.error === '22023', futOffice)
+  const futServer = await tryq(`insert into public.daycare_contact_notes (resident_id, day, body, tenant_id) values (1101, $1, '明日', $2)`, [tomorrow, A])
+  ok('未来の日はサーバーの接続でも書けない（22023・daycare_contact_future）', futServer.code === '22023' && /^daycare_contact_future:/.test(futServer.message), futServer)
+  const fn = (await q(`select p.prosecdef, p.proconfig from pg_proc p where p.oid = 'public.daycare_contact_day_guard()'::regprocedure`))[0]
+  ok('守りの関数は security definer・search_path を空に固定', fn?.prosecdef === true && JSON.stringify(fn.proconfig) === JSON.stringify(['search_path=""']), fn)
+  const exec = (await q(`select has_function_privilege('authenticated', 'public.daycare_contact_day_guard()', 'execute') a,
+                                has_function_privilege('anon', 'public.daycare_contact_day_guard()', 'execute') b`))[0]
+  ok('守りの関数は authenticated・anon が実行できない（0059・0060 と同じ）', exec.a === false && exec.b === false, exec)
 })
 
 await client.end()

@@ -9,7 +9,8 @@
 --   1. daycare_day_notes（施設ごと・日ごとに1行・生きている行で一意）… その日の全員共通の一文（body・200字まで）。
 --        一度書けば、その日の全員の連絡帳の「職員より」に入る。
 --   2. daycare_contact_notes（施設・利用者・日ごとに1行・生きている行で一意）… 1人1日の連絡帳のひと言。
---        body＝職員の個別のひと言（200字まで）・nurse_note＝看護職のひと言（150字まで）・printed_at＝最後に印刷した時刻（任意）。
+--        body＝職員の個別のひと言（200字まで）・nurse_note＝看護職のひと言（150字まで）・
+--        printed_at＝〔印刷する〕で印刷に送った最後の時刻（任意。Ctrl+P・⌘P で刷った時は書かない＝2026-11-09 親の決定）。
 --        body と nurse_note は別々に書く欄（画面は変えた欄だけを送る＝多端末同期の規約 原則3）。
 --   写真の列・ご家族への送信の列は作らない（写真は掲載の同意の運用が先・送信は将来の拡張＝計画 §3 の見送り）。
 --   記録の中身（バイタル・入浴・食事・水分・活動・機能訓練）は表に写さない（画面が今ある読み込みから組み立てる＝転記しない）。
@@ -25,7 +26,12 @@
 --   - 物理削除はできない: delete のポリシーを作らず、authenticated から delete・truncate の権限も外す。anon には何も渡さない
 --   - 冪等キー（client_key）は持たない（送信待ちの経路を作らない＝2026-11-09 計画C の仮置き。2台が同時に1行目を作った時は
 --     自然キーの一意の 23505 になり、画面は読み直して知らせる）
---   - 新しいトリガ関数は作らない（0059・0060 の権限の剥がしは要らない）。Realtime には載せない（画面は〔最新に更新〕で読み直す）
+--   - 過去の日の守り（2026-11-09 反証 軽3・0042／0043／0046 の day_guard と同じ作法）: 現場（field）のログインは、その日（JST の今日）
+--     の行だけ書ける。過去の日の行は事務所・管理者のログインだけ（42501・daycare_contact_past_office_only: …）。まだ来ていない日の行は
+--     誰も書けない（22023・daycare_contact_future: …）。役割が分からない接続（表の所有者・サーバーの接続＝my_role() が null）と
+--     my_role() が無い DB では止めない。トリガ専用の関数 public.daycare_contact_day_guard() を1つ作り、0059・0060 と同じく
+--     誰にも実行の権限を渡さない（トリガが動く時は実行の権限を見ない）
+--   - Realtime には載せない（画面は〔最新に更新〕で読み直す）
 -- 入力解禁: 既存の input_enabled_daycare（app_settings には何も足さない）。
 --
 -- 旧クライアント×新サーバー: 旧版は新しい表を知らないので何も変わらない（連絡帳の画面が無いだけ）。
@@ -40,6 +46,7 @@
 -- 戻し方（必要な時だけ・書いた連絡帳のひと言も消える。先に表の中身を書き出してから流す）:
 --   drop table if exists public.daycare_contact_notes;
 --   drop table if exists public.daycare_day_notes;
+--   drop function if exists public.daycare_contact_day_guard();
 --   （表と一緒に、この移行で足した索引・トリガ・守り・外部キーも外れる。既存の表・関数には触れない）
 --   ★戻す順: 新しい移行から順に戻す。supabase/rollback/0053_back.sql・0054_back.sql を流す前に、必ずこの2表の drop を先に流す
 --     （2表がある間は、0053_back は利用者・職員の（施設の印, 番号）の一意を外せず誤りで止まり＝何も変わらない、0054_back は通るが
@@ -100,7 +107,7 @@ create table if not exists public.daycare_contact_notes (
   day           date not null,                                -- 業務日（JST・クライアントが明示指定する）
   body          text,                                         -- 職員の個別のひと言（200字まで・空は null）
   nurse_note    text,                                         -- 看護職のひと言（150字まで・空は null）
-  printed_at    timestamptz,                                  -- 最後に印刷した時刻（任意）
+  printed_at    timestamptz,                                  -- 〔印刷する〕で印刷に送った最後の時刻（任意）
   recorded_by   bigint,
   rev           integer not null default 1,
   created_at    timestamptz not null default now(),
@@ -125,6 +132,8 @@ comment on table public.daycare_contact_notes is
   'デイの連絡帳の1人1日のひと言（職員の個別のひと言 body・看護職のひと言 nurse_note・最後に印刷した時刻 printed_at）。写真・送信の列は持たない。0061。';
 comment on column public.daycare_contact_notes.edited_by is
   '最後にこの行を書き換えた職員。vitals.edited_by と同じ意味（更新・削除のたびにアプリが送る）。';
+comment on column public.daycare_contact_notes.printed_at is
+  '〔印刷する〕で印刷に送った最後の時刻（画面のボタンから印刷した時だけ書く。Ctrl+P・⌘P で刷った時は書かない）。';
 
 -- 1人1日1行（生きている行だけ・施設の印が先頭）
 create unique index if not exists uq_daycare_contact_notes
@@ -145,7 +154,57 @@ create or replace trigger trg_history_daycare_contact_notes
   after update on public.daycare_contact_notes
   for each row execute function public.record_history_capture('day');
 
--- ---------- 3. RLS（0044 と同じ4本＋0054 と同じ tenant_only） ----------
+-- ---------- 3. 過去の日の守り（現場のログインはその日だけ・過去の日は事務所・未来の日は誰も書けない） ----------
+-- 0046 の daycare_training_day_guard と同じ作法（security definer＝my_role() の実行権限を持たない接続でも JWT だけで役割が決まる・
+-- my_role() が無い DB では止めない・役割が null の接続は止めない）。search_path は 0052 以降の関数と同じく空にして名前を全部書く
+create or replace function public.daycare_contact_day_guard()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $fn$
+declare
+  v_today date := (pg_catalog.now() at time zone 'Asia/Tokyo')::date;
+  v_role text;
+begin
+  -- まだ来ていない日の連絡帳は書けない（役割を問わない。画面も今日より後の日を開かない）
+  if new.day > v_today and (tg_op = 'INSERT' or new.day is distinct from old.day) then
+    raise exception 'daycare_contact_future: まだ来ていない日の連絡帳は書けません'
+      using errcode = '22023';
+  end if;
+  -- 当日・未来の日だけに関わる書き込みは止めない
+  if tg_op = 'INSERT' then
+    if new.day >= v_today then
+      return new;
+    end if;
+  else
+    if new.day >= v_today and old.day >= v_today then
+      return new;
+    end if;
+  end if;
+  if pg_catalog.to_regprocedure('private.my_role()') is null then
+    return new;
+  end if;
+  execute 'select private.my_role()' into v_role;
+  if v_role is distinct from 'field' then
+    return new;
+  end if;
+  raise exception 'daycare_contact_past_office_only: 過去の日の連絡帳は、事務所のログインでだけ書けます（現場の端末は当日だけ）'
+    using errcode = '42501',
+          hint = '事務所（office・admin）のログインで書いてください。見本の確認と印刷は現場でもできます';
+end;
+$fn$;
+comment on function public.daycare_contact_day_guard() is
+  '現場（field）のログインの、過去の日（JST）の daycare_day_notes・daycare_contact_notes への書き込みを 42501・daycare_contact_past_office_only: … で止める。未来の日は役割を問わず 22023。0061。';
+revoke all on function public.daycare_contact_day_guard() from public, anon, authenticated;
+create or replace trigger trg_daycare_day_notes_day_guard
+  before insert or update on public.daycare_day_notes
+  for each row execute function public.daycare_contact_day_guard();
+create or replace trigger trg_daycare_contact_notes_day_guard
+  before insert or update on public.daycare_contact_notes
+  for each row execute function public.daycare_contact_day_guard();
+
+-- ---------- 4. RLS（0044 と同じ4本＋0054 と同じ tenant_only） ----------
 alter table public.daycare_day_notes enable row level security;
 drop policy if exists "read_auth"   on public.daycare_day_notes;
 drop policy if exists "insert_auth" on public.daycare_day_notes;
@@ -186,7 +245,7 @@ notify pgrst, 'reload schema';
 -- ---------------------------------------------------------------------
 -- 適用後の確認（読むだけ。ok なら入った）
 -- ---------------------------------------------------------------------
-select '連絡帳の2表（施設の印が必須・印のトリガ・守り5本ずつ・消す守りと権限なし・1日1行と1人1日1行の一意）' as what,
+select '連絡帳の2表（施設の印が必須・印のトリガ・守り5本ずつ・消す守りと権限なし・1日1行と1人1日1行の一意・過去の日の守り）' as what,
        case when (select pg_catalog.count(*) from information_schema.columns
                    where table_schema = 'public' and column_name = 'tenant_id' and is_nullable = 'NO'
                      and table_name in ('daycare_day_notes', 'daycare_contact_notes')) = 2
@@ -207,4 +266,8 @@ select '連絡帳の2表（施設の印が必須・印のトリガ・守り5本�
                    where schemaname = 'public'
                      and indexname in ('uq_daycare_day_notes', 'uq_daycare_contact_notes')
                      and indexdef like '%USING btree (tenant_id, %WHERE (deleted_at IS NULL)') = 2
+             and (select pg_catalog.count(*) from pg_catalog.pg_trigger
+                   where not tgisinternal and tgname in ('trg_daycare_day_notes_day_guard', 'trg_daycare_contact_notes_day_guard')) = 2
+             and not pg_catalog.has_function_privilege('authenticated', 'public.daycare_contact_day_guard()', 'execute')
+             and not pg_catalog.has_function_privilege('anon', 'public.daycare_contact_day_guard()', 'execute')
             then 'ok' else 'NG' end as result;

@@ -9652,7 +9652,14 @@ export async function recordAbsentBath(p: {
 const CONTACT_MSG = {
   missing: 'デイの連絡帳はまだ使えません（サーバー側の設定待ち）。管理者に連絡してください。',
   offline: '保存できませんでした。通信状態を確認して、もう一度押してください。',
+  pastOffice: '過去の日の連絡帳のひと言は、事務所のログインでだけ書けます（現場の端末は当日だけ）。入れた文は欄に残しています。',
 } as const
+
+/** 過去の日の守り（0061 の daycare_contact_day_guard）で止められた応答か（42501 と文の頭の組で見分ける。許可リスト外の 42501 と分ける） */
+function isContactPastOfficeOnly(res: Res<unknown>): boolean {
+  const e = res.error
+  return e !== null && e.code === '42501' && typeof e.message === 'string' && e.message.startsWith('daycare_contact_past_office_only:')
+}
 
 const DAY_NOTE_COLS = 'id,day,body,rev'
 const CONTACT_NOTE_COLS = 'id,resident_id,day,body,nurse_note,printed_at,rev'
@@ -9693,6 +9700,11 @@ function contactReadError(res: Res<unknown>): DbError {
 /** 連絡帳の書き込み（と書き込みの中の読み直し）の失敗。送信待ちには積まない */
 function contactWriteError(res: Res<unknown>): DbError {
   if (isMissingTable(res)) return new DbError('server', CONTACT_MSG.missing)
+  // 過去の日の守り（現場のログイン）・未来の日の守り（0061）は、許可リスト外・サーバーエラーと別の案内にする
+  if (isContactPastOfficeOnly(res)) return new DbError('server', CONTACT_MSG.pastOffice)
+  if (errCode(res) === '22023' && typeof res.error?.message === 'string' && res.error.message.startsWith('daycare_contact_future:')) {
+    return new DbError('server', DAYCARE_MSG.future)
+  }
   if (isAuthFail(res)) {
     fireAuthExpired()
     return new DbError('auth', MSG.authWrite)
@@ -9894,8 +9906,10 @@ export async function saveDaycareContactField(p: {
 }
 
 /**
- * 印刷した時刻（printed_at）を、印刷した方の行に書く（その列だけ。行が無ければ足す）。最後に印刷した時刻なので rev は照合しない
- * （後から印刷した方の時刻が残ればよい・ひと言の欄には触れない）。失敗しても例外にしない（印刷は止めない）。戻り値は書けた行
+ * 印刷した時刻（printed_at）を、印刷した方の行に書く（その列だけ。行が無ければ足す）。printed_at は「〔印刷する〕で印刷に送った
+ * 最後の時刻」（画面のボタンから呼ぶ時だけ。Ctrl+P・⌘P で刷った時は書かない＝2026-11-09 親の決定）。rev は照合しない
+ * （後から印刷した方の時刻が残ればよい・ひと言の欄には触れない）。失敗しても例外にしない（印刷は止めない。過去の日の守りで
+ * 止まった時も同じ）。戻り値は書けた行
  */
 export async function markDaycareContactPrinted(p: {
   day: string

@@ -2,7 +2,9 @@
 // 実行: npm test（node --experimental-strip-types --test "tests/**/*.test.mjs"）
 //
 // 1. 純ロジック（src/lib/daycareContact.ts）: 記録なし（項目ごと）・入浴の予定なし・再測定・基準外の判定と看護職の欄の出る条件・
-//    印刷前の確かめの対象・来ていない方の紙・読めない項目・ひと言の長さ・印刷する方の既定
+//    印刷前の確かめの対象・来ていない方の紙・読めない項目・ひと言の長さ・印刷する方の既定。
+//    2026-11-09 反証と親の決定: ひと言の欄は空なら見出しごと出さない・欄ごとに値のある一番後の回を合わせる（重1）・
+//    送信待ちを重ねる（中2）・読めない項目と自動の入浴を確かめに並べる（中3・軽5）・入れかけの文と保存値の関係（中1）
 // 2. 静的検査: ルート・入口のボタン・@page の A5 と余白・改ページ・印刷で隠す部品・写真の欄が無い・旗の確かめ・localStorage を使わない・
 //    書き込みは足した関数だけ・変えた欄だけを書く・押す所 44px・判定の記号を紙に載せない
 // 3. 移行 0061 の静的検査: 新しい2つの表・RLS・施設の印の既定と外部キー・一意の索引・既存の表の名前を変えていない／drop していない
@@ -352,7 +354,8 @@ describe('連絡帳の画面・紙（静的検査）', () => {
     assert.match(sheet, /el\.className = 'dcc-print-area'[^]*?document\.body\.appendChild\(el\)/)
     assert.match(css, /\.dcc-print-area \{\s*display: none;/)
     // 印刷するのは選んだ方の紙面だけ
-    assert.match(page, /<DaycareContactPrint ref=\{printRef\} sheets=\{pickedSheets\} \/>/)
+    // 2026-11-09 反証 軽4（固定し直し・意図は同じ）: 氏名を引ける方だけを刷る
+    assert.match(page, /<DaycareContactPrint ref=\{printRef\} sheets=\{printable\} \/>/)
   })
   it('白い紙・黒い文字・色なし（新しい色を足さない）。1枚に収める調整は文字の大きさで（zoom・transform で縮めない）。本文は約11pt', () => {
     const body = css.replace(/\/\*[\s\S]*?\*\//g, '')
@@ -377,7 +380,8 @@ describe('連絡帳の画面・紙（静的検査）', () => {
   it('紙面には判定の記号（↑↓）を載せない・値は数値で（判定は vitalNeedsRecheck とその方の基準）', () => {
     assert.doesNotMatch(sheet, /[↑↓]|LEVEL_MARK|levelMark/)
     assert.doesNotMatch(pure, /[↑↓]|LEVEL_MARK/)
-    assert.match(pure, /vitalNeedsRecheck\(values, p\.target \?\? null, p\.thresholds\)/)
+    // 2026-11-09 反証 重1（固定し直し・意図は同じ）: 欄ごとに合わせた値（v.values）で判定する
+    assert.match(pure, /vitalNeedsRecheck\(v\.values, p\.target \?\? null, p\.thresholds\)/)
     assert.match(page, /thresholds: limits\.lookup\(id, data\.day\)/)
   })
   it('入力解禁は input_enabled_daycare（getKindInputGate(\'daycare\')）。封鎖中は隠さずに押せなくして理由文（見本と印刷は使える）', () => {
@@ -388,7 +392,7 @@ describe('連絡帳の画面・紙（静的検査）', () => {
     assert.match(page, /disabled=\{!notesWritable \|\| busy \|\| !dirty\}/)
     assert.match(page, /kindBlockedMessage\('daycare'\)\}。見本の確認と印刷はできます。/)
     // 〔印刷する（n名）〕は旗で止めない（選んだ方がいない時だけ押せない）
-    assert.match(page, /<button type="button" onClick=\{onPrint\} disabled=\{n === 0\}/)
+    assert.match(page, /<button type="button" onClick=\{onPrint\} disabled=\{n === 0 \|\| printBlocked !== null\}/)
   })
   it('端末に業務データを残さない（localStorage・sessionStorage を使わない）・console に出さない', () => {
     for (const s of [page, sheet, pure]) {
@@ -432,13 +436,18 @@ describe('連絡帳の画面・紙（静的検査）', () => {
     for (const m of page.match(/<button[^>]*className="[^"]*"/g) ?? []) assert.match(m, /min-h-tap/, m)
   })
   it('印刷の前の確かめの小窓は〔戻って書く〕〔このまま印刷する〕・対象は nurseNoteMissing・印刷したら printed_at を書く', () => {
-    assert.match(page, /const nurse = nurseNoteMissing\(pickedSheets, pickedSet\)/)
+    // 2026-11-09 反証 中3・軽5（固定し直し・意図は同じ）: 確かめの対象は印刷に送る方（printable）
+    assert.match(page, /nurse: nurseNoteMissing\(printable, set\)/)
     assert.match(page, />\s*戻って書く\s*</)
     assert.match(page, />\s*このまま印刷する\s*</)
     assert.match(page, /printRef\.current\?\.print\(\)[^]*?markDaycareContactPrinted\(/)
-    // 通信できない時は入れた文を欄に残す（失敗で drafts を消さない）
-    const catchBlock = page.slice(page.indexOf('// 通信できない・封鎖・長すぎる など'), page.indexOf('} finally {', page.indexOf('// 通信できない・封鎖・長すぎる など')))
-    assert.doesNotMatch(catchBlock, /setDrafts/)
+    // 通信できない時は入れた文を欄に残す（失敗で drafts を消さない）。コメントを残した本文で探す（code() はコメントを消す）
+    const rawPage = read('../src/pages/DaycareContactPage.tsx')
+    const at = rawPage.indexOf('// 通信できない・封鎖・長すぎる・過去の日の守り など')
+    assert.ok(at > 0, 'catch の節が見つからない')
+    const catchBlock = rawPage.slice(at, rawPage.indexOf('} finally {', at))
+    assert.ok(catchBlock.length > 20)
+    assert.doesNotMatch(catchBlock, /setDrafts|dropDraft/)
   })
   it('原則11: 日は URL の ?day= で持つ（再読み込みでも同じ日）。選んだ方・入れかけた文は保存しない', () => {
     assert.match(page, /const day = readPersonDay\(search\.get\('day'\), today\)/)
@@ -447,6 +456,7 @@ describe('連絡帳の画面・紙（静的検査）', () => {
 })
 
 describe('移行 0061_daycare_contact.sql（静的検査）', () => {
+  const page2 = code('../src/pages/DaycareContactPage.tsx')
   const raw = read('../supabase/migrations/0061_daycare_contact.sql')
   const m = sqlCode('../supabase/migrations/0061_daycare_contact.sql')
   const T = ['daycare_day_notes', 'daycare_contact_notes']
@@ -485,12 +495,37 @@ describe('移行 0061_daycare_contact.sql（静的検査）', () => {
     assert.match(m, /create unique index if not exists uq_daycare_day_notes\s+on public\.daycare_day_notes \(tenant_id, day\)\s+where deleted_at is null;/)
     assert.match(m, /create unique index if not exists uq_daycare_contact_notes\s+on public\.daycare_contact_notes \(tenant_id, resident_id, day\)\s+where deleted_at is null;/)
   })
-  it('rev・updated_at・変更の記録のトリガ（新しいトリガ関数は作らない）', () => {
+  it('rev・updated_at・変更の記録のトリガ（足すトリガ関数は過去の日の守りの1つだけ）', () => {
     for (const t of T) {
       assert.match(m, new RegExp(`create or replace trigger trg_updated_${t}\\s+before update on public\\.${t}\\s+for each row execute function public\\.set_updated_at_rev\\(\\);`))
       assert.match(m, new RegExp(`create or replace trigger trg_history_${t}\\s+after update on public\\.${t}\\s+for each row execute function public\\.record_history_capture\\('day'\\);`))
     }
-    assert.doesNotMatch(m, /create (or replace )?function/)
+    // 2026-11-09 反証 軽3（固定し直し・意図は同じ）: 作る関数は過去の日の守りのトリガ関数だけ
+    assert.deepEqual(m.match(/create (or replace )?function [\w.]+/g), ['create or replace function public.daycare_contact_day_guard'])
+  })
+  it('過去の日の守り（0042・0043・0046 と同じ作法）: 現場はその日だけ・過去の日は事務所・未来の日は誰も・実行の権限は誰にも渡さない', () => {
+    const fn = m.slice(m.indexOf('create or replace function public.daycare_contact_day_guard()'), m.indexOf('$fn$;') + 5)
+    assert.match(fn, /returns trigger\s+language plpgsql\s+security definer\s+set search_path = ''/)
+    assert.match(fn, /v_today date := \(pg_catalog\.now\(\) at time zone 'Asia\/Tokyo'\)::date;/)
+    assert.match(fn, /if new\.day > v_today and \(tg_op = 'INSERT' or new\.day is distinct from old\.day\) then\s+raise exception 'daycare_contact_future: [^']+'\s+using errcode = '22023';/)
+    assert.match(fn, /if pg_catalog\.to_regprocedure\('private\.my_role\(\)'\) is null then\s+return new;/)
+    assert.match(fn, /if v_role is distinct from 'field' then\s+return new;/)
+    assert.match(fn, /raise exception 'daycare_contact_past_office_only: [^']+'\s+using errcode = '42501'/)
+    assert.match(m, /revoke all on function public\.daycare_contact_day_guard\(\) from public, anon, authenticated;/)
+    for (const t of T) {
+      assert.match(m, new RegExp(`create or replace trigger trg_${t}_day_guard\\s+before insert or update on public\\.${t}\\s+for each row execute function public\\.daycare_contact_day_guard\\(\\);`))
+    }
+    // 戻し方に関数の drop も書いてある・最後の確かめに守りが入っている
+    assert.match(raw, /--\s+drop function if exists public\.daycare_contact_day_guard\(\);/)
+    assert.match(m, /not pg_catalog\.has_function_privilege\('authenticated', 'public\.daycare_contact_day_guard\(\)', 'execute'\)/)
+    // 画面も同じ条件で欄を押せなくする（理由の文つき）・db.ts は守りの誤りを別の案内にする
+    assert.match(page2, /const dayWritable = day === today \|\| \(day < today && canEditPastDaycareTimes\(role\)\)/)
+    assert.match(page2, /const notesWritable = gateOpen && !missing && data !== null && data\.notesOk && day <= today && dayWritable/)
+    assert.match(page2, /\{day < today && !dayWritable \? \(/)
+    assert.match(read('../src/pages/DaycareContactPage.tsx'), /const MSG_PAST_OFFICE = '過去の日の連絡帳のひと言は、事務所のログインでだけ書けます（現場の端末は当日だけ）。/)
+    const db = code('../src/lib/db.ts')
+    assert.match(db, /e\.code === '42501' && typeof e\.message === 'string' && e\.message\.startsWith\('daycare_contact_past_office_only:'\)/)
+    assert.match(db, /if \(isContactPastOfficeOnly\(res\)\) return new DbError\('server', CONTACT_MSG\.pastOffice\)/)
   })
   it('RLS: 0044 と同じ4本＋0054 と同じ tenant_only・delete のポリシーなし・anon は何も無し・delete と truncate の権限を外す', () => {
     for (const t of T) {
@@ -533,3 +568,264 @@ describe('移行 0061_daycare_contact.sql（静的検査）', () => {
     assert.match(read('./daycare-contact-pg.mjs'), /daycare_contact_notes/)
   })
 })
+
+// ══════════════════════════════════════════════════════════════
+// 2026-11-09 反証と親の決定（連絡帳 b499acf の直し）
+// ══════════════════════════════════════════════════════════════
+
+if (C !== null) {
+  describe('親の決定: 「記録なし」は記録の項目だけ・ひと言の欄は空なら見出しごと出さない', () => {
+    it('職員より: 共通の一文も個別のひと言も空なら出さない（共通の一文が空の日も、個別のひと言だけなら出す）', () => {
+      const empty = C.buildContactSheet(input())
+      assert.equal(C.staffSectionShown(empty), false)
+      const onlyPersonal = C.buildContactSheet(input({ note: { body: '笑顔で過ごされました。', nurse_note: null } }))
+      assert.equal(C.staffSectionShown(onlyPersonal), true)
+      assert.deepEqual(onlyPersonal.staff, { common: null, personal: '笑顔で過ごされました。' })
+      const onlyCommon = C.buildContactSheet(input({ dayNote: '秋の歌を歌いました。' }))
+      assert.equal(C.staffSectionShown(onlyCommon), true)
+      // 来ていない方は共通の一文を載せない＝個別のひと言が無ければ出さない
+      assert.equal(C.staffSectionShown(C.buildContactSheet(input({ state: 'absent', dayNote: '秋の歌を歌いました。' }))), false)
+      // ひと言を読めなかった時は「読み込めませんでした」で出す（空とは違う）
+      assert.equal(C.staffSectionShown(C.buildContactSheet(input({ notesOk: false }))), true)
+    })
+    it('看護職より: 基準外で、看護職のひと言がある時だけ（空なら出さない＝印刷の前の注意の対象のまま）', () => {
+      const hotEmpty = C.buildContactSheet(input({ vitals: [vital({ temp: 38.2 })] }))
+      assert.equal(hotEmpty.abnormal, true)
+      assert.equal(C.nurseSectionShown(hotEmpty), false)
+      assert.deepEqual(C.nurseNoteMissing([hotEmpty], new Set([1])), [1])
+      const hotWritten = C.buildContactSheet(input({ vitals: [vital({ temp: 38.2 })], note: { body: null, nurse_note: '受診をおすすめします' } }))
+      assert.equal(C.nurseSectionShown(hotWritten), true)
+      const normal = C.buildContactSheet(input({ vitals: [vital({ temp: 36.5 })], note: { body: null, nurse_note: '書いてあっても基準内なら出さない' } }))
+      assert.equal(C.nurseSectionShown(normal), false)
+    })
+    it('紙面の部品は、ひと言の欄に「記録なし」を使わない（記録の項目だけ）', () => {
+      const view = code('../src/components/print/DaycareContactSheet.tsx')
+      assert.doesNotMatch(view, /NO_RECORD|記録なし/)
+      assert.match(view, /\{staffSectionShown\(sheet\) \? \(/)
+      assert.match(view, /\{nurseSectionShown\(sheet\) \? \(/)
+    })
+  })
+
+  describe('反証 重1: 再測定で一部の欄だけを入れた方は、欄ごとに値のある一番後の回を合わせ、その値で基準外を判定する', () => {
+    it('1回目は全部・再測定は血圧だけ → 体温・脈拍・SpO2 は1回目、血圧は再測定。注記はそのまま', () => {
+      const s = C.buildContactSheet(
+        input({
+          vitals: [
+            vital({ id: 41, temp: 36.6, sys_bp: 172, dia_bp: 96, pulse: 78, spo2: 97, client_key: `dc:${DAY}:1:1` }),
+            vital({ id: 42, sys_bp: 138, dia_bp: 82, client_key: `dc:${DAY}:1:2` }),
+          ],
+        }),
+      )
+      assert.deepEqual(s.vitals.cells.map((c) => c.value), ['36.6℃', '138/82 mmHg', '78 回/分', '97%'])
+      assert.equal(s.vitals.recheck, true)
+      // 合わせた値は基準内（1回目の血圧 172/96 では判定しない）
+      assert.equal(s.abnormal, false)
+    })
+    it('1回目 37.8 と 182/95・再測定は体温だけ（36.8）→ 体温は再測定、血圧は1回目のまま＝血圧で基準外', () => {
+      const s = C.buildContactSheet(
+        input({
+          vitals: [
+            vital({ id: 51, temp: 37.8, sys_bp: 182, dia_bp: 95, client_key: `dc:${DAY}:1:1` }),
+            vital({ id: 52, temp: 36.8, client_key: `dc:${DAY}:1:2` }),
+          ],
+        }),
+      )
+      assert.equal(s.vitals.cells[0].value, '36.8℃')
+      assert.equal(s.vitals.cells[1].value, '182/95 mmHg')
+      assert.equal(s.vitals.recheck, true)
+      assert.equal(s.abnormal, true)
+    })
+    it('血圧は上と下を組で同じ回から取る（再測定で上だけなら、下は前の回と混ぜずに「記録なし」）', () => {
+      const m = C.mergeVitalSlots([
+        { seq: 1, vals: { temp: 36.5, sys_bp: 160, dia_bp: 92, pulse: 70, spo2: 96 } },
+        { seq: 2, vals: { temp: null, sys_bp: 140, dia_bp: null, pulse: null, spo2: null } },
+      ])
+      assert.deepEqual(m.values, { temp: 36.5, sys_bp: 140, dia_bp: null, pulse: 70, spo2: 96 })
+      assert.equal(C.sheetVitalCells(m.values)[1].value, '上 140／下 記録なし')
+      // 回の並びは回の番号の順（渡す順に左右されない）・値の無い回は数えない
+      const r = C.mergeVitalSlots([
+        { seq: 3, vals: { temp: null, sys_bp: null, dia_bp: null, pulse: null, spo2: null } },
+        { seq: 2, vals: { temp: 37.0, sys_bp: null, dia_bp: null, pulse: null, spo2: null } },
+        { seq: 1, vals: { temp: 38.0, sys_bp: null, dia_bp: null, pulse: 88, spo2: null } },
+      ])
+      assert.deepEqual(r, { values: { temp: 37.0, sys_bp: null, dia_bp: null, pulse: 88, spo2: null }, recheck: true })
+      assert.deepEqual(C.mergeVitalSlots([]), { values: null, recheck: false })
+    })
+  })
+
+  describe('反証 中2: 送信待ちの記録を紙面に重ねる（今日の画面と同じ決まり）・重ねた方は見本に「送信待ちを含む」', () => {
+    it('バイタル: 送信待ちにだけある回・サーバーの回に重ねた値（キーごとの pendingRow）', () => {
+      const pend = { [`dc:${DAY}:1:2`]: { values: { temp: 37.9 } } }
+      const s = C.buildContactSheet(
+        input({ vitals: [vital({ id: 61, temp: 36.5, pulse: 70, client_key: `dc:${DAY}:1:1` })], vitalPending: (k) => pend[k] ?? null }),
+      )
+      assert.equal(s.vitals.cells[0].value, '37.9℃')
+      assert.equal(s.vitals.cells[2].value, '70 回/分')
+      assert.equal(s.vitals.recheck, true)
+      assert.equal(s.abnormal, true)
+      assert.deepEqual(s.pendingLabels, ['バイタル'])
+      // サーバーの回の値を送信待ちで直した時も、その値
+      const over = C.buildContactSheet(input({ vitals: [vital({ temp: 36.5 })], vitalPending: (k) => (k === `dc:${DAY}:1:1` ? { values: { temp: 36.9 } } : null) }))
+      assert.equal(over.vitals.cells[0].value, '36.9℃')
+      assert.deepEqual(over.pendingLabels, ['バイタル'])
+      // 送信待ちが無ければ印も無い
+      assert.deepEqual(C.buildContactSheet(input({ vitals: [vital({ temp: 36.5 })] })).pendingLabels, [])
+    })
+    it('昼食: 送っている途中（pending）の値だけ重ねる。止まった値（食い違い・拒まれた）は重ねない', () => {
+      const p = C.buildContactSheet(input({ lunch: null, lunchPending: { state: 'pending', values: { main_amount: 8, side_amount: 6 } } }))
+      assert.equal(itemOf(p, 'お食事'), '昼食 主食 8割・副食 6割')
+      assert.deepEqual(p.pendingLabels, ['お食事'])
+      const stopped = C.buildContactSheet(input({ lunch: null, lunchPending: { state: 'conflict', values: { main_amount: 8 } } }))
+      assert.equal(itemOf(stopped, 'お食事'), '記録なし')
+      assert.deepEqual(stopped.pendingLabels, [])
+    })
+    it('活動: 送信待ちの追加は出す・止まっていない取り消しは出さない（activityShownCells と同じ）', () => {
+      const rows = [{ id: 7, resident_id: 1, day: DAY, label: '体操', participation: 'full', note: null, recorded_by: null, rev: 1 }]
+      const add = C.buildContactSheet(input({ activities: rows, activityPending: [{ kind: 'add', residentId: 1, day: DAY, label: '歌', participation: 'partial', stopped: false }] }))
+      assert.equal(itemOf(add, '活動'), '体操・歌（一部）')
+      assert.deepEqual(add.pendingLabels, ['活動'])
+      const del = C.buildContactSheet(input({ activities: rows, activityPending: [{ kind: 'update', rowId: 7, participation: null, deleted: true, stopped: false }] }))
+      assert.equal(itemOf(del, '活動'), '記録なし')
+      // ほかの方の送信待ちは重ねない
+      const other = C.buildContactSheet(input({ activities: rows, activityPending: [{ kind: 'add', residentId: 2, day: DAY, label: '歌', participation: 'full', stopped: false }] }))
+      assert.equal(itemOf(other, '活動'), '体操')
+      assert.deepEqual(other.pendingLabels, [])
+    })
+    it('機能訓練: サーバーに無く送信待ちの追加だけある時、紙は「記録なし」のまま・見本の「送信待ちを含む」と印刷前の確かめに出す（2026-11-09 親の決定）', () => {
+      const s = C.buildContactSheet(input({ training: [], trainingPending: [{ kind: 'add', table: 'daycare_training_sessions', residentId: 1, day: DAY, stopped: false }] }))
+      assert.equal(itemOf(s, '機能訓練'), '記録なし')
+      assert.doesNotMatch(JSON.stringify(s.items), /送信待ち/)
+      assert.deepEqual(s.pendingLabels, ['機能訓練'])
+      assert.equal(s.trainingQueued, true)
+      assert.deepEqual(C.trainingQueuedPicked([s], new Set([1])), [1])
+      assert.deepEqual(C.trainingQueuedPicked([s], new Set()), [])
+      assert.equal(C.TRAINING_PENDING_TEXT, undefined)
+      // サーバーに記録があれば送信待ちの追加は数えない（記録を出す）
+      const landed = C.buildContactSheet(input({ training: [session()], trainingPending: [{ kind: 'add', table: 'daycare_training_sessions', residentId: 1, day: DAY, stopped: false }] }))
+      assert.equal(itemOf(landed, '機能訓練'), '実施（立ち上がり・20分）')
+      assert.equal(landed.trainingQueued, false)
+      // 配置の送信待ち・ほかの方の送信待ちは数えない
+      const staffing = C.buildContactSheet(input({ training: [], trainingPending: [{ kind: 'add', table: 'daycare_staffing', day: DAY, stopped: false }] }))
+      assert.equal(itemOf(staffing, '機能訓練'), '記録なし')
+      assert.equal(staffing.trainingQueued, false)
+      const other = C.buildContactSheet(input({ training: [], trainingPending: [{ kind: 'add', table: 'daycare_training_sessions', residentId: 2, day: DAY, stopped: false }] }))
+      assert.equal(other.trainingQueued, false)
+      assert.deepEqual(other.pendingLabels, [])
+      // 来ていない方は記録の欄を出さないので数えない
+      assert.equal(C.buildContactSheet(input({ state: 'absent', training: [], trainingPending: [{ kind: 'add', table: 'daycare_training_sessions', residentId: 1, day: DAY, stopped: false }] })).trainingQueued, false)
+    })
+    it('画面: 印刷前の確かめの小窓に「送信待ちの機能訓練がある方（送信が済んでから刷ると紙に載ります）」を並べる', () => {
+      const page = read('../src/pages/DaycareContactPage.tsx')
+      assert.match(page, /trainingQueued: trainingQueuedPicked\(printable, set\)/)
+      assert.match(page, /check\.trainingQueued\.length > 0 \|\|/)
+      assert.match(page, /送信待ちの機能訓練がある方（送信が済んでから刷ると紙に載ります。/)
+      assert.match(page, /\{confirm\.trainingQueued\.map\(\(rid\) => \(/)
+    })
+    it('画面: 今日の画面と同じ関数で送信待ちを渡し、見本の下に「送信待ちを含む」を出す（紙には出さない）', () => {
+      const page = code('../src/pages/DaycareContactPage.tsx')
+      assert.match(page, /vitalPending: \(key\) => pendingRow\('vitals', \{ routine: false, clientKey: key, residentId: id, day: data\.day, kind: 'observation' \}\)/)
+      assert.match(page, /lunchPending: pendingRow\('meals', \{ residentId: id, day: data\.day, slot: 'lunch' \}\)/)
+      assert.match(page, /const activityPending = data\.activities === null \? \[\] : pendingActivityOps\(\)/)
+      assert.match(page, /const trainingPending = data\.training === null \? \[\] : pendingTrainingOps\(\)/)
+      assert.match(page, /送信待ちを含む（\{sheet\.pendingLabels\.join\('・'\)\}）/)
+      // 送信待ちの数が変われば描き直し、減ったら静かに読み直す
+      assert.match(page, /const off = queueSubscribe\(\(n\) => \{\s*setQueueTick\(\(x\) => x \+ 1\)\s*if \(n < last\)/)
+      const pure = code('../src/lib/daycareContact.ts')
+      assert.match(pure, /import \{ activityShownCells, daycareVitalSlotsWithPending, lunchShownWith, vitalShownValues \} from '\.\/daycareProgress\.ts'/)
+      assert.doesNotMatch(code('../src/components/print/DaycareContactSheet.tsx'), /pendingLabels|送信待ち/)
+    })
+  })
+
+  describe('反証 中3・軽5: 読めない項目・自動の入浴を印刷の前に確かめる', () => {
+    it('読めなかった項目の名前（来た方）・ひと言だけ（来ていない方）・確かめの対象', () => {
+      const s = C.buildContactSheet(input({ vitalsOk: false, bathsOk: false, intakeOk: false, activities: null, training: null, notesOk: false }))
+      assert.deepEqual(s.unreadLabels, ['バイタル', '入浴', 'お食事・水分', '活動', '機能訓練', 'ひと言'])
+      assert.deepEqual(C.buildContactSheet(input({ state: 'absent', vitalsOk: false, notesOk: false })).unreadLabels, ['ひと言'])
+      assert.deepEqual(C.buildContactSheet(input()).unreadLabels, [])
+      const ok = C.buildContactSheet(input({ residentId: 2 }))
+      assert.deepEqual(C.unreadPicked([s, ok], new Set([1, 2])), [{ residentId: 1, labels: s.unreadLabels }])
+      assert.deepEqual(C.unreadPicked([s, ok], new Set([2])), [])
+      // バイタルが読めない方は、看護職のひと言が要るか分からない旨を出す
+      assert.deepEqual(C.vitalsUnreadPicked([s, ok], new Set([1, 2])), [1])
+    })
+    it('入浴が自動の記録のまま（12:30 の自動の行）の方を並べる。紙の文言は今のまま・中止の行は除く', () => {
+      const auto = C.buildContactSheet(input({ bath: bath({ auto: true }) }))
+      assert.equal(auto.autoBath, true)
+      assert.equal(itemOf(auto, '入浴'), '入浴しました（全身浴）')
+      assert.deepEqual(C.autoBathPicked([auto], new Set([1])), [1])
+      assert.equal(C.buildContactSheet(input({ bath: bath({ auto: false }) })).autoBath, false)
+      assert.equal(C.bathIsAuto(bath({ auto: true, result: 'cancel', cancel_reason: 'absent' })), false)
+      assert.equal(C.sheetBathText(bath({ auto: true, result: 'cancel', cancel_reason: 'absent' }), true, true), '入浴しませんでした（欠席）')
+    })
+    it('画面: 読めない項目がある日は上に帯・確かめの小窓に並べて〔最新に更新〕をすすめる・自動の入浴も並べる', () => {
+      const page = read('../src/pages/DaycareContactPage.tsx')
+      assert.match(page, /\{unreadDay\.length > 0 && board\.rows\.length > 0 \? \(/)
+      assert.match(page, /の記録を読み込めませんでした（紙には「読み込めませんでした」と載ります）。通信状態を確認して、〔最新に更新〕を押してから印刷してください。/)
+      assert.match(page, /vitalsUnread: vitalsUnreadPicked\(printable, set\)/)
+      assert.match(page, /unread: unreadPicked\(printable, set\)/)
+      assert.match(page, /autoBath: autoBathPicked\(printable, set\)/)
+      assert.match(page, /バイタルを読み込めないため、基準を外れたかを確かめられない方（看護職のひと言が要るか分かりません）/)
+      assert.match(page, /入浴が自動の記録のままの方/)
+      assert.match(page, /setReloadKey\(\(k\) => k \+ 1\)[^]*?最新に更新/)
+    })
+  })
+
+  describe('反証 中1: 入れかけの文が他の端末の保存を黙って上書きしない', () => {
+    it('入れかけの文・入れ始めた時の保存値・いまの保存値の関係', () => {
+      // 保存値が変わっていない
+      assert.equal(C.draftAgainstSaved('入れかけ', 'もと', 'もと'), 'keep')
+      assert.equal(C.draftAgainstSaved('入れかけ', null, ''), 'keep')
+      // 保存値が変わったが、入れかけは入れ始めた時のまま・または新しい保存値と同じ → 入れかけを外す
+      assert.equal(C.draftAgainstSaved('もと', 'もと', '別の端末の文'), 'drop')
+      assert.equal(C.draftAgainstSaved(' 別の端末の文 ', 'もと', '別の端末の文'), 'drop')
+      // 違う文を入れていて、保存値も変わった → 知らせる（上書きしない）
+      assert.equal(C.draftAgainstSaved('私の文', 'もと', '別の端末の文'), 'changed')
+      assert.equal(C.draftAgainstSaved('私の文', null, '別の端末の文'), 'changed')
+    })
+    it('画面: 入れ始めた時の保存の行を欄ごとに控え、それを保存の基準にする（いまの行で上書きしない）', () => {
+      const page = code('../src/pages/DaycareContactPage.tsx')
+      assert.match(page, /const onInput = \(key: FieldKey, v: string\) => \{\s*if \(!\(key in draftBase\)\) \{/)
+      assert.match(page, /const base = key in draftBase \? draftBase\[key\]\.row : rowOf\(key\)/)
+      assert.match(page, /saveDaycareDayNote\(\{ day: target, text, base: base as DaycareDayNote \| null/)
+      assert.match(page, /saveDaycareContactField\(\{[^}]*base: base as DaycareContactNote \| null/)
+      // 読み直し・保存・印刷の後に行を差し替えるたびに見て、変わっていたら欄の下に知らせる
+      assert.match(page, /const rel = draftAgainstSaved\(drafts\[key\], base\.value, saved\)/)
+      assert.match(page, /setMsg\(key, \{ tone: 'warn', text: changedText\(saved\) \}\)/)
+      assert.match(page, /\}, \[data\]\)/)
+      // 日を切り替えたら基準も外す
+      assert.match(page, /setDrafts\(\{\}\)\s*setDraftBase\(\{\}\)/)
+    })
+  })
+
+  describe('反証 軽4: 名簿が読めない時は印刷を止めて理由を出す（「利用者ID 12 様」と刷らない）', () => {
+    it('印刷に送るのは氏名を引ける方だけ・読めない／読み込み中・氏名が無い方がいる時は〔印刷する〕を押せなくして理由', () => {
+      const page = code('../src/pages/DaycareContactPage.tsx')
+      assert.match(page, /const printable = useMemo\(\(\) => \(roster === 'ok' \? pickedSheets\.filter\(\(s\) => nameKnown\(s\.residentId\)\) : \[\]\)/)
+      assert.match(page, /disabled=\{n === 0 \|\| printBlocked !== null\}/)
+      assert.match(page, /roster === 'loading'\s*\? MSG_ROSTER_LOADING\s*: roster === 'failed'\s*\? MSG_ROSTER_FAILED/)
+      assert.match(page, /名簿に氏名が無い方がいるため、印刷できません/)
+      assert.match(read('../src/pages/DaycareContactPage.tsx'), /const MSG_ROSTER_FAILED = '利用者の名簿を読み込めないため、印刷できません（氏名を刷れません）。/)
+      assert.match(page, /if \(printable\.length === 0\) return/)
+    })
+  })
+
+  describe('反証 軽1・軽2: printed_at の意味・変更の記録の呼び名', () => {
+    it('printed_at は「〔印刷する〕で印刷に送った時刻」（Ctrl+P・⌘P では書かない）とコメントに書いてある', () => {
+      assert.match(read('../supabase/migrations/0061_daycare_contact.sql'), /〔印刷する〕で印刷に送った最後の時刻/)
+      assert.match(read('../src/lib/db.ts'), /printed_at は「〔印刷する〕で印刷に送った\n \* 最後の時刻」/)
+      assert.match(read('../src/lib/daycareContact.ts'), /〔印刷する〕で印刷に送った最後の時刻（ISO）/)
+    })
+    it('変更の記録の表と列の呼び名（日本語）', async () => {
+      const HV = await import('../src/lib/historyView.ts')
+      assert.equal(HV.HISTORY_TABLE_LABEL.daycare_day_notes, 'デイの連絡帳（共通の一文）')
+      assert.equal(HV.HISTORY_TABLE_LABEL.daycare_contact_notes, 'デイの連絡帳のひと言')
+      assert.equal(HV.historyColumnLabel('daycare_day_notes', 'body'), '全員共通の一文')
+      assert.equal(HV.historyColumnLabel('daycare_contact_notes', 'body'), '個別のひと言')
+      assert.equal(HV.historyColumnLabel('daycare_contact_notes', 'nurse_note'), '看護職のひと言')
+      assert.equal(HV.historyColumnLabel('daycare_contact_notes', 'printed_at'), '印刷した時刻')
+      assert.equal(HV.historyColumnLabel('daycare_contact_notes', 'day'), '日付')
+      // 申し送りの本文の呼び名は変えない
+      assert.equal(HV.historyColumnLabel('notes', 'body'), '本文')
+    })
+  })
+}

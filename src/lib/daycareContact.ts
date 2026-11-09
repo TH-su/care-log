@@ -4,24 +4,33 @@
 // ・材料は今ある読み込み（今日の画面と同じ loadDaycareDayParts の読み手＋fetchTrainingSessions）と、連絡帳の2表（0061）
 //   （その日の全員共通の一文 daycare_day_notes・1人1日のひと言 daycare_contact_notes）。新しい RPC は作らない
 // ・紙面の並び（DESIGN v1 §7・写真は載せない）: 見出し（事業所名・「連絡帳」・日付）／「◯◯ 様」／今日のご様子（体温・血圧・脈拍・
-//   SpO2 の表。再測定がある時は最後の回の値と「※ 再測定した値を載せています」）／入浴・お食事・水分・活動・機能訓練／
+//   SpO2 の表。再測定がある時は「※ 再測定した値を載せています」）／入浴・お食事・水分・活動・機能訓練／
 //   職員より（共通の一文＋個別のひと言）／看護職より（基準を外れたバイタルがある時だけ）／ご家族より（手書きの罫線4本）／
 //   下端（記入者・次回のご利用日。どちらも手書きの欄）
-// ・記録が無い項目は必ず「記録なし」（空の欄・「—」・「異常なし」にしない）。読めなかった項目は「読み込めませんでした」
-//   （記録が無いことと取り違えない）。入浴の予定が無い日は「今日は入浴の予定はありませんでした」
+// ・「記録なし」は記録の項目（バイタル・食事・水分・入浴・活動・訓練）にだけ使う（空の欄・「—」・「異常なし」にしない）。
+//   読めなかった項目は「読み込めませんでした」（記録が無いことと取り違えない）。入浴の予定が無い日は「今日は入浴の予定はありませんでした」
+// ・ひと言の欄（職員より＝共通の一文・個別のひと言、看護職より）は、空なら見出しごと紙面に出さない（「記録なし」と刷らない。
+//   2026-11-09 親の決定）。基準外なのに看護職のひと言が空の時は、印刷の前に画面が注意を出す（それでも刷る時は欄を出さない）
+// ・バイタルは欄ごとに「値のある一番後の回」の値を合わせて載せ、その合わせた値で基準外を判定する（血圧は上と下を組で同じ回から。
+//   2026-11-09 反証 重1）。再測定の注記は値のある回が2つ以上の時
+// ・送信待ちの記録（この端末で入れて、まだ届いていない値）は、今日の画面と同じ決まり（daycareProgress.ts の lunchShownWith・
+//   daycareVitalSlotsWithPending・vitalShownValues・activityShownCells）で紙面に重ねる（2026-11-09 反証 中2）。訓練の送信待ちの追加は
+//   中身を読めないので紙は「記録なし」のままにし、見本の「送信待ちを含む」と印刷の前の確かめにだけ出す（2026-11-09 親の決定）
 // ・来ていない方（休み・入院中・まだ到着していない方）の紙は作れるが、本文は「本日はお休みでした」などの1文で、記録の欄を出さない
 // ・紙面には判定の記号（↑↓）を載せない。基準を外れたかは今の vitalNeedsRecheck（利用者ごとの基準が優先）で判定し、値は数値で出す
 // 個人情報は扱わない（数値と記録の言葉だけ。氏名は画面が渡し、ここでは並べるだけ）。
 
 import { BATH_CANCEL_REASON_LABEL, BATH_RESULT_LABEL, MEAL_STATUS_LABEL } from './types.ts'
 import type { BathRecord, FluidIntake, Meal } from './types.ts'
-import { DAYCARE_VITAL_FIELDS, daycareBathStatus, daycareVitalSlots, vitalNeedsRecheck } from './daycare.ts'
+import { DAYCARE_VITAL_FIELDS, daycareBathStatus, vitalNeedsRecheck } from './daycare.ts'
 import type { AttendanceState, DaycareVitalField, KeyedVital } from './daycare.ts'
-import { activitiesOf, activityText } from './daycareActivity.ts'
+import { DAYCARE_ACTIVITY_CHIPS, activityText, participationOf } from './daycareActivity.ts'
 import type { DaycareActivity } from './daycareActivity.ts'
 import { TRAINING_CANCEL_REASON_LABEL, sessionOf } from './daycareTraining.ts'
 import type { DaycareTrainingSession } from './daycareTraining.ts'
 import { fluidTotalOf } from './daycarePerson.ts'
+import { activityShownCells, daycareVitalSlotsWithPending, lunchShownWith, vitalShownValues } from './daycareProgress.ts'
+import type { ActivityPendingLike } from './daycareProgress.ts'
 import type { ResidentTargets } from './vitalAlerts.ts'
 import type { VitalThresholds } from './vitalThresholds.ts'
 
@@ -53,7 +62,7 @@ export interface DaycareContactNote {
   body: string | null
   /** 看護職のひと言 */
   nurse_note: string | null
-  /** 最後に印刷した時刻（ISO） */
+  /** 〔印刷する〕で印刷に送った最後の時刻（ISO）。Ctrl+P・⌘P で刷った時は書かない（2026-11-09 親の決定） */
   printed_at: string | null
   rev: number
 }
@@ -90,11 +99,25 @@ export function contactNoteOf(list: readonly DaycareContactNote[], residentId: n
   return list.find((n) => n.resident_id === residentId && n.day === day) ?? null
 }
 
+/**
+ * 入れかけの文と、入れ始めた時の保存値・いまの保存値の関係（2026-11-09 反証 中1: 入れかけの文が他の端末の保存を黙って上書きしない）。
+ *   keep    … 入れ始めた後に保存値は変わっていない（そのまま入れ続けてよい）
+ *   drop    … 保存値は変わったが、入れかけの文は入れ始めた時のまま・または新しい保存値と同じ（入れかけを捨てて新しい保存値を出す）
+ *   changed … 保存値が変わり、入れかけの文もそれと違う（欄の下に知らせを出す。保存の基準は入れ始めた時のままにして上書きしない）
+ */
+export function draftAgainstSaved(draft: string, base: string | null, saved: string | null): 'keep' | 'drop' | 'changed' {
+  const b = normalizeNoteText(base)
+  const s = normalizeNoteText(saved)
+  if (b === s) return 'keep'
+  const d = normalizeNoteText(draft)
+  return d === b || d === s ? 'drop' : 'changed'
+}
+
 // ══════════════════════════════════════════════════════════════
 // 紙面の組み立て
 // ══════════════════════════════════════════════════════════════
 
-/** 記録が無い項目の言葉（空の欄・「—」・「異常なし」にしない） */
+/** 記録が無い項目の言葉（記録の項目にだけ使う。空の欄・「—」・「異常なし」にしない） */
 export const NO_RECORD = '記録なし'
 /** 読めなかった項目の言葉（記録が無いことと取り違えない） */
 export const UNREAD = '読み込めませんでした'
@@ -140,15 +163,33 @@ export interface ContactSheet {
   vitals: { kind: 'ok'; cells: SheetVitalCell[]; recheck: boolean } | { kind: 'unread' } | null
   /** 入浴・お食事・水分・活動・機能訓練（来ていない方は空） */
   items: SheetItem[]
-  /** 職員より（共通の一文・個別のひと言。両方無い時は空＝紙面は「記録なし」） */
+  /** 職員より（共通の一文・個別のひと言。両方無い時は見出しごと出さない） */
   staff: { common: string | null; personal: string | null }
   /** ひと言（連絡帳の2表）を読めなかった（職員より・看護職よりは「読み込めませんでした」） */
   notesUnread: boolean
-  /** 基準を外れたバイタルがある（最後の回の値で判定）。看護職の欄を出す */
+  /** 基準を外れたバイタルがある（欄ごとに合わせた値で判定） */
   abnormal: boolean
-  /** 看護職のひと言（abnormal の時だけ紙面に出す。空なら「記録なし」） */
+  /** 看護職のひと言（abnormal の時だけ。空なら null＝看護職の欄は出さない） */
   nurse: string | null
+  /** 送信待ちの値を重ねた項目の名前（画面の見本に「送信待ちを含む」と出す。紙には出さない） */
+  pendingLabels: string[]
+  /** 読めなかった項目の名前（印刷の前の確かめに並べる） */
+  unreadLabels: string[]
+  /** 入浴が自動の記録（12:30 の自動の行・まだ人が確かめていない）のまま（印刷の前の確かめに並べる。紙の文言は変えない） */
+  autoBath: boolean
+  /**
+   * 機能訓練の記録がサーバーに無く、この端末の送信待ちの追加だけがある（紙は「記録なし」のまま＝送信待ちの中身は読めないため。
+   * 印刷の前の確かめに「送信待ちの機能訓練がある方」として並べる＝2026-11-09 親の決定）
+   */
+  trainingQueued: boolean
 }
+
+/** 昼食の送信待ち（db.ts の pendingRow('meals', …) の形） */
+export type LunchPendingLike = { state: string; values: Record<string, unknown> } | null
+/** 測定の回の送信待ち（db.ts の pendingRow('vitals', …) の形） */
+export type VitalPendingLike = { values: Record<string, unknown> } | null
+/** 機能訓練の送信待ち（db.ts の PendingTrainingOp の形の一部） */
+export type TrainingPendingLike = { kind: string; table: string; residentId?: number; day?: string }
 
 /** 紙面の材料（1人分）。一覧の読み込みをそのまま渡す（ほかの方の行が混ざってもその方の分だけ使う） */
 export interface ContactSheetInput {
@@ -162,6 +203,8 @@ export interface ContactSheetInput {
   /** その日のデイの測定（生きている行・client_key つき） */
   vitals: readonly KeyedVital[]
   vitalsOk: boolean
+  /** 測定の回のキー（'dc:<日>:<利用者id>:<回>'）ごとの送信待ち（省くと送信待ちなし） */
+  vitalPending?: (key: string) => VitalPendingLike
   /** 個別の目標（SpO2 の下限など・無ければ null） */
   target: ResidentTargets | null | undefined
   /** その方・その日の基準（useVitalLimits の lookup。利用者ごとの基準が優先） */
@@ -171,14 +214,20 @@ export interface ContactSheetInput {
   bathsOk: boolean
   /** その方のその日の昼食（無ければ null） */
   lunch: Pick<Meal, 'main_amount' | 'side_amount' | 'status'> | null
+  /** その方のその日の昼食の送信待ち（省くと送信待ちなし） */
+  lunchPending?: LunchPendingLike
   /** その日の水分（全員分でよい） */
   fluids: readonly Pick<FluidIntake, 'resident_id' | 'taken_on' | 'amount_ml'>[]
   /** 昼食・水分を読めたか */
   intakeOk: boolean
   /** その日の活動（全員分でよい・null＝読めない） */
   activities: readonly DaycareActivity[] | null
+  /** 活動の送信待ち（db.ts の pendingActivityOps。省くと送信待ちなし） */
+  activityPending?: readonly ActivityPendingLike[]
   /** その日の機能訓練の記録（全員分でよい・null＝読めない） */
   training: readonly DaycareTrainingSession[] | null
+  /** 機能訓練の送信待ち（db.ts の pendingTrainingOps。省くと送信待ちなし） */
+  trainingPending?: readonly TrainingPendingLike[]
   /** その日の全員共通の一文 */
   dayNote: string | null
   /** その方のその日のひと言の行（無ければ null） */
@@ -199,22 +248,68 @@ export function absentTextOf(state: AttendanceState, hospitalized: boolean): str
   return '本日のご利用の記録はありません。'
 }
 
-/** 紙面に載せる回（値のある回のうち一番後の回）と、値のある回が2つ以上か（再測定） */
+/** 紙面に出す測定の1回（サーバーの値に送信待ちを重ねた値） */
+export interface ShownVitalSlot {
+  seq: number
+  vals: Record<DaycareVitalField, number | null>
+  /** この回に送信待ちの値を重ねた */
+  pending: boolean
+}
+
+/**
+ * 1人のその日の測定の回（今日の画面と同じ決まり: サーバーの行＋送信待ちにだけある回。値は送信待ち → サーバーの順）。
+ * pendingOf＝その回のキーの送信待ち（db.ts の pendingRow('vitals', …)）
+ */
+export function contactVitalSlots(
+  live: readonly KeyedVital[],
+  residentId: number,
+  day: string,
+  pendingOf: (key: string) => VitalPendingLike = () => null,
+): ShownVitalSlot[] {
+  const keys = live.flatMap((v) => (typeof v.client_key === 'string' ? [v.client_key] : []))
+  return daycareVitalSlotsWithPending(live, keys, residentId, day, [], (key) => pendingOf(key) !== null).map((slot) => {
+    const p = pendingOf(slot.key)
+    return {
+      seq: slot.seq,
+      vals: vitalShownValues(p, slot.vital),
+      pending: p !== null && DAYCARE_VITAL_FIELDS.some((f) => f in p.values),
+    }
+  })
+}
+
+/**
+ * 紙面に載せる値: 欄ごとに「値のある一番後の回」の値を合わせる（2026-11-09 反証 重1。再測定で一部の欄だけを入れた方の、
+ * 入れなかった欄を前の回から出す）。血圧は上と下を組で、どちらかに値のある一番後の回から取る（違う回の上と下を混ぜない）。
+ * recheck＝値のある回が2つ以上（再測定の注記）
+ */
+export function mergeVitalSlots(slots: readonly Pick<ShownVitalSlot, 'seq' | 'vals'>[]): {
+  values: Record<DaycareVitalField, number | null> | null
+  recheck: boolean
+} {
+  const withVal = slots.filter((s) => DAYCARE_VITAL_FIELDS.some((f) => s.vals[f] !== null)).sort((a, b) => a.seq - b.seq)
+  if (withVal.length === 0) return { values: null, recheck: false }
+  const out: Record<DaycareVitalField, number | null> = { temp: null, sys_bp: null, dia_bp: null, pulse: null, spo2: null }
+  for (const s of withVal) {
+    // 後の回ほど後に上書きする（値の無い欄は前の回の値を残す）
+    for (const f of ['temp', 'pulse', 'spo2'] as const) if (s.vals[f] !== null) out[f] = s.vals[f]
+    if (s.vals.sys_bp !== null || s.vals.dia_bp !== null) {
+      out.sys_bp = s.vals.sys_bp
+      out.dia_bp = s.vals.dia_bp
+    }
+  }
+  return { values: out, recheck: withVal.length >= 2 }
+}
+
+/** 紙面に載せる値（送信待ちを重ねた回から、欄ごとに合わせる）と、送信待ちを含むか */
 export function sheetVitalValues(
   vitals: readonly KeyedVital[],
   residentId: number,
   day: string,
-): { values: Record<DaycareVitalField, number | null> | null; recheck: boolean } {
-  const slots = daycareVitalSlots(vitals, [], residentId, day).filter(
-    (s) => s.vital !== null && DAYCARE_VITAL_FIELDS.some((f) => s.vital?.[f] !== null && s.vital?.[f] !== undefined),
-  )
-  if (slots.length === 0) return { values: null, recheck: false }
-  const last = slots.reduce((a, b) => (b.seq > a.seq ? b : a))
-  const v = last.vital as KeyedVital
-  return {
-    values: { temp: v.temp, sys_bp: v.sys_bp, dia_bp: v.dia_bp, pulse: v.pulse, spo2: v.spo2 },
-    recheck: slots.length >= 2,
-  }
+  pendingOf?: (key: string) => VitalPendingLike,
+): { values: Record<DaycareVitalField, number | null> | null; recheck: boolean; pending: boolean } {
+  const slots = contactVitalSlots(vitals, residentId, day, pendingOf)
+  const m = mergeVitalSlots(slots)
+  return { ...m, pending: slots.some((s) => s.pending && DAYCARE_VITAL_FIELDS.some((f) => s.vals[f] !== null)) }
 }
 
 /** 紙面のバイタルの4欄（体温・血圧・脈拍・SpO2）。値が無い欄は「記録なし」。判定の記号は付けない */
@@ -234,6 +329,11 @@ export function sheetVitalCells(values: Record<DaycareVitalField, number | null>
   ]
 }
 
+/** 入浴が自動の記録（12:30 の自動の行・まだ人が確かめていない）のままか（中止の行は除く） */
+export function bathIsAuto(bath: BathRecord | null): boolean {
+  return bath !== null && bath.auto && bath.result !== 'cancel'
+}
+
 /** 入浴の欄 */
 export function sheetBathText(bath: BathRecord | null, bathingPlanned: boolean, bathsOk: boolean): string {
   if (!bathsOk) return UNREAD
@@ -241,7 +341,7 @@ export function sheetBathText(bath: BathRecord | null, bathingPlanned: boolean, 
   if (st.kind === 'noPlan') return NO_BATH_PLAN
   if (st.kind === 'todo') return NO_RECORD
   // 自動の記録（予定から入った全身浴など）は、今日の画面と同じく入ったものとして出す（代表者の決定 2026-10-23 の 3）
-  if (st.kind === 'auto' || st.kind === 'done') return `入浴しました（${BATH_RESULT_LABEL[st.record.result]}）`
+  if ((st.kind === 'auto' || st.kind === 'done') && st.record.result !== 'cancel') return `入浴しました（${BATH_RESULT_LABEL[st.record.result]}）`
   const r = st.record.cancel_reason
   return r === null ? '入浴しませんでした' : `入浴しませんでした（${BATH_CANCEL_REASON_LABEL[r]}）`
 }
@@ -258,6 +358,16 @@ export function sheetLunchText(lunch: Pick<Meal, 'main_amount' | 'side_amount' |
   return `昼食 主食 ${m === null ? NO_RECORD : `${m}割`}・副食 ${s === null ? NO_RECORD : `${s}割`}`
 }
 
+/** 昼食の送信待ちを重ねた値と、重ねたか（今日の画面と同じ lunchShownWith＝送っている途中の値だけ重ねる） */
+export function sheetLunchShown(
+  lunch: Pick<Meal, 'main_amount' | 'side_amount' | 'status'> | null,
+  pending: LunchPendingLike | undefined,
+): { lunch: Pick<Meal, 'main_amount' | 'side_amount' | 'status'> | null; pending: boolean } {
+  const p = pending ?? null
+  const used = p !== null && p.state === 'pending' && ['main_amount', 'side_amount', 'status'].some((f) => f in p.values)
+  return { lunch: lunchShownWith(lunch, p), pending: used }
+}
+
 /** 水分の欄（その日の合計 ml。記録の行が無ければ「記録なし」） */
 export function sheetFluidText(
   fluids: readonly Pick<FluidIntake, 'resident_id' | 'taken_on' | 'amount_ml'>[],
@@ -270,21 +380,70 @@ export function sheetFluidText(
   return `${fluidTotalOf(fluids, residentId, day).toLocaleString('ja-JP')} ml`
 }
 
-/** 活動の欄（その日の活動の名前。参加以外は度合いを添える） */
-export function sheetActivityText(activities: readonly DaycareActivity[] | null, residentId: number, day: string): string {
-  if (activities === null) return UNREAD
-  const mine = activitiesOf(activities, residentId, day)
-  return mine.length === 0 ? NO_RECORD : mine.map(activityText).join('・')
+/** 活動の欄（その日の活動の名前。参加以外は度合いを添える。送信待ちは今日の画面と同じ activityShownCells で重ねる） */
+export function sheetActivityText(
+  activities: readonly DaycareActivity[] | null,
+  residentId: number,
+  day: string,
+  pending: readonly ActivityPendingLike[] = [],
+): string {
+  return sheetActivityShown(activities, residentId, day, pending).text
+}
+
+/** 活動の欄と、送信待ちを重ねたか */
+export function sheetActivityShown(
+  activities: readonly DaycareActivity[] | null,
+  residentId: number,
+  day: string,
+  pending: readonly ActivityPendingLike[] = [],
+): { text: string; pending: boolean } {
+  if (activities === null) return { text: UNREAD, pending: false }
+  const mine = activities.filter((a) => a.resident_id === residentId && a.day === day)
+  const ids = new Set(mine.map((a) => a.id))
+  const relevant = pending.filter((p) => (p.kind === 'add' ? p.residentId === residentId && p.day === day : ids.has(p.rowId)))
+  const rank = (label: string) => {
+    const i = DAYCARE_ACTIVITY_CHIPS.indexOf(label)
+    return i < 0 ? DAYCARE_ACTIVITY_CHIPS.length : i
+  }
+  const order = (label: string) => mine.find((a) => a.label === label)?.id ?? Number.MAX_SAFE_INTEGER
+  const shown = activityShownCells(mine, relevant, residentId, day)
+    .filter((c) => c.shown !== null && !c.deleting)
+    .sort((a, b) => rank(a.label) - rank(b.label) || order(a.label) - order(b.label))
+    .map((c) => activityText({ label: c.label, participation: participationOf(c.shown) ?? 'full' }))
+  // 止まった変更・取り消しは重ねない（activityShownCells）ので数えない。止まった追加はサーバーに無い項目なら重ねるので数える
+  return { text: shown.length === 0 ? NO_RECORD : shown.join('・'), pending: relevant.some((p) => p.kind === 'add' || !p.stopped) }
 }
 
 /** 機能訓練の欄（実施・内容） */
-export function sheetTrainingText(training: readonly DaycareTrainingSession[] | null, residentId: number, day: string): string {
-  if (training === null) return UNREAD
+export function sheetTrainingText(
+  training: readonly DaycareTrainingSession[] | null,
+  residentId: number,
+  day: string,
+  pending: readonly TrainingPendingLike[] = [],
+): string {
+  return sheetTrainingShown(training, residentId, day, pending).text
+}
+
+/**
+ * 機能訓練の欄と、送信待ちの追加だけがあるか（今日の画面の trainingFilled と同じ見方）。送信待ちの追加は人と日しか読めない
+ * （db.ts の pendingTrainingOps）ので、紙は「記録なし」のまま（2026-11-09 親の決定）。queued＝見本の「送信待ちを含む」と
+ * 印刷の前の確かめに使う
+ */
+export function sheetTrainingShown(
+  training: readonly DaycareTrainingSession[] | null,
+  residentId: number,
+  day: string,
+  pending: readonly TrainingPendingLike[] = [],
+): { text: string; queued: boolean } {
+  if (training === null) return { text: UNREAD, queued: false }
   const s = sessionOf(training, residentId, day)
-  if (s === null) return NO_RECORD
-  if (s.result === 'cancelled') return s.cancel_reason === null ? '中止' : `中止（${TRAINING_CANCEL_REASON_LABEL[s.cancel_reason]}）`
+  if (s === null) {
+    const queued = pending.some((p) => p.kind === 'add' && p.table === 'daycare_training_sessions' && p.residentId === residentId && p.day === day)
+    return { text: NO_RECORD, queued }
+  }
+  if (s.result === 'cancelled') return { text: s.cancel_reason === null ? '中止' : `中止（${TRAINING_CANCEL_REASON_LABEL[s.cancel_reason]}）`, queued: false }
   const head = s.result === 'partial' ? '一部実施' : '実施'
-  return `${head}（${s.program}${s.duration_min === null ? '' : `・${s.duration_min}分`}）`
+  return { text: `${head}（${s.program}${s.duration_min === null ? '' : `・${s.duration_min}分`}）`, queued: false }
 }
 
 /** 1人の紙面を組む */
@@ -310,27 +469,61 @@ export function buildContactSheet(p: ContactSheetInput): ContactSheet {
       notesUnread,
       abnormal: false,
       nurse: null,
+      pendingLabels: [],
+      unreadLabels: notesUnread ? ['ひと言'] : [],
+      autoBath: false,
+      trainingQueued: false,
     }
   }
-  const { values, recheck } = sheetVitalValues(p.vitals, p.residentId, p.day)
-  const abnormal = p.vitalsOk && values !== null && vitalNeedsRecheck(values, p.target ?? null, p.thresholds)
+  const v = sheetVitalValues(p.vitals, p.residentId, p.day, p.vitalPending)
+  const abnormal = p.vitalsOk && v.values !== null && vitalNeedsRecheck(v.values, p.target ?? null, p.thresholds)
+  const lunch = sheetLunchShown(p.lunch, p.lunchPending)
+  const act = sheetActivityShown(p.activities, p.residentId, p.day, p.activityPending)
+  const tr = sheetTrainingShown(p.training, p.residentId, p.day, p.trainingPending)
+  const pendingLabels: string[] = []
+  if (p.vitalsOk && v.pending) pendingLabels.push('バイタル')
+  if (p.intakeOk && lunch.pending) pendingLabels.push('お食事')
+  if (act.pending) pendingLabels.push('活動')
+  // 機能訓練は紙を「記録なし」のままにし、見本の印と印刷の前の確かめにだけ出す
+  if (tr.queued) pendingLabels.push('機能訓練')
+  const unreadLabels: string[] = []
+  if (!p.vitalsOk) unreadLabels.push('バイタル')
+  if (!p.bathsOk) unreadLabels.push('入浴')
+  if (!p.intakeOk) unreadLabels.push('お食事・水分')
+  if (p.activities === null) unreadLabels.push('活動')
+  if (p.training === null) unreadLabels.push('機能訓練')
+  if (notesUnread) unreadLabels.push('ひと言')
   return {
     ...base,
     attended: true,
     absentText: null,
-    vitals: p.vitalsOk ? { kind: 'ok', cells: sheetVitalCells(values), recheck } : { kind: 'unread' },
+    vitals: p.vitalsOk ? { kind: 'ok', cells: sheetVitalCells(v.values), recheck: v.recheck } : { kind: 'unread' },
     items: [
       { label: '入浴', value: sheetBathText(p.bath, p.bathingPlanned, p.bathsOk) },
-      { label: 'お食事', value: sheetLunchText(p.lunch, p.intakeOk) },
+      { label: 'お食事', value: sheetLunchText(lunch.lunch, p.intakeOk) },
       { label: '水分', value: sheetFluidText(p.fluids, p.residentId, p.day, p.intakeOk) },
-      { label: '活動', value: sheetActivityText(p.activities, p.residentId, p.day) },
-      { label: '機能訓練', value: sheetTrainingText(p.training, p.residentId, p.day) },
+      { label: '活動', value: act.text },
+      { label: '機能訓練', value: tr.text },
     ],
     staff: { common: notesUnread ? null : normalizeNoteText(p.dayNote), personal },
     notesUnread,
     abnormal,
     nurse: abnormal && !notesUnread ? normalizeNoteText(p.note?.nurse_note ?? null) : null,
+    pendingLabels,
+    unreadLabels,
+    autoBath: p.bathsOk && bathIsAuto(p.bath),
+    trainingQueued: tr.queued,
   }
+}
+
+/** 職員よりの欄を紙面に出すか（共通の一文か個別のひと言があるか、ひと言を読めなかった時。空なら見出しごと出さない） */
+export function staffSectionShown(sheet: Pick<ContactSheet, 'staff' | 'notesUnread'>): boolean {
+  return sheet.notesUnread || sheet.staff.common !== null || sheet.staff.personal !== null
+}
+
+/** 看護職よりの欄を紙面に出すか（基準外で、看護職のひと言がある時・ひと言を読めなかった時。空なら見出しごと出さない） */
+export function nurseSectionShown(sheet: Pick<ContactSheet, 'abnormal' | 'nurse' | 'notesUnread'>): boolean {
+  return sheet.abnormal && (sheet.notesUnread || sheet.nurse !== null)
 }
 
 /**
@@ -342,6 +535,29 @@ export function nurseNoteMissing(
   picked: ReadonlySet<number>,
 ): number[] {
   return sheets.filter((s) => picked.has(s.residentId) && s.abnormal && s.nurse === null).map((s) => s.residentId)
+}
+
+/** 印刷の前に確かめる方: 選んだ方のうち読めなかった項目がある方（並びは渡した順・項目の名前つき） */
+export function unreadPicked(
+  sheets: readonly Pick<ContactSheet, 'residentId' | 'unreadLabels'>[],
+  picked: ReadonlySet<number>,
+): { residentId: number; labels: string[] }[] {
+  return sheets.filter((s) => picked.has(s.residentId) && s.unreadLabels.length > 0).map((s) => ({ residentId: s.residentId, labels: s.unreadLabels }))
+}
+
+/** 選んだ方のうち、バイタルを読めず基準外かを確かめられない方（来た方だけ。看護職のひと言が要るか分からない） */
+export function vitalsUnreadPicked(sheets: readonly Pick<ContactSheet, 'residentId' | 'vitals'>[], picked: ReadonlySet<number>): number[] {
+  return sheets.filter((s) => picked.has(s.residentId) && s.vitals !== null && s.vitals.kind === 'unread').map((s) => s.residentId)
+}
+
+/** 印刷の前に確かめる方: 選んだ方のうち入浴が自動の記録のままの方（まだ人が確かめていない） */
+export function autoBathPicked(sheets: readonly Pick<ContactSheet, 'residentId' | 'autoBath'>[], picked: ReadonlySet<number>): number[] {
+  return sheets.filter((s) => picked.has(s.residentId) && s.autoBath).map((s) => s.residentId)
+}
+
+/** 印刷の前に確かめる方: 選んだ方のうち送信待ちの機能訓練がある方（送信が済んでから刷ると紙に載る） */
+export function trainingQueuedPicked(sheets: readonly Pick<ContactSheet, 'residentId' | 'trainingQueued'>[], picked: ReadonlySet<number>): number[] {
+  return sheets.filter((s) => picked.has(s.residentId) && s.trainingQueued).map((s) => s.residentId)
 }
 
 /** 印刷する方の既定（来た方＝在席・帰宅） */

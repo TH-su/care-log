@@ -16,7 +16,7 @@
 
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { NO_RECORD, RECHECK_NOTE, UNREAD } from '../../lib/daycareContact'
+import { RECHECK_NOTE, UNREAD, nurseSectionShown, staffSectionShown } from '../../lib/daycareContact'
 import type { ContactSheet } from '../../lib/daycareContact'
 import './print.css'
 import './daycareContact.css'
@@ -37,7 +37,6 @@ const PRINT_ATTR = 'data-dcc-print'
 
 /** 1人の紙面（見本と印刷で同じ） */
 export function ContactSheetView({ sheet }: { sheet: ContactSheet }) {
-  const staffEmpty = sheet.staff.common === null && sheet.staff.personal === null
   return (
     <article className="dcc-sheet">
       <div className="dcc-head">
@@ -96,14 +95,12 @@ export function ContactSheetView({ sheet }: { sheet: ContactSheet }) {
         </section>
       )}
 
-      {/* 来ていない方は、個別のひと言が書いてある時だけ「職員より」を出す（共通の一文はその日のご様子なので載せない） */}
-      {sheet.attended || sheet.staff.personal !== null || sheet.notesUnread ? (
+      {/* ひと言の欄は空なら見出しごと出さない（「記録なし」と刷らない＝2026-11-09 親の決定）。来ていない方は共通の一文を載せない */}
+      {staffSectionShown(sheet) ? (
         <section className="dcc-sec">
           <p className="dcc-h">職員より</p>
           {sheet.notesUnread ? (
             <p className="dcc-text">{UNREAD}</p>
-          ) : staffEmpty ? (
-            <p className="dcc-text">{NO_RECORD}</p>
           ) : (
             <>
               {sheet.staff.common !== null ? <p className="dcc-text">{sheet.staff.common}</p> : null}
@@ -113,10 +110,11 @@ export function ContactSheetView({ sheet }: { sheet: ContactSheet }) {
         </section>
       ) : null}
 
-      {sheet.abnormal ? (
+      {/* 看護職より: 基準外の時だけ。看護職のひと言が空なら出さない（印刷の前に画面が注意を出す） */}
+      {nurseSectionShown(sheet) ? (
         <section className="dcc-sec">
           <p className="dcc-h">看護職より</p>
-          <p className="dcc-text">{sheet.notesUnread ? UNREAD : (sheet.nurse ?? NO_RECORD)}</p>
+          <p className="dcc-text">{sheet.notesUnread ? UNREAD : sheet.nurse}</p>
         </section>
       ) : null}
 
