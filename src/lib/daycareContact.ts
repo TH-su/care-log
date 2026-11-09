@@ -533,8 +533,9 @@ export function buildContactSheet(p: ContactSheetInput): ContactSheet {
   if (tr.queued) pendingLabels.push('機能訓練')
   const unreadLabels: string[] = []
   if (!p.vitalsOk) unreadLabels.push('バイタル')
-  // 2026-11-10 反証 軽3: 〔未測定〕の印を読めなかった（バイタルを読めた時だけ。読めない時は「バイタル」に含まれる）
-  const unmeasuredUnread = p.vitalsOk && p.unmeasured === null
+  // 2026-11-10 反証 軽3: 〔未測定〕の印を読めなかった（バイタルを読めた時だけ。読めない時は「バイタル」に含まれる）。
+  // 確認の反証 軽4: 紙に載せる5欄の値がそろった方は印に左右されないので足さない（値の無い欄が1つでもある方だけ）
+  const unmeasuredUnread = p.vitalsOk && p.unmeasured === null && DAYCARE_VITAL_FIELDS.some((f) => typeof v.values?.[f] !== 'number')
   if (unmeasuredUnread) unreadLabels.push(UNMEASURED_UNREAD_LABEL)
   if (!p.bathsOk) unreadLabels.push('入浴')
   if (!p.intakeOk) unreadLabels.push('お食事・水分')

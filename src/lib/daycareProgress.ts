@@ -621,21 +621,24 @@ export function unmeasuredSlotSeqs(
 }
 
 /**
- * 数える最初の回（2026-11-10 反証 軽2: バイタル・食事の画面と今日の画面で同じ決まり。取り消した測定の行のキーを見るかどうかに
- * 左右されない）: 測定の行のある回（生きている行・送信待ちの回）があれば、その一番小さい回。無ければ〔未測定〕の印の一番小さい回。
- * どちらも無ければ null（画面の最初の回で数える。印が無いので、どの回でも数は同じ）
+ * 数える最初の回（2026-11-10 反証 軽2: バイタル・食事の画面と今日の画面で同じ決まり）: 測定の行のある回（生きている行・送信待ちの回）が
+ * あれば、その一番小さい回。無ければ〔未測定〕の印の一番小さい回。どちらも無ければ null。
+ * 2026-11-10 確認の反証 軽1: 数える回は画面の行に出している回（shownSeqs）から選ぶ。印の回が行に無い時（取り消した測定の行のキーの回に
+ * 印だけが残った時）は、最初の行の回（空の枠を光らせる回と数える回をそろえる＝押した〔未測定〕が数に効く）。行が1つも無ければ null
  */
-export function daycareCountSeq(rowSeqs: readonly number[], markSeqs: readonly number[]): number | null {
+export function daycareCountSeq(rowSeqs: readonly number[], markSeqs: readonly number[], shownSeqs: readonly number[]): number | null {
+  const shown = new Set(shownSeqs.filter((x) => Number.isInteger(x) && x > 0))
   const pick = (xs: readonly number[]): number | null => {
-    const ok = xs.filter((x) => Number.isInteger(x) && x > 0)
+    const ok = xs.filter((x) => shown.has(x))
     return ok.length === 0 ? null : Math.min(...ok)
   }
-  return pick(rowSeqs) ?? pick(markSeqs)
+  return pick(rowSeqs) ?? pick(markSeqs) ?? pick([...shown])
 }
 
 /**
- * 今日の画面の件数の帯「バイタル未」の「済」（2026-11-10 反証 軽7）: どれかの回のどれかの欄に値がある（今の決まり）か、数える回の5欄が
- * 値か〔未測定〕の印で全部埋まっている（来所者で5欄とも〔未測定〕なら「バイタル未」に入れない）。カードの VS の印は今のまま（値だけ）
+ * 今日の画面の件数の帯「バイタル未」とカードの VS の印の「済」（2026-11-10 反証 軽7・確認の反証 軽5＝カードの VS も同じ・仮置き）:
+ * どれかの回のどれかの欄に値がある（今の決まり）か、数える回の5欄が値か〔未測定〕の印で全部埋まっている（来所者で5欄とも〔未測定〕なら
+ * 「バイタル未」に入れない・VS は済）
  */
 export function vitalsTileDone(anyValue: boolean, countBlankFields: number): boolean {
   return anyValue || countBlankFields === 0

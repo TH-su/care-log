@@ -642,8 +642,9 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
             trainingOk: data.training !== null,
             bathsOk: data.bathsOk,
           }),
-          // 2026-11-10 反証 軽3: 〔未測定〕の印を読めなかった（紙の値の無い欄は「読み込めませんでした」）
-          ...(data.vitalsOk && data.unmeasured === null ? [UNMEASURED_UNREAD_LABEL] : []),
+          // 2026-11-10 反証 軽3: 〔未測定〕の印を読めなかった（紙の値の無い欄は「読み込めませんでした」）。確認の反証 軽4: 値の無い欄が
+          // 1つでもある方がいる時だけ（紙面の読めなかった項目と同じ判定）
+          ...(data.vitalsOk && data.unmeasured === null && sheets.some((s) => s.unreadLabels.includes(UNMEASURED_UNREAD_LABEL)) ? [UNMEASURED_UNREAD_LABEL] : []),
         ]
 
   // ── 描画 ──

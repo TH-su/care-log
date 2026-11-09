@@ -890,6 +890,13 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
     setBuf('')
     setKpError(null)
   }
+  // 2026-11-10 確認の反証 軽2: 入れている欄の行が無くなったら（印だけの再測定の行で最後の印を取り消した・絞り込みで外れた など）テンキーを
+  // 閉じる（テンキーは消えるのに選んでいる欄が残り、物理キーを横取りしたままにしない）。別の日を読んでいる間は見ない（日の切り替えで閉じる）
+  useEffect(() => {
+    if (active === null || data === null || data.day !== day) return
+    if (!flatSlots.some((s) => s.key === active.key)) closeKeypad()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, data, day, flatSlots])
 
   /**
    * 次の欄（列の並び＝DC_BULK_VITAL_ORDER の次・2026-11-09 計画B2）。KT の次は、テンキーを閉じて同じ方の主食の選択肢へフォーカスを移す
@@ -1175,7 +1182,8 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
   const lunchFailed = !lunchReady && lunch.error !== null
   const countRows = board === null || data === null || data.day !== day ? [] : daycareBulkRows(board.rows)
   // 2026-11-10 反証 軽2: 数える回は今日の画面と同じ純関数（daycareCountSeq＝測定の行のある一番小さい回・無ければ印の一番小さい回）。
-  // countSeqOfRow＝その方の数える回（空の枠を光らせる回。null＝最初の回）
+  // 確認の反証 軽1: 数える回は行に出している回から選ぶ（印の回が行に無い時は最初の行の回＝空の枠を光らせる回と数える回をそろえる）。
+  // countSeqOfRow＝その方の数える回（空の枠を光らせる回）
   const countSeqOfRow = new Map<number, number | null>()
   const blankOf = new Map<number, number>(
     countRows.map((r) => {
@@ -1183,9 +1191,10 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
       const cs = daycareCountSeq(
         slots.filter((s) => s.vital !== null || pendingRow('vitals', targetOf(s)) !== null).map((s) => s.seq),
         unmeasuredSeqsOf(data?.unmeasured, r.residentId, day),
+        slots.map((s) => s.seq),
       )
-      const first = cs === null ? slots[0] : slots.find((s) => s.seq === cs)
-      countSeqOfRow.set(r.residentId, cs ?? first?.seq ?? null)
+      const first = slots.find((s) => s.seq === cs) ?? slots[0]
+      countSeqOfRow.set(r.residentId, first?.seq ?? null)
       const vals: Partial<Record<DaycareVitalField, number | null>> = {}
       if (first !== undefined) for (const f of DAYCARE_VITAL_FIELDS) vals[f] = valueOf(first, f).v
       // 2026-11-10 未測定: 数える回の〔未測定〕の印のある欄は入力済み（昼食の拒食と同じ）
@@ -1388,9 +1397,10 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                 {(() => {
                   const cur = valueOf(activeSlot, active.field).v
                   const pv = prevOf(active.residentId)[active.field]
+                  // 2026-11-10 反証 軽5: 〔未測定〕を送っている最中の欄は「送信中」（その欄に残る）。確認の反証 軽3: 送信中はこの文だけの1行
+                  // （前回・「365」の案内を並べると体温の欄で2行になり、テンキーと表の枠が動くため）
+                  if (umBusy.has(umKey(activeSlot, active.field))) return MSG_UM_BUSY
                   const parts: string[] = []
-                  // 2026-11-10 反証 軽5: 〔未測定〕を送っている最中の欄は「送信中」（その欄に残る）
-                  if (umBusy.has(umKey(activeSlot, active.field))) parts.push(MSG_UM_BUSY)
                   if (cur !== null) parts.push(`いまの値 ${fmtVal(active.field, cur)}`)
                   else if (activeMarked) parts.push('未測定と記録済み')
                   if (pv !== undefined) parts.push(`前回 ${fmtVal(active.field, pv.value)}`)

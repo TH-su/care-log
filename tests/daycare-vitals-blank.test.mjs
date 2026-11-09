@@ -432,7 +432,8 @@ describe('静的検査: 全部の枠が埋まるまでの知らせ（計画B2）
     assert.match(nav, /activityRead === null\s*\? null\s*: bulk\.map\(\(r\) => recordBlankFields\(activityCellsFilled\(activityShownCells\(activityRead, activityPending, r\.residentId, data\.day\)\)\)\)/)
     assert.match(nav, /trainingRead === null \? null : bulk\.map\(\(r\) => recordBlankFields\(trainingFilled\(trainingRead, trainingPending, r\.residentId, data\.day\)\)\)/)
     // バイタル一括の slotsOf の最初の回と同じ（daycareVitalSlotsWithPending の並び＝回の小さい順）
-    assert.match(today, /const slots = daycareVitalSlotsWithPending\(vitalsOf\(id\), vitalKeys, id, data\.day, \[\], /)
+    // 2026-11-10 未測定の確認の反証（固定し直し・意図は同じ）（軽1）: 〔未測定〕の印だけの回も足した回に入れる（一括の画面の slotsOf と同じ）
+    assert.match(today, /const slots = daycareVitalSlotsWithPending\(vitalsOf\(id\), vitalKeys, id, data\.day, markSeqs, /)
     // カードの印（済・未・対象外）は今のまま daycareProgressMarks
     assert.match(today, /daycareProgressMarks\(\{\s*state: r\.state,/)
   })

@@ -115,6 +115,7 @@ import {
   trainingFilled,
   unmeasuredFieldsOf,
   unmeasuredSeqsOf,
+  unmeasuredSlotSeqs,
   vitalBlankFields,
   vitalShownValues,
   vitalSlotsFilled,
@@ -174,7 +175,7 @@ interface DayData {
   training: DaycareTrainingSession[] | null
   /**
    * その日の〔未測定〕の印（2026-11-10・0062。切り替えの未入力の数で、印のある欄を入力済みにする）。null＝読めない（表が無い・通信エラー・
-   * 控えで開いた）＝印なしで数える（未入力を多めに出す側）。カードの VS の印は今のまま（値が1つでもあれば済）
+   * 控えで開いた）＝印なしで数える（未入力を多めに出す側）。件数の帯「バイタル未」とカードの VS の印も、5欄が値か印で埋まった方を済にする（2026-11-10 確認の反証 軽5）
    */
   unmeasured: DaycareVitalUnmeasured[] | null
   /** 昼食・おやつ・水分を読めたか（読めない時の空の一覧を控えに「読めた」として入れない＝確認の反証 中1） */
@@ -804,7 +805,10 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   const vitalShown = new Map(
     board.rows.map((r) => {
       const id = r.residentId
-      const slots = daycareVitalSlotsWithPending(vitalsOf(id), vitalKeys, id, data.day, [], (key) => pendingRow('vitals', vitalTarget(id, key)) !== null)
+      // 2026-11-10 確認の反証 軽1: 〔未測定〕の印だけの回も回に入れる（バイタル・食事の画面と同じ。この画面は取り消した測定の行のキーを
+      // 読まないので、生きている行のキーだけで取り消した回を見分ける＝その回に印だけが残った稀な時は一括の画面とずれる）
+      const markSeqs = unmeasuredSlotSeqs(data.unmeasured, id, data.day, vitalKeys, vitalKeys)
+      const slots = daycareVitalSlotsWithPending(vitalsOf(id), vitalKeys, id, data.day, markSeqs, (key) => pendingRow('vitals', vitalTarget(id, key)) !== null)
       return [id, slots.map((slot) => ({ seq: slot.seq, vals: vitalShownValues(pendingRow('vitals', vitalTarget(id, slot.key)), slot.vital) }))]
     }),
   )
@@ -827,11 +831,12 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
     const cs = daycareCountSeq(
       shown.filter((s) => live.has(keyOf(s.seq)) || pendingRow('vitals', vitalTarget(id, keyOf(s.seq))) !== null).map((s) => s.seq),
       unmeasuredSeqsOf(data.unmeasured, id, data.day),
+      shown.map((s) => s.seq),
     )
-    const first = cs === null ? shown[0] : shown.find((s) => s.seq === cs)
-    return vitalBlankFields(first?.vals ?? null, unmeasuredFieldsOf(data.unmeasured, id, data.day, cs ?? first?.seq ?? 1))
+    const first = shown.find((s) => s.seq === cs) ?? shown[0]
+    return vitalBlankFields(first?.vals ?? null, unmeasuredFieldsOf(data.unmeasured, id, data.day, first?.seq ?? cs ?? 1))
   }
-  // 2026-11-10 反証 軽7: 来所者で5欄とも値か〔未測定〕の印で埋まった方は「バイタル未」に入れない（カードの VS の印は今のまま＝値だけ）
+  // 2026-11-10 反証 軽7: 来所者で5欄とも値か〔未測定〕の印で埋まった方は「バイタル未」に入れない（確認の反証 軽5: カードの VS も同じ・仮置き）
   const vitalsWaiting = board.rows.filter((r) => r.state === 'present' && !vitalsTileDone(vitalsDone(r.residentId), countBlankOf(r.residentId))).length
   // 入浴を確かめていない方（代表者の決定 2026-10-23 の 3: 自動の行は「済」で数えない。12:30 を過ぎても行が無い方と、
   // 休みの方に自動の行が残っている方だけ＝daycare.ts の bathCountsUnchecked）
@@ -854,7 +859,9 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
         daycareProgressMarks({
           state: r.state,
           hospitalized: r.hospitalized,
-          vitals: data.vitalsOk ? { done: vDone, abnormal: vDone && vitalsAbnormal(id) } : null,
+          // 2026-11-10 確認の反証 軽5（仮置き）: VS の済も件数の帯と同じ vitalsTileDone（値が1つでもあるか、5欄が値か〔未測定〕で埋まった）。
+          // 要確認（基準外）は値のある時だけ
+          vitals: data.vitalsOk ? { done: vitalsTileDone(vDone, countBlankOf(id)), abnormal: vDone && vitalsAbnormal(id) } : null,
           lunch: lunchShownWith(lunchOf(id), pendingRow('meals', { residentId: id, day: data.day, slot: 'lunch' })),
           lunchRead: data.intakeOk,
           activity: activityRead === null ? null : activityCellsFilled(activityShownCells(activityRead, activityPending, id, data.day)),

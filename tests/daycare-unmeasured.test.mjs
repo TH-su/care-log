@@ -234,28 +234,52 @@ if (P === null) {
       assert.equal(Dc.nextDaycareSeq([key(1)], D, 1), 2, '（前の形）印の回を入れないと 2 を使ってしまう')
       assert.equal(Dc.nextDaycareSeq([key(1), ...marked], D, 1), 3)
     })
-    it('軽2: 数える回は、測定の行のある一番小さい回・無ければ印の一番小さい回・どちらも無ければ null', () => {
-      assert.equal(P.daycareCountSeq([2, 1], [1]), 1)
-      assert.equal(P.daycareCountSeq([3], [1, 2]), 3)
-      assert.equal(P.daycareCountSeq([], [4, 2]), 2)
-      assert.equal(P.daycareCountSeq([], []), null)
-      assert.equal(P.daycareCountSeq([0, -1], [Number.NaN]), null)
+    it('軽2: 数える回は、測定の行のある一番小さい回・無ければ印の一番小さい回（確認の反証 軽1: どちらも行に出している回から選ぶ・無ければ最初の行の回）', () => {
+      assert.equal(P.daycareCountSeq([2, 1], [1], [1, 2]), 1)
+      assert.equal(P.daycareCountSeq([3], [1, 2], [1, 2, 3]), 3)
+      assert.equal(P.daycareCountSeq([], [4, 2], [2, 4]), 2)
+      assert.equal(P.daycareCountSeq([], [], [1]), 1, '行も印も無ければ最初の行の回')
+      assert.equal(P.daycareCountSeq([], [], []), null, '行が1つも無ければ null')
+      // 印の回が行に無い（取り消した測定の行のキーの回に印だけが残った）時は、最初の行の回
+      assert.equal(P.daycareCountSeq([], [1], [2]), 2)
+      assert.equal(P.daycareCountSeq([], [1, 3], [2, 3]), 3)
+      assert.equal(P.daycareCountSeq([0, -1], [Number.NaN], [0]), null)
     })
     it('軽2: 1回目の測定を取り消した方で、バイタル・食事の画面（取り消した行のキーも見る）と今日の画面（生きている行だけ）が同じ回の印を数える', () => {
       const marks = [mark({ seq: 2, field: 'temp' }), mark({ id: 2, seq: 2, field: 'sys_bp' }), mark({ id: 3, seq: 2, field: 'dia_bp' })]
-      const countOf = (slots) => {
-        const cs = P.daycareCountSeq(slots.filter((x) => x.vital !== null).map((x) => x.seq), P.unmeasuredSeqsOf(marks, 1, D))
-        const first = cs === null ? slots[0] : slots.find((x) => x.seq === cs)
-        return { cs, blank: P.vitalBlankFields(first === undefined || first.vital === null ? null : first.vital, P.unmeasuredFieldsOf(marks, 1, D, cs ?? first?.seq ?? 1)) }
+      // 2つの画面の数え方（同じ純関数。行に出す回を渡す）
+      const countOf = (slots, ms = marks) => {
+        const cs = P.daycareCountSeq(slots.filter((x) => x.vital !== null).map((x) => x.seq), P.unmeasuredSeqsOf(ms, 1, D), slots.map((x) => x.seq))
+        const first = slots.find((x) => x.seq === cs) ?? slots[0]
+        return { cs, blank: P.vitalBlankFields(first === undefined || first.vital === null ? null : first.vital, P.unmeasuredFieldsOf(ms, 1, D, first?.seq ?? 1)) }
       }
       // バイタル・食事の画面: 取り消した 1回目のキーを知っているので、行は 2回目（印の回）
       const bulk = P.daycareVitalSlotsWithPending([], [key(1)], 1, D, P.unmeasuredSlotSeqs(marks, 1, D, [], [key(1)]), () => false)
-      // 今日の画面: 生きている行だけを読むので、行の並びは 1回目（空）
-      const today = P.daycareVitalSlotsWithPending([], [], 1, D, [], () => false)
+      // 今日の画面: 生きている行だけを読む（取り消した行のキーを知らない）。2026-11-10 未測定の確認の反証（固定し直し・意図は同じ）: 印の回も行に入れる
+      const today = P.daycareVitalSlotsWithPending([], [], 1, D, P.unmeasuredSlotSeqs(marks, 1, D, [], []), () => false)
       assert.deepEqual(bulk.map((x) => x.seq), [2])
-      assert.deepEqual(today.map((x) => x.seq), [1])
+      assert.deepEqual(today.map((x) => x.seq), [2])
       assert.deepEqual(countOf(bulk), { cs: 2, blank: 2 })
       assert.deepEqual(countOf(today), { cs: 2, blank: 2 }, '両画面で同じ回・同じ数')
+    })
+    it('確認の反証 軽1: 取り消した回に印だけが残り、生きている行が無い方は、画面に出ている回（次の回）で数える＝押した〔未測定〕が数に効く', () => {
+      const orphan = [mark({ seq: 1, field: 'temp' }), mark({ id: 2, seq: 1, field: 'spo2' })]
+      const countOf = (slots, ms) => {
+        const cs = P.daycareCountSeq(slots.filter((x) => x.vital !== null).map((x) => x.seq), P.unmeasuredSeqsOf(ms, 1, D), slots.map((x) => x.seq))
+        const first = slots.find((x) => x.seq === cs) ?? slots[0]
+        return { cs, blank: P.vitalBlankFields(null, P.unmeasuredFieldsOf(ms, 1, D, first?.seq ?? 1)) }
+      }
+      // バイタル・食事の画面: 1回目のキーは取り消した行なので行に出さず、次の回（2回目）の空の行
+      const bulk = P.daycareVitalSlotsWithPending([], [key(1)], 1, D, P.unmeasuredSlotSeqs(orphan, 1, D, [], [key(1)]), () => false)
+      assert.deepEqual(bulk.map((x) => x.seq), [2])
+      assert.deepEqual(countOf(bulk, orphan), { cs: 2, blank: 5 }, '数える回は画面に出ている 2回目（光る枠と数がそろう）')
+      // 2回目で〔未測定〕を押すと数に効く
+      const pressed = [...orphan, mark({ id: 3, seq: 2, field: 'pulse' })]
+      const bulk2 = P.daycareVitalSlotsWithPending([], [key(1)], 1, D, P.unmeasuredSlotSeqs(pressed, 1, D, [], [key(1)]), () => false)
+      assert.deepEqual(countOf(bulk2, pressed), { cs: 2, blank: 4 })
+      // 今日の画面（取り消した行のキーを読まない）は 1回目の印で数える＝この稀な形だけずれが残る（報告済み）
+      const today = P.daycareVitalSlotsWithPending([], [], 1, D, P.unmeasuredSlotSeqs(orphan, 1, D, [], []), () => false)
+      assert.deepEqual(countOf(today, orphan), { cs: 1, blank: 3 })
     })
     it('軽7: 件数の帯「バイタル未」の済＝どれかの値がある（今の決まり）か、数える回の5欄が値か印で全部埋まっている', () => {
       assert.equal(P.vitalsTileDone(true, 4), true)
@@ -307,6 +331,14 @@ if (P === null) {
       assert.deepEqual(s.unreadLabels, ['バイタルの未測定'])
       assert.equal(C.UNMEASURED_UNREAD_LABEL, 'バイタルの未測定')
       assert.deepEqual(C.unreadPicked([s], new Set([1])), [{ residentId: 1, labels: ['バイタルの未測定'] }])
+      // 確認の反証 軽4: 5欄とも値がそろった方は印に左右されないので足さない（確かめに並べない）
+      const full = C.buildContactSheet(input({ vitals: [vital({ temp: 36.5, sys_bp: 120, dia_bp: 70, pulse: 72, spo2: 97 })], unmeasured: null }))
+      assert.deepEqual(full.unreadLabels, [])
+      assert.deepEqual(C.unreadPicked([full], new Set([1])), [])
+      assert.ok(full.vitals.cells.every((c) => c.value !== '読み込めませんでした'))
+      // 1欄でも値が無ければ足す（何も測っていない方も）
+      assert.deepEqual(C.buildContactSheet(input({ vitals: [vital({ temp: 36.5, sys_bp: 120, dia_bp: 70, pulse: 72 })], unmeasured: null })).unreadLabels, ['バイタルの未測定'])
+      assert.deepEqual(C.buildContactSheet(input({ unmeasured: null })).unreadLabels, ['バイタルの未測定'])
       // バイタルそのものを読めない時は「バイタル」だけ（重ねない）・来ていない方は足さない
       assert.deepEqual(C.buildContactSheet(input({ vitalsOk: false, unmeasured: null })).unreadLabels, ['バイタル'])
       assert.deepEqual(C.buildContactSheet(input({ state: 'absent', unmeasured: null })).unreadLabels, [])
@@ -611,20 +643,33 @@ describe('画面（静的検査）', () => {
     assert.match(screen, /let seq = nextDaycareSeq\(\[\.\.\.data\.keys, \.\.\.local, \.\.\.marked, \.\.\.slotsOf\(row\.residentId\)\.map\(\(s\) => s\.key\)\], data\.day, row\.residentId\)/)
   })
   it('反証 軽2: 数える回は今日の画面と同じ純関数（daycareCountSeq）・空の枠を光らせるのもその回', () => {
-    assert.match(screen, /const cs = daycareCountSeq\(\s*slots\.filter\(\(s\) => s\.vital !== null \|\| pendingRow\('vitals', targetOf\(s\)\) !== null\)\.map\(\(s\) => s\.seq\),\s*unmeasuredSeqsOf\(data\?\.unmeasured, r\.residentId, day\),\s*\)/)
+    assert.match(screen, /const cs = daycareCountSeq\(\s*slots\.filter\(\(s\) => s\.vital !== null \|\| pendingRow\('vitals', targetOf\(s\)\) !== null\)\.map\(\(s\) => s\.seq\),\s*unmeasuredSeqsOf\(data\?\.unmeasured, r\.residentId, day\),\s*slots\.map\(\(s\) => s\.seq\),\s*\)/)
+    assert.match(screen, /const first = slots\.find\(\(s\) => s\.seq === cs\) \?\? slots\[0\]/)
     assert.match(screen, /const countedSlot = slot\.seq === countSeqOfRow\.get\(row\.residentId\) && blankCount !== undefined/)
-    assert.match(today, /const cs = daycareCountSeq\(\s*shown\.filter\(\(s\) => live\.has\(keyOf\(s\.seq\)\) \|\| pendingRow\('vitals', vitalTarget\(id, keyOf\(s\.seq\)\)\) !== null\)\.map\(\(s\) => s\.seq\),\s*unmeasuredSeqsOf\(data\.unmeasured, id, data\.day\),\s*\)/)
+    assert.match(today, /const cs = daycareCountSeq\(\s*shown\.filter\(\(s\) => live\.has\(keyOf\(s\.seq\)\) \|\| pendingRow\('vitals', vitalTarget\(id, keyOf\(s\.seq\)\)\) !== null\)\.map\(\(s\) => s\.seq\),\s*unmeasuredSeqsOf\(data\.unmeasured, id, data\.day\),\s*shown\.map\(\(s\) => s\.seq\),\s*\)/)
+    // 確認の反証 軽1: 今日の画面も印だけの回を回に入れる（取り消した行のキーは読まないので、生きている行のキーだけで見分ける）
+    assert.match(today, /const markSeqs = unmeasuredSlotSeqs\(data\.unmeasured, id, data\.day, vitalKeys, vitalKeys\)/)
+    assert.match(today, /const slots = daycareVitalSlotsWithPending\(vitalsOf\(id\), vitalKeys, id, data\.day, markSeqs, \(key\) => pendingRow\('vitals', vitalTarget\(id, key\)\) !== null\)/)
   })
   it('反証 軽3: 印を読めなかった時、バイタル・食事の画面は表の上に1行（前に読んだ印か、印なし）・連絡帳は帯と印刷前の確かめに出す', () => {
     assert.match(screen, /unmeasuredUnread: um !== null \? null : umPrev !== null \? 'prev' : 'none'/)
     assert.match(screen, /\{data\.unmeasuredUnread !== null \? \(\s*<div role="status"[^>]*>\s*<p className="min-w-0 flex-1">\s*<span aria-hidden="true">▲ <\/span>\s*\{MSG_UM_UNREAD\[data\.unmeasuredUnread\]\}/)
     assert.match(screen, /前に読んだ記録で表示しています/)
-    assert.match(contact, /\.\.\.\(data\.vitalsOk && data\.unmeasured === null \? \[UNMEASURED_UNREAD_LABEL\] : \[\]\)/)
+    // 確認の反証 軽4: 帯は、値の無い欄が1つでもある方がいる時だけ（紙面の読めなかった項目と同じ判定）
+    assert.match(contact, /\.\.\.\(data\.vitalsOk && data\.unmeasured === null && sheets\.some\(\(s\) => s\.unreadLabels\.includes\(UNMEASURED_UNREAD_LABEL\)\) \? \[UNMEASURED_UNREAD_LABEL\] : \[\]\)/)
+  })
+  it('確認の反証 軽2: 入れている欄の行が無くなったら（印だけの行で最後の印を取り消した等）テンキーを閉じる（物理キーを横取りしたままにしない）', () => {
+    const eff = screen.slice(screen.indexOf('const closeKeypad = () => {'), screen.indexOf('}, [active, data, day, flatSlots])') + 40)
+    assert.ok(eff.length > 100 && eff.length < 800)
+    assert.match(eff, /useEffect\(\(\) => \{\s*if \(active === null \|\| data === null \|\| data\.day !== day\) return\s*if \(!flatSlots\.some\(\(s\) => s\.key === active\.key\)\) closeKeypad\(\)/)
+    // 物理キーの横取りは active がある間だけ（閉じれば外れる）
+    assert.match(screen, /useEffect\(\(\) => \{\s*if \(active === null\) return\s*const onKey = /)
   })
   it('反証 軽4・軽5: 値を保存できた欄の失敗の知らせを消す・送信中の欄は進めずに「送信中です」', () => {
     assert.match(screen, /setUmNote\(umKey\(slot, f as DaycareVitalField\), null\)/)
     assert.match(screen, /if \(umBusyRef\.current\.has\(umKey\(slot, cur\.field\)\)\) \{\s*setBuf\(''\)\s*setKpError\(null\)\s*return true\s*\}/)
-    assert.match(screen, /if \(umBusy\.has\(umKey\(activeSlot, active\.field\)\)\) parts\.push\(MSG_UM_BUSY\)/)
+    // 確認の反証 軽3: 送信中は案内をこの文だけの1行に（前回・「365」の案内を並べない）
+    assert.match(screen, /if \(umBusy\.has\(umKey\(activeSlot, active\.field\)\)\) return MSG_UM_BUSY\s*const parts: string\[\] = \[\]/)
     assert.match(screen, /const MSG_UM_BUSY = '〔未測定〕を送信中です。終わるまでお待ちください。'/)
   })
   it('今日の画面: 印を読み込みの回に1本足す（読めない時は null）・切り替えの数だけに使う・カードの VS の印は今のまま', () => {
@@ -634,7 +679,8 @@ describe('画面（静的検査）', () => {
     assert.equal((today.match(/unmeasuredFieldsOf\(/g) ?? []).length, 1)
     // 反証 軽7: 件数の帯「バイタル未」は5欄とも値か印で埋まった方を済に（カードの VS は vitalsDone のまま）
     assert.match(today, /const vitalsWaiting = board\.rows\.filter\(\(r\) => r\.state === 'present' && !vitalsTileDone\(vitalsDone\(r\.residentId\), countBlankOf\(r\.residentId\)\)\)\.length/)
-    assert.match(today, /vitals: data\.vitalsOk \? \{ done: vDone, abnormal: vDone && vitalsAbnormal\(id\) \} : null/)
+    // 確認の反証 軽5（仮置き）: カードの VS の済も件数の帯と同じ vitalsTileDone。要確認（基準外）は値のある時だけ
+    assert.match(today, /vitals: data\.vitalsOk \? \{ done: vitalsTileDone\(vDone, countBlankOf\(id\)\), abnormal: vDone && vitalsAbnormal\(id\) \} : null/)
   })
   it('連絡帳: 印を読み込みの回に1本足して紙面の材料に渡す（紙の部品は変えない）', () => {
     assert.equal((contact.match(/fetchDaycareVitalUnmeasured\(/g) ?? []).length, 1)
