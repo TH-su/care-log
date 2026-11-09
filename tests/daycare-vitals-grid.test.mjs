@@ -103,20 +103,21 @@ if (DC === null) {
       assert.match(page, /return slots\.map\(\(slot, si\) => \{/)
       assert.match(page, /<span aria-hidden="true">↳ <\/span>\s*再測定 \{si\}/)
       // 2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 氏名と札の行の間を詰めた（leading-tight）
-      // 2026-11-09 計画B2（固定し直し・意図は同じ）: 空の欄がある行は氏名の横に小さな印（▲未）
+      // 2026-11-09 計画B2（固定し直し・意図は同じ）: 空の欄がある行は小さな印（▲未）。反証 中1 で氏名の横から札の行の頭へ移した
+      // （iPad 縦で氏名の横の印が折り返して行が伸びたため）
       assert.match(
         page,
-        /<span className="block text-base font-bold leading-tight text-ink">\s*\{nameOf\(row\.residentId\)\}\s*\{\(blankCount \?\? 0\) > 0 \? <DaycareRowBlankMark \/> : null\}\s*<\/span>\s*<span className="block text-sm leading-tight text-ink2">\{basis\}<\/span>/,
+        /<span className="block text-base font-bold leading-tight text-ink">\{nameOf\(row\.residentId\)\}<\/span>\s*(\{\}\s*)?<span className="block text-sm leading-tight text-ink2">\s*\{\(blankCount \?\? 0\) > 0 \? <DaycareRowBlankMark lead \/> : null\}\s*\{basis\}\s*<\/span>/,
       )
       assert.match(page, /\{abnormal && isLast \? \(\s*<button[\s\S]{0,200}onClick=\{\(\) => addRecheck\(row, slot\)\}/)
       assert.match(page, /＋再測定/)
     })
     it('前回の値は空の欄にだけ薄く出す（値が入った欄は値＋印と判定語）', () => {
       // 2026-11-09 計画B2（固定し直し・意図は同じ）: 前回の値は 14px（text-xs・leading-tight）で「前回」を付けて出す。空の枠には「未」の字を添え、
-      // 前回が無い空の枠は「未」だけ
+      // 前回が無い空の枠は「未」だけ。反証 軽2: 「未」と「前回…」は横に並べる（左右の余白の分だけ中身を広げる -mx-1）
       assert.match(
         page,
-        /\{v === null \? \(\s*<>\s*\{blank \? <DaycareBlankTag \/> : null\}\s*\{pv \|\| !blank \? \(\s*<span className="font-num text-xs leading-tight text-ink3" aria-hidden="true">\s*\{pv \? `前回\$\{fmtVal\(f, pv\.value\)\}` : '—'\}/,
+        /\{v === null \? \(\s*(\{\}\s*)?<span className="-mx-1 flex items-center gap-1 whitespace-nowrap">\s*\{blank \? <DaycareBlankTag \/> : null\}\s*\{pv \|\| !blank \? \(\s*<span className="font-num text-xs leading-tight text-ink3" aria-hidden="true">\s*\{pv \? `前回\$\{fmtVal\(f, pv\.value\)\}` : '—'\}/,
       )
       assert.match(page, /\{lv !== null \? <span aria-hidden="true">\{LEVEL_MARK\[lv\]\}<\/span> : null\}/)
       assert.match(page, /\{lv !== null \? <span className="text-sm font-bold leading-tight text-ink">\{word\.split\('・'\)\[0\]\}<\/span> : null\}/)

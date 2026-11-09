@@ -268,14 +268,39 @@ describe('静的検査: 空の枠の見た目（一括の4画面・計画B2）',
   })
   it('バイタル一括: 数える方の最初の回の空の欄だけ（入れている欄の色が先）・「未」と小さく薄い「前回…」', () => {
     assert.match(V, /const countedSlot = si === 0 && blankCount !== undefined/)
-    assert.match(V, /const blank = countedSlot && v === null/)
-    assert.match(V, /isActive \? 'border-2 border-primary bg-accent-bg' : blank \? DAYCARE_BLANK_CELL_CLS : levelTone\(lv\)/)
+    // 反証 重1: 入れている（押している）欄は空の枠にしない（「未」を出さない）
+    assert.match(V, /const blank = countedSlot && v === null && !isActive/)
+    assert.match(V, /isActive \? ACTIVE_CELL_CLS : blank \? DAYCARE_BLANK_CELL_CLS : levelTone\(lv\)/)
     assert.match(V, /\{blank \? <DaycareBlankTag \/> : null\}/)
     assert.match(V, /<span className="font-num text-xs leading-tight text-ink3" aria-hidden="true">\s*\{pv \? `前回\$\{fmtVal\(f, pv\.value\)\}` : '—'\}/)
+    // 反証 軽2: 「未」と「前回…」は横に並べる（間 4px）。左右の余白（px-1）の分だけ中身を広げ（-mx-1）、体温の「未 前回36.4」も 88px の枠に1行で収める
+    assert.match(
+      V,
+      /\{v === null \? \(\s*(\{\}\s*)?<span className="-mx-1 flex items-center gap-1 whitespace-nowrap">\s*\{blank \? <DaycareBlankTag \/> : null\}\s*\{pv \|\| !blank \? \(\s*<span className="font-num text-xs leading-tight text-ink3"/,
+    )
+    assert.doesNotMatch(V, /flex-col[^`'"]*-mx-1|-mx-1[^`'"]*flex-col/, '中身は縦に積まない')
     // 「前回」の字を必ず付ける（値だけを出さない）
     assert.doesNotMatch(V, /\{pv \? fmtVal\(f, pv\.value\)/)
     // 読み上げは前と同じ（未入力・前回の値）
     assert.match(V, /\$\{v === null \? '未入力' : fmtVal\(f, v\)\}/)
+  })
+  it('押している欄（反証 重1）: 白い地＋primary の太い実線＋外側の線。空の枠と地・線の形・線の色が全部ちがう（フォーカスの輪は消さない）', () => {
+    const m = /const ACTIVE_CELL_CLS = '([^']+)'/.exec(V)
+    assert.ok(m, 'ACTIVE_CELL_CLS')
+    const active = m[1].split(' ')
+    const blank = /export const DAYCARE_BLANK_CELL_CLS = '([^']+)'/.exec(prog)[1].split(' ')
+    assert.deepEqual(active, ['border-2', 'border-primary', 'bg-surface', 'outline', 'outline-2', 'outline-primary'])
+    assert.ok(!active.includes('border-dashed') && blank.includes('border-dashed'), '線の形: 実線 と 点線')
+    assert.ok(active.includes('bg-surface') && blank.includes('bg-warn-bg'), '地: 白 と 注意の地')
+    assert.ok(active.includes('border-primary') && blank.includes('border-warn'), '線の色: primary と warn')
+    // 外側の線は outline（ring＝box-shadow にすると、キーボードのフォーカスの輪＝box-shadow を上書きして消すため）
+    assert.ok(!active.some((c) => c.startsWith('ring')), 'ring を使わない')
+    assert.match(read('../src/index.css'), /:focus-visible \{\s*outline: none;\s*box-shadow:/)
+    // 前は accent-bg（空の枠の warn-bg とほぼ同じ色）だった
+    assert.doesNotMatch(V, /'border-2 border-primary bg-accent-bg'/)
+  })
+  it('凡例（反証 軽3）: 「— 未測定」はそのまま、「未＝未入力（点線の枠）」を足した', () => {
+    assert.match(V, /記号: ↑↑ 危険（高い）・↑ 注意（高い）・↓ 注意（低い）・↓↓ 危険（低い）・— 未測定・未＝未入力（点線の枠）。範囲外と血圧の上下逆は保存しません。/)
   })
   it('食事一括: 選択肢が「—（未入力）」の時だけ空の見た目（枠と地は排他・selectCls は今のまま）。拒食は入力済み', () => {
     assert.match(M, /const selectCls = 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-2 text-lg text-ink disabled:text-ink3'/)
@@ -316,11 +341,18 @@ describe('静的検査: 全部の枠が埋まるまでの知らせ（計画B2）
     assert.doesNotMatch(cmp, /未到着|数えていません|未入力なし/)
   })
   it('行の印: 空の欄がある行の氏名の横に「▲未」（15px・赤字）・読み上げ「未入力あり」。aria-label の付いたリンク（活動・訓練）は読み上げの文をリンクの外に', () => {
-    assert.match(cmp, /export function DaycareRowBlankMark\(\{ sr = true \}: \{ sr\?: boolean \}\) \{\s*return \(\s*<span className="ml-1 whitespace-nowrap text-sm font-bold text-danger">\s*<span aria-hidden="true">▲未<\/span>\s*\{sr \? <span className="sr-only">（未入力あり）<\/span> : null\}/)
+    // 反証 中1: lead＝行の頭に置く（右に間）。置いた行を高くしない（leading-tight）
+    assert.match(
+      cmp,
+      /export function DaycareRowBlankMark\(\{ sr = true, lead = false \}: \{ sr\?: boolean; lead\?: boolean \}\) \{\s*return \(\s*<span className=\{`\$\{lead \? 'mr-1' : 'ml-1'\} whitespace-nowrap text-sm font-bold leading-tight text-danger`\}>\s*<span aria-hidden="true">▲未<\/span>\s*\{sr \? <span className="sr-only">（未入力あり）<\/span> : null\}/,
+    )
     assert.match(cmp, /export function DaycareRowBlankSr\(\) \{\s*return <span className="sr-only">未入力あり<\/span>/)
     assert.doesNotMatch(cmp, /\btext-(2xs|xs)\b/)
-    // バイタル一括（氏名は文字）・食事一括（リンクに aria-label が無い）は印の中で読む
-    assert.match(BULK.vitals, /\{nameOf\(row\.residentId\)\}\s*\{\(blankCount \?\? 0\) > 0 \? <DaycareRowBlankMark \/> : null\}/)
+    // バイタル一括（氏名は文字）・食事一括（リンクに aria-label が無い）は印の中で読む。
+    // 反証 中1: バイタル一括は札の行の頭（「▲未 施設の基準」）。氏名の横は iPad 縦（氏名の列 112px）で折り返して行が伸びたため
+    assert.match(BULK.vitals, /<span className="block text-sm leading-tight text-ink2">\s*\{\(blankCount \?\? 0\) > 0 \? <DaycareRowBlankMark lead \/> : null\}\s*\{basis\}\s*<\/span>/)
+    assert.match(BULK.vitals, /<span className="block text-base font-bold leading-tight text-ink">\{nameOf\(row\.residentId\)\}<\/span>/)
+    for (const k of ['meals', 'activity', 'training']) assert.doesNotMatch(BULK[k], /<DaycareRowBlankMark lead/, `${k}: 氏名の横のまま`)
     assert.match(BULK.meals, /<span className="sr-only">さんの1日の記録を開く<\/span>\s*(\{\}\s*)?\{\(blankOf\.get\(rid\) \?\? 0\) > 0 \? <DaycareRowBlankMark \/> : null\}\s*<\/span>/)
     // 活動一括・機能訓練: 見える印はリンクの中の氏名の横、読み上げはリンクの外（リンクの aria-label は今のまま）
     assert.match(BULK.activity, /<span aria-hidden="true"> ›<\/span>\s*(\{\}\s*)?\{rowBlank \? <DaycareRowBlankMark sr=\{false\} \/> : null\}/)
@@ -397,7 +429,7 @@ describe('コントラスト（tokens.css の ops・明と暗）', () => {
       ['--c-ink', '--c-warn-bg', '空の選択肢・活動の枠の文字'],
       ['--c-ink2', '--c-warn-bg', '空の行の活動の枠の文字（ほか）'],
       ['--c-ink3', '--c-surface', '再測定の回などの「前回…」（14px）'],
-      ['--c-ink3', '--c-accent-bg', '入れている欄の「前回…」（14px）'],
+      ['--c-ink3', '--c-surface', '入れている欄の「前回…」（14px・反証 重1 で白い地に）'],
       ['--c-danger', '--c-bg', '行の印・未入力の数（ページの地）'],
       ['--c-danger', '--c-surface', '未入力の数（活動一括・機能訓練の区画の地）'],
       ['--c-ok', '--c-bg', '全員入力済み（ページの地）'],
@@ -412,6 +444,9 @@ describe('コントラスト（tokens.css の ops・明と暗）', () => {
       assert.ok(contrast(varOf(b, '--c-warn'), varOf(b, '--c-bg')) >= 3, `${mode} 点線の枠 × ページの地`)
       assert.ok(contrast(varOf(b, '--c-warn'), varOf(b, '--c-warn-bg')) >= 3, `${mode} 点線の枠 × 空の枠の地`)
       assert.ok(contrast(varOf(b, '--c-ink2'), varOf(b, '--c-bg')) >= 3, `${mode} 「/」 × ページの地`)
+      // 押している欄の線（primary）は白い地・ページの地のどちらとも 3 以上（反証 重1）
+      assert.ok(contrast(varOf(b, '--c-primary'), varOf(b, '--c-surface')) >= 3, `${mode} 押している欄の線 × 欄の地`)
+      assert.ok(contrast(varOf(b, '--c-primary'), varOf(b, '--c-bg')) >= 3, `${mode} 押している欄の外側の線 × ページの地`)
     }
   })
 })

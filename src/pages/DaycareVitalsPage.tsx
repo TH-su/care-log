@@ -164,6 +164,12 @@ const DC_KEYPAD_KEYS: readonly (readonly [string, string])[] = [
   ['.', '.'], ['0', '0'], ['back', '⌫'],
 ]
 
+/**
+ * 入れている（テンキーで押している）欄の見た目（2026-11-09 計画B2 の反証 重1）: 白い地＋primary の太い実線＋外側に primary の線 2px。
+ * 空の枠（注意の地＋太い点線）と地の色・線の形・線の色の3つで見分ける。外側の線は outline（フォーカスの輪＝box-shadow と重ならない）
+ */
+const ACTIVE_CELL_CLS = 'border-2 border-primary bg-surface outline outline-2 outline-primary'
+
 function levelTone(lv: Level): string {
   if (lv === 'danger-high' || lv === 'danger-low') return 'border-2 border-danger bg-danger-bg'
   if (lv !== null) return 'border-2 border-warn bg-warn-bg'
@@ -1014,7 +1020,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
         </div>
       ) : null}
       <p className="text-sm leading-tight text-ink2">
-        記号: ↑↑ 危険（高い）・↑ 注意（高い）・↓ 注意（低い）・↓↓ 危険（低い）・— 未測定。範囲外と血圧の上下逆は保存しません。
+        記号: ↑↑ 危険（高い）・↑ 注意（高い）・↓ 注意（低い）・↓↓ 危険（低い）・— 未測定・未＝未入力（点線の枠）。範囲外と血圧の上下逆は保存しません。
       </p>
       {gate !== null && !(gate.observed && gate.value === true) ? (
         <p role="status" className="rounded-lg border border-warn bg-warn-bg px-3 py-1.5 text-base text-ink">
@@ -1236,11 +1242,13 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                               <div className="dc-vital-name">
                                 {si === 0 ? (
                                   <>
-                                    <span className="block text-base font-bold leading-tight text-ink">
-                                      {nameOf(row.residentId)}
-                                      {(blankCount ?? 0) > 0 ? <DaycareRowBlankMark /> : null}
+                                    <span className="block text-base font-bold leading-tight text-ink">{nameOf(row.residentId)}</span>
+                                    {/* 空の欄がある行の印は札の行の頭（「▲未 施設の基準」）。氏名の横に置くと iPad 縦（氏名の列 112px）で折り返して
+                                        行が伸びるため（2026-11-09 計画B2 の反証 中1。読み上げは「未入力あり」） */}
+                                    <span className="block text-sm leading-tight text-ink2">
+                                      {(blankCount ?? 0) > 0 ? <DaycareRowBlankMark lead /> : null}
+                                      {basis}
                                     </span>
-                                    <span className="block text-sm leading-tight text-ink2">{basis}</span>
                                     {slots.length > 1 || time !== null ? (
                                       <span className="block text-sm leading-tight text-ink2">1回目{time !== null ? `（${time}）` : ''}</span>
                                     ) : null}
@@ -1261,7 +1269,8 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                               const isActive = active?.key === slot.key && active.field === f
                               const pv = prev[f]
                               const word = lv === null ? '' : LEVEL_WORD[lv]
-                              const blank = countedSlot && v === null
+                              // 入れている欄は空の枠にしない（「未」を出さない＝反証 重1）
+                              const blank = countedSlot && v === null && !isActive
                               // 欄の間（2026-11-09 計画B2）: 欄の幅はどれも 88px（列の幅 − 左右の余白）。ほかの欄の間は 8px（4px＋4px）、
                               // 血圧の上と下の間は 12px（4px＋8px・間に「/」）、血圧の下と P の間は 20px（16px＋4px）
                               const tdCls = f === 'sys_bp' ? 'w-24 px-1 py-1' : f === 'dia_bp' ? 'relative w-28 py-1 pl-2 pr-4' : 'px-1 py-1'
@@ -1280,22 +1289,25 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                                     data-dc-active={isActive ? '' : undefined}
                                     aria-label={`${nameOf(row.residentId)} ${DAYCARE_VITAL_LABEL[f]} ${v === null ? '未入力' : fmtVal(f, v)}${word ? ` ${word}` : ''}${pv ? `、前回 ${fmtVal(f, pv.value)}` : ''}${local ? '、未送信' : ''}`}
                                     // 欄の高さは押せる下限の 44px（2026-11-09 に 56px から詰めた。行の高さは欄＋上下 4px ずつ＝隣の行の欄と 8px あく）
-                                    // 空の枠（数える方の最初の回で値が無い）は注意の地＋太い点線＋「未」（2026-11-09 計画B2）。入れている欄の色が先
+                                    // 空の枠（数える方の最初の回で値が無い）は注意の地＋太い点線＋「未」（2026-11-09 計画B2）。入れている欄の見た目が先
+                                    // （反証 重1: 入れている欄は「未」を出さず、白い地＋primary の実線＝ACTIVE_CELL_CLS）
                                     className={`flex min-h-tap w-full flex-col items-center justify-center rounded px-1 text-center ${
-                                      isActive ? 'border-2 border-primary bg-accent-bg' : blank ? DAYCARE_BLANK_CELL_CLS : levelTone(lv)
+                                      isActive ? ACTIVE_CELL_CLS : blank ? DAYCARE_BLANK_CELL_CLS : levelTone(lv)
                                     } disabled:opacity-100`}
                                   >
                                     {v === null ? (
                                       // 空の欄だけ前回の値を出す（定時バイタルと同じ・親の回答 4）。入れた値と見分けがつくよう小さく薄く、「前回」を付ける
-                                      // （2026-11-09 計画B2: 14px・text-ink3）。空の枠には「未」の字を添える（前回が無い時は「未」だけ）
-                                      <>
+                                      // （2026-11-09 計画B2: 14px・text-ink3）。空の枠には「未」の字を添える（前回が無い時は「未」だけ）。
+                                      // 「未」と「前回…」は横に並べる（文字を大きくしても枠が高くならない＝反証 軽2）。左右の余白（px-1）の分だけ
+                                      // 中身を広げる（-mx-1）: 体温の「未 前回36.4」も 88px の枠の線の内側に1行で収め、列の幅を広げない
+                                      <span className="-mx-1 flex items-center gap-1 whitespace-nowrap">
                                         {blank ? <DaycareBlankTag /> : null}
                                         {pv || !blank ? (
                                           <span className="font-num text-xs leading-tight text-ink3" aria-hidden="true">
                                             {pv ? `前回${fmtVal(f, pv.value)}` : '—'}
                                           </span>
                                         ) : null}
-                                      </>
+                                      </span>
                                     ) : (
                                       <>
                                         <span className="font-num text-xl font-bold text-ink">

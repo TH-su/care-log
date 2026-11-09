@@ -22,11 +22,13 @@ export function DaycareUnfilledCount({ counts }: { counts: { people: number; fie
 
 /**
  * 空の欄がある行の、氏名の横の小さな印（「▲未」・読み上げは「未入力あり」）。
- * sr=false: 読み上げの文を出さない（aria-label の付いたリンクの中に置く時は、中の文が読まれないので、リンクの外に DaycareRowBlankSr を置く）
+ * sr=false: 読み上げの文を出さない（aria-label の付いたリンクの中に置く時は、中の文が読まれないので、リンクの外に DaycareRowBlankSr を置く）。
+ * lead: 行の頭に置く（右に間をあける。バイタル一括は氏名の下の札の行の頭＝反証 中1）
  */
-export function DaycareRowBlankMark({ sr = true }: { sr?: boolean }) {
+export function DaycareRowBlankMark({ sr = true, lead = false }: { sr?: boolean; lead?: boolean }) {
   return (
-    <span className="ml-1 whitespace-nowrap text-sm font-bold text-danger">
+    // 行の高さを増やさない（text-sm の行の高さ 1.55 のままだと、置いた行が高くなる＝反証 中1 の確かめで見つけた）
+    <span className={`${lead ? 'mr-1' : 'ml-1'} whitespace-nowrap text-sm font-bold leading-tight text-danger`}>
       <span aria-hidden="true">▲未</span>
       {sr ? <span className="sr-only">（未入力あり）</span> : null}
     </span>
