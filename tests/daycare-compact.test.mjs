@@ -15,12 +15,15 @@ const code = (p) =>
 
 const today = code('../src/pages/DaycarePage.tsx')
 const css = read('../src/index.css')
+// 2026-11-09 計画B3（固定し直し・意図は同じ）: バイタル一括と食事一括を1つの画面（バイタル・食事＝DaycareVitalsMealsPage）にした。一括の画面は3つ。
+// 食事一括の昼食と水分の欄はフック（DaycareLunchColumns.tsx の cells）で、画面の表の右の3列になる
 const BULK = {
-  vitals: code('../src/pages/DaycareVitalsPage.tsx'),
+  vitals: code('../src/pages/DaycareVitalsMealsPage.tsx'),
   activity: code('../src/pages/DaycareActivityBulkPage.tsx'),
   training: code('../src/pages/DaycareTrainingPage.tsx'),
-  meals: code('../src/pages/DaycareMealsPage.tsx'),
 }
+const LUNCH = code('../src/pages/DaycareLunchColumns.tsx')
+const LUNCH_CELLS = LUNCH.slice(LUNCH.indexOf('const cells = (rid: number)'), LUNCH.indexOf('const notes = (rid: number)'))
 
 describe('デイの今日のカードを小さく（2026-11-09）', () => {
   const list = today.slice(today.indexOf('<ul className="dc-cards"'), today.indexOf('</ul>', today.indexOf('<ul className="dc-cards"')))
@@ -53,7 +56,8 @@ describe('デイの今日のカードを小さく（2026-11-09）', () => {
     assert.doesNotMatch(list, /\btruncate\b/)
     // 状態の段と進み具合の印は 15px（text-sm）の詰めた段
     assert.match(list, /<p className="break-words text-sm font-bold leading-tight text-ink">\s*<span aria-hidden="true">\{tone\.mark\} <\/span>\s*\{tone\.word\}\s*<\/p>/)
-    assert.match(list, /className=\{`rounded px-1 text-sm leading-tight \$\{PROGRESS_MARK_CLS\[mk\.state\]\}`\}/)
+    // 2026-11-09 計画B3（固定し直し・意図は同じ）: 札の下に分類の色の細い線（progressCategoryLine・枠の形の区別はそのまま）
+    assert.match(list, /className=\{`rounded px-1 text-sm leading-tight \$\{PROGRESS_MARK_CLS\[mk\.state\]\} \$\{progressCategoryLine\(mk\.key\)\}`\}/)
     // 入浴の予定は印の「浴」で分かるので、状態の段に「・入浴」を足さない
     assert.doesNotMatch(list, /'・入浴'/)
     assert.doesNotMatch(list, /入浴 \{bathText\}/)
@@ -82,7 +86,9 @@ describe('一括の4画面で行を増やす（2026-11-09）', () => {
       assert.match(p, /className="dc-table-fit relative isolate overflow-auto"/, k)
       assert.match(p, /useTableFit\(tableBox/, k)
       assert.match(p, /<th scope="col" className="sticky left-0 top-0 z-30 bg-surface2/, k)
-      assert.match(p, /<th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">/, k)
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 氏名の列（sticky）の地は行と同じ1人ずつ交互の地（daycareRowTone）。下を流れる欄を透かさないのは同じ
+      assert.match(p, /<th scope="row" className=\{`sticky left-0 z-10 \$\{rowBg\} px-2 py-1 text-left font-normal`\}>/, k)
+      assert.match(p, /const rowBg = daycareRowTone\(pi\)/, k)
     }
   })
   it('行の高さは押せる下限の近く: 欄は 44px（バイタルは 56px から）・行の上下は 4px ずつ（py-1）より詰めない', () => {
@@ -92,12 +98,16 @@ describe('一括の4画面で行を増やす（2026-11-09）', () => {
       const body = p.slice(p.indexOf('<tbody>'), p.indexOf('</tbody>'))
       assert.doesNotMatch(body, /\bpy-0(\.5)?\b/, `${k}: 欄の上下の余白は 4px より詰めない（隣の行の欄と 8px あける）`)
     }
+    // 2026-11-09 計画B3（固定し直し・意図は同じ）: 昼食と水分の欄（フックの cells）も同じ
+    assert.doesNotMatch(LUNCH_CELLS, /\bpy-0(\.5)?\b/, 'meals')
+    assert.match(LUNCH_CELLS, /<td key=\{f\} className="px-1 py-1">/)
   })
   it('氏名の列: 1人の記録への入口は氏名のリンク（押せる高さ 44px の中に氏名と札の2段）。活動一括・機能訓練の〔記録 ›〕〔1日の記録 ›〕はまとめた', () => {
     // 2026-11-09 計画B（固定し直し・意図は同じ）: 名前の後の「（未到着）」は、見えている来た・まだの言葉（daycareCameMark）に
     assert.match(BULK.activity, /aria-label=\{`\$\{name\}さん（\$\{cm\.word\}）の1日の記録を開く（活動の度合い・前回と同じ）`\}\s+className="flex min-h-tap flex-col justify-center rounded/)
     assert.match(BULK.training, /aria-label=\{`\$\{name\}さんの1日の記録を開く`\}\s+className="flex min-h-tap items-center rounded/)
-    assert.match(BULK.meals, /<Link to=\{personPath\(rid, day, today\)\} className="flex min-h-tap flex-col justify-center/)
+    // 2026-11-09 計画B3（固定し直し・意図は同じ）: 食事一括の氏名のリンクは、バイタル・食事の画面の氏名の列（1回目の行）
+    assert.match(BULK.vitals, /<Link to=\{personPath\(row\.residentId, day, today\)\} className="flex min-h-tap flex-col justify-center/)
     for (const k of ['activity', 'training']) {
       assert.doesNotMatch(BULK[k], /記録<span aria-hidden="true"> ›<\/span>\s*<\/Link>/, `${k}: 枠つきの〔記録 ›〕は無い`)
       assert.match(BULK[k], /<span className="text-base font-bold leading-tight text-link">\s*\{name\}\s*<span aria-hidden="true"> ›<\/span>/, `${k}: 氏名に › を付けて押せることを示す`)
@@ -110,19 +120,22 @@ describe('一括の4画面で行を増やす（2026-11-09）', () => {
       assert.doesNotMatch(p, /\btext-2xs\b/, k)
       if (k !== 'vitals') assert.doesNotMatch(p, /\btext-xs\b/, k)
     }
+    // 2026-11-09 計画B3（固定し直し・意図は同じ）: 昼食と水分の欄（フック）も 14px・13px を使わない
+    assert.doesNotMatch(LUNCH, /\btext-(2?xs)\b/, 'meals')
     assert.equal((BULK.vitals.match(/\btext-xs\b/g) ?? []).length, 1, 'バイタル一括の 14px は1か所だけ')
     assert.match(BULK.vitals, /<span className="font-num text-xs leading-tight text-ink3" aria-hidden="true">\s*\{pv \? `前回\$\{fmtVal\(f, pv\.value\)\}` : '—'\}\s*<\/span>/)
   })
   it('バイタル一括: 日付と「表示する方」を1段に。食事一括: 見出し・未入力の数・予定の人数を1段に、合計と水分の欄を横に', () => {
     // 2026-11-09 計画B（固定し直し・意図は同じ）: 未入力の数を同じ段に入れるため、段の間を 16px から 12px に詰めた（押す所どうしは 8px 以上）
     assert.match(BULK.vitals, /<div className="flex flex-wrap items-center gap-x-3 gap-y-2">\s*<div className="flex flex-wrap items-center gap-gap" role="group" aria-label="日付">[\s\S]*?<div className="flex flex-wrap gap-gap" role="group" aria-label="表示する方">/)
-    const m = BULK.meals
-    const top = m.slice(m.indexOf('<section aria-labelledby="h-meals"'), m.indexOf('<table'))
     // 2026-11-09 計画B（固定し直し・意図は同じ）: 未入力の数は4画面で同じ部品（DaycareUnfilledCount）にした
-    assert.ok(top.indexOf('id="h-meals"') < top.indexOf('<DaycareUnfilledCount') && top.indexOf('<DaycareUnfilledCount') < top.indexOf('予定の方'), '昼食 → 未入力の数 → 予定の人数')
-    const body = m.slice(m.indexOf('<tbody>'), m.indexOf('</tbody>'))
-    assert.match(body, /<div className="flex flex-wrap items-center gap-x-2 gap-y-1">\s*<p className="text-base text-ink">\s*計 /)
-    assert.match(body, /className="flex items-center gap-2"\s*>\s*<input/)
+    // 2026-11-09 計画B3（固定し直し・意図は同じ）: 食事一括の「未入力の数 → 予定の人数」は、バイタル・食事の画面の日付と「表示する方」の段の右に並べる（新しい段を足さない）
+    const v = BULK.vitals
+    const top = v.slice(v.indexOf('role="group" aria-label="表示する方"'), v.indexOf('{releasing ?'))
+    assert.ok(top.indexOf('<DaycareUnfilledCount') > 0 && top.indexOf('<DaycareUnfilledCount') < top.indexOf('予定の方'), '未入力の数 → 予定の人数')
+    // 2026-11-09 計画B3 の手直し（固定し直し・意図は同じ）: 合計と水分の欄は横に並べる（#104 と同じ・行の高さを欄の 44px に保つ）。合計の幅は 64px 以上でそろえる。単位は見出し
+    assert.match(LUNCH_CELLS, /<div className="flex items-center gap-x-1\.5">\s*<p className="min-w-16 whitespace-nowrap text-sm text-ink">\s*計 /)
+    assert.match(LUNCH_CELLS, /className="flex items-center gap-2"\s*>\s*<input/)
   })
   it('食事一括の氏名の列を広げるのは 1024px 以上だけ（iPad 縦で表が横にはみ出さない・反証 中3）。欄へ送る時の逃げも同じ幅', () => {
     assert.match(css, /@media \(min-width: 1024px\) \{\s*\.dc-meal-name \{\s*width: min\(14rem, 22vw\);\s*\}\s*\.dc-table-fit:has\(\.dc-meal-name\) \{\s*scroll-padding-left: calc\(min\(14rem, 22vw\) \+ 1rem\);/)

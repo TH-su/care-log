@@ -9,6 +9,7 @@
 import { daycareBulkRows } from './daycare.ts'
 import type { AttendanceState, DaycareBoardRow } from './daycare.ts'
 import { attendedUnfilledCount, lunchFilled } from './daycareProgress.ts'
+import { vitalsMealsPath } from './daycareRoutes.ts'
 import type { FluidIntake, Meal } from './types.ts'
 
 /** 昼食の主食・副食の割合（既存の食事一括と同じ 0〜10 の11段階） */
@@ -206,9 +207,12 @@ export function mealBulkRows<T extends Pick<DaycareBoardRow, 'residentId' | 'sta
   return daycareBulkRows(rows)
 }
 
-/** 食事一括の画面のルート（業務日は ?day= で持つ。今日は付けない） */
+/**
+ * 食事一括の画面のルート（業務日は ?day= で持つ。今日は付けない）。2026-11-09 計画B3: 食事一括はバイタル一括と1つの画面
+ * （バイタル・食事＝daycareRoutes.ts の vitalsMealsPath）にしたので、そちらを返す
+ */
 export function mealBulkPath(day: string, today: string): string {
-  return `/record/daycare/meals${day === today ? '' : `?day=${day}`}`
+  return vitalsMealsPath(day, today)
 }
 
 /** 昼食・おやつの保存の状態の種類（画面の SaveState の kind と同じ名前） */
@@ -234,10 +238,21 @@ export type LunchAmountField = 'main_amount' | 'side_amount'
 
 /** 主食・副食の選択肢（端末の選択肢）の並び。value は ''＝未入力・'0'〜'10'＝割合・'refused'＝拒食 */
 export const LUNCH_SELECT_OPTIONS: readonly { value: string; label: string }[] = [
-  { value: '', label: '—（未入力）' },
+  // 2026-11-09 計画B3: 「—（未入力）」→「未」（バイタルと同じ表に入れて、行の高さを欄の 44px に保ったまま iPad 横 1180px で横に送らずに
+  // 収まる幅にする。バイタルの空の枠と同じ「未」・凡例の「未＝未入力」。空の見た目は計画B2 のまま・読み上げは「いま: 未入力」）
+  { value: '', label: '未' },
   ...DAYCARE_MEAL_AMOUNTS.map((n) => ({ value: String(n), label: String(n) })),
   { value: 'refused', label: '拒食' },
 ]
+
+/**
+ * 主食・副食の選択肢で止めるキー（2026-11-09 計画B3 の反証 中1）: 数字（半角・全角。テンキーの数字も key は '0'〜'9'）。
+ * 端末の選択肢は数字キーで頭文字の合う選択肢へ移り、すぐ保存してしまうため（バイタルの KT の後に主食へ移った時、物理キーボードで
+ * 打ち続けた数字が入る）。矢印・Enter・Space・Tab などの操作のキーは止めない
+ */
+export function lunchSelectKeyBlocked(key: string): boolean {
+  return /^[0-9０-９]$/.test(key)
+}
 
 /** 主食・副食の選択肢のいまの値: 拒食なら主食・副食の両方の欄が 'refused'。そうでなければその欄の値（null は ''） */
 export function lunchSelectValue(meal: Pick<Meal, 'main_amount' | 'side_amount' | 'status'> | null | undefined, f: LunchAmountField): string {

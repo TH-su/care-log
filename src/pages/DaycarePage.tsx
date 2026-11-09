@@ -61,6 +61,7 @@ import type { DaycareMealRow, MyRole, VitalTarget } from '../lib/db'
 import { fetchAllResidents, fetchResidentsFromAll } from '../lib/cachedReads'
 import { personPath } from '../lib/daycarePerson'
 import { contactPath } from '../lib/daycareContact'
+import { DAYCARE_VITALS_MEALS_PATH } from '../lib/daycareRoutes'
 import type { DaycareActivity } from '../lib/daycareActivity'
 import { loadDaycareDayParts } from '../lib/daycareDayLoad'
 import type { DaycareDayReaders } from '../lib/daycareDayLoad'
@@ -92,6 +93,7 @@ import {
 } from '../lib/daycare'
 import type { KeyedVital } from '../lib/daycare'
 import {
+  DAYCARE_CATEGORY_CLS,
   PROGRESS_MARK_CLS,
   PROGRESS_STATE_WORD,
   activityCellsFilled,
@@ -103,6 +105,7 @@ import {
   lunchBlankFields,
   lunchShownWith,
   navPendingOf,
+  progressCategoryLine,
   recordBlankFields,
   unreadProgressLabels,
   unreadProgressNotice,
@@ -110,8 +113,9 @@ import {
   vitalBlankFields,
   vitalShownValues,
   vitalSlotsFilled,
+  vitalsMealsBlankFields,
 } from '../lib/daycareProgress'
-import type { DaycareNavPending, ProgressMark } from '../lib/daycareProgress'
+import type { DaycareCategory, DaycareNavPending, ProgressMark } from '../lib/daycareProgress'
 import type { DaycareTrainingSession } from '../lib/daycareTraining'
 import { useVitalLimits } from '../hooks/useVitalLimits'
 import { VitalLimitsFailedNote } from '../components/VitalLimitsFailedNote'
@@ -196,28 +200,29 @@ const REST_BTN =
  * デイの画面の上の切り替え（今日／バイタル／食事／排泄／活動／機能訓練）。今いる画面は塗りと aria-current で示す。
  * 〔排泄〕（2026-10-25 §9.7）は別のアプリ（排泄ケアアプリのデイの表示）へ同じタブで移る＝Link でなく a。押した直前に handoff を呼ぶ
  * （今日の一覧を持つ画面は受け渡しのキーを書き直す。今日の一覧が無い画面は渡さない＝書かずに移る）
- * pending（2026-11-09 計画B）: 今日の画面だけ、〔バイタル一括〕〔食事一括〕〔活動一括〕〔機能訓練〕に未入力の数（計画B2: それぞれの一括の画面の
+ * pending（2026-11-09 計画B）: 今日の画面だけ、〔バイタル・食事〕〔活動一括〕〔機能訓練〕に未入力の数（計画B2: それぞれの一括の画面の
  * 「未入力 n名」の n と同じ数え方＝到着を問わず、空の欄がある方の数）を
- * 「未5」と添える（0 は出さない）。読み上げは見えている名前から「バイタル一括（未入力 5名）」。ほかの画面は渡さない（今のまま）
+ * 「未5」と添える（0 は出さない）。読み上げは見えている名前から「バイタル・食事（未入力 5名）」。ほかの画面は渡さない（今のまま）
+ * 2026-11-09 計画B3: 〔バイタル一括〕〔食事一括〕を〔バイタル・食事〕1つにまとめた（未入力の数も1人7欄で1つ）。項目の頭に分類の色の印
+ * （縦の短い棒・バイタル＝ティール・食事＝イエロー・活動＝コーラル・機能訓練＝ローズ。読み上げない。意味は名前で伝える）
  */
 export function DaycareNav({
   current,
   handoff,
   pending,
 }: {
-  current: 'today' | 'vitals' | 'meals' | 'activity' | 'training'
+  current: 'today' | 'vitalsMeals' | 'activity' | 'training'
   handoff?: () => void
   pending?: DaycareNavPending
 }) {
-  const items: { key: 'today' | 'vitals' | 'meals' | 'activity' | 'training'; to: string; label: string }[] = [
-    { key: 'today', to: '/record/daycare', label: '今日（到着・休み）' },
-    { key: 'vitals', to: '/record/daycare/vitals', label: 'バイタル一括' },
-    // 今日の画面の改善 2回目（2026-10-24）: 昼食・おやつをまとめて入れる
-    { key: 'meals', to: '/record/daycare/meals', label: '食事一括' },
+  const items: { key: 'today' | 'vitalsMeals' | 'activity' | 'training'; to: string; label: string; cats: readonly DaycareCategory[] }[] = [
+    { key: 'today', to: '/record/daycare', label: '今日（到着・休み）', cats: [] },
+    // 2026-11-09 計画B3: バイタル一括（2026-10-22）と食事一括（今日の画面の改善 2回目・2026-10-24）を1つの画面に
+    { key: 'vitalsMeals', to: DAYCARE_VITALS_MEALS_PATH, label: 'バイタル・食事', cats: ['vitals', 'meals'] },
     // 段階2b（2026-10-22）: 活動・レクをまとめて記録
-    { key: 'activity', to: '/record/daycare/bulk', label: '活動一括' },
+    { key: 'activity', to: '/record/daycare/bulk', label: '活動一括', cats: ['activity'] },
     // 段階3a（2026-10-23）: 個別機能訓練（配置と実施記録）
-    { key: 'training', to: '/record/daycare/training', label: '機能訓練' },
+    { key: 'training', to: '/record/daycare/training', label: '機能訓練', cats: ['training'] },
   ]
   // 2026-11-09 代表者の指示（1画面に多く）: 押せる高さ 44px は保ち、文字と左右の余白を詰める（どの画面でも上の段が1段で収まるように）
   const navCls = 'flex min-h-tap items-center rounded border border-border-strong bg-surface px-3 text-sm text-ink'
@@ -250,6 +255,15 @@ export function DaycareNav({
           }
         >
           {current === it.key ? <span aria-hidden="true">✓ </span> : null}
+          {/* 分類の色の印（2026-11-09 計画B3・読み上げない）。バイタル・食事は2本。今いる画面（primary の塗り）の上では印が溶けるので、
+              地の色（surface）の細い縁を付ける（反証 軽6: 縁と primary は明 8.6・暗 7.9、印と縁は 3.3 以上） */}
+          {it.cats.length > 0 ? (
+            <span aria-hidden="true" className={`mr-1.5 inline-flex ${current === it.key ? 'gap-1' : 'gap-0.5'}`}>
+              {it.cats.map((c) => (
+                <span key={c} className={`inline-block h-4 w-1 rounded-sm ${DAYCARE_CATEGORY_CLS[c].dot}${current === it.key ? ' ring-1 ring-surface' : ''}`} />
+              ))}
+            </span>
+          ) : null}
           {/* 1280px 未満では括弧の補足を出さない（「今日（到着・休み）」→「今日」。狭い画面で切り替えが2段に収まる）。
               2026-11-09 計画B: 640px（sm）から 1280px（xl）に上げた（今日の画面で未入力の数を添えても、iPad 横 1180px で切り替えと
               記録者が1段に収まるように＝親の決定。デイの5画面で共通） */}
@@ -270,8 +284,8 @@ export function DaycareNav({
             </>
           ) : null}
         </Link>,
-        // 記録の順（バイタル → 食事 → 排泄）に、食事一括の次へ置く
-        ...(it.key === 'meals' ? [excretion] : []),
+        // 記録の順（バイタル → 食事 → 排泄）に、食事の次へ置く（2026-11-09 計画B3: 食事一括はバイタル・食事にまとめたので、その次）
+        ...(it.key === 'vitalsMeals' ? [excretion] : []),
       ])}
     </nav>
   )
@@ -828,15 +842,23 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   )
   // 切り替えの数は今日を見ている時だけ（リンクの先は今日を開くため＝反証 中2）。2026-11-09 計画B2: それぞれの一括の画面の「未入力 n名」の n と
   // 同じ数え方（一括の画面に出る方＝daycareBulkRows を到着を問わず・1人ずつの空の欄の数は一括の画面と同じ純関数・送信待ちを重ねた値）。
-  // バイタル＝最初の回の5欄・昼食＝主食と副食（拒食は入力済み）・活動・訓練＝記録の有無。読めない項目（null）は数を出さない
+  // バイタル・食事＝最初の回の5欄と主食・副食（拒食は入力済み・2026-11-09 計画B3）・活動・訓練＝記録の有無。読めない項目（null）は数を出さない
   const bulk = daycareBulkRows(board.rows)
   const navPending =
     data.day === today
       ? daycareNavPending({
-          vitals: data.vitalsOk ? bulk.map((r) => vitalBlankFields(vitalShown.get(r.residentId)?.[0]?.vals ?? null)) : null,
-          meals: data.intakeOk
-            ? bulk.map((r) => lunchBlankFields(lunchShownWith(lunchOf(r.residentId), pendingRow('meals', { residentId: r.residentId, day: data.day, slot: 'lunch' }))))
-            : null,
+          // 2026-11-09 計画B3: バイタル・食事の画面の「未入力 n名」と同じ1人7欄（バイタルの最初の回の5欄＋昼食の主食・副食）。
+          // バイタルか昼食のどちらかを読めない日は数を出さない（片方だけで数えると、画面の n と食い違うため）
+          vitalsMeals:
+            data.vitalsOk && data.intakeOk
+              ? bulk.map(
+                  (r) =>
+                    vitalsMealsBlankFields(
+                      vitalBlankFields(vitalShown.get(r.residentId)?.[0]?.vals ?? null),
+                      lunchBlankFields(lunchShownWith(lunchOf(r.residentId), pendingRow('meals', { residentId: r.residentId, day: data.day, slot: 'lunch' }))),
+                    ) ?? 0,
+                )
+              : null,
           activity:
             activityRead === null
               ? null
@@ -988,7 +1010,8 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
                     <span
                       key={mk.key}
                       title={`${mk.label}: ${PROGRESS_STATE_WORD[mk.state]}`}
-                      className={`rounded px-1 text-sm leading-tight ${PROGRESS_MARK_CLS[mk.state]}`}
+                      // 2026-11-09 計画B3: 札の下に分類の色の細い線（控えめに。枠の線＝済・未・対象外の形の区別はそのまま・入浴は線なし）
+                      className={`rounded px-1 text-sm leading-tight ${PROGRESS_MARK_CLS[mk.state]} ${progressCategoryLine(mk.key)}`}
                     >
                       <span aria-hidden="true">{mk.short}</span>
                       <span className="sr-only">

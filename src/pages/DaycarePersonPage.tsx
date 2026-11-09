@@ -104,6 +104,7 @@ import {
   settleQueuedFluid,
   snackLabel,
 } from '../lib/daycarePerson'
+import { DAYCARE_VITALS_MEALS_PATH } from '../lib/daycareRoutes'
 import { excretionDayBlank, excretionFailMessage, excretionViewFor, fetchExcretion, MSG_EXCRETION_UNCONFIGURED, MSG_STOOL_DAY_ONLY } from '../lib/excretionClient'
 import type { ExcretionView } from '../lib/excretionClient'
 import type { ResidentTargets } from '../lib/vitalAlerts'
@@ -1204,8 +1205,9 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
             )
           })}
         </ul>
-        <Link to="/record/daycare/vitals" className="inline-flex min-h-tap items-center rounded border border-border-strong px-4 text-base text-link">
-          バイタル一括で入力する<span aria-hidden="true"> ›</span>
+        {/* 2026-11-09 計画B3: バイタル一括は食事一括と1つの画面（バイタル・食事）にした（古い道も送るが、名前と道を新しい画面に合わせた） */}
+        <Link to={DAYCARE_VITALS_MEALS_PATH} className="inline-flex min-h-tap items-center rounded border border-border-strong px-4 text-base text-link">
+          バイタル・食事で入力する<span aria-hidden="true"> ›</span>
         </Link>
         {marks.button(
           { kind: 'vital' },

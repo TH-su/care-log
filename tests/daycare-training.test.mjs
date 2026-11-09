@@ -366,9 +366,11 @@ describe('静的検査（段階3a の規律）', () => {
     // 2026-10-28 見出しの行を上に残す（固定し直し・意図は同じ）: 枠に高さの上限（.dc-table-fit・useTableFit）を付けて枠の中で縦にも送る。
     // 見出しの行は sticky top-0（角の氏名は z-30・ほかの見出しは z-20）、氏名の列は z-10。枠は isolate でアプリの見出しの上に重ならない
     assert.match(head, /<th scope="col" className="sticky left-0 top-0 z-30 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">/)
-    assert.equal((head.match(/<th scope="col" className="sticky top-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">/g) ?? []).length, 4, '内容・時間・指導員・結果の見出しも上に残す')
+    // 2026-11-09 計画B3（固定し直し・意図は同じ）: 見出しの地は分類の色の帯（機能訓練＝ローズ・DAYCARE_CATEGORY_CLS.training.band）・帯の上の文字は text-ink。上に残すのは同じ
+    assert.equal((head.match(/<th scope="col" className=\{`sticky top-0 z-20 \$\{DAYCARE_CATEGORY_CLS\.training\.band\} px-2 py-2 text-sm font-bold text-ink`\}>/g) ?? []).length, 4, '内容・時間・指導員・結果の見出しも上に残す')
     // 2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 氏名の列の中の段の間（space-y-1）を外した
-    assert.match(sec, /<th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">\s*(\{\}\s*)?<div className="dc-vital-name">/)
+    // 2026-11-09 計画B3（固定し直し・意図は同じ）: 氏名の列の地は行と同じ1人ずつ交互の地（daycareRowTone）
+    assert.match(sec, /<th scope="row" className=\{`sticky left-0 z-10 \$\{rowBg\} px-2 py-1 text-left font-normal`\}>\s*(\{\}\s*)?<div className="dc-vital-name">/)
     assert.match(sec, /role="region"[\s\S]*?className="dc-table-fit relative isolate overflow-auto"[\s\S]*?<table className="w-full min-w-max border-collapse text-base">\s*<caption className="sr-only">/)
     assert.doesNotMatch(sec, /<ul className="divide-y divide-border">\s*\{targets\.map/, '1人1行の一覧は表にした')
     // 氏名の列: 札（planTags のまま）と1人の記録への入口。2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 〔1日の記録 ›〕のボタンは
@@ -405,7 +407,8 @@ describe('静的検査（段階3a の規律）', () => {
     const app = code('../src/App.tsx')
     assert.match(app, /<Route path="\/record\/daycare\/training" element=\{<DaycareTrainingPage actorId=\{actorId\} staff=\{staff\} \/>\} \/>/)
     assert.match(app, /if \(pathname === '\/record\/daycare\/training'\) return 'デイ 機能訓練'/)
-    assert.match(code('../src/pages/DaycarePage.tsx'), /\{ key: 'training', to: '\/record\/daycare\/training', label: '機能訓練' \}/)
+    // 2026-11-09 計画B3（固定し直し・意図は同じ）: 項目に分類の色の印（cats）を足した。ルート・key・名前は変えない
+    assert.match(code('../src/pages/DaycarePage.tsx'), /\{ key: 'training', to: '\/record\/daycare\/training', label: '機能訓練', cats: \['training'\] \}/)
     const card = code('../src/components/DaycareTrainingCard.tsx')
     assert.doesNotMatch(card, /\b(insert\w+|update\w+|softDelete\w+)\(/, 'カードからは書かない')
     // 旗が閉じている間・表が無い間は、押しても書けない入口を出さない（反証 軽5）

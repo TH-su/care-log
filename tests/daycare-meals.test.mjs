@@ -64,8 +64,9 @@ if (DP === null) {
       assert.deepEqual(DP.mealBulkRows([]), [])
     })
     it('画面のルート: 今日は ?day= を付けない・それ以外は付ける', () => {
-      assert.equal(DP.mealBulkPath('2026-10-24', '2026-10-24'), '/record/daycare/meals')
-      assert.equal(DP.mealBulkPath('2026-10-20', '2026-10-24'), '/record/daycare/meals?day=2026-10-20')
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 食事一括はバイタル一括と1つの画面（バイタル・食事）にしたので、その道を返す
+      assert.equal(DP.mealBulkPath('2026-10-24', '2026-10-24'), '/record/daycare/vitals-meals')
+      assert.equal(DP.mealBulkPath('2026-10-20', '2026-10-24'), '/record/daycare/vitals-meals?day=2026-10-20')
     })
     it('帯の端の印: 手当てが要る方（食い違い・止まり・拒否・失敗）が先・送信中・未送信・保存済み・無し', () => {
       for (const k of ['conflict', 'held', 'rejected', 'error']) assert.deepEqual(DP.mealBandMark(['saved', k]), { mark: '▲', text: '要確認', tone: 'warn' })
@@ -77,7 +78,10 @@ if (DP === null) {
   })
 
   describe('静的検査（食事一括の決まり）', () => {
-    const page = code('../src/pages/DaycareMealsPage.tsx')
+    // 2026-11-09 計画B3（固定し直し・意図は同じ）: 食事一括の処理は DaycareLunchColumns.tsx（バイタル・食事の画面の昼食と水分の列のフック）に、
+    // 業務日・入力解禁・日付の切り替え・読み込みの3状態はバイタル・食事の画面（DaycareVitalsMealsPage.tsx）に移した
+    const page = code('../src/pages/DaycareLunchColumns.tsx')
+    const screen = code('../src/pages/DaycareVitalsMealsPage.tsx')
     it('書き込みは既存の saveMealEdits・discardPendingRow・insertFluid・softDeleteFluid だけ（新しい書き込みの経路を作らない）・supabase を直に呼ばない', () => {
       const writes = page.match(/\b(save\w+|insert\w+|update\w+|delete\w+|softDelete\w+|upsert\w+|discard\w+)\(/g) ?? []
       const names = [...new Set(writes.map((w) => w.slice(0, -1)))].sort()
@@ -131,22 +135,28 @@ if (DP === null) {
       assert.doesNotMatch(page, /DAYCARE_MEAL_AMOUNTS\.map|chipCls|aria-pressed/)
     })
     it('入力解禁は input_enabled_daycare・サーバーの設定待ちと未来の日は書かない・記録者が無ければ書かない', () => {
-      assert.match(page, /getKindInputGate\('daycare'\)/)
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 入力解禁は画面が読み、フックに渡す
+      assert.match(screen, /getKindInputGate\('daycare'\)/)
+      // 2026-11-09 計画B3 の反証の直し（固定し直し・意図は同じ）（軽4）: その日の材料（写し・予定・出欠）と送信待ちの増減も画面から渡す
+      assert.match(screen, /useDaycareLunchColumns\(\{ day, today, actorId, residents, gate, reloadKey, materials: data, queueTick \}\)/)
       assert.match(page, /const canWrite = gate !== null && gate\.observed && gate\.value === true && !missing && day <= today/)
       assert.match(page, /if \(actorId === null\) return MSG_NO_RECORDER/)
       assert.match(page, /disabled=\{!canWrite\}/)
     })
     it('業務日は URL の ?day=（再読み込みで同じ日に戻る）・端末に業務データを残さない・「自動」の文字を出さない', () => {
-      assert.match(page, /const day = readPersonDay\(search\.get\('day'\), today\)/)
-      assert.match(page, /navigate\(mealBulkPath\(d, today\), \{ replace: true \}\)/)
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 業務日と日付の切り替えはバイタル・食事の画面（道は vitalsMealsPath）
+      assert.match(screen, /const day = readPersonDay\(search\.get\('day'\), today\)/)
+      assert.match(screen, /navigate\(vitalsMealsPath\(d, today\), \{ replace: true \}\)/)
       assert.doesNotMatch(page, /localStorage|sessionStorage/)
       // 「自動」の印（自動の到着・入浴など）は出さない。送信待ちの決まり文句（電波が戻ると自動で送信します）は全画面共通なので除く
       assert.doesNotMatch(page.replace("'電波が届かないため、この端末に保存しました（電波が戻ると自動で送信します）。'", ''), /自動/)
     })
     it('押せる範囲 44px（min-h-tap・min-w-tap）・角は rounded（6px）・rounded-full を使わない・文字は text-lg（選択肢・水分の欄）', () => {
       // 2026-10-28 昼食だけの表にした（固定し直し・意図は同じ）: ボタン列の帯（.dc-meal-row）は表になったので CSS ごと外した
-      assert.match(page, /const selectCls = 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-2 text-lg text-ink disabled:text-ink3'/)
-      assert.match(page, /className="block min-h-tap w-20 rounded border border-border-strong bg-surface px-2 text-lg text-ink disabled:text-ink3"/)
+      // 2026-11-09 計画B3 の手直し（固定し直し・意図は同じ）: 選択肢の左右の余白は 4px（1180px に収める）。押せる範囲・角・文字の大きさは同じ
+      assert.match(page, /const selectCls = 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-1 text-lg text-ink disabled:text-ink3'/)
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 水分の欄の幅は 80px から 56px に（左右の余白 4px・バイタルと同じ表で iPad 横 1180px に横に送らずに収める）
+      assert.match(page, /className="block min-h-tap w-14 rounded border border-border-strong bg-surface px-1 text-lg text-ink disabled:text-ink3"/)
       assert.match(page, /className="min-h-tap min-w-tap rounded border border-primary bg-surface px-2 text-lg font-bold text-primary disabled:border-border disabled:text-ink3"/)
       assert.doesNotMatch(page, /rounded-full/)
       assert.doesNotMatch(page, /dc-meal-row/)
@@ -173,9 +183,15 @@ if (DP === null) {
     })
     it('3状態: 読み込み中・読めない時の再試行・予定の方がいない時の案内', () => {
       // 2026-10-28 昼食だけの表にした（固定し直し・意図は同じ）
-      assert.match(page, /<LoadingBlock label="その日の昼食を読み込んでいます…" \/>/)
-      assert.match(page, /<ErrorBlock message=\{error\} onRetry=\{\(\) => setReloadKey\(\(n\) => n \+ 1\)\} \/>/)
-      assert.match(page, /この日の予定の方がいません（休み・入院中の方は出しません）。予定外で来た方は、今日の画面の〔予定にない方を追加〕で足したカードを押し、〔予定外で到着〕を押すと、ここに出ます。/)
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 3状態はバイタル・食事の画面が出す（昼食と水分も読めてから表を出す・昼食を読めない時も再試行）。
+      // 予定の方がいない時の案内はバイタル一括の文（「全員」の絞り込みがある）
+      assert.match(screen, /<LoadingBlock label="デイのバイタルと昼食を読み込んでいます…" \/>/)
+      assert.match(screen, /const lunchLoading = \(lunch\.loading && lunch\.data === null\) \|\| \(lunch\.data !== null && lunch\.data\.day !== day && lunch\.error === null\)/)
+      // 2026-11-09 計画B3 の反証の直し（固定し直し・意図は同じ）（軽3）: 昼食と水分だけ読めない時は表を止めず、昼食の列を「読み込めません」にして、表の上に理由と〔最新に更新〕
+      assert.doesNotMatch(screen, /<ErrorBlock message=\{lunch\.error\}/)
+      assert.match(screen, /const lunchFailed = !lunchReady && lunch\.error !== null/)
+      assert.match(screen, /\{lunchFailed \? \(\s*<div role="alert"[^>]*>\s*<p className="min-w-0 flex-1">\s*<span aria-hidden="true">▲ <\/span>\s*\{MSG_LUNCH_UNREAD\}/)
+      assert.match(screen, /この日の予定の方がいません（休み・入院中の方は「全員」で出せます）。/)
       assert.doesNotMatch(page, /来た方（在席・帰宅）/)
     })
   })
@@ -189,7 +205,9 @@ if (DP === null) {
       )
       assert.deepEqual(
         DP.LUNCH_SELECT_OPTIONS.map((o) => o.label),
-        ['—（未入力）', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '拒食'],
+        // 2026-11-09 計画B3（固定し直し・意図は同じ）: 空の選択肢の文字を「—（未入力）」から「未入力」に（バイタルと同じ表で iPad 横 1180px に収める幅にする）
+        // 2026-11-09 計画B3 の手直し（固定し直し・意図は同じ）: 「未」（バイタルの空の枠と同じ字・凡例の「未＝未入力」）
+        ['未', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '拒食'],
       )
     })
     it('いまの値: 拒食なら主食・副食の両方が「拒食」・そうでなければその欄の値（null は「—」）・記録なしは「—」', () => {
@@ -274,50 +292,74 @@ if (DP === null) {
   })
 
   describe('静的検査（昼食だけの1行1人の表・2026-10-28）', () => {
-    const page = code('../src/pages/DaycareMealsPage.tsx')
-    const table = page.slice(page.indexOf('<table'), page.indexOf('</table>'))
+    // 2026-11-09 計画B3（固定し直し・意図は同じ）: 食事一括はバイタル一括と1つの画面にした。表の枠・見出し・氏名の列は画面（DaycareVitalsMealsPage.tsx）、
+    // 昼食と水分の処理と欄（主食｜副食｜水分）・行の下の知らせはフック（DaycareLunchColumns.tsx の cells・notes）
+    const page = code('../src/pages/DaycareLunchColumns.tsx')
+    const screen = code('../src/pages/DaycareVitalsMealsPage.tsx')
+    const table = screen.slice(screen.indexOf('<table'), screen.indexOf('</table>'))
     const head = table.slice(table.indexOf('<thead>'), table.indexOf('</thead>'))
-    const body = table.slice(table.indexOf('<tbody>'), table.indexOf('</tbody>'))
+    const screenBody = table.slice(table.indexOf('<tbody>'), table.indexOf('</tbody>'))
+    const body = page.slice(page.indexOf('const cells = (rid: number)'), page.indexOf('return { data, loading'))
     it('見出しは「昼食」・説明の1行は新しい操作に合わせる', () => {
       // 2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 見出しの文字を 22px から 18px に（未入力の数・予定の人数と同じ段）
-      assert.match(page, /<h2 id="h-meals" className="text-lg font-bold leading-tight text-ink">\s*昼食\s*<\/h2>/)
-      assert.match(page, /選ぶとすぐ保存します。昼食は care-log の食事の昼食と同じ記録です。水分は数を入れて改行キー（または〔＋〕）で足します（1人の画面の水分と同じ記録）。/)
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 「昼食」の見出しは、表の見出しの帯（主食｜副食｜水分＝食事の分類の色）にした。説明は1行に詰めて凡例の下に
+      assert.doesNotMatch(screen, /id="h-meals"/)
+      assert.match(head, /className=\{`sticky top-0 z-20 \$\{DAYCARE_CATEGORY_CLS\.meals\.band\} px-2 py-2 text-sm font-bold text-ink`\}>\s*主食\s*<\/th>/)
+      assert.match(screen, /主食・副食は選ぶとすぐ保存します（care-log の食事の昼食と同じ記録）。水分は数を入れて改行キーか〔＋〕で足します（1人の画面の水分と同じ記録）。/)
     })
     it('表の枠はバイタル一括・活動一括と同じ（dc-table-fit・isolate・縦横に送る・useTableFit・キーボードで選べる）', () => {
-      assert.match(page, /ref=\{setTableBox\}\s+role="region"\s+aria-label=\{`\$\{fmtDayLabel\(day\)\}の昼食の表\$\{tableScrolls \? '（横にスクロールできます）' : ''\}`\}\s+tabIndex=\{tableScrolls \|\| tableScrollsY \? 0 : undefined\}\s+className="dc-table-fit relative isolate overflow-auto"/)
-      assert.match(page, /useTableFit\(tableBox\)/)
-      assert.match(page, /const check = \(\) => \{\s*setTableScrolls\(el\.scrollWidth > el\.clientWidth \+ 1\)\s*setTableScrollsY\(el\.scrollHeight > el\.clientHeight \+ 1\)\s*setTableBoxWidth\(el\.clientWidth\)/)
-      assert.match(page, /const ro = new ResizeObserver\(check\)\s*ro\.observe\(el\)\s*if \(el\.firstElementChild\) ro\.observe\(el\.firstElementChild\)/)
-      assert.match(page, /<table className="w-full min-w-max border-collapse text-base">\s*<caption className="sr-only">/)
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 表の枠はバイタル・食事の画面の1つ（テンキーの高さも引く）
+      assert.match(screen, /ref=\{setTableBox\}\s+role="region"\s+aria-label=\{`\$\{fmtDayLabel\(day\)\}のデイのバイタルと昼食の入力表\$\{tableScrolls \? '（横にスクロールできます）' : ''\}`\}\s+tabIndex=\{tableScrolls \|\| tableScrollsY \? 0 : undefined\}\s+className="dc-table-fit relative isolate overflow-auto"/)
+      assert.match(screen, /useTableFit\(tableBox, active !== null \? kpHeight : 0\)/)
+      assert.match(screen, /const check = \(\) => \{\s*setTableScrolls\(el\.scrollWidth > el\.clientWidth \+ 1\)\s*setTableScrollsY\(el\.scrollHeight > el\.clientHeight \+ 1\)\s*setTableBoxWidth\(el\.clientWidth\)/)
+      assert.match(screen, /const ro = new ResizeObserver\(check\)\s*ro\.observe\(el\)\s*if \(el\.firstElementChild\) ro\.observe\(el\.firstElementChild\)/)
+      assert.match(screen, /<table className="w-full min-w-max border-collapse text-base">\s*<caption className="sr-only">/)
     })
     it('列は 氏名｜主食｜副食｜水分（cc）。見出しの行は上に残す（角の氏名は z-30・ほかは z-20）・氏名の列は左に残す（z-10）', () => {
       // 2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 氏名の列は dc-meal-name で「未到着（予定 …）」が1行に入る幅に
-      const cols = [...head.matchAll(/<th scope="col" className="([^"]+)">\s*(?:<span className="dc-vital-name dc-meal-name block">)?([^<\s]+)/g)].map((m) => [m[2], m[1]])
-      assert.deepEqual(cols.map((c) => c[0]), ['氏名', '主食', '副食', '水分（cc）'])
-      assert.equal(cols[0][1], 'sticky left-0 top-0 z-30 bg-surface2 px-2 py-2 text-sm font-bold text-ink2')
-      for (const c of cols.slice(1)) assert.equal(c[1], 'sticky top-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2', c[0])
-      assert.match(body, /<th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">\s*(\{\}\s*)?<div className="dc-vital-name dc-meal-name">/)
-      // 行の列は見出しと同じ並び（氏名 → 主食・副食の選択肢 → 水分）
-      const iName = body.indexOf('<th scope="row"')
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: バイタルと同じ表の右の3列（主食｜副食｜水分（cc））。氏名の列はバイタルの幅（dc-vital-name・iPad 横で横に送らずに収める）。
+      // 見出しの帯は食事の分類の色・行の地は1人ずつ交互（氏名の列も同じ地）
+      assert.match(head, /<th scope="col" className="sticky left-0 top-0 z-30 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">\s*<span className="dc-vital-name block">氏名<\/span>/)
+      const meals = [...head.matchAll(/<th scope="col" className=\{`sticky top-0 z-20 \$\{DAYCARE_CATEGORY_CLS\.meals\.band\} px-2 py-2 text-sm font-bold text-ink`\}>\s*([^<\s]+)/g)].map((m) => m[1])
+      assert.deepEqual(meals, ['主食', '副食', '水分（cc）'])
+      assert.ok(head.indexOf('状態<span') > 0 && head.indexOf('状態<span') < head.indexOf('主食'), '食事の列はバイタル・状態の列の右')
+      assert.match(screenBody, /<th scope="row" className=\{`sticky left-0 z-10 \$\{rowBg\} px-2 py-1 text-left font-normal`\}>\s*(\{\}\s*)?<div className="dc-vital-name">/)
+      assert.doesNotMatch(screen, /dc-meal-name/)
+      // 行の列は見出しと同じ並び（氏名 → バイタル → 状態 → 主食・副食の選択肢 → 水分）
+      const iName = screenBody.indexOf('<th scope="row"')
+      const iCells = screenBody.indexOf('lunch.cells(row.residentId)')
+      assert.ok(iName > 0 && iName < screenBody.indexOf('DC_BULK_VITAL_ORDER.map') && screenBody.indexOf('addRecheck(row, slot)') < iCells)
       const iSel = body.indexOf('<select')
       const iForm = body.indexOf('<form')
-      assert.ok(iName > 0 && iName < iSel && iSel < iForm)
+      assert.ok(iSel > 0 && iSel < iForm)
       assert.match(body, /\{\(\['main_amount', 'side_amount'\] as const\)\.map\(\(f\) => \{/)
     })
     it('行の下の知らせは、表の幅を広げず左に残す行で出す（colSpan・w-0 min-w-full・sticky left-0・枠の幅で折り返す）', () => {
-      assert.match(body, /<td colSpan=\{4\} className="p-0">\s*<div className="w-0 min-w-full">\s*<div className="sticky left-0 space-y-1 px-2 pb-2" style=\{\{ maxWidth: tableBoxWidth > 0 \? tableBoxWidth : undefined \}\}>/)
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 知らせの行はバイタル・食事の画面の1回目の行の下（バイタルの知らせと同じ行・列は10）
+      assert.match(screenBody, /<td colSpan=\{DAYCARE_VITAL_FIELDS\.length \+ 5\} className="p-0">\s*<div className="w-0 min-w-full">\s*<div className="sticky left-0 space-y-1 px-2 pb-2" style=\{\{ maxWidth: tableBoxWidth > 0 \? tableBoxWidth : undefined \}\}>/)
+      assert.match(screenBody, /const lunchNotes = lunchRow \? lunch\.notes\(row\.residentId\) : null/)
       // 昼食の知らせ（食い違い・止まり・拒否・送信待ち・失敗）と水分の知らせ（送信待ち・失敗・数の誤り）
       assert.match(body, /<MealNote\s+word="昼食"/)
       assert.match(body, /\{held\.lost \? MSG_NOT_PERSISTED : MSG_QUEUED\}/)
-      assert.match(body, /const detail = lunchNote \|\| held !== undefined \|\| fn !== undefined/)
+      // 2026-11-09 計画B3 の手直し（固定し直し・意図は同じ）: 取り込みの印・外出／入院の記録も同じ行の下に出す
+      assert.match(page, /const detail = lunchNote \|\| held !== undefined \|\| fn !== undefined \|\| otherStatus !== null \|\| showSource/)
     })
     it('氏名の列: 1人の画面へのリンク（44px）・在席／帰宅／未到着・保存の印（昼食だけ）・取り込みの印', () => {
       // 2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 来た・まだの文字は氏名のリンクの中（押せる高さ 44px の中に2段）
-      assert.match(body, /<Link to=\{personPath\(rid, day, today\)\} className="flex min-h-tap flex-col justify-center/)
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 氏名の列はバイタル・食事の画面（1回目の行）。昼食の保存の印は状態の列へ（バイタルの印と合わせて手当ての要る方）
+      assert.match(screenBody, /<Link to=\{personPath\(row\.residentId, day, today\)\} className="flex min-h-tap flex-col justify-center/)
       // 2026-11-09 計画B（固定し直し・意図は同じ）: 来た・まだは今日のカードと同じ記号＋言葉（daycareCameMark・色は文字だけ）
-      assert.match(body, /<span className=\{`text-sm leading-tight \$\{cm\.textCls\}`\}>\s*<span aria-hidden="true">\{cm\.mark\} <\/span>\s*\{cm\.word\}\s*<\/span>\s*<\/Link>/)
-      assert.match(body, /const mark = mealBandMark\(\[kindOf\(lt, stL\)\]\)/)
-      assert.match(body, /\{source !== null && source !== '画面で入力' \?/)
+      // 2026-11-09 計画B3 の手直し（固定し直し・意図は同じ）: 氏名のリンクの2段目は基準の札（活動一括と同じ形）。来た・まだは状態の列の1段目に短い形（daycareCameShort・時刻なし）。
+      // 取り込みの印・外出／入院の記録は氏名の列に積まず、行の下の知らせ（フックの notes）へ
+      assert.match(screenBody, /const cm = daycareCameShort\(row\)/)
+      // 2026-11-09 計画B3 の反証の直し（固定し直し・意図は同じ）（中3）: 1段目は保存の印があれば印、無ければ来た・まだ（〔＋再測定〕を出す行は出さない）
+      // 2026-11-09 計画B3 の確認の反証の直し（固定し直し・意図は同じ）（中1）: 1段目はいつも来た・まだ（〔＋再測定〕を出す行はボタン）。保存の印に置き換えない
+      assert.match(screenBody, /\) : si === 0 && inBulk \? \(\s*<span className=\{`whitespace-nowrap text-sm leading-tight \$\{cm\.textCls\}`\}>\s*<span aria-hidden="true">\{cm\.mark\} <\/span>\s*\{cm\.word\}\s*<\/span>\s*\) : null\}/)
+      assert.match(page, /return mealBandMark\(\[kindOf\(lt, mealState\[mealKeyOf\(lt\)\]\)\]\)/)
+      assert.match(screenBody, /const mark = lunchRow \? mergeSaveMarks\(vitalMark, lunch\.markOf\(row\.residentId\)\) : vitalMark/)
+      assert.match(page, /const showSource = source !== null && source !== '画面で入力'/)
+      assert.match(page, /const detail = lunchNote \|\| held !== undefined \|\| fn !== undefined \|\| otherStatus !== null \|\| showSource/)
+      assert.doesNotMatch(page + screen, /nameNotes/)
     })
     it('主食・副食は端末の選択肢（44px・text-lg）。読み上げは見えている列の名前で始まる・押せない時（旗・未来の日）は disabled', () => {
       assert.match(body, /<select\s+value=\{v\}\s+disabled=\{!canWrite\}\s+aria-label=\{`\$\{AMOUNT_WORD\[f\]\}：\$\{name\}さん（いま: \$\{now\}）`\}/)
@@ -329,16 +371,20 @@ if (DP === null) {
     it('未入力の数は表の上に（画面に出している値で数える）。1名以上は「▲ 未入力 n名」（赤字）・0名は「✓ 未入力なし」・未到着は灰色で別に', () => {
       // 2026-11-09 計画B2（固定し直し・仕様の変更で数え方を変えた）: 到着を問わず、1人2欄（主食・副食・拒食は入力済み）の空の欄を数える
       // （画面に出している値＝mealShownFor で数えるのは同じ）。表示は「▲ 未入力 n名（m欄）」・全部埋まった時だけ「✓ 全員入力済み」・未到着は出さない
-      assert.match(page, /const blankOf = new Map<number, number>\(came\.map\(\(row\) => \[row\.residentId, lunchBlankFields\(mealShownFor\(targetOf\(row\.residentId\)\)\)\]\)\)/)
-      assert.match(page, /const counts = bulkBlankSummary\(\[\.\.\.blankOf\.values\(\)\]\)/)
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 1人の昼食の空の欄はフックの blankOf（同じ lunchBlankFields・画面に出している値）。画面がバイタルの5欄と合わせて数える
+      assert.match(page, /const blankOf = \(rid: number\) => lunchBlankFields\(mealShownFor\(targetOf\(rid\)\)\)/)
+      // 2026-11-09 計画B3 の反証の直し（固定し直し・意図は同じ）（軽3）: 昼食を読めない時は行の印をバイタルの5欄で出す（上の数は出さない）
+      assert.match(screen, /return \[r\.residentId, lunchReady \? \(vitalsMealsBlankFields\(vitalBlank, lunch\.blankOf\(r\.residentId\)\) \?\? 0\) : vitalBlank\]/)
+      assert.match(screen, /\{lunchReady \? <DaycareUnfilledCount counts=\{unfilled\} \/> : null\}/)
+      assert.match(screen, /const unfilled = bulkBlankSummary\(\[\.\.\.blankOf\.values\(\)\]\)/)
       // 2026-11-09 計画B（固定し直し・意図は同じ）: 表示は一括の4画面で同じ部品（DaycareUnfilledCount）にした
       const unf = code('../src/components/DaycareUnfilledCount.tsx')
       assert.match(unf, /<span className="font-bold text-danger">\s*<span aria-hidden="true">▲ <\/span>未入力 <span className="font-num">\{counts\.people\}<\/span>名（<span className="font-num">\{counts\.fields\}<\/span>欄）/)
       assert.match(unf, /<span className="font-bold text-ok">\s*<span aria-hidden="true">✓ <\/span>全員入力済み/)
       assert.doesNotMatch(unf, /未到着|未入力なし|hideNotArrivedNarrow/)
-      assert.match(page, /<DaycareUnfilledCount counts=\{counts\} \/>/)
-      assert.ok(page.indexOf('const counts = bulkBlankSummary') < page.indexOf('<table'), '表の上')
-      assert.ok(page.indexOf('<DaycareUnfilledCount counts={counts} />') > 0 && page.indexOf('<DaycareUnfilledCount counts={counts} />') < page.indexOf('<table'), '表の上')
+      assert.match(screen, /<DaycareUnfilledCount counts=\{unfilled\} \/>/)
+      assert.ok(screen.indexOf('const unfilled = bulkBlankSummary') < screen.indexOf('<table'), '表の上')
+      assert.ok(screen.indexOf('<DaycareUnfilledCount counts={unfilled} />') > 0 && screen.indexOf('<DaycareUnfilledCount counts={unfilled} />') < screen.indexOf('<table'), '表の上')
     })
     it('水分: form の submit（改行キー）でも〔＋〕でも足す・欄は inputMode numeric（44px・text-lg）・〔＋〕は 44px と「水分を足す」', () => {
       assert.match(body, /<form\s+onSubmit=\{\(e\) => \{\s*e\.preventDefault\(\)\s*submitFluid\(rid\)\s*\}\}/)
@@ -353,7 +399,8 @@ if (DP === null) {
     it('水分: 検査は fluidAmountError（cc の文）・誤りは行の下に（何が違うか＋どうすればよいか）・足せたら欄を空にする', () => {
       // 2026-10-29 親の検収（固定し直し・意図は同じ）: 検査と取り出しは控え（createFluidInputs の take＝cc の文）で行い、送る前に欄を空にする。
       // 送れなかった時は入れた数を欄に戻す（日を移った後・入れ直した時は戻さない）。振る舞いは下の「水分の欄の控え」の試験で確かめる
-      const f = page.slice(page.indexOf('const submitFluid = '), page.indexOf('const goDay = '))
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 日付の切り替え（goDay）は画面へ移したので、submitFluid の範囲は画面に返すもの（blankOf）の手前まで
+      const f = page.slice(page.indexOf('const submitFluid = '), page.indexOf('const blankOf = '))
       assert.match(page, /const \[fluidInputs\] = useState\(\(\) => createFluidInputs\('cc'\)\)/)
       assert.match(f, /const t = fluidInputs\.take\(rid\)\s+if \(t\.kind === 'ignored'\) return\s+if \(t\.kind === 'error'\) \{\s*noteFluid\(key, \{ tone: 'danger', text: t\.message, input: true \}\)\s*return\s*\}\s*setFluidText\(fluidInputs\.all\(\)\)\s*void addFluid\(rid, t\.ml\)/)
       assert.match(f, /if \(ok\) fluidInputs\.done\(rid\)\s+else if \(dayRef\.current === d && fluidInputs\.restore\(rid, t\.text\)\) setFluidText\(fluidInputs\.all\(\)\)/)
@@ -421,14 +468,21 @@ if (DP === null) {
     })
     it('水分: 送信待ちは合計に「（＋n cc 送信待ち）」を重ね、取り直した合計で載った分だけ減らす（1人の画面の queuedFluids と同じ）', () => {
       assert.match(page, /const r = nothingQueued \? null : settleQueuedFluid\(held, fluidTotalOf\(visibleFluids, Number\(ridText\), d\)\)/)
-      assert.match(body, /計 <span className="font-num font-bold">\{fluidSum > 0 \? fmtCc\(fluidSum\) : '—'\}<\/span>/)
-      assert.match(body, /\{held !== undefined \? <span className="text-sm text-ink2">（＋\{fmtCc\(held\.ml\)\} 送信待ち）<\/span> : null\}/)
-      assert.match(body, /const fluidSum = fluidTotalOf\(visibleFluids, rid, data\.day\)/)
+      // 2026-11-09 計画B3 の手直し（固定し直し・意図は同じ）: 合計は欄の横に数だけ（単位は見出しの「水分（cc）」）。送信待ちの量は行の下の知らせ（「水分 ＋n cc: …」）で見せ、合計の横は
+      // 読み上げだけにする（横に並べた欄の幅を変えない）
+      assert.match(body, /計 <span className="font-num font-bold">\{fluidSum > 0 \? fluidSum\.toLocaleString\('ja-JP'\) : '—'\}<\/span>/)
+      assert.match(body, /\{held !== undefined \? <span className="sr-only">（＋\{fmtCc\(held\.ml\)\} 送信待ち）<\/span> : null\}/)
+      assert.match(page, /<span className="sr-only">\{name\}さん：<\/span>水分 ＋\{fmtCc\(held\.ml\)\}: \{held\.lost \? MSG_NOT_PERSISTED : MSG_QUEUED\}/)
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 欄はフックの cells で描く（data が無い間はその画面の日）
+      assert.match(body, /const fluidSum = fluidTotalOf\(visibleFluids, rid, data\?\.day \?\? day\)/)
       // 送信待ちの間にオンラインで足した分は、基準も上げる（「送信待ちが載った」と見て減らさない）
       assert.match(page, /return held === undefined \? q : \{ \.\.\.q, \[key\]: \{ \.\.\.held, base: held\.base \+ saved\.amount_ml \} \}/)
       // 合計は fetchDaycareIntake の fluids（その方・その日の全部）
       assert.match(page, /const fluids = intake\.fluids\.filter\(/)
-      assert.match(page, /if \(table === 'meals' \|\| table === 'fluid_intake'\) onChange\(table, info\)/)
+      // 2026-11-09 計画B3 の反証の直し（固定し直し・意図は同じ）（軽4）: 食事・水分の変更の購読は画面の1組（subscribeChanges）で、昼食の列を読み直す
+      const screen = code('../src/pages/DaycareVitalsMealsPage.tsx')
+      assert.match(screen, /else if \(table === 'meals' \|\| table === 'fluid_intake'\) \{\s*if \(info\?\.row && isSelfWrite\(table, info\.row\)\) return\s*lunchReloadRef\.current\(\)/)
+      assert.doesNotMatch(page, /subscribeChanges|subscribeDaycareChanges|queueSubscribe/)
     })
     it('水分の〔元に戻す〕は softDeleteFluid（1人の画面の removeFluid(fromUndo) と同じ扱い）・送信待ちの取り消しは合計から外す', () => {
       const u = page.slice(page.indexOf('const undoFluid = '), page.indexOf('const submitFluid = '))
@@ -445,34 +499,40 @@ if (DP === null) {
 
   describe('配線（切り替え・ルート・画面名）と、care-log の食事一括を変えていないこと', () => {
     it('デイの切り替えは「今日／バイタル一括／食事一括／活動一括／機能訓練」の順（2026-10-24「活動をまとめて」→「活動一括」・ルートと key は変えない）', () => {
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 〔バイタル一括〕〔食事一括〕を〔バイタル・食事〕1つにまとめた（道は /record/daycare/vitals-meals・分類の色の印つき）。
+      // ほかの項目のルートと key は変えない
       const p = code('../src/pages/DaycarePage.tsx')
       const nav = p.slice(p.indexOf('export function DaycareNav'), p.indexOf('return (', p.indexOf('export function DaycareNav')))
       assert.deepEqual(
-        [...nav.matchAll(/\{ key: '(\w+)', to: '([^']+)', label: '([^']+)' \}/g)].map((m) => [m[1], m[2], m[3]]),
+        [...nav.matchAll(/\{ key: '(\w+)', to: ('[^']+'|DAYCARE_VITALS_MEALS_PATH), label: '([^']+)', cats: \[([^\]]*)\] \}/g)].map((m) => [m[1], m[2], m[3], m[4]]),
         [
-          ['today', '/record/daycare', '今日（到着・休み）'],
-          ['vitals', '/record/daycare/vitals', 'バイタル一括'],
-          ['meals', '/record/daycare/meals', '食事一括'],
-          ['activity', '/record/daycare/bulk', '活動一括'],
-          ['training', '/record/daycare/training', '機能訓練'],
+          ['today', "'/record/daycare'", '今日（到着・休み）', ''],
+          ['vitalsMeals', 'DAYCARE_VITALS_MEALS_PATH', 'バイタル・食事', "'vitals', 'meals'"],
+          ['activity', "'/record/daycare/bulk'", '活動一括', "'activity'"],
+          ['training', "'/record/daycare/training'", '機能訓練', "'training'"],
         ],
       )
-      // 2026-10-25（§9.7）: 食事一括の次に〔排泄〕（別のアプリ＝a・同じタブ・押した直前に受け渡しのキーを書く）
+      assert.equal(code('../src/lib/daycareRoutes.ts').match(/export const DAYCARE_VITALS_MEALS_PATH = '([^']+)'/)?.[1], '/record/daycare/vitals-meals')
+      // 2026-10-25（§9.7）: 食事一括の次に〔排泄〕（別のアプリ＝a・同じタブ・押した直前に受け渡しのキーを書く）。計画B3: 食事＝バイタル・食事の次
       const full = p.slice(p.indexOf('export function DaycareNav'), p.indexOf('/** 予定の帯'))
-      assert.match(full, /\.\.\.\(it\.key === 'meals' \? \[excretion\] : \[\]\)/)
+      assert.match(full, /\.\.\.\(it\.key === 'vitalsMeals' \? \[excretion\] : \[\]\)/)
       assert.match(full, /<a\s+key="excretion"\s+href=\{HAIBEN_DAYCARE_HREF\}\s+onClick=\{\(\) => handoff\?\.\(\)\}/)
       assert.match(full, /排泄<span className="ml-1 text-sm">（別アプリ）<\/span>/)
       assert.doesNotMatch(full, /target="_blank"/, '同じタブで開く')
-      assert.match(code('../src/pages/DaycareMealsPage.tsx'), /<DaycareNav current="meals" handoff=\{\(\) => writeDaycareHandoffFor\(\{ rows: board\?\.rows \?\? null, residents, boardDay: data\?\.day \?\? null, today \}\)\} \/>/)
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 切り替えはバイタル・食事の画面が出す
+      assert.match(code('../src/pages/DaycareVitalsMealsPage.tsx'), /<DaycareNav current="vitalsMeals" handoff=\{\(\) => writeDaycareHandoffFor\(\{ rows: board\?\.rows \?\? null, residents, boardDay: data\?\.day \?\? null, today \}\)\} \/>/)
     })
     it('App.tsx: ルート・画面名・遅れて読む', () => {
       const a = code('../src/App.tsx')
-      assert.match(a, /<Route path="\/record\/daycare\/meals" element=\{<DaycareMealsPage actorId=\{actorId\} staff=\{staff\} \/>\} \/>/)
-      assert.match(a, /if \(pathname === '\/record\/daycare\/meals'\) return 'デイ 食事一括'/)
-      assert.match(a, /const loadDaycareMealsPage = \(\) => import\('\.\/pages\/DaycareMealsPage'\)/)
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 食事一括の道は、バイタル・食事の画面へ送る（?day= を引き継ぐ・置き換えの移動）。画面名と遅れて読む部品はバイタル・食事
+      assert.match(a, /<Route path="\/record\/daycare\/meals" element=\{<DaycareVitalsMealsRedirect \/>\} \/>/)
+      assert.match(a, /<Navigate to=\{vitalsMealsRedirect\(location\.search\)\} replace \/>/)
+      assert.match(a, /if \(pathname === '\/record\/daycare\/vitals-meals'\) return 'デイ バイタル・食事'/)
+      assert.match(a, /const loadDaycareVitalsMealsPage = \(\) => import\('\.\/pages\/DaycareVitalsMealsPage'\)/)
+      assert.doesNotMatch(a, /DaycareMealsPage|'デイ 食事一括'/)
     })
     it('care-log の食事一括（MealsGridPage）は読み込まず・変えない（デイの画面から import しない）', () => {
-      const page = code('../src/pages/DaycareMealsPage.tsx')
+      const page = code('../src/pages/DaycareLunchColumns.tsx')
       assert.doesNotMatch(page, /MealsGridPage/)
     })
   })

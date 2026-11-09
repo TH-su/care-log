@@ -1279,7 +1279,7 @@ if (DC === null) {
       await reset()
     })
     it('静的: デイの画面・純ロジックに kv_put・care_schedule_v2 への書込・supabase の直呼びが無い', () => {
-      for (const f of ['../src/pages/DaycarePage.tsx', '../src/pages/DaycareVitalsPage.tsx', '../src/lib/daycare.ts']) {
+      for (const f of ['../src/pages/DaycarePage.tsx', '../src/pages/DaycareVitalsMealsPage.tsx', '../src/lib/daycare.ts']) {
         const c = code(f)
         assert.doesNotMatch(c, /kv_put|kv_entries|care_schedule_v2/, f)
         assert.doesNotMatch(c, /supabase\.(from|rpc)\(|from '\.\.\/lib\/supabase'/, f)
@@ -1495,7 +1495,7 @@ if (DC === null) {
       assert.match(ops, /reasonHint: '理由は、カードを押した1人の画面で選べます'/)
       for (const x of [ops, t, person]) assert.doesNotMatch(x, /行の入浴の欄|行の〔理由〕|行の〔休み〕|この行の入浴|行の時刻/)
       // 反証 軽1: 〔予定にない方を追加〕の後は「カードを押して〔予定外で到着〕」（追加しただけでは到着にならない）。過去の日の帯も操作の新しい場所を指す
-      const pages = ['DaycarePage', 'DaycareVitalsPage', 'DaycareMealsPage', 'DaycareActivityBulkPage', 'DaycareTrainingPage'].map((f) => code(`../src/pages/${f}.tsx`))
+      const pages = ['DaycarePage', 'DaycareVitalsMealsPage', 'DaycareLunchColumns', 'DaycareActivityBulkPage', 'DaycareTrainingPage'].map((f) => code(`../src/pages/${f}.tsx`))
       for (const x of pages) {
         assert.doesNotMatch(x, /〔予定にない方を追加〕から(到着を)?記録/)
         if (x.includes('〔予定にない方を追加〕')) assert.match(x, /〔予定外で到着〕/)
@@ -1506,8 +1506,14 @@ if (DC === null) {
     it('反証の直し: 食事一括で到着の前の方を「在席」と出さない（中1）・1人の画面は予定も記録も無い方に〔休み〕を出さない（軽2）・画面に戻った時に今日を取り直す（軽4）・ボタンは 44px（軽5）', () => {
       // 2026-11-09 計画B（固定し直し・意図は同じ）: 食事一括の来た・まだは daycareProgress.ts の daycareCameMark（○ 来所前 9:30〜15:30／
       // ● 在席 9:35／✓ 帰宅 15:30）。到着の記録が無い方は「在席」と出さない
-      const meals = code('../src/pages/DaycareMealsPage.tsx')
-      assert.match(meals, /const cm = daycareCameMark\(row, true\)/)
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 食事一括の氏名の列は、バイタル・食事の画面の氏名の列（同じ daycareCameMark(row, true)）
+      const meals = code('../src/pages/DaycareVitalsMealsPage.tsx')
+      // 2026-11-09 計画B3 の手直し（固定し直し・意図は同じ）: バイタル・食事の画面は短い形（daycareCameShort）。在席は到着の記録がある方だけ（同じ決まり）
+      assert.match(meals, /const cm = daycareCameShort\(row\)/)
+      const ct0 = read('../src/lib/daycareProgress.ts')
+      const short = ct0.slice(ct0.indexOf('export function daycareCameShort('), ct0.indexOf('// ── 進み具合の印'))
+      assert.match(short, /if \(row\?\.state === 'present'\) return \{ mark: '●', word: '在席'/)
+      assert.match(short, /return \{ mark: '○', word: '来所前', textCls: 'text-ink2' \}/)
       const ct = read('../src/lib/daycareProgress.ts')
       const cm = ct.slice(ct.indexOf('export function daycareCameMark('), ct.indexOf('// ── 進み具合の印'))
       assert.match(cm, /if \(row\?\.state === 'present'\) return \{ mark: '●', word: `在席/)
@@ -1527,7 +1533,9 @@ if (DC === null) {
     it('App.tsx に /record/daycare と /record/daycare/vitals・記録ハブの許可リスト cl_recordTab は元のまま', () => {
       const a = read('../src/App.tsx')
       assert.match(a, /<Route path="\/record\/daycare" element=\{<DaycarePage actorId=\{actorId\} staff=\{staff\} \/>\} \/>/)
-      assert.match(a, /<Route path="\/record\/daycare\/vitals" element=\{<DaycareVitalsPage actorId=\{actorId\} staff=\{staff\} \/>\} \/>/)
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: バイタル一括の道はバイタル・食事の画面へ送る（?day= を引き継ぐ・置き換えの移動）
+      assert.match(a, /<Route path="\/record\/daycare\/vitals-meals" element=\{<DaycareVitalsMealsPage actorId=\{actorId\} staff=\{staff\} \/>\} \/>/)
+      assert.match(a, /<Route path="\/record\/daycare\/vitals" element=\{<DaycareVitalsMealsRedirect \/>\} \/>/)
       assert.match(a, /const RECORD_TABS = \['vitals', 'meals', 'note', 'outing'\] as const/)
     })
     it('記録ハブはデイだけ input_enabled_daycare で判定する（他の項目の判定は変えない）', () => {
@@ -1556,7 +1564,7 @@ if (DC === null) {
       const app = read('../src/App.tsx')
       assert.match(app, /if \(pathname === '\/record\/daycare'\) return 'デイ せせらぎ'/)
       // 画面に出る文字（コメントを除く）に古い表記が残っていない
-      for (const f of ['../src/App.tsx', '../src/pages/RecordHubPage.tsx', '../src/pages/DaycarePage.tsx', '../src/pages/DaycarePersonPage.tsx', '../src/pages/DaycareVitalsPage.tsx', '../src/pages/DaycareActivityBulkPage.tsx', '../src/pages/DaycareTrainingPage.tsx'])
+      for (const f of ['../src/App.tsx', '../src/pages/RecordHubPage.tsx', '../src/pages/DaycarePage.tsx', '../src/pages/DaycarePersonPage.tsx', '../src/pages/DaycareVitalsMealsPage.tsx', '../src/pages/DaycareActivityBulkPage.tsx', '../src/pages/DaycareTrainingPage.tsx'])
         assert.equal(read(f).replace(/\/\/.*$/gm, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '').includes('デイ（せせらぎ）'), false, f)
     })
     it('db.ts: 到着・欠席は writeGate で input_enabled_daycare・Realtime は別のチャンネル', () => {
@@ -1567,7 +1575,7 @@ if (DC === null) {
       assert.doesNotMatch(d.slice(d.indexOf('const REALTIME_TABLES = ['), d.indexOf('] as const', d.indexOf('const REALTIME_TABLES = ['))), /daycare/, '既存のチャンネルに混ぜない')
     })
     it('反証レビューの直し（静的）: 上下逆で止めた上は送らない・持っている上は離れる前に確かめる・過去の日の到着と帰宅は止める・写しが unknown の日は写し直す', () => {
-      const v = code('../src/pages/DaycareVitalsPage.tsx')
+      const v = code('../src/pages/DaycareVitalsMealsPage.tsx')
       assert.match(v, /pairBlocked\.current\.add\(slot\.key\)/)
       assert.match(v, /if \(pairBlocked\.current\.has\(key\) && 'sys_bp' in edits\) \{[\s\S]*?setDraft\(key, 'sys_bp', undefined\)/)
       assert.match(v, /registerUnsaved\(\(\) => \[\.\.\.draftsRef\.current\.values\(\)\]\.some\(\(d\) => Object\.keys\(d\)\.length > 0\)\)/)
@@ -1589,7 +1597,7 @@ if (DC === null) {
       assert.doesNotMatch(m, /create policy "update_auth" on public\.daycare_days/)
     })
     it('反証レビュー2巡目の直し（静的）: あなたの値はいまの送信待ちから・送れなかった上は消さずに移らない・過去の日の unknown の写しにも帯', () => {
-      const v = code('../src/pages/DaycareVitalsPage.tsx')
+      const v = code('../src/pages/DaycareVitalsMealsPage.tsx')
       // 中1: 〔あなたの値で直す〕と表示は、止まった後に打ち直した値（送信待ちの values）を使う
       assert.match(v, /const withCurrentMine = \(slot: DaycareVitalSlot, cs: CellConflict\[\]\): CellConflict\[\] =>\s*overlayPendingMine\(cs, pendingRow\('vitals', targetOf\(slot\)\)\?\.values \?\? null\)/)
       assert.match(v, /const resolveMine = async \(slot: DaycareVitalSlot, conflicts0: CellConflict\[\]\) => \{\s*const conflicts = withCurrentMine\(slot, conflicts0\)/)
@@ -1600,19 +1608,22 @@ if (DC === null) {
       assert.doesNotMatch(v, /flatSlots\.find\(\(s\) => s\.key === key\)/)
       assert.match(v, /const releaseAllHeld = async \(\): Promise<DaycareReleaseIssue\[\]> => \{/)
       assert.match(v, /const issues = await releaseAllHeld\(\)\s*if \(issues\.length > 0\) \{\s*setPageMsg\(\{ issues, go \}\)\s*return\s*\}/)
-      for (const re of [/afterRelease\(\(\) => setDay\(\(d\) => addDays\(d, -1\)\)\)/, /afterRelease\(\(\) => setDay\(today\)\)/, /afterRelease\(\(\) => setReloadKey\(\(n\) => n \+ 1\)\)/]) assert.match(v, re)
-      assert.doesNotMatch(v, /releaseAllHeld\(\)\s*\n\s*set(Day|ReloadKey)\(/)
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 業務日は URL の ?day=（日付の切り替えは goDay＝navigate）。片づけてから移るのは同じ
+      for (const re of [/afterRelease\(\(\) => goDay\(addDays\(day, -1\)\)\)/, /afterRelease\(\(\) => goDay\(today\)\)/, /afterRelease\(\(\) => setReloadKey\(\(n\) => n \+ 1\)\)/]) assert.match(v, re)
+      assert.doesNotMatch(v, /setDay\(/)
+      assert.doesNotMatch(v, /releaseAllHeld\(\)\s*\n\s*(set(Day|ReloadKey)|goDay)\(/)
       // 記録者が未選択・送れない時は false（入力は消さない）
       assert.match(v, /if \(actorId === null\) \{\s*setState\(slot\.key, \{ kind: 'error', text: MSG_NO_RECORDER \}\)\s*return Promise\.resolve\(MSG_NO_RECORDER\)/)
       const t = code('../src/pages/DaycarePage.tsx')
       assert.match(t, /data\.day < today && !data\.missing && data\.planSource !== 'unknown' && \(data\.snapshot === null \|\| data\.snapshot\.plan_source === 'unknown'\)/)
     })
     it('反証レビュー3巡目の直し（静的）: 送り先の日はキーから・読み込み中は古い行を出さない・片づけ中は止める・打ち直した値は消さない・下も送る・帯に誰か出す', () => {
-      const v = code('../src/pages/DaycareVitalsPage.tsx')
+      const v = code('../src/pages/DaycareVitalsMealsPage.tsx')
       // 中1: 送り先の日・測定時刻はキーの日付から。新しい日を読む間は前の日の行を出さない
       assert.match(v, /day: parseDaycareVitalKey\(slot\.key\)\?\.day \?\? dayRef\.current,/)
       assert.match(v, /const slotDay = parseDaycareVitalKey\(slot\.key\)\?\.day \?\? dayRef\.current/)
-      assert.match(v, /if \(\(loading && data === null\) \|\| \(data !== null && data\.day !== day && error === null\)\) \{/)
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 昼食と水分（それまでの食事一括の読み込み）も、その日で読めるまで行を出さない
+      assert.match(v, /if \(\(loading && data === null\) \|\| \(data !== null && data\.day !== day && error === null\) \|\| lunchLoading\) \{/)
       assert.match(v, /vital: cur !== null && cur\.day === k\.day \?/)
       // 軽1: 片づけの前にテンキーを閉じ、欄・再測定・日付を止める。送っている最中の保存を待つ。送った値と違う入力は残す
       assert.match(v, /releasingRef\.current = true\s*setReleasing\(true\)\s*setActive\(null\)/)
@@ -1676,7 +1687,7 @@ if (DC === null) {
       assert.match(ops, /type="time"/)
     })
     it('反証レビュー4巡目の直し（静的）: 帯の後に入れた値も片づけてから移る・違う日の静かな読み直しは失敗を出す・拒まれた値は帯で知らせる・0042 は付け替えと復活も見る', () => {
-      const v = code('../src/pages/DaycareVitalsPage.tsx')
+      const v = code('../src/pages/DaycareVitalsMealsPage.tsx')
       // F2: 捨てるのは入力を残した測定だけ・残りはもう一度片づけてから移る
       assert.match(v, /for \(const i of msg\.issues\) \{\s*if \(!i\.kept\) continue/)
       assert.match(v, /setPageMsg\(null\)\s*afterRelease\(msg\.go\)\s*\}/)
@@ -1712,12 +1723,12 @@ if (DC === null) {
       assert.match(d, /const key = currentRowKey\(v\.id, rowKey\)/)
       assert.match(d, /\[v\.id\]: \{ rowKey: key, mode, base: cur\?\.base \?\? v, edits: merged \}/)
       assert.match(d, /if \(waitTimer !== null\) clearTimeout\(waitTimer\)/)
-      const v = code('../src/pages/DaycareVitalsPage.tsx')
+      const v = code('../src/pages/DaycareVitalsMealsPage.tsx')
       assert.match(v, /if \(msg === null \|\| releasingRef\.current\) return/)
       assert.ok((v.match(/disabled=\{releasing\}/g) ?? []).length >= 4, '日付の3つと帯のボタン')
     })
     it('画面は端末に業務データを書かない（localStorage は絞り込みの既知値だけ）', () => {
-      for (const f of ['../src/pages/DaycarePage.tsx', '../src/pages/DaycareVitalsPage.tsx']) {
+      for (const f of ['../src/pages/DaycarePage.tsx', '../src/pages/DaycareVitalsMealsPage.tsx']) {
         const c = code(f)
         const sets = c.match(/localStorage\.setItem\([^)]*\)/g) ?? []
         for (const x of sets) assert.match(x, /LS\.dcVitalsFilter/, `${f}: ${x}`)

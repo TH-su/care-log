@@ -82,7 +82,7 @@ import {
 } from '../lib/daycareTraining'
 import type { DaycareStaffing, DaycareTrainingSession, StaffingRole, TrainingInput, TrainingResult } from '../lib/daycareTraining'
 import { personPath, readPersonDay } from '../lib/daycarePerson'
-import { DAYCARE_BLANK_CELL_CLS, bulkBlankSummary, recordBlankFields, trainingFilled } from '../lib/daycareProgress'
+import { DAYCARE_BLANK_CELL_CLS, DAYCARE_CATEGORY_CLS, bulkBlankSummary, daycareRowTone, recordBlankFields, trainingFilled } from '../lib/daycareProgress'
 import { addDays, fmtDayLabel, todayIso } from '../lib/format'
 import type { DaycareAttendance, DaycareDay, DaycarePlanRow, DaycarePlanSource, Resident, Staff } from '../lib/types'
 import { useTableFit } from '../lib/useTableFit'
@@ -804,22 +804,26 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                     <th scope="col" className="sticky left-0 top-0 z-30 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
                       <span className="dc-vital-name block">氏名</span>
                     </th>
-                    <th scope="col" className="sticky top-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
+                    {/* 2026-11-09 計画B3: 見出しの帯は分類の色（機能訓練＝ローズ＝tokens.css の --c-cat-training*）。帯の上の文字は text-ink。
+                        氏名の列は今の灰のまま */}
+                    <th scope="col" className={`sticky top-0 z-20 ${DAYCARE_CATEGORY_CLS.training.band} px-2 py-2 text-sm font-bold text-ink`}>
                       内容（前回）
                     </th>
-                    <th scope="col" className="sticky top-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
+                    <th scope="col" className={`sticky top-0 z-20 ${DAYCARE_CATEGORY_CLS.training.band} px-2 py-2 text-sm font-bold text-ink`}>
                       時間
                     </th>
-                    <th scope="col" className="sticky top-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
+                    <th scope="col" className={`sticky top-0 z-20 ${DAYCARE_CATEGORY_CLS.training.band} px-2 py-2 text-sm font-bold text-ink`}>
                       指導員
                     </th>
-                    <th scope="col" className="sticky top-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
+                    <th scope="col" className={`sticky top-0 z-20 ${DAYCARE_CATEGORY_CLS.training.band} px-2 py-2 text-sm font-bold text-ink`}>
                       結果
                     </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {targets.map((rid) => {
+                  {targets.map((rid, pi) => {
+                    // 行の地は1人ずつ交互（2026-11-09 計画B3）。知らせの行と左に残る氏名の列（sticky）も同じ地
+                    const rowBg = daycareRowTone(pi)
                     const s = sessionOf(sessions, rid, day)
                     const prev = previousProgram(data.recent, rid, day)
                     const add = pendingAdd(rid)
@@ -848,9 +852,9 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                     const blank = data.sessions !== null && !trainingFilled(sessions, pending, rid, day)
                     return (
                       <Fragment key={rid}>
-                        <tr className={`align-middle ${detail ? '' : 'border-b border-border'}`}>
-                          {/* 氏名の列は横スクロールしても左に残す（sticky）。背景はページの地の色（下を流れる欄を透かさない） */}
-                          <th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">
+                        <tr className={`align-middle ${rowBg} ${detail ? '' : 'border-b border-border'}`}>
+                          {/* 氏名の列は横スクロールしても左に残す（sticky）。背景は行と同じ地（下を流れる欄を透かさない） */}
+                          <th scope="row" className={`sticky left-0 z-10 ${rowBg} px-2 py-1 text-left font-normal`}>
                             {/* 氏名の列の幅は dc-vital-name で決める（札が長くても列を広げず、中で折り返す）。
                                 氏名を押すと1人の記録へ（2026-11-09: 〔1日の記録 ›〕のボタンを氏名のリンクにまとめ、行の高さを押せる下限の近くまで
                                 下げた＝代表者の指示「もっと多くの行が出るように」。押せる高さは 44px・活動一括と同じ形） */}
@@ -951,7 +955,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                           </td>
                         </tr>
                         {detail ? (
-                          <tr className="border-b border-border">
+                          <tr className={`${rowBg} border-b border-border`}>
                             {/* 知らせの行は表の幅を広げない（バイタル一括と同じ形）。幅0＋最小100% の箱で表の幅の計算から外し、
                                 文は表の枠の幅で折り返して、横スクロールしても左に残す（sticky） */}
                             <td colSpan={5} className="p-0">

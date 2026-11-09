@@ -119,6 +119,20 @@
     overflow: visible;
   }
 }
+/* デイの分類の色の細い線（2026-11-09 計画B3・色は tokens.css の --c-cat-*）。一括の表の見出しの帯の下の線と、今日のカードの進み具合の札の
+   下の線に使う。枠の線（札の 済＝実線・未＝点線・対象外＝枠なし・要確認＝太枠・読めない＝細い点線）とは別の内側の線なので、札の形の区別は変えない */
+.dc-cat-line-vitals {
+  box-shadow: inset 0 -3px 0 var(--c-cat-vitals);
+}
+.dc-cat-line-meals {
+  box-shadow: inset 0 -3px 0 var(--c-cat-meals);
+}
+.dc-cat-line-activity {
+  box-shadow: inset 0 -3px 0 var(--c-cat-activity);
+}
+.dc-cat-line-training {
+  box-shadow: inset 0 -3px 0 var(--c-cat-training);
+}
 /* デイのバイタル一括のテンキー（2026-10-24）: 文字を大きくしても画面の上へはみ出さない（収まらない分はテンキーの中でスクロール）。
    下の帯（3.5rem＝bottom-14）の上に出す。広い画面（lg＝1024px 以上）は帯が無いので画面の高さまで */
 .dc-keypad {

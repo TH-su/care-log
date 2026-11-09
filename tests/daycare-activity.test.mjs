@@ -550,9 +550,11 @@ if (A === null) {
       // 2026-10-28 見出しの行を上に残す（固定し直し・意図は同じ）: 枠に高さの上限（.dc-table-fit・useTableFit）を付けて枠の中で縦にも送る。
       // 見出しの行は sticky top-0（角の氏名は z-30・ほかの見出しは z-20）、氏名の列は z-10。枠は isolate でアプリの見出しの上に重ならない
       assert.match(head, /<th scope="col" className="sticky left-0 top-0 z-30 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">/)
-      assert.equal((head.match(/className="sticky top-0 z-20 bg-surface2 px-1 py-1"/g) ?? []).length, 2, '列の見出し（定型の7つ・その他）は上に残す')
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 列の見出しの地は分類の色の帯（活動＝コーラル・DAYCARE_CATEGORY_CLS.activity.band）。上に残すのは同じ
+      assert.equal((head.match(/className=\{`sticky top-0 z-20 \$\{DAYCARE_CATEGORY_CLS\.activity\.band\} px-1 py-1`\}/g) ?? []).length, 2, '列の見出し（定型の7つ・その他）は上に残す')
       // 2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 氏名の列の中の段の間（space-y-1）を外した
-      assert.match(b, /<th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">\s*(\{\}\s*)?<div className="dc-vital-name">/)
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 氏名の列の地は行と同じ1人ずつ交互の地（daycareRowTone）
+      assert.match(b, /<th scope="row" className=\{`sticky left-0 z-10 \$\{rowBg\} px-2 py-1 text-left font-normal`\}>\s*(\{\}\s*)?<div className="dc-vital-name">/)
       assert.match(b, /role="region"\s+aria-label=\{`\$\{fmtDayLabel\(day\)\}の活動一括の表\$\{tableScrolls \? '（横にスクロールできます）' : ''\}`\}\s+tabIndex=\{tableScrolls \|\| tableScrollsY \? 0 : undefined\}\s+className="dc-table-fit relative isolate overflow-auto"/)
       assert.match(b, /useTableFit\(tableBox\)/)
       assert.match(b, /<table className="w-full min-w-max border-collapse text-base">\s*<caption className="sr-only">/)
@@ -691,7 +693,8 @@ if (A === null) {
       assert.match(person, /import \{ activityText \} from '\.\.\/lib\/daycareActivity'/)
       assert.match(person, /fluidTotalOf\(/)
       // 2026-10-24（§9.4）: 「活動をまとめて」→「活動一括」。ルートと key は変えない（固定し直し）
-      assert.match(d, /\{ key: 'activity', to: '\/record\/daycare\/bulk', label: '活動一括' \}/)
+      // 2026-11-09 計画B3（固定し直し・意図は同じ）: 項目に分類の色の印（cats）を足した。ルート・key・名前は変えない
+      assert.match(d, /\{ key: 'activity', to: '\/record\/daycare\/bulk', label: '活動一括', cats: \['activity'\] \}/)
       const app = code('../src/App.tsx')
       assert.match(app, /<Route path="\/record\/daycare\/bulk" element=\{<DaycareActivityBulkPage actorId=\{actorId\} staff=\{staff\} \/>\} \/>/)
       assert.match(app, /if \(pathname === '\/record\/daycare\/bulk'\) return 'デイ 活動一括'/)
