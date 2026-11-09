@@ -45,7 +45,7 @@ import {
 } from '../lib/db'
 import type { MyRole } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
-import { DaycareUnfilledCount } from '../components/DaycareUnfilledCount'
+import { DaycareBlankTag, DaycareRowBlankMark, DaycareRowBlankSr, DaycareUnfilledCount } from '../components/DaycareUnfilledCount'
 import { DaycareHomeVisitSection } from '../components/DaycareHomeVisitSection'
 import { DaycareReviewDueSection } from '../components/DaycareReviewDueSection'
 import { TARGET_NO_PLAN_LABEL, targetPlanTags, weekScope } from '../lib/trainingDue'
@@ -82,7 +82,7 @@ import {
 } from '../lib/daycareTraining'
 import type { DaycareStaffing, DaycareTrainingSession, StaffingRole, TrainingInput, TrainingResult } from '../lib/daycareTraining'
 import { personPath, readPersonDay } from '../lib/daycarePerson'
-import { attendedUnfilledCount, trainingFilled } from '../lib/daycareProgress'
+import { DAYCARE_BLANK_CELL_CLS, bulkBlankSummary, recordBlankFields, trainingFilled } from '../lib/daycareProgress'
 import { addDays, fmtDayLabel, todayIso } from '../lib/format'
 import type { DaycareAttendance, DaycareDay, DaycarePlanRow, DaycarePlanSource, Resident, Staff } from '../lib/types'
 import { useTableFit } from '../lib/useTableFit'
@@ -360,10 +360,8 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
   const dual = dualRoleWithoutTime(staffing, day)
   // 対象者でない方の記録（到着を取り消した・欠席にした方。直す入口を残す＝反証 中4）
   const outside = sessionsOutsideTargets(sessions, targets, day)
-  // 未入力の数（在席・帰宅の方だけ数える・2026-11-09 計画B）。入力済み＝その日の記録がある（この端末の送信待ちの追加を含む）
-  const unfilled = attendedUnfilledCount(
-    targets.map((rid) => ({ state: board?.rows.find((r) => r.residentId === rid)?.state ?? 'planned', filled: trainingFilled(sessions, pending, rid, day) })),
-  )
+  // 未入力の数（2026-11-09 計画B2: 到着を問わず1人1欄で数える）。入力済み＝その日の記録がある（この端末の送信待ちの追加を含む・計画B）
+  const unfilled = bulkBlankSummary(targets.map((rid) => recordBlankFields(trainingFilled(sessions, pending, rid, day))))
   /** その方の今日の送信待ちの追加（stopped＝止まっている） */
   const pendingAdd = (rid: number) =>
     pending.find((p) => p.kind === 'add' && p.table === 'daycare_training_sessions' && p.residentId === rid && p.day === day)
@@ -846,6 +844,8 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                     const stoppedNote = add?.stopped === true || p?.stopped === true
                     const m = rowMsg !== null && rowMsg.rid === rid && rowMsg.day === day ? rowMsg.msg : null
                     const detail = stoppedNote || m !== null
+                    // その日の記録が無い方（読めている時だけ・送信待ちの追加は入力済み）。結果の欄を空の枠の見た目にする（2026-11-09 計画B2）
+                    const blank = data.sessions !== null && !trainingFilled(sessions, pending, rid, day)
                     return (
                       <Fragment key={rid}>
                         <tr className={`align-middle ${detail ? '' : 'border-b border-border'}`}>
@@ -863,8 +863,11 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                                 <span className="text-base font-bold leading-tight text-link">
                                   {name}
                                   <span aria-hidden="true"> ›</span>
+                                  {/* 空の欄がある行の印（2026-11-09 計画B2）。リンクは aria-label で読むので、読み上げの文はリンクの外に置く */}
+                                  {blank ? <DaycareRowBlankMark sr={false} /> : null}
                                 </span>
                               </Link>
+                              {blank ? <DaycareRowBlankSr /> : null}
                               {planTags?.noPlan.has(rid) ? <span className="block text-sm leading-tight text-ink2">{TARGET_NO_PLAN_LABEL[planTags.noPlan.get(rid) ?? 'nocopy']}</span> : null}
                             </div>
                           </th>
@@ -909,9 +912,11 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                               )}
                             </div>
                           </td>
-                          {/* 結果の文字とボタンは横に並べる（幅が足りない時は折り返す・2026-11-09 行の高さを詰めた） */}
-                          <td className="px-2 py-1">
+                          {/* 結果の文字とボタンは横に並べる（幅が足りない時は折り返す・2026-11-09 行の高さを詰めた）。
+                              記録が無い方は結果の欄を空の枠の見た目＋「未」の字（2026-11-09 計画B2） */}
+                          <td className={blank ? `${DAYCARE_BLANK_CELL_CLS} px-2 py-1` : 'px-2 py-1'}>
                             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                              {blank ? <DaycareBlankTag /> : null}
                               {s !== null ? (
                                 <p className="text-base font-bold text-ink">
                                   {TRAINING_RESULT_LABEL[s.result]}

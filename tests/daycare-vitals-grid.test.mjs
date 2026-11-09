@@ -62,7 +62,8 @@ if (DC === null) {
 
   describe('静的検査（表の形）', () => {
     const page = code('../src/pages/DaycareVitalsPage.tsx')
-    it('1行1人の表（横スクロールは枠の中だけ・氏名の列は左に残す・列は 氏名｜KT｜上｜下｜P｜SpO2｜再測定｜状態）', () => {
+    // 2026-11-09 計画B2（固定し直し・代表者の指示で列の並びを変えた）: 列は 氏名｜血圧（上 / 下）｜P｜SpO2｜KT｜再測定｜状態（daycare-vitals-blank.test.mjs）
+    it('1行1人の表（横スクロールは枠の中だけ・氏名の列は左に残す・列は 氏名｜血圧（上 / 下）｜P｜SpO2｜KT｜再測定｜状態）', () => {
       assert.match(page, /<table className="w-full min-w-max border-collapse text-base">/)
       // 2026-10-28 見出しの行を上に残す（固定し直し・意図は同じ）: 枠に高さの上限（.dc-table-fit・useTableFit）を付けて枠の中で縦にも送る。
       // 見出しの行は sticky top-0（角の氏名は z-30・ほかの見出しは z-20）、氏名の列は z-10。枠は isolate でアプリの見出しの上に重ならない
@@ -87,9 +88,11 @@ if (DC === null) {
       assert.match(page, /<div className="dc-vital-name">/)
       assert.match(read('../src/index.css'), /\.dc-vital-name \{\s*width: min\(7rem, 35vw\);\s*(\/\*[\s\S]*?\*\/\s*)?min-width: 100%;\s*overflow-wrap: anywhere;/)
       assert.match(page, /<th scope="row" className="sticky left-0 z-10 bg-bg px-2 py-1 text-left font-normal">/)
-      assert.match(page, /\{DAYCARE_VITAL_FIELDS\.map\(\(f\) => \(\s*<th key=\{f\} scope="col"/)
+      assert.match(page, /\{DC_BULK_VITAL_ORDER\.filter\(\(f\) => f !== 'sys_bp' && f !== 'dia_bp'\)\.map\(\(f\) => \(\s*<th key=\{f\} scope="col"/)
       const head = page.slice(page.indexOf('<thead>'), page.indexOf('</thead>'))
-      assert.ok(head.indexOf('氏名') < head.indexOf('DAYCARE_VITAL_FIELDS') && head.indexOf('DAYCARE_VITAL_FIELDS') < head.indexOf('再測定') && head.indexOf('再測定') < head.indexOf('状態'))
+      assert.ok(
+        head.indexOf('氏名') < head.indexOf('血圧') && head.indexOf('血圧') < head.indexOf('DC_BULK_VITAL_ORDER') && head.indexOf('DC_BULK_VITAL_ORDER') < head.indexOf('再測定') && head.indexOf('再測定') < head.indexOf('状態'),
+      )
       // 表が枠より広い時だけ手がかりを出す（定時バイタルと同じ）
       assert.match(page, /const check = \(\) => \{\s*setTableScrolls\(el\.scrollWidth > el\.clientWidth \+ 1\)\s*setTableScrollsY\(el\.scrollHeight > el\.clientHeight \+ 1\)\s*setTableBoxWidth\(el\.clientWidth\)/)
       assert.match(page, /表は横にスクロールできます（氏名の列は左に残ります）/)
@@ -100,12 +103,21 @@ if (DC === null) {
       assert.match(page, /return slots\.map\(\(slot, si\) => \{/)
       assert.match(page, /<span aria-hidden="true">↳ <\/span>\s*再測定 \{si\}/)
       // 2026-11-09 1画面に多くの行を出すため詰めた（固定し直し・意図は同じ）: 氏名と札の行の間を詰めた（leading-tight）
-      assert.match(page, /<span className="block text-base font-bold leading-tight text-ink">\{nameOf\(row\.residentId\)\}<\/span>\s*<span className="block text-sm leading-tight text-ink2">\{basis\}<\/span>/)
+      // 2026-11-09 計画B2（固定し直し・意図は同じ）: 空の欄がある行は氏名の横に小さな印（▲未）
+      assert.match(
+        page,
+        /<span className="block text-base font-bold leading-tight text-ink">\s*\{nameOf\(row\.residentId\)\}\s*\{\(blankCount \?\? 0\) > 0 \? <DaycareRowBlankMark \/> : null\}\s*<\/span>\s*<span className="block text-sm leading-tight text-ink2">\{basis\}<\/span>/,
+      )
       assert.match(page, /\{abnormal && isLast \? \(\s*<button[\s\S]{0,200}onClick=\{\(\) => addRecheck\(row, slot\)\}/)
       assert.match(page, /＋再測定/)
     })
     it('前回の値は空の欄にだけ薄く出す（値が入った欄は値＋印と判定語）', () => {
-      assert.match(page, /\{v === null \? \(\s*<span className="font-num text-sm text-ink3" aria-hidden="true">\s*\{pv \? `前回\$\{fmtVal\(f, pv\.value\)\}` : '—'\}/)
+      // 2026-11-09 計画B2（固定し直し・意図は同じ）: 前回の値は 14px（text-xs・leading-tight）で「前回」を付けて出す。空の枠には「未」の字を添え、
+      // 前回が無い空の枠は「未」だけ
+      assert.match(
+        page,
+        /\{v === null \? \(\s*<>\s*\{blank \? <DaycareBlankTag \/> : null\}\s*\{pv \|\| !blank \? \(\s*<span className="font-num text-xs leading-tight text-ink3" aria-hidden="true">\s*\{pv \? `前回\$\{fmtVal\(f, pv\.value\)\}` : '—'\}/,
+      )
       assert.match(page, /\{lv !== null \? <span aria-hidden="true">\{LEVEL_MARK\[lv\]\}<\/span> : null\}/)
       assert.match(page, /\{lv !== null \? <span className="text-sm font-bold leading-tight text-ink">\{word\.split\('・'\)\[0\]\}<\/span> : null\}/)
       // 読み上げは前と同じ（前回の値・未送信も読む）

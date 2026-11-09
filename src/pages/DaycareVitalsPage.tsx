@@ -4,7 +4,8 @@
 // 絞り込みは端末の UI 状態 cl_dcVitalsFilter）。1人に1回目の行、
 // 基準を外れた時は〔＋再測定〕で2回目以降の行を足す。欄を押すとテンキー（広い画面は右に常設・狭い画面は下から）。
 // 欄送りは桁数で自動（体温 365→36.5・血圧の上と脈は先頭が1か2なら3桁・血圧の下と SpO2 は先頭が1なら3桁）。
-// SpO2 が埋まると次の方の体温へ。物理キーボード（数字・.・Backspace・Enter・Esc）も効く。
+// 列と欄送りの順は 血圧の上 → 下 → P → SpO2 → KT（2026-11-09 計画B2・DC_BULK_VITAL_ORDER）。KT が埋まると次の方の血圧の上へ。
+// 物理キーボード（数字・.・Backspace・Enter・Esc）も効く。
 // 保存（代表者の回答 5.2 の10）: 範囲外（DB の check と同じ VITAL_RANGE）と血圧の上下逆（上 ≦ 下）は保存しない（欄に理由・欄は進まない）。
 //   血圧は上と下を組で送る（下を入れるまで上だけを送らない＝逆転した組は1欄も載らない）。
 //   閾値を超えた値は保存して「38.1↑↑ 危険」と出し、〔＋再測定〕を出す。
@@ -44,7 +45,7 @@ import {
 } from '../lib/db'
 import type { CellConflict, CellEditInput, VitalCellField, VitalTarget } from '../lib/db'
 import { RecorderBar } from '../components/RecorderBar'
-import { DaycareUnfilledCount } from '../components/DaycareUnfilledCount'
+import { DaycareBlankTag, DaycareRowBlankMark, DaycareUnfilledCount } from '../components/DaycareUnfilledCount'
 import { ConfirmDialog, ErrorBlock, LoadingBlock } from '../components/ui'
 import { registerUnsaved } from '../lib/leaveGuard'
 import { useTableFit } from '../lib/useTableFit'
@@ -54,6 +55,7 @@ import {
   DAYCARE_VITAL_HEAD,
   DAYCARE_VITAL_LABEL,
   DAYCARE_VITAL_UNIT,
+  DC_BULK_VITAL_ORDER,
   DC_VITALS_FILTERS,
   dcVitalSlotMark,
   LEVEL_WORD,
@@ -66,6 +68,7 @@ import {
   keypadAppend,
   keypadComplete,
   keypadValue,
+  nextBulkVitalField,
   nextDaycareSeq,
   nowHm,
   overlayPendingMine,
@@ -80,7 +83,7 @@ import {
   vitalRangeError,
 } from '../lib/daycare'
 import { writeDaycareHandoffFor } from '../lib/daycareHandoff'
-import { attendedUnfilledCount, daycareVitalSlotsWithPending, vitalShownValue, vitalSlotsFilled } from '../lib/daycareProgress'
+import { DAYCARE_BLANK_CELL_CLS, bulkBlankSummary, daycareVitalSlotsWithPending, vitalBlankFields, vitalShownValue } from '../lib/daycareProgress'
 import type { DaycareBoardRow, DaycareReleaseIssue, DaycareVitalField, DaycareVitalSlot, DcVitalsFilter, KeyedVital } from '../lib/daycare'
 import { useVitalLimits } from '../hooks/useVitalLimits'
 import { vitalThresholds } from '../lib/vitalThresholds'
@@ -655,16 +658,16 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     setKpError(null)
   }
 
-  /** 次の欄（SpO2 の次は次の方の体温） */
+  /** 次の欄（列の並び＝DC_BULK_VITAL_ORDER の次。KT の次は次の方の血圧の上＝2026-11-09 計画B2） */
   const advance = (cur: Active) => {
-    const i = DAYCARE_VITAL_FIELDS.indexOf(cur.field)
-    if (i < DAYCARE_VITAL_FIELDS.length - 1) {
-      setActive({ ...cur, field: DAYCARE_VITAL_FIELDS[i + 1] })
+    const nf = nextBulkVitalField(cur.field)
+    if (nf !== null) {
+      setActive({ ...cur, field: nf })
     } else {
       const at = flatSlots.findIndex((s) => s.key === cur.key)
       const next = flatSlots.slice(at + 1).find((s) => s.residentId !== cur.residentId) ?? null
       flushHeldSys(cur, next?.key ?? null)
-      setActive(next === null ? null : { residentId: next.residentId, seq: next.seq, key: next.key, field: 'temp' })
+      setActive(next === null ? null : { residentId: next.residentId, seq: next.seq, key: next.key, field: DC_BULK_VITAL_ORDER[0] })
     }
     setBuf('')
     setKpError(null)
@@ -789,7 +792,13 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
     const vals: Partial<Record<DaycareVitalField, number | null>> = {}
     for (const f of DAYCARE_VITAL_FIELDS) vals[f] = valueOf(last, f).v
     flushHeldSys(active, null)
-    setActive({ residentId: row.residentId, seq, key: daycareVitalKey(data.day, row.residentId, seq), field: firstAbnormalField(vals, targets.get(row.residentId), limits.lookup(row.residentId, data.day)) })
+    // 基準を外れた欄を列の並び（DC_BULK_VITAL_ORDER）で探す。無ければ血圧の上から（2026-11-09 計画B2）
+    setActive({
+      residentId: row.residentId,
+      seq,
+      key: daycareVitalKey(data.day, row.residentId, seq),
+      field: firstAbnormalField(vals, targets.get(row.residentId), limits.lookup(row.residentId, data.day), DC_BULK_VITAL_ORDER),
+    })
     setBuf('')
     setKpError(null)
   }
@@ -883,15 +892,19 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   }, [active, tableBox, kpBox, kpHeight])
 
   // ── 描画 ──
-  // 未入力の数（2026-11-09 計画B・一括の4画面で同じ数え方）。数える方は「表示する方」によらず予定の方（daycareBulkRows＝休み・入院中を
-  // 除く）で、在席・帰宅の方だけ。入力済み＝どれかの回のどれかの欄に値がある（画面に出している値＝端末の値・送信待ち・サーバーの値）
+  // 未入力の数（2026-11-09 計画B2・一括の4画面で同じ数え方）。数える方は「表示する方」によらず予定の方（daycareBulkRows＝休み・入院中を
+  // 除く・予定外で来た方を含む）で、到着の有無を問わない。1人5欄＝その方の最初の回の 上・下・P・SpO2・KT（再測定の回は数えない）。
+  // 値は画面に出している値（端末の値・送信待ち・サーバーの値）。空の枠の見た目と行の印も、ここで数えた方の最初の回だけに出す
   const countRows = board === null || data === null || data.day !== day ? [] : daycareBulkRows(board.rows)
-  const unfilled = attendedUnfilledCount(
-    countRows.map((r) => ({
-      state: r.state,
-      filled: vitalSlotsFilled(slotsOf(r.residentId).map((slot) => DAYCARE_VITAL_FIELDS.map((f) => valueOf(slot, f).v))),
-    })),
+  const blankOf = new Map<number, number>(
+    countRows.map((r) => {
+      const first = slotsOf(r.residentId)[0]
+      const vals: Partial<Record<DaycareVitalField, number | null>> = {}
+      if (first !== undefined) for (const f of DAYCARE_VITAL_FIELDS) vals[f] = valueOf(first, f).v
+      return [r.residentId, vitalBlankFields(first === undefined ? null : vals)]
+    }),
   )
+  const unfilled = bulkBlankSummary([...blankOf.values()])
   // 上の段は詰める（日付と「表示する方」を1段に・余白と文字を小さく＝2026-11-09 代表者の指示「一括入力の画面で、もっと多くの行が出るように」）
   const header = (
     <div className="space-y-2">
@@ -961,12 +974,12 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
             </button>
           ))}
         </div>
-        {/* 未入力の数は日付と「表示する方」の段の右（新しい段を足さない）。1024px 以上は、残りの幅が 16rem 以上あれば同じ段に置き、その幅に
-            収まらない分（未到着の数）は数の中で折り返す（反証 軽1・iPad 横 1180px で残りは約 340px）。1024px 未満は未到着の数を出さず、
-            未入力の数だけを同じ段に入れる（確認の反証 軽1）。どちらも入らない時だけ次の段へ回る */}
+        {/* 未入力の数は日付と「表示する方」の段の右（新しい段を足さない）。1024px 以上は、残りの幅が 16rem 以上あれば同じ段に置く
+            （反証 軽1・iPad 横 1180px で残りは約 340px）。入らない時だけ次の段へ回る。2026-11-09 計画B2: 「未到着 n名」は出さない
+            （到着を問わず数えるため）ので、1024px 未満で隠す指定は外した */}
         {countRows.length > 0 ? (
           <div className="min-w-0 grow lg:basis-64">
-            <DaycareUnfilledCount counts={unfilled} hideNotArrivedNarrow />
+            <DaycareUnfilledCount counts={unfilled} />
           </div>
         ) : null}
       </div>
@@ -1046,7 +1059,7 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
   const keypad =
     active !== null && activeSlot !== null ? (
       // 今日の画面の改善 2回目（2026-10-24）: どの幅でも画面の下に出す（定時バイタルと同じ置き場所と並び）。
-      // 押した時の動き（桁がそろうと次へ・SpO2 の次は次の方の体温・血圧の上は下と組で送る）と文言は変えない
+      // 押した時の動き（桁がそろうと次へ・KT の次は次の方の血圧の上＝2026-11-09 計画B2・血圧の上は下と組で送る）と文言は変えない
       <section ref={setKpBox} aria-label="テンキー" className="dc-keypad fixed inset-x-0 bottom-14 z-40 border-t border-border-strong bg-surface p-3 lg:bottom-0">
         <div className="mx-auto max-w-md">
           <div className="mb-2" aria-live="polite">
@@ -1160,7 +1173,12 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                     <th scope="col" className="sticky left-0 top-0 z-30 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
                       <span className="dc-vital-name block">氏名</span>
                     </th>
-                    {DAYCARE_VITAL_FIELDS.map((f) => (
+                    {/* 2026-11-09 計画B2（代表者の指示）: 列は 血圧（上 / 下）｜P｜SpO2｜KT。血圧は上と下の2列にまたがる見出し1つ
+                        （「上」「下」の見出しは出さない。読み上げは各欄の「血圧の上」「血圧の下」） */}
+                    <th scope="col" colSpan={2} className="sticky top-0 z-20 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
+                      血圧
+                    </th>
+                    {DC_BULK_VITAL_ORDER.filter((f) => f !== 'sys_bp' && f !== 'dia_bp').map((f) => (
                       <th key={f} scope="col" className="sticky top-0 z-20 w-24 bg-surface2 px-2 py-2 text-sm font-bold text-ink2">
                         <span aria-hidden="true">{DAYCARE_VITAL_HEAD[f]}</span>
                         <span className="sr-only">{DAYCARE_VITAL_LABEL[f]}</span>
@@ -1187,8 +1205,12 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                         : own
                           ? '個人の基準'
                           : '施設の基準'
+                    // 空の欄の数（数える方だけ・最初の回。「全員」で出した休み・入院中の方は数えないので undefined）
+                    const blankCount = blankOf.get(row.residentId)
                     return slots.map((slot, si) => {
                       const st = slotState.get(slot.key)
+                      // 空の枠を目立たせるのは、数える方の最初の回だけ（数えた欄と光る欄をそろえる・2026-11-09 計画B2）
+                      const countedSlot = si === 0 && blankCount !== undefined
                       const pend = pendingRow('vitals', targetOf(slot))
                       const vals: Partial<Record<DaycareVitalField, number | null>> = {}
                       for (const f of DAYCARE_VITAL_FIELDS) vals[f] = valueOf(slot, f).v
@@ -1214,7 +1236,10 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                               <div className="dc-vital-name">
                                 {si === 0 ? (
                                   <>
-                                    <span className="block text-base font-bold leading-tight text-ink">{nameOf(row.residentId)}</span>
+                                    <span className="block text-base font-bold leading-tight text-ink">
+                                      {nameOf(row.residentId)}
+                                      {(blankCount ?? 0) > 0 ? <DaycareRowBlankMark /> : null}
+                                    </span>
                                     <span className="block text-sm leading-tight text-ink2">{basis}</span>
                                     {slots.length > 1 || time !== null ? (
                                       <span className="block text-sm leading-tight text-ink2">1回目{time !== null ? `（${time}）` : ''}</span>
@@ -1230,14 +1255,24 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                                 )}
                               </div>
                             </th>
-                            {DAYCARE_VITAL_FIELDS.map((f) => {
+                            {DC_BULK_VITAL_ORDER.map((f) => {
                               const { v, local } = valueOf(slot, f)
                               const lv = vitalLevel(f, v, target, th)
                               const isActive = active?.key === slot.key && active.field === f
                               const pv = prev[f]
                               const word = lv === null ? '' : LEVEL_WORD[lv]
+                              const blank = countedSlot && v === null
+                              // 欄の間（2026-11-09 計画B2）: 欄の幅はどれも 88px（列の幅 − 左右の余白）。ほかの欄の間は 8px（4px＋4px）、
+                              // 血圧の上と下の間は 12px（4px＋8px・間に「/」）、血圧の下と P の間は 20px（16px＋4px）
+                              const tdCls = f === 'sys_bp' ? 'w-24 px-1 py-1' : f === 'dia_bp' ? 'relative w-28 py-1 pl-2 pr-4' : 'px-1 py-1'
                               return (
-                                <td key={f} className="px-1 py-1">
+                                <td key={f} className={tdCls}>
+                                  {f === 'dia_bp' ? (
+                                    // 上の枠と下の枠の間の「/」（読み上げない・押すのを妨げない）。上と下の間 12px のまん中（下の列の左の端から 2px）
+                                    <span aria-hidden="true" className="pointer-events-none absolute left-0.5 top-1/2 -translate-x-1/2 -translate-y-1/2 text-lg font-bold text-ink2">
+                                      /
+                                    </span>
+                                  ) : null}
                                   <button
                                     type="button"
                                     onClick={() => openCell(slot, f)}
@@ -1245,15 +1280,22 @@ export function DaycareVitalsPage({ staff = undefined, actorId = null }: Daycare
                                     data-dc-active={isActive ? '' : undefined}
                                     aria-label={`${nameOf(row.residentId)} ${DAYCARE_VITAL_LABEL[f]} ${v === null ? '未入力' : fmtVal(f, v)}${word ? ` ${word}` : ''}${pv ? `、前回 ${fmtVal(f, pv.value)}` : ''}${local ? '、未送信' : ''}`}
                                     // 欄の高さは押せる下限の 44px（2026-11-09 に 56px から詰めた。行の高さは欄＋上下 4px ずつ＝隣の行の欄と 8px あく）
+                                    // 空の枠（数える方の最初の回で値が無い）は注意の地＋太い点線＋「未」（2026-11-09 計画B2）。入れている欄の色が先
                                     className={`flex min-h-tap w-full flex-col items-center justify-center rounded px-1 text-center ${
-                                      isActive ? 'border-2 border-primary bg-accent-bg' : levelTone(lv)
+                                      isActive ? 'border-2 border-primary bg-accent-bg' : blank ? DAYCARE_BLANK_CELL_CLS : levelTone(lv)
                                     } disabled:opacity-100`}
                                   >
                                     {v === null ? (
-                                      // 空の欄だけ前回の値を薄く出す（定時バイタルと同じ・親の回答 4）
-                                      <span className="font-num text-sm text-ink3" aria-hidden="true">
-                                        {pv ? `前回${fmtVal(f, pv.value)}` : '—'}
-                                      </span>
+                                      // 空の欄だけ前回の値を出す（定時バイタルと同じ・親の回答 4）。入れた値と見分けがつくよう小さく薄く、「前回」を付ける
+                                      // （2026-11-09 計画B2: 14px・text-ink3）。空の枠には「未」の字を添える（前回が無い時は「未」だけ）
+                                      <>
+                                        {blank ? <DaycareBlankTag /> : null}
+                                        {pv || !blank ? (
+                                          <span className="font-num text-xs leading-tight text-ink3" aria-hidden="true">
+                                            {pv ? `前回${fmtVal(f, pv.value)}` : '—'}
+                                          </span>
+                                        ) : null}
+                                      </>
                                     ) : (
                                       <>
                                         <span className="font-num text-xl font-bold text-ink">

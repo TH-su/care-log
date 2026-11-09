@@ -85,6 +85,7 @@ import {
   canChangeDaycareTimes,
   canEditPastDaycareTimes,
   daycareBathStatus,
+  daycareBulkRows,
   nowHm,
   vitalNeedsRecheck,
 } from '../lib/daycare'
@@ -98,11 +99,14 @@ import {
   daycareProgressMarks,
   daycareStateTone,
   daycareVitalSlotsWithPending,
+  lunchBlankFields,
   lunchShownWith,
   navPendingOf,
+  recordBlankFields,
   unreadProgressLabels,
   unreadProgressNotice,
   trainingFilled,
+  vitalBlankFields,
   vitalShownValues,
   vitalSlotsFilled,
 } from '../lib/daycareProgress'
@@ -191,7 +195,8 @@ const REST_BTN =
  * デイの画面の上の切り替え（今日／バイタル／食事／排泄／活動／機能訓練）。今いる画面は塗りと aria-current で示す。
  * 〔排泄〕（2026-10-25 §9.7）は別のアプリ（排泄ケアアプリのデイの表示）へ同じタブで移る＝Link でなく a。押した直前に handoff を呼ぶ
  * （今日の一覧を持つ画面は受け渡しのキーを書き直す。今日の一覧が無い画面は渡さない＝書かずに移る）
- * pending（2026-11-09 計画B）: 今日の画面だけ、〔バイタル一括〕〔食事一括〕〔活動一括〕〔機能訓練〕に未入力の数（来た方で印が「未」の数）を
+ * pending（2026-11-09 計画B）: 今日の画面だけ、〔バイタル一括〕〔食事一括〕〔活動一括〕〔機能訓練〕に未入力の数（計画B2: それぞれの一括の画面の
+ * 「未入力 n名」の n と同じ数え方＝到着を問わず、空の欄がある方の数）を
  * 「未5」と添える（0 は出さない）。読み上げは見えている名前から「バイタル一括（未入力 5名）」。ほかの画面は渡さない（今のまま）
  */
 export function DaycareNav({
@@ -784,7 +789,7 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
   const bathClock = { pastDay: data.day < today, nowHm: nowHm() }
   const bathUnchecked = board.rows.filter((r) => bathCountsUnchecked(daycareBathStatus(bathOf(r.residentId), r.bathingPlanned), r.state, bathClock)).length
 
-  // 進み具合の印（2026-11-09 計画B・daycareProgress.ts）。カードの段4と、上の切り替えの未入力の数（来た方で「未」の数）の両方に使う。
+  // 進み具合の印（2026-11-09 計画B・daycareProgress.ts）。カードの段4に使う（切り替えの未入力の数は計画B2 で一括の画面と同じ数え方にした＝下の navPending）。
   // 送信待ちは一括の画面と同じ決まりで重ねる（反証 中1: 食事＝送っている途中の値だけ・バイタル＝どの状態の値も・活動＝枠と同じ・訓練＝追加）。
   // 読めない項目は「読めない」の印（反証 中6）
   const trainingRead = data.training
@@ -820,9 +825,25 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
       bathsOk: data.bathsOk,
     }),
   )
-  // 切り替えの数は今日を見ている時だけ（リンクの先は今日を開くため＝反証 中2）
+  // 切り替えの数は今日を見ている時だけ（リンクの先は今日を開くため＝反証 中2）。2026-11-09 計画B2: それぞれの一括の画面の「未入力 n名」の n と
+  // 同じ数え方（一括の画面に出る方＝daycareBulkRows を到着を問わず・1人ずつの空の欄の数は一括の画面と同じ純関数・送信待ちを重ねた値）。
+  // バイタル＝最初の回の5欄・昼食＝主食と副食（拒食は入力済み）・活動・訓練＝記録の有無。読めない項目（null）は数を出さない
+  const bulk = daycareBulkRows(board.rows)
   const navPending =
-    data.day === today ? daycareNavPending(board.rows.map((r) => ({ state: r.state, marks: marksOf.get(r.residentId) ?? [] }))) : undefined
+    data.day === today
+      ? daycareNavPending({
+          vitals: data.vitalsOk ? bulk.map((r) => vitalBlankFields(vitalShown.get(r.residentId)?.[0]?.vals ?? null)) : null,
+          meals: data.intakeOk
+            ? bulk.map((r) => lunchBlankFields(lunchShownWith(lunchOf(r.residentId), pendingRow('meals', { residentId: r.residentId, day: data.day, slot: 'lunch' }))))
+            : null,
+          activity:
+            activityRead === null
+              ? null
+              : bulk.map((r) => recordBlankFields(activityCellsFilled(activityShownCells(activityRead, activityPending, r.residentId, data.day)))),
+          training:
+            trainingRead === null ? null : bulk.map((r) => recordBlankFields(trainingFilled(trainingRead, trainingPending, r.residentId, data.day))),
+        })
+      : undefined
 
   // value=null＝読めない（バイタル・入浴を読めなかった日は数を「—」にし、▲ の注意の形にしない＝確認の反証 軽2）
   const tiles: { label: string; value: number | null; tone?: 'warn' }[] = [
