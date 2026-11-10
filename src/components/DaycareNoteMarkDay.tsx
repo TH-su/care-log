@@ -15,7 +15,7 @@
 // ・送れた・外した・直した行は、読み直しが失敗しても・古い読み込みが後から届いても画面の印に持つ（mergeKeptRows）
 // ・印の読み込みは、その日の全員分を1本（fetchDaycareDayNotes）。Realtime の購読は足さない（他の端末の印は〔最新に更新〕・送信待ちが
 //   送れて減った時・送る直前に読み直す）。端末に業務データを残さない
-// 1人の画面の useDaycareNoteMarks は変えていない（1人・1日ごとの読み込みと2タップの小窓のまま）。
+// 1人の画面の useDaycareNoteMarks は1人・1日ごとの読み込みと2タップの小窓のまま（2026-11-10 1人の画面の印の守りで、読み込みの番号・人と日の照合・送れた行の控えをこの部品とそろえた）。
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'

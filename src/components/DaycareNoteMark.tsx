@@ -7,6 +7,11 @@
 // ・元の記録を後から直した・取り消した時は、申し送りはその時点の文のまま残し、印の横に知らせる
 // ・17時のロック（0033）: 現場のログインは記録日の 17:00 から付け外し・直しができない（事務所はできる。サーバーが正）
 // ・送信待ち・止まった時は印の横に出す（止まった分は設定の「送れていない申し送り」で確かめる）。端末に業務データを残さない
+// ・2026-11-10 1人の画面の印の守り: 読み込みに番号を付け、いま表示している人・日の、その人・日で入れた読み込みより後に始めた読み込みだけを
+//   印に入れる（送っている最中に人・日を替えても、前の方の読み直しを表示中の方の印に入れない・上書きして「読めていない」に見せない）。送れた・
+//   外した・直した行は人・日ごとに控え（表示中でない方の書き込みも）、読み直しの失敗・古い読み込みで消さない（一括の画面 DaycareNoteMarkDay.tsx
+//   と同じ守り。判断は daycareNoteMarkPerson.ts）。1人の画面は〔前の方〕〔次の方〕で同じ部品のまま人が替わる（Route に key が無い）ので、
+//   人・日を替えたら印をその人・日の分が読めるまで空にする（前に読めた行を見せない＝反証 中1）
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -46,6 +51,17 @@ import {
   parseMarkKey,
 } from '../lib/daycareNoteMark'
 import type { MarkRecord } from '../lib/daycareNoteMark'
+import {
+  emptyPersonStore,
+  markPersonKey,
+  marksFor,
+  marksWithRow,
+  personKeep,
+  personKnown,
+  personLoadFailShown,
+  personLoaded,
+} from '../lib/daycareNoteMarkPerson'
+import type { PersonMarks, PersonStore } from '../lib/daycareNoteMarkPerson'
 import { lockState } from '../lib/noteLock'
 import { noteTimeFor } from '../lib/nextMorning'
 import type { Note } from '../lib/types'
@@ -94,10 +110,22 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
   button: (rec: MarkRecord, text: string | null, known?: boolean) => ReactNode
   dialogs: ReactNode
 } {
-  const personKey = `${residentId}:${day}`
-  /** 読めた印（key＝読んだ人・日。違う人・日の分は使わない） */
-  const [marks, setMarks] = useState<{ key: string; rows: DaycareNoteMarkRow[] } | null>(null)
-  const [loadFailed, setLoadFailed] = useState(false)
+  const personKey = markPersonKey(residentId, day)
+  /** 読めた印（key＝読んだ人・日。違う人・日の分は使わない。人・日を替えたら、その人・日の分が読めるまで null） */
+  const [marks, setMarks] = useState<PersonMarks<DaycareNoteMarkRow> | null>(null)
+  /** 読めなかった人・日（2026-11-10 1人の画面の印の守り: 前の方の読み込みの失敗で、表示中の方を「読めていない」にしない） */
+  const [failedFor, setFailedFor] = useState<string | null>(null)
+  const loadFailed = failedFor === personKey
+  /**
+   * 表示している人・日（2026-11-10 1人の画面の印の守り 反証 中1）。替わったら、描画の前に印と「読めていない」を空にする（前に読めたその人・日の
+   * 行を見せない。読めるまでは rows が null＝〔申し送りにする〕を押しても MSG_NOT_READ・読めなかった時は押せない）
+   */
+  const [visitKey, setVisitKey] = useState(personKey)
+  if (visitKey !== personKey) {
+    setVisitKey(personKey)
+    setMarks(null)
+    setFailedFor(null)
+  }
   const [role, setRole] = useState<MyRole | null | undefined>(cachedMyRole())
   const [msgs, setMsgs] = useState<Record<string, Msg>>({})
   const [busy, setBusy] = useState<Set<string>>(new Set())
@@ -118,23 +146,48 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
   } | null>(null)
   const [delRow, setDelRow] = useState<{ rid: number; d: string; rec: MarkRecord; row: DaycareNoteMarkRow } | null>(null)
   const genRef = useRef(0)
+  /**
+   * 人・日ごとの、このマウント中に入れた最後の読み込み（番号・行）と書けた行の控え（表示中でない方の書き込みも、その人・日の鍵で控える）。
+   * 古い読み込みを捨てる番号の比べも人・日ごと（反証 軽3）
+   */
+  const storeRef = useRef<PersonStore<DaycareNoteMarkRow>>(emptyPersonStore())
   const here = useRef({ residentId, day })
   here.current = { residentId, day }
+  const hereKey = () => markPersonKey(here.current.residentId, here.current.day)
 
+  /**
+   * その人・その日の印を読む（読めた行を返す。読めなければ null）。2026-11-10 1人の画面の印の守り: 画面に入れるのは、いま表示している
+   * 人・日の読み込みで、その人・日で入れた読み込みより後に始めた時だけ（送っている最中に人・日を替えても、前の方の読み直しの結果を表示中の
+   * 方の印に入れない・上書きしない）。その人・日の控えは、この読み込みより後に書いた分だけ重ねる（判断は personLoaded）
+   */
   const load = useCallback(async (d: string, rid: number): Promise<DaycareNoteMarkRow[] | null> => {
     const gen = ++genRef.current
+    const from = markPersonKey(rid, d)
     try {
       const rows = await fetchDaycareNoteMarks(d, rid)
-      if (gen === genRef.current) {
-        setMarks({ key: `${rid}:${d}`, rows })
-        setLoadFailed(false)
+      const r = personLoaded(storeRef.current, { rows, gen, from, shown: hereKey() })
+      storeRef.current = r.store
+      if (r.show !== null) {
+        setMarks(r.show)
+        setFailedFor(null)
       }
-      return rows
+      return r.rows
     } catch {
-      if (gen === genRef.current) setLoadFailed(true)
+      if (personLoadFailShown(storeRef.current, { gen, from, shown: hereKey() })) setFailedFor(from)
       return null
     }
   }, [])
+
+  /**
+   * 書けた行を、その人・日の控えに入れる（表示中でない方の書き込みも＝反証 中1・軽2）。表示中の方の読めた印には、すぐ重ねる。読み直しが
+   * 失敗しても・古い読み込みが後から届いても持ち、その方へ戻った時の読み込みと送る直前の読み直しの代わりにも重ねる
+   */
+  const keepRow = (rid: number, d: string, row: DaycareNoteMarkRow) => {
+    const from = markPersonKey(rid, d)
+    const gen = genRef.current
+    storeRef.current = personKeep(storeRef.current, { from, row, gen })
+    setMarks((prev) => marksWithRow(prev, from, row, gen))
+  }
 
   useEffect(() => {
     setMsgs({})
@@ -187,7 +240,7 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
     }
   }, [])
 
-  const rows = marks !== null && marks.key === personKey ? marks.rows : null
+  const rows = marksFor(marks, personKey)
   // この方・この日の送信待ちの印の登録（描画ごとに1回だけ読む）
   const pendAll = pendingDaycareNoteMarks(markDayPrefix(day, residentId))
   const lockedForMe = lockState(day, 'daycare', false, now).locked && !canUnlockNotes(role)
@@ -235,7 +288,8 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
       const prefix = markPrefix(d, rid, rec)
       const fresh = await load(d, rid)
       // 読み直せない時は、同じ人・日で前に読めた印があればそれで数える。一度も読めていなければ付けない
-      const known = fresh ?? (marks !== null && marks.key === `${rid}:${d}` ? marks.rows : null)
+      // （2026-11-10 1人の画面の印の守り 反証 中1: その人・日で、このマウント中に入れた最後の読み込み＋控え。違う人・日の印は使わない）
+      const known = fresh ?? personKnown(storeRef.current, markPersonKey(rid, d))
       if (known === null) {
         say(k, { tone: 'warn', text: MSG_NOT_READ })
         return
@@ -269,13 +323,16 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
         after16: false,
         ...(markCategories(rec.kind).length > 0 ? { categories: markCategories(rec.kind) } : {}),
       }
-      const res = await insertNote(payload, { clientKey: markKey(d, rid, rec, gen, token) })
+      const clientKey = markKey(d, rid, rec, gen, token)
+      const res = await insertNote(payload, { clientKey })
       if (res === 'queued') {
         setTick((x) => x + 1)
         say(k, { tone: isQueuePersisted() ? 'info' : 'danger', text: `申し送り：${queuedText()}` })
         return
       }
       say(k, null)
+      // 送れた行は読み直しが失敗しても印として持つ（〔申し送りにする〕に戻して2件目を作れる状態にしない＝2026-11-10 1人の画面の印の守り）
+      keepRow(rid, d, { note: res, clientKey, deleted: false })
       await load(d, rid)
       if (here.current.residentId === rid && here.current.day === d) show('申し送りにしました')
     } catch (e) {
@@ -307,6 +364,8 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
         return
       }
       say(k, null)
+      // 外した行は、古い読み込みが後から届いても印に戻さない（2026-11-10 1人の画面の印の守り）
+      keepRow(rid, d, { ...row, deleted: true })
       await load(d, rid)
       if (here.current.residentId === rid && here.current.day === d) show('申し送りの印を外しました（申し送りを取り消しました）')
     } catch (e) {
@@ -341,6 +400,8 @@ export function useDaycareNoteMarks({ residentId, day, actorId, canWrite, blocke
         return
       }
       say(k, null)
+      // 直した本文は、読み直しが失敗しても・古い読み込みが後から届いても印に持つ（2026-11-10 1人の画面の印の守り）
+      keepRow(rid, d, { ...row, note: res.row ?? { ...row.note, body: full.trim() } })
       await load(d, rid)
       if (here.current.residentId === rid && here.current.day === d) show('申し送りを直しました')
     } catch (e) {
