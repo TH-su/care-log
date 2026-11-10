@@ -7,6 +7,8 @@
 //    取り消した申し送りも読むこと（世代を数えるため）
 // 3. 静的検査: 申し送りへの書き込みは印の部品の中だけで、既存の insertNote・deleteNote・saveNoteEdits だけを使う・
 //    1人の記録の画面と活動の欄は申し送りへ書かない・移行を足さない・types.ts と notes の表に触れない
+// 4. 2026-11-10 1人の画面の印の守り（src/lib/daycareNoteMarkPerson.ts を部品と同じ手順で動かす）: 古い読み込みを捨てる・送っている最中に
+//    人・日を替えても前の方の読み直しを表示中の方の印に入れない・送れた行を読み直しの失敗で消さない・取り消した行を戻さない
 // 個人情報は置かない（利用者は数値IDだけ）。
 
 import { describe, it } from 'node:test'
@@ -24,6 +26,8 @@ const code = (p) =>
 const lsStore = new Map()
 let M = null
 let DB = null
+/** 1人の画面の印の読み込みの判断の純関数（daycareNoteMarkPerson.ts・2026-11-10 1人の画面の印の守り） */
+let P = null
 let loadError = null
 try {
   const { registerHooks } = await import('node:module')
@@ -50,6 +54,7 @@ try {
     },
   }
   M = await import('../src/lib/daycareNoteMark.ts')
+  P = await import('../src/lib/daycareNoteMarkPerson.ts')
   DB = await import('../src/lib/db.ts?daycare-note-mark')
 } catch (e) {
   loadError = e
@@ -220,6 +225,350 @@ if (M === null) {
     })
   })
 
+  describe('1人の画面の印の読み込みの守り（daycareNoteMarkPerson.ts・動きで確かめる・2026-11-10 1人の画面の印の守り）', () => {
+    const D = '2026-11-10'
+    const D2 = '2026-11-11'
+    const row = (id, key, body = 'x', deleted = false) => ({ note: { id, body }, clientKey: key, deleted })
+    const ids = (rows) => (rows === null ? null : rows.map((r) => [r.note.id, r.deleted]).sort((a, b) => a[0] - b[0]))
+    /**
+     * 部品（useDaycareNoteMarks）の load・keepRow・人を替えた時（visitKey）・〔申し送りにする〕の門・sendAdd の判断と同じ手順を、純関数だけで
+     * 動かす模型（React も DB も使わない）。start＝読み込みを始める（番号を付ける）・done／fail＝その読み込みが届いた・失敗した・keep＝書けた行を
+     * 控える・view＝表示する人・日を替える・pressAdd＝〔申し送りにする〕を押す・send＝〔送る〕の判断（insertNote を呼ぶ所まで来たら inserts を数える）
+     */
+    const sim = (rid, d) => {
+      const s = { shown: P.markPersonKey(rid, d), visit: P.markPersonKey(rid, d), gen: 0, store: P.emptyPersonStore(), marks: null, failedFor: null, inserts: 0 }
+      const m = {
+        start: (r, dd) => ({ gen: ++s.gen, from: P.markPersonKey(r, dd) }),
+        done: (ld, rows) => {
+          const out = P.personLoaded(s.store, { rows, gen: ld.gen, from: ld.from, shown: s.shown })
+          s.store = out.store
+          if (out.show !== null) {
+            s.marks = out.show
+            s.failedFor = null
+          }
+          return out.rows
+        },
+        fail: (ld) => {
+          if (P.personLoadFailShown(s.store, { gen: ld.gen, from: ld.from, shown: s.shown })) s.failedFor = ld.from
+          return null
+        },
+        keep: (r, dd, kr) => {
+          const from = P.markPersonKey(r, dd)
+          s.store = P.personKeep(s.store, { from, row: kr, gen: s.gen })
+          s.marks = P.marksWithRow(s.marks, from, kr, s.gen)
+        },
+        view: (r, dd) => {
+          s.shown = P.markPersonKey(r, dd)
+          // 部品の visitKey: 替わったら、描画の前に印と「読めていない」を空にする
+          if (s.visit !== s.shown) {
+            s.visit = s.shown
+            s.marks = null
+            s.failedFor = null
+          }
+        },
+        /** 表示中の方の印（部品の rows＝marksFor(marks, personKey)。null＝読めていない） */
+        shownRows: () => P.marksFor(s.marks, s.shown),
+        /** 表示中の方が「読めていない」か（部品の loadFailed＝failedFor === personKey） */
+        shownFailed: () => s.failedFor === s.shown,
+        /** 〔申し送りにする〕を押した（部品の button: 生きている印があれば出ない＝live・読めていなければ MSG_NOT_READ＝not-read・小窓が開く＝open） */
+        pressAdd: (prefix) => {
+          const rows = m.shownRows()
+          if (rows === null) return 'not-read'
+          if (rows.some((r) => !r.deleted && r.clientKey.startsWith(prefix))) return 'live'
+          return 'open'
+        },
+        /** 〔送る〕の判断（部品の sendAdd: fresh＝送る直前の読み直し。読めなければ personKnown。生きている印があれば作らない） */
+        send: (r, dd, fresh, prefix) => {
+          const known = fresh ?? P.personKnown(s.store, P.markPersonKey(r, dd))
+          if (known === null) return 'not-read'
+          if (known.some((x) => !x.deleted && x.clientKey.startsWith(prefix))) return 'taken'
+          s.inserts++
+          return 'insert'
+        },
+        keptSize: (r, dd) => s.store.kept.get(P.markPersonKey(r, dd))?.size ?? 0,
+        s,
+      }
+      return m
+    }
+    const LUNCH7 = M.markPrefix(D, 7, { kind: 'lunch' })
+
+    it('古い読み込みを捨てる: 同じ人・日で、後に始めた読み込みが先に届いたら、前に始めた読み込みは入れない（遅れた失敗も「読めていない」にしない）', () => {
+      const m = sim(7, D)
+      const l1 = m.start(7, D)
+      const l2 = m.start(7, D)
+      m.done(l2, [row(1, `dcn:${D}:7:lunch:1-aa`)])
+      m.done(l1, [])
+      assert.deepEqual(ids(m.shownRows()), [[1, false]], '前に始めた読み込み（印の無い頃の読み）で新しい印を消さない')
+      m.fail(l1)
+      assert.equal(m.shownFailed(), false)
+      // 前に始めた読み込みが先に届けば、順に入る（後に始めた読み込みが正）
+      const l3 = m.start(7, D)
+      const l4 = m.start(7, D)
+      m.done(l3, [])
+      assert.deepEqual(ids(m.shownRows()), [])
+      m.done(l4, [row(2, `dcn:${D}:7:vital:1-aa`)])
+      assert.deepEqual(ids(m.shownRows()), [[2, false]])
+    })
+
+    it('送っている最中に人を替えた: 前の方の送った後の読み直しを表示中の方の印に入れない・表示中の方の印を上書きして「読めていない」に見せない', () => {
+      const bRows = [row(20, `dcn:${D}:8:vital:1-bb`)]
+      const aAfter = [row(10, `dcn:${D}:7:lunch:1-aa`)]
+      for (const order of ['表示中の方が先に届く', '前の方の読み直しが先に届く', '前の方の読み直しが失敗']) {
+        const m = sim(7, D)
+        m.done(m.start(7, D), [])
+        // 7番の方で〔送る〕: 送る直前の読み直しは届いて世代を数え、insertNote の応答を待つ間に 8番の方へ替えた
+        const pre = m.start(7, D)
+        assert.deepEqual(ids(m.done(pre, [])), [], '送る直前の読み直しは呼んだ所へ返す')
+        m.view(8, D)
+        assert.equal(m.shownRows(), null, '替えた直後は 8番の方の印をまだ読めていない（7番の方の印を出さない）')
+        assert.equal(m.shownFailed(), false)
+        const lb = m.start(8, D)
+        // 2026-11-10 1人の画面の印の守り 反証（固定し直し）: 送れた行は 7番の方の控えに入る（表示中の 8番の方の印には入れない）
+        m.keep(7, D, aAfter[0])
+        assert.equal(m.shownRows(), null)
+        assert.equal(m.keptSize(7, D), 1)
+        const la = m.start(7, D)
+        if (order === '表示中の方が先に届く') {
+          m.done(lb, bRows)
+          assert.deepEqual(ids(m.done(la, aAfter)), [[10, false]], '前の方の読み直しの行は呼んだ所へ返す')
+        } else if (order === '前の方の読み直しが先に届く') {
+          // 以前は「最後に始めた読み込みだけを入れる」だったので、ここで 8番の方の読み込みが捨てられ「読めていない」のままだった
+          m.done(la, aAfter)
+          assert.equal(m.shownRows(), null, '前の方の読み直しは表示中の方の印に入れない')
+          m.done(lb, bRows)
+        } else {
+          m.done(lb, bRows)
+          m.fail(la)
+        }
+        assert.deepEqual(ids(m.shownRows()), [[20, false]], `${order}: 表示中の方の印は表示中の方の読み込みのまま`)
+        assert.equal(m.shownFailed(), false, `${order}: 前の方の読み直しの失敗で「読めていない」にしない`)
+        assert.equal(m.s.marks.key, P.markPersonKey(8, D))
+      }
+    })
+
+    it('人を替えた時に前の方の「読めていない」を残さない・前に読めたその方の行を見せない。別の日の結果を入れない（同じ方で日を替えた）', () => {
+      const m = sim(7, D)
+      m.fail(m.start(7, D))
+      assert.equal(m.shownFailed(), true)
+      m.view(8, D)
+      assert.equal(m.shownFailed(), false, '8番の方は、8番の方の読み込みが失敗するまで「読めていない」にしない')
+      // 前に読めたその方の行: 7番の方を読めた→8番の方（読めない）→7番の方へ戻ると、7番の方の分が読めるまで印は空
+      const r = sim(7, D)
+      r.done(r.start(7, D), [row(1, `dcn:${D}:7:lunch:1-aa`)])
+      r.view(8, D)
+      r.fail(r.start(8, D))
+      r.view(7, D)
+      assert.equal(r.shownRows(), null, '前に読めた 7番の方の行を出さない（戻った時の読み込みを待つ）')
+      assert.equal(r.pressAdd(LUNCH7), 'not-read')
+      r.done(r.start(7, D), [row(1, `dcn:${D}:7:lunch:1-aa`)])
+      assert.deepEqual(ids(r.shownRows()), [[1, false]])
+      // 7番の方の前の日の読み込みが、日を替えた後に届いた
+      const m2 = sim(7, D)
+      const ld = m2.start(7, D)
+      m2.view(7, D2)
+      m2.done(ld, [row(1, `dcn:${D}:7:lunch:1-aa`)])
+      assert.equal(m2.shownRows(), null, '前の日の印を表示中の日の印に入れない')
+      m2.fail(m2.start(7, D))
+      assert.equal(m2.shownFailed(), false, '前の日の読み込みの失敗で表示中の日を「読めていない」にしない')
+      // 読めた印・送る直前の読み直しの代わりも、同じ人・日の分だけ
+      assert.equal(P.marksFor({ key: P.markPersonKey(7, D), rows: [] }, P.markPersonKey(8, D)), null)
+      assert.equal(P.marksFor({ key: P.markPersonKey(7, D), rows: [] }, P.markPersonKey(7, D2)), null)
+      assert.deepEqual(P.marksFor({ key: P.markPersonKey(7, D), rows: [] }, P.markPersonKey(7, D)), [])
+      assert.equal(P.personKnown(m2.s.store, P.markPersonKey(7, D2)), null, '表示中の日の読み込みが1回も入っていなければ代わりは無い')
+      assert.deepEqual(ids(P.personKnown(m2.s.store, P.markPersonKey(7, D))), [[1, false]])
+      assert.notEqual(P.markPersonKey(7, D), P.markPersonKey(8, D))
+      assert.notEqual(P.markPersonKey(7, D), P.markPersonKey(7, D2))
+    })
+
+    it('送れた行を読み直しの失敗で消さない（送る前に始めた読み込みが後から届いても消さない）。後に始めた読み込みはサーバーを正として控えを外す', () => {
+      const m = sim(7, D)
+      m.done(m.start(7, D), [])
+      // 送る前に始めた読み込み（他の端末の変更で始めた等）が飛んでいる間に送れた
+      const before = m.start(7, D)
+      const landed = row(9, `dcn:${D}:7:lunch:1-zz`, '昼食 主食 全量')
+      m.keep(7, D, landed)
+      assert.deepEqual(ids(m.shownRows()), [[9, false]], '送れたらすぐ印に入る')
+      // 送った後の読み直しが失敗: 印は残る（〔申し送りにする〕に戻して2件目を作れる状態にしない）
+      m.fail(m.start(7, D))
+      assert.deepEqual(ids(m.shownRows()), [[9, false]])
+      // 送る前に始めた読み込みが後から届いた（送れた行を知らない）: 消さない
+      m.done(before, [])
+      assert.deepEqual(ids(m.shownRows()), [[9, false]])
+      assert.equal(m.keptSize(7, D), 1)
+      // 送った後に始めた読み込み: サーバーが正（載っていればその行・控えは外す）
+      m.done(m.start(7, D), [row(9, landed.clientKey, 'サーバーの本文')])
+      assert.deepEqual(m.shownRows().map((r) => r.note.body), ['サーバーの本文'])
+      assert.equal(m.keptSize(7, D), 0)
+    })
+
+    it('取り消した行を戻さない（外す前に始めた読み込みが生きた行を返しても）。直した本文も古い読み込みで戻さない', () => {
+      const m = sim(7, D)
+      const live = row(5, `dcn:${D}:7:vital:1-aa`, 'バイタル 体温 36.5℃')
+      m.done(m.start(7, D), [live])
+      const before = m.start(7, D)
+      m.keep(7, D, { ...live, deleted: true })
+      assert.deepEqual(ids(m.shownRows()), [[5, true]])
+      m.done(before, [live])
+      assert.deepEqual(ids(m.shownRows()), [[5, true]], '外す前に始めた読み込みで取り消した印を戻さない')
+      m.fail(m.start(7, D))
+      assert.deepEqual(ids(m.shownRows()), [[5, true]], '外した後の読み直しが失敗しても戻さない')
+      m.done(m.start(7, D), [{ ...live, deleted: true }])
+      assert.deepEqual(ids(m.shownRows()), [[5, true]])
+      assert.equal(m.keptSize(7, D), 0)
+      // 直した本文
+      const m2 = sim(7, D)
+      m2.done(m2.start(7, D), [live])
+      const old = m2.start(7, D)
+      m2.keep(7, D, { ...live, note: { ...live.note, body: 'バイタル 体温 37.0℃' } })
+      m2.done(old, [live])
+      assert.deepEqual(m2.shownRows().map((r) => r.note.body), ['バイタル 体温 37.0℃'])
+    })
+
+    it('控えは人・日ごと（前の方の控えを次の方の印に混ぜない）。表示中でない方の書き込みも、その人・日の控えに入れる', () => {
+      // 2026-11-10 1人の画面の印の守り 反証（固定し直し）: 前は「表示中でない方の書き込みは控えない」だった。反証 中1 で、表示中でない方の
+      // 書き込みもその人・日の鍵で控える決まりに変えた（ほかの人・日の読み込みには重ねない・ほかの人・日の控えは触らない、は同じ）
+      const m = sim(7, D)
+      m.done(m.start(7, D), [])
+      const before8 = m.start(8, D)
+      m.keep(7, D, row(9, `dcn:${D}:7:lunch:1-zz`))
+      m.view(8, D)
+      m.done(before8, [row(20, `dcn:${D}:8:vital:1-bb`)])
+      assert.deepEqual(ids(m.shownRows()), [[20, false]], '7番の方の控えを 8番の方の印に入れない')
+      assert.equal(m.keptSize(7, D), 1, '7番の方の控えはそのまま')
+      // 8番の方の表示中に、8番の方と 7番の方の書き込みが届いた: どちらもその人・日の控えへ。表示中の 8番の方の印にだけすぐ重ねる
+      m.keep(8, D, row(21, `dcn:${D}:8:lunch:1-cc`))
+      m.keep(7, D, row(11, `dcn:${D}:7:snack:1-dd`))
+      assert.deepEqual([...m.s.store.kept.get(P.markPersonKey(8, D)).keys()], [21])
+      assert.deepEqual([...m.s.store.kept.get(P.markPersonKey(7, D)).keys()].sort((a, b) => a - b), [9, 11])
+      assert.deepEqual(ids(m.shownRows()), [[20, false], [21, false]])
+      const marks = { key: P.markPersonKey(8, D), rows: [] }
+      assert.equal(P.marksWithRow(marks, P.markPersonKey(7, D), row(1, 'x'), 1), marks, '違う人・日の印には重ねない')
+      assert.equal(P.marksWithRow(null, P.markPersonKey(8, D), row(1, 'x'), 1), null, 'まだ読めていない時は変えない')
+    })
+
+    it('反証 中1: 替える→送れる（別の方の表示中に届く）→戻る→読み込みがすべて失敗。〔申し送りにする〕に戻して見せない・2件目を作らない（insertNote は1回）', () => {
+      const landed = row(9, `dcn:${D}:7:lunch:1-zz`, '昼食 主食 全量')
+      for (const v of ['8番の方は読めた', '8番の方も読めなかった']) {
+        const m = sim(7, D)
+        m.done(m.start(7, D), [])
+        assert.equal(m.pressAdd(LUNCH7), 'open')
+        const fresh = m.done(m.start(7, D), [])
+        assert.equal(m.send(7, D, fresh, LUNCH7), 'insert', '1件目（insertNote の応答待ち）')
+        m.view(8, D)
+        const l8 = m.start(8, D)
+        if (v === '8番の方は読めた') m.done(l8, [row(20, `dcn:${D}:8:vital:1-bb`)])
+        else m.fail(l8)
+        // 8番の方の表示中に 7番の方の insertNote が届いた→送った後の読み直しも失敗
+        m.keep(7, D, landed)
+        m.fail(m.start(7, D))
+        m.view(7, D)
+        assert.equal(m.shownRows(), null, `${v}: 前に読めた送る前の行（印なし）を出さない`)
+        // 戻った時の読み込みも失敗
+        m.fail(m.start(7, D))
+        assert.equal(m.shownRows(), null)
+        assert.equal(m.shownFailed(), true, `${v}: 読めなかった（〔申し送りにする〕は押せない）`)
+        assert.equal(m.pressAdd(LUNCH7), 'not-read')
+        // 送る直前の読み直しも失敗した時の代わり（このマウント中の最後の読み込み＋控え）には送れた行がある
+        assert.deepEqual(ids(P.personKnown(m.s.store, P.markPersonKey(7, D))), [[9, false]])
+        assert.equal(m.send(7, D, m.fail(m.start(7, D)), LUNCH7), 'taken')
+        assert.equal(m.s.inserts, 1, `${v}: 2件目を作らない（insertNote は1回だけ）`)
+      }
+    })
+
+    it('反証 中1: 同じ流れで、戻った時の読み込みが成功（送れた後に始めた・送れる前に始めた）。送れた行を印に出し〔申し送りにする〕は出さない', () => {
+      const landed = row(9, `dcn:${D}:7:lunch:1-zz`, '昼食 主食 全量')
+      for (const v of ['送れた後に戻った', '送れる前に戻った']) {
+        const m = sim(7, D)
+        m.done(m.start(7, D), [])
+        assert.equal(m.send(7, D, m.done(m.start(7, D), []), LUNCH7), 'insert')
+        m.view(8, D)
+        m.fail(m.start(8, D))
+        let back
+        if (v === '送れた後に戻った') {
+          m.keep(7, D, landed)
+          m.view(7, D)
+          back = m.start(7, D)
+          m.done(back, [landed])
+        } else {
+          // 戻った時の読み込みは送れた行を知らない（insertNote の応答より前に始めた）
+          m.view(7, D)
+          back = m.start(7, D)
+          m.keep(7, D, landed)
+          assert.equal(m.shownRows(), null, '読めるまでは空のまま')
+          m.done(back, [])
+        }
+        assert.deepEqual(ids(m.shownRows()), [[9, false]], `${v}: 送れた行が印に出る`)
+        assert.equal(m.pressAdd(LUNCH7), 'live', `${v}: 〔申し送りにする〕に戻らない`)
+        assert.equal(m.send(7, D, m.fail(m.start(7, D)), LUNCH7), 'taken')
+        assert.equal(m.s.inserts, 1, `${v}: 2件目を作らない（insertNote は1回だけ）`)
+      }
+    })
+
+    it('反証 軽2: 外す・直すも同じ。別の方の表示中に届いた取り消し・直しを控え、戻った画面に取り消した印・直す前の本文を出さない', () => {
+      const live = row(5, `dcn:${D}:7:vital:1-aa`, 'バイタル 体温 36.5℃')
+      for (const op of ['外す', '直す']) {
+        const after = op === '外す' ? { ...live, deleted: true } : { ...live, note: { ...live.note, body: 'バイタル 体温 37.0℃' } }
+        const shown = (rows) => rows.map((r) => [r.note.id, r.deleted, r.note.body])
+        for (const v of ['戻った読み込みが失敗', '外す・直す前に始めた読み込みが戻った後に届く', '戻った読み込みが送れる前に始まった']) {
+          const m = sim(7, D)
+          m.done(m.start(7, D), [live])
+          const stale = m.start(7, D)
+          m.view(8, D)
+          m.done(m.start(8, D), [])
+          let back = null
+          if (v === '戻った読み込みが送れる前に始まった') {
+            m.view(7, D)
+            back = m.start(7, D)
+          }
+          m.keep(7, D, after)
+          m.fail(m.start(7, D))
+          if (back === null) m.view(7, D)
+          if (v === '戻った読み込みが失敗') {
+            m.fail(m.start(7, D))
+            assert.equal(m.shownRows(), null, `${op}・${v}: 前に読めた${op === '外す' ? '生きた印' : '直す前の本文'}を出さない`)
+            assert.deepEqual(shown(P.personKnown(m.s.store, P.markPersonKey(7, D))), shown([after]), '代わりには控えが重なる')
+          } else if (v === '外す・直す前に始めた読み込みが戻った後に届く') {
+            m.done(stale, [live])
+            assert.deepEqual(shown(m.shownRows()), shown([after]), `${op}・${v}`)
+            m.fail(m.start(7, D))
+            assert.deepEqual(shown(m.shownRows()), shown([after]), `${op}・${v}: 読み直しが失敗しても戻さない`)
+          } else {
+            m.done(back, [live])
+            assert.deepEqual(shown(m.shownRows()), shown([after]), `${op}・${v}`)
+          }
+        }
+      }
+    })
+
+    it('反証 軽3: 番号は人・日ごと。7番の方の読み込み1が遅れて届き、8番の方の番号2が先に入っていても、7番の方へ戻った後なら入れる', () => {
+      const m = sim(7, D)
+      const l1 = m.start(7, D)
+      m.view(8, D)
+      m.done(m.start(8, D), [row(20, `dcn:${D}:8:vital:1-bb`)])
+      m.view(7, D)
+      const l3 = m.start(7, D)
+      m.done(l1, [row(1, `dcn:${D}:7:lunch:1-aa`)])
+      assert.deepEqual(ids(m.shownRows()), [[1, false]], '8番の方の番号2で 7番の方の読み込み1を捨てない')
+      m.done(l3, [row(1, `dcn:${D}:7:lunch:1-aa`), row(2, `dcn:${D}:7:vital:1-aa`)])
+      assert.deepEqual(ids(m.shownRows()), [[1, false], [2, false]])
+      // 同じ人・日で後に始めた読み込みが入った後なら、前に始めた読み込みは捨てる（人・日ごとの番号）
+      const m2 = sim(7, D)
+      const a1 = m2.start(7, D)
+      const a2 = m2.start(7, D)
+      m2.done(a2, [row(2, `dcn:${D}:7:vital:1-aa`)])
+      m2.done(a1, [])
+      assert.deepEqual(ids(m2.shownRows()), [[2, false]])
+      // 8番の方の表示中に届いた 7番の方の読み込みは、7番の方の番号だけを進める（8番の方の失敗の扱いは変えない）
+      const m3 = sim(8, D)
+      const b1 = m3.start(8, D)
+      m3.done(m3.start(7, D), [])
+      m3.fail(b1)
+      assert.equal(m3.shownFailed(), true, '7番の方の番号で 8番の方の失敗を隠さない')
+      m3.fail(m3.start(7, D))
+      assert.equal(m3.shownFailed(), true, '表示中でない 7番の方の読み込みの失敗で、8番の方の「読めなかった」を消さない')
+    })
+  })
+
   describe('静的検査（段階2c の規律）', () => {
     const comp = code('../src/components/DaycareNoteMark.tsx')
     it('申し送りへの書き込みは印の部品の中だけで、既存の insertNote・deleteNote・saveNoteEdits だけ', () => {
@@ -227,7 +576,8 @@ if (M === null) {
       assert.deepEqual([...new Set(writes.map((w) => w.slice(0, -1)))].sort(), ['deleteNote', 'insertNote', 'saveNoteEdits'])
       assert.doesNotMatch(comp, /supabase|\.from\(|\.rpc\(|localStorage/)
       // 冪等キーは世代つきの鍵・区分はデイ・「16時以降」は付けない・分類は記録の種類から
-      assert.match(comp, /insertNote\(payload, \{ clientKey: markKey\(d, rid, rec, gen, token\) \}\)/)
+      // 2026-11-10 1人の画面の印の守り（固定し直し・意図は同じ）: 送れた行を控えるため、鍵を clientKey に出してから insertNote へ渡す
+      assert.match(comp, /const clientKey = markKey\(d, rid, rec, gen, token\)\s+const res = await insertNote\(payload, \{ clientKey \}\)/)
       assert.match(comp, /const token = Math\.random\(\)\.toString\(36\)\.slice\(2, 10\) \|\| '0'/)
       assert.match(comp, /shift: 'daycare' as const,/)
       assert.match(comp, /after16: false,/)
@@ -258,6 +608,36 @@ if (M === null) {
       assert.match(comp, /直した後の申し送り（全文を確かめて、必要なら直してください）/)
       assert.match(comp, /<textarea/)
       assert.doesNotMatch(comp, /markTail/)
+    })
+    it('2026-11-10 1人の画面の印の守り: 読み込み・控え・読めなかった印の判断は純関数（動きは上の試験）を、部品と同じ手順で通す', () => {
+      const load = comp.slice(comp.indexOf('const load = useCallback'), comp.indexOf('const keepRow'))
+      // 2026-11-10 1人の画面の印の守り 反証（固定し直し）: 読み込みと控えは人・日ごとの store（番号の比べも人・日ごと）・表示中でない方の
+      // 書き込みも控える・人・日を替えたら印を空にする・送る直前の読み直しの代わりは personKnown（動きは上の試験）
+      assert.match(load, /const r = personLoaded\(storeRef\.current, \{ rows, gen, from, shown: hereKey\(\) \}\)\s+storeRef\.current = r\.store/)
+      assert.match(load, /if \(r\.show !== null\) \{\s+setMarks\(r\.show\)\s+setFailedFor\(null\)/)
+      assert.match(load, /if \(personLoadFailShown\(storeRef\.current, \{ gen, from, shown: hereKey\(\) \}\)\) setFailedFor\(from\)/)
+      assert.doesNotMatch(comp, /gen === genRef\.current|setLoadFailed|appliedRef|keptRef|marksRef/, '前の作り（最後に始めた読み込みだけ・番号1つ・控え1人分）は残さない')
+      assert.match(comp, /const storeRef = useRef<PersonStore<DaycareNoteMarkRow>>\(emptyPersonStore\(\)\)/)
+      assert.match(comp, /const hereKey = \(\) => markPersonKey\(here\.current\.residentId, here\.current\.day\)/)
+      const keep = comp.slice(comp.indexOf('const keepRow'), comp.indexOf('useEffect(', comp.indexOf('const keepRow')))
+      assert.match(keep, /storeRef\.current = personKeep\(storeRef\.current, \{ from, row, gen \}\)\s+setMarks\(\(prev\) => marksWithRow\(prev, from, row, gen\)\)/)
+      assert.doesNotMatch(keep, /return|hereKey/, '表示中でない方の書き込みも控える')
+      assert.match(comp, /const \[visitKey, setVisitKey\] = useState\(personKey\)\s+if \(visitKey !== personKey\) \{\s+setVisitKey\(personKey\)\s+setMarks\(null\)\s+setFailedFor\(null\)\s+\}/)
+      assert.match(comp, /const rows = marksFor\(marks, personKey\)/)
+      assert.match(comp, /const loadFailed = failedFor === personKey/)
+      assert.match(comp, /const known = fresh \?\? personKnown\(storeRef\.current, markPersonKey\(rid, d\)\)/)
+      // 読めない間の門（今のまま）: 〔申し送りにする〕は rows が null なら MSG_NOT_READ・読めなかった時は押せない
+      assert.match(comp, /disabled=\{isBusy \|\| \(rows === null && loadFailed\)\}/)
+      assert.match(comp, /const why = precheck\(\) \?\? \(rows === null \? MSG_NOT_READ : null\)/)
+      // 送れた・外した・直した行は、送った後の読み直しの前に控える
+      assert.match(comp, /keepRow\(rid, d, \{ note: res, clientKey, deleted: false \}\)\s+await load\(d, rid\)/)
+      assert.match(comp, /keepRow\(rid, d, \{ \.\.\.row, deleted: true \}\)\s+await load\(d, rid\)/)
+      assert.match(comp, /keepRow\(rid, d, \{ \.\.\.row, note: res\.row \?\? \{ \.\.\.row\.note, body: full\.trim\(\) \} \}\)\s+await load\(d, rid\)/)
+      // 知らせ・送信中の鍵は人・日つき（前の方の知らせ・送信中を表示中の方に出さない）。人・日を替えたら知らせを消す
+      assert.match(comp, /const msgKey = \(rec: MarkRecord\) => `\$\{personKey\}:\$\{markPrefix\(day, residentId, rec\)\}`/)
+      assert.equal((comp.match(/const k = `\$\{rid\}:\$\{d\}:\$\{markPrefix\(d, rid, rec\)\}`/g) ?? []).length, 3)
+      assert.match(comp, /const personKey = markPersonKey\(residentId, day\)/)
+      assert.match(comp, /useEffect\(\(\) => \{\s+setMsgs\(\{\}\)\s+void load\(day, residentId\)\s+\}, \[day, residentId, refreshKey, load\]\)/)
     })
     it('17時のロック: 現場のログインは記録日の 17:00 から付け外し・直しをしない（事務所はできる・サーバーが正）', () => {
       assert.match(comp, /const lockedForMe = lockState\(day, 'daycare', false, now\)\.locked && !canUnlockNotes\(role\)/)
@@ -293,6 +673,10 @@ if (M === null) {
     })
     it('純ロジックは端末に何も残さない（localStorage を使わない）', () => {
       assert.doesNotMatch(code('../src/lib/daycareNoteMark.ts'), /localStorage|supabase/)
+      // 2026-11-10 1人の画面の印の守り: 読み込みの判断の純関数も、端末に残さない・書かない・db を読まない・console に出さない
+      const person = code('../src/lib/daycareNoteMarkPerson.ts')
+      assert.doesNotMatch(person, /localStorage|supabase|console\.|from '\.\/db/)
+      assert.deepEqual(person.match(/\b(save\w+|insert\w+|update\w+|delete\w+|softDelete\w+|upsert\w+|discard\w+|stage\w+)\(/g) ?? [], [])
     })
   })
 }
