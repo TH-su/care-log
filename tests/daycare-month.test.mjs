@@ -113,6 +113,13 @@ const came = (day, residentId, over = {}) => ({
 const rest = (day, residentId, reason = 'condition', over = {}) =>
   came(day, residentId, { arrived_at: null, left_at: null, absent: true, absent_reason: reason, ...over })
 
+/** その月の日付の一覧（試験の見本づくり） */
+const monthDaysOf = (m) => {
+  const [y, mo] = m.split('-').map(Number)
+  const last = new Date(y, mo, 0).getDate()
+  return Array.from({ length: last }, (_, i) => `${m}-${String(i + 1).padStart(2, '0')}`)
+}
+
 /** 日ごとの数が今日の画面の counts（buildDaycareBoard）と同じか（数える日だけ） */
 function assertSameAsDayScreen(report, snapshots, attendance) {
   for (const d of report.days) {
@@ -505,6 +512,56 @@ if (M === null) {
       assert.deepEqual(M.initialDayFromUrl('', '2026-11-10'), { day: '2026-11-10', strip: true })
     })
 
+    it('未記録のタイルの文（反証の確認 軽2）: 数えた日のことだけ・今日の未到着があれば言い切らない・数えた日が0日なら「数えた日はありません」・写しの無い日は必ず並べる', () => {
+      const report = (snapshots, attendance, today = '2026-11-10') =>
+        M.buildDaycareMonth({ month: '2026-11', today, snapshots, attendance, residents: RES, closedDates: null })
+      // 未記録あり
+      const a = report([snap('2026-11-09', [planRow('a', 1)])], [])
+      assert.equal(M.unrecordedTileNote(a), '過去の日に来所も休みも無い予定（下の表の ▲）。写しの無い日 9日は数えていません')
+      // 数えた日が0日（写しが1つも無い）
+      const b = report([], [])
+      assert.equal(M.unrecordedTileNote(b), '数えた日はありません。写しの無い日 10日は数えていません')
+      // 今日の未到着がある（過去の日は記録済み）: 言い切らずに未到着の人数を添える
+      const c = report([snap('2026-11-09', [planRow('a', 1)]), snap('2026-11-10', [planRow('a', 1), planRow('b', 2)])], [came('2026-11-09', 1), came('2026-11-10', 1)])
+      assert.equal(M.unrecordedTileNote(c), '数えた過去の日（1日）の予定は記録済み・今日の未到着 1名。写しの無い日 8日は数えていません')
+      assert.doesNotMatch(M.unrecordedTileNote(c), /^数えた日（/)
+      // 数えた日が今日だけで、今日の未到着がある
+      const d = report([snap('2026-11-10', [planRow('a', 1)])], [])
+      assert.equal(M.unrecordedTileNote(d), '数えた過去の日はありません・今日の未到着 1名。写しの無い日 9日は数えていません')
+      // 全部記録済み・写しの無い日なし（過去の月）
+      const e = M.buildDaycareMonth({
+        month: '2026-02',
+        today: '2026-11-10',
+        snapshots: monthDaysOf('2026-02').map((day) => snap(day, [planRow('a', 1)])),
+        attendance: monthDaysOf('2026-02').map((day) => came(day, 1)),
+        residents: RES,
+        closedDates: null,
+      })
+      assert.equal(M.unrecordedTileNote(e), '数えた日（28日）の予定は記録済み')
+    })
+
+    it('前の月の下限（観察）: 2026年10月より前へは〔前の月〕で戻れない・?m= で下限より前は下限の月・不正値と先の月は今月', () => {
+      assert.equal(M.DAYCARE_MONTH_MIN, '2026-10')
+      assert.equal(M.canGoPrevMonth('2026-11'), true)
+      assert.equal(M.canGoPrevMonth('2026-10'), false)
+      assert.equal(M.canGoPrevMonth('2026-09'), false)
+      assert.equal(M.canGoPrevMonth('2027-01'), true, '年をまたぐ')
+      assert.equal(M.daycareMonthFromUrl('2026-09', '2026-11'), '2026-10', '下限より前は下限の月')
+      assert.equal(M.daycareMonthFromUrl('2025-12', '2026-11'), '2026-10')
+      assert.equal(M.daycareMonthFromUrl('2026-10', '2026-11'), '2026-10')
+      assert.equal(M.daycareMonthFromUrl('2026-12', '2026-11'), '2026-11', '先の月は今月')
+      assert.equal(M.daycareMonthFromUrl('2026-13', '2026-11'), '2026-11', '形が違えば今月')
+      assert.equal(M.daycareMonthFromUrl(null, '2026-11'), '2026-11')
+      assert.equal(M.daycareMonthFromUrl(null, '2026-09'), '2026-09', '端末の時計が下限より前でも今月を開く（行き止まりにしない）')
+    })
+
+    it('日付の変わり目をまたいだ読み込み（反証の確認 軽1）: 読み始めた日の今月を読んでいて、読めた時に日付が変わっていたら読み直す', () => {
+      assert.equal(M.loadCrossedMidnight('2026-11', '2026-11-10', '2026-11-10'), false, '同じ日のうちに読めた')
+      assert.equal(M.loadCrossedMidnight('2026-11', '2026-11-10', '2026-11-11'), true, '23:59 に読み始めて 0:00 過ぎに読めた')
+      assert.equal(M.loadCrossedMidnight('2026-11', '2026-11-30', '2026-12-01'), true, '月末をまたいだ')
+      assert.equal(M.loadCrossedMidnight('2026-10', '2026-11-10', '2026-11-11'), false, '過去の月は数が変わらない')
+    })
+
     it('道: 月は ?m=（今月は付けない）・今日の画面のその日は ?day=（今日は付けない）', () => {
       assert.equal(M.daycareMonthPath('2026-11', '2026-11'), '/record/daycare/month')
       assert.equal(M.daycareMonthPath('2026-10', '2026-11'), '/record/daycare/month?m=2026-10')
@@ -526,7 +583,19 @@ if (M === null) {
           state.calls.push(q)
           if (state.fail) return { data: null, error: { message: 'timeout', code: '' }, status: 0 }
           if (state.shrinkAfterFirst && state.calls.length > 1) state[table] = []
-          const all = (state[table] ?? []).filter(hit)
+          // 本物の DB と同じく、order を付けない・order で決まらない行どうしの並びは決まらない（問い合わせごとに入れ替える）。
+          // order が抜けると、ページの間で行が重なる・抜ける＝試験が落ちる（反証の確認 軽3）
+          const n = state.calls.length
+          const scramble = (r) => ((Number(r.id) * 7919 + n * 104729) % 1000003)
+          const all = (state[table] ?? [])
+            .filter(hit)
+            .slice()
+            .sort((a, b2) => {
+              for (const [k, asc] of q.orders) {
+                if (a[k] !== b2[k]) return (a[k] < b2[k] ? -1 : 1) * (asc ? 1 : -1)
+              }
+              return scramble(a) - scramble(b2)
+            })
           // サーバーの1回の上限（db-max-rows）。range は from〜to（両端を含む）
           const cap = state.maxRows ?? 1000
           const from = q.range?.[0] ?? 0
@@ -568,8 +637,8 @@ if (M === null) {
             q.filters.push(['eq', k, v])
             return b
           },
-          order(k) {
-            q.orders.push(k)
+          order(k, o) {
+            q.orders.push([k, o?.ascending !== false])
             return b
           },
           limit(n) {
@@ -637,6 +706,10 @@ if (M === null) {
           ['is', 'deleted_at', null],
         ])
         assert.deepEqual(q.range, [0, 999], '1000件ずつ')
+        assert.deepEqual(q.orders, [
+          ['day', true],
+          ['id', true],
+        ], '並びは日→id（ページの間で行が重ならない・抜けない）')
         assert.deepEqual(q.opts, { count: 'exact' }, '最初の1回で件数も受け取る')
         assert.ok(state.calls.every((c) => c.action === 'select'), '読むだけ')
         // 端末に持ち出さない列（client_key）は返さない
@@ -672,6 +745,7 @@ if (M === null) {
           ['lte', 'day', '2026-11-30'],
         ])
         assert.deepEqual(q.range, [0, 999])
+        assert.deepEqual(q.orders, [['day', true]], '写しは1日1行なので日の並びだけ')
       })
     })
 
@@ -694,6 +768,12 @@ if (M === null) {
             Array.from({ length: calls }, (_, i) => [i * 1000, i * 1000 + 999]),
           )
           assert.ok(st.calls.slice(1).every((c) => c.opts === null), '件数は最初の1回だけ受け取る')
+          assert.ok(
+            st.calls.every((c) => JSON.stringify(c.orders) === JSON.stringify([['day', true], ['id', true]])),
+            'どのページも同じ並び（日→id）',
+          )
+          // 返る並びも日→id（今日の画面と同じく、同じ方・同じ日の2行は id の大きい方を取れる並び）
+          for (let i = 1; i < rows.length; i++) assert.ok(rows[i - 1].day < rows[i].day || (rows[i - 1].day === rows[i].day && rows[i - 1].id < rows[i].id))
         })
       }
       const st = { calls: [], daycare_attendance: many(2001) }
@@ -786,7 +866,11 @@ if (M === null) {
 
     it('数え方は純関数（buildDaycareMonth）・現在地の月は URL の ?m=（parseMonthKey で不正値・先の月は今月）', () => {
       assert.match(page, /buildDaycareMonth\(\{ month, today: at, snapshots, attendance, residents, closedDates: closed\.v, weekdayPlanned \}\)/)
-      assert.match(page, /const month = parseMonthKey\(search\.get\('m'\), currentMonth\) \?\? currentMonth/)
+      assert.match(page, /const month = daycareMonthFromUrl\(search\.get\('m'\), currentMonth\)/)
+      assert.match(page, /const goMonth = \(m: string\) => navigate\(daycareMonthPath\(daycareMonthFromUrl\(m, currentMonth\), currentMonth\), \{ replace: true \}\)/)
+      assert.match(page, /disabled=\{!canGoPrevMonth\(month\)\}/)
+      assert.match(lib, /export const DAYCARE_MONTH_MIN = '2026-10'/)
+      assert.match(lib, /仮置き・デイの記録を使い始めた月/)
       assert.match(lib, /export const DAYCARE_CAPACITY = 27/)
       assert.match(lib, /公開 LP の値。指定申請上の利用定員とは突き合わせていない。\s*\n\s*\* 変わる時は PR で直す/)
       // 稼働率の式を添える・未記録は ▲ と文字（色だけにしない）
@@ -800,10 +884,11 @@ if (M === null) {
       // 日をまたぐ: 60秒ごと・画面に戻った時に今日を取り直し、今月を見ている時だけ読み直す
       assert.match(page, /const TODAY_TICK_MS = 60_000/)
       assert.match(page, /if \(shouldReloadOnDayChange\(loadedRef\.current, today\)\) setReloadKey/)
+      // 読んでいる間に日付が変わった時は、読めた直後に確かめて読み直す（今の世代の時だけ）
+      assert.match(page, /monthLoadDone\(prev, month, gen, [^\n]*\s*if \(gen === genRef\.current && loadCrossedMidnight\(month, at, todayIso\(\)\)\) setReloadKey/)
       // 未記録のタイルは数えた日のことだけを言い、写しの無い日を並べる（反証 中1）
       assert.doesNotMatch(page, /すべて記録済み/)
-      assert.match(page, /数えた日（\$\{s\.countedDays\}日）の予定は記録済み/)
-      assert.match(page, /写しの無い日 \$\{s\.noSnapshotDays\}日は数えていません/)
+      assert.match(page, /sub=\{unrecordedTileNote\(report\)\}/)
       assert.match(page, /記録の無い営業日かもしれない日 \{s\.maybeBusinessDays\}日/)
     })
 

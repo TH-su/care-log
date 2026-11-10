@@ -23,22 +23,26 @@ import type { ReactNode } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { DbError, fetchDaycareAttendanceMonth, fetchDaycareDaysMonth, fetchDaycarePlan, getAppSetting } from '../lib/db'
 import { fetchAllResidents } from '../lib/cachedReads'
-import { fmtMonthLabel, isoWeekdayIndex, monthKeyOf, parseMonthKey, shiftMonth } from '../lib/bath'
+import { fmtMonthLabel, isoWeekdayIndex, monthKeyOf, shiftMonth } from '../lib/bath'
 import {
   DAYCARE_CAPACITY,
   DAYCARE_MONTH_REASONS,
   buildDaycareMonth,
   canGoNextMonth,
+  canGoPrevMonth,
   daycareDayPath,
+  daycareMonthFromUrl,
   daycareMonthHintDays,
   daycareMonthPath,
   fmtRate10,
+  loadCrossedMidnight,
   monthLoadDone,
   monthLoadFail,
   monthLoadStart,
   planHintCount,
   reasonsShort,
   shouldReloadOnDayChange,
+  unrecordedTileNote,
 } from '../lib/daycareMonth'
 import type { DaycareMonthDay, DaycareMonthReason, DaycareMonthReport, MonthLoadState } from '../lib/daycareMonth'
 import { personPath } from '../lib/daycarePerson'
@@ -166,8 +170,8 @@ export function DaycareMonthPage() {
   // 今日（60秒ごと・画面に戻った時に取り直す＝今日の画面と同じ・反証 軽4）
   const [today, setToday] = useState(todayIso())
   const currentMonth = monthKeyOf(today)
-  // 現在地（月）は URL の ?m=（再読み込みで同じ月・不正値と先の月は今月＝parseMonthKey）
-  const month = parseMonthKey(search.get('m'), currentMonth) ?? currentMonth
+  // 現在地（月）は URL の ?m=（再読み込みで同じ月・不正値と先の月は今月・デイの記録を使い始めた月より前は下限の月＝daycareMonthFromUrl）
+  const month = daycareMonthFromUrl(search.get('m'), currentMonth)
   // 読み込みの状態（純関数 monthLoadStart・Done・Fail＝別の月の遅れた応答・古い世代を捨てる・失敗と月の変更で前の数を消す）
   const [load, setLoad] = useState<MonthLoadState<Loaded>>({ month, gen: 0, data: null, error: null, loading: true })
   const genRef = useRef(0)
@@ -222,6 +226,8 @@ export function DaycareMonthPage() {
           return
         }
         setLoad((prev) => monthLoadDone(prev, month, gen, { month, today: at, report, residents, closedFailed: closed.failed }))
+        // 読んでいる間に日付が変わった（今月を読んでいた時だけ）: 読めた直後に読み直す（反証の確認 軽1。読み始めた日の数のまま残さない）
+        if (gen === genRef.current && loadCrossedMidnight(month, at, todayIso())) setReloadKey((n) => n + 1)
       } catch (e) {
         // 読み切れない（上限）・読めない時は数を出さない（前に出していた数も消す＝欠けた数を見せない）
         setLoad((prev) => monthLoadFail(prev, month, gen, e instanceof DbError && e.kind === 'server' ? e.message : ERR_LOAD))
@@ -240,7 +246,7 @@ export function DaycareMonthPage() {
     if (shouldReloadOnDayChange(loadedRef.current, today)) setReloadKey((n) => n + 1)
   }, [today])
 
-  const goMonth = (m: string) => navigate(daycareMonthPath(parseMonthKey(m, currentMonth) ?? currentMonth, currentMonth), { replace: true })
+  const goMonth = (m: string) => navigate(daycareMonthPath(daycareMonthFromUrl(m, currentMonth), currentMonth), { replace: true })
   const monthLabel = fmtMonthLabel(month)
 
   const header = (
@@ -251,7 +257,7 @@ export function DaycareMonthPage() {
         </Link>
       </div>
       <div className="flex flex-wrap items-center gap-gap" role="group" aria-label="月">
-        <button type="button" onClick={() => goMonth(shiftMonth(month, -1))} className={BTN} aria-label="前の月へ">
+        <button type="button" onClick={() => goMonth(shiftMonth(month, -1))} disabled={!canGoPrevMonth(month)} className={BTN} aria-label="前の月へ">
           <span aria-hidden="true">‹</span>
           <span className="ml-1 text-sm">前の月</span>
         </button>
@@ -327,12 +333,8 @@ export function DaycareMonthPage() {
           label="未記録"
           value={s.unrecorded}
           warn={s.unrecorded > 0}
-          sub={
-            // 数えた日のことだけを言う（写しの無い日は数えていない＝言い切らない・反証 中1）
-            `${s.unrecorded > 0 ? '過去の日に来所も休みも無い予定（下の表の ▲）' : `数えた日（${s.countedDays}日）の予定は記録済み`}${
-              s.noSnapshotDays > 0 ? `。写しの無い日 ${s.noSnapshotDays}日は数えていません` : ''
-            }`
-          }
+          // 数えた日のことだけを言う（写しの無い日・今日の未到着があれば言い切らない・反証 中1・反証の確認 軽2）
+          sub={unrecordedTileNote(report)}
         />
         {s.waitingToday > 0 ? <Tile label="今日の未到着" value={s.waitingToday} sub="未記録には入れていません" /> : null}
         <Tile label="延べ来所数" value={s.came} sub="予定あり＋予定外" />

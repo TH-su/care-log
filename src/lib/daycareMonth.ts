@@ -18,7 +18,7 @@
 //
 // 拡張子付きで import する（tests から node で直接読めるようにするため）。個人情報は扱わない（利用者は数値IDだけ・氏名は画面が引く）。
 
-import { isDaycareClosedOn, isoWeekdayIndex, monthDays, shiftMonth } from './bath.ts'
+import { isDaycareClosedOn, isoWeekdayIndex, monthDays, parseMonthKey, shiftMonth } from './bath.ts'
 import { buildDaycareBoard, kanaSortKey } from './daycare.ts'
 import { readPersonDay } from './daycarePerson.ts'
 import { daycarePlanWarning } from './daycareProgress.ts'
@@ -497,6 +497,55 @@ export function monthLoadFail<T>(prev: MonthLoadState<T>, month: string, gen: nu
 /** 〔次の月〕を押せるか（先の月へは進めない） */
 export function canGoNextMonth(month: string, currentMonth: string): boolean {
   return shiftMonth(month, 1) <= currentMonth
+}
+
+/**
+ * 月の実績で開ける一番古い月（仮置き・デイの記録を使い始めた月＝0041 の適用 2026-10）。それより前は記録が無いので〔前の月〕で行かない。
+ * 変わる時は PR で直す
+ */
+export const DAYCARE_MONTH_MIN = '2026-10'
+
+/** 〔前の月〕を押せるか（DAYCARE_MONTH_MIN より前へは戻らない） */
+export function canGoPrevMonth(month: string, minMonth: string = DAYCARE_MONTH_MIN): boolean {
+  return shiftMonth(month, -1) >= minMonth
+}
+
+/**
+ * URL の ?m= から開く月。形が違う・先の月は今月（parseMonthKey）、DAYCARE_MONTH_MIN より前は下限の月。
+ * 下限が今月より先（端末の時計が下限より前）の時は今月
+ */
+export function daycareMonthFromUrl(raw: unknown, currentMonth: string, minMonth: string = DAYCARE_MONTH_MIN): string {
+  const m = parseMonthKey(raw, currentMonth) ?? currentMonth
+  if (minMonth > currentMonth) return currentMonth
+  return m < minMonth ? minMonth : m
+}
+
+/**
+ * 未記録のタイルの小さな文（2026-11-10 反証の確認 軽2・数えた日のことだけを言い、言い切らない）。
+ * 未記録あり → 表の ▲ へ／数えた日が0日 → 「数えた日はありません」／今日の未到着がある → 過去の日だけ記録済みと言い、未到着の人数を添える／
+ * それ以外 → 「数えた日（n日）の予定は記録済み」。写しの無い日があれば必ず「写しの無い日 m日は数えていません」を並べる
+ */
+export function unrecordedTileNote(report: Pick<DaycareMonthReport, 'days' | 'summary'>): string {
+  const s = report.summary
+  const pastCounted = report.days.filter((d) => d.kind === 'counted' && !d.isToday).length
+  const head =
+    s.unrecorded > 0
+      ? '過去の日に来所も休みも無い予定（下の表の ▲）'
+      : s.countedDays === 0
+        ? '数えた日はありません'
+        : s.waitingToday > 0
+          ? `${pastCounted > 0 ? `数えた過去の日（${pastCounted}日）の予定は記録済み` : '数えた過去の日はありません'}・今日の未到着 ${s.waitingToday}名`
+          : `数えた日（${s.countedDays}日）の予定は記録済み`
+  return s.noSnapshotDays > 0 ? `${head}。写しの無い日 ${s.noSnapshotDays}日は数えていません` : head
+}
+
+/**
+ * 読み込みが日付の変わり目をまたいだか（2026-11-10 反証の確認 軽1）。読み始めた日（startedOn）の今月を読んでいて、読めた時の今日
+ * （nowToday）が読み始めた日と違えば true＝読み直す。読んでいる間に今日の取り直しが来ても、数の無い間は読み直しの合図に使えないため、
+ * 読めた直後にこれで確かめる（判断は shouldReloadOnDayChange と同じ）
+ */
+export function loadCrossedMidnight(month: string, startedOn: string, nowToday: string): boolean {
+  return shouldReloadOnDayChange({ month, today: startedOn }, nowToday)
 }
 
 /**
