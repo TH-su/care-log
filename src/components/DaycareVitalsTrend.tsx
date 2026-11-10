@@ -30,25 +30,28 @@ import {
   TREND_ONE_TEXT,
   TREND_PANELS,
   TREND_PICK_HINT,
+  TREND_RELOAD_MS,
   TREND_ROUNDS,
   TREND_UNREAD_TEXT,
   abnormalCount,
   nearestIndex,
   roundWhen,
+  selectedIndexOf,
   stepIndex,
   trendCell,
   trendDayUnreadText,
-  trendFitRounds,
   trendLayout,
   trendLevel,
   trendPanelReadout,
   trendPlotWidth,
   trendReadout,
+  trendReloadStep,
   trendRounds,
   trendSpeech,
   trendView,
+  trendWindow,
 } from '../lib/daycareVitalsTrend'
-import type { TrendMarker, TrendPanelSpec, TrendRound } from '../lib/daycareVitalsTrend'
+import type { TrendMarker, TrendPanelSpec, TrendReloadInputs, TrendRound } from '../lib/daycareVitalsTrend'
 
 interface Props {
   /** 見出し（h3）の id（画面の section の aria-labelledby） */
@@ -79,8 +82,6 @@ type Load =
 
 const EMPTY_ROWS: KeyedVital[] = []
 const EMPTY_MARKS: DaycareVitalUnmeasured[] = []
-/** 変更の知らせをまとめる時間（画面の読み直しと同じ） */
-const RELOAD_DEBOUNCE_MS = 400
 
 export function DaycareVitalsTrend({ headingId, residentId, day, isToday, dayRows, dayRowsOk, target, limitsOf, refreshKey = 0, changeKey = 0 }: Props) {
   const key = `${residentId}:${day}`
@@ -102,18 +103,22 @@ export function DaycareVitalsTrend({ headingId, residentId, day, isToday, dayRow
     [dayRows, residentId, day],
   )
 
-  // まとめた読み直し: 同じ人・同じ日のまま表示中の日の行が変わった時と、変更の知らせが届いた時（人・日の切り替えはすぐ読むので数えない）
-  const seen = useRef({ key, mineSig, changeKey })
+  // まとめた読み直し（trendReloadStep）: 同じ人・同じ日のまま表示中の日の行が変わった時と、変更の知らせが届いた時は 400ms 待って1回。
+  // 人・日が変わったら待っている読み直しを消す（新しい人・日はすぐ読む＝下の読み込み）
+  const seen = useRef<TrendReloadInputs>({ key, mineSig, changeKey })
   const timer = useRef<number | null>(null)
   useEffect(() => {
-    const prev = seen.current
-    seen.current = { key, mineSig, changeKey }
-    if (prev.key !== key || (prev.mineSig === mineSig && prev.changeKey === changeKey)) return
+    const next = { key, mineSig, changeKey }
+    const step = trendReloadStep(seen.current, next)
+    seen.current = next
+    if (step === 'none') return
     if (timer.current !== null) window.clearTimeout(timer.current)
+    timer.current = null
+    if (step === 'cancel') return
     timer.current = window.setTimeout(() => {
       timer.current = null
       setTick((n) => n + 1)
-    }, RELOAD_DEBOUNCE_MS)
+    }, TREND_RELOAD_MS)
   }, [key, mineSig, changeKey])
   useEffect(
     () => () => {
@@ -144,11 +149,10 @@ export function DaycareVitalsTrend({ headingId, residentId, day, isToday, dayRow
   const marks = ready === null ? EMPTY_MARKS : ready.unmeasured
   const all = useMemo(() => trendRounds(dayRows, pastRows, residentId, day, marks), [dayRows, pastRows, residentId, day, marks])
   // 点の間が狭くなりすぎる幅（375px で文字 200% など）では、新しい方から入る回だけ出す（表も同じ回）
-  const fit = plotW === null ? TREND_ROUNDS : trendFitRounds(plotW)
-  const rounds = useMemo(() => (all.length > fit ? all.slice(-fit) : all), [all, fit])
+  const rounds = useMemo(() => trendWindow(all, plotW), [all, plotW])
   const marksUnread = ready !== null && ready.unmeasured === null
   const levelOf = (r: TrendRound, f: DaycareVitalField): Level => trendLevel(r, f, target, limitsOf)
-  const selIdx = sel !== null && sel.key === key ? rounds.findIndex((r) => r.id === sel.id) : -1
+  const selIdx = selectedIndexOf(rounds, sel, key)
   const selected = selIdx >= 0 ? rounds[selIdx] : null
   const pickIdx = (i: number | null, toggle: boolean) => {
     if (i === null) return
@@ -429,7 +433,8 @@ function TrendChart({ panel, rounds, levelOf, marksUnread, selIdx, onPick, onSte
   }, [W, plotW, onPlotW])
   const prevIdx = stepIndex(n, selIdx < 0 ? null : selIdx, -1)
   const nextIdx = stepIndex(n, selIdx < 0 ? null : selIdx, 1)
-  const btn = 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-3 text-base text-ink disabled:text-ink3'
+  // 端では押しても動かない（disabled にせず aria-disabled＝押した後もフォーカスが残る。見た目は押せない時の決まり ink3）
+  const btn = 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-3 text-base text-ink aria-disabled:text-ink3'
 
   return (
     // 枠で囲まない（欄のカードの中にカードを重ねない）。グラフどうしは間の余白で分ける
@@ -495,7 +500,7 @@ function TrendChart({ panel, rounds, levelOf, marksUnread, selIdx, onPick, onSte
               <line key={`g-${t.v}`} x1={lay.padL} x2={W - lay.padR} y1={t.y} y2={t.y} className="stroke-border" strokeWidth={1} />
             ))}
             {lay.ticks.map((t) => (
-              <text key={`t-${t.v}`} x={lay.padL - 6} y={t.y + Math.round(fs * 0.35)} textAnchor="end" className="fill-ink2 font-num text-sm">
+              <text key={`t-${t.v}`} x={lay.padL - 6} y={t.baseline} textAnchor="end" className="fill-ink2 font-num text-sm">
                 {t.text}
               </text>
             ))}
@@ -560,10 +565,10 @@ function TrendChart({ panel, rounds, levelOf, marksUnread, selIdx, onPick, onSte
             ))}
           </div>
           <div className="flex flex-wrap gap-gap" role="group" aria-label={`${panel.title}のグラフの回を動かす`}>
-            <button type="button" onClick={() => onStep(-1)} disabled={prevIdx === null} className={btn}>
+            <button type="button" onClick={() => prevIdx !== null && onStep(-1)} aria-disabled={prevIdx === null} className={btn}>
               <span aria-hidden="true">‹ </span>前の回
             </button>
-            <button type="button" onClick={() => onStep(1)} disabled={nextIdx === null} className={btn}>
+            <button type="button" onClick={() => nextIdx !== null && onStep(1)} aria-disabled={nextIdx === null} className={btn}>
               次の回<span aria-hidden="true"> ›</span>
             </button>
           </div>

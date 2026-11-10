@@ -466,6 +466,8 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
       attendance: data.attendance,
       baths: data.baths,
       vitals: data.vitals,
+      // 2026-11-10 計画F 反証の確認 軽4: バイタルを読めなかった時は控えの読めた値を空で上書きしない（mergeDaycareMemo が前の値を残す）
+      vitalsOk: data.vitalsOk,
       meals: data.meals,
       fluids: data.fluids,
       intakeOk: data.intakeOk,

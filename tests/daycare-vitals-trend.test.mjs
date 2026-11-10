@@ -31,6 +31,7 @@ let CT = null
 let CH = null
 let VT = null
 let DB = null
+let MEMO = null
 let loadError = null
 try {
   const { registerHooks } = await import('node:module')
@@ -62,6 +63,7 @@ try {
   CH = await import('../src/lib/chart.ts')
   VT = await import('../src/lib/vitalThresholds.ts')
   DB = await import('../src/lib/db.ts?daycare-vitals-trend')
+  MEMO = await import('../src/lib/daycareDayMemo.ts')
 } catch (e) {
   loadError = e
   T = null
@@ -351,7 +353,8 @@ if (T === null) {
     it('押した時: その回の日時と全部の項目（単位・基準外の記号と言葉）', () => {
       assert.equal(T.roundWhen(r[2]), '11/10（火） 9:40')
       assert.equal(T.roundWhen({ day: '2026-11-08', hm: '' }), '11/8（日）')
-      assert.equal(T.trendReadout(r[2], lv, false), '11/10（火） 9:40 の回: 血圧 上 150／下 — mmHg・脈 未測定・SpO2 95%・体温 37.6℃（↑ 注意・高い）')
+      // 2026-11-10 反証の確認 軽7: 押した回の行と読み上げでは、値の無い欄は「記録なし」（表は「—」のまま＝上の試験）
+      assert.equal(T.trendReadout(r[2], lv, false), '11/10（火） 9:40 の回: 血圧 上 150／下 記録なし mmHg・脈 未測定・SpO2 95%・体温 37.6℃（↑ 注意・高い）')
     })
     it('読み上げの要約（role="img" のグラフの名前）: 直近の回の数・期間・最新・基準外の回数・値の無い回', () => {
       assert.equal(T.trendSpeech(bp, r, lv), '血圧 直近3回（11/7〜11/10）。最新 上 150／下 — mmHg。基準外 1回。')
@@ -498,11 +501,12 @@ if (T === null) {
       assert.equal(T.stepIndex(0, null, -1), null)
       assert.equal(T.stepIndex(4, 9, -1), 3, '範囲外は選んでいない扱い')
     })
-    it('軽7: 読み直すのは、その方の表示中の日以前のデイの測定の変更と、行の分からない取り直しの合図だけ', () => {
+    it('軽7: 読み直すのは、その方の表示中の日より前のデイの測定の変更・表示中の日以前の印・行の分からない取り直しの合図だけ', () => {
       const day = '2026-11-10'
       const row = (over) => ({ resident_id: 7, measured_on: '2026-11-08', client_key: 'dc:2026-11-08:7:1', ...over })
       assert.equal(T.trendChangeHits('vitals', { event: 'UPDATE', row: row() }, 7, day), true)
-      assert.equal(T.trendChangeHits('vitals', { event: 'INSERT', row: row({ measured_on: day, client_key: `dc:${day}:7:2` }) }, 7, day), true)
+      // 反証の確認 軽3: 表示中の日の測定は数えない（画面が読み直して mineSig が変わる1回だけ＝二重に読まない）
+      assert.equal(T.trendChangeHits('vitals', { event: 'INSERT', row: row({ measured_on: day, client_key: `dc:${day}:7:2` }) }, 7, day), false)
       assert.equal(T.trendChangeHits('vitals', { event: 'INSERT', row: row({ measured_on: '2026-11-11' }) }, 7, day), false, '後の日')
       assert.equal(T.trendChangeHits('vitals', { event: 'UPDATE', row: row({ resident_id: 8 }) }, 7, day), false, 'ほかの方')
       assert.equal(T.trendChangeHits('vitals', { event: 'UPDATE', row: row({ client_key: null }) }, 7, day), false, 'デイ以外の測定')
@@ -532,6 +536,188 @@ if (T === null) {
       assert.equal(T.trendPanelReadout(bp, hi, lvOf, false), '11/8（日） 10:05　160/45 mmHg（上 ↑↑ 危険・高い・下 ↓ 注意・低い）')
       assert.equal(T.trendDayUnreadText(true), '今日の値を読み込めませんでした（前の日の回だけを出しています）。')
       assert.equal(T.trendDayUnreadText(false), 'この日の値を読み込めませんでした（前の日の回だけを出しています）。')
+    })
+  })
+
+  describe('反証の確認（2026-11-10）: 目盛りとの重なり・最新どうし・読み直し・回の窓・選んだ回・記録なし', () => {
+    const lim = () => base()
+    const lvOf = (x, f) => T.trendLevel(x, f, null, lim)
+    const bp = T.TREND_PANELS[0]
+    let id = 50000
+    const rowsOf = (vals, from = '2026-11-03') => {
+      const ds = days(vals.length, from)
+      return vals.map((v, i) => vital(7, ds[i], 1, v))
+    }
+    const bpVals = (list) =>
+      list.map((t) => {
+        const [a, b] = t.split('/')
+        return { sys_bp: a === '' ? null : Number(a), dia_bp: b === '' || b === undefined ? null : Number(b), pulse: 70 }
+      })
+    /** ラベル・目盛りの数字の箱（描く側と同じ寸法で検算する: 基準線から 0.85 字上・高さ 1 字・目盛りは padL - 6 に右寄せ） */
+    const labelBoxes = (lay, fs, charW) =>
+      lay.labels.map((l) => {
+        const w = T.textWidth(l.text, fs, charW)
+        const left = l.anchor === 'end' ? l.x - w : l.x - w / 2
+        const top = l.y - Math.round(fs * 0.85)
+        return [left, top, left + w, top + Math.ceil(fs)]
+      })
+    const tickBoxes = (lay, fs, charW) =>
+      lay.ticks.map((t) => {
+        const w = T.textWidth(t.text, fs, charW)
+        const top = t.baseline - Math.round(fs * 0.85)
+        return [lay.padL - 6 - w, top, lay.padL - 6, top + Math.ceil(fs)]
+      })
+    const ov = (a, b) => Math.min(a[2], b[2]) - Math.max(a[0], b[0]) > 0.5 && Math.min(a[3], b[3]) - Math.max(a[1], b[1]) > 0.5
+    /** 1枚のグラフの検算: 最新のラベルがある・ラベルは描く枠の内側・ラベルどうし・ラベルと目盛りの数字が重ならない */
+    const check = (panel, r, W, fs, charW, tag) => {
+      const lay = T.trendLayout(panel, r, lvOf, { width: W, fs, charW })
+      for (const f of panel.fields) {
+        const li = T.lastIndexWithValue(r, f)
+        if (li >= 0) assert.ok(lay.labels.some((l) => l.id === `${f}:${li}`), `${tag} 最新 ${f}`)
+      }
+      const ls = labelBoxes(lay, fs, charW)
+      const ts = tickBoxes(lay, fs, charW)
+      ls.forEach((b, i) => {
+        assert.ok(b[0] >= lay.padL - 0.5 && b[2] <= W - lay.padR + 0.5 && b[1] >= -0.5, `${tag} 枠の内側 ${lay.labels[i].text}`)
+        for (const t of ts) assert.ok(!ov(b, t), `${tag} 目盛りの数字に乗る ${lay.labels[i].text}`)
+        for (let j = i + 1; j < ls.length; j += 1) assert.ok(!ov(b, ls[j]), `${tag} ラベルどうし ${lay.labels[i].text}/${lay.labels[j].text}`)
+      })
+      return lay
+    }
+    it('軽1: 375px・文字 200%（幅 197・文字 30px）でラベルが左の目盛りの数字に乗らない（反証の再現 144/74・132/71・153/60・152/68・130/100 ほか）。名前を外す判定は描ける幅で', () => {
+      for (const list of [
+        ['144/74', '132/71', '153/60', '152/68', '130/100'],
+        ['143/82', '158/84', '133/83', '155/83', '143/103'],
+        ['157/72', '122/67', '121/75', '132/60', '128/98'],
+        ['176/81', '163/66', '162/84', '161/71', '151/76'],
+      ]) {
+        const r = T.trendRounds([], rowsOf(bpVals(list)), 7, '2026-11-20', [])
+        const lay = check(bp, r, 197, 30, 18, list.join(' '))
+        // 描ける幅（197 - padL 80 - padR 4 = 113）に「下 100↑↑」は入らないので名前を外す（記号まで入らない最新は値だけ）
+        for (const l of lay.labels) assert.ok(T.textWidth(l.text, 30, 18) <= 197 - lay.padL - lay.padR, l.text)
+      }
+      // 置ける範囲（左に置く案を含む）も描く枠の内側・目盛りの数字の箱はどの段でも避ける
+      const libSrc = code('../src/lib/daycareVitalsTrend.ts')
+      assert.match(libSrc, /const bounds: LabelObstacle = \[padL, 0, W - padR, plotBottom\]/)
+      assert.match(libSrc, /const picked = pickLabels\(cands, Math\.ceil\(fs \* 0\.25\), obstacles, 1, bounds, tickBoxes\)/)
+    })
+    it('軽2: 上と下の最新のラベルどうしが重ならない（反証の再現: 幅 520・文字 30px・152/73 … —/66、92/38 だけの2回）', () => {
+      const r = T.trendRounds([], rowsOf(bpVals(['152/73', '128/', '74/39', '93/54', '131/99', '181/', '196/160', '71/36', '/66'])), 7, '2026-11-20', [])
+      check(bp, r, 520, 30, 18, '152/73…/66')
+      const r2 = T.trendRounds([], rowsOf([{ sys_bp: 92, dia_bp: 38, pulse: 70 }, { pulse: 72 }]), 7, '2026-11-20', [])
+      const lay = check(bp, r2, 520, 30, 18, '92/38')
+      assert.equal(lay.labels.find((l) => l.id === 'sys_bp:0').text, '上 92')
+      // 最後の逃げ道で、2つ目の最新のラベルを1段ずらす（縦に積む）: 置いたラベルに重なる案しか無い時
+      const c = (cid, spots) => ({ id: cid, w: 40, h: 16, priority: cid === 'a' ? 0 : 0.1, latest: true, spots })
+      const got = T.pickLabels([c('a', [{ side: 'below', anchor: 'middle', x: 100, top: 50 }]), c('b', [{ side: 'below', anchor: 'middle', x: 105, top: 52 }])], 4, [], 0, [0, 0, 300, 200])
+      assert.equal(got.get('a').top, 50)
+      assert.equal(got.get('b').top, 52 + 16 + 4, '1段下へ')
+    })
+    it('乱数の検算（種 7・幅 197〜810・文字 100%／200%・4つのグラフ）: 最新のラベルは必ず出て、枠の内側で、ラベルどうし・目盛りの数字と重ならない', () => {
+      let seed = 7
+      const rnd = () => {
+        seed = (seed * 1103515245 + 12345) & 0x7fffffff
+        return seed / 0x7fffffff
+      }
+      const ri = (a, b) => Math.floor(a + rnd() * (b - a + 1))
+      let cases = 0
+      for (let it = 0; it < 120; it += 1) {
+        const vals = Array.from({ length: ri(2, 10) }, () => {
+          const sys = rnd() < 0.1 ? null : ri(70, 200)
+          const s0 = sys ?? 125
+          return { sys_bp: sys, dia_bp: rnd() < 0.15 ? null : ri(Math.max(35, s0 - 80), Math.max(36, s0 - 25)), pulse: ri(35, 140), spo2: ri(85, 100), temp: Math.round((35 + rnd() * 4) * 10) / 10 }
+        })
+        const all = T.trendRounds([], rowsOf(vals, '2026-10-20'), 7, '2026-11-20', [])
+        for (const [fs, charW] of [
+          [15, 9],
+          [30, 18],
+        ]) {
+          for (const W of [197, 285, 343, 520, 642, 810]) {
+            const r = T.trendWindow(all, T.trendPlotWidth({ width: W, fs, charW }))
+            for (const p of T.TREND_PANELS) {
+              if (!r.some((x) => p.fields.some((f) => x.vals[f] !== null))) continue
+              check(p, r, W, fs, charW, `it=${it} W=${W} fs=${fs} ${p.key}`)
+              cases += 1
+            }
+          }
+        }
+      }
+      assert.ok(cases > 2500, String(cases))
+    })
+    it('軽3: 二重に読み直さない（表示中の日の測定は知らせで数えず mineSig の1回・前の日は知らせの1回・400ms 以内の重なりは1回にまとめる・人・日が変わったら待っている読み直しを消す）', () => {
+      const day = '2026-11-10'
+      /** 部品の読み直しのまとめ（trendReloadStep と TREND_RELOAD_MS）を時刻つきで流し、読み直した回数を数える */
+      const simulate = (events) => {
+        let prev = { key: '7:' + day, mineSig: 'a', changeKey: 0 }
+        let pendingAt = null
+        const fires = []
+        for (const e of events) {
+          if (pendingAt !== null && pendingAt <= e.t) {
+            fires.push(pendingAt)
+            pendingAt = null
+          }
+          const next = { ...prev, ...e.change }
+          const step = T.trendReloadStep(prev, next)
+          prev = next
+          if (step === 'cancel') pendingAt = null
+          if (step === 'schedule') pendingAt = e.t + T.TREND_RELOAD_MS
+        }
+        if (pendingAt !== null) fires.push(pendingAt)
+        return fires
+      }
+      assert.equal(T.TREND_RELOAD_MS, 400)
+      // 表示中の日の測定の変更: 知らせ（trendChangeHits＝数えない）＋画面の読み直しで mineSig が1回変わる → 1回
+      const todayRow = { resident_id: 7, measured_on: day, client_key: `dc:${day}:7:1` }
+      const kick1 = T.trendChangeHits('vitals', { event: 'UPDATE', row: todayRow }, 7, day) ? 1 : 0
+      assert.deepEqual(simulate([{ t: 0, change: { changeKey: kick1 } }, { t: 650, change: { mineSig: 'b' } }]), [1050])
+      // 前の日の測定の変更（知らせ1回）→ 1回
+      const pastRow = { resident_id: 7, measured_on: '2026-11-07', client_key: 'dc:2026-11-07:7:1' }
+      assert.equal(T.trendChangeHits('vitals', { event: 'UPDATE', row: pastRow }, 7, day), true)
+      assert.deepEqual(simulate([{ t: 0, change: { changeKey: 1 } }]), [400])
+      // 取り直しの合図（知らせ）と、その読み直しで変わった mineSig が 400ms 以内に重なる → 待ち直して1回
+      assert.deepEqual(simulate([{ t: 0, change: { changeKey: 1 } }, { t: 300, change: { mineSig: 'b' } }]), [700])
+      // 待っている間に人・日が変わった → 消す（前の方の読み直しを後から走らせない）
+      assert.deepEqual(simulate([{ t: 0, change: { changeKey: 1 } }, { t: 100, change: { key: '8:' + day, mineSig: '' } }]), [])
+      assert.equal(T.trendReloadStep({ key: 'a', mineSig: 'x', changeKey: 1 }, { key: 'a', mineSig: 'x', changeKey: 1 }), 'none')
+    })
+    it('軽5: 回の窓（測った幅から回の数）と、選んだ回を行の id で持つ作り（回を減らして外れたら選んでいない扱い・残れば同じ回）', () => {
+      const all = T.trendRounds([], rowsOf(Array.from({ length: 10 }, (_, i) => ({ pulse: 60 + i }))), 7, '2026-11-20', [])
+      assert.equal(T.trendWindow(all, null).length, 10, 'まだ測っていない間は 10 回')
+      assert.equal(T.trendWindow(all, T.trendPlotWidth({ width: 343, fs: 15, charW: 9 })).length, 10)
+      const narrow = T.trendWindow(all, T.trendPlotWidth({ width: 197, fs: 30, charW: 18 }))
+      assert.equal(narrow.length, 5)
+      assert.deepEqual(
+        narrow.map((r) => r.id),
+        all.slice(-5).map((r) => r.id),
+        '新しい方から',
+      )
+      const key = '7:2026-11-20'
+      const oldest = { key, id: all[0].id }
+      const latest = { key, id: all[9].id }
+      assert.equal(T.selectedIndexOf(all, oldest, key), 0)
+      assert.equal(T.selectedIndexOf(narrow, oldest, key), -1, '回を減らして外れた回は選んでいない扱い')
+      assert.equal(T.stepIndex(narrow.length, null, -1), 4, '〔‹ 前の回〕で最新から選び直せる')
+      assert.equal(T.selectedIndexOf(all, latest, key), 9)
+      assert.equal(T.selectedIndexOf(narrow, latest, key), 4, '残った回は同じ回のまま')
+      assert.equal(T.selectedIndexOf(all, latest, '8:2026-11-20'), -1, 'ほかの方・日の選択は使わない')
+      assert.equal(T.selectedIndexOf(all, null, key), -1)
+    })
+    it('軽7: 値の無い回を選んだ時の行と読み上げは「記録なし」（表は「—」）', () => {
+      const r = T.trendRounds([], rowsOf([{ sys_bp: 120, dia_bp: 70, pulse: 70 }, { pulse: 72 }]), 7, '2026-11-20', [])
+      assert.equal(T.trendPanelReadout(bp, r[1], lvOf, false), '11/4（水） 10:05　記録なし')
+      assert.match(T.trendReadout(r[1], lvOf, false), /血圧 記録なし・脈 72 回\/分・SpO2 記録なし・体温 記録なし$/)
+      assert.equal(T.trendCell(bp, r[1], lvOf, false).text, '—')
+      // 〔未測定〕の印・印を読めなかった時は今までどおり
+      const m = T.trendRounds([], rowsOf([{ pulse: 70 }, { pulse: 72 }]), 7, '2026-11-20', [mark(7, '2026-11-04', 1, 'spo2')])
+      assert.equal(T.trendPanelReadout(T.TREND_PANELS[2], m[1], lvOf, false), '11/4（水） 10:05　未測定')
+      assert.equal(T.trendPanelReadout(T.TREND_PANELS[2], m[1], lvOf, true), '11/4（水） 10:05　読み込めませんでした')
+    })
+    it('軽4: 控えはバイタルを読めなかった一覧で、前に読めたバイタルを空にしない（1人の画面が vitalsOk を渡す）', () => {
+      const memo = (vitals, vitalsOk) => ({ day: '2026-11-10', planRows: [], planSource: 'kv', snapshot: null, missing: false, attendance: [], baths: [], vitals, vitalsOk, meals: [], fluids: [], intakeOk: true, residents: [], savedAt: 1 })
+      const good = memo([vital(7, '2026-11-10', 1, { temp: 36.5 })], true)
+      const merged = MEMO.mergeDaycareMemo(good, memo([], false))
+      assert.equal(merged.vitals.length, 1)
+      assert.equal(MEMO.memoVitalsOk(merged), true)
     })
   })
 
@@ -803,24 +989,32 @@ describe('静的検査', () => {
     assert.ok(iSvg > 0 && iRow > iSvg && iBtn > iRow, 'グラフ → 押した回の行 → ボタン')
     assert.match(chart, /\[grid-area:1\/1\] text-ink2 \$\{selIdx < 0 \? '' : 'invisible'\}/)
     assert.match(chart, /\{rounds\.map\(\(r, i\) => \(\s*<p key=\{r\.id\} className=\{`\[grid-area:1\/1\] \$\{i === selIdx \? '' : 'invisible'\}`\}>/)
-    assert.match(chart, /const btn = 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-3 text-base text-ink disabled:text-ink3'/)
-    assert.match(chart, /<button type="button" onClick=\{\(\) => onStep\(-1\)\} disabled=\{prevIdx === null\} className=\{btn\}>/)
-    assert.match(chart, /<button type="button" onClick=\{\(\) => onStep\(1\)\} disabled=\{nextIdx === null\} className=\{btn\}>/)
+    // 反証の確認 軽6: 端では disabled にせず aria-disabled（押しても動かない・フォーカスを失わない）。見た目は押せない時の決まり（ink3）
+    assert.match(chart, /const btn = 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-3 text-base text-ink aria-disabled:text-ink3'/)
+    assert.match(chart, /<button type="button" onClick=\{\(\) => prevIdx !== null && onStep\(-1\)\} aria-disabled=\{prevIdx === null\} className=\{btn\}>/)
+    assert.match(chart, /<button type="button" onClick=\{\(\) => nextIdx !== null && onStep\(1\)\} aria-disabled=\{nextIdx === null\} className=\{btn\}>/)
+    assert.doesNotMatch(chart, /(?<![-\w])disabled=\{/, "disabled は使わない（フォーカスを失うため）")
     assert.match(comp, /<p role="status" aria-live="polite" className="sr-only">/)
     // タップはいちばん近い回（nearestIndex）・ボタンは stepIndex（どちらも純関数）
     assert.match(chart, /const i = nearestIndex\(lay\.xs, /)
     assert.match(comp, /const step = \(dir: -1 \| 1\) => pickIdx\(stepIndex\(rounds\.length, selIdx < 0 \? null : selIdx, dir\), false\)/)
+    // 選んだ回は行の id で持つ（selectedIndexOf）・出す回は測った幅から（trendWindow）
+    assert.match(comp, /const rounds = useMemo\(\(\) => trendWindow\(all, plotW\), \[all, plotW\]\)/)
+    assert.match(comp, /const selIdx = selectedIndexOf\(rounds, sel, key\)/)
   })
   it('読み直し: 画面の購読の知らせのうち、その方の表示中の日以前の測定（trendChangeHits）を数えて部品へ渡し、部品は 400ms でまとめて読み直す', () => {
     assert.match(page, /const offC = subscribeChanges\(\(table, info\) => \{\s*if \(trendChangeHits\(table, info, residentRef\.current, dayRef\.current\)\) setTrendChange\(\(n\) => n \+ 1\)\s*if \(table === 'vitals' \|\| table === 'meals' \|\| table === 'fluid_intake'\) onChange\(table, info\)/)
-    assert.match(comp, /const RELOAD_DEBOUNCE_MS = 400/)
-    assert.match(comp, /if \(prev\.key !== key \|\| \(prev\.mineSig === mineSig && prev\.changeKey === changeKey\)\) return/)
+    // 判断は trendReloadStep（純関数）。人・日が変わったら待っている読み直しを消す（cancel）・schedule は TREND_RELOAD_MS 待って1回
+    assert.match(comp, /const step = trendReloadStep\(seen\.current, next\)\s*seen\.current = next\s*if \(step === 'none'\) return\s*if \(timer\.current !== null\) window\.clearTimeout\(timer\.current\)\s*timer\.current = null\s*if \(step === 'cancel'\) return/)
+    assert.match(comp, /\}, TREND_RELOAD_MS\)/)
     assert.match(comp, /\}, \[key, residentId, day, refreshKey, retry, tick\]\)/)
   })
   it('今日の値を読めなかった時: 画面の読み込みの失敗を部品に渡し（控えで開いた時は控えの値）、推移はその旨を出して「まだありません」と言い切らない', () => {
     assert.match(page, /fetchDaycareVitals\(target\)\.catch\(\(\) => null\),/)
     assert.match(page, /vitals: dv\?\.live \?\? \[\],\s*vitalsOk: dv !== null,/)
     assert.match(page, /vitals: m\.vitals,\s*vitalsOk: memoVitalsOk\(m\),/)
+    // 反証の確認 軽4: 控えにも読めたかを渡す（読めなかった時に控えの読めたバイタルを空で上書きしない＝mergeDaycareMemo が前の値を残す）
+    assert.match(page, /rememberDaycareDay\(\{[^}]*vitals: data\.vitals,[^}]*vitalsOk: data\.vitalsOk,[^}]*residents,\s*savedAt: data\.readAt,/)
     assert.match(comp, /\{dayRowsOk \? null : \(\s*<p role="status" className="rounded border border-warn bg-warn-bg p-2 text-sm text-ink">/)
     assert.match(comp, /\{dayRowsOk \? TREND_EMPTY_TEXT : TREND_EMPTY_DAY_UNREAD_TEXT\}/)
   })
