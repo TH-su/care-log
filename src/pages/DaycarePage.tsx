@@ -26,7 +26,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   DbError,
   FORBIDDEN_REASON,
@@ -66,6 +66,7 @@ import type { DaycareMealRow, MyRole, VitalTarget } from '../lib/db'
 import { fetchAllResidents, fetchResidentsFromAll } from '../lib/cachedReads'
 import { personPath } from '../lib/daycarePerson'
 import { contactPath } from '../lib/daycareContact'
+import { daycareMonthPath, initialDayFromUrl } from '../lib/daycareMonth'
 import { DAYCARE_VITALS_MEALS_PATH } from '../lib/daycareRoutes'
 import type { DaycareActivity } from '../lib/daycareActivity'
 import { loadDaycareDayParts } from '../lib/daycareDayLoad'
@@ -366,7 +367,25 @@ export interface DaycarePageProps {
 export function DaycarePage({ staff = undefined, actorId = null }: DaycarePageProps = {}) {
   const { toast, show } = useToast()
   const [today, setToday] = useState(todayIso())
-  const [day, setDay] = useState(todayIso())
+  // 月の実績の日ごとの表・1人の画面の〔デイの一覧へ〕から開いた日（?day=・2026-11-10 計画E）。開いた時の1回だけ読み、下で URL から外す
+  // （再読み込みは今までどおり今日を開く＝過去の日を開いたまま次の日の記録を始めない）。形が違う・未来の日は今日。?day= が無ければ今までどおり今日。
+  // 判断は純関数 initialDayFromUrl（daycareMonth.ts）
+  const [search, setSearch] = useSearchParams()
+  const [opened] = useState(() => initialDayFromUrl(search.get('day'), todayIso()))
+  const [day, setDay] = useState(opened.day)
+  useEffect(() => {
+    if (!opened.strip) return
+    setSearch(
+      (prev) => {
+        const next = new URLSearchParams(prev)
+        next.delete('day')
+        return next
+      },
+      { replace: true },
+    )
+    // 開いた時の1回だけ（日付の切り替えは URL に書かない＝今までどおり）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   const [data, setData] = useState<DayData | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -1158,6 +1177,15 @@ export function DaycarePage({ staff = undefined, actorId = null }: DaycarePagePr
           className="inline-flex min-h-tap items-center rounded border border-primary px-4 text-base font-bold text-primary"
         >
           連絡帳
+        </Link>
+        {/* 月の実績（2026-11-10 計画E・読むだけ）: 表示している日の月を開く。上の切り替え（DaycareNav）・日付の段・件数の帯には足さない
+            （iPad 横 1180px の実測: 切り替えに足すと記録者との余りが 3px で、記録者の名前が少し長いと見出しの段が2段に折れる。
+            日付の段に足すと件数の帯が次の行へ回る。どちらもカードが下がる＝連絡帳と同じ理由でここに置く） */}
+        <Link
+          to={daycareMonthPath(day.slice(0, 7), today.slice(0, 7))}
+          className="inline-flex min-h-tap items-center rounded border border-primary px-4 text-base font-bold text-primary"
+        >
+          月の実績
         </Link>
         {/* 印の説明（一覧の下に1行。上の段には足さない＝2026-11-09 計画B） */}
         {board.rows.length > 0 ? (
