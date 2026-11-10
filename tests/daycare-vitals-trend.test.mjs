@@ -365,6 +365,176 @@ if (T === null) {
     })
   })
 
+  describe('配置（trendLayout）・押した回・読み直しの判断（2026-11-10 反証 中1・軽2・軽3・軽9・軽10）', () => {
+    const lim = () => base()
+    const lvOf = (x, f) => T.trendLevel(x, f, null, lim)
+    const bp = T.TREND_PANELS[0]
+    /** 反証の再現: 9回目 上124以上・10回目 上120・下は 70〜76 のあと最後に 80 */
+    const repro = (sys9) => {
+      const ds = days(10, '2026-10-27')
+      const sys = [118, 122, 120, 126, 119, 121, 123, 117, sys9, 120]
+      const dia = [70, 72, 74, 76, 71, 73, 75, 70, 76, 80]
+      return T.trendRounds([], ds.map((d, i) => vital(7, d, 1, { sys_bp: sys[i], dia_bp: dia[i] })), 7, '2026-11-10', [])
+    }
+    const boxOf = (l, fs, charW) => {
+      const w = T.textWidth(l.text, fs, charW)
+      const left = l.anchor === 'end' ? l.x - w : l.x - w / 2
+      return [left, l.y - Math.round(fs * 0.85), left + w, l.y - Math.round(fs * 0.85) + Math.ceil(fs)]
+    }
+    const overlap = (a, b) => Math.min(a[2], b[2]) - Math.max(a[0], b[0]) > 0.5 && Math.min(a[3], b[3]) - Math.max(a[1], b[1]) > 0.5
+    it('中1: 系列ごとの最新の値は必ずラベルに出す（反証の再現: 9回目 上124〜135・10回目 上120・下 80／幅 300〜400・文字 100%／200%）。枠からはみ出さず、ラベルどうしは重ならない', () => {
+      for (const sys9 of [124, 126, 130, 135]) {
+        const r = repro(sys9)
+        for (const [fs, charW] of [
+          [15, 9],
+          [30, 18],
+        ]) {
+          for (let W = 300; W <= 400; W += 10) {
+            const lay = T.trendLayout(bp, r, lvOf, { width: W, fs, charW })
+            const ids = lay.labels.map((l) => l.id)
+            assert.ok(ids.includes('sys_bp:9'), `上の最新 W=${W} fs=${fs} 9回目=${sys9}`)
+            assert.ok(ids.includes('dia_bp:9'), `下の最新 W=${W} fs=${fs} 9回目=${sys9}`)
+            const boxes = lay.labels.map((l) => boxOf(l, fs, charW))
+            for (const b of boxes) assert.ok(b[0] >= -0.5 && b[2] <= W + 0.5 && b[1] >= -0.5 && b[3] <= lay.H + 0.5, `枠の内側 W=${W} fs=${fs}`)
+            for (let i = 0; i < boxes.length; i += 1) for (let j = i + 1; j < boxes.length; j += 1) assert.ok(!overlap(boxes[i], boxes[j]), `重ならない W=${W} fs=${fs} ${ids[i]}/${ids[j]}`)
+          }
+        }
+      }
+      // 印に重ならない場所があれば、そこを先に使う（点の上 → 左寄せ → 下の順に試す）。反証の再現では、上の最新のラベル「上 120」は
+      // 点の上だと 9回目（上 126）の印に乗るので、ほかの場所へ移る（どこも空いていない時だけ印に重ねる＝下の最新など）
+      for (let W = 300; W <= 400; W += 10) {
+        const lay = T.trendLayout(bp, repro(126), lvOf, { width: W, fs: 15, charW: 9 })
+        const l = lay.labels.find((x) => x.id === 'sys_bp:9')
+        const m = lay.markers.find((x) => x.id === 'sys_bp:8')
+        assert.ok(!overlap(boxOf(l, 15, 9), [m.x - 6, m.y - 6, m.x + 6, m.y + 6]), `W=${W} 上の最新のラベルが 9回目の印に重なる`)
+      }
+      // 名前つきで出す（入る幅では「上 120」「下 80」）
+      const lay = T.trendLayout(bp, repro(126), lvOf, { width: 343, fs: 15, charW: 9 })
+      assert.deepEqual(
+        lay.labels.filter((l) => l.latest).map((l) => l.text),
+        ['上 120', '下 80'],
+      )
+    })
+    it('中1: 試験用の画面の値（上 182↑↑・最新 上 128）でも最新のラベルが出る。1本の項目（SpO2 89↓↓・体温 37.8↑）も最新が出る', () => {
+      const ds = days(10, '2026-10-27')
+      const sys = [132, 136, 129, 141, 182, 140, 135, 131, 134, 128]
+      const dia = [80, 82, 78, 86, 96, 82, 80, 79, 81, null]
+      const sp = [96, 95, 96, 94, 95, 89, 96, 97, 98, 97]
+      const tp = [36.4, 36.6, 36.5, 37.8, 36.7, 36.5, 36.4, 36.6, 36.5, 36.5]
+      const r = T.trendRounds([], ds.map((d, i) => vital(7, d, 1, { sys_bp: sys[i], dia_bp: dia[i], spo2: sp[i], temp: tp[i] })), 7, '2026-11-10', [])
+      for (const W of [300, 343, 400, 642, 810]) {
+        const ids = T.trendLayout(bp, r, lvOf, { width: W, fs: 15, charW: 9 }).labels.map((l) => l.id)
+        assert.ok(ids.includes('sys_bp:9') && ids.includes('dia_bp:8'), `W=${W} ${ids}`)
+        assert.ok(T.trendLayout(T.TREND_PANELS[2], r, lvOf, { width: W, fs: 15, charW: 9 }).labels.some((l) => l.id === 'spo2:9'))
+        assert.ok(T.trendLayout(T.TREND_PANELS[3], r, lvOf, { width: W, fs: 15, charW: 9 }).labels.some((l) => l.id === 'temp:9'))
+      }
+      // 基準外のラベルは「上」「下」つき・記号つき
+      const lay = T.trendLayout(bp, r, lvOf, { width: 343, fs: 15, charW: 9 })
+      assert.ok(lay.labels.some((l) => l.text === '上 182↑↑'), JSON.stringify(lay.labels.map((l) => l.text)))
+    })
+    it('軽2・軽3: 点の印の形（ふつう＝丸・血圧の下＝四角／基準外は三角・血圧の下は四角のまま＋向き／注意と危険を形で分ける tone）', () => {
+      const ds = days(4, '2026-11-01')
+      const r = T.trendRounds([], [
+        vital(7, ds[0], 1, { sys_bp: 120, dia_bp: 70 }),
+        vital(7, ds[1], 1, { sys_bp: 160, dia_bp: 95 }),
+        vital(7, ds[2], 1, { sys_bp: 85, dia_bp: 45 }),
+        vital(7, ds[3], 1, { sys_bp: 125, dia_bp: 72 }),
+      ], 7, '2026-11-10', [])
+      const ms = T.trendLayout(bp, r, lvOf, { width: 343, fs: 15, charW: 9 }).markers
+      const m = (id) => ms.find((x) => x.id === id)
+      assert.deepEqual([m('sys_bp:0').kind, m('sys_bp:0').tone, m('sys_bp:0').dir], ['circle', 'series', null])
+      assert.deepEqual([m('dia_bp:0').kind, m('dia_bp:0').tone], ['square', 'series'])
+      assert.deepEqual([m('sys_bp:1').kind, m('sys_bp:1').tone, m('sys_bp:1').dir], ['triangle', 'danger', 'up'])
+      assert.deepEqual([m('dia_bp:1').kind, m('dia_bp:1').tone, m('dia_bp:1').dir], ['square', 'danger', 'up'])
+      assert.deepEqual([m('sys_bp:2').kind, m('sys_bp:2').tone, m('sys_bp:2').dir], ['triangle', 'warn', 'down'])
+      assert.deepEqual([m('dia_bp:2').kind, m('dia_bp:2').tone, m('dia_bp:2').dir], ['square', 'warn', 'down'])
+    })
+    it('軽2: ラベルの順は 最新 → いちばん新しい基準外 → 危険 → 注意（置けない時は後の方から落ちる）', () => {
+      // 脈: 注意（38↓）が新しく、危険（↑↑）が古い。狭い幅で全部は置けない時、最新・いちばん新しい基準外が先
+      const ds = days(10, '2026-10-27')
+      const pu = [70, 72, 105, 110, 108, 72, 38, 39, 37, 72]
+      const r = T.trendRounds([], ds.map((d, i) => vital(7, d, 1, { pulse: pu[i] })), 7, '2026-11-10', [])
+      const panel = T.TREND_PANELS[1]
+      const lay = T.trendLayout(panel, r, lvOf, { width: 300, fs: 15, charW: 9 })
+      const ids = lay.labels.map((l) => l.id)
+      assert.ok(ids.includes('pulse:9'), '最新')
+      assert.ok(ids.includes('pulse:8'), 'いちばん新しい基準外')
+      // 置けた基準外のうち、危険（2〜4）が注意（6・7）より先に置かれる（同じ高さの近い点で注意が落ちても危険は残る）
+      const dangerShown = ids.filter((id) => ['pulse:2', 'pulse:3', 'pulse:4'].includes(id)).length
+      assert.ok(dangerShown >= 1, String(ids))
+    })
+    it('軽9: 横軸は日付・同じ日の2回目からは「再n」（日付のラベルが先・重なる時は出さない）', () => {
+      assert.deepEqual(
+        T.xLabelTexts([{ day: '2026-11-08' }, { day: '2026-11-10' }, { day: '2026-11-10' }, { day: '2026-11-10' }]),
+        [
+          { text: '11/8', secondary: false },
+          { text: '11/10', secondary: false },
+          { text: '再2', secondary: true },
+          { text: '再3', secondary: true },
+        ],
+      )
+      // 最後が「再2」でも、日付のラベル（同じ日の1回目）を先に置く
+      const got = T.pickXLabels([40, 200, 230], [40, 45, 30], 8, [false, false, true])
+      assert.deepEqual(got, [0, 1])
+      const lay = T.trendLayout(T.TREND_PANELS[3], T.trendRounds([vital(7, '2026-11-10', 1, { temp: 37.6 }), vital(7, '2026-11-10', 2, { temp: 37.2 })], [vital(7, '2026-11-03', 1, { temp: 36.5 })], 7, '2026-11-10', []), lvOf, { width: 810, fs: 15, charW: 9 })
+      assert.deepEqual(
+        lay.xLabels.map((x) => x.text),
+        ['11/3', '11/10', '再2'],
+      )
+    })
+    it('軽4・軽5: 押した回の選び方（いちばん近い回）と〔‹ 前の回〕〔次の回 ›〕（何も選んでいない時は〔‹ 前の回〕で最新・端では押せない）', () => {
+      const xs = [40, 70, 100, 130]
+      assert.equal(T.nearestIndex(xs, 0), 0)
+      assert.equal(T.nearestIndex(xs, 84), 1)
+      assert.equal(T.nearestIndex(xs, 86), 2)
+      assert.equal(T.nearestIndex(xs, 999), 3)
+      assert.equal(T.nearestIndex([], 50), -1)
+      assert.equal(T.stepIndex(4, null, -1), 3)
+      assert.equal(T.stepIndex(4, null, 1), null)
+      assert.equal(T.stepIndex(4, 3, -1), 2)
+      assert.equal(T.stepIndex(4, 3, 1), null)
+      assert.equal(T.stepIndex(4, 0, -1), null)
+      assert.equal(T.stepIndex(4, 0, 1), 1)
+      assert.equal(T.stepIndex(0, null, -1), null)
+      assert.equal(T.stepIndex(4, 9, -1), 3, '範囲外は選んでいない扱い')
+    })
+    it('軽7: 読み直すのは、その方の表示中の日以前のデイの測定の変更と、行の分からない取り直しの合図だけ', () => {
+      const day = '2026-11-10'
+      const row = (over) => ({ resident_id: 7, measured_on: '2026-11-08', client_key: 'dc:2026-11-08:7:1', ...over })
+      assert.equal(T.trendChangeHits('vitals', { event: 'UPDATE', row: row() }, 7, day), true)
+      assert.equal(T.trendChangeHits('vitals', { event: 'INSERT', row: row({ measured_on: day, client_key: `dc:${day}:7:2` }) }, 7, day), true)
+      assert.equal(T.trendChangeHits('vitals', { event: 'INSERT', row: row({ measured_on: '2026-11-11' }) }, 7, day), false, '後の日')
+      assert.equal(T.trendChangeHits('vitals', { event: 'UPDATE', row: row({ resident_id: 8 }) }, 7, day), false, 'ほかの方')
+      assert.equal(T.trendChangeHits('vitals', { event: 'UPDATE', row: row({ client_key: null }) }, 7, day), false, 'デイ以外の測定')
+      assert.equal(T.trendChangeHits('vitals', { event: 'RESYNC', row: null }, 7, day), true, '分からない＝取り直す')
+      assert.equal(T.trendChangeHits('vitals', undefined, 7, day), true)
+      assert.equal(T.trendChangeHits('meals', { event: 'UPDATE', row: { resident_id: 7 } }, 7, day), false)
+      assert.equal(T.trendChangeHits('meals', { event: 'RESYNC', row: null }, 7, day), false)
+      assert.equal(T.trendChangeHits('daycare_vital_unmeasured', { event: 'INSERT', row: { resident_id: 7, day } }, 7, day), true)
+      assert.equal(T.trendChangeHits('daycare_vital_unmeasured', { event: 'INSERT', row: { resident_id: 7, day: '2026-11-11' } }, 7, day), false)
+      assert.equal(T.trendChangeHits('daycare_vital_unmeasured', { event: 'RESYNC', row: null }, 7, day), false)
+    })
+    it('軽10: 幅に合わせて回を減らす（描く幅 → 点を並べる幅 → 回の数）。375px で文字 200%（幅 197・文字 30px）は 5 回・iPad の2列は 10 回', () => {
+      assert.equal(T.trendPadLeft(15, 9), 44)
+      assert.equal(T.trendPlotWidth({ width: 343, fs: 15, charW: 9 }), 343 - 44 - 4 - 20)
+      assert.equal(T.trendFitRounds(T.trendPlotWidth({ width: 343, fs: 15, charW: 9 })), 10)
+      assert.equal(T.trendFitRounds(T.trendPlotWidth({ width: 285, fs: 15, charW: 9 })), 10)
+      assert.equal(T.trendPlotWidth({ width: 197, fs: 30, charW: 18 }), 197 - 80 - 4 - 20)
+      assert.equal(T.trendFitRounds(T.trendPlotWidth({ width: 197, fs: 30, charW: 18 })), 5)
+      // 配置の点を並べる幅と同じ
+      const r = repro(126)
+      assert.equal(T.trendLayout(bp, r, lvOf, { width: 343, fs: 15, charW: 9 }).plotW, T.trendPlotWidth({ width: 343, fs: 15, charW: 9 }))
+    })
+    it('押した回の行と、今日の値を読めなかった時の言葉', () => {
+      const r = repro(126)
+      assert.equal(T.trendPanelReadout(bp, r[9], lvOf, false), '11/5（木） 10:05　120/80 mmHg')
+      const hi = T.trendRounds([], [vital(7, '2026-11-08', 1, { sys_bp: 160, dia_bp: 45 })], 7, '2026-11-10', [])[0]
+      assert.equal(T.trendPanelReadout(bp, hi, lvOf, false), '11/8（日） 10:05　160/45 mmHg（上 ↑↑ 危険・高い・下 ↓ 注意・低い）')
+      assert.equal(T.trendDayUnreadText(true), '今日の値を読み込めませんでした（前の日の回だけを出しています）。')
+      assert.equal(T.trendDayUnreadText(false), 'この日の値を読み込めませんでした（前の日の回だけを出しています）。')
+    })
+  })
+
   describe('db.ts を偽の Supabase で動かす（通信しない）', () => {
     const fake = (state) => {
       const builder = (table) => {
@@ -586,7 +756,7 @@ describe('静的検査', () => {
     const sec = page.slice(iTrend, iDialogs)
     assert.match(
       sec,
-      /<DaycareVitalsTrend\s+headingId="h-trend"\s+residentId=\{residentId\}\s+day=\{data\.day\}\s+dayRows=\{data\.vitals\}\s+target=\{targets\.get\(residentId\)\}\s+limitsOf=\{\(d\) => limits\.lookup\(residentId, d\)\}\s+refreshKey=\{reloadKey\}\s+\/>\s*<\/section>/,
+      /<DaycareVitalsTrend\s+headingId="h-trend"\s+residentId=\{residentId\}\s+day=\{data\.day\}\s+isToday=\{data\.day === today\}\s+dayRows=\{data\.vitals\}\s+dayRowsOk=\{data\.vitalsOk\}\s+target=\{targets\.get\(residentId\)\}\s+limitsOf=\{\(d\) => limits\.lookup\(residentId, d\)\}\s+refreshKey=\{reloadKey\}\s+changeKey=\{trendChange\}\s+\/>\s*<\/section>/,
     )
     assert.equal((page.match(/<DaycareVitalsTrend\b/g) ?? []).length, 1)
     // 見出し（h3）は部品がどの状態でも出す（読み込み中・読めない・0回でも欄に名前がある）
@@ -598,14 +768,15 @@ describe('静的検査', () => {
   })
   it('血圧の上・下はどちらも実線（破線は予測に見えるため使わない）。点の形（上＝丸・下＝四角）と凡例・直接の名前で見分ける', () => {
     assert.doesNotMatch(comp, /strokeDasharray/)
-    assert.match(comp, /square=\{f === 'dia_bp'\}/)
-    assert.match(comp, /if \(square\) return <rect /)
+    // 点の形の決まりは trendLayout（下の純関数の試験で動きも確かめる）。描く側は四角を rect で描く
+    assert.match(lib, /const kind: TrendMarker\['kind'\] = f === 'dia_bp' \? 'square' : lv === null \? 'circle' : 'triangle'/)
+    assert.match(comp, /if \(m\.kind === 'square'\) return <rect /)
     assert.deepEqual(T === null ? { sys_bp: '上', dia_bp: '下' } : T.BP_SERIES_NAME, { sys_bp: '上', dia_bp: '下' })
   })
   it('部品は読むだけ（書き込み・送信待ち・購読なし）・端末に残さない・console なし・動きを付けない', () => {
     assert.match(comp, /import \{ fetchDaycareVitalsTrend \} from '\.\.\/lib\/db'/)
     assert.doesNotMatch(comp + lib, /localStorage|sessionStorage|indexedDB|console\./)
-    assert.doesNotMatch(comp, /\b(insert|update|upsert|save|mark|clear|enqueue|subscribe)[A-Z]\w*\(/)
+    assert.doesNotMatch(comp, /(?<!\.)\b(insert|update|upsert|save|mark|clear|enqueue|subscribe)[A-Z]\w*\(/)
     assert.doesNotMatch(comp, /animate-|transition|<animate/)
     assert.doesNotMatch(lib, /from '\.\/db/)
     // 判定は連絡帳と同じ vitalLevel（新しい基準を作らない）
@@ -617,11 +788,41 @@ describe('静的検査', () => {
     // tailwind.config.js の色の名前（tokens.css の変数）のうち、この部品が使ってよいもの
     const themeColors = [...read('../tailwind.config.js').matchAll(/^\s+'?([a-z][a-z0-9-]*)'?: 'var\(--c-[a-z0-9-]+\)'/gm)].map((m) => m[1])
     assert.ok(themeColors.includes('cat-vitals') && themeColors.includes('ink2'))
-    const allowed = new Set(['cat-vitals', 'warn', 'danger', 'ink', 'ink2', 'surface', 'border', 'border-strong', 'link', 'warn-bg'])
+    const allowed = new Set(['cat-vitals', 'warn', 'danger', 'ink', 'ink2', 'ink3', 'surface', 'border', 'border-strong', 'link', 'warn-bg'])
     const used = [...comp.matchAll(/\b(?:fill|stroke|text|bg|border)-([a-z][a-z0-9-]*)/g)].map((m) => m[1]).filter((c) => themeColors.includes(c))
     assert.ok(used.includes('cat-vitals') && used.includes('warn') && used.includes('danger'))
     for (const c of used) assert.ok(allowed.has(c), `使っていない種類の色: ${c}`)
     assert.doesNotMatch(comp, /text-cat-vitals|fill-cat-vitals font|fill-cat-vitals text/)
+    assert.doesNotMatch(comp, /(fill|stroke|text|bg|border)-\$\{/, '色のクラスを組み立てない（Tailwind が拾えない）')
+  })
+  it('押した回の行はグラフのすぐ下（全部の回の文を同じ場所に重ねて高さを動かさない）・〔‹ 前の回〕〔次の回 ›〕は 44px のボタン・読み上げは1か所', () => {
+    const chart = comp.slice(comp.indexOf('function TrendChart('))
+    const iSvg = chart.indexOf('<svg')
+    const iRow = chart.indexOf('<div className="grid text-sm text-ink" aria-hidden="true">')
+    const iBtn = chart.indexOf('前の回')
+    assert.ok(iSvg > 0 && iRow > iSvg && iBtn > iRow, 'グラフ → 押した回の行 → ボタン')
+    assert.match(chart, /\[grid-area:1\/1\] text-ink2 \$\{selIdx < 0 \? '' : 'invisible'\}/)
+    assert.match(chart, /\{rounds\.map\(\(r, i\) => \(\s*<p key=\{r\.id\} className=\{`\[grid-area:1\/1\] \$\{i === selIdx \? '' : 'invisible'\}`\}>/)
+    assert.match(chart, /const btn = 'min-h-tap min-w-tap rounded border border-border-strong bg-surface px-3 text-base text-ink disabled:text-ink3'/)
+    assert.match(chart, /<button type="button" onClick=\{\(\) => onStep\(-1\)\} disabled=\{prevIdx === null\} className=\{btn\}>/)
+    assert.match(chart, /<button type="button" onClick=\{\(\) => onStep\(1\)\} disabled=\{nextIdx === null\} className=\{btn\}>/)
+    assert.match(comp, /<p role="status" aria-live="polite" className="sr-only">/)
+    // タップはいちばん近い回（nearestIndex）・ボタンは stepIndex（どちらも純関数）
+    assert.match(chart, /const i = nearestIndex\(lay\.xs, /)
+    assert.match(comp, /const step = \(dir: -1 \| 1\) => pickIdx\(stepIndex\(rounds\.length, selIdx < 0 \? null : selIdx, dir\), false\)/)
+  })
+  it('読み直し: 画面の購読の知らせのうち、その方の表示中の日以前の測定（trendChangeHits）を数えて部品へ渡し、部品は 400ms でまとめて読み直す', () => {
+    assert.match(page, /const offC = subscribeChanges\(\(table, info\) => \{\s*if \(trendChangeHits\(table, info, residentRef\.current, dayRef\.current\)\) setTrendChange\(\(n\) => n \+ 1\)\s*if \(table === 'vitals' \|\| table === 'meals' \|\| table === 'fluid_intake'\) onChange\(table, info\)/)
+    assert.match(comp, /const RELOAD_DEBOUNCE_MS = 400/)
+    assert.match(comp, /if \(prev\.key !== key \|\| \(prev\.mineSig === mineSig && prev\.changeKey === changeKey\)\) return/)
+    assert.match(comp, /\}, \[key, residentId, day, refreshKey, retry, tick\]\)/)
+  })
+  it('今日の値を読めなかった時: 画面の読み込みの失敗を部品に渡し（控えで開いた時は控えの値）、推移はその旨を出して「まだありません」と言い切らない', () => {
+    assert.match(page, /fetchDaycareVitals\(target\)\.catch\(\(\) => null\),/)
+    assert.match(page, /vitals: dv\?\.live \?\? \[\],\s*vitalsOk: dv !== null,/)
+    assert.match(page, /vitals: m\.vitals,\s*vitalsOk: memoVitalsOk\(m\),/)
+    assert.match(comp, /\{dayRowsOk \? null : \(\s*<p role="status" className="rounded border border-warn bg-warn-bg p-2 text-sm text-ink">/)
+    assert.match(comp, /\{dayRowsOk \? TREND_EMPTY_TEXT : TREND_EMPTY_DAY_UNREAD_TEXT\}/)
   })
   it('SVG は role="img" と読み上げの要約・表は本物の table（見出しの行と列）・〔数値で見る〕は 44px', () => {
     assert.match(comp, /role="img"\s+aria-label=\{speech\}/)

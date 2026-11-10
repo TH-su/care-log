@@ -58,6 +58,7 @@ import { RecorderBar } from '../components/RecorderBar'
 import { DaycareActivitySection } from '../components/DaycareActivitySection'
 import { DaycareTrainingCard } from '../components/DaycareTrainingCard'
 import { DaycareVitalsTrend } from '../components/DaycareVitalsTrend'
+import { trendChangeHits } from '../lib/daycareVitalsTrend'
 import { hasTimes, hmShort, useDaycareAttendanceOps } from '../components/DaycareAttendanceOps'
 import { writeDaycareHandoffFor } from '../lib/daycareHandoff'
 import {
@@ -68,6 +69,7 @@ import {
   memoWithFluid,
   memoWithMeal,
   memoWithoutAttendance,
+  memoVitalsOk,
   memoWithoutFluid,
   rememberDaycareDay,
   updateDaycareDayMemo,
@@ -141,6 +143,11 @@ interface PersonData {
   /** 食事・水分を読めたか（読めない時はその欄だけ「読めませんでした」・出欠と入浴の操作は動かす＝親の検収 軽3） */
   intakeOk: boolean
   /**
+   * その日のデイの測定を読めたか（2026-11-10 計画F 反証 軽8: 推移に「今日の値を読み込めませんでした」と出す。上の要約は今までどおり「—」）。
+   * 控えで開いた時は控えの値（memoVitalsOk）
+   */
+  vitalsOk: boolean
+  /**
    * 食事・水分を、この読み込みでサーバーから読めたか（親の反証 中1・2026-10-25）。intakeOk（表示に使える値がある）と分ける:
    * 静かな読み直しで食事・水分だけ読めなかった時は、前の値を出す（intakeOk）が、送信待ちの水分の消し込み・控えへの書き込みは
    * 「今回読めた」時だけ行う（古い一覧を最新として消し込まない）
@@ -211,6 +218,8 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [reloadKey, setReloadKey] = useState(0)
+  /** 推移（計画F）を読み直す変更の知らせの回数（その方の表示中の日以前のデイの測定・trendChangeHits） */
+  const [trendChange, setTrendChange] = useState(0)
   const [residents, setResidents] = useState<Resident[]>([])
   const [targets, setTargets] = useState<Map<number, ResidentTargets>>(new Map())
   // 段階2d-2: 個人のバイタルの閾値（印をその方のその日の基準で出す。読めない時は施設の基準・その旨を出す）
@@ -336,7 +345,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
         usable ? Promise.resolve(null) : fetchDaycarePlan(target),
         missing ? Promise.resolve([] as DaycareAttendance[]) : fetchDaycareAttendance(target),
         fetchBathDay(target).catch(() => [] as BathRecord[]),
-        fetchDaycareVitals(target).catch(() => ({ live: [] as KeyedVital[], keys: [] as string[] })),
+        fetchDaycareVitals(target).catch(() => null),
         fetchDaycareIntake(target).catch(() => null),
       ])
       if (gen !== genRef.current || target !== dayRef.current) return
@@ -352,7 +361,8 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           missing: missing || plan?.missing === true,
           attendance,
           baths,
-          vitals: dv.live,
+          vitals: dv?.live ?? [],
+          vitalsOk: dv !== null,
           meals: intake?.meals ?? (keep ? prev.meals : []),
           fluids: intake?.fluids ?? (keep ? prev.fluids : []),
           intakeOk: intake !== null || keep,
@@ -378,6 +388,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           attendance: m.attendance,
           baths: m.baths,
           vitals: m.vitals,
+          vitalsOk: memoVitalsOk(m),
           meals: m.meals,
           fluids: m.fluids,
           intakeOk: m.intakeOk,
@@ -424,6 +435,8 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
     const offA = subscribeDaycareChanges(onChange)
     const offB = subscribeBathChanges(onChange)
     const offC = subscribeChanges((table, info) => {
+      // 2026-11-10 計画F 反証 軽7: その方の表示中の日以前のデイの測定の変更（行の分からない取り直しの合図を含む）は推移も読み直す（部品が 400ms でまとめる）
+      if (trendChangeHits(table, info, residentRef.current, dayRef.current)) setTrendChange((n) => n + 1)
       if (table === 'vitals' || table === 'meals' || table === 'fluid_intake') onChange(table, info)
     })
     let last = queuePending()
@@ -1498,10 +1511,13 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           headingId="h-trend"
           residentId={residentId}
           day={data.day}
+          isToday={data.day === today}
           dayRows={data.vitals}
+          dayRowsOk={data.vitalsOk}
           target={targets.get(residentId)}
           limitsOf={(d) => limits.lookup(residentId, d)}
           refreshKey={reloadKey}
+          changeKey={trendChange}
         />
       </section>
 

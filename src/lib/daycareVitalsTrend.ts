@@ -234,48 +234,71 @@ export function textWidth(text: string, fs: number, charW: number = fs * 0.6): n
   return Math.ceil(w)
 }
 
-/** ラベルを置く場所の案（side＝点の上か下か・x＝文字の中心・top＝文字の上端） */
+/**
+ * ラベルを置く場所の案。side＝点の上・下・左（左は文字の終わりを点の左に合わせる＝右端の最新の点で使う）。
+ * anchor＝SVG の text-anchor（middle＝x が文字の中心・end＝x が文字の右端）・top＝文字の上端
+ */
 export interface LabelSpot {
-  side: 'above' | 'below'
+  side: 'above' | 'below' | 'left'
+  anchor: 'middle' | 'end'
   x: number
   top: number
 }
 
-/** ラベルの候補（w・h＝文字の幅と高さ・spots＝置く場所の案を試す順に・priority＝小さいほど先に置く） */
+/**
+ * ラベルの候補（w・h＝文字の幅と高さ・spots＝置く場所の案を試す順に・priority＝小さいほど先に置く）。
+ * latest＝その系列の最新の値（必ず出す。ほかの点の印に重なってもよい＝描く側が文字に面の色の縁を付ける）
+ */
 export interface LabelCandidate {
   id: string
   w: number
   h: number
   priority: number
   spots: readonly LabelSpot[]
+  latest?: boolean
 }
 
 /** 四角（left・top・right・bottom） */
 export type LabelObstacle = readonly [number, number, number, number]
 
+/** ラベルの箱（anchor に合わせる） */
+export function labelBox(c: Pick<LabelCandidate, 'w' | 'h'>, s: LabelSpot): LabelObstacle {
+  const left = s.anchor === 'end' ? s.x - c.w : s.x - c.w / 2
+  return [left, s.top, left + c.w, s.top + c.h]
+}
+
 /**
- * 出すラベルと置く場所を選ぶ（全部の点に数字を並べない）。priority の小さい順に、spots を順に試し、既に置いたラベルとも
- * 避ける四角（点の印。id が同じ＝そのラベルの点の印は避けない）と obstacleGap より近づかない最初の場所に置く。どこにも置けなければ出さない
- * （印は残る。値は押した時の表示と〔数値で見る〕の表に出る）。画面は「最新の値」を priority 0、「基準外の点」を新しい順に 1 から渡す
+ * 出すラベルと置く場所を選ぶ（全部の点に数字を並べない）。priority の小さい順に置く。
+ * ・ふつうのラベル（基準外の点）: spots を順に試し、置ける範囲（bounds）の内側で、既に置いたラベルとも gap、避ける四角（点の印。id が同じ＝
+ *   そのラベルの点の印は避けない）とも obstacleGap より近づかない最初の場所に置く。どこにも置けなければ出さない
+ *   （印は残る。値は押した回の行と〔数値で見る〕の表に出る）
+ * ・最新のラベル（latest）: 必ず出す。同じ順で、まず印も避ける場所 → 無ければ印に重なってもよい場所（ラベルどうしは重ねない）→
+ *   それも無ければ最初の案に置く（2026-11-10 反証 中1）
+ * 画面は最新を先（priority 0〜）、次にいちばん新しい基準外、危険、注意の順に渡す（2026-11-10 反証 軽2）
  */
 export function pickLabels(
   cands: readonly LabelCandidate[],
   gap: number,
   obstacles: readonly { id: string; box: LabelObstacle }[] = [],
   obstacleGap = 0,
+  bounds: LabelObstacle = [-Infinity, -Infinity, Infinity, Infinity],
 ): Map<string, LabelSpot> {
   const placed: LabelObstacle[] = []
   const out = new Map<string, LabelSpot>()
   const hits = (r: LabelObstacle, o: LabelObstacle, g: number) => r[0] < o[2] + g && o[0] < r[2] + g && r[1] < o[3] + g && o[1] < r[3] + g
+  const inside = (r: LabelObstacle) => r[0] >= bounds[0] - 0.5 && r[1] >= bounds[1] - 0.5 && r[2] <= bounds[2] + 0.5 && r[3] <= bounds[3] + 0.5
   const order = [...cands].sort((a, b) => a.priority - b.priority)
   for (const c of order) {
-    for (const s of c.spots) {
-      const r: LabelObstacle = [s.x - c.w / 2, s.top, s.x + c.w / 2, s.top + c.h]
-      if (placed.some((o) => hits(r, o, gap)) || obstacles.some((o) => o.id !== c.id && hits(r, o.box, obstacleGap))) continue
-      placed.push(r)
-      out.set(c.id, s)
-      break
+    const free = (s: LabelSpot, withMarks: boolean) => {
+      const r = labelBox(c, s)
+      if (!inside(r) || placed.some((o) => hits(r, o, gap))) return false
+      return !withMarks || !obstacles.some((o) => o.id !== c.id && hits(r, o.box, obstacleGap))
     }
+    let spot = c.spots.find((s) => free(s, true))
+    if (spot === undefined && c.latest === true) spot = c.spots.find((s) => free(s, false)) ?? c.spots.find((s) => inside(labelBox(c, s))) ?? c.spots[0]
+    if (spot === undefined) continue
+    placed.push(labelBox(c, spot))
+    out.set(c.id, spot)
   }
   return out
 }
@@ -287,18 +310,285 @@ export function clampLabelX(x: number, w: number, left: number, right: number): 
 }
 
 /**
- * 横軸の日付のラベルを出す回の添字（重ならない分だけ）。最後（最新）→ 最初 → 新しい順に、既に出したラベルと gap より近づかないものを出す
+ * 横軸のラベルを出す回の添字（重ならない分だけ）。日付のラベル（最後 → 最初 → 新しい順）を先に、
+ * 同じ日の2回目以降のラベル「再n」（secondary・新しい順）を後に置き、既に出したラベルと gap より近づかないものを出す
  */
-export function pickXLabels(xs: readonly number[], widths: readonly number[], gap: number): number[] {
+export function pickXLabels(xs: readonly number[], widths: readonly number[], gap: number, secondary: readonly boolean[] = []): number[] {
   const n = xs.length
   if (n === 0) return []
-  const order = [n - 1, ...(n > 1 ? [0] : []), ...Array.from({ length: Math.max(0, n - 2) }, (_, k) => n - 2 - k)]
+  const base = [n - 1, ...(n > 1 ? [0] : []), ...Array.from({ length: Math.max(0, n - 2) }, (_, k) => n - 2 - k)]
+  const order = [...base.filter((i) => secondary[i] !== true), ...base.filter((i) => secondary[i] === true)]
   const placed: number[] = []
   for (const i of order) {
     const ok = placed.every((j) => Math.abs(xs[i] - xs[j]) >= (widths[i] + widths[j]) / 2 + gap)
     if (ok) placed.push(i)
   }
   return placed.sort((a, b) => a - b)
+}
+
+/** 横軸の言葉: 日付（'11/8'）。同じ日の2回目以降は「再n」（n＝その日の何回目か・表示中の回の中で数える）。2026-11-10 反証 軽9（仮置き） */
+export function xLabelTexts(rounds: readonly Pick<TrendRound, 'day'>[]): { text: string; secondary: boolean }[] {
+  let k = 0
+  return rounds.map((r, i) => {
+    k = i > 0 && rounds[i - 1].day === r.day ? k + 1 : 1
+    return k === 1 ? { text: shortDay(r.day), secondary: false } : { text: `再${k}`, secondary: true }
+  })
+}
+
+// ══════════════════════════════════════════════════════════════
+// 1項目のグラフの配置（寸法・目盛・点の印・線・ラベル・横軸）。描く側はこれをそのまま描く（2026-11-10 反証 軽10）
+// ══════════════════════════════════════════════════════════════
+
+/** 描く寸法（width＝SVG の幅・fs＝文字の大きさ・charW＝数字1字の幅。どれも画面で実測した値） */
+export interface TrendGeom {
+  width: number
+  fs: number
+  charW: number
+}
+
+/** 点の印。kind＝丸（ふつう）・四角（血圧の下）・三角（基準外・血圧の下は四角のまま）。tone＝系列の色・注意・危険。dir＝基準外の向き */
+export interface TrendMarker {
+  id: string
+  field: DaycareVitalField
+  i: number
+  x: number
+  y: number
+  kind: 'circle' | 'square' | 'triangle'
+  tone: 'series' | 'warn' | 'danger'
+  dir: 'up' | 'down' | null
+}
+
+/** 直接のラベル（y＝文字の基準線） */
+export interface TrendLabel {
+  id: string
+  text: string
+  x: number
+  y: number
+  anchor: 'middle' | 'end'
+  latest: boolean
+}
+
+export interface TrendLayout {
+  W: number
+  H: number
+  padL: number
+  padR: number
+  padT: number
+  plotH: number
+  /** 回の横の位置（左が古い） */
+  xs: number[]
+  /** 点を並べる幅（最初の点から最後の点まで。回の数を決める＝trendFitRounds） */
+  plotW: number
+  ticks: { v: number; y: number; text: string }[]
+  /** 線（値の無い回で切る。1回だけの区間は線を引かない） */
+  lines: { field: DaycareVitalField; points: [number, number][] }[]
+  markers: TrendMarker[]
+  labels: TrendLabel[]
+  /** 横軸のラベル（重ならない分だけ） */
+  xLabels: { i: number; x: number; text: string }[]
+  /** ラベルの文字の大きさから決めた、文字の基準線から上端までの高さ */
+  ascent: number
+}
+
+/** 左の目盛の数字の幅（4つのグラフで同じ＝4字「36.0」。横の位置を4つのグラフでそろえる） */
+export function trendPadLeft(fs: number, charW: number): number {
+  return textWidth('00.0', fs, charW) + 8
+}
+
+/** 点を並べる幅（SVG の幅から左の目盛・右の余白・両端の点の余白を引いた幅。回の数は trendFitRounds(これ)） */
+export function trendPlotWidth(geom: TrendGeom): number {
+  return Math.max(0, geom.width - trendPadLeft(geom.fs, geom.charW) - TREND_PAD_R - 20)
+}
+
+const TREND_PAD_R = 4
+
+/** 印の大きさ（四角の当たり）。丸・四角は半径 4＋縁 2・三角は 7＋縁 2・危険は外の輪（半径 11） */
+function markerHalf(m: Pick<TrendMarker, 'kind' | 'tone'>): number {
+  if (m.tone === 'danger') return 12
+  return m.kind === 'triangle' ? 9 : m.tone === 'warn' ? 10 : 6
+}
+
+/**
+ * 1項目のグラフの配置。rounds＝出す回（古い順）・levelOf＝その回のその欄の判定（trendLevel）。
+ * ・最新の値のラベル（血圧は「上」「下」つき）は必ず出す（点の上 → 左寄せ → 下の順に、印も避けられる所を先に探す）
+ * ・基準外のラベル（血圧は「上」「下」つき）は、いちばん新しい基準外 → 危険 → 注意の順に、ほかのラベルと印を避けて置ける分だけ
+ * ・ラベル・横軸の文字は SVG の幅の内側（はみ出さない）
+ */
+export function trendLayout(
+  panel: TrendPanelSpec,
+  rounds: readonly TrendRound[],
+  levelOf: (r: TrendRound, f: DaycareVitalField) => Level,
+  geom: TrendGeom,
+): TrendLayout {
+  const { width: W, fs, charW } = geom
+  const tw = (t: string) => textWidth(t, fs, charW)
+  const n = rounds.length
+  const lineH = Math.ceil(fs * 1.3)
+  // グラフの高さは文字の大きさに合わせて少し伸ばす（文字 100%＝72px・200%＝108px）。目盛は chartTicks が間引く
+  const plotH = Math.round(Math.max(64, 36 + fs * 2.4))
+  const domain = trendDomain(panel, rounds)
+  // 目盛の数字の間は文字1行分より少し広く（文字が重ならない）
+  const tickVals = trendTicks(panel, domain, plotH, Math.ceil(fs * 1.25))
+  const padL = trendPadLeft(fs, charW)
+  const padR = TREND_PAD_R
+  // 点の上・下に置くラベルの分（上は ▲ の印の上、下は ▼ の印の下）
+  const padT = lineH + 6
+  const belowRoom = Math.ceil(fs) + 14
+  const xAxisH = lineH + 4
+  const H = padT + plotH + belowRoom + xAxisH
+  const x0 = padL + 10
+  const x1 = Math.max(x0, W - padR - 10)
+  const xs = rounds.map((_, i) => (n <= 1 ? (x0 + x1) / 2 : x0 + (i * (x1 - x0)) / (n - 1)))
+  const span = domain[1] - domain[0] || 1
+  const y = (v: number) => padT + (1 - (v - domain[0]) / span) * plotH
+  const ascent = Math.round(fs * 0.85)
+  const textH = Math.ceil(fs)
+
+  const ticks = tickVals.map((v) => ({ v, y: y(v), text: fmtTick(panel, v) }))
+  const lines = panel.fields.flatMap((f) =>
+    trendSegments(rounds.map((r) => r.vals[f]))
+      .filter((seg) => seg.length >= 2)
+      .map((seg) => ({ field: f, points: seg.map((i): [number, number] => [xs[i], y(rounds[i].vals[f] as number)]) })),
+  )
+
+  const markers: TrendMarker[] = []
+  for (const f of panel.fields) {
+    rounds.forEach((r, i) => {
+      const v = r.vals[f]
+      if (v === null) return
+      const lv = levelOf(r, f)
+      const dir = lv === null ? null : levelIsHigh(lv) ? 'up' : 'down'
+      // 血圧の下は基準外でも四角のまま（色は状態の色＋向きの小さな印）。ほかは基準外を三角（向き）にする（2026-11-10 反証 軽3）
+      const kind: TrendMarker['kind'] = f === 'dia_bp' ? 'square' : lv === null ? 'circle' : 'triangle'
+      markers.push({ id: `${f}:${i}`, field: f, i, x: xs[i], y: y(v), kind, tone: lv === null ? 'series' : levelIsDanger(lv) ? 'danger' : 'warn', dir })
+    })
+  }
+
+  // ── ラベル ──
+  const plotBottom = padT + plotH + belowRoom
+  const bounds: LabelObstacle = [0, 0, W, plotBottom]
+  const spotsFor = (m: TrendMarker, w: number, order: readonly LabelSpot['side'][]): LabelSpot[] => {
+    const off = markerHalf(m) + 3
+    const cx = clampLabelX(m.x, w, w <= W - padR - padL ? padL : 0, w <= W - padR - padL ? W - padR : W)
+    return order.map((side) =>
+      side === 'above'
+        ? { side, anchor: 'middle' as const, x: cx, top: m.y - off - textH }
+        : side === 'below'
+          ? { side, anchor: 'middle' as const, x: cx, top: m.y + off }
+          : { side, anchor: 'end' as const, x: m.x - off, top: m.y - textH / 2 },
+    )
+  }
+  const bpName = (f: DaycareVitalField) => (panel.key === 'bp' ? BP_SERIES_NAME[f] : undefined)
+  const cands: (LabelCandidate & { text: string })[] = []
+  const lastOf = new Map(panel.fields.map((f) => [f, lastIndexWithValue(rounds, f)] as const))
+  // 基準外の点（最新を除く）の並び: いちばん新しい基準外 → 危険（新しい順）→ 注意（新しい順）
+  const abnormal = markers.filter((m) => m.tone !== 'series' && lastOf.get(m.field) !== m.i).sort((a, b) => b.i - a.i || panel.fields.indexOf(a.field) - panel.fields.indexOf(b.field))
+  const newest = abnormal[0]
+  for (const m of markers) {
+    const isLatest = lastOf.get(m.field) === m.i
+    if (!isLatest && m.tone === 'series') continue
+    const v = rounds[m.i].vals[m.field] as number
+    const lv = levelOf(rounds[m.i], m.field)
+    const body = `${fmtTrendValue(m.field, v)}${lv === null ? '' : LEVEL_MARK[lv]}`
+    const name = bpName(m.field)
+    // 血圧は上・下の名前を付ける（入らない時は名前を外した形）
+    const texts = name === undefined ? [body] : [`${name} ${body}`, body]
+    const text = texts.find((t) => tw(t) <= W) ?? texts[texts.length - 1]
+    const w = tw(text)
+    // 置く側: 血圧の上は点の上・下は点の下を先に（2本の間は後回し）。1本の項目は高い値・ふつうの値は上、低い値は下を先に
+    const first: 'above' | 'below' = panel.key === 'bp' ? (m.field === 'sys_bp' ? 'above' : 'below') : m.dir === 'down' ? 'below' : 'above'
+    const other = first === 'above' ? 'below' : 'above'
+    const fi = panel.fields.indexOf(m.field)
+    const priority = isLatest
+      ? fi * 0.1
+      : m === newest
+        ? 1
+        : (m.tone === 'danger' ? 2 : 3) + (n - 1 - m.i) * 0.01 + fi * 0.001
+    cands.push({
+      id: m.id,
+      w,
+      h: textH,
+      priority,
+      latest: isLatest,
+      spots: spotsFor(m, w, isLatest ? [first, 'left', other] : [first, other]),
+      text,
+    })
+  }
+  const obstacles = markers.map((m) => {
+    const h = markerHalf(m)
+    return { id: m.id, box: [m.x - h, m.y - h, m.x + h, m.y + h] as LabelObstacle }
+  })
+  const picked = pickLabels(cands, Math.ceil(fs * 0.25), obstacles, 1, bounds)
+  const labels: TrendLabel[] = cands.flatMap((c) => {
+    const s = picked.get(c.id)
+    return s === undefined ? [] : [{ id: c.id, text: c.text, x: s.x, y: s.top + ascent, anchor: s.anchor, latest: c.latest === true }]
+  })
+
+  // ── 横軸 ──
+  const xt = xLabelTexts(rounds)
+  const xWs = xt.map((t) => tw(t.text))
+  // 端のラベルは枠の内側へ寄せた位置で重なりを見る（右端の最新のラベルが左へ寄る分）
+  const xAt = rounds.map((_, i) => clampLabelX(xs[i], xWs[i], 0, W))
+  const xIdx = pickXLabels(
+    xAt,
+    xWs,
+    Math.ceil(fs * 0.6),
+    xt.map((t) => t.secondary),
+  )
+  const xLabels = xIdx.map((i) => ({ i, x: xAt[i], text: xt[i].text }))
+
+  return { W, H, padL, padR, padT, plotH, xs, plotW: Math.max(0, x1 - x0), ticks, lines, markers, labels, xLabels, ascent }
+}
+
+// ══════════════════════════════════════════════════════════════
+// 押した回（グラフのタップ・〔‹ 前の回〕〔次の回 ›〕。2026-11-10 反証 軽4・軽5）
+// ══════════════════════════════════════════════════════════════
+
+/** 押した位置にいちばん近い回の添字（回が無ければ -1） */
+export function nearestIndex(xs: readonly number[], px: number): number {
+  let best = -1
+  for (let i = 0; i < xs.length; i += 1) if (best < 0 || Math.abs(xs[i] - px) < Math.abs(xs[best] - px)) best = i
+  return best
+}
+
+/**
+ * 〔‹ 前の回〕（dir＝-1）・〔次の回 ›〕（dir＝1）で動かした先の添字。何も選んでいない時は〔‹ 前の回〕で最新の回を選ぶ。
+ * 端では動かない（null＝押せない）
+ */
+export function stepIndex(n: number, cur: number | null, dir: -1 | 1): number | null {
+  if (n <= 0) return null
+  if (cur === null || cur < 0 || cur >= n) return dir === -1 ? n - 1 : null
+  const next = cur + dir
+  return next < 0 || next >= n ? null : next
+}
+
+// ══════════════════════════════════════════════════════════════
+// 読み直し（2026-11-10 反証 軽7）
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * 画面に届いた変更の知らせ（db.ts の subscribeChanges の表と行）で、推移を読み直すか。
+ * ・vitals: その方の、表示中の日以前のデイの測定（client_key 'dc:'）の行。行の分からない知らせ（取り直しの合図 RESYNC・行の無い DELETE）は
+ *   読み直す（分からない＝取り直す側に倒す）
+ * ・daycare_vital_unmeasured: その方の、表示中の日以前の印の行（今は購読の知らせが届かない表＝この判断は届いた時のため）
+ * ・ほかの表・ほかの方・後の日は読み直さない
+ */
+export function trendChangeHits(
+  table: string,
+  info: { event?: string; row: Record<string, unknown> | null } | undefined,
+  residentId: number,
+  day: string,
+): boolean {
+  if (table !== 'vitals' && table !== 'daycare_vital_unmeasured') return false
+  const row = info?.row ?? null
+  if (row === null) return table === 'vitals'
+  if (row.resident_id !== residentId) return false
+  if (table === 'vitals') {
+    const on = row.measured_on
+    const ck = row.client_key
+    return typeof on === 'string' && on <= day && typeof ck === 'string' && ck.startsWith('dc:')
+  }
+  return typeof row.day === 'string' && row.day <= day
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -355,6 +645,18 @@ export function trendCell(
   const v = r.vals[f]
   const t = levelText(levelOf(r, f))
   return { text: v === null ? noneText(r, f, marksUnread) : fmtTrendValue(f, v), flags: t === null ? [] : [t] }
+}
+
+/** 押した回の行（グラフのすぐ下・その項目だけ）: '11/5（木） 10:05　138/82 mmHg（上 ↑↑ 危険・高い）' */
+export function trendPanelReadout(
+  panel: Pick<TrendPanelSpec, 'key' | 'fields' | 'unit'>,
+  r: TrendRound,
+  levelOf: (r: TrendRound, f: DaycareVitalField) => Level,
+  marksUnread: boolean,
+): string {
+  const c = trendCell(panel, r, levelOf, marksUnread)
+  const hasVal = panel.fields.some((f) => r.vals[f] !== null)
+  return `${roundWhen(r)}　${hasVal ? withUnit(panel, c.text) : c.text}${c.flags.length > 0 ? `（${c.flags.join('・')}）` : ''}`
 }
 
 /** 押した時の表示（その回の日時と全部の項目の値。基準外は記号と言葉） */
@@ -424,5 +726,11 @@ export function trendView(rounds: readonly unknown[]): TrendView {
 /** 空の状態・1回だけの時の文 */
 export const TREND_EMPTY_TEXT = 'デイで測ったバイタルの記録は、この日まではまだありません。'
 export const TREND_ONE_TEXT = '記録が1回だけのため、推移のグラフはまだ出せません（2回目の記録から出します）。値は下の〔数値で見る〕で確かめられます。'
-export const TREND_UNREAD_TEXT = '前の回のバイタルを読み込めませんでした。通信状態を確認して、〔再試行〕を押してください（上の値はこの日の記録です）。'
+export const TREND_UNREAD_TEXT = '前の回のバイタルを読み込めませんでした。通信状態を確認して、〔再試行〕を押してください（バイタルの欄の値はこの日の記録です）。'
+export const TREND_PICK_HINT = '押した回の値をここに出します。'
+/** 表示中の日の測定を読めなかった時（1人の画面の読み込みの失敗。前の日の回だけで描く・「まだありません」と言い切らない＝2026-11-10 反証 軽8） */
+export function trendDayUnreadText(isToday: boolean): string {
+  return `${isToday ? '今日' : 'この日'}の値を読み込めませんでした（前の日の回だけを出しています）。`
+}
+export const TREND_EMPTY_DAY_UNREAD_TEXT = '前の日のデイで測ったバイタルの記録はありません。'
 export const TREND_MARKS_UNREAD_TEXT = '〔未測定〕の印を読み込めませんでした（値の無い欄は「読み込めませんでした」と出しています）。'
