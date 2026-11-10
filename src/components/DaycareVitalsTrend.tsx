@@ -1,7 +1,9 @@
 // デイ（せせらぎ）計画F: 1人の画面のバイタルの推移（直近の回）の小さなグラフ（2026-11-10）。読むだけ。
+// 画面の最後の独立した欄（見出し「バイタルの推移（直近 n 回）」はこの部品が出す・欄の枠は画面の section）。入力の欄を下げない（仮置き・親の決定）
 //
 // ・項目ごとの小さなグラフ（血圧＝上・下の2本・脈・SpO2・体温）。二つの目盛り（二軸）は使わない
-// ・色はバイタルの分類色（--c-cat-vitals・暗は明るめの値）。血圧の2本は線の形（実線・破線）と点の形（丸・四角）・凡例・直接の名前「上」「下」で見分ける
+// ・色はバイタルの分類色（--c-cat-vitals・暗は明るめの値）。血圧の2本はどちらも実線（破線は予測に見えるため使わない＝dataviz・親の決定）で、
+//   点の形（上＝丸・下＝四角）・凡例・直接の名前「上」「下」で見分ける
 // ・基準外の点だけ状態の色（注意・危険）にし、形（▲高い・▼低い）と記号（↑・↑↑）を添える。判定は連絡帳と同じ（daycareVitalsTrend.ts の trendLevel）
 // ・数値も出す: 最新の値と基準外の点は値を直接出す（重なる分は出さない）。全部の値は〔数値で見る〕の表（本物の table）
 // ・グラフを押すと、いちばん近い回の日時と全部の項目の値を下の1行に出す（もう一度押すと消す）
@@ -51,6 +53,8 @@ import {
 import type { LabelCandidate, LabelObstacle, LabelSpot, TrendPanelSpec, TrendRound } from '../lib/daycareVitalsTrend'
 
 interface Props {
+  /** 見出し（h3）の id（画面の section の aria-labelledby） */
+  headingId: string
   residentId: number
   /** 表示中の日（この日までの直近の回） */
   day: string
@@ -72,7 +76,7 @@ type Load =
 const EMPTY_ROWS: KeyedVital[] = []
 const EMPTY_MARKS: DaycareVitalUnmeasured[] = []
 
-export function DaycareVitalsTrend({ residentId, day, dayRows, target, limitsOf, refreshKey = 0 }: Props) {
+export function DaycareVitalsTrend({ headingId, residentId, day, dayRows, target, limitsOf, refreshKey = 0 }: Props) {
   const key = `${residentId}:${day}`
   const [load, setLoad] = useState<Load>({ status: 'loading', key })
   const [retry, setRetry] = useState(0)
@@ -123,18 +127,26 @@ export function DaycareVitalsTrend({ residentId, day, dayRows, target, limitsOf,
     setSel((prev) => (prev !== null && prev.key === key && prev.id === r.id ? null : { key, id: r.id }))
   }
 
+  // 見出しはどの状態でも出す（画面の section の名前）。回の数は出せる時だけ
+  const heading = (text: string) => (
+    <h3 id={headingId} className="text-lg font-bold text-ink">
+      {text}
+    </h3>
+  )
   if (load.key !== key || load.status === 'loading') {
     return (
-      <div className="border-t border-border pt-2">
+      <>
+        {heading('バイタルの推移')}
         <p role="status" className="text-sm text-ink2">
           推移を読み込んでいます…
         </p>
-      </div>
+      </>
     )
   }
   if (load.status === 'error') {
     return (
-      <div className="border-t border-border pt-2">
+      <>
+        {heading('バイタルの推移')}
         <div role="alert" className="space-y-2 rounded border border-warn bg-warn-bg p-2 text-base text-ink">
           <p>
             <span aria-hidden="true">▲ </span>
@@ -144,23 +156,21 @@ export function DaycareVitalsTrend({ residentId, day, dayRows, target, limitsOf,
             再試行
           </button>
         </div>
-      </div>
+      </>
     )
   }
 
   const view = trendView(all)
   const n = rounds.length
   return (
-    <div className="space-y-2 border-t border-border pt-2">
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <h4 className="text-base font-bold text-ink">{view.kind === 'none' ? '推移' : `推移（直近${n}回）`}</h4>
-        {view.kind === 'chart' ? (
-          <p className="text-sm text-ink2">
-            横軸は測った回の順に等間隔（日付の間が空いても詰めています）
-            {n < all.length && n < TREND_ROUNDS ? `。画面の幅に合わせて直近${n}回にしています` : ''}
-          </p>
-        ) : null}
-      </div>
+    <>
+      {heading(view.kind === 'none' ? 'バイタルの推移' : `バイタルの推移（直近${n}回）`)}
+      {view.kind === 'chart' ? (
+        <p className="text-sm text-ink2">
+          横軸は測った回の順に等間隔（日付の間が空いても詰めています）
+          {n < all.length && n < TREND_ROUNDS ? `。画面の幅に合わせて直近${n}回にしています` : ''}
+        </p>
+      ) : null}
       {view.kind === 'none' ? <p className="text-base text-ink2">{TREND_EMPTY_TEXT}</p> : null}
       {view.kind === 'one' ? <p className="text-base text-ink2">{TREND_ONE_TEXT}</p> : null}
       {view.kind === 'chart' ? (
@@ -232,7 +242,7 @@ export function DaycareVitalsTrend({ residentId, day, dayRows, target, limitsOf,
           </div>
         </details>
       )}
-    </div>
+    </>
   )
 }
 
@@ -421,7 +431,7 @@ function TrendChart({ panel, rounds, levelOf, selectedId, onPick, onPlotW }: Cha
             </span>
             <span className="inline-flex items-center gap-1">
               <svg width="28" height="12" aria-hidden="true" className="shrink-0">
-                <line x1="2" x2="26" y1="6" y2="6" className="stroke-cat-vitals" strokeWidth={2} strokeDasharray="6 4" />
+                <line x1="2" x2="26" y1="6" y2="6" className="stroke-cat-vitals" strokeWidth={2} strokeLinecap="round" />
                 <rect x="10" y="2" width="8" height="8" className="fill-cat-vitals stroke-surface" strokeWidth={2} />
               </svg>
               下
@@ -468,7 +478,7 @@ function TrendChart({ panel, rounds, levelOf, selectedId, onPick, onPlotW }: Cha
             ))}
             {/* 押した回（縦の細い線） */}
             {selIdx >= 0 ? <line x1={x(selIdx)} x2={x(selIdx)} y1={padT - 4} y2={padT + plotH + 4} className="stroke-border-strong" strokeWidth={1} /> : null}
-            {/* 線（値の無い回で切る・血圧の下は破線） */}
+            {/* 線（値の無い回で切る・2px の実線。血圧の上・下は点の形と名前で見分ける） */}
             {panel.fields.map((f) =>
               trendSegments(rounds.map((r) => r.vals[f]))
                 .filter((seg) => seg.length >= 2)
@@ -480,7 +490,6 @@ function TrendChart({ panel, rounds, levelOf, selectedId, onPick, onPlotW }: Cha
                     strokeWidth={2}
                     strokeLinejoin="round"
                     strokeLinecap="round"
-                    strokeDasharray={f === 'dia_bp' ? '6 4' : undefined}
                   />
                 )),
             )}

@@ -6,7 +6,8 @@
 //   書き込みの下準備（入浴の旗の観測・役割・休業日・開所の写し）はこの画面が自分で取る（入口の画面に頼らない＝M-085）。
 //   今日で記録の無い在籍中の方は「予定外」として〔予定外で到着〕を出す（今日の画面の〔予定にない方を追加〕から来た方・〔休み〕は出さない）。
 // 〔前の方〕〔次の方〕は、一括の画面と同じ方（予定の方のうち休み・入院中を除く全員と予定外で来た方）を五十音で回る。
-// 2026-11-10 計画F: バイタルの欄の終わりに推移（直近の回・10回まで）の小さなグラフ（DaycareVitalsTrend・読むだけ。前の日の回と〔未測定〕の印は部品が読む）。
+// 2026-11-10 計画F: 画面の最後（すべての入力の欄の後）に独立した欄「バイタルの推移（直近の回・10回まで）」の小さなグラフ（DaycareVitalsTrend・読むだけ。
+//   前の日の回と〔未測定〕の印は部品が読む）。入力の欄の位置は変えない（仮置き・親の決定）。
 //
 // 規律（段階1と同じ）:
 //   ・取得・保存は db.ts の関数だけ。昼食・おやつは既存の saveMealEdits（meals の lunch・snack）、水分は既存の insertFluid・
@@ -1211,16 +1212,6 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           { kind: 'vital' },
           vitalMarkText({ temp: latestOf('temp'), sys_bp: latestOf('sys_bp'), dia_bp: latestOf('dia_bp'), pulse: latestOf('pulse'), spo2: latestOf('spo2') }),
         )}
-        {/* 2026-11-10 計画F: 推移（直近の回）の小さなグラフ。入力（バイタル・食事の画面への道・申し送りの印）の後に置く。
-            表示中の日の回は上の要約と同じ行（data.vitals）・前の日の回と〔未測定〕の印は部品が読む。基準はその回の日のその方の基準 */}
-        <DaycareVitalsTrend
-          residentId={residentId}
-          day={data.day}
-          dayRows={data.vitals}
-          target={targets.get(residentId)}
-          limitsOf={(d) => limits.lookup(residentId, d)}
-          refreshKey={reloadKey}
-        />
       </section>
 
       <section aria-labelledby="h-bath" className={sectionCls}>
@@ -1497,6 +1488,21 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           排泄ケアアプリで記録する<span aria-hidden="true"> ›</span>
         </a>
         {marks.button({ kind: 'ex' }, excretionMarkText(exDay), ex.status === 'ok' && ex.view.linked && exDay !== null)}
+      </section>
+
+      {/* 2026-11-10 計画F（仮置き・親の決定）: バイタルの推移（直近の回）の小さなグラフ。入力の欄を下げないよう、すべての入力の欄・
+          申し送りの印の後に独立した欄で置く。表示中の日の回は上のバイタルの要約と同じ行（data.vitals）・前の日の回と〔未測定〕の印は
+          部品が読む。基準はその回の日のその方の基準 */}
+      <section aria-labelledby="h-trend" className={sectionCls}>
+        <DaycareVitalsTrend
+          headingId="h-trend"
+          residentId={residentId}
+          day={data.day}
+          dayRows={data.vitals}
+          target={targets.get(residentId)}
+          limitsOf={(d) => limits.lookup(residentId, d)}
+          refreshKey={reloadKey}
+        />
       </section>
 
       {marks.dialogs}

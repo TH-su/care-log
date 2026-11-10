@@ -572,18 +572,35 @@ describe('静的検査', () => {
   const comp = code('../src/components/DaycareVitalsTrend.tsx')
   const lib = code('../src/lib/daycareVitalsTrend.ts')
   const db = code('../src/lib/db.ts')
-  it('置き場: 1人の画面のバイタルの欄の中で、入力（バイタル・食事への道・申し送りの印）の後。基準は画面の lookup をその方で渡す', () => {
+  it('置き場: 1人の画面の最後（すべての入力の欄・申し送りの印の後）の独立した欄。バイタルの欄は計画F の前のまま（入力の欄を下げない＝仮置き・親の決定）。基準は画面の lookup をその方で渡す', () => {
+    // バイタルの欄はグラフも推移へのリンクも持たない（要約・バイタル・食事への道・申し送りの印で終わる）
     const vital = page.slice(page.indexOf('<section aria-labelledby="h-vital"'), page.indexOf('<section aria-labelledby="h-bath"'))
-    const iLink = vital.indexOf('<Link to={DAYCARE_VITALS_MEALS_PATH}')
-    const iMark = vital.indexOf("{ kind: 'vital' }")
-    const iTrend = vital.indexOf('<DaycareVitalsTrend')
-    assert.ok(iLink >= 0 && iMark > iLink && iTrend > iMark, '入力が先・グラフは後')
+    assert.doesNotMatch(vital, /DaycareVitalsTrend|推移|h-trend/)
+    assert.match(vital, /\{ kind: 'vital' \},\s*vitalMarkText\([^\n]*\),\s*\)\}\s*<\/section>/)
+    // 推移の欄は排泄の欄（最後の入力の欄）の後・画面の小窓の前
+    const iEx = page.indexOf('<section aria-labelledby="h-ex"')
+    const iTrend = page.indexOf('<section aria-labelledby="h-trend" className={sectionCls}>')
+    const iDialogs = page.indexOf('{marks.dialogs}')
+    assert.ok(iEx > 0 && iTrend > iEx && iDialogs > iTrend, '入力の欄が先・推移の欄は最後')
+    for (const h of ['h-att', 'h-vital', 'h-bath', 'h-lunch', 'h-snack', 'h-fluid']) assert.ok(page.indexOf(`aria-labelledby="${h}"`) < iTrend, h)
+    const sec = page.slice(iTrend, iDialogs)
     assert.match(
-      vital,
-      /<DaycareVitalsTrend\s+residentId=\{residentId\}\s+day=\{data\.day\}\s+dayRows=\{data\.vitals\}\s+target=\{targets\.get\(residentId\)\}\s+limitsOf=\{\(d\) => limits\.lookup\(residentId, d\)\}\s+refreshKey=\{reloadKey\}\s+\/>/,
+      sec,
+      /<DaycareVitalsTrend\s+headingId="h-trend"\s+residentId=\{residentId\}\s+day=\{data\.day\}\s+dayRows=\{data\.vitals\}\s+target=\{targets\.get\(residentId\)\}\s+limitsOf=\{\(d\) => limits\.lookup\(residentId, d\)\}\s+refreshKey=\{reloadKey\}\s+\/>\s*<\/section>/,
     )
+    assert.equal((page.match(/<DaycareVitalsTrend\b/g) ?? []).length, 1)
+    // 見出し（h3）は部品がどの状態でも出す（読み込み中・読めない・0回でも欄に名前がある）
+    assert.equal((comp.match(/\{heading\(/g) ?? []).length, 3)
+    assert.match(comp, /<h3 id=\{headingId\} className="text-lg font-bold text-ink">/)
+    assert.match(comp, /`バイタルの推移（直近\$\{n\}回）`/)
     // 1人の画面の読み込み（load）は変えない（推移は部品が別に読む）
     assert.doesNotMatch(page, /fetchDaycareVitalsTrend/)
+  })
+  it('血圧の上・下はどちらも実線（破線は予測に見えるため使わない）。点の形（上＝丸・下＝四角）と凡例・直接の名前で見分ける', () => {
+    assert.doesNotMatch(comp, /strokeDasharray/)
+    assert.match(comp, /square=\{f === 'dia_bp'\}/)
+    assert.match(comp, /if \(square\) return <rect /)
+    assert.deepEqual(T === null ? { sys_bp: '上', dia_bp: '下' } : T.BP_SERIES_NAME, { sys_bp: '上', dia_bp: '下' })
   })
   it('部品は読むだけ（書き込み・送信待ち・購読なし）・端末に残さない・console なし・動きを付けない', () => {
     assert.match(comp, /import \{ fetchDaycareVitalsTrend \} from '\.\.\/lib\/db'/)
