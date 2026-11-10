@@ -105,6 +105,7 @@ import {
   snackLabel,
 } from '../lib/daycarePerson'
 import { DAYCARE_VITALS_MEALS_PATH } from '../lib/daycareRoutes'
+import { daycareDayPath } from '../lib/daycareMonth'
 import { excretionDayBlank, excretionFailMessage, excretionViewFor, fetchExcretion, MSG_EXCRETION_UNCONFIGURED, MSG_STOOL_DAY_ONLY } from '../lib/excretionClient'
 import type { ExcretionView } from '../lib/excretionClient'
 import type { ResidentTargets } from '../lib/vitalAlerts'
@@ -893,8 +894,9 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   const header = (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-gap">
+        {/* 表示中の日が今日でない時は、その日の今日の画面へ戻る（?day=・2026-11-10 計画E 反証 軽5。今日の画面は ?day= を1回だけ読んで消す） */}
         <Link
-          to={day === today ? '/record/daycare' : `/record/daycare`}
+          to={daycareDayPath(day, today)}
           className="inline-flex min-h-tap items-center rounded border border-border-strong bg-surface px-4 text-base text-ink"
         >
           <span aria-hidden="true">‹ </span>デイの一覧へ

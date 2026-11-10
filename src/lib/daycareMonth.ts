@@ -7,19 +7,23 @@
 //
 // 数えない日（2026-11-10 親の決め・仮置き）:
 //   ・今日より後の日（今月は今日までを数える）
-//   ・予定の写しが無い日・写しが「読めなかった」（unknown）日 … 今の曜日の型で作り直さない（過去を作り話にしない）。記録があれば数だけ見せる
-//   ・休業日（app_settings の daycare_closed_dates）… 写しがあっても数えない（休業日に開いた写しの予定を「未記録」にしない）。記録があれば数だけ見せる
+//   ・予定の写しが無い日・写しが「読めなかった」（unknown）日 … 今の曜日の型で作り直さない（過去を作り話にしない）。記録があれば数だけ見せる。
+//     過去の日で、今の週間計画にその曜日の予定がある日は「記録の無い営業日かもしれない日」として目立たせる（反証 中1）。
+//     今の週間計画は手がかりとしてだけ使い、延べ予定・未記録・稼働率には入れない（weekdayPlanned・planHint）
+//   ・写しの無い休業日（app_settings の daycare_closed_dates）… 休業日として出す（上の「かもしれない日」にも入れない）。
+//     写しのある休業日は今日の画面と同じく数え、「休業日の設定の日」と添えるだけ（反証 軽2・今日の画面と月の画面を食い違わせない）
 // 営業日 ＝ 数える日のうち、予定（入院中を除く）が1人以上あった日（仮置き）。予定外の来所だけの日は営業日に入れず、来所は延べ来所に入れる
 // 未記録 ＝ 過去の日（今日より前）に、予定があって来所も休みも無い方。今日のまだの方は「今日の未到着」で、未記録に入れない
 // 恒等式（試験で固定）: 延べ予定 ＝ 予定あり来所 ＋ 予定あり休み ＋ 未記録 ＋ 今日の未到着。休みの理由の合計 ＝ 休み（予定あり＋予定外）
 //
 // 拡張子付きで import する（tests から node で直接読めるようにするため）。個人情報は扱わない（利用者は数値IDだけ・氏名は画面が引く）。
 
-import { isDaycareClosedOn, monthDays } from './bath.ts'
+import { isDaycareClosedOn, isoWeekdayIndex, monthDays, shiftMonth } from './bath.ts'
 import { buildDaycareBoard, kanaSortKey } from './daycare.ts'
+import { readPersonDay } from './daycarePerson.ts'
 import { daycarePlanWarning } from './daycareProgress.ts'
 import { DAYCARE_ABSENT_REASON_VALUES } from './types.ts'
-import type { DaycareAbsentReason, DaycareAttendance, DaycareDay, Resident } from './types.ts'
+import type { DaycareAbsentReason, DaycareAttendance, DaycareDay, DaycarePlanRow, DaycarePlanSource, Resident } from './types.ts'
 
 /**
  * デイ せせらぎの定員（稼働率の分母）。公開 LP の値。指定申請上の利用定員とは突き合わせていない。
@@ -38,7 +42,8 @@ function zeroReasons(): DaycareMonthReasonCounts {
 }
 
 /**
- * 日の種類。counted＝数える日（写しが kv か none）／noSnapshot＝写しが無い・読めなかった／closed＝休業日／future＝今日より後
+ * 日の種類。counted＝数える日（写しが kv か none。休業日でも写しがあれば数える）／noSnapshot＝写しが無い・読めなかった／
+ * closed＝写しの無い休業日／future＝今日より後
  */
 export type DaycareMonthDayKind = 'counted' | 'noSnapshot' | 'closed' | 'future'
 
@@ -48,6 +53,17 @@ export interface DaycareMonthDay {
   isToday: boolean
   /** noSnapshot の時: 'missing'＝写しが無い／'unknown'＝写しはあるが予定を読めなかった。ほかは null */
   noSnapshot: 'missing' | 'unknown' | null
+  /** 休業日の設定の日（写しがあって数えた日にも付く＝「休業日の設定の日」と添える） */
+  closedSetting: boolean
+  /**
+   * 過去の日で写しが無い（休業日でない）日の、今の週間計画のその曜日の予定の人数（入院中を除く）。手がかりだけで数には入れない。
+   * 当てはまらない日・読めなかった曜日は null
+   */
+  planHint: number | null
+  /** 過去の日で写しが無い（休業日でない）日のうち、今の週間計画のその曜日を読めなかった日 */
+  planHintUnread: boolean
+  /** 記録の無い営業日かもしれない日（過去・写しなし・休業日でない・今の週間計画にその曜日の予定がある） */
+  maybeBusiness: boolean
   /** 営業日（数える日で、予定が1人以上） */
   business: boolean
   /** 延べ予定（入院中を除く＝今日の画面の「予定」と同じ） */
@@ -115,6 +131,12 @@ export interface DaycareMonthSummary {
   futureDays: number
   /** 数えない日に記録が残っていた日の数 */
   uncountedRecordDays: number
+  /** 記録の無い営業日かもしれない日の数（過去・写しなし・今の週間計画にその曜日の予定がある） */
+  maybeBusinessDays: number
+  /** 写しの無い過去の日のうち、今の週間計画を読めなかった日の数 */
+  planHintUnreadDays: number
+  /** 写しのある休業日（数えた日）の数 */
+  closedCountedDays: number
   /** 稼働率（0.1% 単位の整数・営業日0なら null） */
   utilization10: number | null
   /** 予定に対する来所の割合（0.1% 単位の整数・延べ予定0なら null） */
@@ -161,6 +183,11 @@ export function buildDaycareMonth(p: {
   residents: readonly (Pick<Resident, 'id'> & Partial<Pick<Resident, 'name' | 'kana'>>)[]
   closedDates: string | null
   capacity?: number
+  /**
+   * 今の週間計画の曜日ごとの予定の人数（曜日＝isoWeekdayIndex の 0〜6。値 null＝読めなかった・無い曜日は読んでいない）。
+   * 写しの無い過去の日の手がかりだけに使う（daycareMonthHintDays で読む日を決め、planHintCount で数える）
+   */
+  weekdayPlanned?: ReadonlyMap<number, number | null>
 }): DaycareMonthReport | null {
   const all = monthDays(p.month)
   if (all.length === 0) return null
@@ -205,6 +232,9 @@ export function buildDaycareMonth(p: {
     closedDays: 0,
     futureDays: 0,
     uncountedRecordDays: 0,
+    maybeBusinessDays: 0,
+    planHintUnreadDays: 0,
+    closedCountedDays: 0,
   }
   const days: DaycareMonthDay[] = []
   for (const day of all) {
@@ -214,6 +244,10 @@ export function buildDaycareMonth(p: {
       kind: 'counted',
       isToday: day === p.today,
       noSnapshot: null,
+      closedSetting: isDaycareClosedOn(day, p.closedDates),
+      planHint: null,
+      planHintUnread: false,
+      maybeBusiness: false,
       business: false,
       planned: 0,
       plannedCame: 0,
@@ -230,17 +264,27 @@ export function buildDaycareMonth(p: {
       uncountedAbsent: 0,
     }
     const snap = snapOf.get(day) ?? null
-    const kind: DaycareMonthDayKind =
-      day > p.today
-        ? 'future'
-        : isDaycareClosedOn(day, p.closedDates)
-          ? 'closed'
-          : snap === null || snap.plan_source === 'unknown'
-            ? 'noSnapshot'
-            : 'counted'
+    const usable = snap !== null && snap.plan_source !== 'unknown'
+    // 写しのある日は休業日の設定の日でも数える（今日の画面と同じ）。写しの無い休業日だけ休業日として数えない
+    const kind: DaycareMonthDayKind = day > p.today ? 'future' : usable ? 'counted' : base.closedSetting ? 'closed' : 'noSnapshot'
     base.kind = kind
     if (kind !== 'counted') {
-      if (kind === 'noSnapshot') base.noSnapshot = snap === null ? 'missing' : 'unknown'
+      if (kind === 'noSnapshot') {
+        base.noSnapshot = snap === null ? 'missing' : 'unknown'
+        // 過去の日だけ今の週間計画を手がかりに見る（今日はまだ途中＝写しが後で作られる）。数には入れない
+        if (day < p.today) {
+          const w = isoWeekdayIndex(day)
+          const hint = w === null || p.weekdayPlanned === undefined || !p.weekdayPlanned.has(w) ? undefined : p.weekdayPlanned.get(w)
+          if (hint === null) {
+            base.planHintUnread = true
+            sum.planHintUnreadDays += 1
+          } else if (typeof hint === 'number') {
+            base.planHint = hint
+            base.maybeBusiness = hint > 0
+            if (base.maybeBusiness) sum.maybeBusinessDays += 1
+          }
+        }
+      }
       // 数えない日の記録は、今日の画面と同じ「1人1日1件（id の大きい方）」で数だけ出す
       const latest = new Map<number, DaycareAttendance>()
       for (const a of att) {
@@ -310,6 +354,7 @@ export function buildDaycareMonth(p: {
     }
     base.business = base.planned > 0
     sum.countedDays += 1
+    if (base.closedSetting) sum.closedCountedDays += 1
     if (base.business) sum.businessDays += 1
     days.push(base)
   }
@@ -341,6 +386,9 @@ export function buildDaycareMonth(p: {
     closedDays: sum.closedDays,
     futureDays: sum.futureDays,
     uncountedRecordDays: sum.uncountedRecordDays,
+    maybeBusinessDays: sum.maybeBusinessDays,
+    planHintUnreadDays: sum.planHintUnreadDays,
+    closedCountedDays: sum.closedCountedDays,
     utilization10: rate10(came, capacity * sum.businessDays),
     attendRate10: rate10(plannedCame, planned),
     capacity,
@@ -385,4 +433,85 @@ export function daycareMonthPath(month: string, currentMonth: string): string {
 /** 今日の画面のその日（今日は ?day= を付けない） */
 export function daycareDayPath(day: string, today: string): string {
   return `/record/daycare${day === today ? '' : `?day=${day}`}`
+}
+
+// ══════════════════════════════════════════════════════════════
+// 写しの無い過去の日の手がかり（今の週間計画・数には入れない＝反証 中1）
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * 今の週間計画を読む日（曜日ごとに1日・その月の古い日）。過去の日（今日より前）で、写しが無いか読めなかった、休業日でない日の曜日だけ。
+ * 当てはまる日が無ければ空（読みに行かない）。週間計画は曜日ごとなので、その日付で読めば今のその曜日の予定になる（RPC daycare_plan）
+ */
+export function daycareMonthHintDays(p: { month: string; today: string; snapshots: readonly DaycareDay[]; closedDates: string | null }): string[] {
+  const usable = new Set(p.snapshots.filter((s) => s.plan_source !== 'unknown').map((s) => s.day))
+  const byWeekday = new Map<number, string>()
+  for (const day of monthDays(p.month)) {
+    if (day >= p.today || usable.has(day) || isDaycareClosedOn(day, p.closedDates)) continue
+    const w = isoWeekdayIndex(day)
+    if (w !== null && !byWeekday.has(w)) byWeekday.set(w, day)
+  }
+  return [...byWeekday.values()].sort()
+}
+
+/** 今の週間計画のその日の予定の人数（入院中を除く＝今日の画面の「予定」と同じ数え方）。読めない（unknown）は null */
+export function planHintCount(
+  planRows: readonly DaycarePlanRow[],
+  source: DaycarePlanSource,
+  residents: readonly (Pick<Resident, 'id'> & Partial<Pick<Resident, 'name' | 'kana'>>)[],
+): number | null {
+  if (source === 'unknown') return null
+  return buildDaycareBoard({ planRows, source, residents, attendance: [] }).counts.planned
+}
+
+// ══════════════════════════════════════════════════════════════
+// 画面の判断（月の読み込みの状態・月の切り替え・日をまたぐ・今日の画面の ?day=）
+// ══════════════════════════════════════════════════════════════
+
+/** 月の読み込みの状態。gen は読み込みの世代（新しく読み始めるたびに増やす） */
+export interface MonthLoadState<T> {
+  month: string
+  gen: number
+  data: T | null
+  error: string | null
+  loading: boolean
+}
+
+/** 読み始め: 同じ月の読み直しの間は今の数を出したまま、別の月へ移った時は前の数を消す */
+export function monthLoadStart<T>(prev: MonthLoadState<T>, month: string, gen: number): MonthLoadState<T> {
+  return { month, gen, data: prev.month === month ? prev.data : null, error: null, loading: true }
+}
+
+/** 読めた: 今の世代・今の月の応答だけ入れる（別の月の遅れた応答・古い世代の応答は捨てる） */
+export function monthLoadDone<T>(prev: MonthLoadState<T>, month: string, gen: number, data: T): MonthLoadState<T> {
+  if (gen !== prev.gen || month !== prev.month) return prev
+  return { ...prev, data, error: null, loading: false }
+}
+
+/** 読めなかった（上限に当たった・通信できない）: 今の世代の時だけ、前の数も消して知らせる（欠けた数を見せない） */
+export function monthLoadFail<T>(prev: MonthLoadState<T>, month: string, gen: number, error: string): MonthLoadState<T> {
+  if (gen !== prev.gen || month !== prev.month) return prev
+  return { ...prev, data: null, error, loading: false }
+}
+
+/** 〔次の月〕を押せるか（先の月へは進めない） */
+export function canGoNextMonth(month: string, currentMonth: string): boolean {
+  return shiftMonth(month, 1) <= currentMonth
+}
+
+/**
+ * 今日を取り直して日付が変わった時に読み直すか。読み込んだ月が、読み込んだ時の今月だった時だけ（今日までを数えているので、
+ * 昨日の「今日の未到着」を未記録に・今日を数える日にする）。過去の月は日付が変わっても数が変わらないので読み直さない
+ */
+export function shouldReloadOnDayChange(loaded: { month: string; today: string } | null, nowToday: string): boolean {
+  if (loaded === null || nowToday === loaded.today) return false
+  return loaded.month === loaded.today.slice(0, 7)
+}
+
+/**
+ * 今日の画面を開いた時の日（月の実績の日ごとの表・1人の画面の〔デイの一覧へ〕から来た ?day=）。日は readPersonDay で読み
+ * （形が違う・未来の日は今日）、?day= があれば URL から外す（strip。再読み込みは今までどおり今日を開く）
+ */
+export function initialDayFromUrl(raw: string | null, today: string): { day: string; strip: boolean } {
+  return { day: readPersonDay(raw, today), strip: raw !== null }
 }

@@ -7,29 +7,40 @@
 // 数え方は src/lib/daycareMonth.ts（今日の画面と同じ buildDaycareBoard を日ごとに使う＝日の画面と月の画面の数が食い違わない）。
 //
 // 規律:
-// - 取得は db.ts の fetchDaycareDaysMonth・fetchDaycareAttendanceMonth と、今ある名簿（cachedReads）・休業日の設定（getAppSetting）だけ。
-//   1回の読み込みは4本（名簿は控えに相乗り）。購読は足さない（〔最新に更新〕で読み直す）。上限に届いたら数を出さない（db.ts が例外）
-// - 予定の写しの無い過去の日は「予定の写しなし」と出し、数えない（今の曜日の型で作り直さない＝過去を作り話にしない）
+// - 取得は db.ts の fetchDaycareDaysMonth・fetchDaycareAttendanceMonth と、今ある名簿（cachedReads）・休業日の設定（getAppSetting）。
+//   1回の読み込みは4本（名簿は控えに相乗り。出欠・写しは1000件ずつ＝ふつうは1本ずつ）。写しの無い過去の日（休業日でない）がある時だけ、
+//   その曜日の今の週間計画を fetchDaycarePlan で読む（曜日ごとに1本・最大7本・2026-11-10 反証 中1）。購読は足さない（〔最新に更新〕で読み直す）。
+//   2000件を超えたら数を出さない（db.ts が例外）
+// - 予定の写しの無い過去の日は「予定の写しなし」と出し、数えない（今の曜日の型で作り直さない＝過去を作り話にしない）。今の週間計画に
+//   その曜日の予定がある日は「▲ 記録の無い営業日かもしれない日」として目立たせる（手がかりだけ・数には入れない）
+// - 今日は60秒ごと・画面に戻った時に取り直し、日付が変わったら今月を見ている時だけ読み直す（反証 軽4）
 // - 現在地（月）は URL の ?m= で持つ（再読み込みで同じ月。不正値・先の月は今月）。端末には保存しない
 // - 氏名・記録を localStorage・console に出さない。色だけで意味を伝えない（▲ と文字を併記）。押す所は 44px 以上・文字は 15px 以上
 // - Tailwind はトークン由来のクラスのみ（新しい色は足さない）。表の枠は一括の画面と同じ .dc-table-fit・useTableFit（見出しの行を上に残す）
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
-import { DbError, fetchDaycareAttendanceMonth, fetchDaycareDaysMonth, getAppSetting } from '../lib/db'
+import { DbError, fetchDaycareAttendanceMonth, fetchDaycareDaysMonth, fetchDaycarePlan, getAppSetting } from '../lib/db'
 import { fetchAllResidents } from '../lib/cachedReads'
-import { fmtMonthLabel, monthKeyOf, parseMonthKey, shiftMonth } from '../lib/bath'
+import { fmtMonthLabel, isoWeekdayIndex, monthKeyOf, parseMonthKey, shiftMonth } from '../lib/bath'
 import {
   DAYCARE_CAPACITY,
   DAYCARE_MONTH_REASONS,
   buildDaycareMonth,
+  canGoNextMonth,
   daycareDayPath,
+  daycareMonthHintDays,
   daycareMonthPath,
   fmtRate10,
+  monthLoadDone,
+  monthLoadFail,
+  monthLoadStart,
+  planHintCount,
   reasonsShort,
+  shouldReloadOnDayChange,
 } from '../lib/daycareMonth'
-import type { DaycareMonthDay, DaycareMonthReason, DaycareMonthReport } from '../lib/daycareMonth'
+import type { DaycareMonthDay, DaycareMonthReason, DaycareMonthReport, MonthLoadState } from '../lib/daycareMonth'
 import { personPath } from '../lib/daycarePerson'
 import { daycareRowTone } from '../lib/daycareProgress'
 import { useTableFit } from '../lib/useTableFit'
@@ -124,70 +135,110 @@ function Tile({ label, value, sub, warn = false, srNull }: { label: string; valu
   )
 }
 
-/** 数えない日の行の文（写しなし・読めなかった・休業日。記録が残っていれば数だけ添える） */
+/**
+ * 数えない日の行の文（写しなし・読めなかった・休業日。記録が残っていれば数だけ添える）。写しの無い過去の日は、今の週間計画の
+ * その曜日の人数を手がかりとして添える（数には入れない＝反証 中1）
+ */
 function uncountedText(d: DaycareMonthDay): string {
+  const hint = d.maybeBusiness
+    ? `今の週間計画では ${d.planHint}名・数えていません`
+    : d.planHintUnread
+      ? '数えていません・今の週間計画を読めませんでした'
+      : '数えていません'
   const why =
     d.kind === 'closed'
       ? '休業日'
-      : d.noSnapshot === 'unknown'
-        ? '予定の写しを読めなかった日（数えていません）'
-        : d.isToday
-          ? '今日の予定の写しはまだありません（今日の画面で最初の記録をすると作られます）'
-          : '予定の写しなし（数えていません）'
+      : d.isToday
+        ? '今日の予定の写しはまだありません（今日の画面で最初の記録をすると作られます）'
+        : d.noSnapshot === 'unknown'
+          ? `予定の写しを読めなかった日（${hint}）`
+          : `予定の写しなし（${hint}）`
   const rec = d.uncountedCame + d.uncountedAbsent
   return rec > 0 ? `${why}・記録あり（来所 ${d.uncountedCame}・休み ${d.uncountedAbsent}）は数に入れていません` : why
 }
 
+/** 今日を取り直す間隔（今日の画面と同じ 60秒） */
+const TODAY_TICK_MS = 60_000
+
 export function DaycareMonthPage() {
   const navigate = useNavigate()
   const [search] = useSearchParams()
-  const currentMonth = monthKeyOf(todayIso())
+  // 今日（60秒ごと・画面に戻った時に取り直す＝今日の画面と同じ・反証 軽4）
+  const [today, setToday] = useState(todayIso())
+  const currentMonth = monthKeyOf(today)
   // 現在地（月）は URL の ?m=（再読み込みで同じ月・不正値と先の月は今月＝parseMonthKey）
   const month = parseMonthKey(search.get('m'), currentMonth) ?? currentMonth
-  const [data, setData] = useState<Loaded | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
+  // 読み込みの状態（純関数 monthLoadStart・Done・Fail＝別の月の遅れた応答・古い世代を捨てる・失敗と月の変更で前の数を消す）
+  const [load, setLoad] = useState<MonthLoadState<Loaded>>({ month, gen: 0, data: null, error: null, loading: true })
+  const genRef = useRef(0)
   const [reloadKey, setReloadKey] = useState(0)
 
   useEffect(() => {
-    let alive = true
-    setLoading(true)
-    setError(null)
-    // 別の月の数を残さない（同じ月の読み直しの間は今の表を出したまま）
-    setData((d) => (d !== null && d.month === month ? d : null))
-    const today = todayIso()
-    // 1回の読み込み: 名簿（控えに相乗り）・休業日の設定・その月の予定の写し・その月の出欠の4本
-    Promise.all([
-      fetchAllResidents(),
-      getAppSetting('daycare_closed_dates')
-        .then((v) => ({ v, failed: false }))
-        .catch(() => ({ v: null as string | null, failed: true })),
-      fetchDaycareDaysMonth(month),
-      fetchDaycareAttendanceMonth(month),
-    ])
-      .then(([residents, closed, snapshots, attendance]) => {
-        if (!alive) return
-        const report = buildDaycareMonth({ month, today, snapshots, attendance, residents, closedDates: closed.v })
+    const tick = () => setToday(todayIso())
+    const t = window.setInterval(tick, TODAY_TICK_MS)
+    const vis = () => {
+      if (document.visibilityState === 'visible') tick()
+    }
+    document.addEventListener('visibilitychange', vis)
+    return () => {
+      window.clearInterval(t)
+      document.removeEventListener('visibilitychange', vis)
+    }
+  }, [])
+
+  useEffect(() => {
+    const gen = ++genRef.current
+    setLoad((prev) => monthLoadStart(prev, month, gen))
+    const at = todayIso()
+    void (async () => {
+      try {
+        // 1回の読み込み: 名簿（控えに相乗り）・休業日の設定・その月の予定の写し・その月の出欠の4本
+        const [residents, closed, snapshots, attendance] = await Promise.all([
+          fetchAllResidents(),
+          getAppSetting('daycare_closed_dates')
+            .then((v) => ({ v, failed: false }))
+            .catch(() => ({ v: null as string | null, failed: true })),
+          fetchDaycareDaysMonth(month),
+          fetchDaycareAttendanceMonth(month),
+        ])
+        // 写しの無い過去の日（休業日でない）がある時だけ、その曜日の今の週間計画を読む（曜日ごとに1本・手がかりだけ・数には入れない）。
+        // 読めない曜日は null（「今の週間計画を読めませんでした」と出すだけで、画面は止めない）
+        const hintDays = daycareMonthHintDays({ month, today: at, snapshots, closedDates: closed.v })
+        const hints = await Promise.all(
+          hintDays.map(async (d) => {
+            try {
+              const r = await fetchDaycarePlan(d)
+              return [isoWeekdayIndex(d), r.missing ? null : planHintCount(r.rows, r.source, residents)] as const
+            } catch {
+              return [isoWeekdayIndex(d), null] as const
+            }
+          }),
+        )
+        const weekdayPlanned = new Map<number, number | null>()
+        for (const [w, n] of hints) if (w !== null) weekdayPlanned.set(w, n)
+        const report = buildDaycareMonth({ month, today: at, snapshots, attendance, residents, closedDates: closed.v, weekdayPlanned })
         if (report === null) {
-          setData(null)
-          setError(ERR_LOAD)
+          setLoad((prev) => monthLoadFail(prev, month, gen, ERR_LOAD))
           return
         }
-        setData({ month, today, report, residents, closedFailed: closed.failed })
-      })
-      .catch((e: unknown) => {
-        if (!alive) return
+        setLoad((prev) => monthLoadDone(prev, month, gen, { month, today: at, report, residents, closedFailed: closed.failed }))
+      } catch (e) {
         // 読み切れない（上限）・読めない時は数を出さない（前に出していた数も消す＝欠けた数を見せない）
-        setData(null)
-        setError(e instanceof DbError && e.kind === 'server' ? e.message : ERR_LOAD)
-      })
-      .finally(() => {
-        if (alive) setLoading(false)
-      })
-    return () => {
-      alive = false
-    }
+        setLoad((prev) => monthLoadFail(prev, month, gen, e instanceof DbError && e.kind === 'server' ? e.message : ERR_LOAD))
+      }
+    })()
   }, [month, reloadKey])
+
+  const data = load.month === month ? load.data : null
+  const error = load.month === month ? load.error : null
+  const loading = load.loading || load.month !== month
+
+  // 日付が変わったら、今月を見ている時だけ読み直す（昨日の「今日の未到着」を未記録に・今日を数える日にする＝反証 軽4）
+  const loadedRef = useRef<{ month: string; today: string } | null>(null)
+  loadedRef.current = data === null ? null : { month: data.month, today: data.today }
+  useEffect(() => {
+    if (shouldReloadOnDayChange(loadedRef.current, today)) setReloadKey((n) => n + 1)
+  }, [today])
 
   const goMonth = (m: string) => navigate(daycareMonthPath(parseMonthKey(m, currentMonth) ?? currentMonth, currentMonth), { replace: true })
   const monthLabel = fmtMonthLabel(month)
@@ -208,7 +259,7 @@ export function DaycareMonthPage() {
           {monthLabel}
           {month === currentMonth ? <span className="ml-2 text-base text-ok">今月</span> : null}
         </span>
-        <button type="button" onClick={() => goMonth(shiftMonth(month, 1))} disabled={month >= currentMonth} className={BTN} aria-label="次の月へ">
+        <button type="button" onClick={() => goMonth(shiftMonth(month, 1))} disabled={!canGoNextMonth(month, currentMonth)} className={BTN} aria-label="次の月へ">
           <span className="mr-1 text-sm">次の月</span>
           <span aria-hidden="true">›</span>
         </button>
@@ -238,7 +289,7 @@ export function DaycareMonthPage() {
     )
   }
 
-  const { report, today } = data
+  const { report } = data
   const s = report.summary
   const nameOf = (id: number) => data.residents.find((r) => r.id === id)?.name ?? `利用者ID ${id}`
   const retiredOf = (id: number) => data.residents.find((r) => r.id === id)?.active === false
@@ -276,7 +327,12 @@ export function DaycareMonthPage() {
           label="未記録"
           value={s.unrecorded}
           warn={s.unrecorded > 0}
-          sub={s.unrecorded > 0 ? '過去の日に来所も休みも無い予定（下の表の ▲）' : '過去の日の予定はすべて記録済み'}
+          sub={
+            // 数えた日のことだけを言う（写しの無い日は数えていない＝言い切らない・反証 中1）
+            `${s.unrecorded > 0 ? '過去の日に来所も休みも無い予定（下の表の ▲）' : `数えた日（${s.countedDays}日）の予定は記録済み`}${
+              s.noSnapshotDays > 0 ? `。写しの無い日 ${s.noSnapshotDays}日は数えていません` : ''
+            }`
+          }
         />
         {s.waitingToday > 0 ? <Tile label="今日の未到着" value={s.waitingToday} sub="未記録には入れていません" /> : null}
         <Tile label="延べ来所数" value={s.came} sub="予定あり＋予定外" />
@@ -297,6 +353,12 @@ export function DaycareMonthPage() {
 
       {/* 数えていない日・数に入らない予定の知らせ（文字で。注意は ▲） */}
       <div className="space-y-2">
+        {s.maybeBusinessDays > 0 ? (
+          <p role="status" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">
+            <span aria-hidden="true">▲ </span>
+            記録の無い営業日かもしれない日 {s.maybeBusinessDays}日（予定の写しが無く、今の週間計画ではその曜日に予定があります）。日ごとの表の ▲ の日を開いて確かめてください。今の週間計画は数に入れていません。
+          </p>
+        ) : null}
         {s.uncountedRecordDays > 0 ? (
           <p role="status" className="rounded-lg border border-warn bg-warn-bg p-3 text-base text-ink">
             <span aria-hidden="true">▲ </span>
@@ -306,6 +368,12 @@ export function DaycareMonthPage() {
         {s.noSnapshotDays > 0 ? (
           <p role="status" className="rounded-lg border border-border bg-surface2 p-3 text-sm text-ink2">
             予定の写しの無い日 {s.noSnapshotDays}日は数えていません（今の週間計画で過去の予定を作り直しません）。
+            {s.planHintUnreadDays > 0 ? `うち ${s.planHintUnreadDays}日は、今の週間計画も読めず、予定のある曜日か確かめられませんでした。` : ''}
+          </p>
+        ) : null}
+        {s.closedCountedDays > 0 ? (
+          <p role="status" className="rounded-lg border border-border bg-surface2 p-3 text-sm text-ink2">
+            休業日の設定の日に予定の写しがある日 {s.closedCountedDays}日は、今日の画面と同じく数えています（日ごとの表に「休業日の設定の日」）。
           </p>
         ) : null}
         {s.unconfirmed > 0 || s.planWarn > 0 ? (
@@ -381,7 +449,7 @@ export function DaycareMonthPage() {
                 {shown.map((d, i) => {
                   const rowBg = daycareRowTone(i)
                   const counted = d.kind === 'counted'
-                  const warnUncounted = !counted && d.uncountedCame + d.uncountedAbsent > 0
+                  const warnUncounted = !counted && (d.uncountedCame + d.uncountedAbsent > 0 || d.maybeBusiness)
                   const review = d.planWarn + d.unconfirmed
                   return (
                     <tr key={d.day} className={`border-b border-border align-middle ${rowBg}`}>
@@ -395,6 +463,7 @@ export function DaycareMonthPage() {
                           {d.isToday ? <span className="ml-1 text-sm text-ok">今日</span> : null}
                           <span aria-hidden="true"> ›</span>
                         </Link>
+                        {d.closedSetting && counted ? <span className="block text-sm text-ink2">休業日の設定の日</span> : null}
                       </th>
                       {counted ? (
                         <>

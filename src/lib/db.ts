@@ -8144,6 +8144,7 @@ const DAYCARE_MSG = {
   // 月の実績（計画E・2026-11-10）: 上限に届いた＝その月を読み切れていない。欠けたまま数を出さない
   monthTooMany: 'この月のデイの記録を読み切れませんでした（件数が上限を超えています）。数を出していません。管理者に連絡してください。',
   badMonth: '月の指定を読み取れませんでした。',
+  monthChanged: '読み込みの途中で記録が変わりました。〔最新に更新〕でもう一度読み込んでください。',
 } as const
 
 /** 1日のデイの到着・欠席の取得上限（1日の利用者数がこれを超える運用は無い） */
@@ -8391,59 +8392,88 @@ function assertAttendanceInput(day: string, v: Parameters<typeof validateAttenda
 }
 
 // ── 月の実績（計画E・2026-11-10・読むだけ。src/lib/daycareMonth.ts が数える） ──────────────────────────
-// 1回の読み込みはこの2本（出欠・予定の写し）＋今ある名簿・休業日の設定だけ。購読は足さない（画面の〔最新に更新〕で読み直す）
+// 1回の読み込みはこの2本（出欠・予定の写し）＋今ある名簿・休業日の設定だけ（写しの無い過去の日がある時だけ、今の週間計画を曜日ごとに
+// fetchDaycarePlan で読む＝手がかり）。購読は足さない（画面の〔最新に更新〕で読み直す）
 
-/** 1か月のデイの出欠・予定の写しの取得上限（定員27名×31日≒840件。上限に届いたら読み切れていない＝数を出さない） */
+/** 1か月のデイの出欠・予定の写しの取得上限（定員27名×31日≒840件。超えたら読み切れていない＝数を出さない） */
 const DAYCARE_MONTH_ROWS = MAX_ROWS
+/**
+ * 1回の取得の大きさ（2026-11-10 反証 軽3: サーバーの1回の上限＝Supabase の db-max-rows の既定 1000 に合わせて、.range で分けて読む）。
+ * 最初の1回で件数（count: 'exact'）も受け取り、件数に届くまで続きを読む（サーバーの1回の上限がこれより小さくても欠けない）
+ */
+const DAYCARE_MONTH_PAGE = 1000
 
-/** 上限に届いた＝この月を読み切れていない（黙って切らずに例外＝画面は数を出さない） */
-function assertDaycareMonthAll(res: Res<unknown>): void {
-  if (Array.isArray(res.data) && res.data.length >= DAYCARE_MONTH_ROWS) throw new DbError('server', DAYCARE_MSG.monthTooMany)
+/**
+ * 月の期間読みを1000件ずつ読む。件数が上限（2000）を超えたら例外（monthTooMany＝数を出さない）。件数を受け取れない時は通信の失敗と同じ
+ * （読み切れたかを確かめられない）。読む間に行が減って件数に届かない時は例外（monthChanged）
+ */
+async function readDaycareMonthPages(
+  read: (from: number, to: number, withCount: boolean) => PromiseLike<Res<unknown> & { count?: number | null }>,
+): Promise<unknown[]> {
+  const out: unknown[] = []
+  let total: number | null = null
+  for (;;) {
+    const res = await read(out.length, out.length + DAYCARE_MONTH_PAGE - 1, total === null)
+    if (res.error !== null) throw daycareReadError(res)
+    if (total === null) {
+      const n = res.count
+      if (typeof n !== 'number' || !Number.isInteger(n) || n < 0) throw new DbError('network', MSG.networkRead)
+      if (n > DAYCARE_MONTH_ROWS) throw new DbError('server', DAYCARE_MSG.monthTooMany)
+      total = n
+    }
+    const rows = Array.isArray(res.data) ? res.data : []
+    out.push(...rows)
+    if (out.length > DAYCARE_MONTH_ROWS) throw new DbError('server', DAYCARE_MSG.monthTooMany)
+    if (out.length >= total) return out
+    if (rows.length === 0) throw new DbError('server', DAYCARE_MSG.monthChanged)
+  }
 }
 
 /**
- * その月（'yyyy-MM'）のデイの到着・帰宅・欠席（取り消した行を除く）。1回の読み取りで月の全部を読む（日数ぶん問い合わせない）。
+ * その月（'yyyy-MM'）のデイの到着・帰宅・欠席（取り消した行を除く）。月の全部を期間で読む（日数ぶん問い合わせない・1000件ずつ）。
  * 読む列は 0041 からある列（DAYCARE_ATTENDANCE_COLS）。自動の印の列（0047）は数えに使わないので読まない（列の有る無しで読み直さない）。
- * 上限に届いたら例外（DAYCARE_MSG.monthTooMany）
+ * 2000件を超えたら例外（DAYCARE_MSG.monthTooMany）
  */
 export async function fetchDaycareAttendanceMonth(monthKey: string): Promise<DaycareAttendance[]> {
   const range = monthRange(monthKey)
   if (range === null) throw new DbError('server', DAYCARE_MSG.badMonth)
   const sb = await getClient()
-  const res = (await sb
-    .from('daycare_attendance')
-    .select(DAYCARE_ATTENDANCE_COLS)
-    .gte('day', range.from)
-    .lte('day', range.to)
-    .is('deleted_at', null)
-    .order('day', { ascending: true })
-    .order('id', { ascending: true })
-    .limit(DAYCARE_MONTH_ROWS)) as Res<unknown>
-  if (res.error !== null) throw daycareReadError(res)
-  assertDaycareMonthAll(res)
-  const rows = list(res.data, normalizeDaycareAttendance, DAYCARE_MONTH_ROWS)
+  const raw = await readDaycareMonthPages(
+    (from, to, withCount) =>
+      sb
+        .from('daycare_attendance')
+        .select(DAYCARE_ATTENDANCE_COLS, withCount ? { count: 'exact' } : undefined)
+        .gte('day', range.from)
+        .lte('day', range.to)
+        .is('deleted_at', null)
+        .order('day', { ascending: true })
+        .order('id', { ascending: true })
+        .range(from, to) as unknown as PromiseLike<Res<unknown> & { count?: number | null }>,
+  )
+  const rows = list(raw, normalizeDaycareAttendance, DAYCARE_MONTH_ROWS)
   await assertSessionIfEmpty(sb, rows.length) // anon で読んだ0件を「記録なし」と出さない（F58）
   return rows
 }
 
 /**
  * その月（'yyyy-MM'）のデイの予定の写し（daycare_days・1日1行）。写しの無い日は行が無い（作り直さない）。
- * 上限に届いたら例外（DAYCARE_MSG.monthTooMany。1日1行なので運用では届かない）
+ * 出欠と同じく1000件ずつ読み、2000件を超えたら例外（1日1行なので運用では届かない）
  */
 export async function fetchDaycareDaysMonth(monthKey: string): Promise<DaycareDay[]> {
   const range = monthRange(monthKey)
   if (range === null) throw new DbError('server', DAYCARE_MSG.badMonth)
   const sb = await getClient()
-  const res = (await sb
-    .from('daycare_days')
-    .select(DAYCARE_DAY_COLS)
-    .gte('day', range.from)
-    .lte('day', range.to)
-    .order('day', { ascending: true })
-    .limit(DAYCARE_MONTH_ROWS)) as Res<unknown>
-  if (res.error !== null) throw daycareReadError(res)
-  assertDaycareMonthAll(res)
-  const rows = list(res.data, normalizeDaycareDay, DAYCARE_MONTH_ROWS)
+  const raw = await readDaycareMonthPages(
+    (from, to, withCount) =>
+      sb
+        .from('daycare_days')
+        .select(DAYCARE_DAY_COLS, withCount ? { count: 'exact' } : undefined)
+        .gte('day', range.from)
+        .lte('day', range.to)
+        .order('day', { ascending: true })
+        .range(from, to) as unknown as PromiseLike<Res<unknown> & { count?: number | null }>,
+  )
+  const rows = list(raw, normalizeDaycareDay, DAYCARE_MONTH_ROWS)
   await assertSessionIfEmpty(sb, rows.length) // anon で読んだ0件を「写しなし」と出さない（F58）
   return rows
 }

@@ -64,9 +64,9 @@ import {
 import type { DaycareMealRow, MyRole, VitalTarget } from '../lib/db'
 // 名簿は読み込みの控えを通し、在籍者は全員の名簿から切り出す（同じ取得に相乗り＝residents 表を1回だけ読む・2026-10-29）
 import { fetchAllResidents, fetchResidentsFromAll } from '../lib/cachedReads'
-import { personPath, readPersonDay } from '../lib/daycarePerson'
+import { personPath } from '../lib/daycarePerson'
 import { contactPath } from '../lib/daycareContact'
-import { daycareMonthPath } from '../lib/daycareMonth'
+import { daycareMonthPath, initialDayFromUrl } from '../lib/daycareMonth'
 import { DAYCARE_VITALS_MEALS_PATH } from '../lib/daycareRoutes'
 import type { DaycareActivity } from '../lib/daycareActivity'
 import { loadDaycareDayParts } from '../lib/daycareDayLoad'
@@ -367,12 +367,14 @@ export interface DaycarePageProps {
 export function DaycarePage({ staff = undefined, actorId = null }: DaycarePageProps = {}) {
   const { toast, show } = useToast()
   const [today, setToday] = useState(todayIso())
-  // 月の実績の日ごとの表から開いた日（?day=・2026-11-10 計画E）。開いた時の1回だけ読み、下で URL から外す（再読み込みは今までどおり
-  // 今日を開く＝過去の日を開いたまま次の日の記録を始めない）。形が違う・未来の日は今日（readPersonDay）。?day= が無ければ今までどおり今日
+  // 月の実績の日ごとの表・1人の画面の〔デイの一覧へ〕から開いた日（?day=・2026-11-10 計画E）。開いた時の1回だけ読み、下で URL から外す
+  // （再読み込みは今までどおり今日を開く＝過去の日を開いたまま次の日の記録を始めない）。形が違う・未来の日は今日。?day= が無ければ今までどおり今日。
+  // 判断は純関数 initialDayFromUrl（daycareMonth.ts）
   const [search, setSearch] = useSearchParams()
-  const [day, setDay] = useState(() => readPersonDay(search.get('day'), todayIso()))
+  const [opened] = useState(() => initialDayFromUrl(search.get('day'), todayIso()))
+  const [day, setDay] = useState(opened.day)
   useEffect(() => {
-    if (!search.has('day')) return
+    if (!opened.strip) return
     setSearch(
       (prev) => {
         const next = new URLSearchParams(prev)

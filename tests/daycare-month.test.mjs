@@ -252,24 +252,85 @@ if (M === null) {
       assert.deepEqual([t.kind, t.noSnapshot, t.isToday], ['noSnapshot', 'missing', true])
     })
 
-    it('休業日: 写しがあっても数えない（予定を未記録にしない）。記録は数だけ見せる。写しの無い休業日は「写しなし」でなく休業日', () => {
+    it('休業日（反証 軽2）: 写しのある休業日は今日の画面と同じく数え「休業日の設定の日」と添える。写しの無い休業日は数えず、かもしれない日にも入れない', () => {
       const snapshots = [snap('2026-12-30', [planRow('a', 1), planRow('b', 2)]), snap('2026-12-31', [planRow('a', 1), planRow('b', 2)])]
-      const attendance = [came('2026-12-30', 1), came('2026-12-30', 2), came('2026-12-31', 1)]
-      const r = M.buildDaycareMonth({ month: '2026-12', today: '2027-01-05', snapshots, attendance, residents: RES, closedDates: '12-31, 01-01,2026-12-29' })
+      const attendance = [came('2026-12-30', 1), came('2026-12-30', 2), came('2026-12-31', 1), came('2026-12-29', 3)]
+      // 写しの無い休業日 12/29 の曜日（火）に今の週間計画の予定があっても、休業日は「かもしれない日」にしない
+      const weekdayPlanned = new Map([[1, 5]])
+      const r = M.buildDaycareMonth({ month: '2026-12', today: '2027-01-05', snapshots, attendance, residents: RES, closedDates: '12-31, 01-01,2026-12-29', weekdayPlanned })
       const d = (day) => r.days.find((x) => x.day === day)
-      assert.equal(d('2026-12-31').kind, 'closed')
-      assert.deepEqual([d('2026-12-31').planned, d('2026-12-31').unrecorded, d('2026-12-31').business, d('2026-12-31').uncountedCame], [0, 0, false, 1])
-      // 'YYYY-MM-DD' の休業日も同じ（写しなしの日でも休業日として出す）
-      assert.equal(d('2026-12-29').kind, 'closed')
-      assert.equal(d('2026-12-29').noSnapshot, null)
-      assert.equal(d('2026-12-30').kind, 'counted')
-      assert.equal(r.summary.closedDays, 2)
-      assert.deepEqual([r.summary.planned, r.summary.came, r.summary.businessDays, r.summary.unrecorded], [2, 2, 1, 0])
+      assertSameAsDayScreen(r, snapshots, attendance)
+      // 写しのある休業日（12/31）: 今日の画面と同じ数（予定2・来所1・未記録1）。設定の日の印だけ
+      assert.deepEqual([d('2026-12-31').kind, d('2026-12-31').closedSetting], ['counted', true])
+      assert.deepEqual([d('2026-12-31').planned, d('2026-12-31').plannedCame, d('2026-12-31').unrecorded, d('2026-12-31').business], [2, 1, 1, true])
+      // 'YYYY-MM-DD' の休業日（写しなし）は数えない・記録は数だけ・写しなしの印も手がかりも付けない
+      assert.deepEqual([d('2026-12-29').kind, d('2026-12-29').noSnapshot, d('2026-12-29').maybeBusiness, d('2026-12-29').planHint], ['closed', null, false, null])
+      assert.equal(d('2026-12-29').uncountedCame, 1)
+      assert.deepEqual([d('2026-12-30').kind, d('2026-12-30').closedSetting], ['counted', false])
+      // かもしれない日は写しの無い火曜（12/1・12/8・12/15・12/22）だけ。休業日の 12/29 は入れない
+      assert.deepEqual([r.summary.closedDays, r.summary.closedCountedDays, r.summary.maybeBusinessDays], [1, 1, 4])
+      assert.deepEqual([r.summary.planned, r.summary.came, r.summary.businessDays, r.summary.unrecorded], [4, 3, 2, 1])
       assertIdentities(r)
-      // 休業日の設定が無い（読めない）時は休業日を分けない（写しがあれば数える）
+      // 休業日の設定が無い（読めない）時も、写しのある日は同じに数える（休業日の設定の日の印だけ無い）
       const r2 = M.buildDaycareMonth({ month: '2026-12', today: '2027-01-05', snapshots, attendance, residents: RES, closedDates: null })
-      assert.equal(r2.days.find((x) => x.day === '2026-12-31').kind, 'counted')
+      assert.deepEqual([r2.days.find((x) => x.day === '2026-12-31').kind, r2.days.find((x) => x.day === '2026-12-31').closedSetting], ['counted', false])
       assert.equal(r2.summary.unrecorded, 1)
+      assert.equal(r2.days.find((x) => x.day === '2026-12-29').kind, 'noSnapshot')
+    })
+
+    it('写しの無い過去の日（反証 中1）: 今の週間計画にその曜日の予定がある日は「記録の無い営業日かもしれない日」。数には入れない（延べ予定・未記録・稼働率は同じ）', () => {
+      // 2026-10: 10/5（月）・10/6（火）は写しあり。10/12（月）・10/13（火）・10/14（水）・10/18（日）は写しなし。今日は 10/15（木）
+      const snapshots = [snap('2026-10-05', [planRow('a', 1)]), snap('2026-10-06', [planRow('a', 1)]), snap('2026-10-14', [], 'unknown')]
+      const attendance = [came('2026-10-05', 1), came('2026-10-06', 1)]
+      const base = { month: '2026-10', today: '2026-10-15', snapshots, attendance, residents: RES, closedDates: null }
+      // 読む日は曜日ごとに1日（その月の古い日）。過去・写しなし（unknown も）・休業日でない日だけ。今日と未来の日は読まない
+      const hintDays = M.daycareMonthHintDays({ ...base, closedDates: '10-01' })
+      assert.deepEqual(hintDays, ['2026-10-02', '2026-10-03', '2026-10-04', '2026-10-07', '2026-10-08', '2026-10-12', '2026-10-13'])
+      assert.deepEqual(M.daycareMonthHintDays({ month: '2026-10', today: '2026-10-07', snapshots: [snap('2026-10-01', []), snap('2026-10-02', []), snap('2026-10-03', []), snap('2026-10-04', []), snap('2026-10-05', []), snap('2026-10-06', [])], closedDates: null }), [], '写しの無い過去の日が無ければ読みに行かない')
+      // 月（0）は今の週間計画で 3名・火（1）は 0名・水（2）は読めなかった・日（6）は 0名
+      const weekdayPlanned = new Map([
+        [0, 3],
+        [1, 0],
+        [2, null],
+        [3, 2],
+        [4, 2],
+        [5, 0],
+        [6, 0],
+      ])
+      const without = M.buildDaycareMonth(base)
+      const r = M.buildDaycareMonth({ ...base, weekdayPlanned })
+      const d = (day) => r.days.find((x) => x.day === day)
+      assert.deepEqual([d('2026-10-12').maybeBusiness, d('2026-10-12').planHint, d('2026-10-12').kind], [true, 3, 'noSnapshot'])
+      assert.deepEqual([d('2026-10-13').maybeBusiness, d('2026-10-13').planHint], [false, 0], '予定の無い曜日の写しなしは目立たせない')
+      assert.deepEqual([d('2026-10-14').maybeBusiness, d('2026-10-14').planHintUnread, d('2026-10-14').noSnapshot], [false, true, 'unknown'])
+      assert.deepEqual([d('2026-10-15').maybeBusiness, d('2026-10-15').planHint, d('2026-10-15').isToday], [false, null, true], '今日は手がかりを見ない（まだ途中）')
+      assert.deepEqual([d('2026-10-16').kind, d('2026-10-16').maybeBusiness], ['future', false])
+      // 月: 10/12（3名）・10/19 は未来。木・金の 10/1・10/2・10/8・10/9 も写しなし（2名）
+      assert.equal(r.summary.maybeBusinessDays, ['2026-10-01', '2026-10-02', '2026-10-08', '2026-10-09', '2026-10-12'].length)
+      assert.equal(r.summary.planHintUnreadDays, 2, '水の 10/7・10/14')
+      // 手がかりは数に入れない（延べ予定・未記録・営業日・稼働率は手がかり無しと同じ）
+      for (const k of ['planned', 'unrecorded', 'businessDays', 'came', 'utilization10', 'attendRate10', 'noSnapshotDays']) assert.equal(r.summary[k], without.summary[k], k)
+      assert.equal(without.summary.maybeBusinessDays, 0)
+      assertIdentities(r)
+    })
+
+    it('日の画面との一致（反証 軽6）: 写しのある休業日の日は同じ数・写しの無い日は今日の画面が今の週間計画で出し、月の画面は数えない（意図した差）', () => {
+      const snapshots = [snap('2026-12-31', [planRow('a', 1), planRow('b', 2), planRow('c', 3)])]
+      const attendance = [came('2026-12-31', 1), rest('2026-12-31', 2, 'family'), came('2026-12-28', 1), came('2026-12-28', 4)]
+      const current = [planRow('a', 1), planRow('b', 2), planRow('h', 5, { hospitalized: true })]
+      const r = M.buildDaycareMonth({ month: '2026-12', today: '2027-01-05', snapshots, attendance, residents: RES, closedDates: '12-31', weekdayPlanned: new Map([[0, M.planHintCount(current, 'kv', RES)]]) })
+      // 写しのある休業日: 今日の画面（写し）と同じ数
+      assertSameAsDayScreen(r, snapshots, attendance)
+      const c31 = DC.buildDaycareBoard({ planRows: snapshots[0].plan_rows, source: 'kv', residents: RES, attendance: attendance.filter((a) => a.day === '2026-12-31') }).counts
+      const m31 = r.days.find((x) => x.day === '2026-12-31')
+      assert.deepEqual([m31.planned, m31.plannedCame, m31.plannedAbsent, m31.unrecorded], [c31.planned, c31.present + c31.left, c31.absent, c31.waiting])
+      // 写しの無い日（12/28 月）: 今日の画面は今の週間計画で予定2（入院中を除く）・来所2（予定外の 4 を含む）
+      const c28 = DC.buildDaycareBoard({ planRows: current, source: 'kv', residents: RES, attendance: attendance.filter((a) => a.day === '2026-12-28') }).counts
+      assert.deepEqual([c28.planned, c28.present + c28.left, c28.waiting, c28.hospitalized], [2, 2, 1, 1])
+      // 月の画面は数えない（予定0）。今の週間計画の人数は手がかり（2名）としてだけ出し、記録は数だけ
+      const m28 = r.days.find((x) => x.day === '2026-12-28')
+      assert.deepEqual([m28.kind, m28.planned, m28.unrecorded, m28.planHint, m28.maybeBusiness, m28.uncountedCame], ['noSnapshot', 0, 0, 2, true, 2])
+      assert.equal(M.planHintCount([], 'unknown', RES), null, '週間計画を読めない時は手がかりなし')
     })
 
     it('休みの理由: 6つの理由と「理由は後で」「理由なし（知らない値）」の合計が休みの数と一致する。予定外の方の休みも入る', () => {
@@ -401,6 +462,49 @@ if (M === null) {
       assert.equal(M.fmtRate10(M.rate10(486, 27 * 20)), '90.0%')
     })
 
+    it('月の読み込みの状態: 別の月の遅れた応答・古い世代を捨てる。同じ月の読み直しは数を残し、失敗と月の変更で前の数を消す', () => {
+      const s0 = { month: '2026-11', gen: 0, data: null, error: null, loading: true }
+      const s1 = M.monthLoadStart(s0, '2026-11', 1)
+      const s2 = M.monthLoadDone(s1, '2026-11', 1, 'NOV')
+      assert.deepEqual([s2.data, s2.loading, s2.error], ['NOV', false, null])
+      // 同じ月の読み直し: 読んでいる間も今の数を出したまま
+      const s3 = M.monthLoadStart(s2, '2026-11', 2)
+      assert.deepEqual([s3.data, s3.loading], ['NOV', true])
+      // 月を変えた: 前の月の数を消す。前の月の遅れた応答（gen 2）は捨てる
+      const s4 = M.monthLoadStart(s3, '2026-10', 3)
+      assert.equal(s4.data, null)
+      assert.equal(M.monthLoadDone(s4, '2026-11', 2, 'NOV-late'), s4, '別の月の遅れた応答は捨てる')
+      assert.equal(M.monthLoadDone(s4, '2026-10', 2, 'OCT-old'), s4, '古い世代の応答は捨てる')
+      assert.equal(M.monthLoadDone(s4, '2026-11', 3, 'NOV-wrong'), s4, '世代が同じでも月が違う応答は入れない')
+      assert.equal(M.monthLoadFail(s4, '2026-11', 2, '失敗'), s4, '別の月の遅れた失敗も捨てる')
+      const s5 = M.monthLoadDone(s4, '2026-10', 3, 'OCT')
+      assert.equal(s5.data, 'OCT')
+      // 読み直しが失敗（上限・通信）: 前の数を消して知らせる
+      const s6 = M.monthLoadFail(M.monthLoadStart(s5, '2026-10', 4), '2026-10', 4, '読み切れませんでした')
+      assert.deepEqual([s6.data, s6.error, s6.loading], [null, '読み切れませんでした', false])
+      // 失敗の後に読み始めると知らせを消す
+      assert.equal(M.monthLoadStart(s6, '2026-10', 5).error, null)
+    })
+
+    it('〔次の月〕は先の月へは押せない・日をまたいだら今月を見ている時だけ読み直す・今日の画面の ?day= は1回だけ読む', () => {
+      assert.equal(M.canGoNextMonth('2026-10', '2026-11'), true)
+      assert.equal(M.canGoNextMonth('2026-11', '2026-11'), false)
+      assert.equal(M.canGoNextMonth('2026-12', '2026-11'), false)
+      assert.equal(M.canGoNextMonth('2025-12', '2026-01'), true, '年をまたぐ')
+      // 日をまたぐ
+      assert.equal(M.shouldReloadOnDayChange({ month: '2026-11', today: '2026-11-10' }, '2026-11-10'), false, '同じ日は読まない')
+      assert.equal(M.shouldReloadOnDayChange({ month: '2026-11', today: '2026-11-10' }, '2026-11-11'), true, '今月は読み直す')
+      assert.equal(M.shouldReloadOnDayChange({ month: '2026-11', today: '2026-11-30' }, '2026-12-01'), true, '月末から翌月へ')
+      assert.equal(M.shouldReloadOnDayChange({ month: '2026-10', today: '2026-11-10' }, '2026-11-11'), false, '過去の月は数が変わらない')
+      assert.equal(M.shouldReloadOnDayChange(null, '2026-11-11'), false, 'まだ読めていない')
+      // ?day=
+      assert.deepEqual(M.initialDayFromUrl(null, '2026-11-10'), { day: '2026-11-10', strip: false }, '?day= が無ければ今日・URL はそのまま')
+      assert.deepEqual(M.initialDayFromUrl('2026-11-03', '2026-11-10'), { day: '2026-11-03', strip: true })
+      assert.deepEqual(M.initialDayFromUrl('2026-11-11', '2026-11-10'), { day: '2026-11-10', strip: true }, '未来の日は今日')
+      assert.deepEqual(M.initialDayFromUrl('2026-02-30', '2026-11-10'), { day: '2026-11-10', strip: true }, '無い日は今日')
+      assert.deepEqual(M.initialDayFromUrl('', '2026-11-10'), { day: '2026-11-10', strip: true })
+    })
+
     it('道: 月は ?m=（今月は付けない）・今日の画面のその日は ?day=（今日は付けない）', () => {
       assert.equal(M.daycareMonthPath('2026-11', '2026-11'), '/record/daycare/month')
       assert.equal(M.daycareMonthPath('2026-10', '2026-11'), '/record/daycare/month?m=2026-10')
@@ -415,18 +519,29 @@ if (M === null) {
   describe('db.ts: 月の出欠・予定の写しの読み取り（読むだけ・取り消した行を除く・上限で数を出さない）', () => {
     const fake = (state) => {
       const builder = (table) => {
-        const q = { table, cols: null, filters: [], limit: null, action: 'select', orders: [] }
+        const q = { table, cols: null, opts: null, filters: [], limit: null, range: null, action: 'select', orders: [] }
         const hit = (r) =>
           q.filters.every(([op, k, v]) => (op === 'gte' ? r[k] >= v : op === 'lte' ? r[k] <= v : op === 'is' ? (r[k] ?? null) === v : op === 'eq' ? r[k] === v : true))
         const run = () => {
           state.calls.push(q)
           if (state.fail) return { data: null, error: { message: 'timeout', code: '' }, status: 0 }
-          const rows = (state[table] ?? []).filter(hit).slice(0, q.limit ?? undefined)
-          return { data: rows.map((r) => ({ ...r })), error: null, status: 200 }
+          if (state.shrinkAfterFirst && state.calls.length > 1) state[table] = []
+          const all = (state[table] ?? []).filter(hit)
+          // サーバーの1回の上限（db-max-rows）。range は from〜to（両端を含む）
+          const cap = state.maxRows ?? 1000
+          const from = q.range?.[0] ?? 0
+          const want = q.range ? q.range[1] - q.range[0] + 1 : (q.limit ?? all.length)
+          const rows = all.slice(from, from + Math.min(want, cap))
+          return { data: rows.map((r) => ({ ...r })), error: null, status: 200, count: q.opts?.count === 'exact' && !state.dropCount ? all.length : null }
         }
         const b = {
-          select(c) {
+          select(c, opts) {
             q.cols = c
+            q.opts = opts ?? null
+            return b
+          },
+          range(f, t) {
+            q.range = [f, t]
             return b
           },
           insert() {
@@ -495,7 +610,7 @@ if (M === null) {
     }
     const row = (id, day, over = {}) => ({ ...came(day, 1, { id }), deleted_at: null, client_key: `k${id}`, ...over })
 
-    it('出欠: その月の範囲（うるう年の2月は 29日まで）・取り消した行を除く・0041 の列・上限 2000・読むだけ', async () => {
+    it('出欠: その月の範囲（うるう年の2月は 29日まで）・取り消した行を除く・0041 の列・1000件ずつ・読むだけ', async () => {
       const state = {
         calls: [],
         daycare_attendance: [
@@ -521,14 +636,15 @@ if (M === null) {
           ['lte', 'day', '2028-02-29'],
           ['is', 'deleted_at', null],
         ])
-        assert.equal(q.limit, 2000)
+        assert.deepEqual(q.range, [0, 999], '1000件ずつ')
+        assert.deepEqual(q.opts, { count: 'exact' }, '最初の1回で件数も受け取る')
         assert.ok(state.calls.every((c) => c.action === 'select'), '読むだけ')
         // 端末に持ち出さない列（client_key）は返さない
         assert.equal('client_key' in rows[0], false)
       })
     })
 
-    it('予定の写し: その月の範囲・全列（予定の行を含む）・上限 2000', async () => {
+    it('予定の写し: その月の範囲・全列（予定の行を含む）・1000件ずつ', async () => {
       const state = {
         calls: [],
         daycare_days: [
@@ -555,21 +671,63 @@ if (M === null) {
           ['gte', 'day', '2026-11-01'],
           ['lte', 'day', '2026-11-30'],
         ])
-        assert.equal(q.limit, 2000)
+        assert.deepEqual(q.range, [0, 999])
       })
     })
 
-    it('上限に当たった時: 読み切れていない＝「読み切れませんでした」で止める（数を出さない）。少なければ通す', async () => {
-      const many = Array.from({ length: 2000 }, (_, i) => row(i + 1, '2026-10-15', { resident_id: i + 1 }))
-      await withDb({ calls: [], daycare_attendance: many }, async () => {
+    it('1000件ずつ（反証 軽3）: 1000件ちょうど＝1回・1001件＝2回で全部・2000件ちょうど＝2回で全部・2001件＝「読み切れませんでした」で止める（数を出さない）', async () => {
+      const many = (n) => Array.from({ length: n }, (_, i) => row(i + 1, `2026-10-${String((i % 28) + 1).padStart(2, '0')}`, { resident_id: i + 1 }))
+      for (const [n, calls] of [
+        [0, 1],
+        [1000, 1],
+        [1001, 2],
+        [2000, 2],
+      ]) {
+        const st = { calls: [], daycare_attendance: many(n) }
+        await withDb(st, async () => {
+          const rows = await DB.fetchDaycareAttendanceMonth('2026-10')
+          assert.equal(rows.length, n, `${n}件を欠けずに読む`)
+          assert.equal(new Set(rows.map((r) => r.id)).size, n, `${n}件に重なりが無い`)
+          assert.equal(st.calls.length, calls, `${n}件は ${calls}回`)
+          assert.deepEqual(
+            st.calls.map((c) => c.range),
+            Array.from({ length: calls }, (_, i) => [i * 1000, i * 1000 + 999]),
+          )
+          assert.ok(st.calls.slice(1).every((c) => c.opts === null), '件数は最初の1回だけ受け取る')
+        })
+      }
+      const st = { calls: [], daycare_attendance: many(2001) }
+      await withDb(st, async () => {
         await assert.rejects(() => DB.fetchDaycareAttendanceMonth('2026-10'), (e) => e instanceof DB.DbError && /読み切れませんでした/.test(e.message))
+        assert.equal(st.calls.length, 1, '件数で分かったら続きを読まない')
       })
-      await withDb({ calls: [], daycare_attendance: many.slice(0, 1999) }, async () => {
-        assert.equal((await DB.fetchDaycareAttendanceMonth('2026-10')).length, 1999)
-      })
-      const days = Array.from({ length: 2000 }, (_, i) => ({ ...snap('2026-10-15', []), id: i + 1 }))
+      const days = Array.from({ length: 2001 }, (_, i) => ({ ...snap('2026-10-15', []), id: i + 1 }))
       await withDb({ calls: [], daycare_days: days }, async () => {
         await assert.rejects(() => DB.fetchDaycareDaysMonth('2026-10'), (e) => e instanceof DB.DbError && /読み切れませんでした/.test(e.message))
+      })
+    })
+
+    it('サーバーの1回の上限が 1000 より小さくても欠けない（件数に届くまで続きを読む）。件数を受け取れない・途中で減った時は数を出さない', async () => {
+      const many = (n) => Array.from({ length: n }, (_, i) => row(i + 1, '2026-10-15', { resident_id: i + 1 }))
+      const st = { calls: [], maxRows: 400, daycare_attendance: many(1001) }
+      await withDb(st, async () => {
+        const rows = await DB.fetchDaycareAttendanceMonth('2026-10')
+        assert.equal(rows.length, 1001)
+        assert.equal(new Set(rows.map((r) => r.id)).size, 1001)
+        assert.deepEqual(
+          st.calls.map((c) => c.range[0]),
+          [0, 400, 800],
+          '受け取った数の続きから読む',
+        )
+      })
+      // 件数を返さない（数えられない）＝読み切れたか確かめられない＝数を出さない
+      await withDb({ calls: [], dropCount: true, daycare_attendance: many(3) }, async () => {
+        await assert.rejects(() => DB.fetchDaycareAttendanceMonth('2026-10'), (e) => e instanceof DB.DbError)
+      })
+      // 途中で行が減った（件数に届かないまま0件）
+      const shrink = { calls: [], maxRows: 2, daycare_attendance: many(5), shrinkAfterFirst: true }
+      await withDb(shrink, async () => {
+        await assert.rejects(() => DB.fetchDaycareAttendanceMonth('2026-10'), (e) => e instanceof DB.DbError && /途中で記録が変わりました/.test(e.message))
       })
     })
 
@@ -603,7 +761,7 @@ if (M === null) {
       assert.doesNotMatch(page, /supabase\.(from|rpc)\(|from '\.\.\/lib\/supabase'/)
     })
 
-    it('1回の読み込みは4本（名簿・休業日の設定・月の写し・月の出欠）。db.ts から読むのはこの3つと DbError だけ', () => {
+    it('1回の読み込みは4本（名簿・休業日の設定・月の写し・月の出欠）＋写しの無い過去の日がある時だけ今の週間計画を曜日ごとに。db.ts から読むのはこの4つと DbError だけ', () => {
       const m = /import \{([^}]*)\} from '\.\.\/lib\/db'/.exec(page)
       assert.ok(m !== null)
       assert.deepEqual(
@@ -612,23 +770,41 @@ if (M === null) {
           .map((x) => x.trim())
           .filter((x) => x !== '')
           .sort(),
-        ['DbError', 'fetchDaycareAttendanceMonth', 'fetchDaycareDaysMonth', 'getAppSetting'],
+        ['DbError', 'fetchDaycareAttendanceMonth', 'fetchDaycareDaysMonth', 'fetchDaycarePlan', 'getAppSetting'],
       )
-      const load = page.slice(page.indexOf('Promise.all(['), page.indexOf('.then(([residents, closed, snapshots, attendance])'))
-      assert.deepEqual(load.match(/\b(fetch\w+|getAppSetting)\(/g), ['fetchAllResidents(', "getAppSetting(", 'fetchDaycareDaysMonth(', 'fetchDaycareAttendanceMonth('])
+      const head = page.indexOf('const [residents, closed, snapshots, attendance] = await Promise.all([')
+      assert.ok(head > 0)
+      const load = page.slice(head, page.indexOf('const hintDays', head))
+      assert.deepEqual(load.match(/\b(fetch\w+|getAppSetting)\(/g), ['fetchAllResidents(', 'getAppSetting(', 'fetchDaycareDaysMonth(', 'fetchDaycareAttendanceMonth('])
       assert.match(load, /getAppSetting\('daycare_closed_dates'\)/)
+      // 今の週間計画は daycareMonthHintDays が決めた日だけ（曜日ごとに1本・写しの無い過去の日が無ければ0本）。数には planHintCount を通す
+      const hint = page.slice(page.indexOf('const hintDays'), page.indexOf('const report = buildDaycareMonth'))
+      assert.match(hint, /const hintDays = daycareMonthHintDays\(\{ month, today: at, snapshots, closedDates: closed\.v \}\)/)
+      assert.match(hint, /hintDays\.map\(async \(d\) => \{[\s\S]*?await fetchDaycarePlan\(d\)[\s\S]*?planHintCount\(r\.rows, r\.source, residents\)/)
+      assert.equal((page.match(/fetchDaycarePlan\(/g) ?? []).length, 1)
     })
 
     it('数え方は純関数（buildDaycareMonth）・現在地の月は URL の ?m=（parseMonthKey で不正値・先の月は今月）', () => {
-      assert.match(page, /buildDaycareMonth\(\{ month, today, snapshots, attendance, residents, closedDates: closed\.v \}\)/)
+      assert.match(page, /buildDaycareMonth\(\{ month, today: at, snapshots, attendance, residents, closedDates: closed\.v, weekdayPlanned \}\)/)
       assert.match(page, /const month = parseMonthKey\(search\.get\('m'\), currentMonth\) \?\? currentMonth/)
       assert.match(lib, /export const DAYCARE_CAPACITY = 27/)
       assert.match(lib, /公開 LP の値。指定申請上の利用定員とは突き合わせていない。\s*\n\s*\* 変わる時は PR で直す/)
       // 稼働率の式を添える・未記録は ▲ と文字（色だけにしない）
       assert.match(page, /延べ来所 \$\{s\.came\} ÷（定員 \$\{s\.capacity\} × 営業日 \$\{s\.businessDays\}）/)
       assert.match(page, /<span aria-hidden="true">▲<\/span>未記録 /)
-      // 上限に当たった時・読めない時は前の数も消す
-      assert.match(page, /\.catch\(\(e: unknown\) => \{\s*if \(!alive\) return\s*setData\(null\)/)
+      // 読み込みの状態は純関数で（上限に当たった時・読めない時は前の数も消す＝monthLoadFail・別の月の遅れた応答は捨てる）
+      assert.match(page, /setLoad\(\(prev\) => monthLoadStart\(prev, month, gen\)\)/)
+      assert.match(page, /setLoad\(\(prev\) => monthLoadDone\(prev, month, gen, \{/)
+      assert.match(page, /setLoad\(\(prev\) => monthLoadFail\(prev, month, gen, e instanceof DbError/)
+      assert.match(page, /disabled=\{!canGoNextMonth\(month, currentMonth\)\}/)
+      // 日をまたぐ: 60秒ごと・画面に戻った時に今日を取り直し、今月を見ている時だけ読み直す
+      assert.match(page, /const TODAY_TICK_MS = 60_000/)
+      assert.match(page, /if \(shouldReloadOnDayChange\(loadedRef\.current, today\)\) setReloadKey/)
+      // 未記録のタイルは数えた日のことだけを言い、写しの無い日を並べる（反証 中1）
+      assert.doesNotMatch(page, /すべて記録済み/)
+      assert.match(page, /数えた日（\$\{s\.countedDays\}日）の予定は記録済み/)
+      assert.match(page, /写しの無い日 \$\{s\.noSnapshotDays\}日は数えていません/)
+      assert.match(page, /記録の無い営業日かもしれない日 \{s\.maybeBusinessDays\}日/)
     })
 
     it('道・画面名・遅延読込（App.tsx）', () => {
@@ -649,10 +825,21 @@ if (M === null) {
       assert.doesNotMatch(header, /月の実績|daycareMonthPath/)
     })
 
-    it('今日の画面は ?day= を開いた時の1回だけ読む（readPersonDay）・URL から外す（日付の切り替えは URL に書かない）', () => {
-      assert.match(today, /const \[day, setDay\] = useState\(\(\) => readPersonDay\(search\.get\('day'\), todayIso\(\)\)\)/)
+    it('今日の画面は ?day= を開いた時の1回だけ読む（initialDayFromUrl）・URL から外す（日付の切り替えは URL に書かない）', () => {
+      assert.match(today, /const \[opened\] = useState\(\(\) => initialDayFromUrl\(search\.get\('day'\), todayIso\(\)\)\)/)
+      assert.match(today, /const \[day, setDay\] = useState\(opened\.day\)/)
+      assert.match(today, /if \(!opened\.strip\) return/)
       assert.match(today, /next\.delete\('day'\)/)
       assert.equal((today.match(/setSearch\(/g) ?? []).length, 1, 'URL を書くのは ?day= を外す1か所だけ')
+    })
+
+    it('1人の画面の〔デイの一覧へ〕は表示中の日の今日の画面へ（今日は ?day= なし・反証 軽5）', () => {
+      const person = code('../src/pages/DaycarePersonPage.tsx')
+      const i = person.indexOf('デイの一覧へ')
+      const link = person.slice(person.lastIndexOf('<Link', i), i)
+      assert.match(link, /to=\{daycareDayPath\(day, today\)\}/)
+      assert.equal(M.daycareDayPath('2026-11-03', '2026-11-10'), '/record/daycare?day=2026-11-03')
+      assert.equal(M.daycareDayPath('2026-11-10', '2026-11-10'), '/record/daycare')
     })
   })
 }
