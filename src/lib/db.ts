@@ -9638,6 +9638,64 @@ export async function fetchDaycareVitalsLive(dayIso: string): Promise<KeyedVital
   return list(res.data, normalizeKeyedVital, DAYCARE_DAY_ROWS).filter((v) => isDaycareVitalKey(v.client_key))
 }
 
+// ── 1人の画面のバイタルの推移（直近の回・2026-11-10 計画F）。読むだけ・SQL／表／RPC は足さない ─────────────
+// （〔未測定〕の印の列と正規化は下の〔未測定〕の節の UNMEASURED_COLS・normalizeUnmeasured を使う。印の節には vitals を読む処理を置かない）
+
+/** 表示中の日より前の日の、その方のデイの測定の取得上限（グラフは直近10回。値の無い行を数えない分の余裕） */
+const DAYCARE_TREND_ROWS = 30
+/** その方の表示中の日までの〔未測定〕の印の取得上限（10回×5欄＝50 に余裕。新しい日から） */
+const DAYCARE_TREND_MARKS = 200
+
+/**
+ * 1人の画面のバイタルの推移（直近の回）の材料。問い合わせは2本（同時に送る）。
+ * rows＝その方の、表示中の日（dayIso）より前の日のデイの測定（client_key が 'dc:' で始まる生きている行・client_key つき・
+ *   新しい日から上限まで）。表示中の日の回は1人の画面が読んだ fetchDaycareVitals の行を使う（上のバイタルの要約と同じ行）。
+ * unmeasured＝その方の、表示中の日までの〔未測定〕の印（取り消した行を除く・新しい日から上限まで）。表が無い DB（0062 未適用）は
+ *   []（印なし）・読めない時は null（値の無い欄を「読み込めませんでした」にする。測定の読み込みは止めない）。
+ * 測定を読めない時は例外（DbError）
+ */
+export async function fetchDaycareVitalsTrend(
+  residentId: number,
+  dayIso: string,
+): Promise<{ rows: KeyedVital[]; unmeasured: DaycareVitalUnmeasured[] | null }> {
+  assertDay(dayIso)
+  if (idNum(residentId) === null) return { rows: [], unmeasured: [] }
+  const sb = await getClient()
+  const [vitalsRes, marksRes] = await Promise.all([
+    sb
+      .from('vitals')
+      .select(`${VITAL_COLS},client_key`)
+      .eq('resident_id', residentId)
+      .lt('measured_on', dayIso)
+      .like('client_key', 'dc:%')
+      .is('deleted_at', null)
+      .order('measured_on', { ascending: false })
+      .order('id', { ascending: false })
+      .limit(DAYCARE_TREND_ROWS) as unknown as Promise<Res<unknown>>,
+    (
+      sb
+        .from('daycare_vital_unmeasured')
+        .select(UNMEASURED_COLS)
+        .eq('resident_id', residentId)
+        .lte('day', dayIso)
+        .is('deleted_at', null)
+        .order('day', { ascending: false })
+        .order('id', { ascending: false })
+        .limit(DAYCARE_TREND_MARKS) as unknown as Promise<Res<unknown>>
+    ).then(
+      (r) => r,
+      (): null => null,
+    ),
+  ])
+  if (vitalsRes.error !== null) throw readError(vitalsRes)
+  const rows = list(vitalsRes.data, normalizeKeyedVital, DAYCARE_TREND_ROWS).filter((v) => isDaycareVitalKey(v.client_key))
+  let unmeasured: DaycareVitalUnmeasured[] | null
+  if (marksRes === null) unmeasured = null
+  else if (marksRes.error !== null) unmeasured = isMissingTable(marksRes) ? [] : null
+  else unmeasured = list(marksRes.data, normalizeUnmeasured, DAYCARE_TREND_MARKS)
+  return { rows, unmeasured }
+}
+
 /**
  * 前回値の材料:方々の、期間（from〜to）の測定（種類を問わない・削除済みを除く・client_key つき）。新しい順に上限まで
  * （上限を超えた分は古い側が落ちる＝前回値の表示だけに使う）

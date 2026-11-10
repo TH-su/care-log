@@ -6,6 +6,8 @@
 //   書き込みの下準備（入浴の旗の観測・役割・休業日・開所の写し）はこの画面が自分で取る（入口の画面に頼らない＝M-085）。
 //   今日で記録の無い在籍中の方は「予定外」として〔予定外で到着〕を出す（今日の画面の〔予定にない方を追加〕から来た方・〔休み〕は出さない）。
 // 〔前の方〕〔次の方〕は、一括の画面と同じ方（予定の方のうち休み・入院中を除く全員と予定外で来た方）を五十音で回る。
+// 2026-11-10 計画F: 画面の最後（すべての入力の欄の後）に独立した欄「バイタルの推移（直近の回・10回まで）」の小さなグラフ（DaycareVitalsTrend・読むだけ。
+//   前の日の回と〔未測定〕の印は部品が読む）。入力の欄の位置は変えない（仮置き・親の決定）。
 //
 // 規律（段階1と同じ）:
 //   ・取得・保存は db.ts の関数だけ。昼食・おやつは既存の saveMealEdits（meals の lunch・snack）、水分は既存の insertFluid・
@@ -55,6 +57,8 @@ import type { CellConflict, CellEditInput, DaycareMealRow, MealCellField, MealTa
 import { RecorderBar } from '../components/RecorderBar'
 import { DaycareActivitySection } from '../components/DaycareActivitySection'
 import { DaycareTrainingCard } from '../components/DaycareTrainingCard'
+import { DaycareVitalsTrend } from '../components/DaycareVitalsTrend'
+import { trendChangeHits } from '../lib/daycareVitalsTrend'
 import { hasTimes, hmShort, useDaycareAttendanceOps } from '../components/DaycareAttendanceOps'
 import { writeDaycareHandoffFor } from '../lib/daycareHandoff'
 import {
@@ -65,6 +69,7 @@ import {
   memoWithFluid,
   memoWithMeal,
   memoWithoutAttendance,
+  memoVitalsOk,
   memoWithoutFluid,
   rememberDaycareDay,
   updateDaycareDayMemo,
@@ -138,6 +143,11 @@ interface PersonData {
   /** 食事・水分を読めたか（読めない時はその欄だけ「読めませんでした」・出欠と入浴の操作は動かす＝親の検収 軽3） */
   intakeOk: boolean
   /**
+   * その日のデイの測定を読めたか（2026-11-10 計画F 反証 軽8: 推移に「今日の値を読み込めませんでした」と出す。上の要約は今までどおり「—」）。
+   * 控えで開いた時は控えの値（memoVitalsOk）
+   */
+  vitalsOk: boolean
+  /**
    * 食事・水分を、この読み込みでサーバーから読めたか（親の反証 中1・2026-10-25）。intakeOk（表示に使える値がある）と分ける:
    * 静かな読み直しで食事・水分だけ読めなかった時は、前の値を出す（intakeOk）が、送信待ちの水分の消し込み・控えへの書き込みは
    * 「今回読めた」時だけ行う（古い一覧を最新として消し込まない）
@@ -208,6 +218,8 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [reloadKey, setReloadKey] = useState(0)
+  /** 推移（計画F）を読み直す変更の知らせの回数（その方の表示中の日以前のデイの測定・trendChangeHits） */
+  const [trendChange, setTrendChange] = useState(0)
   const [residents, setResidents] = useState<Resident[]>([])
   const [targets, setTargets] = useState<Map<number, ResidentTargets>>(new Map())
   // 段階2d-2: 個人のバイタルの閾値（印をその方のその日の基準で出す。読めない時は施設の基準・その旨を出す）
@@ -333,7 +345,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
         usable ? Promise.resolve(null) : fetchDaycarePlan(target),
         missing ? Promise.resolve([] as DaycareAttendance[]) : fetchDaycareAttendance(target),
         fetchBathDay(target).catch(() => [] as BathRecord[]),
-        fetchDaycareVitals(target).catch(() => ({ live: [] as KeyedVital[], keys: [] as string[] })),
+        fetchDaycareVitals(target).catch(() => null),
         fetchDaycareIntake(target).catch(() => null),
       ])
       if (gen !== genRef.current || target !== dayRef.current) return
@@ -349,7 +361,8 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           missing: missing || plan?.missing === true,
           attendance,
           baths,
-          vitals: dv.live,
+          vitals: dv?.live ?? [],
+          vitalsOk: dv !== null,
           meals: intake?.meals ?? (keep ? prev.meals : []),
           fluids: intake?.fluids ?? (keep ? prev.fluids : []),
           intakeOk: intake !== null || keep,
@@ -375,6 +388,7 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           attendance: m.attendance,
           baths: m.baths,
           vitals: m.vitals,
+          vitalsOk: memoVitalsOk(m),
           meals: m.meals,
           fluids: m.fluids,
           intakeOk: m.intakeOk,
@@ -421,6 +435,8 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
     const offA = subscribeDaycareChanges(onChange)
     const offB = subscribeBathChanges(onChange)
     const offC = subscribeChanges((table, info) => {
+      // 2026-11-10 計画F 反証 軽7: その方の表示中の日以前のデイの測定の変更（行の分からない取り直しの合図を含む）は推移も読み直す（部品が 400ms でまとめる）
+      if (trendChangeHits(table, info, residentRef.current, dayRef.current)) setTrendChange((n) => n + 1)
       if (table === 'vitals' || table === 'meals' || table === 'fluid_intake') onChange(table, info)
     })
     let last = queuePending()
@@ -450,6 +466,8 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
       attendance: data.attendance,
       baths: data.baths,
       vitals: data.vitals,
+      // 2026-11-10 計画F 反証の確認 軽4: バイタルを読めなかった時は控えの読めた値を空で上書きしない（mergeDaycareMemo が前の値を残す）
+      vitalsOk: data.vitalsOk,
       meals: data.meals,
       fluids: data.fluids,
       intakeOk: data.intakeOk,
@@ -1485,6 +1503,24 @@ export function DaycarePersonPage({ staff = undefined, actorId = null }: Daycare
           排泄ケアアプリで記録する<span aria-hidden="true"> ›</span>
         </a>
         {marks.button({ kind: 'ex' }, excretionMarkText(exDay), ex.status === 'ok' && ex.view.linked && exDay !== null)}
+      </section>
+
+      {/* 2026-11-10 計画F（仮置き・親の決定）: バイタルの推移（直近の回）の小さなグラフ。入力の欄を下げないよう、すべての入力の欄・
+          申し送りの印の後に独立した欄で置く。表示中の日の回は上のバイタルの要約と同じ行（data.vitals）・前の日の回と〔未測定〕の印は
+          部品が読む。基準はその回の日のその方の基準 */}
+      <section aria-labelledby="h-trend" className={sectionCls}>
+        <DaycareVitalsTrend
+          headingId="h-trend"
+          residentId={residentId}
+          day={data.day}
+          isToday={data.day === today}
+          dayRows={data.vitals}
+          dayRowsOk={data.vitalsOk}
+          target={targets.get(residentId)}
+          limitsOf={(d) => limits.lookup(residentId, d)}
+          refreshKey={reloadKey}
+          changeKey={trendChange}
+        />
       </section>
 
       {marks.dialogs}
