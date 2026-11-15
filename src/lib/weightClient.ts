@@ -362,9 +362,10 @@ type SnapFetchResult = { ok: true; snap: WeightSnapshot } | { ok: false; reason:
 
 /**
  * 共通の DB から体重を読む手（db.ts が置く）。切り替え済みで形が正しい時だけ getAll と同じ形の中身
- * （{residents, records}）を返し、それ以外（関数が無い・切り替え前・断られた・形が違う・通信できない）は null。例外は投げない
+ * （{residents, records}）を返す。切り替え前（Google が正本）は 'shadow'、それ以外（関数が無い・断られた・形が違う・
+ * 通信できない）は null。例外は投げない
  */
-export type WeightDbReader = () => Promise<{ residents: unknown[]; records: unknown[] } | null>
+export type WeightDbReader = () => Promise<{ residents: unknown[]; records: unknown[] } | 'shadow' | null>
 let weightDbReader: WeightDbReader | null = null
 
 /** DB の読み手を置く（db.ts が読み込まれた時に1回だけ呼ぶ。試験は null で外せる） */
@@ -394,11 +395,13 @@ export function clearWeightCache(): void {
 }
 
 /** DB の読み手を1回呼ぶ（読み手が無い・null・例外は「DB からは読めない」＝GAS へ戻る） */
-async function readFromDb(): Promise<WeightSnapshot | null> {
+/** DB の読み手の結果。'none'＝読み手が無い（試験など）・'shadow'＝切り替え前（Google が正本）・null＝読めない */
+async function readFromDb(): Promise<WeightSnapshot | 'none' | 'shadow' | null> {
   const reader = weightDbReader
-  if (reader === null) return null
+  if (reader === null) return 'none'
   try {
     const payload = await reader()
+    if (payload === 'shadow') return 'shadow'
     if (payload === null || !Array.isArray(payload.residents) || !Array.isArray(payload.records)) return null
     return parseWeightPayload(payload)
   } catch {
@@ -437,11 +440,16 @@ async function requestAll(url: string, token: string): Promise<SnapFetchResult> 
   }
 }
 
-/** 先に DB、読めなければ体重管理の GAS（接続設定がある時だけ）。メモリへの控えもここで行う */
+/**
+ * 先に DB。体重管理の GAS（接続設定がある時だけ）を読むのは、DB が「切り替え前（Google が正本）」と答えた時と、DB の読み手が無い時だけ。
+ * DB を読めない時（通信の失敗・断られた・形が違う）は Google へ戻さず失敗にする（2026-11-15・M1 順4: 写し返しを止める前に GAS を読まないようにする）。
+ * メモリへの控えもここで行う
+ */
 async function loadAll(cfg: { url: string; token: string } | 'invalid' | null): Promise<SnapFetchResult> {
   const gen = weightGen
   const fromDb = await readFromDb()
-  if (fromDb !== null) {
+  if (fromDb === null) return { ok: false, reason: 'network' }
+  if (fromDb !== 'shadow' && fromDb !== 'none') {
     if (gen === weightGen) weightCache = { src: WEIGHT_SRC_DB, at: Date.now(), snap: fromDb }
     return { ok: true, snap: fromDb }
   }
@@ -454,7 +462,8 @@ async function loadAll(cfg: { url: string; token: string } | 'invalid' | null): 
 }
 
 /**
- * 体重を読み、resident_id ごとの測定の列にする。先に共通の DB（切り替え済みの時だけ）、読めなければ体重管理の GAS の getAll。
+ * 体重を読み、resident_id ごとの測定の列にする。先に共通の DB（切り替え済みの時だけ）、切り替え前の時だけ体重管理の GAS の getAll
+ * （DB を読めない時は GAS へ戻さず { ok:false, reason:'network' }）。
  * DB から読めず接続設定も無い端末では null。失敗は { ok:false, reason }（例外を外へ出さない）。
  * 直近 WEIGHT_CACHE_MS 以内に DB か同じ接続先から取れていれば、通信せずその結果を使う。
  * force（「再試行する」）の時はメモリの結果を使わず取り直す。送信中の取得があればそれを待つ（二重に投げない）。

@@ -9358,8 +9358,9 @@ export async function syncTrainingDue(
 
 // ── 体重と計画書の期限を、共通の DB の正本から読む（2026-11-08・care-backend 0077・写し返しを止める計画 3-2） ──
 //
-// どちらも読むだけ。切り替え済み（live）で形が正しい時だけ中身を返し、それ以外（関数が無い・切り替え前・断られた・形が違う・
-// 通信できない・待ちの上限を過ぎた）は null を返す＝呼ぶ側が今までどおり Google（体重管理・計画書の GAS）へ戻る。例外は投げない。
+// どちらも読むだけ。切り替え済み（live）で形が正しい時だけ中身を返す。切り替え前（{ok:false, error:'shadow'}＝Google が正本）は
+// 'shadow' を返す＝呼ぶ側が今までどおり Google（体重管理・計画書の GAS）から読む。それ以外（関数が無い・断られた・形が違う・
+// 通信できない・待ちの上限を過ぎた）は null＝呼ぶ側は Google へ戻さず「読めない」として止める（2026-11-15・M1 順4）。例外は投げない。
 // 結果は呼ぶ側のメモリにだけ渡す（dataCache・端末に置かない）。
 
 /** 共通の DB の読む口の応答待ちの上限（ms。読めなければ Google へ戻るので、長く待たせない） */
@@ -9369,7 +9370,7 @@ const SHARED_READ_TIMEOUT_MS = 20_000
  * 体重（care-backend 0077 の carelog_weight_read・許可リストの有効な人なら現場も）。
  * 返すのは GAS の getAll と同じ名前の項目だけ（入居者の id・masterId、記録の residentId・measuredOn・weight・wheelchairKg・measureMode・updatedAt）
  */
-export async function readWeightsFromDb(): Promise<{ residents: unknown[]; records: unknown[] } | null> {
+export async function readWeightsFromDb(): Promise<{ residents: unknown[]; records: unknown[] } | 'shadow' | null> {
   try {
     const sb = await getClient()
     const res = await withTimeout(
@@ -9381,6 +9382,7 @@ export async function readWeightsFromDb(): Promise<{ residents: unknown[]; recor
     )
     if (res.error !== null) return null
     const r = asRecord(res.data)
+    if (r !== null && r.ok === false && r.error === 'shadow') return 'shadow'
     if (r === null || r.ok !== true || !Array.isArray(r.residents) || !Array.isArray(r.records)) return null
     return { residents: r.residents, records: r.records }
   } catch {
@@ -9393,9 +9395,9 @@ setWeightDbReader(readWeightsFromDb)
 /**
  * 計画書の索引の期限と状態（care-backend 0077 の carelog_training_due_index・事務所・管理者だけ）。
  * 返すのは索引と同じ形（{rows:{利用者番号:{latestPlanDate, nextDue, status, stop:{reason, from}}}, settings:{dueRule, warnDays}}）だけ。
- * 索引がまだ無い（data が null）時も null（Google へ戻る）
+ * 切り替え前は 'shadow'（Google から読む）。切り替え後で索引がまだ無い（data が null）時は 'empty'（Google へ戻さない）
  */
-export async function readTrainingPlanIndexFromDb(): Promise<Record<string, unknown> | null> {
+export async function readTrainingPlanIndexFromDb(): Promise<Record<string, unknown> | 'shadow' | 'empty' | null> {
   try {
     const sb = await getClient()
     const res = await withTimeout(
@@ -9407,7 +9409,9 @@ export async function readTrainingPlanIndexFromDb(): Promise<Record<string, unkn
     )
     if (res.error !== null) return null
     const r = asRecord(res.data)
+    if (r !== null && r.ok === false && r.error === 'shadow') return 'shadow'
     if (r === null || r.ok !== true || r.mode !== 'live') return null
+    if (r.data === null || r.data === undefined) return 'empty'
     return asRecord(r.data)
   } catch {
     return null

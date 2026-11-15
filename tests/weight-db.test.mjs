@@ -139,26 +139,38 @@ describe('体重を共通の DB から読む道（偽の読み手・偽の GAS�
     assert.equal(calls.length, 0)
   })
 
+  it('DB の読み手が切り替え前（shadow）と答えた時だけ今までどおり GAS へ戻る。接続設定も無ければ null', async () => {
+    installLS({ wtmgr_api_url: DUMMY_URL, wtmgr_api_token: DUMMY_TOKEN, wtmgr_v1: LOCAL })
+    W.setWeightDbReader(async () => 'shadow')
+    const r = await W.fetchWeights(CL)
+    assert.equal(r.ok, true)
+    assert.deepEqual(calls.map((c) => [c.url, c.body.action]), [[DUMMY_URL, 'getAll']])
+    W.clearWeightCache()
+    installLS({})
+    assert.equal(await W.fetchWeights(CL), null)
+    assert.equal(calls.length, 1)
+    installLS({ wtmgr_api_url: 'https://example.com/x' })
+    assert.deepEqual(await W.fetchWeights(CL), { ok: false, reason: 'url' }, 'GAS の形でない接続先へは送らない')
+    assert.equal(calls.length, 1)
+  })
+
+  // 2026-11-15（M1 順4）: DB を読めない時は、接続設定があっても体重管理の GAS へ戻さず「読めない」にする
   for (const [label, reader] of [
-    ['null（関数が無い・切り替え前・断られた）', async () => null],
+    ['null（関数が無い・断られた・通信の失敗）', async () => null],
     ['例外', async () => {
       throw new Error('boom')
     }],
     ['形が違う（residents が配列でない）', async () => ({ residents: {}, records: [] })],
   ]) {
-    it(`DB の読み手が ${label} の時は今までどおり GAS へ戻る。接続設定も無ければ null`, async () => {
+    it(`DB の読み手が ${label} の時は GAS へ戻さず { ok:false, reason:'network' }（接続設定の有無によらない）`, async () => {
       installLS({ wtmgr_api_url: DUMMY_URL, wtmgr_api_token: DUMMY_TOKEN, wtmgr_v1: LOCAL })
       W.setWeightDbReader(reader)
-      const r = await W.fetchWeights(CL)
-      assert.equal(r.ok, true)
-      assert.deepEqual(calls.map((c) => [c.url, c.body.action]), [[DUMMY_URL, 'getAll']])
+      assert.deepEqual(await W.fetchWeights(CL), { ok: false, reason: 'network' })
+      assert.equal(calls.length, 0, 'GAS へ送らない')
       W.clearWeightCache()
       installLS({})
-      assert.equal(await W.fetchWeights(CL), null)
-      assert.equal(calls.length, 1)
-      installLS({ wtmgr_api_url: 'https://example.com/x' })
-      assert.deepEqual(await W.fetchWeights(CL), { ok: false, reason: 'url' }, 'GAS の形でない接続先へは送らない')
-      assert.equal(calls.length, 1)
+      assert.deepEqual(await W.fetchWeights(CL), { ok: false, reason: 'network' })
+      assert.equal(calls.length, 0)
     })
   }
 
@@ -203,12 +215,12 @@ describe('体重を共通の DB から読む道（偽の読み手・偽の GAS�
     assert.equal((await q).ok, true)
   })
 
-  it('DB から読めず GAS から読んだ結果は、接続先ごとにメモリに持つ（接続先を変えたら読み直す）', async () => {
+  it('DB が切り替え前で GAS から読んだ結果は、接続先ごとにメモリに持つ（接続先を変えたら読み直す）', async () => {
     installLS({ wtmgr_api_url: DUMMY_URL, wtmgr_api_token: DUMMY_TOKEN })
     let dbCalls = 0
     W.setWeightDbReader(async () => {
       dbCalls++
-      return null
+      return 'shadow'
     })
     await W.fetchWeights(CL)
     await W.fetchWeights(CL)

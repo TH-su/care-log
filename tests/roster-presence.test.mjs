@@ -154,7 +154,11 @@ function memSupabase(tables = {}, fail = () => null) {
   // 既定では、勤務表の読む口 carelog_staff_names は「勤務表は Google が正本（mode:shadow）」と答える
   // （2026-11-15 から、GAS の職員名簿を読むのはこの時だけ。GAS の職員名簿から読む前提の試験の材料。読む口を試す試験は置き換える・消す）
   const rpcCalls = []
-  const rpcReplies = { carelog_staff_names: () => ({ data: { mode: 'shadow' }, error: null, status: 200 }) }
+  // 利用者名簿の読む口 carelog_roster も同じく、既定では「入居者マスタは Google が正本（mode:shadow）」と答える（2026-11-15）
+  const rpcReplies = {
+    carelog_staff_names: () => ({ data: { mode: 'shadow' }, error: null, status: 200 }),
+    carelog_roster: () => ({ data: { mode: 'shadow' }, error: null, status: 200 }),
+  }
   const rpc = (fn, args) => {
     rpcCalls.push(fn)
     if (fn === 'my_account') return Promise.resolve({ data: { role: testRole }, error: null, status: 200 })
@@ -830,8 +834,16 @@ describe('F21 「書いています」の判定（liveComposing・latestComposin
 // ══════════════════════════════════════════════════════════════
 describe('F52 カルテの体重の端末差（wm_ の id から当てる）', { skip: W === null ? UNSUPPORTED : false }, () => {
   const WURL = 'https://script.google.com/macros/s/WEIGHT_DUMMY/exec'
-  beforeEach(() => W.clearWeightCache())
-  afterEach(() => W.clearWeightCache())
+  // この組は体重管理の GAS から読む場面を試す。2026-11-15 から GAS を読むのは共通の DB が「切り替え前」と答えた時だけなので、
+  // DB の読み手を「切り替え前」と答える物に置き換える（終わったら db.ts の読み手に戻す）
+  beforeEach(() => {
+    W.setWeightDbReader(async () => 'shadow')
+    W.clearWeightCache()
+  })
+  afterEach(() => {
+    W.setWeightDbReader(D.readWeightsFromDb)
+    W.clearWeightCache()
+  })
   function server(body) {
     lsStore.set('wtmgr_api_url', WURL)
     globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => body })
@@ -1769,27 +1781,45 @@ describe('利用者名簿は共通のデータベースの読む口（0078）か
     assert.deepEqual(a, g)
   })
 
+  it('切り替える前（mode:shadow）の時だけ、今までどおり入居者マスタの GAS から読む', async () => {
+    configure()
+    const sb = base()
+    sb.rpcReplies.carelog_roster = ok({ mode: 'shadow' })
+    useClient(sb)
+    const gas = fakeGas({ roster: [...LIST, { id: 'R008', name: '利用者08' }], staff: ['職員01'] })
+    const out = await G.syncMasters()
+    assert.equal(typeof out, 'object')
+    assert.ok(sb.rpcCalls.includes('carelog_roster'))
+    assert.deepEqual(toMaster(gas).map((r) => [r.method, r.body?.action]), [['POST', 'getRoster']])
+    assert.ok(sb.db.residents.some((r) => r.source_id === 'R008'), 'GAS の名簿を反映した')
+  })
+
+  // 2026-11-15（M1 順4）: 読めない時（関数が無い・断られた・通信の失敗・切り替えの印の無い応答）は GAS へ戻さず、利用者の行を書き換えずに止める
   const fallbacks = [
     ['関数が無い（0078 が未適用）', null],
     ['断られた（42501・現場や写し返し専用のアカウント）', () => ({ data: null, error: { message: 'not allowed', code: '42501' }, status: 403 })],
     ['通信の失敗（例外）', () => Promise.reject(new Error('network'))],
-    ['切り替える前（mode:shadow）', ok({ mode: 'shadow' })],
     ['応答が配列', ok([{ id: 'R009', name: '利用者09' }])],
     ['応答が空', ok(null)],
+    ['mode が文字でない', ok({ mode: 1, ok: true, roster: [{ id: 'R009', name: '利用者09' }] })],
   ]
   for (const [label, reply] of fallbacks) {
-    it(`使えない時は今までどおり入居者マスタの GAS から読む: ${label}`, async () => {
+    it(`読めない時は入居者マスタの GAS へ戻さず、利用者の行を書き換えずに止める（職員は同期する）: ${label}`, async () => {
       configure()
       const sb = base()
       if (reply) sb.rpcReplies.carelog_roster = reply
+      else delete sb.rpcReplies.carelog_roster
       useClient(sb)
-      const gas = fakeGas({ roster: [...LIST, { id: 'R008', name: '利用者08' }], staff: ['職員01'] })
-      const out = await G.syncMasters()
-      assert.equal(typeof out, 'object', label)
+      const gas = fakeGas({ roster: [...LIST, { id: 'R008', name: '利用者08' }], staff: ['職員01', '職員02'] })
+      await assert.rejects(G.syncMasters(), (e) => {
+        assert.equal(e.message, G.ROSTER_DB_BROKEN_MSG, label)
+        return true
+      })
       assert.ok(sb.rpcCalls.includes('carelog_roster'), label)
-      assert.deepEqual(toMaster(gas).map((r) => [r.method, r.body?.action]), [['POST', 'getRoster']], label)
-      assert.ok(sb.db.residents.some((r) => r.source_id === 'R008'), `${label}: GAS の名簿を反映した`)
-      assert.equal(sb.db.residents.some((r) => r.source_id === 'R009'), false, `${label}: 使えない応答の方を入れていない`)
+      assert.equal(toMaster(gas).length, 0, `${label}: 入居者マスタの GAS を呼んでいない`)
+      assert.equal(resWrites(sb), 0, `${label}: 利用者の表に書いていない`)
+      assert.equal(sb.db.residents.some((r) => r.source_id === 'R008' || r.source_id === 'R009'), false, label)
+      assert.ok(sb.db.staff.some((s) => s.name === '職員02'), `${label}: 職員マスタは同期する`)
     })
   }
 

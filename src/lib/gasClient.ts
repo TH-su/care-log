@@ -383,13 +383,15 @@ function isLiveReply(r: unknown): r is Record<string, unknown> {
  * 返すのは GAS の getRoster と同じ形（{roster:[…]}）の、ケアログが使う項目（id・name・kana・room・gender・careLevel・active）だけ。
  * 退去した方も行として返す（active:false）＝事務所の合言葉の GAS の getRoster と同じ。GAS と同じ取り出し方（projectRoster）を通す。
  * 戻り値: 名簿（1人以上）… これを使い、入居者マスタの GAS を呼ばない／
- *         null … 関数が無い・断られた・通信の失敗・時間切れ・切り替える前（shadow）＝今までどおり入居者マスタの GAS から読む／
- *         'broken' … 入居者マスタは切り替え後（live）なのに形が違う・0人＝ GAS へ戻さず、利用者の一覧を変えずに止める（代表者の決定 2026-11-08 と同じ）
+ *         null … 切り替えの印が live でない（shadow＝切り替える前・Google へ戻した後）＝入居者マスタの GAS から読む（GAS が正本の間だけ）／
+ *         'broken' … 入居者マスタは切り替え後（live）なのに形が違う・0人、または関数が無い・断られた・通信の失敗・時間切れ・切り替えの印の無い応答
+ *                    ＝ GAS へ戻さず、利用者の一覧を変えずに止める（代表者の決定 2026-11-08 と同じ・2026-11-15 M1 順4 で読めない時も同じに）
  * 応答の中身は console・localStorage に残さない
  */
 async function pullRosterFromDb(): Promise<RosterEntry[] | null | 'broken'> {
   const r = await callReadRpc('carelog_roster', TIMEOUT_MS)
-  if (r === 'unavailable' || !isLiveReply(r)) return null
+  if (r === 'unavailable') return 'broken'
+  if (!isLiveReply(r)) return isModeReply(r) ? null : 'broken'
   if (r.ok !== true || !Array.isArray(r.roster)) return 'broken'
   const roster = projectRoster(r)
   return roster !== null && roster.length > 0 ? roster : 'broken'
