@@ -723,7 +723,11 @@ describe('静的な見張り（読むだけ・個人情報を残さない）', (
     // tests/daycare-person.test.mjs が別に確かめる）
     // pages/GlanceBoardPage.tsx は見守りボード（2026-10-29）が fetchExcretion（読むだけ・全員分の写しを1回）を呼ぶ
     // pages/GlancePage.tsx はひと目ボード（2026-10-29）が fetchExcretion（読むだけ・全員分の写しを1回。照合は glance.ts）を呼ぶ
-    assert.deepEqual(users.sort(), ['lib/cachedReads.ts', 'pages/AlertsPage.tsx', 'pages/DaycarePersonPage.tsx', 'pages/GlanceBoardPage.tsx', 'pages/GlancePage.tsx', 'pages/KartePage.tsx'])
+    // lib/db.ts は共通の DB の読み手を置く（setExcretionDbReader）とメモリを捨てる（clearExcretionCache）だけ（2026-11-15・0094）。
+    //   GAS の URL へは送らない（読み込むのはこの2つだけ）ことを下で確かめる
+    const dbSrc = readFileSync(join(root, 'lib/db.ts'), 'utf8')
+    assert.match(dbSrc, /\nimport \{ clearExcretionCache, setExcretionDbReader \} from '\.\/excretionClient'\n/)
+    assert.deepEqual(users.sort(), ['lib/cachedReads.ts', 'lib/db.ts', 'pages/AlertsPage.tsx', 'pages/DaycarePersonPage.tsx', 'pages/GlanceBoardPage.tsx', 'pages/GlancePage.tsx', 'pages/KartePage.tsx'])
   })
 
   it('カルテ: 排泄の欄（karte-excretion）を食事・水分の次に置き、移動ボタンと ?sec= の許可リストにも入る', () => {

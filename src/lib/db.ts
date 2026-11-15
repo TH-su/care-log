@@ -121,6 +121,7 @@ import type { ContactNoteField, DaycareContactNote, DaycareDayNote } from './day
 import type { DueCopyRow, DueCopySettings } from './trainingDue'
 import type { TrainingDueCopyInput, TrainingDueSettingsInput, TrainingDueSyncResult } from './trainingPlanClient'
 import { clearWeightCache, setWeightDbReader } from './weightClient'
+import { clearExcretionCache, setExcretionDbReader } from './excretionClient'
 import { addDays as addDaysIso } from './format'
 import { normalizeChoices, normalizeIncidentDetail, validateIncidentInput } from './incident'
 import type { IncidentInput } from './incident'
@@ -582,6 +583,7 @@ async function onAuthEvent(event: string): Promise<void> {
     deniedProbeInFlight = null
     forgetPresenceTopic() // 居場所のトピック名も前のアカウントの施設のもの（0056）
     clearWeightCache() // メモリの体重も前のアカウントのもの（共通の DB から読んだ分を使い回さない・0077）
+    clearExcretionCache() // 排便の記録も同じ（0094）
   }
   if (event !== 'SIGNED_IN' && event !== 'TOKEN_REFRESHED') return
   // ログインし直した: 拒否で止まった退避 op を1回だけ送り直す（F37。権限が直った後なら届く。TOKEN_REFRESHED では解かない）。
@@ -9391,6 +9393,35 @@ export async function readWeightsFromDb(): Promise<{ residents: unknown[]; recor
 }
 // 体重の読み口（weightClient.ts）に DB の読み手を置く（weightClient は db.ts を読み込まない＝試験から単独で読めるまま）
 setWeightDbReader(readWeightsFromDb)
+
+/**
+ * 排便の記録（care-backend 0094 の carelog_haiben_read・許可リストの有効な人なら現場も＝今の hb_call と同じ範囲）。2026-11-15・M1 順4。
+ * 切り替えの印（mode）が 'live' で ok:true・residents と records が配列の時だけ中身（GAS の getAll と同じ名前の、ケアログが使う項目だけ）を返す。
+ * mode が文字で live でない（shadow＝切り替える前・Google へ戻した後）時は 'shadow'＝呼ぶ側が今までどおり排便記録の GAS から読む。
+ * それ以外（関数が無い・断られた・形が違う・印の無い応答・通信できない・待ちの上限を過ぎた）は null＝GAS へ戻さず「読めない」として止める。例外は投げない
+ */
+export async function readExcretionFromDb(): Promise<{ residents: unknown[]; records: unknown[]; cfg?: unknown } | 'shadow' | null> {
+  try {
+    const sb = await getClient()
+    const res = await withTimeout(
+      (signal) => {
+        const q = sb.rpc('carelog_haiben_read') as unknown as PromiseLike<Res<unknown>> & { abortSignal?: (s: AbortSignal) => PromiseLike<Res<unknown>> }
+        return signal !== null && typeof q.abortSignal === 'function' ? q.abortSignal(signal) : q
+      },
+      SHARED_READ_TIMEOUT_MS,
+    )
+    if (res.error !== null) return null
+    const r = asRecord(res.data)
+    if (r === null || typeof r.mode !== 'string') return null
+    if (r.mode !== 'live') return 'shadow'
+    if (r.ok !== true || !Array.isArray(r.residents) || !Array.isArray(r.records)) return null
+    return { residents: r.residents, records: r.records, cfg: r.cfg }
+  } catch {
+    return null
+  }
+}
+// 排便の読み口（excretionClient.ts）に DB の読み手を置く（excretionClient は db.ts を読み込まない＝試験から単独で読めるまま）
+setExcretionDbReader(readExcretionFromDb)
 
 /**
  * 計画書の索引の期限と状態（care-backend 0077 の carelog_training_due_index・事務所・管理者だけ）。
