@@ -165,7 +165,11 @@ function fakeClient(state) {
         if (state.syncResult === 'forbidden') return Promise.resolve({ data: null, error: { message: 'training_due_office_only: x', code: '42501' }, status: 403 })
         return Promise.resolve({ data: state.syncResult, error: null, status: 200 })
       }
-      // 共通の DB の正本の読む口（care-backend 0077）。{ error: 'コード' } の形なら断られた・無い応答、ほかはそのまま data で返す
+      // 共通の DB の正本の読む口（care-backend 0077）。{ error: 'コード' } の形なら断られた・無い応答、ほかはそのまま data で返す。
+      // 計画書の索引は、置いていない時は「切り替え前（Google が正本）」と答える（2026-11-15 から GAS を読むのはこの時だけ＝GAS から読む前提の試験の材料）
+      if (fn === 'carelog_training_due_index' && state.tpIndex === undefined) {
+        return Promise.resolve({ data: { ok: false, error: 'shadow' }, error: null, status: 200 })
+      }
       if ((fn === 'carelog_training_due_index' && state.tpIndex !== undefined) || (fn === 'carelog_weight_read' && state.weightRead !== undefined)) {
         const v = fn === 'carelog_training_due_index' ? state.tpIndex : state.weightRead
         if (v !== null && typeof v === 'object' && typeof v.error === 'string' && v.ok === undefined) {
@@ -722,7 +726,7 @@ if (DB === null) {
       const viaGas = await fresh({ role: 'office', residents: [resident(1, 'T001'), resident(2, 'T002')], syncResult: ok })
       lsStore.set('tp_cfg', JSON.stringify({ url: FAKE_URL, token: 'fake-token' }))
       const g = await withFakePlanApp(() => SYNC.syncTrainingPlanDue(4))
-      assert.equal(g.seen.length, 1, '関数が無い DB では GAS を読む（今までどおり）')
+      assert.equal(g.seen.length, 1, '切り替え前の DB では GAS を読む（今までどおり）')
       assert.equal(g.out.kind, 'done')
       const gasPayload = syncPayload(viaGas)
       await done()
@@ -743,28 +747,39 @@ if (DB === null) {
       assert.equal(syncPayload(st).p_rows.length, 2)
       await done()
     })
-    for (const [label, tpIndex] of [
-      ['切り替え前（shadow）', { ok: false, error: 'shadow' }],
-      ['索引がまだ無い（data が null）', { ok: true, mode: 'live', data: null }],
-      ['形が違う（noshape）', { ok: false, error: 'noshape' }],
-      ['形が違う（data が配列）', { ok: true, mode: 'live', data: [1] }],
-      ['断られた（42501）', { error: '42501' }],
-      ['関数が無い（PGRST202）', { error: 'PGRST202' }],
+    it('計画書: DB が切り替え前（shadow）の時だけ今までどおり計画書の GAS を読む。接続設定も無ければ「接続設定がありません」で何も書かない', async () => {
+      const tpIndex = { ok: false, error: 'shadow' }
+      const st = await fresh({ role: 'office', residents: [resident(1, 'T001')], syncResult: { ok: true, written: 1, unmatched: 0, cancelled: 0 }, tpIndex })
+      lsStore.set('tp_cfg', JSON.stringify({ url: FAKE_URL, token: 'fake-token' }))
+      const a = await withFakePlanApp(() => SYNC.syncTrainingPlanDue(4))
+      assert.equal(a.out.kind, 'done')
+      assert.deepEqual(a.seen.map((x) => [x.url, x.body.action, x.body.key]), [[FAKE_URL, 'get', 'training_plan:index']])
+      await done()
+      const st2 = await fresh({ role: 'office', residents: [resident(1, 'T001')], syncResult: { ok: true, written: 1, unmatched: 0, cancelled: 0 }, tpIndex })
+      const b = await withFakePlanApp(() => SYNC.syncTrainingPlanDue(4))
+      assert.equal(b.out.kind, 'fail')
+      assert.match(b.out.text, /計画書アプリの接続設定がありません/)
+      assert.equal(b.seen.length, 0)
+      assert.equal(st2.calls.some((c) => c.fn === 'daycare_training_due_sync'), false)
+      assert.ok(st.calls.length > 0)
+      await done()
+    })
+    // 2026-11-15（M1 順4）: 読めない時・切り替え後で索引がまだ無い時は、計画書の GAS へ戻さず写さない
+    for (const [label, tpIndex, text] of [
+      ['索引がまだ無い（切り替え後・data が null）', { ok: true, mode: 'live', data: null }, /一覧（索引）がまだありません/],
+      ['形が違う（noshape）', { ok: false, error: 'noshape' }, /一覧を読めませんでした/],
+      ['形が違う（data が配列）', { ok: true, mode: 'live', data: [1] }, /一覧を読めませんでした/],
+      ['断られた（42501）', { error: '42501' }, /一覧を読めませんでした/],
+      ['関数が無い（PGRST202）', { error: 'PGRST202' }, /一覧を読めませんでした/],
     ]) {
-      it(`計画書: DB が ${label} の時は今までどおり計画書の GAS を読む。接続設定も無ければ「接続設定がありません」で何も書かない`, async () => {
+      it(`計画書: DB が ${label} の時は計画書の GAS へ戻さず、何も書かずに止める`, async () => {
         const st = await fresh({ role: 'office', residents: [resident(1, 'T001')], syncResult: { ok: true, written: 1, unmatched: 0, cancelled: 0 }, tpIndex })
         lsStore.set('tp_cfg', JSON.stringify({ url: FAKE_URL, token: 'fake-token' }))
         const a = await withFakePlanApp(() => SYNC.syncTrainingPlanDue(4))
-        assert.equal(a.out.kind, 'done')
-        assert.deepEqual(a.seen.map((x) => [x.url, x.body.action, x.body.key]), [[FAKE_URL, 'get', 'training_plan:index']])
-        await done()
-        const st2 = await fresh({ role: 'office', residents: [resident(1, 'T001')], syncResult: { ok: true, written: 1, unmatched: 0, cancelled: 0 }, tpIndex })
-        const b = await withFakePlanApp(() => SYNC.syncTrainingPlanDue(4))
-        assert.equal(b.out.kind, 'fail')
-        assert.match(b.out.text, /計画書アプリの接続設定がありません/)
-        assert.equal(b.seen.length, 0)
-        assert.equal(st2.calls.some((c) => c.fn === 'daycare_training_due_sync'), false)
-        assert.ok(st.calls.length > 0)
+        assert.equal(a.out.kind, 'fail', label)
+        assert.match(a.out.text, text, label)
+        assert.equal(a.seen.length, 0, `${label}: 計画書の GAS へ送らない`)
+        assert.equal(st.calls.some((c) => c.fn === 'daycare_training_due_sync'), false, `${label}: 写しの関数を呼ばない`)
         await done()
       })
     }
@@ -776,11 +791,13 @@ if (DB === null) {
       assert.equal(st.calls.some((c) => c.fn === 'carelog_training_due_index'), false)
       await done()
     })
-    it('体重: readWeightsFromDb は ok で入居者と記録が配列の時だけ中身を返し、それ以外は null（GAS へ戻る合図）', async () => {
+    it('体重: readWeightsFromDb は ok で入居者と記録が配列の時だけ中身を返し、切り替え前は shadow（GAS へ戻る合図）、それ以外は null（読めない）', async () => {
       const body = { ok: true, ver: 2, residents: [{ id: 'w1', masterId: 'T001' }], records: [{ residentId: 'w1', measuredOn: '2026-09-14', weight: 52.3 }] }
       await fresh({ weightRead: body })
       assert.deepEqual(await DB.readWeightsFromDb(), { residents: body.residents, records: body.records })
-      for (const v of [{ ok: false, error: 'shadow' }, { ok: true, residents: {}, records: [] }, { ok: true, residents: [] }, null, { error: '42501' }, { error: 'PGRST202' }]) {
+      await fresh({ weightRead: { ok: false, error: 'shadow' } })
+      assert.equal(await DB.readWeightsFromDb(), 'shadow')
+      for (const v of [{ ok: false, error: 'noshape' }, { ok: true, residents: {}, records: [] }, { ok: true, residents: [] }, null, { error: '42501' }, { error: 'PGRST202' }]) {
         await fresh({ weightRead: v })
         assert.equal(await DB.readWeightsFromDb(), null, JSON.stringify(v))
       }
@@ -810,10 +827,14 @@ if (DB === null) {
       }
       await done()
     })
-    it('計画書: readTrainingPlanIndexFromDb は live の時だけ data を返す', async () => {
+    it('計画書: readTrainingPlanIndexFromDb は live の時だけ data を返す（切り替え前は shadow・索引がまだ無い時は empty・それ以外は null）', async () => {
       await fresh({ tpIndex: { ok: true, mode: 'live', data: DB_INDEX } })
       assert.deepEqual(await DB.readTrainingPlanIndexFromDb(), DB_INDEX)
-      for (const v of [{ ok: true, mode: 'shadow', data: DB_INDEX }, { ok: false, error: 'shadow' }, { ok: true, mode: 'live', data: null }, { error: '42501' }]) {
+      await fresh({ tpIndex: { ok: false, error: 'shadow' } })
+      assert.equal(await DB.readTrainingPlanIndexFromDb(), 'shadow')
+      await fresh({ tpIndex: { ok: true, mode: 'live', data: null } })
+      assert.equal(await DB.readTrainingPlanIndexFromDb(), 'empty')
+      for (const v of [{ ok: true, mode: 'shadow', data: DB_INDEX }, { ok: false, error: 'noshape' }, { error: '42501' }, { error: 'PGRST202' }]) {
         await fresh({ tpIndex: v })
         assert.equal(await DB.readTrainingPlanIndexFromDb(), null, JSON.stringify(v))
       }
