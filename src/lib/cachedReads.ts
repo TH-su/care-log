@@ -462,7 +462,7 @@ export function prefetchPlan(ctx: PrefetchContext): PrefetchTask[] {
   const iq: IncidentQuery = { fromIso: inc.from, toIso: inc.to, kind: null, status: null }
   add('incidents', ensure(cacheKeys.incidents(iq), () => db.fetchIncidents(iq), { meta: { tables: ['incidents'] } }))
 
-  // 6. 外部 GAS（排泄・体重）は最後（重い）。それぞれの部品がメモリに数分持つ（接続設定の無い端末は通信しない）
+  // 6. 外部 GAS（排泄・体重）は最後（重い）。それぞれの部品がメモリに数分持つ（先に共通の DB の読む口を読み、切り替える前の時だけ GAS へ。切り替える前で接続設定の無い端末は GAS へ送らない）
   add('excretion', () => fetchExcretion())
   add('weights', () => fetchWeights([]))
   return tasks
