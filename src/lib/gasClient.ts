@@ -3,7 +3,8 @@
 // ── 読み取り専用・PII 非残留規約（wsClient.ts と同型。レビューで機械確認される）──
 //  1. GAS エンドポイント・合言葉（トークン）の具体値をコード/リポジトリに書かない（localStorage 手入力のみ）。
 //  2. GAS へ送るのは読み取り action（getRoster / pull）だけ（2026-11-08 から利用者名簿・職員名簿・入職日は、まず共通の Supabase の
-//     読むだけの関数（carelog_roster・carelog_staff_names・carelog_staff_hire_dates）を読み、使えない時だけ GAS へ）。書込 action（save/put/push 系）の
+//     読むだけの関数（carelog_roster・carelog_staff_names・carelog_staff_hire_dates）を読み、使えない時だけ GAS へ。
+//     職員名簿は 2026-11-15 から、勤務表が Google へ戻っている時だけ GAS へ）。書込 action（save/put/push 系）の
 //     コードパスを作らない＝既存GAS・スプレッドシートへの書込は構造的に不可能。
 //  3. GAS 応答・Supabase 応答の本文（氏名・かな・居室・介護度）を console / localStorage に一切残さない。
 //     console に出すのはエラー種別だけ。
@@ -365,7 +366,7 @@ async function callReadRpc(
     if (!got || got.error) return 'unavailable'
     return got.data as unknown
   } catch {
-    return 'unavailable' // 読めなければ今までの読み先へ戻す（例外を外へ出さない。中身は出さない）
+    return 'unavailable' // 読めない印を返す（読み先の戻し方は呼び出し側が決める。職員名簿は GAS へ戻さない・例外を外へ出さない。中身は出さない）
   } finally {
     if (timer !== undefined) clearTimeout(timer)
   }
@@ -398,14 +399,16 @@ async function pullRosterFromDb(): Promise<RosterEntry[] | null | 'broken'> {
  * 勤務表の職員一覧を、共通の Supabase の読む口 carelog_staff_names（care-backend 0076）から読む（2026-11-08）。
  * 返すのは GAS の pull staff と同じ並びの要素の、ケアログが使う項目（name・active・status・order）だけ（労務の項目は来ない）。
  * 戻り値: 職員の一覧（1件以上）… これを使う／'unavailable' … 関数が無い・断られた・通信の失敗＝前の読み先（kv_get）を試す／
- *         'broken' … 勤務表は切り替え後（live）なのに形が違う・0件＝ GAS（10/16 のままの古い一覧）へ戻さず、職員の同期を止める
- *                    （代表者の決定 2026-11-08: 古い一覧で在籍を外さない）／
- *         null … 切り替える前（shadow）・live でない応答＝ GAS から読む（GAS が正本の間）
+ *         'broken' … 勤務表は切り替え後（live）なのに形が違う・0件、または切り替えの印の無い応答（配列・空）＝ GAS（10/16 のままの古い一覧）へ戻さず、
+ *                    職員の同期を止める（代表者の決定 2026-11-08: 古い一覧で在籍を外さない・2026-11-15 M1 順4 で印の無い応答も同じに）／
+ *         null … 切り替えの印が live でない（shadow＝切り替える前・Google へ戻した後）＝ GAS から読む（GAS が正本の間だけ）
  */
 async function pullStaffNamesFromCarelogRpc(): Promise<StaffEntry[] | null | 'unavailable' | 'broken'> {
   const r = await callReadRpc('carelog_staff_names', TIMEOUT_MS)
   if (r === 'unavailable') return 'unavailable'
-  if (!isLiveReply(r)) return null
+  // 切り替えの印（mode）を文字で答えた時だけ、live でなければ GAS（写しの期間・Google へ戻した後＝GAS が正本）。
+  // 印の無い応答（配列・空・形の違い）は GAS へ戻さない（2026-11-15・M1 順4）
+  if (!isLiveReply(r)) return isModeReply(r) ? null : 'broken'
   if (!Array.isArray(r.staff)) return 'broken'
   const names = projectStaffNames(r)
   return names !== null && names.length > 0 ? names : 'broken'
@@ -413,12 +416,19 @@ async function pullStaffNamesFromCarelogRpc(): Promise<StaffEntry[] | null | 'un
 
 /**
  * 職員の名前の読み先（2026-11-08）: ① carelog_staff_names（0076）→ ② 関数が無い・断られた時だけ kv_get('staff')（2026-11-07 の道）。
- * どちらも使えない時は null＝今までどおり GAS から読む。'broken'（live なのに形が違う・0件）は GAS へ戻さない
+ * GAS から読む（null）のは、どちらかが「切り替えの印が live でない」と答えた時だけ（勤務表を Google へ戻した時）。
+ * どちらも読めない（通信の失敗・時間切れ・断られた・形の違い）時は 'broken'＝ GAS（10/16 のままの古い一覧）へ戻さず、
+ * 職員の一覧を変えずに止める（2026-11-15・M1 順4: 写し返しを止める前に、ケアログが GAS を読まないようにする）
  */
 async function pullStaffNamesFromDb(): Promise<StaffEntry[] | null | 'broken'> {
   const r = await pullStaffNamesFromCarelogRpc()
   if (r !== 'unavailable') return r
   return pullStaffNamesFromKv()
+}
+
+/** 応答が {mode:'…'}（切り替えの印を文字で持つ）の形か。live でない印＝切り替える前・Google へ戻した後 */
+function isModeReply(r: unknown): boolean {
+  return !!r && typeof r === 'object' && !Array.isArray(r) && typeof (r as { mode?: unknown }).mode === 'string'
 }
 
 /**
@@ -428,25 +438,28 @@ async function pullStaffNamesFromDb(): Promise<StaffEntry[] | null | 'broken'> {
  * GAS の pull は 10/16 のままの一覧を返し続ける＝この道を先に試し、読めた時は GAS を呼ばない。
  *  - 呼ぶのは読み取りの関数 kv_get('staff') だけ（書く関数は呼ばない）。kv_entries は同じ施設の許可リストの人が読める（RLS）
  *  - 使うのは、応答が ok:true で、その行が切り替え後（mode:'live'＝Supabase が正本）の時だけ。写しの期間・Google へ戻した後
- *    （mode:'shadow'）・行が無い・形が違う・0件・関数が無い・断られた・通信の失敗・時間切れは null＝今までどおり GAS から読む
+ *    （ok:true で mode が live でない）だけ null＝ GAS から読む。行が無い・形が違う・0件・関数が無い・断られた・通信の失敗・時間切れは
+ *    'broken'＝ GAS へ戻さず、職員の同期を止める（2026-11-15・M1 順4）
  *  - 取り出すのは GAS の pull と同じ射影（氏名・在籍・入職順）だけ。応答の本文は console・localStorage に残さない
  */
-async function pullStaffNamesFromKv(): Promise<StaffEntry[] | null> {
+async function pullStaffNamesFromKv(): Promise<StaffEntry[] | null | 'broken'> {
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     const timeout = new Promise<null>((resolve) => {
       timer = setTimeout(() => resolve(null), TIMEOUT_MS)
     })
     const got = await Promise.race([supabase.rpc('kv_get', { p_key: 'staff' }), timeout])
-    if (!got || got.error) return null
+    if (!got || got.error) return 'broken'
     const r = got.data as unknown
-    if (!r || typeof r !== 'object' || Array.isArray(r)) return null
+    if (!r || typeof r !== 'object' || Array.isArray(r)) return 'broken'
     const rec = r as { ok?: unknown; mode?: unknown; data?: unknown }
-    if (rec.ok !== true || rec.mode !== 'live') return null
+    // 行があって、印が live でない（写しの期間・Google へ戻した後）と答えた時だけ GAS から読む
+    if (rec.ok === true && typeof rec.mode === 'string' && rec.mode !== 'live') return null
+    if (rec.ok !== true || rec.mode !== 'live') return 'broken'
     const names = projectStaffNames(rec.data)
-    return names !== null && names.length > 0 ? names : null
+    return names !== null && names.length > 0 ? names : 'broken'
   } catch {
-    return null // 読めなければ GAS へ戻す（例外を外へ出さない。中身は出さない）
+    return 'broken' // 読めなくても 10/16 のままの GAS へ戻さない（例外を外へ出さない。中身は出さない）
   } finally {
     if (timer !== undefined) clearTimeout(timer)
   }
@@ -1205,7 +1218,7 @@ export const ROSTER_DB_BROKEN_MSG =
 export const ROSTER_DB_BROKEN_BOTH_MSG =
   '利用者の名簿を読めませんでした（職員名簿も取得できませんでした）。安全のため、利用者・職員の一覧は変えていません。時間をおいてもう一度〔マスタを同期〕を押し、続く時は開発者に連絡してください。'
 
-/** 勤務表が切り替え後なのに職員の一覧を読めなかった時の文（GAS へは戻さない・2026-11-08 代表者の決定） */
+/** 職員の一覧を新しい保存先から読めなかった時の文（勤務表が切り替え後で形が違う時・2026-11-08 代表者の決定、通信の失敗・時間切れ・断られた時・2026-11-15。GAS へは戻さない） */
 export const STAFF_LIST_DB_BROKEN_MSG =
   '職員の一覧を読めませんでした（利用者マスタは同期しました）。職員の一覧は変えていません。時間をおいてもう一度〔マスタを同期〕を押し、続く時は開発者に連絡してください。'
 
@@ -1256,7 +1269,8 @@ export interface SyncOptions {
  *  - 反映した後は notifyMastersChanged で他の画面へ知らせる（App の職員名簿の取り直し・F47）。
  *  - 自動の同期（起動時＋60分間隔）は autoSyncMasters が受け持つ（F50）。本関数は呼ばれたら常に同期する。
  *  - 職員名簿は勤務表の正本（Supabase の carelog_staff_names（0076）・無い時は kv_get('staff')・切り替え後だけ）を先に読み、
- *    読めた時は GAS の職員名簿を呼ばない（2026-11-07・11-08。GAS の勤務表は 10/16 から更新されていない）。読めない・形が違う時は今までどおり GAS から読む。
+ *    読めた時は GAS の職員名簿を呼ばない（2026-11-07・11-08。GAS の勤務表は 10/16 から更新されていない）。GAS から読むのは、
+ *    読む口が「勤務表は切り替える前・Google へ戻した後」と答えた時だけ。読めない・形が違う時は GAS へ戻さず、職員の行を書き換えない（2026-11-15）。
  *  - 入職日は職員マスタの正本（Supabase の carelog_staff_hire_dates（0076）・切り替え後だけ）を先に読み、読めない時だけ職員マスタの GAS から読む。
  *  - 利用者名簿は入居者マスタの正本（Supabase の carelog_roster（0078）・切り替え後だけ）を先に読み、読めた時は入居者マスタの GAS を呼ばない。
  *    関数が無い・断られた・通信の失敗・切り替える前は今までどおり GAS から読む。切り替え後なのに形が違う・0人の時は GAS へ戻さず、
@@ -1274,9 +1288,10 @@ export async function syncMasters(opts: SyncOptions = {}): Promise<MasterSyncOut
   }
 
   // 職員名簿は、勤務表の正本（Supabase の carelog_staff_names・無い時は kv_get('staff')・切り替え後の時だけ）を先に読む。
-  // 読めた時は GAS の職員名簿を使わない（GAS の勤務表は 2026-10-16 から更新されていない）。読めない時だけ、下の GAS の職員名簿へ戻す（今までどおり）
-  // 勤務表が切り替え後なのに形が違う・0件と答えた時（'broken'）は、10/16 のままの GAS の一覧へ戻さず、職員の同期だけを止める
-  // （職員の行は書き換えない・代表者の決定 2026-11-08）
+  // 読めた時は GAS の職員名簿を使わない（GAS の勤務表は 2026-10-16 から更新されていない）。下の GAS の職員名簿へ戻すのは、
+  // 読む口が「勤務表は live でない（Google が正本）」と答えた時（null）だけ。
+  // 形が違う・0件・読めない時（'broken'）は、10/16 のままの GAS の一覧へ戻さず、職員の同期だけを止める
+  // （職員の行は書き換えない・代表者の決定 2026-11-08・2026-11-15 M1 順4 で読めない時も同じに）
   const dbNames = await pullStaffNamesFromDb()
   const staffBroken = dbNames === 'broken'
   const kvNames = Array.isArray(dbNames) ? dbNames : null

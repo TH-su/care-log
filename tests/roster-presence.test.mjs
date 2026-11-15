@@ -151,8 +151,10 @@ function memSupabase(tables = {}, fail = () => null) {
   // ログインの役割（care-backend の public.my_account() の真似。db.ts の fetchMyRole が読む）
   // （calls には控えない＝「書き込みが0件か」の数え方を変えない。問い合わせた回数は rpcCalls に数える）
   // rpcReplies[関数名](引数) が返す物をその関数の応答にする（勤務表の kv_get など。置いていない関数は「関数が無い」）
+  // 既定では、勤務表の読む口 carelog_staff_names は「勤務表は Google が正本（mode:shadow）」と答える
+  // （2026-11-15 から、GAS の職員名簿を読むのはこの時だけ。GAS の職員名簿から読む前提の試験の材料。読む口を試す試験は置き換える・消す）
   const rpcCalls = []
-  const rpcReplies = {}
+  const rpcReplies = { carelog_staff_names: () => ({ data: { mode: 'shadow' }, error: null, status: 200 }) }
   const rpc = (fn, args) => {
     rpcCalls.push(fn)
     if (fn === 'my_account') return Promise.resolve({ data: { role: testRole }, error: null, status: 200 })
@@ -1233,8 +1235,12 @@ describe('現場のログインでは名簿の同期をしない（0040・代表
 //   切り替え後（mode:'live'）の一覧が読めた時は GAS の職員名簿を呼ばない。読めない・形が違う時は今までどおり GAS から読む
 // ══════════════════════════════════════════════════════════════
 describe('職員の名前は勤務表の正本（Supabase の kv_get）から先に読む（2026-11-07）', { skip }, () => {
-  const base = () =>
-    memSupabase({ residents: [res(1, 'R001', '利用者01')], staff: [{ id: 1, name: '職員01', active: true, manual: false }] })
+  // この組は「読む口 carelog_staff_names が無い（0076 の前）」の時の kv_get の道を試す
+  const base = () => {
+    const sb = memSupabase({ residents: [res(1, 'R001', '利用者01')], staff: [{ id: 1, name: '職員01', active: true, manual: false }] })
+    delete sb.rpcReplies.carelog_staff_names
+    return sb
+  }
   const kvLive = (data) => () => ({ data: { ok: true, rev: 12, data, updatedAt: '2026-11-07T00:00:00Z', mode: 'live' }, error: null, status: 200 })
   const toShift = (gas) => gas.requests.filter((r) => r.url.startsWith(SHIFT_URL))
   const staffWrites = (sb) => sb.calls.filter((q) => q.table === 'staff' && q.action !== 'select').length
@@ -1288,13 +1294,27 @@ describe('職員の名前は勤務表の正本（Supabase の kv_get）から先
     assert.ok(sb.db.staff.some((s) => s.name === '職員05'))
   })
 
+  it('写しの期間・Google へ戻した後（ok:true・mode が live でない）だけ、今までどおり GAS の職員名簿から読む', async () => {
+    configure()
+    const sb = base()
+    sb.rpcReplies.kv_get = () => ({ data: { ok: true, rev: 3, data: [{ name: '職員09', active: true }], mode: 'shadow' }, error: null, status: 200 })
+    useClient(sb)
+    const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: ['職員01', '職員06'] })
+    const out = await G.syncMasters()
+    assert.equal(typeof out, 'object')
+    assert.deepEqual(toShift(gas).map((r) => [r.method, r.body?.action, r.body?.keys]), [['POST', 'pull', ['staff']]])
+    assert.ok(sb.db.staff.some((s) => s.name === '職員06'))
+    assert.equal(sb.db.staff.some((s) => s.name === '職員09'), false, '写しの期間の一覧の氏名を入れていない')
+  })
+
+  // 2026-11-15（M1 順4）: 読めない・形が違う時は、10/16 のままの GAS の職員名簿へ戻さず、職員の行を書き換えずに止める
   const fallbacks = [
     ['関数が無い（PGRST202）', null],
     ['断られた（42501）', () => ({ data: null, error: { message: 'permission denied', code: '42501' }, status: 403 })],
     ['通信の失敗（例外）', () => Promise.reject(new Error('network'))],
-    ['写しの期間（mode:shadow）', () => ({ data: { ok: true, rev: 3, data: [{ name: '職員09', active: true }], mode: 'shadow' }, error: null, status: 200 })],
     ['行が無い（rev 0・data null・mode なし）', () => ({ data: { ok: true, rev: 0, data: null }, error: null, status: 200 })],
     ['ok が true でない', () => ({ data: { ok: false, data: [{ name: '職員09', active: true }], mode: 'live' }, error: null, status: 200 })],
+    ['ok が true でない・mode が shadow', () => ({ data: { ok: false, data: [{ name: '職員09', active: true }], mode: 'shadow' }, error: null, status: 200 })],
     ['中身が配列でも { staff } でもない', kvLive('職員09')],
     ['中身が0件', kvLive([])],
     ['氏名の無い行だけ', kvLive([{ active: true }, { name: '' }, null, 7])],
@@ -1302,25 +1322,38 @@ describe('職員の名前は勤務表の正本（Supabase の kv_get）から先
     ['応答が空', () => ({ data: null, error: null, status: 200 })],
   ]
   for (const [label, reply] of fallbacks) {
-    it(`読めない・形が違う時は今までどおり GAS の職員名簿から読む: ${label}`, async () => {
+    it(`読めない・形が違う時は GAS（古い一覧）へ戻さず、職員の行を書き換えずに止める: ${label}`, async () => {
       configure()
       const sb = base()
       if (reply) sb.rpcReplies.kv_get = reply
       useClient(sb)
-      const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: ['職員01', '職員06'] })
-      const out = await G.syncMasters()
-      assert.equal(typeof out, 'object', label)
+      const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }, { id: 'R002', name: '利用者02' }], staff: ['職員01', '職員06'] })
+      await assert.rejects(G.syncMasters(), (e) => {
+        assert.equal(e.message, G.STAFF_LIST_DB_BROKEN_MSG, label)
+        return true
+      })
       assert.ok(sb.rpcCalls.includes('kv_get'), label)
-      assert.deepEqual(toShift(gas).map((r) => [r.method, r.body?.action, r.body?.keys]), [['POST', 'pull', ['staff']]], label)
-      assert.ok(sb.db.staff.some((s) => s.name === '職員06'), label)
-      assert.equal(sb.db.staff.some((s) => s.name === '職員09'), false, `${label}: 使えない応答の氏名を入れていない`)
+      assert.equal(toShift(gas).length, 0, `${label}: GAS の職員名簿を呼んでいない`)
+      assert.equal(staffWrites(sb), 0, `${label}: 職員の表に書いていない`)
+      assert.deepEqual(sb.db.staff.map((s) => [s.name, s.active]), [['職員01', true]], label)
+      assert.ok(sb.db.residents.some((r) => r.source_id === 'R002'), `${label}: 利用者マスタは同期する`)
     })
   }
 
-  it('Supabase も GAS も読めない時は職員の表に1行も書かない（空上書き保護はそのまま）', async () => {
+  it('職員の接続設定が崩れていても、読めない時は GAS へ問い合わせずに止める（接続設定の誤りの文を出さない）', async () => {
+    configure()
+    lsStore.set('cl_staffGasUrl', 'https://example.invalid/not-gas')
+    const sb = base()
+    useClient(sb)
+    const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: ['職員01'] })
+    await assert.rejects(G.syncMasters(), (e) => e.message === G.STAFF_LIST_DB_BROKEN_MSG)
+    assert.equal(gas.requests.some((r) => !r.url.startsWith(MASTER_URL)), false)
+  })
+
+  it('勤務表が Google の間（shadow）に GAS も読めない時は職員の表に1行も書かない（空上書き保護はそのまま）', async () => {
     configure()
     const sb = base()
-    sb.rpcReplies.kv_get = () => ({ data: { ok: true, rev: 3, data: [], mode: 'live' }, error: null, status: 200 })
+    sb.rpcReplies.kv_get = () => ({ data: { ok: true, rev: 3, data: [], mode: 'shadow' }, error: null, status: 200 })
     useClient(sb)
     lsStore.set('cl_staffGasToken', 'wrong') // GAS の職員名簿も断られる
     fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: ['職員01'] })
@@ -1420,7 +1453,10 @@ describe('職員の名前・入職日は共通のデータベースの読む口�
       configure()
       const sb = base([])
       if (viaRpc) sb.rpcReplies.carelog_staff_names = namesLive(list)
-      else sb.rpcReplies.kv_get = ok({ ok: true, rev: 1, data: list, mode: 'live' })
+      else {
+        delete sb.rpcReplies.carelog_staff_names // 読む口が無い時の kv_get の道
+        sb.rpcReplies.kv_get = ok({ ok: true, rev: 1, data: list, mode: 'live' })
+      }
       useClient(sb)
       fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: [] })
       await G.syncMasters()
@@ -1434,29 +1470,59 @@ describe('職員の名前・入職日は共通のデータベースの読む口�
     assert.deepEqual(a, b)
   })
 
-  const nameFallbacks = [
-    // [見出し, 応答, kv_get へ進むか]
-    ['関数が無い（0076 が未適用）', null, true],
-    ['断られた（42501）', () => ({ data: null, error: { message: 'not allowed', code: '42501' }, status: 403 }), true],
-    ['通信の失敗（例外）', () => Promise.reject(new Error('network')), true],
-    ['切り替える前（mode:shadow）', ok({ mode: 'shadow' }), false],
-    ['応答が配列', ok([{ name: '職員09', active: true }]), false],
-    ['応答が空', ok(null), false],
+  // 2026-11-15（M1 順4）: GAS の職員名簿を読むのは、読む口か kv_get が「勤務表は live でない（Google が正本）」と答えた時だけ
+  const nameToGas = [
+    // [見出し, 読む口の応答, kv_get の応答（null＝呼ばない）]
+    ['切り替える前（mode:shadow）', ok({ mode: 'shadow' }), null],
+    ['読む口が無く、kv_get が写しの期間と答えた', null, ok({ ok: true, rev: 2, data: [{ name: '職員09', active: true }], mode: 'shadow' })],
+    ['読む口が断られ、kv_get が写しの期間と答えた', () => ({ data: null, error: { message: 'not allowed', code: '42501' }, status: 403 }), ok({ ok: true, rev: 2, data: [], mode: 'shadow' })],
   ]
-  for (const [label, reply, toKv] of nameFallbacks) {
-    it(`名前: 使えない時は今までどおりの読み先へ戻す（${toKv ? 'kv_get → GAS' : 'GAS'}）: ${label}`, async () => {
+  for (const [label, reply, kv] of nameToGas) {
+    it(`名前: 勤務表が Google の間だけ GAS の職員名簿から読む: ${label}`, async () => {
       configure()
       const sb = base()
       if (reply) sb.rpcReplies.carelog_staff_names = reply
+      else delete sb.rpcReplies.carelog_staff_names
+      if (kv) sb.rpcReplies.kv_get = kv
       useClient(sb)
       const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }], staff: ['職員01', '職員06'] })
       const out = await G.syncMasters()
       assert.equal(typeof out, 'object', label)
       assert.ok(sb.rpcCalls.includes('carelog_staff_names'), label)
-      assert.equal(sb.rpcCalls.includes('kv_get'), toKv, `${label}: kv_get へ進むか`)
+      assert.equal(sb.rpcCalls.includes('kv_get'), kv !== null, `${label}: kv_get へ進むか`)
       assert.deepEqual(toShift(gas).map((r) => [r.method, r.body?.action]), [['POST', 'pull']], label)
       assert.ok(sb.db.staff.some((s) => s.name === '職員06'), label)
       assert.equal(sb.db.staff.some((s) => s.name === '職員09'), false, `${label}: 使えない応答の氏名を入れていない`)
+    })
+  }
+
+  const nameStop = [
+    // [見出し, 読む口の応答（null＝関数が無い）, kv_get へ進むか]
+    ['関数が無い（0076 が未適用）・kv_get も無い', null, true],
+    ['断られた（42501）・kv_get も無い', () => ({ data: null, error: { message: 'not allowed', code: '42501' }, status: 403 }), true],
+    ['通信の失敗（例外）・kv_get も無い', () => Promise.reject(new Error('network')), true],
+    ['応答が配列（切り替えの印が無い）', ok([{ name: '職員09', active: true }]), false],
+    ['応答が空', ok(null), false],
+    ['mode が文字でない', ok({ mode: 1, staff: [{ name: '職員09' }] }), false],
+  ]
+  for (const [label, reply, toKv] of nameStop) {
+    it(`名前: 読めない時は GAS（古い一覧）へ戻さず、職員の行を書き換えずに止める: ${label}`, async () => {
+      configure()
+      const sb = base()
+      if (reply) sb.rpcReplies.carelog_staff_names = reply
+      else delete sb.rpcReplies.carelog_staff_names
+      useClient(sb)
+      const gas = fakeGas({ roster: [{ id: 'R001', name: '利用者01' }, { id: 'R002', name: '利用者02' }], staff: ['職員01', '職員06'] })
+      await assert.rejects(G.syncMasters(), (e) => {
+        assert.equal(e.message, G.STAFF_LIST_DB_BROKEN_MSG, label)
+        return true
+      })
+      assert.ok(sb.rpcCalls.includes('carelog_staff_names'), label)
+      assert.equal(sb.rpcCalls.includes('kv_get'), toKv, `${label}: kv_get へ進むか`)
+      assert.equal(toShift(gas).length, 0, `${label}: GAS の職員名簿を呼んでいない`)
+      assert.equal(sb.calls.filter((q) => q.table === 'staff' && q.action !== 'select').length, 0, `${label}: 職員の表に書いていない`)
+      assert.deepEqual(sb.db.staff.map((s) => [s.name, s.active]), [['職員01', true]], label)
+      assert.ok(sb.db.residents.some((r) => r.source_id === 'R002'), `${label}: 利用者マスタは同期する`)
     })
   }
 
