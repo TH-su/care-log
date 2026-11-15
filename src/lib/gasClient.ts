@@ -366,7 +366,7 @@ async function callReadRpc(
     if (!got || got.error) return 'unavailable'
     return got.data as unknown
   } catch {
-    return 'unavailable' // 読めなければ今までの読み先へ戻す（例外を外へ出さない。中身は出さない）
+    return 'unavailable' // 読めない印を返す（読み先の戻し方は呼び出し側が決める。職員名簿は GAS へ戻さない・例外を外へ出さない。中身は出さない）
   } finally {
     if (timer !== undefined) clearTimeout(timer)
   }
@@ -1218,7 +1218,7 @@ export const ROSTER_DB_BROKEN_MSG =
 export const ROSTER_DB_BROKEN_BOTH_MSG =
   '利用者の名簿を読めませんでした（職員名簿も取得できませんでした）。安全のため、利用者・職員の一覧は変えていません。時間をおいてもう一度〔マスタを同期〕を押し、続く時は開発者に連絡してください。'
 
-/** 勤務表が切り替え後なのに職員の一覧を読めなかった時の文（GAS へは戻さない・2026-11-08 代表者の決定） */
+/** 職員の一覧を新しい保存先から読めなかった時の文（勤務表が切り替え後で形が違う時・2026-11-08 代表者の決定、通信の失敗・時間切れ・断られた時・2026-11-15。GAS へは戻さない） */
 export const STAFF_LIST_DB_BROKEN_MSG =
   '職員の一覧を読めませんでした（利用者マスタは同期しました）。職員の一覧は変えていません。時間をおいてもう一度〔マスタを同期〕を押し、続く時は開発者に連絡してください。'
 
