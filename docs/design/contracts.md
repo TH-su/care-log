@@ -384,6 +384,14 @@ readTrainingPlanIndexFromDb(): Promise<Record<string, unknown> | null>
 - `readWeightsFromDb` は db.ts が読み込まれた時に `setWeightDbReader`（`weightClient.ts`）で体重の読み口に置く。`weightClient.ts` は db.ts を import しない（試験から単独で読めるまま）。画面は今までどおり `fetchWeights` だけを使う
 - 返す中身は GAS の getAll・索引と同じ名前の項目だけなので、GAS 経由と同じそろえ方（`parseWeightPayload`・`normalizeTrainingPlanIndex`）を通す。試験は `tests/weight-db.test.mjs`・`tests/daycare-training-db.test.mjs`
 - `rpc('carelog_weight_read'` と `rpc('carelog_training_due_index'` が現れるのは `src/lib/db.ts` の1か所ずつだけ。結果は呼ぶ側のメモリにだけ渡す（dataCache・端末に置かない）
+
+```ts
+readExcretionFromDb(): Promise<{ residents: unknown[]; records: unknown[]; cfg?: unknown } | 'shadow' | null>
+```
+
+- 排便の記録（care-backend 0094 の `carelog_haiben_read`・2026-11-15・M1 順4）。読むだけ。切り替えの印（mode）が `'live'` で形が正しい時だけ中身を返す。mode が文字で live でない時は `'shadow'`（呼ぶ側が排便記録の GAS の getAll から読む）。それ以外（関数が無い・断られた・形が違う・印の無い応答・通信できない・待ちの上限 20秒）は null（呼ぶ側は GAS へ戻さず「読めない」として止める）。投げない
+- db.ts が読み込まれた時に `setExcretionDbReader`（`excretionClient.ts`）で排便の読み口に置く。`excretionClient.ts` は db.ts を import しない。画面は今までどおり `fetchExcretion` だけを使う。GAS 経由と同じ `parseExcretionPayload` を通す。試験は `tests/excretion-db.test.mjs`
+- `rpc('carelog_haiben_read'` が現れるのは `src/lib/db.ts` の1か所だけ。結果は `excretionClient.ts` のメモリにだけ渡す（dataCache・端末に置かない）。ログインし直した時は `clearExcretionCache` で捨てる
 開発用の見本は `glance-preview.html`＋`src/dev/glancePreview.tsx`（架空データだけ・db／supabase／gasClient を import しない・vite build の入口に入れない＝`npx vite` で開いて見るだけ。端末に置くのは `cl_glanceRange`・`cl_glanceSort` だけ）
 
 ## src/lib/actor.ts

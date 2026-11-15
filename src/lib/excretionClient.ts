@@ -8,6 +8,7 @@
 //     sessionStorage（タブごとで別のタブには届かない）・Cookie・IndexedDB は読まない（排便記録アプリは見つけた値を
 //     localStorage の主キーへ書き戻すので、アプリを開いた端末なら主キーにある）。
 //  2. GAS へ送るのは読み取りの getAll だけ（POST 本文・text/plain。合言葉を URL に載せない）。書き込みの action の経路を作らない。
+//     GAS へ送るのは、共通の DB が「排泄ケア記録は切り替える前」と答えた時（と DB の読み手が無い時）だけ（下の 7）。
 //  3. 取得した記録は画面のメモリにだけ持つ（EXCRETION_CACHE_MS）。localStorage・IndexedDB にも console にも残さない。
 //     メモリに持つのは照合に要る「空白を除いた氏名」と居室・判定に要る項目だけ。記録のメモ（notes）・記入者（staff）は捨てる。
 //  4. 照合は「氏名（types.ts の nameKey と同じ＝空白の違いだけ吸収）＋居室」の両方が一致した方だけ。
@@ -18,6 +19,13 @@
 //     施設では排泄を記録していない方なので、記録はデイの日だけ。今日の要注意の「排便なし◯日」と、カルテ・デイの1人の画面の
 //     「最後の排便から◯日」の判定は出さず、「デイの日の記録だけ（施設では記録していません）」と出す（記録の一覧は出す）。
 //     印を付けるのは排泄ケアアプリ側。取り込みの順は care-log（印を読んで外す側）が先
+//  7. 排泄ケア記録の正本の切り替え（2026-11-15・M1 順4: 写し返しを止める前に読み手を移す）: 先に共通の DB の読む口
+//     （carelog_haiben_read・care-backend 0094・ケアログが使う項目だけ）を読む。排泄ケア記録が切り替え済み（live）で形が正しい時だけそれを使い、
+//     GAS へは送らない。DB が切り替えの印を文字で答え、それが live でない時（shadow＝切り替える前・Google へ戻した後）だけ、今までどおり GAS の getAll。
+//     DB を読めない時（関数が無い・断られた・形が違う・通信できない・印の無い応答）は GAS へ戻さず「読めない」として止める（体重・名簿と同じ決まり）。
+//     DB を呼ぶのは db.ts だけ（contracts: rpc は db.ts と gasClient.ts だけ）。db.ts が読み込まれた時に setExcretionDbReader で読み手を置く
+//     （このファイルは db.ts を読み込まない＝試験から単独で読めるまま）。読み手が無い時は GAS だけ（今までと同じ）。
+//     DB の応答は GAS の getAll と同じ名前の項目なので、同じ parseExcretionPayload と照合を通す（結果は GAS 経由と同じ）。
 //
 // ── 読み方（getAll の since を「今から16日前」にして送る・理由）──
 //  gas/haiben-api.gs（2026-10-16 時点）の読み取りは3つ:
@@ -732,14 +740,70 @@ export function stoolAlertReasons(
 
 export type ExcretionFetchResult = { ok: true; snap: HbSnapshot; at: number } | { ok: false; reason: ExcretionFailReason }
 
-/** 画面のメモリにだけ持つ直近の成功結果（接続先ごと）と、送信中の取得（同時に何本も投げない） */
-let cache: { url: string; at: number; snap: HbSnapshot } | null = null
-let inflight: { url: string; p: Promise<ExcretionFetchResult> } | null = null
+/**
+ * 共通の DB の読み手（db.ts の readExcretionFromDb）。戻り値: 中身（切り替え済み・GAS の getAll と同じ名前の項目）／
+ * 'shadow'（切り替えの印が文字で live でない＝GAS から読む）／null（読めない＝GAS へ戻さず止める）
+ */
+export type ExcretionDbReader = () => Promise<{ residents: unknown[]; records: unknown[]; cfg?: unknown } | 'shadow' | null>
+let excretionDbReader: ExcretionDbReader | null = null
 
-/** メモリの記録を捨てる（試験と、将来のログアウト処理用） */
+/** メモリの結果の出どころ（DB から読めた時はこの印・GAS の時は接続先） */
+const EXCRETION_SRC_DB = 'db:'
+
+/** 画面のメモリにだけ持つ直近の成功結果（出どころごと）と、送信中の取得（同時に何本も投げない） */
+let cache: { url: string; at: number; snap: HbSnapshot } | null = null
+let inflight: { url: string; p: Promise<ExcretionFetchResult | null> } | null = null
+/** 捨てた回数（捨てる前に出した取得の結果をメモリに控えない＝ログインし直した後に前のアカウントの記録を使い回さない） */
+let excretionGen = 0
+
+/** メモリの記録を捨てる（試験と、ログアウト・ログインし直した時＝cachedReads.ts・db.ts が呼ぶ） */
 export function clearExcretionCache(): void {
+  excretionGen += 1
   cache = null
   inflight = null
+}
+
+/** DB の読み手を置く（db.ts が読み込まれた時に1回だけ呼ぶ。試験は null で外せる） */
+export function setExcretionDbReader(reader: ExcretionDbReader | null): void {
+  excretionDbReader = reader
+  clearExcretionCache()
+}
+
+/** DB の読み手の結果。'none'＝読み手が無い（試験など）・'shadow'＝切り替え前（Google が正本）・null＝読めない */
+async function readFromDb(now: number): Promise<HbSnapshot | 'none' | 'shadow' | null> {
+  const reader = excretionDbReader
+  if (reader === null) return 'none'
+  try {
+    const payload = await reader()
+    if (payload === 'shadow') return 'shadow'
+    if (payload === null || typeof payload !== 'object' || !Array.isArray(payload.residents) || !Array.isArray(payload.records)) return null
+    // GAS の時と同じく、16日より前の日付の記録は捨てる（数える範囲を一定にする）
+    return parseExcretionPayload(payload, addDaysIsoUtc(jstDay(now), -EXCRETION_FETCH_DAYS))
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 先に DB。排泄ケア記録の GAS（接続設定がある時だけ）を読むのは、DB が「切り替え前（Google が正本）」と答えた時と、DB の読み手が無い時だけ。
+ * DB を読めない時は Google へ戻さず失敗にする（2026-11-15・M1 順4）。メモリへの控えもここで行う。
+ * 切り替え前で接続設定が無い端末は null（今までの「接続設定がありません」）
+ */
+async function loadExcretion(cfg: { url: string; token: string } | 'invalid' | null): Promise<ExcretionFetchResult | null> {
+  const gen = excretionGen
+  const fromDb = await readFromDb(Date.now())
+  if (fromDb === null) return { ok: false, reason: 'network' }
+  if (fromDb !== 'shadow' && fromDb !== 'none') {
+    const at = Date.now()
+    if (gen === excretionGen) cache = { url: EXCRETION_SRC_DB, at, snap: fromDb }
+    return { ok: true, snap: fromDb, at }
+  }
+  if (cfg === null) return null
+  if (cfg === 'invalid') return { ok: false, reason: 'url' }
+  const url = cfg.url
+  const r = await requestWindow(url, cfg.token)
+  if (r.ok && gen === excretionGen) cache = { url, at: r.at, snap: r.snap }
+  return r
 }
 
 async function requestWindow(url: string, token: string): Promise<ExcretionFetchResult> {
@@ -778,27 +842,35 @@ async function requestWindow(url: string, token: string): Promise<ExcretionFetch
 }
 
 /**
- * 排便記録の GAS から直近の記録を読む。接続設定が無い端末では null。失敗は { ok:false, reason }（例外を外へ出さない）。
- * 直近 EXCRETION_CACHE_MS 以内に同じ接続先から取れていれば、通信せずその結果を使う。force の時は取り直す。
+ * 排便記録を読む。先に共通の DB（排泄ケア記録が切り替え済みの時だけ）、切り替え前の時だけ排便記録の GAS の getAll
+ * （DB を読めない時は GAS へ戻さず { ok:false, reason:'network' }）。
+ * 切り替え前（または DB の読み手が無い）で接続設定も無い端末では null。失敗は { ok:false, reason }（例外を外へ出さない）。
+ * 直近 EXCRETION_CACHE_MS 以内に DB か同じ接続先から取れていれば、通信せずその結果を使う。force の時は取り直す。
  */
 export async function fetchExcretion(opts: { force?: boolean } = {}): Promise<ExcretionFetchResult | null> {
   const cfg = readExcretionConfig()
-  if (cfg === null) return null
-  if (cfg === 'invalid') return { ok: false, reason: 'url' }
+  const hasDb = excretionDbReader !== null
+  // DB の読み手が無い時は今までどおり（接続設定が無ければ通信せずに null）
+  if (!hasDb && cfg === null) return null
+  if (!hasDb && cfg === 'invalid') return { ok: false, reason: 'url' }
+  const gasUrl = cfg !== null && cfg !== 'invalid' ? cfg.url : null
   const now = Date.now()
-  if (!opts.force && cache !== null && cache.url === cfg.url && now - cache.at >= 0 && now - cache.at < EXCRETION_CACHE_MS) {
+  if (
+    !opts.force &&
+    cache !== null &&
+    ((hasDb && cache.url === EXCRETION_SRC_DB) || cache.url === gasUrl) &&
+    now - cache.at >= 0 &&
+    now - cache.at < EXCRETION_CACHE_MS
+  ) {
     return { ok: true, snap: cache.snap, at: cache.at }
   }
-  let p: Promise<ExcretionFetchResult>
-  if (inflight !== null && inflight.url === cfg.url) {
+  const key = `${hasDb ? EXCRETION_SRC_DB : ''}${gasUrl ?? (cfg === 'invalid' ? 'invalid' : '')}`
+  let p: Promise<ExcretionFetchResult | null>
+  if (inflight !== null && inflight.url === key) {
     p = inflight.p
   } else {
-    const url = cfg.url
-    p = requestWindow(url, cfg.token).then((r) => {
-      if (r.ok) cache = { url, at: r.at, snap: r.snap }
-      return r
-    })
-    const mine = { url, p }
+    p = loadExcretion(cfg)
+    const mine = { url: key, p }
     inflight = mine
     void p.finally(() => {
       if (inflight === mine) inflight = null
