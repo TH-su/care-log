@@ -23,7 +23,7 @@ export async function syncTrainingPlanDue(actorId: number | null): Promise<Train
   // 役割を先に確かめる（分からない時も写さない側に倒す）
   if (!canWriteMasters(await fetchMyRole())) return { kind: 'role' }
   if (actorId === null) return { kind: 'fail', text: '記録者が選ばれていません。上の「記録者」で選んでから押してください。' }
-  // 共通の DB の正本（事務所・管理者のログインで読む口）を先に。読めなければ計画書の GAS（その端末に接続設定がある時だけ）
+  // 共通の DB の正本（事務所・管理者のログインで読む口）を先に。計画書の GAS（その端末に接続設定がある時だけ）は「切り替え前」の時だけ
   const fromDb = await readTrainingPlanIndexFromDb()
   if (fromDb === null) return { kind: 'fail', text: trainingPlanFailText('format') }
   if (fromDb === 'empty') return { kind: 'fail', text: trainingPlanFailText('noindex') }

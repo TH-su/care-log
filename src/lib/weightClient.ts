@@ -394,7 +394,6 @@ export function clearWeightCache(): void {
   localMapCache = new Map()
 }
 
-/** DB の読み手を1回呼ぶ（読み手が無い・null・例外は「DB からは読めない」＝GAS へ戻る） */
 /** DB の読み手の結果。'none'＝読み手が無い（試験など）・'shadow'＝切り替え前（Google が正本）・null＝読めない */
 async function readFromDb(): Promise<WeightSnapshot | 'none' | 'shadow' | null> {
   const reader = weightDbReader
@@ -464,7 +463,7 @@ async function loadAll(cfg: { url: string; token: string } | 'invalid' | null): 
 /**
  * 体重を読み、resident_id ごとの測定の列にする。先に共通の DB（切り替え済みの時だけ）、切り替え前の時だけ体重管理の GAS の getAll
  * （DB を読めない時は GAS へ戻さず { ok:false, reason:'network' }）。
- * DB から読めず接続設定も無い端末では null。失敗は { ok:false, reason }（例外を外へ出さない）。
+ * 切り替え前（または DB の読み手が無い）で接続設定も無い端末では null。失敗は { ok:false, reason }（例外を外へ出さない）。
  * 直近 WEIGHT_CACHE_MS 以内に DB か同じ接続先から取れていれば、通信せずその結果を使う。
  * force（「再試行する」）の時はメモリの結果を使わず取り直す。送信中の取得があればそれを待つ（二重に投げない）。
  */
