@@ -2755,6 +2755,8 @@ function FragmentRow({
                   busy={presence.cellBusy(target)}
                   onEditStart={() => presence.enter(focusOf(target))}
                   align="center"
+                  // 数字のキーボードで開く（食事量の表と同じ）。体温だけ小数点が要るので 'decimal'（2026-11-17・本人指示）
+                  inputMode={f === 'temp' ? 'decimal' : 'numeric'}
                   width={FIELD_WIDTH[f]}
                   level={level}
                   extraMark={usualMark}
