@@ -443,7 +443,7 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
     return null
   }
 
-  // 申し送りの印（2026-11-10 計画D）。入力が使えるかと理由はこの画面の旗（活動だけの旗）のまま。記録者・17時のロックは部品が見る
+  // 申し送りの印（2026-11-10 計画D）。入力が使えるかと理由はこの画面の旗（活動だけの旗）のまま。記録者・19時のロックは部品が見る
   const marks = useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason: canWrite ? null : precheck(), refreshKey: reloadKey, show })
 
   const say = (key: string, tone: Msg['tone'], text: string, queued = false) =>

@@ -405,7 +405,7 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
     return null
   }
   // 申し送りの印（2026-11-10 計画D）。使えるかはこの画面の旗（機能訓練だけの旗）と設定待ちだけで見る（居宅訪問と同じ＝配置を読めない時・
-  // 過去の日でも止めない。現場のログインの過去の日は部品の 17時のロックで止まる）。記録者・17時のロックは部品が見る
+  // 過去の日でも止めない。現場のログインの過去の日は部品の 19時のロックで止まる）。記録者・19時のロックは部品が見る
   const markWritable = gateOk && !missing
   const marks = useDaycareNoteMarksDay({
     day,

@@ -1657,7 +1657,7 @@ main:has(.dsheet-frame) {
     opacity: 0.45;
   }
 }
-/* 表題帯のロックの印（🔒 ロック中（17:00））。文字は帯の色を継ぐ */
+/* 表題帯のロックの印（🔒 ロック中（17:00）・デイは 19:00）。文字は帯の色を継ぐ */
 .dsheet-lock-mark {
   font-weight: var(--fw-bold);
 }

@@ -163,13 +163,15 @@ describe('2. 時間によるロック', () => {
     noteHasInput: (d) => d.body.trim() !== '' || d.targetPicked || (d.categories?.length ?? 0) > 0,
   })
 
-  it('4欄の印（日勤・16時以降・デイ・夜勤）: 16:59→17:00・23:59→0:00・翌7:59→8:00 で変わる', () => {
+  it('4欄の印（日勤・16時以降・デイ・夜勤）: 16:59→17:00・18:59→19:00（デイ）・23:59→0:00・翌7:59→8:00 で変わる', () => {
     assert.deepEqual(
       NOTE_SECTION_ORDER.map((x) => x.sec),
       ['day', 'late', 'daycare', 'night'],
     )
     assert.equal(lockSigOf(DAY, jst('16:59')), '0000')
-    assert.equal(lockSigOf(DAY, jst('17:00')), '1010')
+    assert.equal(lockSigOf(DAY, jst('17:00')), '1000')
+    assert.equal(lockSigOf(DAY, jst('18:59')), '1000')
+    assert.equal(lockSigOf(DAY, jst('19:00')), '1010')
     assert.equal(lockSigOf(DAY, jst('23:59')), '1010')
     assert.equal(lockSigOf(DAY, jst('00:00', '2026-10-16')), '1110')
     assert.equal(lockSigOf(DAY, jst('07:59', '2026-10-16')), '1110')

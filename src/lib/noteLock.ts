@@ -1,11 +1,12 @@
 // 申し送りの時間によるロックの判定（純関数・副作用なし。2026-10-15 本人回答・仕様 §2）。
-// サーバーのトリガ（supabase/migrations/0033_note_lock.sql の private.note_lock_at）と同じ規則。ただし画面は猶予なし
+// サーバーのトリガ（supabase/migrations/0033_note_lock.sql・0063_daycare_note_lock_19.sql の private.note_lock_at）と同じ規則。ただし画面は猶予なし
 // （サーバーだけ 30分の猶予＝圏外で書いて後から届く分のため）。
 //
-//   日勤（shift='day' かつ after16=false）・デイ（shift='daycare'）… 記録日の 17:00
+//   日勤（shift='day' かつ after16=false）… 記録日の 17:00
+//   デイ（shift='daycare'）             … 記録日の 19:00（2026-11-17 本人指示・0063）
 //   16時以降（shift='day' かつ after16=true）                         … 記録日の 24:00（翌日の 0:00）
 //   夜勤（shift='night'）                                              … 翌朝 8:00
-//   ちょうどその時刻からロック（17:00:00 は書けない）。時刻は日本時間（端末の時刻帯には左右されない）。
+//   ちょうどその時刻からロック（17:00:00・19:00:00 は書けない）。時刻は日本時間（端末の時刻帯には左右されない）。
 //
 // 拡張子付きで import する（tests から直接読めるようにするため）。個人情報は扱わない。
 
@@ -23,13 +24,14 @@ export interface NoteLockState {
   locked: boolean
   /** ロックの時刻（epoch ms）。記録日が読めない時は null（その時はロックしない＝サーバーの判定に任せる） */
   lockAt: number | null
-  /** 表題帯に出す時刻の書き方（'17:00'・'24:00'・'翌8:00'）。記録日が読めない時は '' */
+  /** 表題帯に出す時刻の書き方（'17:00'・'19:00'・'24:00'・'翌8:00'）。記録日が読めない時は '' */
   label: string
 }
 
 /** 区分ごとのロックの時刻（記録日の 0:00 からの時間）と書き方 */
 function lockOffset(shift: Shift, after16: boolean): { hours: number; label: string } {
   if (shift === 'night') return { hours: 24 + 8, label: '翌8:00' }
+  if (shift === 'daycare') return { hours: 19, label: '19:00' }
   if (shift === 'day' && after16) return { hours: 24, label: '24:00' }
   return { hours: 17, label: '17:00' }
 }

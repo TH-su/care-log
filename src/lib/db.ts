@@ -9502,7 +9502,7 @@ export interface PendingNoteMark {
   clientKey: string
   /** pending＝送信待ち／conflict・rejected＝止まった（設定の「送れていない申し送り」で確かめる） */
   state: 'pending' | 'conflict' | 'rejected'
-  /** 17時のロック（0033）で止まった */
+  /** 時間のロック（0033・デイは 19:00＝0063）で止まった */
   locked: boolean
   body: string
 }

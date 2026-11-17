@@ -28,7 +28,7 @@ export const LOCK_DAY = '2026-11-01'
 export const LOCK_SECTIONS = [
   { key: 'day', label: '日勤', shift: 'day', after16: false, lockAt: '2026-11-01T17:00:00+09:00' },
   { key: 'late', label: '16時以降', shift: 'day', after16: true, lockAt: '2026-11-02T00:00:00+09:00' },
-  { key: 'daycare', label: 'デイ', shift: 'daycare', after16: false, lockAt: '2026-11-01T17:00:00+09:00' },
+  { key: 'daycare', label: 'デイ', shift: 'daycare', after16: false, lockAt: '2026-11-01T19:00:00+09:00' },
   { key: 'night', label: '夜勤', shift: 'night', after16: false, lockAt: '2026-11-02T08:00:00+09:00' },
 ]
 
@@ -49,11 +49,14 @@ function judgeCases() {
       out.push({ name: `${s.label}: ロックの時刻 ${off >= 0 ? '+' : ''}${off}分・猶予30分（サーバー）`, day: LOCK_DAY, shift: s.shift, after16: s.after16, now: addMin(s.lockAt, off), grace: 30, expect: want })
     }
   }
-  // 16時以降の印はデイ・夜勤には効かない（デイは 17:00・夜勤は翌8:00 のまま）
-  out.push({ name: 'デイに after16=true: 17:00 でロック（16時以降の 24:00 にならない）', day: LOCK_DAY, shift: 'daycare', after16: true, now: '2026-11-01T17:00:00+09:00', grace: 0, expect: true })
-  out.push({ name: 'デイに after16=true: 16:59 はまだ書ける', day: LOCK_DAY, shift: 'daycare', after16: true, now: '2026-11-01T16:59:00+09:00', grace: 0, expect: false })
+  // 16時以降の印はデイ・夜勤には効かない（デイは 19:00・夜勤は翌8:00 のまま）
+  out.push({ name: 'デイに after16=true: 19:00 でロック（16時以降の 24:00 にならない）', day: LOCK_DAY, shift: 'daycare', after16: true, now: '2026-11-01T19:00:00+09:00', grace: 0, expect: true })
+  out.push({ name: 'デイに after16=true: 18:59 はまだ書ける', day: LOCK_DAY, shift: 'daycare', after16: true, now: '2026-11-01T18:59:00+09:00', grace: 0, expect: false })
   out.push({ name: '夜勤に after16=true: 翌7:59 はまだ書ける', day: LOCK_DAY, shift: 'night', after16: true, now: '2026-11-02T07:59:00+09:00', grace: 0, expect: false })
   out.push({ name: '夜勤に after16=true: 翌8:00 でロック', day: LOCK_DAY, shift: 'night', after16: true, now: '2026-11-02T08:00:00+09:00', grace: 0, expect: true })
+  // デイは日勤の 17:00 ではロックしない（0063）
+  out.push({ name: 'デイ: 日勤のロックの 17:00 ではまだ書ける（0063）', day: LOCK_DAY, shift: 'daycare', after16: false, now: '2026-11-01T17:00:00+09:00', grace: 0, expect: false })
+  out.push({ name: 'デイ: 18:30 は猶予30分のサーバーでもまだ受ける', day: LOCK_DAY, shift: 'daycare', after16: false, now: '2026-11-01T18:30:00+09:00', grace: 30, expect: false })
   // 前日・未来の日・日本時間の日付またぎ
   out.push({ name: '前日の日勤: 当日の朝 7:00 はロック中', day: '2026-10-31', shift: 'day', after16: false, now: '2026-11-01T07:00:00+09:00', grace: 0, expect: true })
   out.push({ name: '前日の16時以降: 当日の 0:00 ちょうどでロック', day: '2026-10-31', shift: 'day', after16: true, now: '2026-11-01T00:00:00+09:00', grace: 0, expect: true })
