@@ -8427,7 +8427,8 @@ function NoteBlock({
   matched,
 }: NoteBlockProps) {
   const count = rows.length
-  // 行の並びは読み込みの並び（時刻→id）のまま。保存した直後の行は末尾にあり、同じ方の行があればそこへ入る（仕様 §4）
+  // 行の並びは読み込みの並び（時刻→id）のまま。保存した直後の行は末尾にある。同じ方の行があれば、日勤・16時以降・夜勤では
+  // まとめた行ごと後に書いた記録の位置（末尾）へ移る（2026-11-17 本人指示）。デイは最初の記録の位置のまま（仕様 §4）
   const groups = useMemo(() => groupNotesByResident(rows, null), [rows])
   const shown = matched === null ? null : countMatched(rows, matched)
   const locked = lock.locked && !lock.unlocked

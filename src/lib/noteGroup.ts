@@ -4,7 +4,9 @@
 //   区分 … 日勤（day・16時前）／16時以降（day・after16）／デイ（daycare）／夜勤（night）
 //   束ねる鍵 … 記録日（note_on）・区分・対象（resident_id）。対象なし（null）と「予定」の記録は束ねない（1件ずつの行・
 //             「予定」は 2026-10-20 本人指示＝事務所の予定は1件ずつ見えるように）
-//   並び … 日報と同じ（時刻 timeSortKey〔夜勤明けの「翌」は夜の後ろ〕→ id）。まとめた行は最初の記録の位置に出す
+//   並び … 日報と同じ（時刻 timeSortKey〔夜勤明けの「翌」は夜の後ろ〕→ id）。まとめた行は、日勤・16時以降・夜勤では
+//          最後に書いた記録（id がいちばん大きい＝書いた順の最後）の位置に出す（2026-11-17 本人指示「最初に書いた欄に寄ると、読み返さない恐れがある」）。
+//          デイは最初の記録の位置のまま（指示の外・仮置き）。まとめた行の中の並び（最初の本文が上）は変えない
 //   内容 … 最初の本文、改行して2件目以降の本文。記入者の列がある区分では、記録ごとに記入者の枠を区切って出す
 //          （2026-10-20 本人指示）。記入者の列が無い区分（夜勤）だけ、2件目以降の末尾に「（記入者の姓）」を付ける
 //          （1つ前の記録と同じ記入者の時は紙に出さない・2026-11-07 本人指示）
@@ -43,17 +45,25 @@ export interface NoteGroupRow {
   note_on: string
   section: NoteSection
   resident_id: number | null
-  /** まとめた記録（1件以上・並び順）。notes[0] が最初の記録（記入者欄・行の位置） */
+  /** まとめた記録（1件以上・並び順）。notes[0] が最初の記録（記入者欄）。行の位置は groupAnchorLast の区分では最後の記録 */
   notes: Note[]
   /** まとめた記録の分類の和集合（NOTE_CATEGORIES の並び） */
   categories: NoteCategory[]
 }
 
 /**
+ * まとめた行を最後の記録の位置に出す区分か（日勤・16時以降・夜勤。2026-11-17 本人指示）。デイは最初の記録の位置のまま（仮置き）
+ */
+export function groupAnchorLast(section: NoteSection): boolean {
+  return section !== 'daycare'
+}
+
+/**
  * 申し送りを、同じ日・同じ区分・同じ対象（resident_id。null は対象外）ごとに1つの行へまとめる。
  * order を省くと日報の並び（sheetNoteOrder）で並べ替えてからまとめる（入力の配列は書き換えない）。
  * order に null を渡すと入力の並びをそのまま使う（呼び手が並べ済みの時）。
- * 行の並びは「その行の最初の記録」の位置。まとめた行の中の並びも同じ順
+ * 行の並びは、日勤・16時以降・夜勤では「その行の最後の記録」の位置、デイは「その行の最初の記録」の位置（groupAnchorLast）。
+ * まとめた行の中の並びは入力の並び（最初の記録が上）
  */
 export function groupNotesByResident(
   notes: readonly Note[],
@@ -62,23 +72,35 @@ export function groupNotesByResident(
   const list = order === null ? notes.slice() : notes.slice().sort(order)
   const rows: NoteGroupRow[] = []
   const byKey = new Map<string, NoteGroupRow>()
+  // 行の位置（list の何番目の記録の位置に出すか）。まとめた行は区分で最初か最後の記録（2026-11-17 本人指示）
+  const anchor = new Map<NoteGroupRow, number>()
+  let idx = -1
   for (const n of list) {
+    idx += 1
     const section = noteSectionOf(n)
     if (n.resident_id === null || hasSchedule(n.categories)) {
       // 対象なしの行と「予定」の記録は1件ずつの行（同じ方の記録でもまとめない）
-      rows.push({ key: `n:${n.id}`, note_on: n.note_on, section, resident_id: n.resident_id, notes: [n], categories: [] })
+      const single: NoteGroupRow = { key: `n:${n.id}`, note_on: n.note_on, section, resident_id: n.resident_id, notes: [n], categories: [] }
+      anchor.set(single, idx)
+      rows.push(single)
       continue
     }
     const key = `g:${n.note_on}|${section}|${n.resident_id}`
     const row = byKey.get(key)
     if (row !== undefined) {
+      // 最後に書いた記録＝記録の番号（id・書いた順に増える）がいちばん大きい記録。時刻の並びの最後ではない
+      // （過去の日の日勤は時刻が入らず並びの先頭に来るため・反証レビュー 2026-11-17）
+      if (groupAnchorLast(section) && n.id > row.notes.reduce((m, x) => (x === n ? m : Math.max(m, x.id)), -Infinity)) anchor.set(row, idx)
       row.notes.push(n)
       continue
     }
     const created: NoteGroupRow = { key, note_on: n.note_on, section, resident_id: n.resident_id, notes: [n], categories: [] }
     byKey.set(key, created)
+    anchor.set(created, idx)
     rows.push(created)
   }
+  // 位置の並べ替え（Array.prototype.sort は安定。位置はどの行も別の番号なので同じ値は無い）
+  rows.sort((a, b) => (anchor.get(a) ?? 0) - (anchor.get(b) ?? 0))
   for (const r of rows) r.categories = unionCategories(r.notes.map((n) => n.categories))
   return rows
 }
