@@ -612,6 +612,11 @@ export interface SheetCellProps {
    * 渡さない画面は従来どおり（打ちかけは確定しない）。値が編集を始めた時と同じなら呼ばない
    */
   onAbandon?: (value: string, meta: { base: string }) => void
+  /**
+   * 1行の入力欄で開くキーボードの種類（2026-11-17・本人指示）。数字の欄は 'numeric'、小数点が要る欄は 'decimal'。
+   * 省略＝今までどおり（指定なし＝ふつうのキーボード）。multiline には効かない
+   */
+  inputMode?: 'numeric' | 'decimal'
 }
 
 /**
@@ -637,6 +642,7 @@ export function SheetCell({
   busy = null,
   onEditStart,
   onAbandon,
+  inputMode,
 }: SheetCellProps) {
   const text = value ?? ''
   const editable = typeof onCommit === 'function'
@@ -849,6 +855,7 @@ export function SheetCell({
       <input
         ref={inputRef}
         type="text"
+        inputMode={inputMode}
         value={draft}
         aria-label={ariaLabel}
         aria-describedby={busy ? busyId : undefined}
