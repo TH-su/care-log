@@ -174,17 +174,58 @@ if (pureError !== null) {
       assert.equal(noteSectionOf({ shift: 'night', after16: true }), 'night')
     })
 
-    it('同じ日・同じ区分・同じ対象の2件以上を1行に・最初の記録の位置に出す・中の並びも時刻→id', () => {
+    it('同じ日・同じ区分・同じ対象の2件以上を1行に・最後に書いた記録の位置に出す（2026-11-17 本人指示）・中の並びは時刻→id のまま', () => {
       const ns = [
-        note({ id: 5, resident_id: 1, occurred_at: '10:00:00', body: 'B' }),
+        note({ id: 12, resident_id: 1, occurred_at: '10:00:00', body: 'B' }), // いちばん後に書いた記録
         note({ id: 3, resident_id: 2, occurred_at: '09:00:00', body: 'X' }),
         note({ id: 4, resident_id: 1, occurred_at: '08:00:00', body: 'A' }),
         note({ id: 9, resident_id: 1, occurred_at: '08:00:00', body: 'A2' }),
       ]
       const rows = groupNotesByResident(ns)
-      assert.deepEqual(rows.map((r) => r.notes.map((n) => n.id)), [[4, 9, 5], [3]])
-      assert.equal(rows[0].key, `g:${LOCK_DAY}|day|1`)
-      assert.equal(rows[0].resident_id, 1)
+      // 9:00 の別の方の行が上、8:00・8:00・10:00 の方の行は最後の 10:00 の位置（下）
+      assert.deepEqual(rows.map((r) => r.notes.map((n) => n.id)), [[3], [4, 9, 12]])
+      assert.equal(rows[1].key, `g:${LOCK_DAY}|day|1`)
+      assert.equal(rows[1].resident_id, 1)
+    })
+
+    it('16時以降・夜勤も最後に書いた記録の位置・デイは最初の記録の位置のまま（2026-11-17 本人指示・デイは仮置き）', () => {
+      for (const [shift, after16] of [['day', true], ['night', false]]) {
+        const ns = [
+          note({ id: 1, resident_id: 1, shift, after16, occurred_at: '17:00:00' }),
+          note({ id: 2, resident_id: 2, shift, after16, occurred_at: '18:00:00' }),
+          note({ id: 3, resident_id: 3, shift, after16, occurred_at: '19:00:00' }),
+          note({ id: 4, resident_id: 1, shift, after16, occurred_at: '20:00:00' }),
+        ]
+        assert.deepEqual(groupNotesByResident(ns).map((r) => r.notes.map((n) => n.id)), [[2], [3], [1, 4]], shift)
+      }
+      const dc = [
+        note({ id: 1, resident_id: 1, shift: 'daycare', occurred_at: '10:00:00' }),
+        note({ id: 2, resident_id: 2, shift: 'daycare', occurred_at: '11:00:00' }),
+        note({ id: 3, resident_id: 1, shift: 'daycare', occurred_at: '12:00:00' }),
+      ]
+      assert.equal(GROUP.groupAnchorLast('daycare'), false)
+      assert.deepEqual(groupNotesByResident(dc).map((r) => r.notes.map((n) => n.id)), [[1, 3], [2]])
+    })
+
+    it('最後に書いた＝記録の番号が大きい方。過去の日の時刻なしの記録を後から書いた時は、その記録の位置（反証レビュー 2026-11-17）', () => {
+      const ns = [
+        note({ id: 10, resident_id: 1, occurred_at: '10:00:00' }),
+        note({ id: 11, resident_id: 2, occurred_at: '09:00:00' }),
+        note({ id: 20, resident_id: 1, occurred_at: null }),
+        note({ id: 21, resident_id: 3, occurred_at: null }),
+      ]
+      // 並び: 20（時刻なし）→ 21（時刻なし）→ 11（9:00）→ 10（10:00）。方1の行は後に書いた 20 の位置
+      assert.deepEqual(groupNotesByResident(ns).map((r) => r.notes.map((n) => n.id)), [[20, 10], [21], [11]])
+    })
+
+    it('読み込みの並び（order=null）では、保存した直後に末尾へ足した記録の方の行が末尾へ移る（2026-11-17 本人指示）', () => {
+      const ns = [
+        note({ id: 1, resident_id: 1, occurred_at: '09:00:00' }),
+        note({ id: 2, resident_id: 2, occurred_at: '10:00:00' }),
+        note({ id: 3, resident_id: null, occurred_at: '11:00:00' }),
+        note({ id: 9, resident_id: 1, occurred_at: '08:00:00' }),
+      ]
+      assert.deepEqual(groupNotesByResident(ns, null).map((r) => r.notes.map((n) => n.id)), [[2], [3], [1, 9]])
     })
 
     it('区分が違えば・日が違えば・対象が違えばまとめない／対象なし（null）は1件ずつ', () => {
@@ -362,9 +403,10 @@ if (pureError !== null) {
         { ...base, id: 3, categories: [] },
         { ...base, id: 4, categories: ['食事', '予定'] },
       ])
-      assert.deepEqual(rows.map((r) => r.notes.map((n) => n.id)), [[1, 3], [2], [4]])
-      assert.deepEqual(rows[1].categories, ['予定'])
-      assert.equal(rows[1].resident_id, 5)
+      // まとめた [1, 3] は最後の記録（3）の位置＝予定の 2 の後ろ（2026-11-17 本人指示）
+      assert.deepEqual(rows.map((r) => r.notes.map((n) => n.id)), [[2], [1, 3], [4]])
+      assert.deepEqual(rows[0].categories, ['予定'])
+      assert.equal(rows[0].resident_id, 5)
     })
   })
 
