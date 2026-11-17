@@ -124,7 +124,7 @@ if (pureError !== null) {
         const st = lockState(LOCK_DAY, s.shift, s.after16, Date.parse(s.lockAt) - 60_000)
         assert.equal(st.lockAt, Date.parse(s.lockAt), s.label)
         assert.equal(st.locked, false, s.label)
-        assert.equal(st.label, { day: '17:00', late: '24:00', daycare: '17:00', night: '翌8:00' }[s.key], s.label)
+        assert.equal(st.label, { day: '17:00', late: '24:00', daycare: '19:00', night: '翌8:00' }[s.key], s.label)
       }
     })
 

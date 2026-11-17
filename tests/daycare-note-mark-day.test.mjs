@@ -437,7 +437,7 @@ if (M === null) {
       // 「別の端末が先に…」は結果ではない（テンキーの1行に出さない）
       assert.match(day, /say\(k, \{ tone: 'info', text: '別の端末が先に申し送りにしていました（申し送りは1件のままです）。' \}\)/)
     })
-    it('17時のロック・記録者・旗は1人の画面と同じ。付いた印〔⚑〕も〔申し送りを直す〕も、直す・外すの送信待ち・止まり・付け外しできない時は押せない（反証の確認 軽4・軽5）', () => {
+    it('19時のロック・記録者・旗は1人の画面と同じ。付いた印〔⚑〕も〔申し送りを直す〕も、直す・外すの送信待ち・止まり・付け外しできない時は押せない（反証の確認 軽4・軽5）', () => {
       assert.match(day, /const lockedForMe = lockState\(day, 'daycare', false, now\)\.locked && !canUnlockNotes\(role\)/)
       assert.match(day, /if \(lockedForMe\) return MSG_LOCKED_FIELD/)
       assert.match(day, /if \(actorRef\.current === null\) return MSG_NO_RECORDER/)

@@ -10,7 +10,7 @@
 // ・書き込みは既存の insertNote（冪等キー dcn:<日>:<利用者id>:<記録>:<世代>-<送るたびの印>・鍵の作りは daycareNoteMark.ts）・deleteNote・
 //   saveNoteEdits だけ。送る直前に読み直して世代を決め、生きている印があれば2件目を作らない（1人の画面の部品 DaycareNoteMark.tsx と同じ手順）。
 //   機能訓練は1人1日1件として扱う（markTaken: 記録を入れ直して id が替わっても、生きている tr＊ の印があれば作らない）
-// ・17時のロック（0033）・送信待ち・止まった時・記録者の扱いは1人の画面と同じ（現場のログインは記録日の 17:00 から付け外し・直しができない）。
+// ・19時のロック（0033・0063）・送信待ち・止まった時・記録者の扱いは1人の画面と同じ（現場のログインは記録日の 19:00 から付け外し・直しができない）。
 //   押せない時は disabled にせず aria-disabled にし、押すと理由を出す（一括の画面は行の下・バイタル・食事のテンキーはテンキーの1行）
 // ・送れた・外した・直した行は、読み直しが失敗しても・古い読み込みが後から届いても画面の印に持つ（mergeKeptRows）
 // ・印の読み込みは、その日の全員分を1本（fetchDaycareDayNotes）。Realtime の購読は足さない（他の端末の印は〔最新に更新〕・送信待ちが
@@ -66,12 +66,12 @@ const MSG_QUEUED = '電波が届かないため、この端末に保存しまし
 const MSG_NOT_PERSISTED =
   '送信待ちにしましたが、端末に控えを残せませんでした（保存領域の空きが不足している可能性があります）。この画面を閉じずに電波の回復をお待ちください。'
 const MSG_HELD = '他の端末で先に変更されていたため、止めました。設定の「送れていない申し送り」で確かめてください。'
-const MSG_LOCKED_FIELD = '17:00 を過ぎたため、現場の端末ではこの日の申し送りの印を付け外しできません（事務所のログインでできます）。'
+const MSG_LOCKED_FIELD = '19:00 を過ぎたため、現場の端末ではこの日の申し送りの印を付け外しできません（事務所のログインでできます）。'
 const MSG_NOT_READ = '申し送りの印を読み込めていないため、印を付けられません。電波の届く所で〔最新に更新〕を押してください。'
 const MSG_NO_RECORDER = '記録者が選ばれていません。上の「記録者」で選んでから入れてください。'
 const MSG_LOADING = '申し送りの印を読み込んでいます。'
 const MSG_STOPPED_ADD = '申し送りが止まっています。設定の「送れていない申し送り」で確かめてください。'
-const MSG_STOPPED_ADD_LOCKED = '申し送りは 17:00 のロックで止まっています。設定の「送れていない申し送り」で確かめてください。'
+const MSG_STOPPED_ADD_LOCKED = '申し送りは 19:00 のロックで止まっています。設定の「送れていない申し送り」で確かめてください。'
 const MSG_STOPPED_EDIT = 'この申し送りへの変更が止まっています。設定の「送れていない申し送り」で確かめてください。'
 /** 付いている印へ直す・外す操作が送信待ち・止まっている間は、〔⚑〕〔申し送りを直す〕を押せない（反証の確認 軽5） */
 const MSG_CHANGE_PENDING = 'この申し送りへの変更（直す・外す）が送信待ちです。届いてから押してください。'
@@ -485,7 +485,7 @@ export function useDaycareNoteMarksDay({ day, actorId, canWrite, blockedReason, 
     const pend = rec === null ? null : pendOf(rid, rec)
     const w = widthCls === '' ? '' : ` ${widthCls}`
     if (rec !== null && live !== null) {
-      // 付けた印（もう一度押すと〔外す〕の確認）。直す・外す操作が送信待ち・止まった時・付け外しできない時（17時のロック・記録者なし 等）は押せない
+      // 付けた印（もう一度押すと〔外す〕の確認）。直す・外す操作が送信待ち・止まった時・付け外しできない時（19時のロック・記録者なし 等）は押せない
       const hold = changeHold(live)
       const stale = known && markDiffers(rec.kind, live.note.body, text)
       const reason = hold.reason ?? (isBusy ? '送信中です。' : precheck())
