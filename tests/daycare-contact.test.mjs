@@ -1097,3 +1097,45 @@ describe('項目ごとの記載・各画面との連動（静的検査・2026-11
     }
   })
 })
+
+// 2026-11-18 親の決定（仮置き）: 10px でも1枚に収まらない方は文を切らずに2枚目へ続け、印刷の前の確かめと見本で知らせる
+if (C !== null) {
+  describe('紙が2枚になる方（fitContactFont・overflowPicked）', () => {
+    // 高さは文字の大きさに比例する見立て（1px あたり h）
+    const lin = (h) => (px) => px * h
+    it('上限で収まれば上限・下げて収まる所で止まる・下限でも収まらなければ overflow（下限の大きさのまま）', () => {
+      assert.deepEqual(C.fitContactFont(lin(40), 711, 15, 10, 0.5), { px: 15, overflow: false })
+      assert.deepEqual(C.fitContactFont(lin(60), 711, 15, 10, 0.5), { px: 11.5, overflow: false })
+      assert.deepEqual(C.fitContactFont(lin(70), 711, 15, 10, 0.5), { px: 10, overflow: false })
+      assert.deepEqual(C.fitContactFont(lin(87), 711, 15, 10, 0.5), { px: 10, overflow: true })
+    })
+    it('ちょうど収まる高さは収まる扱い（以下で比べる）', () => {
+      assert.deepEqual(C.fitContactFont(() => 711, 711, 15, 10, 0.5), { px: 15, overflow: false })
+      assert.deepEqual(C.fitContactFont((px) => (px > 10 ? 712 : 711), 711, 15, 10, 0.5), { px: 10, overflow: false })
+    })
+    it('印刷の前の確かめ: 選んだ方のうち2枚になる方だけ・紙面の並び', () => {
+      const sheets = [{ residentId: 3 }, { residentId: 1 }, { residentId: 2 }]
+      assert.deepEqual(C.overflowPicked(sheets, new Set([1, 2, 3]), new Set([2, 3])), [3, 2])
+      assert.deepEqual(C.overflowPicked(sheets, new Set([1]), new Set([2, 3])), [])
+    })
+  })
+}
+
+describe('紙が2枚になる方（静的検査・2026-11-18）', () => {
+  const page = code('../src/pages/DaycareContactPage.tsx')
+  const sheet = code('../src/components/print/DaycareContactSheet.tsx')
+  const css = read('../src/components/print/daycareContact.css')
+  it('印刷と同じ探し方（fitSheets）で数え、印刷の前の確かめと見本に出す・文は切らない', () => {
+    assert.match(sheet, /function fitSheets\(host: HTMLElement\): number\[\]/)
+    assert.match(sheet, /if \(r\.overflow && Number\.isSafeInteger\(rid\)\) overflow\.push\(rid\)/)
+    assert.match(sheet, /<article className="dcc-sheet" data-rid=\{sheet\.residentId\}>/)
+    assert.match(sheet, /export function useContactSheetOverflow\(sheets: readonly ContactSheet\[\]\)/)
+    assert.match(page, /overflow: overflowPicked\(printable, set, sheetFit\.overflow\)/)
+    assert.match(page, /check\.overflow\.length > 0 \|\|/)
+    assert.match(page, /紙が2枚になります/)
+    assert.match(page, /\{sheetFit\.portal\}/)
+    // 測る置き場は印刷に出さない（body の直下の .dcc-print-area 以外は印刷の間隠す）・紙を切る指定（overflow: hidden・固定の高さ）を足していない
+    assert.match(css, /html\[data-dcc-print\] body > \*:not\(\.dcc-print-area\) \{\s*display: none !important;/)
+    assert.doesNotMatch(css, /overflow:\s*hidden/)
+  })
+})

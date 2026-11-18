@@ -99,6 +99,7 @@ import {
   noteLength,
   normalizeNoteText,
   nurseNoteMissing,
+  overflowPicked,
   trainingQueuedPicked,
   unreadPicked,
   vitalsStoppedPicked,
@@ -110,7 +111,7 @@ import { VitalLimitsFailedNote } from '../components/VitalLimitsFailedNote'
 import { RecorderBar } from '../components/RecorderBar'
 import { registerUnsaved } from '../lib/leaveGuard'
 import { ErrorBlock, LoadingBlock, ModalShell } from '../components/ui'
-import { ContactSheetView, DaycareContactPrint } from '../components/print/DaycareContactSheet'
+import { ContactSheetView, DaycareContactPrint, useContactSheetOverflow } from '../components/print/DaycareContactSheet'
 import type { DaycareContactPrintHandle } from '../components/print/DaycareContactSheet'
 import { addDays, fmtDayLabel, todayIso } from '../lib/format'
 import type { BathRecord, DaycareAttendance, DaycarePlanRow, DaycarePlanSource, FluidIntake, Resident, Staff } from '../lib/types'
@@ -209,6 +210,8 @@ interface PrintCheck {
   trainingQueued: number[]
   /** バイタルの送信待ちが競合・拒否で止まっている方（その値は紙に載らない） */
   vitalsStopped: number[]
+  /** 10px でも1枚に収まらず、紙が2枚になる方（2026-11-18 親の決定・仮置き。文は切らずに続けて刷る） */
+  overflow: number[]
   /** この端末の送信待ちの件数（queuePending。入浴・水分は中身を重ねないので、0 でなければ1行で知らせる） */
   queued: number
   unsaved: number[]
@@ -451,6 +454,8 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
     })
     // 基準の引き方（limits.lookup）は個人の基準の行が変わった時だけ作り直される
   }, [data, board, nameOf, officeName, targets, limits.lookup, queueTick])
+  // 紙が2枚になる方（印刷と同じ部品・幅・探し方で、画面に出ない所に組んで測る。見本の「2枚になります」と印刷の前の確かめ）
+  const sheetFit = useContactSheetOverflow(sheets)
   const pickedSet = useMemo<ReadonlySet<number>>(() => picked ?? (board === null ? new Set() : defaultPicked(board.rows)), [picked, board])
   const pickedSheets = useMemo(() => sheets.filter((s) => pickedSet.has(s.residentId)), [sheets, pickedSet])
   /** 印刷に送る紙面（氏名を引ける方だけ。名簿が読めない間は1枚も刷らない＝「利用者ID 12 様」と刷らない） */
@@ -668,6 +673,7 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
       autoBath: autoBathPicked(printable, set),
       trainingQueued: trainingQueuedPicked(printable, set),
       vitalsStopped: vitalsStoppedPicked(printable, set),
+      overflow: overflowPicked(printable, set, sheetFit.overflow),
       queued: queuePending(),
       unsaved: printable
         .map((s) => s.residentId)
@@ -686,6 +692,7 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
       check.autoBath.length > 0 ||
       check.trainingQueued.length > 0 ||
       check.vitalsStopped.length > 0 ||
+      check.overflow.length > 0 ||
       check.queued > 0 ||
       check.unsaved.length > 0 ||
       check.dayUnsaved
@@ -1056,6 +1063,12 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
                   <figure className="dcc-preview m-0" aria-label={`${name}さんの連絡帳の見本`}>
                     <ContactSheetView sheet={sheet} />
                   </figure>
+                  {/* 10px でも1枚に収まらない方（紙は2枚目に続く・文は切らない） */}
+                  {sheetFit.overflow.has(id) ? (
+                    <p className="text-sm font-bold text-ink">
+                      <span aria-hidden="true">▲ </span>紙が2枚になります（いちばん小さい文字でも1枚に収まりません）
+                    </p>
+                  ) : null}
                   {/* 送信待ちを重ねた方（紙には出さない。届いた後に読み直すと送信待ちの印が消える） */}
                   {sheet.pendingLabels.length > 0 ? (
                     <p className="text-sm text-ink2">
@@ -1070,6 +1083,7 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
       )}
 
       <DaycareContactPrint ref={printRef} sheets={printable} />
+      {sheetFit.portal}
 
       {/* 印刷の前の確かめ（基準外なのに看護職のひと言が空・バイタルが読めない・読めない項目・入浴が自動のまま・送信待ちの機能訓練・
           送れずに止まっているバイタル・この端末の送信待ちの件数・保存していない文） */}
@@ -1145,6 +1159,18 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
               </p>
               <ul className="ml-5 list-disc text-base text-ink">
                 {confirm.vitalsStopped.map((rid) => (
+                  <li key={rid}>{nameOf(rid)} 様</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {confirm !== null && confirm.overflow.length > 0 ? (
+            <div>
+              <p className="text-base text-ink">
+                <span aria-hidden="true">▲ </span>紙が2枚になる方（いちばん小さい文字でも1枚に収まらないため、文は切らずに2枚目に続けて刷ります）:
+              </p>
+              <ul className="ml-5 list-disc text-base text-ink">
+                {confirm.overflow.map((rid) => (
                   <li key={rid}>{nameOf(rid)} 様</li>
                 ))}
               </ul>

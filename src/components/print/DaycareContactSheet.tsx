@@ -14,10 +14,11 @@
 // 中身（言葉・記録なし・基準外の判定）は src/lib/daycareContact.ts（純関数・試験あり）。ここは描くだけ。写真の欄は持たない。
 // console に何も出さない。氏名は紙に出すだけで保存しない。
 
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { RECHECK_NOTE, UNREAD, nurseSectionShown, staffSectionShown } from '../../lib/daycareContact'
+import { RECHECK_NOTE, UNREAD, fitContactFont, nurseSectionShown, staffSectionShown } from '../../lib/daycareContact'
 import type { ContactSheet } from '../../lib/daycareContact'
+import type { ReactNode } from 'react'
 import './print.css'
 import './daycareContact.css'
 
@@ -38,7 +39,7 @@ const PRINT_ATTR = 'data-dcc-print'
 /** 1人の紙面（見本と印刷で同じ） */
 export function ContactSheetView({ sheet }: { sheet: ContactSheet }) {
   return (
-    <article className="dcc-sheet">
+    <article className="dcc-sheet" data-rid={sheet.residentId}>
       <div className="dcc-head">
         {sheet.officeName !== '' ? <p className="dcc-office">{sheet.officeName}</p> : null}
         <p className="dcc-title">連絡帳</p>
@@ -163,22 +164,34 @@ function pxPerMm(): number {
   return w > 0 ? w / 100 : 96 / 25.4
 }
 
-/** 1人ずつ、1枚（印刷できる高さ）に収まる文字の大きさを探して --dcc-font に書く（文字の大きさだけで収める） */
-function fitSheets(host: HTMLElement): void {
+/**
+ * 1人ずつ、1枚（印刷できる高さ）に収まる文字の大きさを探して --dcc-font に書く（文字の大きさだけで収める）。
+ * 10px でも収まらない方の番号を返す（2026-11-18 親の決定・仮置き: 文は切らずに2枚目へ続けて刷る。画面は印刷の前の確かめと見本で知らせる）
+ */
+function fitSheets(host: HTMLElement): number[] {
   const availH = PRINTABLE_H_MM * pxPerMm() * FIT_SAFETY
+  const overflow: number[] = []
   host.setAttribute('data-dcc-measure', '')
   try {
     for (const el of Array.from(host.querySelectorAll<HTMLElement>('.dcc-sheet'))) {
-      let size = CONTACT_FONT_MAX_PX
-      for (; size > CONTACT_FONT_MIN_PX; size -= FONT_STEP_PX) {
-        el.style.setProperty('--dcc-font', `${size}px`)
-        if (el.scrollHeight <= availH) break
-      }
-      el.style.setProperty('--dcc-font', `${Math.max(size, CONTACT_FONT_MIN_PX)}px`)
+      const r = fitContactFont(
+        (size) => {
+          el.style.setProperty('--dcc-font', `${size}px`)
+          return el.scrollHeight
+        },
+        availH,
+        CONTACT_FONT_MAX_PX,
+        CONTACT_FONT_MIN_PX,
+        FONT_STEP_PX,
+      )
+      el.style.setProperty('--dcc-font', `${r.px}px`)
+      const rid = Number(el.dataset.rid)
+      if (r.overflow && Number.isSafeInteger(rid)) overflow.push(rid)
     }
   } finally {
     host.removeAttribute('data-dcc-measure')
   }
+  return overflow
 }
 
 function injectPageStyle(): void {
@@ -259,3 +272,44 @@ export const DaycareContactPrint = forwardRef<DaycareContactPrintHandle, { sheet
         host,
       )
 })
+
+/**
+ * 紙が2枚になる方（10px でも1枚に収まらない方）の番号（2026-11-18 親の決定・仮置き）。印刷と同じ部品・同じ幅（132mm）・同じ探し方（fitSheets）で、
+ * 画面に出ない置き場（.dcc-measure-area・印刷にも出さない）に組んで測る。見本の「2枚になります」と印刷の前の確かめに使う。
+ * 紙面が変わるたび・書体が読み込まれた後に測り直す
+ */
+export function useContactSheetOverflow(sheets: readonly ContactSheet[]): { overflow: ReadonlySet<number>; portal: ReactNode } {
+  const [host, setHost] = useState<HTMLDivElement | null>(null)
+  const [overflow, setOverflow] = useState<ReadonlySet<number>>(() => new Set())
+  const [fontTick, setFontTick] = useState(0)
+  useEffect(() => {
+    const el = document.createElement('div')
+    el.className = 'dcc-measure-area'
+    el.setAttribute('aria-hidden', 'true')
+    document.body.appendChild(el)
+    setHost(el)
+    let alive = true
+    void document.fonts?.ready.then(() => alive && setFontTick((n) => n + 1))
+    return () => {
+      alive = false
+      el.remove()
+    }
+  }, [])
+  useLayoutEffect(() => {
+    if (host === null) return
+    const ids = fitSheets(host)
+    setOverflow((prev) => (prev.size === ids.length && ids.every((id) => prev.has(id)) ? prev : new Set(ids)))
+  }, [host, sheets, fontTick])
+  const portal =
+    host === null
+      ? null
+      : createPortal(
+          <>
+            {sheets.map((s) => (
+              <ContactSheetView key={s.residentId} sheet={s} />
+            ))}
+          </>,
+          host,
+        )
+  return { overflow, portal }
+}

@@ -726,3 +726,23 @@ export function changedText(current: string | null): string {
   const now = current === null || current.trim() === '' ? '（空）' : `「${current}」`
   return `入れている間に、他の端末がこの欄を書き換えました。いま保存されている文は ${now} です。入れた文は欄に残しています（まだ上書きしていません）。見比べて直し、〔保存〕を押してください。`
 }
+
+// ══════════════════════════════════════════════════════════════
+// 紙の文字の大きさ（2026-11-18 親の決定・仮置き: 10px でも1枚に収まらない方は2枚目に続けて刷り、印刷の前に知らせる）
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * 1枚（avail の高さ）に収まる文字の大きさを、max から step ずつ下げて探す（純関数・高さの測り方は渡す）。
+ * min でも収まらない時は px＝min・overflow＝true（文は切らず、紙が2枚になる）
+ */
+export function fitContactFont(heightAt: (px: number) => number, avail: number, max: number, min: number, step: number): { px: number; overflow: boolean } {
+  for (let px = max; px > min; px -= step) {
+    if (heightAt(px) <= avail) return { px, overflow: false }
+  }
+  return { px: min, overflow: heightAt(min) > avail }
+}
+
+/** 印刷の前の確かめ: 選んだ方のうち、紙が2枚になる方（並びは紙面の並び） */
+export function overflowPicked(sheets: readonly Pick<ContactSheet, 'residentId'>[], picked: ReadonlySet<number>, overflow: ReadonlySet<number>): number[] {
+  return sheets.filter((s) => picked.has(s.residentId) && overflow.has(s.residentId)).map((s) => s.residentId)
+}

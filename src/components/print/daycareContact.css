@@ -152,6 +152,23 @@
 .dcc-print-area .dcc-rule {
   height: 7mm;
 }
+/* 紙が2枚になる方を画面で知らせるための測る置き場（2026-11-18・useContactSheetOverflow）。印刷と同じ幅・同じ文字の決まりで、
+   いつも見えない位置に組む。body の直下で .dcc-print-area ではないので、印刷の間は下の規則で紙に出ない */
+.dcc-measure-area {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 132mm;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: -1;
+}
+.dcc-measure-area .dcc-sheet {
+  font-size: var(--dcc-font, 0.9375rem);
+}
+.dcc-measure-area .dcc-rule {
+  height: 7mm;
+}
 
 @media print {
   html[data-dcc-print],
