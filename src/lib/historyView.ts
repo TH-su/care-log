@@ -180,6 +180,10 @@ const TABLE_LABEL: Record<string, Record<string, string>> = {
     day: '日付',
     body: '個別のひと言',
     nurse_note: '看護職のひと言',
+    vital_meal_note: 'バイタル・食事（連絡帳）',
+    activity_note: '活動（連絡帳）',
+    training_note: '機能訓練（リハビリ）（連絡帳）',
+    behavior_note: '行動・ご様子（連絡帳）',
     printed_at: '印刷した時刻',
   },
   // デイのバイタルの〔未測定〕の印（2026-11-10・0062）。seq はデイの測定の回・field は欄（temp など）

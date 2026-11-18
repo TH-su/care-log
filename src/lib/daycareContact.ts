@@ -67,17 +67,52 @@ export interface DaycareContactNote {
   body: string | null
   /** 看護職のひと言 */
   nurse_note: string | null
+  /** 項目ごとの記載（2026-11-18・0064）。各画面と連絡帳の画面の両方から書く同じ列 */
+  vital_meal_note: string | null
+  activity_note: string | null
+  training_note: string | null
+  behavior_note: string | null
   /** 〔印刷する〕で印刷に送った最後の時刻（ISO）。Ctrl+P・⌘P で刷った時は書かない（2026-11-09 親の決定） */
   printed_at: string | null
   rev: number
 }
 
+/**
+ * 項目ごとの記載の欄（2026-11-18 本人指示・代表者の決定「4項目」・0064）。並びは画面・紙の並び。
+ * 書ける画面: バイタル・食事＝バイタル・食事の画面、活動・行動・ご様子＝活動の画面、機能訓練＝機能訓練の画面。どれも連絡帳の画面からも書ける
+ * （同じ行の同じ列を書く＝写しを作らない）
+ */
+export const CONTACT_SECTION_FIELDS = ['vital_meal_note', 'activity_note', 'training_note', 'behavior_note'] as const
+export type ContactSectionField = (typeof CONTACT_SECTION_FIELDS)[number]
+/** 項目ごとの記載の欄の名前（画面の欄の見出しと紙の見出し・仮置き） */
+export const CONTACT_SECTION_LABEL: Record<ContactSectionField, string> = {
+  vital_meal_note: 'バイタル・食事',
+  activity_note: '活動',
+  training_note: '機能訓練（リハビリ）',
+  behavior_note: '行動・ご様子',
+}
+/** 項目ごとの記載の上限（字・DB の check と同じ） */
+export const CONTACT_SECTION_MAX = 200
+
 /** 1人のひと言の欄（別々に書く欄＝変えた欄だけを送る） */
-export type ContactNoteField = 'body' | 'nurse_note'
+export type ContactNoteField = 'body' | 'nurse_note' | ContactSectionField
+
+/** 項目ごとの記載の欄か */
+export function isContactSectionField(field: string): field is ContactSectionField {
+  return (CONTACT_SECTION_FIELDS as readonly string[]).includes(field)
+}
 
 /** 欄の上限（字） */
 export function contactFieldMax(field: ContactNoteField): number {
-  return field === 'body' ? CONTACT_BODY_MAX : CONTACT_NURSE_MAX
+  if (field === 'nurse_note') return CONTACT_NURSE_MAX
+  if (field === 'body') return CONTACT_BODY_MAX
+  return CONTACT_SECTION_MAX
+}
+
+/** 行のその欄の値（行が無ければ null） */
+export function contactFieldValue(row: Pick<DaycareContactNote, ContactNoteField> | null | undefined, field: ContactNoteField): string | null {
+  if (row === null || row === undefined) return null
+  return row[field] ?? null
 }
 
 /** 字数（DB の char_length と同じ数え方＝サロゲートの文字も1字） */
@@ -172,6 +207,11 @@ export interface ContactSheet {
   vitals: { kind: 'ok'; cells: SheetVitalCell[]; recheck: boolean } | { kind: 'unread' } | null
   /** 入浴・お食事・水分・活動・機能訓練（来ていない方は空） */
   items: SheetItem[]
+  /**
+   * 項目ごとの記載（2026-11-18・0064。バイタル・食事／活動／機能訓練（リハビリ）／行動・ご様子の順。書いてある欄だけ・来た方だけ。
+   * 1つも無い時・ひと言を読めなかった時は空＝見出しごと出さない。読めなかった時は職員よりの欄が「読み込めませんでした」になる）
+   */
+  sections: SheetItem[]
   /** 職員より（共通の一文・個別のひと言。両方無い時は見出しごと出さない） */
   staff: { common: string | null; personal: string | null }
   /** ひと言（連絡帳の2表）を読めなかった（職員より・看護職よりは「読み込めませんでした」） */
@@ -242,7 +282,7 @@ export interface ContactSheetInput {
   /** その日の全員共通の一文 */
   dayNote: string | null
   /** その方のその日のひと言の行（無ければ null） */
-  note: Pick<DaycareContactNote, 'body' | 'nurse_note'> | null
+  note: (Pick<DaycareContactNote, 'body' | 'nurse_note'> & Partial<Pick<DaycareContactNote, ContactSectionField>>) | null
   /** ひと言（共通の一文・1人のひと言）を読めたか（省くと読めた） */
   notesOk?: boolean
   /**
@@ -509,6 +549,7 @@ export function buildContactSheet(p: ContactSheetInput): ContactSheet {
       absentText: absentTextOf(p.state, p.hospitalized),
       vitals: null,
       items: [],
+      sections: [],
       staff: { common: null, personal },
       notesUnread,
       abnormal: false,
@@ -556,6 +597,7 @@ export function buildContactSheet(p: ContactSheetInput): ContactSheet {
       { label: '活動', value: act.text },
       { label: '機能訓練', value: tr.text },
     ],
+    sections: notesUnread ? [] : contactSectionItems(p.note),
     staff: { common: notesUnread ? null : normalizeNoteText(p.dayNote), personal },
     notesUnread,
     abnormal,
@@ -566,6 +608,16 @@ export function buildContactSheet(p: ContactSheetInput): ContactSheet {
     trainingQueued: tr.queued,
     vitalsStopped: p.vitalsOk && v.stopped,
   }
+}
+
+/** 項目ごとの記載のうち、書いてある欄（並びは CONTACT_SECTION_FIELDS） */
+export function contactSectionItems(note: Partial<Pick<DaycareContactNote, ContactSectionField>> | null | undefined): SheetItem[] {
+  const out: SheetItem[] = []
+  for (const f of CONTACT_SECTION_FIELDS) {
+    const t = normalizeNoteText(note?.[f] ?? null)
+    if (t !== null) out.push({ label: CONTACT_SECTION_LABEL[f], value: t })
+  }
+  return out
 }
 
 /** 職員よりの欄を紙面に出すか（共通の一文か個別のひと言があるか、ひと言を読めなかった時。空なら見出しごと出さない） */
@@ -615,6 +667,35 @@ export function autoBathPicked(sheets: readonly Pick<ContactSheet, 'residentId' 
 /** 印刷の前に確かめる方: 選んだ方のうち送信待ちの機能訓練がある方（送信が済んでから刷ると紙に載る） */
 export function trainingQueuedPicked(sheets: readonly Pick<ContactSheet, 'residentId' | 'trainingQueued'>[], picked: ReadonlySet<number>): number[] {
   return sheets.filter((s) => picked.has(s.residentId) && s.trainingQueued).map((s) => s.residentId)
+}
+
+// ══════════════════════════════════════════════════════════════
+// 前回の参加の日（2026-11-18 本人指示: 連絡帳で前回の参加の分と今回の分を左右に並べる）
+// ══════════════════════════════════════════════════════════════
+
+/** 前回の参加の日を探す期間（日・仮置き）。この期間に来ていない方は「前回の参加は見つかりません」 */
+export const PREV_LOOKBACK_DAYS = 60
+
+/** 到着の記録の行（fetchDaycarePrevContacts が読む列の形） */
+export type ArrivalLike = { resident_id: unknown; day: unknown; arrived_at: unknown; absent: unknown }
+
+/**
+ * 人ごとの前回の参加の日（day より前で、到着の時刻があり休みでない、いちばん新しい日）。
+ * 到着の記録が無い方は null。day の当日・後の日の行は使わない。並び・重なりは問わない（純関数）
+ */
+export function prevAttendedDays(rows: readonly ArrivalLike[], residentIds: readonly number[], day: string): Map<number, string | null> {
+  const want = new Set(residentIds)
+  const out = new Map<number, string | null>()
+  for (const id of residentIds) out.set(id, null)
+  for (const r of rows) {
+    const id = typeof r.resident_id === 'number' ? r.resident_id : Number(r.resident_id)
+    const d = typeof r.day === 'string' ? r.day.slice(0, 10) : null
+    if (!Number.isSafeInteger(id) || !want.has(id) || d === null || !/^\d{4}-\d{2}-\d{2}$/.test(d)) continue
+    if (d >= day || r.absent === true || r.arrived_at === null || r.arrived_at === undefined || r.arrived_at === '') continue
+    const cur = out.get(id) ?? null
+    if (cur === null || d > cur) out.set(id, d)
+  }
+  return out
 }
 
 /** 印刷する方の既定（来た方＝在席・帰宅） */
