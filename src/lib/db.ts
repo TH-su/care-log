@@ -10087,9 +10087,10 @@ function contactNoteCols(): string {
 /** 連絡帳の行を読む（0064 の列が無い DB では古い列だけで読み直す） */
 async function selectContactNotes(run: (cols: string) => PromiseLike<Res<unknown>>): Promise<Res<unknown>> {
   const res = (await run(contactNoteCols())) as Res<unknown>
-  if (res.error !== null && !contactSectionsMissing && isMissingColumn(res)) {
+  // 列が無い応答なら、古い列だけで読み直す（同時に走った別の読み取りが先に旗を立てていても読み直す＝反証 軽1）
+  if (res.error !== null && isMissingColumn(res)) {
     contactSectionsMissing = true
-    return (await run(contactNoteCols())) as Res<unknown>
+    return (await run(CONTACT_NOTE_COLS_LEGACY)) as Res<unknown>
   }
   return res
 }

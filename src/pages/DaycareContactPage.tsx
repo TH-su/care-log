@@ -110,7 +110,7 @@ import { useVitalLimits } from '../hooks/useVitalLimits'
 import { VitalLimitsFailedNote } from '../components/VitalLimitsFailedNote'
 import { RecorderBar } from '../components/RecorderBar'
 import { registerUnsaved } from '../lib/leaveGuard'
-import { ErrorBlock, LoadingBlock, ModalShell } from '../components/ui'
+import { ConfirmDialog, ErrorBlock, LoadingBlock, ModalShell } from '../components/ui'
 import { ContactSheetView, DaycareContactPrint, useContactSheetOverflow } from '../components/print/DaycareContactSheet'
 import type { DaycareContactPrintHandle } from '../components/print/DaycareContactSheet'
 import { addDays, fmtDayLabel, todayIso } from '../lib/format'
@@ -700,7 +700,13 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
     else doPrint()
   }
 
-  const goDay = (d: string) => navigate(contactPath(d, today), { replace: true })
+  // 日を変える前に、保存していない文があれば確かめる（react-router の replace は App の離れる前の確かめを通らないため・反証 中1）
+  const [dayAsk, setDayAsk] = useState<string | null>(null)
+  const goDayNow = (d: string) => navigate(contactPath(d, today), { replace: true })
+  const goDay = (d: string) => {
+    if (unsavedRef.current) setDayAsk(d)
+    else goDayNow(d)
+  }
 
   // その日に読めなかった項目（一覧の上の帯）
   const unreadDay =
@@ -1216,6 +1222,19 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
           </button>
         </div>
       </ModalShell>
+      <ConfirmDialog
+        open={dayAsk !== null}
+        title="保存せずに日を変えますか"
+        body="保存していない文があります。日を変えると、入れた文は消えます。"
+        confirmLabel="保存せずに移る"
+        danger
+        onConfirm={() => {
+          const d = dayAsk
+          setDayAsk(null)
+          if (d !== null) goDayNow(d)
+        }}
+        onCancel={() => setDayAsk(null)}
+      />
     </div>
   )
 }
