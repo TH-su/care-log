@@ -52,6 +52,7 @@ import { DaycareRowBlankMark, DaycareRowBlankSr, DaycareUnfilledCount } from '..
 import { ConfirmDialog, ErrorBlock, LoadingBlock, ModalShell, useToast } from '../components/ui'
 import { useDaycareNoteMarksDay } from '../components/DaycareNoteMarkDay'
 import { DaycareContactEntryButton, DaycareContactSectionDialog } from '../components/DaycareContactSectionDialog'
+import { DaycareContactSectionList } from '../components/DaycareContactSectionList'
 import { useDaycareContactNotes } from '../hooks/useDaycareContactNotes'
 import { contactFieldValue, normalizeNoteText } from '../lib/daycareContact'
 import type { ContactSectionField } from '../lib/daycareContact'
@@ -965,13 +966,6 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
             <p className="text-sm leading-tight text-ink2">
               <span aria-hidden="true">↻</span>＝送信待ち・保存中（届くまで押せません）　<span aria-hidden="true">▲</span>＝送れずに止まっています（行の下の文を見てください）　取り消し線＝取り消しの送信待ち
             </p>
-            {/* 連絡帳のボタンを押せない理由（表が無い・4欄の列が無い・読めない時だけ・2026-11-18） */}
-            {contacts.blockedReason !== null ? (
-              <p role="status" className="rounded-lg border border-warn bg-warn-bg px-3 py-1.5 text-base text-ink">
-                <span aria-hidden="true">▲ </span>
-                {contacts.blockedReason}
-              </p>
-            ) : null}
             {tableScrolls ? (
               <p className="text-sm text-ink2">
                 <span aria-hidden="true">⇆ </span>
@@ -1162,6 +1156,9 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                 </tbody>
               </table>
             </div>
+            {/* 連絡帳の記載（2026-11-18 親の決定・仮置き）: 表のすぐ下に、表と同じ方ごとの今の文と〔書く〕／〔直す〕（表の幅・列は変えない）。
+                押せない時の理由の帯もこの中に出す */}
+            <DaycareContactSectionList fields={CONTACT_FIELDS_HERE} residentIds={targets} nameOf={nameOf} contacts={contacts} onOpen={setContactFor} />
           </>
         )}
       </section>

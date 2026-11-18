@@ -74,6 +74,7 @@ import { DaycareBlankTag, DaycareRowBlankMark, DaycareUnfilledCount } from '../c
 import { ConfirmDialog, ErrorBlock, LoadingBlock } from '../components/ui'
 import { useDaycareNoteMarksDay } from '../components/DaycareNoteMarkDay'
 import { DaycareContactEntryButton, DaycareContactSectionDialog } from '../components/DaycareContactSectionDialog'
+import { DaycareContactSectionList } from '../components/DaycareContactSectionList'
 import { useDaycareContactNotes } from '../hooks/useDaycareContactNotes'
 import { contactFieldValue, normalizeNoteText } from '../lib/daycareContact'
 import type { ContactSectionField } from '../lib/daycareContact'
@@ -1576,13 +1577,6 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
           </div>
         ) : (
           <>
-            {/* 連絡帳のボタンを押せない理由（表が無い・4欄の列が無い・読めない時だけ・2026-11-18） */}
-            {contacts.blockedReason !== null ? (
-              <p role="status" className="rounded-lg border border-warn bg-warn-bg px-3 py-1.5 text-base text-ink">
-                <span aria-hidden="true">▲ </span>
-                {contacts.blockedReason}
-              </p>
-            ) : null}
             {lunchFailed ? (
               <div role="alert" className="flex flex-wrap items-center gap-gap rounded-lg border border-warn bg-warn-bg px-3 py-1.5 text-base text-ink">
                 <p className="min-w-0 flex-1">
@@ -1949,6 +1943,9 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                 </tbody>
               </table>
             </div>
+            {/* 連絡帳の記載（2026-11-18 親の決定・仮置き）: 表のすぐ下に、表と同じ方ごとの今の文と〔書く〕／〔直す〕（表の幅・列は変えない）。
+                押せない時の理由の帯もこの中に出す */}
+            <DaycareContactSectionList fields={CONTACT_FIELDS_HERE} residentIds={shownRows.map((r) => r.residentId)} nameOf={nameOf} contacts={contacts} onOpen={setContactFor} />
           </>
         )}
       </div>

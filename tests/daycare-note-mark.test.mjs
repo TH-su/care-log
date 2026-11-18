@@ -664,7 +664,8 @@ if (M === null) {
       // 2026-11-09 計画C（固定し直し・意図は同じ）: 連絡帳の 0061 も段階2c の分ではない
       // 2026-11-10 未測定（固定し直し・意図は同じ）: 〔未測定〕の印の 0062 も段階2c の分ではない
       // 2026-11-17 デイのロック 19:00（固定し直し・意図は同じ）: 0063 も段階2c の分ではない
-      assert.deepEqual(after.filter((f) => !['0045_resident_vital_limits.sql', '0046_daycare_training.sql', '0047_daycare_auto_attendance.sql', '0048_daycare_auto_attendance_fix.sql', '0049_daycare_auto_leave_editor.sql', '0050_pinned_open_lookback.sql', '0051_tenant_stage1.sql', '0052_tenant_stage2.sql', '0053_tenant_stage3.sql', '0054_tenant_stage4.sql', '0055_tenant_client_key.sql', '0056_presence_tenant.sql', '0057_import_tool_ver.sql', '0058_note_reporter_name.sql', '0059_trigger_fn_hardening.sql', '0060_trigger_fn_revoke_rest.sql', '0061_daycare_contact.sql', '0062_daycare_vital_unmeasured.sql', '0063_daycare_note_lock_19.sql'].includes(f)), [], '段階2c は移行を足さない')
+      // 2026-11-18 連絡帳の項目ごとの記載（固定し直し・意図は同じ）: 0064 も段階2c の分ではない
+      assert.deepEqual(after.filter((f) => !['0045_resident_vital_limits.sql', '0046_daycare_training.sql', '0047_daycare_auto_attendance.sql', '0048_daycare_auto_attendance_fix.sql', '0049_daycare_auto_leave_editor.sql', '0050_pinned_open_lookback.sql', '0051_tenant_stage1.sql', '0052_tenant_stage2.sql', '0053_tenant_stage3.sql', '0054_tenant_stage4.sql', '0055_tenant_client_key.sql', '0056_presence_tenant.sql', '0057_import_tool_ver.sql', '0058_note_reporter_name.sql', '0059_trigger_fn_hardening.sql', '0060_trigger_fn_revoke_rest.sql', '0061_daycare_contact.sql', '0062_daycare_vital_unmeasured.sql', '0063_daycare_note_lock_19.sql', '0064_daycare_contact_sections.sql'].includes(f)), [], '段階2c は移行を足さない')
       assert.doesNotMatch(read('../src/lib/types.ts'), /dcn:|NoteMark/)
       // 取り消した申し送りも読む読み取りは、印の鍵の頭で絞った1か所だけ
       const db = code('../src/lib/db.ts')

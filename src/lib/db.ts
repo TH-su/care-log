@@ -10382,7 +10382,8 @@ export async function saveDaycareDayNote(p: {
 }
 
 /**
- * 1人のひと言の1つの欄（個別のひと言 body・看護職のひと言 nurse_note）を保存する（その欄だけを送る）。
+ * 1人のひと言の1つの欄（個別のひと言 body・看護職のひと言 nurse_note・項目ごとの記載の4欄 vital_meal_note・activity_note・
+ * training_note・behavior_note＝0064）を保存する（その欄だけを送る）。4欄は列が無い DB では送らない（sectionsMissing）。
  * base＝画面が読んだ時のその方の行（無ければ null）。上限を超える・未来の日は送らない
  */
 export async function saveDaycareContactField(p: {

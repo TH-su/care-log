@@ -1072,11 +1072,20 @@ describe('項目ごとの記載・各画面との連動（静的検査・2026-11
   it('各画面: 活動は2欄（活動・行動・ご様子）・バイタル・食事は1欄・入口は「✓ 連絡帳」／「連絡帳 ✎」（文字でも分かる・44px）', () => {
     assert.match(act, /const CONTACT_FIELDS_HERE: readonly ContactSectionField\[\] = \['activity_note', 'behavior_note'\]/)
     assert.match(vm, /const CONTACT_FIELDS_HERE: readonly ContactSectionField\[\] = \['vital_meal_note'\]/)
-    for (const p of [act, vm]) {
+    // 2026-11-18 親の決定（仮置き）: 3画面とも表のすぐ下に「連絡帳の記載」の一覧（押せない時の理由の帯もこの中）
+    const tr = code('../src/pages/DaycareTrainingPage.tsx')
+    assert.match(tr, /const CONTACT_FIELDS_HERE: readonly ContactSectionField\[\] = \['training_note'\]/)
+    for (const [p, ids] of [[act, 'targets'], [vm, 'shownRows\\.map\\(\\(r\\) => r\\.residentId\\)'], [tr, 'targets']]) {
       assert.match(p, /useDaycareContactNotes\(day, reloadKey\)/)
       assert.match(p, /<DaycareContactSectionDialog\s+residentId=\{contactFor\}/)
-      assert.match(p, /\{contacts\.blockedReason !== null \? \(/)
+      assert.match(p, new RegExp(`<\\/table>\\s*<\\/div>\\s*(\\{\\}\\s*)?<DaycareContactSectionList fields=\\{CONTACT_FIELDS_HERE\\} residentIds=\\{${ids}\\} nameOf=\\{nameOf\\} contacts=\\{contacts\\} onOpen=\\{setContactFor\\} \\/>`))
     }
+    const list = code('../src/components/DaycareContactSectionList.tsx')
+    assert.match(list, /\{written \? '直す' : '書く'\}/)
+    assert.match(list, /line-clamp-3/)
+    assert.match(list, /grid grid-cols-1 gap-gap lg:grid-cols-2 xl:grid-cols-3/)
+    assert.match(list, /\{contacts\.blockedReason !== null \? \(/)
+    assert.match(list, /const NO_ENTRY = '（記載なし）'/)
     assert.match(dlg, /<span aria-hidden="true">✓ <\/span>連絡帳/)
     assert.match(dlg, /連絡帳<span aria-hidden="true"> ✎<\/span>/)
     assert.match(dlg, /inline-flex min-h-tap \$\{widthCls\} shrink-0/)
