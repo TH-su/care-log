@@ -103,6 +103,19 @@ export function ContactSheetView({ sheet }: { sheet: ContactSheet }) {
             <p className="dcc-text">{UNREAD}</p>
           ) : (
             <>
+              {/* 項目ごとの記載（2026-11-18・書いてある欄だけ・項目名｜文の表。共通の一文・個別のひと言の前） */}
+              {sheet.sections.length > 0 ? (
+                <table className="dcc-items">
+                  <tbody>
+                    {sheet.sections.map((it) => (
+                      <tr key={it.label}>
+                        <th scope="row">{it.label}</th>
+                        <td>{it.value}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : null}
               {sheet.staff.common !== null ? <p className="dcc-text">{sheet.staff.common}</p> : null}
               {sheet.staff.personal !== null ? <p className="dcc-text">{sheet.staff.personal}</p> : null}
             </>

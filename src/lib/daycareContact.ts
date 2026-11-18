@@ -620,9 +620,12 @@ export function contactSectionItems(note: Partial<Pick<DaycareContactNote, Conta
   return out
 }
 
-/** 職員よりの欄を紙面に出すか（共通の一文か個別のひと言があるか、ひと言を読めなかった時。空なら見出しごと出さない） */
-export function staffSectionShown(sheet: Pick<ContactSheet, 'staff' | 'notesUnread'>): boolean {
-  return sheet.notesUnread || sheet.staff.common !== null || sheet.staff.personal !== null
+/**
+ * 職員よりの欄を紙面に出すか（共通の一文か個別のひと言か項目ごとの記載があるか、ひと言を読めなかった時。空なら見出しごと出さない）。
+ * 項目ごとの記載（sections・2026-11-18）は「職員より」の欄の中に載せるので、それだけが書いてある時も出す
+ */
+export function staffSectionShown(sheet: Pick<ContactSheet, 'staff' | 'notesUnread'> & Partial<Pick<ContactSheet, 'sections'>>): boolean {
+  return sheet.notesUnread || sheet.staff.common !== null || sheet.staff.personal !== null || (sheet.sections?.length ?? 0) > 0
 }
 
 /** 看護職よりの欄を紙面に出すか（基準外で、看護職のひと言がある時・ひと言を読めなかった時。空なら見出しごと出さない） */
@@ -706,4 +709,20 @@ export function defaultPicked(rows: readonly { residentId: number; state: Attend
 /** 連絡帳の画面のルート（業務日は ?day= で持つ。今日は付けない） */
 export function contactPath(day: string, today: string): string {
   return `/record/daycare/contact${day === today ? '' : `?day=${day}`}`
+}
+
+// ══════════════════════════════════════════════════════════════
+// 保存の時の知らせ（連絡帳の画面と、各画面の連絡帳の小窓で同じ文を使う・2026-11-18 に画面から移した）
+// ══════════════════════════════════════════════════════════════
+
+/** 保存の時に、他の端末が先に書き換えていた時の知らせ（上書きしていない・入れた文は欄に残している） */
+export function conflictText(current: string | null): string {
+  const now = current === null || current.trim() === '' ? '（空）' : `「${current}」`
+  return `他の端末が先にこの欄を書き換えていたため、上書きしていません。いま保存されている文は ${now} です。入れた文は欄に残しています。見比べて直し、もう一度〔保存〕を押してください。`
+}
+
+/** 入れている間に、他の端末がこの欄を書き換えた時の知らせ（読み直した時に見つけた。上書きはしていない） */
+export function changedText(current: string | null): string {
+  const now = current === null || current.trim() === '' ? '（空）' : `「${current}」`
+  return `入れている間に、他の端末がこの欄を書き換えました。いま保存されている文は ${now} です。入れた文は欄に残しています（まだ上書きしていません）。見比べて直し、〔保存〕を押してください。`
 }
