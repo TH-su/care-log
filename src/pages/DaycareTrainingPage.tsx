@@ -53,6 +53,10 @@ import { DaycareReviewDueSection } from '../components/DaycareReviewDueSection'
 import { TARGET_NO_PLAN_LABEL, targetPlanTags, weekScope } from '../lib/trainingDue'
 import type { DueCopyLoad, WeekScope } from '../lib/trainingDue'
 import { ConfirmDialog, ErrorBlock, LoadingBlock, ModalShell, useToast } from '../components/ui'
+import { DaycareContactSectionDialog } from '../components/DaycareContactSectionDialog'
+import { DaycareContactSectionList } from '../components/DaycareContactSectionList'
+import { useDaycareContactNotes } from '../hooks/useDaycareContactNotes'
+import type { ContactSectionField } from '../lib/daycareContact'
 import { useDaycareNoteMarksDay } from '../components/DaycareNoteMarkDay'
 import { trainingMarkText } from '../lib/daycareNoteMark'
 import type { MarkRecord } from '../lib/daycareNoteMark'
@@ -146,6 +150,9 @@ const nowMinutes = () => {
   return d.getHours() * 60 + d.getMinutes()
 }
 
+/** この画面から書く連絡帳の欄（2026-11-18 本人指示。回ごとの備考 daycare_training_sessions.note とは別の欄） */
+const CONTACT_FIELDS_HERE: readonly ContactSectionField[] = ['training_note']
+
 export function DaycareTrainingPage({ staff = undefined, actorId = null }: DaycareTrainingPageProps = {}) {
   const [search] = useSearchParams()
   const navigate = useNavigate()
@@ -155,6 +162,11 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [reloadKey, setReloadKey] = useState(0)
+  // 連絡帳の項目ごとの記載（2026-11-18 本人指示・仮置き）: その日の連絡帳の行（表の下の一覧）と、書く小窓を開いている方
+  const contacts = useDaycareContactNotes(day, reloadKey)
+  const [contactFor, setContactFor] = useState<number | null>(null)
+  // 日を変えたら小窓を閉じる（ほかの日の方へ書かない）
+  useEffect(() => setContactFor(null), [day])
   const [residents, setResidents] = useState<Resident[]>([])
   const [gate, setGate] = useState<Gate | null>(null)
   const [role, setRole] = useState<MyRole | null>(null)
@@ -1024,6 +1036,9 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
                 </tbody>
               </table>
             </div>
+            {/* 連絡帳の記載（2026-11-18 親の決定・仮置き）: 表のすぐ下に、表と同じ方ごとの今の文と〔書く〕／〔直す〕（表の幅・列は変えない）。
+                押せない時の理由の帯もこの中に出す */}
+            <DaycareContactSectionList fields={CONTACT_FIELDS_HERE} residentIds={targets} nameOf={nameOf} contacts={contacts} onOpen={setContactFor} />
           </>
         )}
         {outside.length > 0 ? (
@@ -1360,6 +1375,16 @@ export function DaycareTrainingPage({ staff = undefined, actorId = null }: Dayca
         onCancel={() => setDelStaff(null)}
       />
       {marks.dialogs}
+      <DaycareContactSectionDialog
+        residentId={contactFor}
+        name={contactFor === null ? '' : nameOf(contactFor)}
+        day={day}
+        today={today}
+        fields={CONTACT_FIELDS_HERE}
+        actorId={actorId}
+        contacts={contacts}
+        onClose={() => setContactFor(null)}
+      />
       {toast}
     </div>
   )

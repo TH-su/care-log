@@ -67,17 +67,52 @@ export interface DaycareContactNote {
   body: string | null
   /** 看護職のひと言 */
   nurse_note: string | null
+  /** 項目ごとの記載（2026-11-18・0064）。各画面と連絡帳の画面の両方から書く同じ列 */
+  vital_meal_note: string | null
+  activity_note: string | null
+  training_note: string | null
+  behavior_note: string | null
   /** 〔印刷する〕で印刷に送った最後の時刻（ISO）。Ctrl+P・⌘P で刷った時は書かない（2026-11-09 親の決定） */
   printed_at: string | null
   rev: number
 }
 
+/**
+ * 項目ごとの記載の欄（2026-11-18 本人指示・代表者の決定「4項目」・0064）。並びは画面・紙の並び。
+ * 書ける画面: バイタル・食事＝バイタル・食事の画面、活動・行動・ご様子＝活動の画面、機能訓練＝機能訓練の画面。どれも連絡帳の画面からも書ける
+ * （同じ行の同じ列を書く＝写しを作らない）
+ */
+export const CONTACT_SECTION_FIELDS = ['vital_meal_note', 'activity_note', 'training_note', 'behavior_note'] as const
+export type ContactSectionField = (typeof CONTACT_SECTION_FIELDS)[number]
+/** 項目ごとの記載の欄の名前（画面の欄の見出しと紙の見出し・仮置き） */
+export const CONTACT_SECTION_LABEL: Record<ContactSectionField, string> = {
+  vital_meal_note: 'バイタル・食事',
+  activity_note: '活動',
+  training_note: '機能訓練（リハビリ）',
+  behavior_note: '行動・ご様子',
+}
+/** 項目ごとの記載の上限（字・DB の check と同じ） */
+export const CONTACT_SECTION_MAX = 200
+
 /** 1人のひと言の欄（別々に書く欄＝変えた欄だけを送る） */
-export type ContactNoteField = 'body' | 'nurse_note'
+export type ContactNoteField = 'body' | 'nurse_note' | ContactSectionField
+
+/** 項目ごとの記載の欄か */
+export function isContactSectionField(field: string): field is ContactSectionField {
+  return (CONTACT_SECTION_FIELDS as readonly string[]).includes(field)
+}
 
 /** 欄の上限（字） */
 export function contactFieldMax(field: ContactNoteField): number {
-  return field === 'body' ? CONTACT_BODY_MAX : CONTACT_NURSE_MAX
+  if (field === 'nurse_note') return CONTACT_NURSE_MAX
+  if (field === 'body') return CONTACT_BODY_MAX
+  return CONTACT_SECTION_MAX
+}
+
+/** 行のその欄の値（行が無ければ null） */
+export function contactFieldValue(row: Pick<DaycareContactNote, ContactNoteField> | null | undefined, field: ContactNoteField): string | null {
+  if (row === null || row === undefined) return null
+  return row[field] ?? null
 }
 
 /** 字数（DB の char_length と同じ数え方＝サロゲートの文字も1字） */
@@ -172,6 +207,11 @@ export interface ContactSheet {
   vitals: { kind: 'ok'; cells: SheetVitalCell[]; recheck: boolean } | { kind: 'unread' } | null
   /** 入浴・お食事・水分・活動・機能訓練（来ていない方は空） */
   items: SheetItem[]
+  /**
+   * 項目ごとの記載（2026-11-18・0064。バイタル・食事／活動／機能訓練（リハビリ）／行動・ご様子の順。書いてある欄だけ・来た方だけ。
+   * 1つも無い時・ひと言を読めなかった時は空＝見出しごと出さない。読めなかった時は職員よりの欄が「読み込めませんでした」になる）
+   */
+  sections: SheetItem[]
   /** 職員より（共通の一文・個別のひと言。両方無い時は見出しごと出さない） */
   staff: { common: string | null; personal: string | null }
   /** ひと言（連絡帳の2表）を読めなかった（職員より・看護職よりは「読み込めませんでした」） */
@@ -242,7 +282,7 @@ export interface ContactSheetInput {
   /** その日の全員共通の一文 */
   dayNote: string | null
   /** その方のその日のひと言の行（無ければ null） */
-  note: Pick<DaycareContactNote, 'body' | 'nurse_note'> | null
+  note: (Pick<DaycareContactNote, 'body' | 'nurse_note'> & Partial<Pick<DaycareContactNote, ContactSectionField>>) | null
   /** ひと言（共通の一文・1人のひと言）を読めたか（省くと読めた） */
   notesOk?: boolean
   /**
@@ -509,6 +549,7 @@ export function buildContactSheet(p: ContactSheetInput): ContactSheet {
       absentText: absentTextOf(p.state, p.hospitalized),
       vitals: null,
       items: [],
+      sections: [],
       staff: { common: null, personal },
       notesUnread,
       abnormal: false,
@@ -556,6 +597,7 @@ export function buildContactSheet(p: ContactSheetInput): ContactSheet {
       { label: '活動', value: act.text },
       { label: '機能訓練', value: tr.text },
     ],
+    sections: notesUnread ? [] : contactSectionItems(p.note),
     staff: { common: notesUnread ? null : normalizeNoteText(p.dayNote), personal },
     notesUnread,
     abnormal,
@@ -568,9 +610,22 @@ export function buildContactSheet(p: ContactSheetInput): ContactSheet {
   }
 }
 
-/** 職員よりの欄を紙面に出すか（共通の一文か個別のひと言があるか、ひと言を読めなかった時。空なら見出しごと出さない） */
-export function staffSectionShown(sheet: Pick<ContactSheet, 'staff' | 'notesUnread'>): boolean {
-  return sheet.notesUnread || sheet.staff.common !== null || sheet.staff.personal !== null
+/** 項目ごとの記載のうち、書いてある欄（並びは CONTACT_SECTION_FIELDS） */
+export function contactSectionItems(note: Partial<Pick<DaycareContactNote, ContactSectionField>> | null | undefined): SheetItem[] {
+  const out: SheetItem[] = []
+  for (const f of CONTACT_SECTION_FIELDS) {
+    const t = normalizeNoteText(note?.[f] ?? null)
+    if (t !== null) out.push({ label: CONTACT_SECTION_LABEL[f], value: t })
+  }
+  return out
+}
+
+/**
+ * 職員よりの欄を紙面に出すか（共通の一文か個別のひと言か項目ごとの記載があるか、ひと言を読めなかった時。空なら見出しごと出さない）。
+ * 項目ごとの記載（sections・2026-11-18）は「職員より」の欄の中に載せるので、それだけが書いてある時も出す
+ */
+export function staffSectionShown(sheet: Pick<ContactSheet, 'staff' | 'notesUnread'> & Partial<Pick<ContactSheet, 'sections'>>): boolean {
+  return sheet.notesUnread || sheet.staff.common !== null || sheet.staff.personal !== null || (sheet.sections?.length ?? 0) > 0
 }
 
 /** 看護職よりの欄を紙面に出すか（基準外で、看護職のひと言がある時・ひと言を読めなかった時。空なら見出しごと出さない） */
@@ -617,6 +672,35 @@ export function trainingQueuedPicked(sheets: readonly Pick<ContactSheet, 'reside
   return sheets.filter((s) => picked.has(s.residentId) && s.trainingQueued).map((s) => s.residentId)
 }
 
+// ══════════════════════════════════════════════════════════════
+// 前回の参加の日（2026-11-18 本人指示: 連絡帳で前回の参加の分と今回の分を左右に並べる）
+// ══════════════════════════════════════════════════════════════
+
+/** 前回の参加の日を探す期間（日・仮置き）。この期間に来ていない方は「前回の参加は見つかりません」 */
+export const PREV_LOOKBACK_DAYS = 60
+
+/** 到着の記録の行（fetchDaycarePrevContacts が読む列の形） */
+export type ArrivalLike = { resident_id: unknown; day: unknown; arrived_at: unknown; absent: unknown }
+
+/**
+ * 人ごとの前回の参加の日（day より前で、到着の時刻があり休みでない、いちばん新しい日）。
+ * 到着の記録が無い方は null。day の当日・後の日の行は使わない。並び・重なりは問わない（純関数）
+ */
+export function prevAttendedDays(rows: readonly ArrivalLike[], residentIds: readonly number[], day: string): Map<number, string | null> {
+  const want = new Set(residentIds)
+  const out = new Map<number, string | null>()
+  for (const id of residentIds) out.set(id, null)
+  for (const r of rows) {
+    const id = typeof r.resident_id === 'number' ? r.resident_id : Number(r.resident_id)
+    const d = typeof r.day === 'string' ? r.day.slice(0, 10) : null
+    if (!Number.isSafeInteger(id) || !want.has(id) || d === null || !/^\d{4}-\d{2}-\d{2}$/.test(d)) continue
+    if (d >= day || r.absent === true || r.arrived_at === null || r.arrived_at === undefined || r.arrived_at === '') continue
+    const cur = out.get(id) ?? null
+    if (cur === null || d > cur) out.set(id, d)
+  }
+  return out
+}
+
 /** 印刷する方の既定（来た方＝在席・帰宅） */
 export function defaultPicked(rows: readonly { residentId: number; state: AttendanceState }[]): Set<number> {
   return new Set(rows.filter((r) => attendedState(r.state)).map((r) => r.residentId))
@@ -625,4 +709,40 @@ export function defaultPicked(rows: readonly { residentId: number; state: Attend
 /** 連絡帳の画面のルート（業務日は ?day= で持つ。今日は付けない） */
 export function contactPath(day: string, today: string): string {
   return `/record/daycare/contact${day === today ? '' : `?day=${day}`}`
+}
+
+// ══════════════════════════════════════════════════════════════
+// 保存の時の知らせ（連絡帳の画面と、各画面の連絡帳の小窓で同じ文を使う・2026-11-18 に画面から移した）
+// ══════════════════════════════════════════════════════════════
+
+/** 保存の時に、他の端末が先に書き換えていた時の知らせ（上書きしていない・入れた文は欄に残している） */
+export function conflictText(current: string | null): string {
+  const now = current === null || current.trim() === '' ? '（空）' : `「${current}」`
+  return `他の端末が先にこの欄を書き換えていたため、上書きしていません。いま保存されている文は ${now} です。入れた文は欄に残しています。見比べて直し、もう一度〔保存〕を押してください。`
+}
+
+/** 入れている間に、他の端末がこの欄を書き換えた時の知らせ（読み直した時に見つけた。上書きはしていない） */
+export function changedText(current: string | null): string {
+  const now = current === null || current.trim() === '' ? '（空）' : `「${current}」`
+  return `入れている間に、他の端末がこの欄を書き換えました。いま保存されている文は ${now} です。入れた文は欄に残しています（まだ上書きしていません）。見比べて直し、〔保存〕を押してください。`
+}
+
+// ══════════════════════════════════════════════════════════════
+// 紙の文字の大きさ（2026-11-18 親の決定・仮置き: 10px でも1枚に収まらない方は2枚目に続けて刷り、印刷の前に知らせる）
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * 1枚（avail の高さ）に収まる文字の大きさを、max から step ずつ下げて探す（純関数・高さの測り方は渡す）。
+ * min でも収まらない時は px＝min・overflow＝true（文は切らず、紙が2枚になる）
+ */
+export function fitContactFont(heightAt: (px: number) => number, avail: number, max: number, min: number, step: number): { px: number; overflow: boolean } {
+  for (let px = max; px > min; px -= step) {
+    if (heightAt(px) <= avail) return { px, overflow: false }
+  }
+  return { px: min, overflow: heightAt(min) > avail }
+}
+
+/** 印刷の前の確かめ: 選んだ方のうち、紙が2枚になる方（並びは紙面の並び） */
+export function overflowPicked(sheets: readonly Pick<ContactSheet, 'residentId'>[], picked: ReadonlySet<number>, overflow: ReadonlySet<number>): number[] {
+  return sheets.filter((s) => picked.has(s.residentId) && overflow.has(s.residentId)).map((s) => s.residentId)
 }

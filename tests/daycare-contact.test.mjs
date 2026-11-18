@@ -935,3 +935,207 @@ if (C !== null) {
     })
   })
 }
+
+// ══════════════════════════════════════════════════════════════
+// 2026-11-18 本人指示: 連絡帳の項目ごとの記載（4欄・0064）・前回の参加の分と今回の分の左右の比べ・各画面との連動
+// ══════════════════════════════════════════════════════════════
+if (C !== null) {
+  const PREV_DAY = '2026-11-06'
+  /** 到着の記録の行（fetchDaycarePrevContacts が読む列） */
+  const arr = (resident_id, day, over = {}) => ({ resident_id, day, arrived_at: `${day}T09:30:00+09:00`, absent: false, ...over })
+
+  describe('前回の参加の日（prevAttendedDays）', () => {
+    it('休みを挟んでも、その日より前で到着の時刻があり休みでない、いちばん新しい日', () => {
+      const rows = [arr(1, '2026-11-02'), arr(1, '2026-11-04', { absent: true, arrived_at: null }), arr(1, PREV_DAY), arr(1, '2026-11-07', { absent: true })]
+      assert.equal(C.prevAttendedDays(rows, [1], DAY).get(1), PREV_DAY)
+      // 並びに左右されない
+      assert.equal(C.prevAttendedDays([...rows].reverse(), [1], DAY).get(1), PREV_DAY)
+    })
+    it('当日・後の日の行は使わない／到着の時刻の無い行は使わない', () => {
+      const rows = [arr(1, DAY), arr(1, '2026-11-10'), arr(1, '2026-11-05', { arrived_at: null }), arr(1, '2026-11-03', { arrived_at: '' })]
+      assert.equal(C.prevAttendedDays(rows, [1], DAY).get(1), null)
+    })
+    it('期間内に無い方・渡していない方: 渡した方だけを null で持ち、ほかの方の行を混ぜない', () => {
+      const m = C.prevAttendedDays([arr(2, PREV_DAY), arr(3, '2026-11-01')], [1, 2], DAY)
+      assert.deepEqual([...m.entries()].sort(), [
+        [1, null],
+        [2, PREV_DAY],
+      ])
+      assert.equal(m.has(3), false)
+    })
+    it('日付が壊れた行・番号が壊れた行は飛ばす（文字の番号は数にして読む）', () => {
+      const rows = [arr(1, 'not-a-day'), arr(1, null), arr('x', PREV_DAY), arr('1', '2026-11-05'), arr(1, '2026-11-04T00:00:00')]
+      assert.equal(C.prevAttendedDays(rows, [1], DAY).get(1), '2026-11-05')
+      assert.equal(C.PREV_LOOKBACK_DAYS, 60)
+    })
+  })
+
+  describe('項目ごとの記載の4欄（紙面・欄の上限と値）', () => {
+    const full = { body: null, nurse_note: null, vital_meal_note: '水分をよく召し上がりました。', activity_note: ' 歌の会に参加 ', training_note: null, behavior_note: '穏やかに過ごされました。' }
+    it('並び・名前・上限（200字）', () => {
+      assert.deepEqual([...C.CONTACT_SECTION_FIELDS], ['vital_meal_note', 'activity_note', 'training_note', 'behavior_note'])
+      assert.deepEqual(C.CONTACT_SECTION_FIELDS.map((f) => C.CONTACT_SECTION_LABEL[f]), ['バイタル・食事', '活動', '機能訓練（リハビリ）', '行動・ご様子'])
+      for (const f of C.CONTACT_SECTION_FIELDS) {
+        assert.equal(C.contactFieldMax(f), 200)
+        assert.equal(C.isContactSectionField(f), true)
+      }
+      assert.equal(C.isContactSectionField('body'), false)
+      assert.equal(C.isContactSectionField('nurse_note'), false)
+      assert.equal(C.contactFieldMax('body'), 200)
+      assert.equal(C.contactFieldMax('nurse_note'), 150)
+    })
+    it('contactFieldValue: 行が無ければ null・欄の値（無い欄は null）', () => {
+      assert.equal(C.contactFieldValue(null, 'activity_note'), null)
+      assert.equal(C.contactFieldValue(undefined, 'body'), null)
+      assert.equal(C.contactFieldValue(full, 'vital_meal_note'), '水分をよく召し上がりました。')
+      assert.equal(C.contactFieldValue(full, 'training_note'), null)
+      assert.equal(C.contactFieldValue({ body: 'ひと言', nurse_note: null }, 'behavior_note'), null)
+      assert.equal(C.contactFieldValue({ body: 'ひと言', nurse_note: '看' }, 'nurse_note'), '看')
+    })
+    it('contactSectionItems: 書いてある欄だけ・並びは4欄の順・前後の空白は落とす', () => {
+      assert.deepEqual(C.contactSectionItems(full), [
+        { label: 'バイタル・食事', value: '水分をよく召し上がりました。' },
+        { label: '活動', value: '歌の会に参加' },
+        { label: '行動・ご様子', value: '穏やかに過ごされました。' },
+      ])
+      assert.deepEqual(C.contactSectionItems(null), [])
+      assert.deepEqual(C.contactSectionItems({ vital_meal_note: '   ', training_note: '' }), [])
+    })
+    it('buildContactSheet の sections: 来た方だけ・来ていない方は空・ひと言を読めない時は空', () => {
+      const s = C.buildContactSheet(input({ note: full }))
+      assert.deepEqual(s.sections.map((x) => x.label), ['バイタル・食事', '活動', '行動・ご様子'])
+      assert.deepEqual(C.buildContactSheet(input({ state: 'absent', note: full })).sections, [])
+      assert.deepEqual(C.buildContactSheet(input({ notesOk: false, note: full })).sections, [])
+      assert.deepEqual(C.buildContactSheet(input({ note: null })).sections, [])
+      // 古い行（4欄の列が無い DB の行）でも組み立てられる
+      assert.deepEqual(C.buildContactSheet(input({ note: { body: '笑顔で過ごされました。', nurse_note: null } })).sections, [])
+    })
+    it('staffSectionShown: 項目ごとの記載だけが書いてある時も「職員より」を出す・何も無ければ出さない', () => {
+      const only = C.buildContactSheet(input({ note: { body: null, nurse_note: null, activity_note: '体操に参加' } }))
+      assert.equal(only.staff.common, null)
+      assert.equal(only.staff.personal, null)
+      assert.equal(C.staffSectionShown(only), true)
+      assert.equal(C.staffSectionShown(C.buildContactSheet(input({ note: null }))), false)
+      // sections を持たない呼び方（前の形）でも今までどおり
+      assert.equal(C.staffSectionShown({ staff: { common: null, personal: null }, notesUnread: false }), false)
+    })
+    it('保存の時の知らせ（連絡帳の画面と小窓で同じ文）', () => {
+      assert.match(C.conflictText(null), /いま保存されている文は （空） です。入れた文は欄に残しています。/)
+      assert.match(C.conflictText('今の文'), /いま保存されている文は 「今の文」 です。/)
+      assert.match(C.changedText('  '), /入れている間に、他の端末がこの欄を書き換えました。いま保存されている文は （空） です。/)
+    })
+  })
+}
+
+describe('項目ごとの記載・各画面との連動（静的検査・2026-11-18）', () => {
+  const page = code('../src/pages/DaycareContactPage.tsx')
+  const sheet = code('../src/components/print/DaycareContactSheet.tsx')
+  const dlg = code('../src/components/DaycareContactSectionDialog.tsx')
+  const hook = code('../src/hooks/useDaycareContactNotes.ts')
+  const act = code('../src/pages/DaycareActivityBulkPage.tsx')
+  const vm = code('../src/pages/DaycareVitalsMealsPage.tsx')
+  it('紙: 「職員より」の中、共通の一文・個別のひと言の前に、項目名｜文の表（.dcc-items）で載せる', () => {
+    const staff = sheet.slice(sheet.indexOf('{staffSectionShown(sheet) ? ('), sheet.indexOf('{nurseSectionShown(sheet) ? ('))
+    assert.ok(staff.indexOf('sheet.sections.map') > 0)
+    assert.ok(staff.indexOf('sheet.sections.map') < staff.indexOf('sheet.staff.common'))
+    assert.match(staff, /<table className="dcc-items">\s*<tbody>\s*\{sheet\.sections\.map\(\(it\) => \(\s*<tr key=\{it\.label\}>\s*<th scope="row">\{it\.label\}<\/th>\s*<td>\{it\.value\}<\/td>/)
+  })
+  it('連絡帳の画面: 4欄の入力・知らない欄は送らない・印刷の前の確かめに4欄・離れる前の確かめ', () => {
+    assert.match(page, /CONTACT_SECTION_FIELDS\.map\(\(f\) => \(\s*<div key=\{f\}>\{noteField\(fieldKeyOf\(id, f\), CONTACT_SECTION_LABEL\[f\], CONTACT_SECTION_MAX, null, name, data\.sectionsReady\)\}<\/div>/)
+    assert.match(page, /const field = fieldOfKey\(key\)\s*if \(field === null \|\| !Number\.isSafeInteger\(residentId\)\) return/)
+    assert.match(page, /CONTACT_SECTION_FIELDS\.some\(\(f\) => isDirty\(fieldKeyOf\(id, f\)\)\)/)
+    assert.match(page, /useEffect\(\(\) => registerUnsaved\(\(\) => unsavedRef\.current\), \[\]\)/)
+    // 4欄の列が無い DB だと分かるのは読んだ後（読み込みの後に旗を取る）
+    assert.match(page, /const sectionsReady = contactSectionsReady\(\)/)
+  })
+  it('連絡帳の画面: 前回の分は今回の分と別に1回読み（日・〔最新に更新〕・方の並び）、読めない・無い・確かめられないを分ける', () => {
+    assert.match(page, /const prevKey = data === null \|\| data\.day !== day \|\| board === null \? null : `\$\{day\}\|\$\{reloadKey\}\|\$\{prevIds\}`/)
+    assert.match(page, /fetchDaycarePrevContacts\(day, ids\)/)
+    assert.match(page, /\}, \[prevKey\]\)/)
+    assert.match(read('../src/pages/DaycareContactPage.tsx'), /const MSG_PREV_FAILED = '前回の分を読み込めませんでした。〔最新に更新〕を押してください。'/)
+    assert.match(read('../src/pages/DaycareContactPage.tsx'), /const MSG_PREV_NONE = `前回の参加は見つかりません（直近\$\{PREV_LOOKBACK_DAYS\}日）`/)
+    assert.match(read('../src/pages/DaycareContactPage.tsx'), /const MSG_PREV_UNKNOWN = '前回の参加の日を確かめられません'/)
+    assert.match(page, /cur\.data\.truncated \? MSG_PREV_UNKNOWN : MSG_PREV_NONE/)
+    // 左右2列は幅 1024px 以上（lg）・狭い幅は縦に積む（前回→今回）
+    assert.match(page, /className="mt-2 grid grid-cols-1 gap-4 lg:grid-cols-2">\s*\{prevPanel\(id, name\)\}/)
+  })
+  it('小窓: 開いた時に読み直してから基準にする・保存は saveDaycareContactField・競合は上書きせず今の文を見せる', () => {
+    assert.match(dlg, /contacts\s*\.refetch\(\)\s*\.then\(\(rows\) => \{/)
+    assert.match(dlg, /saveDaycareContactField\(\{/)
+    assert.match(dlg, /setMsg\(f, \{ tone: 'warn', text: conflictText\(cur\) \}\)/)
+    assert.match(dlg, /getKindInputGate\('daycare'\)/)
+    assert.match(dlg, /canEditPastDaycareTimes\(role\)/)
+    assert.match(dlg, /const canSave = inputsOn && actorId !== null && dirtyFields\.length > 0/)
+    assert.match(dlg, /useEffect\(\(\) => registerUnsaved\(\(\) => dirtyRef\.current\), \[\]\)/)
+    assert.doesNotMatch(dlg + hook, /supabase|\.from\(/)
+  })
+  it('各画面: 活動は2欄（活動・行動・ご様子）・バイタル・食事は1欄・入口は「✓ 連絡帳」／「連絡帳 ✎」（文字でも分かる・44px）', () => {
+    assert.match(act, /const CONTACT_FIELDS_HERE: readonly ContactSectionField\[\] = \['activity_note', 'behavior_note'\]/)
+    assert.match(vm, /const CONTACT_FIELDS_HERE: readonly ContactSectionField\[\] = \['vital_meal_note'\]/)
+    // 2026-11-18 親の決定（仮置き）: 3画面とも表のすぐ下に「連絡帳の記載」の一覧（押せない時の理由の帯もこの中）
+    const tr = code('../src/pages/DaycareTrainingPage.tsx')
+    assert.match(tr, /const CONTACT_FIELDS_HERE: readonly ContactSectionField\[\] = \['training_note'\]/)
+    for (const [p, ids] of [[act, 'targets'], [vm, 'shownRows\\.map\\(\\(r\\) => r\\.residentId\\)'], [tr, 'targets']]) {
+      assert.match(p, /useDaycareContactNotes\(day, reloadKey\)/)
+      assert.match(p, /<DaycareContactSectionDialog\s+residentId=\{contactFor\}/)
+      assert.match(p, new RegExp(`<\\/table>\\s*<\\/div>\\s*(\\{\\}\\s*)?<DaycareContactSectionList fields=\\{CONTACT_FIELDS_HERE\\} residentIds=\\{${ids}\\} nameOf=\\{nameOf\\} contacts=\\{contacts\\} onOpen=\\{setContactFor\\} \\/>`))
+    }
+    const list = code('../src/components/DaycareContactSectionList.tsx')
+    assert.match(list, /\{written \? '直す' : '書く'\}/)
+    assert.match(list, /line-clamp-3/)
+    assert.match(list, /grid grid-cols-1 gap-gap lg:grid-cols-2 xl:grid-cols-3/)
+    assert.match(list, /\{contacts\.blockedReason !== null \? \(/)
+    assert.match(list, /const NO_ENTRY = '（記載なし）'/)
+    assert.match(dlg, /<span aria-hidden="true">✓ <\/span>連絡帳/)
+    assert.match(dlg, /連絡帳<span aria-hidden="true"> ✎<\/span>/)
+    assert.match(dlg, /inline-flex min-h-tap \$\{widthCls\} shrink-0/)
+  })
+  it('端末に業務データを残さない・console に出さない', () => {
+    for (const s of [dlg, hook]) {
+      assert.doesNotMatch(s, /localStorage|sessionStorage/)
+      assert.doesNotMatch(s, /console\./)
+    }
+  })
+})
+
+// 2026-11-18 親の決定（仮置き）: 10px でも1枚に収まらない方は文を切らずに2枚目へ続け、印刷の前の確かめと見本で知らせる
+if (C !== null) {
+  describe('紙が2枚になる方（fitContactFont・overflowPicked）', () => {
+    // 高さは文字の大きさに比例する見立て（1px あたり h）
+    const lin = (h) => (px) => px * h
+    it('上限で収まれば上限・下げて収まる所で止まる・下限でも収まらなければ overflow（下限の大きさのまま）', () => {
+      assert.deepEqual(C.fitContactFont(lin(40), 711, 15, 10, 0.5), { px: 15, overflow: false })
+      assert.deepEqual(C.fitContactFont(lin(60), 711, 15, 10, 0.5), { px: 11.5, overflow: false })
+      assert.deepEqual(C.fitContactFont(lin(70), 711, 15, 10, 0.5), { px: 10, overflow: false })
+      assert.deepEqual(C.fitContactFont(lin(87), 711, 15, 10, 0.5), { px: 10, overflow: true })
+    })
+    it('ちょうど収まる高さは収まる扱い（以下で比べる）', () => {
+      assert.deepEqual(C.fitContactFont(() => 711, 711, 15, 10, 0.5), { px: 15, overflow: false })
+      assert.deepEqual(C.fitContactFont((px) => (px > 10 ? 712 : 711), 711, 15, 10, 0.5), { px: 10, overflow: false })
+    })
+    it('印刷の前の確かめ: 選んだ方のうち2枚になる方だけ・紙面の並び', () => {
+      const sheets = [{ residentId: 3 }, { residentId: 1 }, { residentId: 2 }]
+      assert.deepEqual(C.overflowPicked(sheets, new Set([1, 2, 3]), new Set([2, 3])), [3, 2])
+      assert.deepEqual(C.overflowPicked(sheets, new Set([1]), new Set([2, 3])), [])
+    })
+  })
+}
+
+describe('紙が2枚になる方（静的検査・2026-11-18）', () => {
+  const page = code('../src/pages/DaycareContactPage.tsx')
+  const sheet = code('../src/components/print/DaycareContactSheet.tsx')
+  const css = read('../src/components/print/daycareContact.css')
+  it('印刷と同じ探し方（fitSheets）で数え、印刷の前の確かめと見本に出す・文は切らない', () => {
+    assert.match(sheet, /function fitSheets\(host: HTMLElement\): number\[\]/)
+    assert.match(sheet, /if \(r\.overflow && Number\.isSafeInteger\(rid\)\) overflow\.push\(rid\)/)
+    assert.match(sheet, /<article className="dcc-sheet" data-rid=\{sheet\.residentId\}>/)
+    assert.match(sheet, /export function useContactSheetOverflow\(sheets: readonly ContactSheet\[\]\)/)
+    assert.match(page, /overflow: overflowPicked\(printable, set, sheetFit\.overflow\)/)
+    assert.match(page, /check\.overflow\.length > 0 \|\|/)
+    assert.match(page, /紙が2枚になります/)
+    assert.match(page, /\{sheetFit\.portal\}/)
+    // 測る置き場は印刷に出さない（body の直下の .dcc-print-area 以外は印刷の間隠す）・紙を切る指定（overflow: hidden・固定の高さ）を足していない
+    assert.match(css, /html\[data-dcc-print\] body > \*:not\(\.dcc-print-area\) \{\s*display: none !important;/)
+    assert.doesNotMatch(css, /overflow:\s*hidden/)
+  })
+})

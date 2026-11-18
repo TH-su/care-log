@@ -38,6 +38,7 @@ import {
   FORBIDDEN_REASON,
   OUTDATED_REASON,
   cachedMyRole,
+  contactSectionsReady,
   fetchBathDay,
   fetchDaycareActivities,
   fetchDaycareAttendance,
@@ -46,6 +47,7 @@ import {
   fetchDaycareDayNote,
   fetchDaycareIntake,
   fetchDaycarePlan,
+  fetchDaycarePrevContacts,
   fetchDaycareVitalUnmeasured,
   fetchDaycareVitalsLive,
   fetchMyRole,
@@ -65,7 +67,7 @@ import {
   saveDaycareDayNote,
   subscribeMyRole,
 } from '../lib/db'
-import type { DaycareMealRow, MyRole } from '../lib/db'
+import type { DaycareMealRow, DaycarePrevContacts, MyRole } from '../lib/db'
 import { fetchAllResidents } from '../lib/cachedReads'
 import { loadDaycareDayParts } from '../lib/daycareDayLoad'
 import type { DaycareDayReaders } from '../lib/daycareDayLoad'
@@ -79,10 +81,17 @@ import { readPersonDay } from '../lib/daycarePerson'
 import {
   CONTACT_BODY_MAX,
   CONTACT_NURSE_MAX,
+  CONTACT_SECTION_FIELDS,
+  CONTACT_SECTION_LABEL,
+  CONTACT_SECTION_MAX,
   DAY_NOTE_MAX,
+  PREV_LOOKBACK_DAYS,
   UNMEASURED_UNREAD_LABEL,
   autoBathPicked,
   buildContactSheet,
+  changedText,
+  conflictText,
+  contactFieldValue,
   contactNoteOf,
   contactPath,
   defaultPicked,
@@ -90,6 +99,7 @@ import {
   noteLength,
   normalizeNoteText,
   nurseNoteMissing,
+  overflowPicked,
   trainingQueuedPicked,
   unreadPicked,
   vitalsStoppedPicked,
@@ -99,8 +109,9 @@ import type { ContactNoteField, ContactSheet, DaycareContactNote, DaycareDayNote
 import { useVitalLimits } from '../hooks/useVitalLimits'
 import { VitalLimitsFailedNote } from '../components/VitalLimitsFailedNote'
 import { RecorderBar } from '../components/RecorderBar'
-import { ErrorBlock, LoadingBlock, ModalShell } from '../components/ui'
-import { ContactSheetView, DaycareContactPrint } from '../components/print/DaycareContactSheet'
+import { registerUnsaved } from '../lib/leaveGuard'
+import { ConfirmDialog, ErrorBlock, LoadingBlock, ModalShell } from '../components/ui'
+import { ContactSheetView, DaycareContactPrint, useContactSheetOverflow } from '../components/print/DaycareContactSheet'
 import type { DaycareContactPrintHandle } from '../components/print/DaycareContactSheet'
 import { addDays, fmtDayLabel, todayIso } from '../lib/format'
 import type { BathRecord, DaycareAttendance, DaycarePlanRow, DaycarePlanSource, FluidIntake, Resident, Staff } from '../lib/types'
@@ -116,6 +127,12 @@ const MSG_NOTES_UNREAD = '連絡帳のひと言を読み込めませんでした
 const MSG_PAST_OFFICE = '過去の日の連絡帳のひと言は、事務所のログインでだけ書けます（現場の端末は当日だけ）。見本の確認と印刷はできます。'
 const MSG_NO_RECORDER = '記録者が選ばれていません。上の「記録者」で選んでから保存してください。'
 const MSG_FUTURE = '未来の日には書けません。'
+const MSG_SECTIONS_MISSING = '連絡帳の項目ごとの記載はまだ使えません（サーバー側の設定待ち）。管理者に連絡してください。個別のひと言・看護職のひと言は書けます。'
+const MSG_PREV_LOADING = '前回の分を読み込んでいます…'
+const MSG_PREV_FAILED = '前回の分を読み込めませんでした。〔最新に更新〕を押してください。'
+const MSG_PREV_NONE = `前回の参加は見つかりません（直近${PREV_LOOKBACK_DAYS}日）`
+const MSG_PREV_UNKNOWN = '前回の参加の日を確かめられません'
+const NO_ENTRY = '（記載なし）'
 const MSG_ROSTER_LOADING = '利用者の名簿を読み込んでいます。読み込めるまで印刷はできません（氏名を刷るため）。'
 const MSG_ROSTER_FAILED = '利用者の名簿を読み込めないため、印刷できません（氏名を刷れません）。通信状態を確認して、〔最新に更新〕を押してください。'
 
@@ -142,6 +159,8 @@ interface ContactData {
   notesOk: boolean
   /** 連絡帳の表が無い（0061 未適用） */
   notesMissing: boolean
+  /** 項目ごとの記載の4欄（0064）が使えるか（列が無い DB だと読んだ後に分かる。読んだ後に取る） */
+  sectionsReady: boolean
   /** その日の〔未測定〕の印（2026-11-10・0062。紙と見本に「未測定」と出す）。null＝読めない（印なし＝今までどおり「記録なし」） */
   unmeasured: DaycareVitalUnmeasured[] | null
 }
@@ -162,6 +181,19 @@ const DAY_READERS: DaycareDayReaders = {
 type FieldKey = string
 const fieldKeyOf = (residentId: number, field: ContactNoteField): FieldKey => `${residentId}:${field}`
 const DAY_KEY: FieldKey = 'day'
+/** 1人の欄（項目ごとの記載の4欄・個別のひと言・看護職のひと言） */
+const PERSON_FIELDS: readonly ContactNoteField[] = [...CONTACT_SECTION_FIELDS, 'body', 'nurse_note']
+/** 欄の鍵から欄を取り出す（知らない欄は null＝送らない） */
+function fieldOfKey(key: FieldKey): ContactNoteField | null {
+  const f = key.slice(key.indexOf(':') + 1)
+  return (PERSON_FIELDS as readonly string[]).includes(f) ? (f as ContactNoteField) : null
+}
+/** 前回の欄の名前（左の比べ・全部の見出しを並べる） */
+const PREV_ROWS: readonly { field: ContactNoteField; label: string }[] = [
+  ...CONTACT_SECTION_FIELDS.map((f) => ({ field: f, label: CONTACT_SECTION_LABEL[f] })),
+  { field: 'body', label: '個別のひと言' },
+  { field: 'nurse_note', label: '看護職のひと言' },
+]
 
 /** 欄の下の知らせ */
 type FieldMsg = { tone: 'ok' | 'warn' | 'danger'; text: string }
@@ -178,6 +210,8 @@ interface PrintCheck {
   trainingQueued: number[]
   /** バイタルの送信待ちが競合・拒否で止まっている方（その値は紙に載らない） */
   vitalsStopped: number[]
+  /** 10px でも1枚に収まらず、紙が2枚になる方（2026-11-18 親の決定・仮置き。文は切らずに続けて刷る） */
+  overflow: number[]
   /** この端末の送信待ちの件数（queuePending。入浴・水分は中身を重ねないので、0 でなければ1行で知らせる） */
   queued: number
   unsaved: number[]
@@ -303,6 +337,8 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
           .catch((): DaycareVitalUnmeasured[] | null => null),
       ])
       if (gen !== genRef.current || target !== dayRef.current) return
+      // 4欄の列が無い DB だと分かるのは読んだ後（列が無い応答を受けた時だけ false になる旗）
+      const sectionsReady = contactSectionsReady()
       const usable = parts.snapshot !== null && parts.snapshot.plan_source !== 'unknown'
       setData({
         day: target,
@@ -320,6 +356,7 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
         activities: parts.activities,
         training,
         ...notes,
+        sectionsReady,
         unmeasured,
       })
       setError(null)
@@ -417,6 +454,8 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
     })
     // 基準の引き方（limits.lookup）は個人の基準の行が変わった時だけ作り直される
   }, [data, board, nameOf, officeName, targets, limits.lookup, queueTick])
+  // 紙が2枚になる方（印刷と同じ部品・幅・探し方で、画面に出ない所に組んで測る。見本の「2枚になります」と印刷の前の確かめ）
+  const sheetFit = useContactSheetOverflow(sheets)
   const pickedSet = useMemo<ReadonlySet<number>>(() => picked ?? (board === null ? new Set() : defaultPicked(board.rows)), [picked, board])
   const pickedSheets = useMemo(() => sheets.filter((s) => pickedSet.has(s.residentId)), [sheets, pickedSet])
   /** 印刷に送る紙面（氏名を引ける方だけ。名簿が読めない間は1枚も刷らない＝「利用者ID 12 様」と刷らない） */
@@ -440,11 +479,37 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
     const row = rowOf(key, d)
     if (row === null) return ''
     if (key === DAY_KEY) return (row as DaycareDayNote).body ?? ''
-    const n = row as DaycareContactNote
-    return (key.endsWith(':nurse_note') ? n.nurse_note : n.body) ?? ''
+    const field = fieldOfKey(key)
+    return field === null ? '' : (contactFieldValue(row as DaycareContactNote, field) ?? '')
   }
   const draftOf = (key: FieldKey): string => drafts[key] ?? savedOf(key)
   const isDirty = (key: FieldKey): boolean => key in drafts && normalizeNoteText(drafts[key]) !== normalizeNoteText(savedOf(key))
+
+  // ── 保存していない文がある間は、離れる前に確かめる（App の確認と再読み込みの警告・2026-11-18） ──
+  const unsavedRef = useRef(false)
+  unsavedRef.current = Object.keys(drafts).some(isDirty)
+  useEffect(() => registerUnsaved(() => unsavedRef.current), [])
+
+  // ── 前回の参加の分（2026-11-18 本人指示: 左に前回・右に今回）。今回の分とは別に読み、失敗しても今回の分は使える ──
+  // 読むのは日・〔最新に更新〕・その日の方の並びが変わった時の1回だけ（保存・送信待ちの静かな読み直しでは読まない）
+  // 並びは名簿（五十音）が届くと変わるので、番号の順にそろえてから鍵にする（名簿が後から届いても読み直さない）
+  const prevIds = board === null ? '' : [...new Set(board.rows.map((r) => r.residentId))].sort((a, b) => a - b).join(',')
+  const prevKey = data === null || data.day !== day || board === null ? null : `${day}|${reloadKey}|${prevIds}`
+  const [prev, setPrev] = useState<{ key: string; status: 'loading' | 'ok' | 'failed'; data: DaycarePrevContacts | null } | null>(null)
+  useEffect(() => {
+    if (prevKey === null) return
+    let alive = true
+    setPrev({ key: prevKey, status: 'loading', data: null })
+    const ids = prevIds === '' ? [] : prevIds.split(',').map(Number)
+    fetchDaycarePrevContacts(day, ids)
+      .then((r) => alive && setPrev({ key: prevKey, status: 'ok', data: r }))
+      .catch(() => alive && setPrev({ key: prevKey, status: 'failed', data: null }))
+    return () => {
+      alive = false
+    }
+    // prevKey に日・読み込みの回・方の並びを入れてある
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prevKey])
 
   const setMsg = (key: FieldKey, m: FieldMsg | null) =>
     setFieldMsg((prev) => {
@@ -554,9 +619,9 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
         }
         return
       }
-      const [rid, fieldRaw] = key.split(':')
-      const residentId = Number(rid)
-      const field: ContactNoteField = fieldRaw === 'nurse_note' ? 'nurse_note' : 'body'
+      const residentId = Number(key.split(':')[0])
+      const field = fieldOfKey(key)
+      if (field === null || !Number.isSafeInteger(residentId)) return
       const r = await saveDaycareContactField({
         residentId,
         day: target,
@@ -572,7 +637,7 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
         if (r.row !== null) putContact(target, r.row)
         setMsg(key, { tone: 'ok', text: '✓ 保存しました' })
       } else {
-        const cur = r.row === null ? null : field === 'body' ? r.row.body : r.row.nurse_note
+        const cur = r.row === null ? null : contactFieldValue(r.row, field)
         setDraftBase((prev) => ({ ...prev, [key]: { row: r.row, value: normalizeNoteText(cur) } }))
         if (r.row !== null) putContact(target, r.row)
         setMsg(key, { tone: 'warn', text: conflictText(cur) })
@@ -608,10 +673,16 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
       autoBath: autoBathPicked(printable, set),
       trainingQueued: trainingQueuedPicked(printable, set),
       vitalsStopped: vitalsStoppedPicked(printable, set),
+      overflow: overflowPicked(printable, set, sheetFit.overflow),
       queued: queuePending(),
       unsaved: printable
         .map((s) => s.residentId)
-        .filter((id) => isDirty(fieldKeyOf(id, 'body')) || (sheets.find((s) => s.residentId === id)?.abnormal === true && isDirty(fieldKeyOf(id, 'nurse_note')))),
+        .filter(
+          (id) =>
+            isDirty(fieldKeyOf(id, 'body')) ||
+            CONTACT_SECTION_FIELDS.some((f) => isDirty(fieldKeyOf(id, f))) ||
+            (sheets.find((s) => s.residentId === id)?.abnormal === true && isDirty(fieldKeyOf(id, 'nurse_note'))),
+        ),
       dayUnsaved: isDirty(DAY_KEY),
     }
     const any =
@@ -621,6 +692,7 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
       check.autoBath.length > 0 ||
       check.trainingQueued.length > 0 ||
       check.vitalsStopped.length > 0 ||
+      check.overflow.length > 0 ||
       check.queued > 0 ||
       check.unsaved.length > 0 ||
       check.dayUnsaved
@@ -628,7 +700,13 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
     else doPrint()
   }
 
-  const goDay = (d: string) => navigate(contactPath(d, today), { replace: true })
+  // 日を変える前に、保存していない文があれば確かめる（react-router の replace は App の離れる前の確かめを通らないため・反証 中1）
+  const [dayAsk, setDayAsk] = useState<string | null>(null)
+  const goDayNow = (d: string) => navigate(contactPath(d, today), { replace: true })
+  const goDay = (d: string) => {
+    if (unsavedRef.current) setDayAsk(d)
+    else goDayNow(d)
+  }
 
   // その日に読めなかった項目（一覧の上の帯）
   const unreadDay =
@@ -719,6 +797,12 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
           {data.notesMissing ? MSG_CONTACT_MISSING : MSG_NOTES_UNREAD}
         </p>
       ) : null}
+      {data !== null && data.day === day && data.notesOk && !data.sectionsReady ? (
+        <p role="status" className="rounded-lg border border-warn bg-warn-bg px-3 py-1.5 text-base text-ink">
+          <span aria-hidden="true">▲ </span>
+          {MSG_SECTIONS_MISSING}
+        </p>
+      ) : null}
     </div>
   )
 
@@ -741,7 +825,10 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
   if (data === null || board === null) return null
 
   /** 1つの欄（全員共通の一文・個別のひと言・看護職のひと言） */
-  const noteField = (key: FieldKey, label: string, max: number, hint: string | null, labelledName: string | null) => {
+  const pageWritable = notesWritable
+  const noteField = (key: FieldKey, label: string, max: number, hint: string | null, labelledName: string | null, enabled = true) => {
+    // 項目ごとの記載の4欄は、列が無い DB（0064 未適用）では書けない（enabled=false・理由は上の帯）
+    const notesWritable = pageWritable && enabled
     const value = draftOf(key)
     const count = noteLength(value)
     const busy = saving.has(key)
@@ -792,6 +879,61 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
           </p>
         ) : null}
       </div>
+    )
+  }
+
+  /** 前回の参加の分（読むだけ）。全部の見出しを並べ、空は「（記載なし）」 */
+  const prevPanel = (id: number, name: string) => {
+    const cur = prev !== null && prev.key === prevKey ? prev : null
+    const head = (text: string) => <h3 className="text-base font-bold text-ink">{text}</h3>
+    const note = (text: string, alert = false) => (
+      <p role={alert ? 'alert' : 'status'} className={`rounded border p-2 text-base text-ink ${alert ? 'border-warn bg-warn-bg' : 'border-border bg-surface2'}`}>
+        {alert ? <span aria-hidden="true">▲ </span> : null}
+        {text}
+      </p>
+    )
+    const label = `${name}さんの前回の参加の分`
+    if (cur === null || cur.status === 'loading') {
+      return (
+        <section className="min-w-0 space-y-2" aria-label={label}>
+          {head('前回の分')}
+          {note(MSG_PREV_LOADING)}
+        </section>
+      )
+    }
+    if (cur.status === 'failed' || cur.data === null) {
+      return (
+        <section className="min-w-0 space-y-2" aria-label={label}>
+          {head('前回の分')}
+          {note(MSG_PREV_FAILED, true)}
+        </section>
+      )
+    }
+    const pd = cur.data.prevDay.get(id) ?? null
+    if (pd === null) {
+      return (
+        <section className="min-w-0 space-y-2" aria-label={label}>
+          {head('前回の分')}
+          {note(cur.data.truncated ? MSG_PREV_UNKNOWN : MSG_PREV_NONE)}
+        </section>
+      )
+    }
+    const row = contactNoteOf(cur.data.notes, id, pd)
+    return (
+      <section className="min-w-0 space-y-2 rounded border border-border bg-surface2 p-2" aria-label={label}>
+        {head(`前回（${fmtDayLabel(pd)}）の分`)}
+        <dl className="space-y-2">
+          {PREV_ROWS.map(({ field, label: l }) => {
+            const t = normalizeNoteText(contactFieldValue(row, field))
+            return (
+              <div key={field}>
+                <dt className="text-sm font-bold text-ink2">{l}</dt>
+                <dd className={`m-0 whitespace-pre-wrap break-words text-base ${t === null ? 'text-ink2' : 'text-ink'}`}>{t ?? NO_ENTRY}</dd>
+              </div>
+            )
+          })}
+        </dl>
+      </section>
     )
   }
 
@@ -902,20 +1044,14 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
                     印刷する<span className="sr-only">（{name}さん）</span>
                   </label>
                 </div>
-                <div className="mt-2 flex flex-wrap items-start gap-4">
-                  {/* 紙面の見本（印刷と同じ部品を枠の幅に合わせて縮める） */}
-                  <div className="w-full max-w-[22rem] shrink-0 space-y-1">
-                    <figure className="dcc-preview m-0" aria-label={`${name}さんの連絡帳の見本`}>
-                      <ContactSheetView sheet={sheet} />
-                    </figure>
-                    {/* 送信待ちを重ねた方（紙には出さない。届いた後に読み直すと送信待ちの印が消える） */}
-                    {sheet.pendingLabels.length > 0 ? (
-                      <p className="text-sm text-ink2">
-                        <span aria-hidden="true">↻ </span>送信待ちを含む（{sheet.pendingLabels.join('・')}）
-                      </p>
-                    ) : null}
-                  </div>
-                  <div className="min-w-[16rem] flex-1 space-y-3">
+                {/* 前回の参加の分（左・読むだけ）と今回の分（右・入力）。幅 1024px 以上は左右2列、それより狭い幅は縦に積む（前回→今回）（2026-11-18 本人指示） */}
+                <div className="mt-2 grid grid-cols-1 gap-4 lg:grid-cols-2">
+                  {prevPanel(id, name)}
+                  <section className="min-w-0 space-y-3" aria-label={`${name}さんの今回（${fmtDayLabel(day)}）の分`}>
+                    <h3 className="text-base font-bold text-ink">今回（{fmtDayLabel(day)}）の分</h3>
+                    {CONTACT_SECTION_FIELDS.map((f) => (
+                      <div key={f}>{noteField(fieldKeyOf(id, f), CONTACT_SECTION_LABEL[f], CONTACT_SECTION_MAX, null, name, data.sectionsReady)}</div>
+                    ))}
                     {noteField(fieldKeyOf(id, 'body'), '個別のひと言', CONTACT_BODY_MAX, null, name)}
                     {sheet.abnormal
                       ? noteField(
@@ -926,7 +1062,25 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
                           name,
                         )
                       : null}
-                  </div>
+                  </section>
+                </div>
+                {/* 紙面の見本（印刷と同じ部品を枠の幅に合わせて縮める。比べの下に置く＝仮置き） */}
+                <div className="mt-3 w-full max-w-[22rem] space-y-1">
+                  <figure className="dcc-preview m-0" aria-label={`${name}さんの連絡帳の見本`}>
+                    <ContactSheetView sheet={sheet} />
+                  </figure>
+                  {/* 10px でも1枚に収まらない方（紙は2枚目に続く・文は切らない） */}
+                  {sheetFit.overflow.has(id) ? (
+                    <p className="text-sm font-bold text-ink">
+                      <span aria-hidden="true">▲ </span>紙が2枚になります（いちばん小さい文字でも1枚に収まりません）
+                    </p>
+                  ) : null}
+                  {/* 送信待ちを重ねた方（紙には出さない。届いた後に読み直すと送信待ちの印が消える） */}
+                  {sheet.pendingLabels.length > 0 ? (
+                    <p className="text-sm text-ink2">
+                      <span aria-hidden="true">↻ </span>送信待ちを含む（{sheet.pendingLabels.join('・')}）
+                    </p>
+                  ) : null}
                 </div>
               </li>
             )
@@ -935,6 +1089,7 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
       )}
 
       <DaycareContactPrint ref={printRef} sheets={printable} />
+      {sheetFit.portal}
 
       {/* 印刷の前の確かめ（基準外なのに看護職のひと言が空・バイタルが読めない・読めない項目・入浴が自動のまま・送信待ちの機能訓練・
           送れずに止まっているバイタル・この端末の送信待ちの件数・保存していない文） */}
@@ -1015,6 +1170,18 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
               </ul>
             </div>
           ) : null}
+          {confirm !== null && confirm.overflow.length > 0 ? (
+            <div>
+              <p className="text-base text-ink">
+                <span aria-hidden="true">▲ </span>紙が2枚になる方（いちばん小さい文字でも1枚に収まらないため、文は切らずに2枚目に続けて刷ります）:
+              </p>
+              <ul className="ml-5 list-disc text-base text-ink">
+                {confirm.overflow.map((rid) => (
+                  <li key={rid}>{nameOf(rid)} 様</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
           {confirm !== null && confirm.queued > 0 ? (
             <p className="text-base text-ink">
               <span aria-hidden="true">▲ </span>この端末に送信待ちが {confirm.queued} 件あります（届く前の記録は紙に載らないことがあります）。
@@ -1028,7 +1195,7 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
               <ul className="ml-5 list-disc text-base text-ink">
                 {confirm.dayUnsaved ? <li>全員共通の一文</li> : null}
                 {confirm.unsaved.map((rid) => (
-                  <li key={rid}>{nameOf(rid)} 様のひと言</li>
+                  <li key={rid}>{nameOf(rid)} 様のひと言・項目ごとの記載</li>
                 ))}
               </ul>
             </div>
@@ -1055,20 +1222,21 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
           </button>
         </div>
       </ModalShell>
+      <ConfirmDialog
+        open={dayAsk !== null}
+        title="保存せずに日を変えますか"
+        body="保存していない文があります。日を変えると、入れた文は消えます。"
+        confirmLabel="保存せずに移る"
+        danger
+        onConfirm={() => {
+          const d = dayAsk
+          setDayAsk(null)
+          if (d !== null) goDayNow(d)
+        }}
+        onCancel={() => setDayAsk(null)}
+      />
     </div>
   )
-}
-
-/** 保存の時に、他の端末が先に書き換えていた時の知らせ（上書きしていない・入れた文は欄に残している） */
-function conflictText(current: string | null): string {
-  const now = current === null || current.trim() === '' ? '（空）' : `「${current}」`
-  return `他の端末が先にこの欄を書き換えていたため、上書きしていません。いま保存されている文は ${now} です。入れた文は欄に残しています。見比べて直し、もう一度〔保存〕を押してください。`
-}
-
-/** 入れている間に、他の端末がこの欄を書き換えた時の知らせ（読み直した時に見つけた。上書きはしていない） */
-function changedText(current: string | null): string {
-  const now = current === null || current.trim() === '' ? '（空）' : `「${current}」`
-  return `入れている間に、他の端末がこの欄を書き換えました。いま保存されている文は ${now} です。入れた文は欄に残しています（まだ上書きしていません）。見比べて直し、〔保存〕を押してください。`
 }
 
 export default DaycareContactPage

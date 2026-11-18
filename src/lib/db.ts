@@ -116,8 +116,17 @@ import { normalizeReporterName } from './reporterName'
 import { EXPLAINED_TOS, HOME_VISIT_PURPOSES, HOME_VISIT_TEXT_MAX } from './daycareHomeVisit'
 import type { DaycareHomeVisit, ExplainedTo, HomeVisitPurpose, homeVisitPayload } from './daycareHomeVisit'
 // デイの連絡帳（段階4・2026-11-09 計画C・0061）
-import { DAY_NOTE_MAX, contactFieldMax, noteLengthError, normalizeNoteText } from './daycareContact'
-import type { ContactNoteField, DaycareContactNote, DaycareDayNote } from './daycareContact'
+import {
+  DAY_NOTE_MAX,
+  PREV_LOOKBACK_DAYS,
+  contactFieldMax,
+  contactFieldValue,
+  isContactSectionField,
+  noteLengthError,
+  normalizeNoteText,
+  prevAttendedDays,
+} from './daycareContact'
+import type { ArrivalLike, ContactNoteField, DaycareContactNote, DaycareDayNote } from './daycareContact'
 import type { DueCopyRow, DueCopySettings } from './trainingDue'
 import type { TrainingDueCopyInput, TrainingDueSettingsInput, TrainingDueSyncResult } from './trainingPlanClient'
 import { clearWeightCache, setWeightDbReader } from './weightClient'
@@ -10057,6 +10066,7 @@ const CONTACT_MSG = {
   missing: 'デイの連絡帳はまだ使えません（サーバー側の設定待ち）。管理者に連絡してください。',
   offline: '保存できませんでした。通信状態を確認して、もう一度押してください。',
   pastOffice: '過去の日の連絡帳のひと言は、事務所のログインでだけ書けます（現場の端末は当日だけ）。入れた文は欄に残しています。',
+  sectionsMissing: '連絡帳の項目ごとの記載はまだ使えません（サーバー側の設定待ち）。管理者に連絡してください。',
 } as const
 
 /** 過去の日の守り（0061 の daycare_contact_day_guard）で止められた応答か（42501 と文の頭の組で見分ける。許可リスト外の 42501 と分ける） */
@@ -10066,7 +10076,32 @@ function isContactPastOfficeOnly(res: Res<unknown>): boolean {
 }
 
 const DAY_NOTE_COLS = 'id,day,body,rev'
-const CONTACT_NOTE_COLS = 'id,resident_id,day,body,nurse_note,printed_at,rev'
+const CONTACT_NOTE_COLS_LEGACY = 'id,resident_id,day,body,nurse_note,printed_at,rev'
+/** 0064 の項目ごとの記載の4列を含めた列（DB に列が無い時は古い列だけで読み直す＝contactNoteCols） */
+const CONTACT_NOTE_COLS_FULL = `${CONTACT_NOTE_COLS_LEGACY},vital_meal_note,activity_note,training_note,behavior_note`
+/** 0064 の列が無い DB だと分かったか（列が無い応答を1度受けたら、この画面の間は古い列だけで読み書きする） */
+let contactSectionsMissing = false
+function contactNoteCols(): string {
+  return contactSectionsMissing ? CONTACT_NOTE_COLS_LEGACY : CONTACT_NOTE_COLS_FULL
+}
+/** 連絡帳の行を読む（0064 の列が無い DB では古い列だけで読み直す） */
+async function selectContactNotes(run: (cols: string) => PromiseLike<Res<unknown>>): Promise<Res<unknown>> {
+  const res = (await run(contactNoteCols())) as Res<unknown>
+  // 列が無い応答なら、古い列だけで読み直す（同時に走った別の読み取りが先に旗を立てていても読み直す＝反証 軽1）
+  if (res.error !== null && isMissingColumn(res)) {
+    contactSectionsMissing = true
+    return (await run(CONTACT_NOTE_COLS_LEGACY)) as Res<unknown>
+  }
+  return res
+}
+/** 連絡帳の項目ごとの記載（0064）が使えるか（列が無い DB だと分かった時だけ false） */
+export function contactSectionsReady(): boolean {
+  return !contactSectionsMissing
+}
+/** 項目ごとの記載の保存が「列が無い（0064 未適用）」で止まったか */
+export function isContactSectionsMissingError(e: unknown): boolean {
+  return e instanceof DbError && e.message === CONTACT_MSG.sectionsMissing
+}
 /** 1日の連絡帳のひと言の取得上限（1日の利用者数がこれを超える運用は無い） */
 const DAYCARE_CONTACT_ROWS = DAY_ROWS
 
@@ -10088,7 +10123,19 @@ function normalizeContactNote(row: unknown): DaycareContactNote | null {
   const day = dateStr(r.day)
   const rev = num(r.rev)
   if (id === null || resident_id === null || day === null || rev === null) return null
-  return { id, resident_id, day, body: str(r.body), nurse_note: str(r.nurse_note), printed_at: str(r.printed_at), rev }
+  return {
+    id,
+    resident_id,
+    day,
+    body: str(r.body),
+    nurse_note: str(r.nurse_note),
+    vital_meal_note: str(r.vital_meal_note),
+    activity_note: str(r.activity_note),
+    training_note: str(r.training_note),
+    behavior_note: str(r.behavior_note),
+    printed_at: str(r.printed_at),
+    rev,
+  }
 }
 
 /** 連絡帳の読み書きが「表が無い（0061 未適用）」で止まったか（画面はひと言の欄だけ「設定待ち」にする） */
@@ -10137,15 +10184,75 @@ export async function fetchDaycareDayNote(dayIso: string): Promise<DaycareDayNot
 export async function fetchDaycareContactNotes(dayIso: string): Promise<DaycareContactNote[]> {
   assertDay(dayIso)
   const sb = await getClient()
-  const res = (await sb
-    .from('daycare_contact_notes')
-    .select(CONTACT_NOTE_COLS)
-    .eq('day', dayIso)
-    .is('deleted_at', null)
-    .order('id', { ascending: true })
-    .limit(DAYCARE_CONTACT_ROWS)) as Res<unknown>
+  const res = await selectContactNotes((cols) =>
+    sb
+      .from('daycare_contact_notes')
+      .select(cols)
+      .eq('day', dayIso)
+      .is('deleted_at', null)
+      .order('id', { ascending: true })
+      .limit(DAYCARE_CONTACT_ROWS),
+  )
   if (res.error !== null) throw contactReadError(res)
   return list(res.data, normalizeContactNote, DAYCARE_CONTACT_ROWS)
+}
+
+/** 前回の参加の分（2026-11-18 本人指示・連絡帳の左右の比べ） */
+export interface DaycarePrevContacts {
+  /** 人ごとの前回の参加の日（期間に来ていない方は null） */
+  prevDay: Map<number, string | null>
+  /** 前回の参加の日のその方の行（書いていない方は入らない） */
+  notes: DaycareContactNote[]
+  /** 到着の記録が読み取りの上限に届いた（前回の日を決めきれない方がいる）。画面は null の方を「確かめられません」と出す */
+  truncated: boolean
+}
+
+/** 前回の参加の日を探す到着の記録の取得上限（サーバーの1回の上限 1000 に合わせる） */
+const DAYCARE_PREV_ROWS = 1000
+
+/**
+ * 渡した方の、day より前の前回の参加の日（到着の時刻があり休みでない日・PREV_LOOKBACK_DAYS の間）と、その日の連絡帳の行を読む（読むだけ）。
+ * 到着の記録は期間を切って1回・連絡帳の行は出てきた日の分だけ1回（全件を読まない）。読めない時は例外（画面は前回の欄だけ「読み込めませんでした」）
+ */
+export async function fetchDaycarePrevContacts(dayIso: string, residentIds: readonly number[]): Promise<DaycarePrevContacts> {
+  assertDay(dayIso)
+  const ids = [...new Set(residentIds.filter((x) => Number.isSafeInteger(x) && x > 0))]
+  if (ids.length === 0) return { prevDay: new Map(), notes: [], truncated: false }
+  const sb = await getClient()
+  const from = addDaysIso(dayIso, -PREV_LOOKBACK_DAYS)
+  const to = addDaysIso(dayIso, -1)
+  const att = (await (sb
+    .from('daycare_attendance')
+    .select('resident_id,day,arrived_at,absent')
+    .in('resident_id', ids)
+    .gte('day', from)
+    .lte('day', to)
+    .eq('absent', false)
+    .not('arrived_at', 'is', null)
+    .is('deleted_at', null)
+    .order('day', { ascending: false })
+    .limit(DAYCARE_PREV_ROWS) as unknown as Promise<Res<unknown>>)) as Res<unknown>
+  if (att.error !== null) throw daycareReadError(att)
+  const rows = Array.isArray(att.data) ? (att.data as ArrivalLike[]) : []
+  const truncated = rows.length >= DAYCARE_PREV_ROWS
+  const prevDay = prevAttendedDays(rows, ids, dayIso)
+  const days = [...new Set([...prevDay.values()].filter((d): d is string => d !== null))]
+  if (days.length === 0) return { prevDay, notes: [], truncated }
+  const res = await selectContactNotes((cols) =>
+    sb
+      .from('daycare_contact_notes')
+      .select(cols)
+      .in('resident_id', ids)
+      .in('day', days)
+      .is('deleted_at', null)
+      .order('id', { ascending: true })
+      .limit(DAYCARE_PREV_ROWS),
+  )
+  if (res.error !== null) throw contactReadError(res)
+  const all = list(res.data, normalizeContactNote, DAYCARE_PREV_ROWS)
+  // 出てきた日のうち、その方の前回の日の行だけを残す（ほかの方の前回の日に書いた行を混ぜない）
+  const notes = all.filter((n) => prevDay.get(n.resident_id) === n.day)
+  return { prevDay, notes, truncated }
 }
 
 /** 書き込みの中で、いまの生きている行を読み直す（通信できない時は保存できなかった扱い） */
@@ -10158,16 +10265,18 @@ async function readDayNoteLive(sb: SupabaseClient, dayIso: string): Promise<Dayc
 }
 
 async function readContactNoteLive(sb: SupabaseClient, residentId: number, dayIso: string): Promise<DaycareContactNote | null> {
-  const res = await bounded(
-    sb
-      .from('daycare_contact_notes')
-      .select(CONTACT_NOTE_COLS)
-      .eq('resident_id', residentId)
-      .eq('day', dayIso)
-      .is('deleted_at', null)
-      .order('id', { ascending: false })
-      .limit(1)
-      .maybeSingle(),
+  const res = await selectContactNotes((cols) =>
+    bounded(
+      sb
+        .from('daycare_contact_notes')
+        .select(cols)
+        .eq('resident_id', residentId)
+        .eq('day', dayIso)
+        .is('deleted_at', null)
+        .order('id', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+    ),
   )
   if (res.error !== null) throw contactWriteError(res)
   return res.data === null ? null : normalizeContactNote(res.data)
@@ -10186,7 +10295,7 @@ async function writeNoteField<T extends { id: number; rev: number }>(o: {
   cols: string
   /** 行を足す時の自然キー（{ day } か { resident_id, day }） */
   insertKey: Record<string, unknown>
-  field: 'body' | 'nurse_note'
+  field: 'body' | ContactNoteField
   want: string | null
   base: T | null
   valueOf: (row: T) => string | null
@@ -10274,7 +10383,8 @@ export async function saveDaycareDayNote(p: {
 }
 
 /**
- * 1人のひと言の1つの欄（個別のひと言 body・看護職のひと言 nurse_note）を保存する（その欄だけを送る）。
+ * 1人のひと言の1つの欄（個別のひと言 body・看護職のひと言 nurse_note・項目ごとの記載の4欄 vital_meal_note・activity_note・
+ * training_note・behavior_note＝0064）を保存する（その欄だけを送る）。4欄は列が無い DB では送らない（sectionsMissing）。
  * base＝画面が読んだ時のその方の行（無ければ null）。上限を超える・未来の日は送らない
  */
 export async function saveDaycareContactField(p: {
@@ -10291,17 +10401,19 @@ export async function saveDaycareContactField(p: {
   const why = noteLengthError(p.text, contactFieldMax(p.field))
   if (why !== null) throw new DbError('server', why)
   await assertKindWritable('daycare')
+  // 0064 の列が無い DB（項目ごとの記載はまだ使えない）では送らない（個別のひと言・看護職のひと言は今までどおり）
+  if (isContactSectionField(p.field) && contactSectionsMissing) throw new DbError('server', CONTACT_MSG.sectionsMissing)
   const sb = await getClient()
   const field = p.field
   return writeNoteField<DaycareContactNote>({
     sb,
     table: 'daycare_contact_notes',
-    cols: CONTACT_NOTE_COLS,
+    cols: contactNoteCols(),
     insertKey: { resident_id: p.residentId, day: p.day },
     field,
     want: normalizeNoteText(p.text),
     base: p.base,
-    valueOf: (r) => (field === 'body' ? r.body : r.nurse_note),
+    valueOf: (r) => contactFieldValue(r, field),
     readLive: () => readContactNoteLive(sb, p.residentId, p.day),
     normalize: normalizeContactNote,
     recordedBy: p.recordedBy,
@@ -10332,7 +10444,7 @@ export async function markDaycareContactPrinted(p: {
     const update = async (id: number): Promise<DaycareContactNote | null> => {
       const sent = withEditor({ printed_at: at }, p.editedBy)
       const res = await sendWithEditor(sent, (x) =>
-        bounded(sb.from('daycare_contact_notes').update(x).eq('id', id).is('deleted_at', null).select(CONTACT_NOTE_COLS).maybeSingle()),
+        bounded(sb.from('daycare_contact_notes').update(x).eq('id', id).is('deleted_at', null).select(contactNoteCols()).maybeSingle()),
       )
       return res.error === null && res.data !== null ? normalizeContactNote(res.data) : null
     }
@@ -10346,7 +10458,7 @@ export async function markDaycareContactPrinted(p: {
           sb
             .from('daycare_contact_notes')
             .insert({ resident_id: residentId, day: p.day, printed_at: at, recorded_by: idNum(p.recordedBy) })
-            .select(CONTACT_NOTE_COLS)
+            .select(contactNoteCols())
             .maybeSingle(),
         )
         if (res.error === null) return normalizeContactNote(res.data)

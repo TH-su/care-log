@@ -73,6 +73,11 @@ import { RecorderBar } from '../components/RecorderBar'
 import { DaycareBlankTag, DaycareRowBlankMark, DaycareUnfilledCount } from '../components/DaycareUnfilledCount'
 import { ConfirmDialog, ErrorBlock, LoadingBlock } from '../components/ui'
 import { useDaycareNoteMarksDay } from '../components/DaycareNoteMarkDay'
+import { DaycareContactEntryButton, DaycareContactSectionDialog } from '../components/DaycareContactSectionDialog'
+import { DaycareContactSectionList } from '../components/DaycareContactSectionList'
+import { useDaycareContactNotes } from '../hooks/useDaycareContactNotes'
+import { contactFieldValue, normalizeNoteText } from '../lib/daycareContact'
+import type { ContactSectionField } from '../lib/daycareContact'
 import { latestVitalValues, vitalMarkText } from '../lib/daycareNoteMark'
 import { keypadKeyAction, keypadMarkLine, keypadNoteKey, keypadOpKey } from '../lib/daycareNoteMarkDay'
 import { registerUnsaved } from '../lib/leaveGuard'
@@ -240,6 +245,9 @@ function levelTone(lv: Level): string {
   if (lv !== null) return 'border-2 border-warn bg-warn-bg'
   return 'border border-border-strong bg-surface'
 }
+
+/** この画面から書く連絡帳の欄（2026-11-18 本人指示） */
+const CONTACT_FIELDS_HERE: readonly ContactSectionField[] = ['vital_meal_note']
 
 export interface DaycareVitalsMealsPageProps {
   staff?: Staff[] | null
@@ -481,6 +489,13 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
   }, [board, filter])
 
   const nameOf = useCallback((id: number) => residents.find((r) => r.id === id)?.name ?? `利用者ID ${id}`, [residents])
+  // 連絡帳の項目ごとの記載（2026-11-18 本人指示・仮置き）: その日の連絡帳の行（入口の「✓」）と、書く小窓を開いている方。
+  // 入口はテンキーの右の列（いま入れている方の分）。表に列を足すと iPad 横 1180px で横に送るようになり、状態の列の中に置くと行の高さ 53px が崩れるため
+  const contacts = useDaycareContactNotes(day, reloadKey)
+  const [contactFor, setContactFor] = useState<number | null>(null)
+  // 日を変えたら小窓を閉じる（ほかの日の方へ書かない）
+  useEffect(() => setContactFor(null), [day])
+  const contactWritten = (rid: number): boolean => CONTACT_FIELDS_HERE.some((f) => normalizeNoteText(contactFieldValue(contacts.noteOf(rid), f)) !== null)
 
   /**
    * 1人の測定の並び（サーバーの行＋足した再測定＋送信待ちにだけある回）。送信待ちの回を出すのは、読み直しの後に圏外で入れた
@@ -1532,6 +1547,15 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
               <button type="button" onClick={() => press('close')} className="min-h-tap rounded border border-border-strong bg-surface px-3 text-base text-ink">
                 閉じる
               </button>
+              {/* 2026-11-18 本人指示（仮置き）: いま入れている方の連絡帳（バイタル・食事の欄）を書く小窓を開く。押せない時の理由は表の上の帯 */}
+              <DaycareContactEntryButton
+                name={nameOf(active.residentId)}
+                written={contactWritten(active.residentId)}
+                disabled={contacts.loading || contacts.blockedReason !== null}
+                onClick={() => setContactFor(active.residentId)}
+                sectionLabel="連絡帳のバイタル・食事"
+                widthCls="w-full"
+              />
             </div>
           </div>
         </div>
@@ -1919,6 +1943,9 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
                 </tbody>
               </table>
             </div>
+            {/* 連絡帳の記載（2026-11-18 親の決定・仮置き）: 表のすぐ下に、表と同じ方ごとの今の文と〔書く〕／〔直す〕（表の幅・列は変えない）。
+                押せない時の理由の帯もこの中に出す */}
+            <DaycareContactSectionList fields={CONTACT_FIELDS_HERE} residentIds={shownRows.map((r) => r.residentId)} nameOf={nameOf} contacts={contacts} onOpen={setContactFor} />
           </>
         )}
       </div>
@@ -1932,6 +1959,16 @@ export function DaycareVitalsMealsPage({ staff = undefined, actorId = null }: Da
         {lunch.toast}
       </div>
       {marks.dialogs}
+      <DaycareContactSectionDialog
+        residentId={contactFor}
+        name={contactFor === null ? '' : nameOf(contactFor)}
+        day={day}
+        today={today}
+        fields={CONTACT_FIELDS_HERE}
+        actorId={actorId}
+        contacts={contacts}
+        onClose={() => setContactFor(null)}
+      />
       <ConfirmDialog
         open={discardAsk}
         title="保存せずに移りますか"

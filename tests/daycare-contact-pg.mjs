@@ -12,6 +12,8 @@
 //   6. 物理削除はできない（delete の権限なし）・冪等（もう一度流しても通り、最後の確かめが ok）
 //   7. 過去の日の守り（2026-11-09 反証 軽3）: 現場（field）のログインは今日だけ書ける・過去の日は 42501・事務所と役割の分からない
 //      接続は過去の日も書ける・未来の日は誰も書けない（22023）・トリガ関数は誰も実行できない
+//   8. 項目ごとの記載の4欄（0064・2026-11-18）: 各200字まで（201字は欄ごとの制約で 23514）・1つの欄だけ直すと他の欄は変わらない・
+//      現場のログインは過去の日の4欄を書けない（42501）・事務所は書ける
 // 日付: 1〜6 は過去の決まった日（2026-11-01〜03）を使い、役割の分からない接続（test.role 未設定＝my_role() が null）で書く
 //   （過去の日の守りは役割が null なら止めない＝どの日に流しても同じ結果）。7 の今日・未来の日は SQL の now() から作る
 // 1件ずつトランザクションを張り、最後に必ず rollback する（表に何も残さない）。個人情報は置かない（利用者01・職員01 と数値IDだけ）。
@@ -263,6 +265,40 @@ await inTx('過去の日の守り: 現場は今日だけ・過去の日は事務
   const exec = (await q(`select has_function_privilege('authenticated', 'public.daycare_contact_day_guard()', 'execute') a,
                                 has_function_privilege('anon', 'public.daycare_contact_day_guard()', 'execute') b`))[0]
   ok('守りの関数は authenticated・anon が実行できない（0059・0060 と同じ）', exec.a === false && exec.b === false, exec)
+})
+
+// ── 8. 項目ごとの記載の4欄（0064・2026-11-18 本人指示） ──
+const SECTIONS = ['vital_meal_note', 'activity_note', 'training_note', 'behavior_note']
+await inTx('項目ごとの記載の4欄: 200字まで・1つの欄だけ直せる・現場は過去の日を書けない', async () => {
+  await seedTwo()
+  for (const f of SECTIONS) {
+    const okLen = await tryq(`insert into public.daycare_contact_notes (resident_id, day, ${f}, tenant_id) values (1101, '2026-11-01', repeat('あ', 200), $1) returning id`, [A])
+    ok(`${f}: 200字は通る`, okLen.code === null && okLen.rowCount === 1, okLen)
+    await q(`update public.daycare_contact_notes set deleted_at = now() where resident_id = 1101 and day = '2026-11-01' and deleted_at is null`)
+    const long = await tryq(`insert into public.daycare_contact_notes (resident_id, day, ${f}, tenant_id) values (1102, '2026-11-01', repeat('あ', 201), $1)`, [A])
+    ok(`${f}: 201字は 23514（${f} の制約）`, long.code === '23514' && long.constraint === `daycare_contact_notes_${f}_check`, long)
+  }
+  const ins = await asUser(A, () =>
+    q(`insert into public.daycare_contact_notes (resident_id, day, body, vital_meal_note, activity_note, training_note, behavior_note)
+       values (1101, '2026-11-02', 'ひと言', '主食を全部', '体操に参加', '立ち上がり 10回', '穏やか') returning id, rev`),
+  )
+  ok('ログインした人は4欄を足せる', Array.isArray(ins) && ins.length === 1, ins)
+  const up = await asUser(A, () => q(`update public.daycare_contact_notes set activity_note = '歌の会に参加', edited_by = 1201 where id = $1 and rev = $2 returning *`, [ins[0].id, ins[0].rev]))
+  const row = Array.isArray(up) ? up[0] : null
+  ok('1つの欄（活動）だけ直すと、ほかの欄は変わらない・rev が進む',
+    row !== null && row.activity_note === '歌の会に参加' && row.body === 'ひと言' && row.vital_meal_note === '主食を全部' && row.training_note === '立ち上がり 10回' && row.behavior_note === '穏やか' && row.rev === ins[0].rev + 1,
+    row)
+  const today = (await q(`select ((now() at time zone 'Asia/Tokyo')::date)::text d`))[0].d
+  const fToday = await asRole(A, 'field', () => q(`insert into public.daycare_contact_notes (resident_id, day, training_note) values (1102, $1, '今日の機能訓練') returning id`, [today]))
+  ok('現場のログインは今日の4欄を書ける', Array.isArray(fToday) && fToday.length === 1, fToday)
+  for (const f of SECTIONS) {
+    const fUpd = await asRole(A, 'field', () => q(`update public.daycare_contact_notes set ${f} = '直し' where id = $1 returning id`, [ins[0].id]))
+    ok(`現場のログインは過去の日の ${f} を直せない（42501）`, fUpd.error === '42501', fUpd)
+  }
+  const fIns = await asRole(A, 'field', () => q(`insert into public.daycare_contact_notes (resident_id, day, behavior_note) values (1102, '2026-11-03', '過去の様子')`))
+  ok('現場のログインは過去の日に4欄の行を足せない（42501）', fIns.error === '42501', fIns)
+  const oUpd = await asRole(A, 'office', () => q(`update public.daycare_contact_notes set behavior_note = '事務所の直し' where id = $1 returning id`, [ins[0].id]))
+  ok('事務所のログインは過去の日の4欄を直せる', Array.isArray(oUpd) && oUpd.length === 1, oUpd)
 })
 
 await client.end()

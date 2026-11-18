@@ -51,6 +51,11 @@ import { RecorderBar } from '../components/RecorderBar'
 import { DaycareRowBlankMark, DaycareRowBlankSr, DaycareUnfilledCount } from '../components/DaycareUnfilledCount'
 import { ConfirmDialog, ErrorBlock, LoadingBlock, ModalShell, useToast } from '../components/ui'
 import { useDaycareNoteMarksDay } from '../components/DaycareNoteMarkDay'
+import { DaycareContactEntryButton, DaycareContactSectionDialog } from '../components/DaycareContactSectionDialog'
+import { DaycareContactSectionList } from '../components/DaycareContactSectionList'
+import { useDaycareContactNotes } from '../hooks/useDaycareContactNotes'
+import { contactFieldValue, normalizeNoteText } from '../lib/daycareContact'
+import type { ContactSectionField } from '../lib/daycareContact'
 import { activityDayMarkText } from '../lib/daycareNoteMark'
 import { writeDaycareHandoffFor } from '../lib/daycareHandoff'
 import { buildDaycareBoard } from '../lib/daycare'
@@ -155,6 +160,9 @@ export interface DaycareActivityBulkPageProps {
   actorId?: number | null
 }
 
+/** この画面から書く連絡帳の欄（2026-11-18 代表者の決定: 行動・ご様子の欄は活動の画面に置く） */
+const CONTACT_FIELDS_HERE: readonly ContactSectionField[] = ['activity_note', 'behavior_note']
+
 export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: DaycareActivityBulkPageProps = {}) {
   const [search] = useSearchParams()
   const navigate = useNavigate()
@@ -193,6 +201,16 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
   /** いまの記録者（〔元に戻す〕は消した時の画面の関数で走るので、記録者は押した時の値を ref から読む＝確認の反証 軽3） */
   const actorRef = useRef(actorId)
   actorRef.current = actorId
+  // 連絡帳の項目ごとの記載（2026-11-18 本人指示）: その日の連絡帳の行（行のボタンの「✓」）と、書く小窓を開いている方
+  const contacts = useDaycareContactNotes(day, reloadKey)
+  const [contactFor, setContactFor] = useState<number | null>(null)
+  // 日を変えたら小窓を閉じる（ほかの日の方へ書かない）
+  useEffect(() => setContactFor(null), [day])
+  /** その方の連絡帳に、この画面の欄のどれかが書いてあるか */
+  const contactWritten = (rid: number): boolean => {
+    const n = contacts.noteOf(rid)
+    return CONTACT_FIELDS_HERE.some((f) => normalizeNoteText(contactFieldValue(n, f)) !== null)
+  }
 
   useEffect(() => {
     const t = window.setInterval(() => setToday(todayIso()), 60_000)
@@ -1076,6 +1094,8 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                             </div>
                           </td>
                           <td className="px-1 py-1">
+                            {/* 2026-11-18 本人指示: 連絡帳（活動・行動・ご様子）の入口を申し送りの右に並べる（列を足さない＝行の高さ・知らせの行のまたがりを変えない・仮置き） */}
+                            <div className="flex items-center gap-gap">
                             {marks.button({
                               residentId: rid,
                               name,
@@ -1092,6 +1112,14 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                                       ? '活動の記録が無いため、申し送りにできません（記録してから押してください）。'
                                       : null,
                             })}
+                            <DaycareContactEntryButton
+                              name={name}
+                              written={contactWritten(rid)}
+                              disabled={contacts.loading || contacts.blockedReason !== null}
+                              onClick={() => setContactFor(rid)}
+                              sectionLabel="連絡帳の活動・行動・ご様子"
+                            />
+                            </div>
                           </td>
                         </tr>
                         {detail ? (
@@ -1128,6 +1156,9 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
                 </tbody>
               </table>
             </div>
+            {/* 連絡帳の記載（2026-11-18 親の決定・仮置き）: 表のすぐ下に、表と同じ方ごとの今の文と〔書く〕／〔直す〕（表の幅・列は変えない）。
+                押せない時の理由の帯もこの中に出す */}
+            <DaycareContactSectionList fields={CONTACT_FIELDS_HERE} residentIds={targets} nameOf={nameOf} contacts={contacts} onOpen={setContactFor} />
           </>
         )}
       </section>
@@ -1200,6 +1231,16 @@ export function DaycareActivityBulkPage({ staff = undefined, actorId = null }: D
         onCancel={() => setLateAsk(null)}
       />
       {marks.dialogs}
+      <DaycareContactSectionDialog
+        residentId={contactFor}
+        name={contactFor === null ? '' : nameOf(contactFor)}
+        day={day}
+        today={today}
+        fields={CONTACT_FIELDS_HERE}
+        actorId={actorId}
+        contacts={contacts}
+        onClose={() => setContactFor(null)}
+      />
       {toast}
     </div>
   )
