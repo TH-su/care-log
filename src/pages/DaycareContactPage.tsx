@@ -487,7 +487,8 @@ export function DaycareContactPage({ staff = undefined, actorId = null }: Daycar
 
   // ── 前回の参加の分（2026-11-18 本人指示: 左に前回・右に今回）。今回の分とは別に読み、失敗しても今回の分は使える ──
   // 読むのは日・〔最新に更新〕・その日の方の並びが変わった時の1回だけ（保存・送信待ちの静かな読み直しでは読まない）
-  const prevIds = board === null ? '' : board.rows.map((r) => r.residentId).join(',')
+  // 並びは名簿（五十音）が届くと変わるので、番号の順にそろえてから鍵にする（名簿が後から届いても読み直さない）
+  const prevIds = board === null ? '' : [...new Set(board.rows.map((r) => r.residentId))].sort((a, b) => a - b).join(',')
   const prevKey = data === null || data.day !== day || board === null ? null : `${day}|${reloadKey}|${prevIds}`
   const [prev, setPrev] = useState<{ key: string; status: 'loading' | 'ok' | 'failed'; data: DaycarePrevContacts | null } | null>(null)
   useEffect(() => {

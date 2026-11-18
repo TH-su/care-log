@@ -190,6 +190,8 @@ function SectionDialogBody({ residentId, name, day, today, fields, actorId, cont
   const save = async () => {
     if (!canSave || actorId === null) return
     setSaving(true)
+    /** この回の保存で返ってきた最後の行（行の無い方に2欄を書く時、2欄目を足し直さずにこの行を直す） */
+    let latest: DaycareContactNote | null = null
     try {
       for (const f of dirtyFields) {
         setMsg(f, null)
@@ -199,7 +201,11 @@ function SectionDialogBody({ residentId, name, day, today, fields, actorId, cont
             day,
             field: f,
             text: drafts[f] ?? '',
-            base: base[f] ?? null,
+            // その欄の値が開いた時と同じなら、直前に返った行を基準にする（読み直しの往復を減らす。値が違えば開いた時の行のまま＝競合で止める）
+            base:
+              latest !== null && normalizeNoteText(contactFieldValue(latest, f)) === normalizeNoteText(contactFieldValue(base[f] ?? null, f))
+                ? latest
+                : (base[f] ?? null),
             recordedBy: actorId,
             editedBy: actorId,
           })
@@ -210,6 +216,7 @@ function SectionDialogBody({ residentId, name, day, today, fields, actorId, cont
               return next
             })
             if (r.row !== null) {
+              latest = r.row
               contacts.put(r.row)
               // ほかの欄の基準も、その欄の値が同じなら新しい行にする（次の保存で読み直しを1回減らす）
               const row = r.row
