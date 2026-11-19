@@ -1011,6 +1011,19 @@
   }
 }
 
+/* 日報の確認欄（2026-11-19 代表者の指示）は、夜勤申し送りの欄（左右 16px）よりさらに左右へ細くする（左右 32px）。
+   上の .dsheet-body > :not(.dsheet-island) の左右の線は付けない（確認欄は自分の枠を持つ）。画面だけ（確認欄は印刷に出ない） */
+@media screen {
+  .dsheet-body > section.dsheet-readcheck {
+    margin-left: calc(var(--sp-6) + var(--sheet-rule-bold));
+    margin-right: calc(var(--sp-6) + var(--sheet-rule-bold));
+    border-left-width: 2px;
+    border-right-width: 2px;
+    border-left-color: var(--c-border-strong);
+    border-right-color: var(--c-border-strong);
+  }
+}
+
 /* 「↓16時以降の記録」の帯。2026-10-09 指示で画面からは外す（16時以降の欄はタイトル帯の「（16時以降）」で分かる）。
    印刷は従来どおり黒い帯のまま（原則2） */
 .dsheet-late-band {

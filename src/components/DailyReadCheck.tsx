@@ -1,16 +1,16 @@
-// 日報の確認欄（その日の日報を読んだ ✔）と未読者欄（2026-11-19 本人指示・0065）。
+// 日報の確認欄（その日の日報を読んだ ✔）と未読者（2026-11-19 本人指示・0065・0066）。
 // どちらも画面だけ（print:hidden）＝紙の日報は1pxも変えない（dev-principles 原則2）。
-//   UnreadSummaryBanner … 日報のページの上に1つ（2026-11-19 代表者の指示で、日ごとの見出しの下の欄から移した）。
-//     昨日までの日報の未読者の人数。押すと氏名と未読の日（押すとその日の確認欄へ）
-//   ReadCheckPanel  … 1日の枠の末尾。職員全員の名前の ✔ ボタン（1人1日1回）
+//   ReadCheckPanel … 1日の枠の末尾（夜勤申し送りの下・夜勤の枠より左右に細い）。その日報を読む人だけの名前の ✔ ボタン
+//     （夜勤入りの人は当日の日報から・日勤の人は前日までの日報。決まりは lib/readCheck.ts の buildCheckPanel）。
+//     下に〔未読者〕ボタン。押すまで氏名を出さず、押すと昨日までの未読の人と、その右に未読の日付。日付を押すとその日の申送へ飛ぶ
+//     （2026-11-19 代表者の指示で、ページの上の未読者欄から確認欄の下へ移した）。
 // ✔ は「記録する職員（操作者）」として付ける（既読と同じ・ui-design.md §0 の誤帰属の防止）。
 // 自分以外の名前を押した時は、その人に記録する職員を切り替えてから付ける（確認の窓で知らせる）。
-// 判定の決まりは lib/readCheck.ts。
 
 import { useState } from 'react'
 import { ConfirmDialog } from './ui'
 import { setActorId } from '../lib/actor'
-import type { ReadCheckView, UnreadSummary } from '../lib/readCheck'
+import type { CheckPanel, CheckPanelMember, UnreadSummary } from '../lib/readCheck'
 import type { ReadChecksState, UnreadSource } from '../hooks/useReadChecks'
 
 const WEEK = ['日', '月', '火', '水', '木', '金', '土']
@@ -22,11 +22,11 @@ function fmtDay(iso: string): string {
 }
 
 /**
- * 未読者欄（日報のページの上に1つ・2026-11-19 代表者の指示）。
- * 押すまで氏名を出さない（閉じている間は人数だけ＝氏名は画面にも読み上げにも出さない）。開くと、人ごとに未読の日を並べ、
- * 日を押すとその日の日報の確認欄へ飛ぶ。今日の分は数えない（昨日まで）。数え方は lib/readCheck.ts の buildUnreadSummary。
+ * 確認欄の下の〔未読者〕（2026-11-19 代表者の指示）。押すまで氏名を出さない（閉じている間は人数だけ＝氏名は画面にも読み上げにも出さない）。
+ * 開くと、昨日までの日報に ✔ を付けていない人と、その右に未読の日付。日付を押すとその日の申送の頭へ飛ぶ（すぐ読めるように）。
+ * 名前が出るのは、その日報を読む番が来てから（夜勤入り・休み明けの出勤の日の出勤の時刻より後）。数え方は lib/readCheck.ts の buildUnreadSummary。
  */
-export function UnreadSummaryBanner({
+function UnreadButton({
   summary,
   source,
   onPickDay,
@@ -37,10 +37,10 @@ export function UnreadSummaryBanner({
 }) {
   const [open, setOpen] = useState(false)
   if (!source.ready || source.missing) return null
-  const box = 'print:hidden flex flex-wrap items-center gap-x-2 border px-2 py-1 text-sm'
+  const row = 'flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-border px-2 py-2 text-sm'
   if (source.failed) {
     return (
-      <div className={`${box} border-border text-ink2`} role="status">
+      <div className={`${row} text-ink2`} role="status">
         <span className="font-bold">未読者</span>
         <span>判定できません（勤務表か確認欄を読めませんでした。〔最新に更新〕で読み直してください）</span>
       </div>
@@ -49,54 +49,46 @@ export function UnreadSummaryBanner({
   if (summary === null || summary.window.length === 0) return null
   const n = summary.people.length
   const und = summary.undeterminedDays.length
-  const undNote = (
+  const notes = (
     <>
-      {und > 0 && <span className="text-ink2">・判定できない日 {und}日（勤務表が無い・読めない記号）</span>}
-      {summary.unmatched > 0 && <span className="text-ink2">・勤務表で名前が見つからない職員 {summary.unmatched}名（数えていません）</span>}
+      {und > 0 && <span className="text-ink2">判定できない日 {und}日（勤務表が無い・読めない記号）</span>}
+      {summary.unmatched > 0 && <span className="text-ink2">勤務表で名前が見つからない職員 {summary.unmatched}名（数えていません）</span>}
     </>
   )
-  if (n === 0) {
-    // 判定できない日・数えていない職員がいる時は「なし」と言い切らない（落ち着いた色で「未読者 0名」）
-    const sure = und === 0 && summary.unmatched === 0
-    return (
-      <div className={`${box} ${sure ? 'border-ok bg-ok-bg text-ok' : 'border-border text-ink2'}`} role="status">
-        <span className="font-bold">{sure ? '✓ 未読者なし' : '未読者 0名'}</span>
-        <span className="text-ink2">（昨日までの日報・今日の分は明日から数えます）</span>
-        {undNote}
-      </div>
-    )
-  }
   return (
-    <div className="print:hidden border-2 border-danger bg-danger-bg px-2 py-1.5 text-danger" data-readcheck-unread={n}>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <button
-          type="button"
-          className="min-h-tap rounded-sm bg-danger px-3 text-base font-bold text-surface"
-          aria-expanded={open}
-          aria-controls="unread-summary-list"
-          onClick={() => setOpen((v) => !v)}
-        >
-          ⚠ 未読者 {n}名 {open ? '▲ 閉じる' : '▼ 押すと氏名を表示'}
-        </button>
-        <span className="text-sm text-ink2">昨日までの日報（日勤は前日の分・夜勤はその日の日中の分から）</span>
-        {undNote}
-      </div>
-      {open && (
-        <ul id="unread-summary-list" className="mt-1 space-y-1" role="list">
+    <div className={`${row} ${n > 0 ? 'bg-danger-bg text-danger' : 'text-ink2'}`} data-readcheck-unread={n}>
+      <button
+        type="button"
+        className={`min-h-tap rounded-sm border-2 px-3 text-base font-bold ${n > 0 ? 'border-danger bg-danger text-surface' : 'border-border bg-surface text-ink2'}`}
+        aria-expanded={open}
+        disabled={n === 0}
+        onClick={() => setOpen((v) => !v)}
+      >
+        {n > 0 ? `⚠ 未読者 ${n}名 ${open ? '▲' : '▼'}` : '未読者 0名'}
+      </button>
+      <span className="text-ink2">
+        {n > 0 ? (open ? '日付を押すと、その日の申送へ移ります' : '押すと氏名と未読の日付が出ます') : '昨日までの日報'}
+      </span>
+      {notes}
+      {open && n > 0 && (
+        <ul className="w-full space-y-1 pt-1" role="list">
           {summary.people.map((p) => (
-            <li key={p.id} className="flex flex-wrap items-center gap-x-2 gap-y-1">
-              <span className="min-w-[6rem] font-bold">{p.name}</span>
-              {p.days.map((d) => (
-                <button
-                  key={d}
-                  type="button"
-                  className="min-h-tap rounded-sm border border-danger bg-surface px-2 text-sm font-bold text-danger underline"
-                  aria-label={`${p.name}さんの未読 ${fmtDay(d)} の日報の確認欄へ`}
-                  onClick={() => onPickDay(d)}
-                >
-                  {fmtDay(d)}
-                </button>
-              ))}
+            <li key={p.id} className="flex items-start gap-x-2">
+              <span className="min-w-[6rem] shrink-0 pt-2 font-bold">{p.name}</span>
+              {/* 日付は氏名の右側の中で折り返す（狭い画面でも氏名の下へ回さない） */}
+              <span className="flex flex-1 flex-wrap gap-1">
+                {p.days.map((d) => (
+                  <button
+                    key={d}
+                    type="button"
+                    className="min-h-tap rounded-sm border border-danger bg-surface px-2 text-sm font-bold text-danger underline"
+                    aria-label={`${p.name}さんの未読 ${fmtDay(d)} の申送へ`}
+                    onClick={() => onPickDay(d)}
+                  >
+                    {fmtDay(d)}
+                  </button>
+                ))}
+              </span>
             </li>
           ))}
         </ul>
@@ -112,21 +104,31 @@ type Pending =
 /** 確認欄（1日の枠の末尾） */
 export function ReadCheckPanel({
   day,
-  view,
+  panel,
   state,
   actorId,
   unreadIds,
+  summary,
+  unreadSource,
+  onPickDay,
 }: {
   day: string
-  view: ReadCheckView
+  panel: CheckPanel
   state: ReadChecksState
   actorId: number | null
-  /** この日の未読の人（未読者欄と同じ数え方・今日と14日より前の日は空） */
+  /** この日の未読の人（未読者と同じ数え方・今日と14日より前の日は空） */
   unreadIds: ReadonlySet<number>
+  /** 昨日までの未読者（確認欄の下の〔未読者〕に出す） */
+  summary: UnreadSummary | null
+  unreadSource: UnreadSource
+  /** 未読の日付を押した: その日の申送へ移る */
+  onPickDay: (day: string) => void
 }) {
   const [pending, setPending] = useState<Pending | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
-  if (view.source === 'future' || view.source === 'before') return null
+  if (panel.source === 'future' || panel.source === 'before') return null
+  // 勤務表を読み終える前は並べない（読む前の仮の並びで押し間違えないように）
+  const shiftReady = state.shiftLoaded
 
   // 赤い「未読」は未読者欄と同じ数え方（昨日まで・日勤は翌日の勤務・夜勤はその日の夜勤入り）。✔ はこの画面の最新で外す
   const disabled = !state.loaded || state.missing || state.loadFailed
@@ -148,7 +150,7 @@ export function ReadCheckPanel({
     }
   }
 
-  const onPress = (m: ReadCheckView['members'][number]) => {
+  const onPress = (m: CheckPanelMember) => {
     if (disabled) return
     if (state.busy.has(`${day}|${m.id}`)) return
     if (m.checked) {
@@ -162,25 +164,39 @@ export function ReadCheckPanel({
     setPending({ kind: 'other', id: m.id, name: m.name })
   }
 
-  const checkedN = view.members.filter((m) => m.checked).length
+  const members = shiftReady ? panel.members : []
+  const checkedN = members.filter((m) => m.checked).length
   return (
     <section
       id={`readcheck-${day}`}
-      className="print:hidden mt-3 border-2 border-border-strong bg-surface"
+      className="dsheet-readcheck print:hidden mt-3 border-2 border-border-strong bg-surface"
       aria-label="確認欄（この日の日報を読んだら自分の名前を押す）"
     >
       <div className="flex flex-wrap items-center gap-x-2 border-b border-border-strong bg-surface2 px-2 py-1 font-bold text-ink">
         <span>確認欄</span>
         <span className="text-sm font-normal text-ink2">
-          この日の日報を読んだら、自分の名前を押して ✔ を付けてください（1日1回）。✔ {checkedN}／{view.members.length}名
+          この日の日報を読んだら、自分の名前を押して ✔ を付けてください（1日1回）。✔ {checkedN}／{members.length}名
         </span>
       </div>
       {state.missing && <p className="px-2 py-1 text-sm text-warn">確認欄はまだ使えません（サーバー側の設定待ち）。</p>}
       {state.loadFailed && !state.missing && (
         <p className="px-2 py-1 text-sm text-warn">確認欄を読み込めませんでした。〔最新に更新〕で読み直してください。</p>
       )}
+      {shiftReady && panel.source === 'fallback' && (
+        <p className="px-2 pt-1 text-sm text-ink2">勤務表が読めないため、施設の職員を全員並べています。</p>
+      )}
+      {shiftReady && panel.source === 'shift' && members.length === 0 && (
+        <p className="px-2 pt-1 text-sm text-ink2">
+          {panel.isToday
+            ? 'この日の日報を読む夜勤の人はいません（日勤の人は明日、この日の確認欄に並びます）。'
+            : 'この日の日報を読む人は勤務表にいません。'}
+        </p>
+      )}
+      {shiftReady && panel.stale && (
+        <p className="px-2 pt-1 text-sm text-ink2">14日より前の日のため、現場の端末からは ✔ を付けられません。</p>
+      )}
       <ul className="flex flex-wrap gap-2 p-2" role="list">
-        {view.members.map((m) => {
+        {members.map((m) => {
           const busy = state.busy.has(`${day}|${m.id}`)
           const unread = !m.checked && unreadIds.has(m.id)
           const tone = m.checked
@@ -202,6 +218,7 @@ export function ReadCheckPanel({
                   {m.checked ? '✔' : '□'}
                 </span>
                 {m.name}
+                {m.why === 'night' && <span className="ml-1 text-xs text-ink2">夜勤</span>}
                 {unread && <span className="ml-1 text-xs">未読</span>}
               </button>
             </li>
@@ -213,9 +230,12 @@ export function ReadCheckPanel({
           ▲ {msg}
         </p>
       )}
+      <UnreadButton summary={summary} source={unreadSource} onPickDay={onPickDay} />
       <ConfirmDialog
         open={pending !== null}
-        title={pending?.kind === 'cancel' ? `${pending.name}さんの確認を取り消しますか？` : `${pending?.name ?? ''}さんとして確認を付けますか？`}
+        title={
+          pending?.kind === 'cancel' ? `${pending.name}さんの確認を取り消しますか？` : `${pending?.name ?? ''}さんとして確認を付けますか？`
+        }
         body={
           pending?.kind === 'cancel'
             ? 'この日の ✔ が外れます。取り消した後に、もう一度付けることもできます。'
