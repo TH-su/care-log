@@ -404,8 +404,11 @@ export function projectShiftMonth(data: unknown): ShiftMonth | null {
 }
 
 // ── 未読者欄の数え方（2026-11-19 代表者の指示「日勤者は前日分から・夜勤者は当日の日中分から」「デイ職員・厨房職員は氏名を出さない」）──
-// 未読者欄は施設（ラウレアハレ）の勤務だけで数える: 主の区分が施設の職員の主の欄と、全職員の施設の応援の欄。
-// 主の区分が通所（デイ職員）の人は外す（施設の応援の欄があっても外す＝仮置き）。厨房の職員は勤務表の名簿に居ない（2026-11-19 実測）ので
+// 未読者欄は施設の勤務だけで数える: 主の区分が通所でない職員（施設・訪問・区分なし）の主の欄と、全職員の通所以外の応援の欄（施設・訪問）。
+// 2026-11-19 訂正（代表者の指示「施設長だけが確認欄に出ている」の原因の直し）: 住宅型のため、施設で早番・遅番・日勤・夜勤に入る
+// 介護職員の多くは主の区分が「訪問」で、その主の欄に「早」「遅」「日2」などの施設の勤務が入っている。訪問の応援の欄にも夜勤入り
+// 「(22」がある。前の決まり（主の区分が施設の人の主の欄と施設の応援の欄だけ）では、ほぼ施設が主の人しか数えていなかった。
+// 主の区分が通所（デイ職員）の人は外す（施設の応援の欄があっても外す＝仮置き）。通所の応援の欄は数えない（デイの勤務）。厨房の職員は勤務表の名簿に居ない（2026-11-19 実測）ので
 // 名簿で見つからない人は数えない（＝氏名は出ない）。日勤（勤務の部分）と夜勤入りを分けて持つ（日報 R を読む人＝R の夜勤入り＋R の翌日の日勤）。
 
 /** 施設の勤務の1人1日ぶん */
@@ -428,13 +431,15 @@ export type FacilityDutyTable = Map<string, Map<string, FacilityDuty>>
 function facilityCells(st: ShiftStaff, month: ShiftMonth | null | undefined, d: number): unknown[] {
   if (!month) return []
   const out: unknown[] = []
-  if (mainDivisionOf(st) === '施設') out.push(cellOf(month.cells?.[st.id], d))
+  if (mainDivisionOf(st) !== '通所') out.push(cellOf(month.cells?.[st.id], d))
   const subs = month.subCells?.[st.id]
-  if (subs && typeof subs === 'object') out.push(cellOf(subs['施設'], d))
+  if (subs && typeof subs === 'object') {
+    for (const dv of Object.keys(subs)) if (dv !== '通所') out.push(cellOf(subs[dv], d))
+  }
   return out
 }
 
-/** 1人・1日の施設の勤務（実績に施設の欄のセルが1つでもあれば実績だけ、無ければ予定） */
+/** 1人・1日の施設の勤務（実績に施設の勤務の欄＝上の facilityCells のセルが1つでもあれば実績だけ、無ければ予定） */
 export function staffDayFacility(
   st: ShiftStaff,
   d: number,

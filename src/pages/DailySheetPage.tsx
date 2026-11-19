@@ -103,6 +103,9 @@ import {
   newClientKey,
   pendingRow,
   saveAttendance,
+  autoAddAttendance,
+  fetchAttendanceForDay,
+  hasPendingAttendance,
   saveVitalEdits,
   setOutingEnd,
   softDeleteOuting,
@@ -275,6 +278,7 @@ import { useReadChecks, useUnreadSource } from '../hooks/useReadChecks'
 import type { ReadChecksState, UnreadSource } from '../hooks/useReadChecks'
 import type { UnreadSummary } from '../lib/readCheck'
 import { buildCheckPanel, buildUnreadSummary } from '../lib/readCheck'
+import { attendDisplayNames, attendRedDays, planAutoAttendance, undoAttendanceRows } from '../lib/attendanceAuto'
 
 // ══════════════════════════════════════════════════════════════
 // 定数・文言
@@ -4419,8 +4423,10 @@ function DaySheet({
         if (undoLabel !== null) {
           show(undoLabel, () => {
             // 戻す操作も同じ列に並べる（戻した内容が、後から届いた保存で上書きされないように）。
-            // baseline は戻す時点の一覧から組み直す＝直列化後の実際の前状態になる
-            enqueueAttendanceRef.current(dayIso, () => ({ rows: prev, undoLabel: null }))
+            // baseline は戻す時点の一覧から組み直す＝直列化後の実際の前状態になる。
+            // 送る一覧は「外す前の一覧」ではなく、戻す時点の一覧にこの操作の分だけを戻したもの（2026-11-19 反証 medium1:
+            // その間に自動入力・ほかの端末が足した人を外さない。外すと取り消し済みになり、二度と自動では入らない）
+            enqueueAttendanceRef.current(dayIso, (cur) => ({ rows: undoAttendanceRows(prev, next, cur), undoLabel: null }))
           })
         }
       } catch (err) {
@@ -4497,6 +4503,66 @@ function DaySheet({
     },
     [day, enqueueAttendance],
   )
+
+  // 出勤者の欄の自動入力（今日の日報だけ・2026-11-19 代表者の指示。2026-11-07 の決定「勤務表から日報の出勤者の欄への
+  // 自動の書き写しはしない」を置き換えた）。勤務表で施設の勤務がある人を、出勤時刻の30分前から足す（lib/attendanceAuto.ts）。
+  // 足すだけ（取り消した人を戻さない＝db.ts の autoAddAttendance が既にある行を飛ばす）。1分ごとの見直し（nowMin）と読み込みのたびに見直す。
+  // 手で足す・外す保存と同じ列に並べる（応答待ちの間の一覧で並びを決めない）。この画面で一度送れた人は送り直さない（毎分の問い合わせを作らない）
+  const autoTriedRef = useRef<{ day: string; ids: Set<number> }>({ day: '', ids: new Set() })
+  const autoBusyRef = useRef(false)
+  const todayFac = day === today && readChecks.shiftLoaded ? (readChecks.fac?.get(today) ?? null) : null
+  useEffect(() => {
+    if (day !== today || phase !== 'ready' || !enabled || todayFac === null || autoBusyRef.current) return
+    // その日の出勤者に送信待ち（圏外で手で足した・外した）がある間は、書き込みも読み直しもしない（反証 low2:
+    // サーバーの一覧だけで画面を差し替えると送信待ちの人が一時的に消える）。送れた後の見直し（次の分）でまた試す
+    if (hasPendingAttendance(day)) return
+    if (autoTriedRef.current.day !== day) autoTriedRef.current = { day, ids: new Set() }
+    const tried = autoTriedRef.current.ids
+    const first = planAutoAttendance({
+      day,
+      today,
+      nowMin,
+      staff,
+      duty: todayFac,
+      existing: attendanceRef.current,
+      managerStaffId,
+      skip: tried,
+    })
+    if (first.length === 0) return
+    autoBusyRef.current = true
+    const chain = attendanceChainRef.current
+    const job = async () => {
+      if (!aliveRef.current || dayRef.current !== day) return
+      // 列の順番が来た時の一覧で決め直す（前の保存の結果を基準にする）
+      if (hasPendingAttendance(day)) return
+      const rows = planAutoAttendance({ day, today, nowMin, staff, duty: todayFac, existing: attendanceRef.current, managerStaffId, skip: tried })
+      if (rows.length === 0) return
+      const landed = await autoAddAttendance(day, rows)
+      if (landed === null) return // 封鎖中・通信できない＝黙って次の分でまた試す
+      // 送れた人は覚える（入った人も、既に行があって飛ばした人も。送り直さない）
+      for (const r of rows) tried.add(r.staff_id)
+      if (!aliveRef.current || dayRef.current !== day) return
+      markSelfWrite()
+      // その日の出勤者を読み直す（日の枠ごとの読み直しは画面が一度消えるので、出勤者の欄だけを取り直す）。
+      // 入った行が0件でも読み直す（ほかの端末が先に足した・取り置きの古い一覧から描いた時に、欄が空のまま残らないように。
+      // 送れた人は覚えるので、読み直しは1人につき1回まで）
+      try {
+        const fresh = await fetchAttendanceForDay(day)
+        if (aliveRef.current && dayRef.current === day && !hasPendingAttendance(day)) applyAttendance(fresh)
+      } catch {
+        // 読めない時は今の一覧のまま（次の読み込み・〔最新に更新〕で出る）
+      }
+    }
+    const prevChain = chain.get(day) ?? Promise.resolve()
+    const nextChain = prevChain
+      .catch(() => undefined)
+      .then(job)
+      .catch(() => undefined)
+      .finally(() => {
+        autoBusyRef.current = false
+      })
+    chain.set(day, nextChain)
+  }, [day, today, nowMin, phase, enabled, todayFac, staff, managerStaffId, attendance, applyAttendance, markSelfWrite])
 
   // ── 申し送り ───────────────────────────────────────────────
 
@@ -6274,6 +6340,20 @@ function DaySheet({
 
   const manager = attendance.find((a) => a.role === 'manager') ?? null
   const workers = attendance.filter((a) => a.role !== 'manager')
+  // 未読の人の赤い氏名枠（今日の日報の出勤者・施設長の欄だけ・2026-11-19 代表者の指示）。前日までの日報に ✔ の無い日があり、
+  // 今の時刻がその人の今日の出勤時刻（30分前ではなく出勤時刻そのもの）以降の人。決まりは lib/attendanceAuto.ts の attendRedDays
+  const attendRed = useMemo(
+    () =>
+      attendRedDays({
+        day,
+        today,
+        nowMin,
+        ids: attendance.map((a) => a.staff_id),
+        people: unreadSummary?.people,
+        duty: unreadSource.duty?.get(today) ?? readChecks.fac?.get(today) ?? null,
+      }),
+    [day, today, nowMin, attendance, unreadSummary, unreadSource.duty, readChecks.fac],
+  )
 
   // 確認欄に並べる人（2026-11-19 代表者の指示・lib/readCheck.ts の buildCheckPanel）。夜勤入りの人は当日の日報から、
   // 日勤の人は前日までの日報に並ぶ。デイ職員（主の区分が通所）は並べない
@@ -6463,6 +6543,8 @@ function DaySheet({
           }
           removeAttendance(staffId)
         }}
+        redDays={attendRed}
+        onPickUnread={onPickUnread}
       />
 
       {/* 送れていない申し送り（この日の分。1件も無い時は何も出さない＝見た目は変わらない・2026-09-29 H1） */}
@@ -7279,12 +7361,20 @@ function DayPicker({
   )
 }
 
+const UNREAD_WEEK = ['日', '月', '火', '水', '木', '金', '土']
+/** 'YYYY-MM-DD' → 'M/D(曜)'（未読の日のボタン・DailyReadCheck の〔未読者〕と同じ書き方） */
+function fmtUnreadDay(iso: string): string {
+  const [y, m, d] = iso.split('-').map((x) => parseInt(x, 10))
+  return `${m}/${d}(${UNREAD_WEEK[new Date(Date.UTC(y, m - 1, d)).getUTCDay()]})`
+}
+
 /** 出勤者の1枠（実物のスプシと同じ固定幅のセル） */
 function AttendCell({
   label,
   name,
   disabled,
   onClick,
+  unread = false,
 }: {
   /** 読み上げ用の説明（「施設長 ○○ を取り消す」「出勤者を追加する」） */
   label: string
@@ -7292,27 +7382,55 @@ function AttendCell({
   name: string | null
   disabled: boolean
   onClick: () => void
+  /**
+   * 未読の人の赤い氏名枠（2026-11-19 代表者の指示）。画面だけ（色は sheet.css の @media screen・「未読」の印は print:hidden）＝紙は変えない。
+   * 幅・高さは変えない（枠は内側の影で描く）
+   */
+  unread?: boolean
 }) {
   return (
     <Cell width="var(--w-attend)" pad={false} className="flex items-center">
       <button
         type="button"
         onClick={onClick}
-        disabled={disabled}
+        // 赤い枠は押すと未読の日の窓を開く（封鎖中でも日付へ移れるように押せる。外すボタンは窓の中で封鎖を守る）
+        disabled={disabled && !unread}
         aria-label={label}
-        className={`${CELL_HIT} sheet-dense-btn w-full rounded-sm px-1 text-left ${
-          disabled ? 'text-ink2' : 'text-link'
+        className={`${CELL_HIT} sheet-dense-btn w-full rounded-sm px-1 text-left ${disabled ? 'text-ink2' : 'text-link'}${
+          unread ? ' dsheet-attend-unread' : ''
         }`}
       >
-        <span className="block truncate">
-          {name === null ? <span aria-hidden="true">＋</span> : name}
-          {name !== null && !disabled ? (
-            <span aria-hidden="true" className="sheet-mark">
-              {' '}
-              ✕
+        {unread && name !== null ? (
+          <>
+            {/* 画面: 氏名は詰めて、「未読」の小さな印は残す（色だけに頼らない） */}
+            <span className="flex min-w-0 items-center gap-px print:hidden">
+              <span className="min-w-0 truncate">{name}</span>
+              <span aria-hidden="true" className="shrink-0 text-[0.7em] leading-none">
+                未読
+              </span>
             </span>
-          ) : null}
-        </span>
+            {/* 紙: 今までと同じ形（赤くしない・印を出さない） */}
+            <span className="hidden truncate print:block">
+              {name}
+              {!disabled ? (
+                <span aria-hidden="true" className="sheet-mark">
+                  {' '}
+                  ✕
+                </span>
+              ) : null}
+            </span>
+          </>
+        ) : (
+          <span className="block truncate">
+            {name === null ? <span aria-hidden="true">＋</span> : name}
+            {name !== null && !disabled ? (
+              <span aria-hidden="true" className="sheet-mark">
+                {' '}
+                ✕
+              </span>
+            ) : null}
+          </span>
+        )}
       </button>
     </Cell>
   )
@@ -7332,6 +7450,8 @@ function DayHeader({
   onPickDay,
   onAddAttendance,
   onRemoveAttendance,
+  redDays,
+  onPickUnread,
 }: {
   ctx: SheetCtx
   day: string
@@ -7357,9 +7477,25 @@ function DayHeader({
   onPickDay: (iso: string) => void
   onAddAttendance: (role: 'manager' | 'staff') => void
   onRemoveAttendance: (staffId: number) => void
+  /** 赤い氏名枠にする人（id → 前日までの未読の日・古い順）。今日の日報だけ（lib/attendanceAuto.ts の attendRedDays） */
+  redDays: ReadonlyMap<number, readonly string[]>
+  /** 未読の日を押した: その日の申送の頭へ移る（goUnreadDay） */
+  onPickUnread: (day: string) => void
 }) {
   const managerName =
     manager === null ? null : staffName(ctx.staffById.get(manager.staff_id), manager.staff_id)
+  // 欄に出す名前は苗字（同じ苗字が2人以上の時はその人たちだけ氏名・2026-11-19 代表者の指示）。読み上げは氏名のまま
+  // 名簿に無い職員（「職員ID n」と出る人）は縮めない（反証 low3）
+  const shownIds = [...(manager === null ? [] : [manager.staff_id]), ...workers.map((a) => a.staff_id)]
+  const shown = attendDisplayNames(
+    shownIds.map((id) => staffName(ctx.staffById.get(id), id)),
+    shownIds.map((id) => !ctx.staffById.has(id)),
+  )
+  const managerShown = managerName === null ? null : shown[0]
+  const workerShown = managerName === null ? shown : shown.slice(1)
+  /** 赤い枠を押して開いた未読の日の窓（画面だけ・覚えない） */
+  const [unreadOpen, setUnreadOpen] = useState<{ id: number; name: string } | null>(null)
+  const unreadOpenDays = unreadOpen === null ? undefined : redDays.get(unreadOpen.id)
   // 日付の行の高さを測って、その日の枠（section.dsheet-day）に --dsheet-daybar-h として書く。
   // 申し送りのタイトル帯はこの高さの位置に貼り付く（sheet.css の .dsheet-note-title・2026-10-09 指示）。
   // 文字の大きさ・倍率・出勤者の数で行の高さが変わるので ResizeObserver で追う
@@ -7409,26 +7545,38 @@ function DayHeader({
             label={
               managerName === null
                 ? '施設長を選ぶ'
-                : `施設長 ${managerName} を取り消す`
+                : redDays.has(manager?.staff_id ?? -1)
+                  ? `施設長 ${managerName}（前日までの日報に未読があります）。押すと未読の日が出ます`
+                  : `施設長 ${managerName} を取り消す`
             }
-            name={managerName}
+            name={managerShown}
             disabled={ctx.disabled}
+            unread={manager !== null && redDays.has(manager.staff_id)}
             onClick={() =>
-              manager === null ? onAddAttendance('manager') : onRemoveAttendance(manager.staff_id)
+              manager === null
+                ? onAddAttendance('manager')
+                : redDays.has(manager.staff_id) && managerName !== null
+                  ? setUnreadOpen({ id: manager.staff_id, name: managerName })
+                  : onRemoveAttendance(manager.staff_id)
             }
           />
           <Cell width="var(--w-attend-label)" className="flex items-center bg-surface2 font-bold text-ink2">
             <span className="truncate">出勤者</span>
           </Cell>
-          {workers.map((a) => (
-            <AttendCell
-              key={a.staff_id}
-              label={`出勤者 ${staffName(ctx.staffById.get(a.staff_id), a.staff_id)} を取り消す`}
-              name={staffName(ctx.staffById.get(a.staff_id), a.staff_id)}
-              disabled={ctx.disabled}
-              onClick={() => onRemoveAttendance(a.staff_id)}
-            />
-          ))}
+          {workers.map((a, i) => {
+            const full = staffName(ctx.staffById.get(a.staff_id), a.staff_id)
+            const red = redDays.has(a.staff_id)
+            return (
+              <AttendCell
+                key={a.staff_id}
+                label={red ? `出勤者 ${full}（前日までの日報に未読があります）。押すと未読の日が出ます` : `出勤者 ${full} を取り消す`}
+                name={workerShown[i] ?? full}
+                disabled={ctx.disabled}
+                unread={red}
+                onClick={() => (red ? setUnreadOpen({ id: a.staff_id, name: full }) : onRemoveAttendance(a.staff_id))}
+              />
+            )
+          })}
           <AttendCell
             label="出勤者を追加する"
             name={null}
@@ -7437,6 +7585,50 @@ function DayHeader({
           />
         </div>
       </div>
+      {/* 赤い枠を押した時の未読の日の窓（画面だけ）。日付を押すとその日の申送の頭へ移る。〔出勤者から外す〕は今までの取り消し */}
+      {unreadOpen !== null && unreadOpenDays !== undefined && (
+        <div className="print:hidden">
+          <ModalShell open label={`${unreadOpen.name}さんの未読の日`} onClose={() => setUnreadOpen(null)} narrow>
+            <div className="space-y-3 p-4">
+              <p className="font-bold">{unreadOpen.name}さんの未読の日</p>
+              <p className="text-sm text-ink2">前日までの日報で ✔ が付いていない日です。日付を押すと、その日の申送へ移ります。</p>
+              <div className="flex flex-wrap gap-1">
+                {unreadOpenDays.map((d) => (
+                  <button
+                    key={d}
+                    type="button"
+                    className="min-h-tap rounded-sm border border-danger bg-surface px-2 text-sm font-bold text-danger underline"
+                    aria-label={`${unreadOpen.name}さんの未読 ${fmtUnreadDay(d)} の申送へ`}
+                    onClick={() => {
+                      setUnreadOpen(null)
+                      onPickUnread(d)
+                    }}
+                  >
+                    {fmtUnreadDay(d)}
+                  </button>
+                ))}
+              </div>
+              <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-3">
+                <button
+                  type="button"
+                  className="min-h-tap rounded-sm border border-border px-3 text-link disabled:text-ink2"
+                  disabled={ctx.disabled}
+                  onClick={() => {
+                    const id = unreadOpen.id
+                    setUnreadOpen(null)
+                    onRemoveAttendance(id)
+                  }}
+                >
+                  出勤者から外す
+                </button>
+                <button type="button" className="min-h-tap rounded-sm border border-border px-3" onClick={() => setUnreadOpen(null)}>
+                  閉じる
+                </button>
+              </div>
+            </div>
+          </ModalShell>
+        </div>
+      )}
       <div className="dsheet-frame-row border-b border-border-strong">
         <StatusText status={ctx.status.attendance} />
 

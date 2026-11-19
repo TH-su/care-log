@@ -13025,6 +13025,65 @@ async function insertAttendanceRows(
   throw wrote ? partialWriteError() : new DbError('server', SHEET_MSG.attendanceRace)
 }
 
+/**
+ * その日の出勤者の送信待ち（圏外で手で足した・外した操作・止まった分も含む）があるか（2026-11-19 反証 low2）。
+ * ある間は自動入力が書き込み・読み直しをしない（サーバーの一覧だけで画面を差し替えると、送信待ちの人が一時的に消える）
+ */
+export function hasPendingAttendance(day: string): boolean {
+  const opDone = opDoneIndex(readStoresQuiet().s2?.done)
+  for (const op of [...queue.filter((o) => !isOpDone(o, opDone)), ...storedOps()]) {
+    if (op.table !== 'attendance' || op.kind !== 'attendance' || sentQids.has(op.qid)) continue
+    // 止まった送信待ち（blocked＝競合・拒否）はもう自動では送られず、人が「送れていない記録」で選ぶまで残る。
+    // 数えると、その端末ではその日の自動入力が一日中止まる（再レビュー medium）ので数えない
+    if (op.blocked !== undefined) continue
+    if (str(asRecord(op.payload)?.day) === day) return true
+  }
+  return false
+}
+
+/**
+ * 出勤者の欄の自動入力（今日の日報・勤務表で出勤時刻の30分前を過ぎた人・2026-11-19 代表者の指示）。
+ * 2026-11-07 の決定「勤務表から日報の出勤者の欄への自動の書き写しはしない」を、この指示で置き換えた。
+ * **足すだけ**: 同じ (施設, 日, 職員) の行が既にあれば何もしない（取り消し済み＝sort < 0 の行も含む＝人が外した人を戻さない）。
+ * 主キー（0054 から tenant_id, day, staff_id。tenant_id は carelog_fill_tenant が埋める）への ON CONFLICT DO NOTHING なので、
+ * 複数の端末が同時に足しても1件になる。施設長は1日1人の索引（0026）に当たった時は（ほかの端末が別の施設長を選んだ）、
+ * 職員として足し直す。
+ * 入力封鎖中（assertWritable が投げる）・通信できない時は黙って何もしない（次の分の見直しでまた試す）。送信待ちには積まない。
+ * @returns 実際に入った行の職員 id（既にあって飛ばした人は入らない。null＝送れなかった＝次にまた試す）
+ */
+export async function autoAddAttendance(
+  day: string,
+  rows: { staff_id: number; role: 'manager' | 'staff'; sort: number }[],
+): Promise<number[] | null> {
+  try {
+    assertDay(day)
+    const payload: Attendance[] = []
+    for (const r of rows) {
+      const id = idNum(r?.staff_id)
+      if (id === null) continue
+      payload.push({ day, staff_id: id, role: oneOf(r.role, ATTENDANCE_ROLES) ?? 'staff', sort: Number.isInteger(r.sort) && r.sort >= 0 ? r.sort : 0 })
+    }
+    if (payload.length === 0) return []
+    await assertWritable()
+    const sb = await getClient()
+    for (const row of payload) markSelfRow('attendance', { day, staff_id: row.staff_id }, null)
+    const send = (list: Attendance[]) =>
+      bounded(sb.from('attendance').upsert(list, { onConflict: 'tenant_id,day,staff_id', ignoreDuplicates: true }).select('staff_id'))
+    let res = await send(payload)
+    // 施設長は1日1人の索引（0026）に当たった＝ほかの端末が先に別の施設長を選んだ。その人も職員として足す（1文なのでまだ1行も入っていない）
+    if (res.error !== null && isManagerTaken(res)) res = await send(payload.map((r) => ({ ...r, role: 'staff' as const })))
+    if (res.error !== null) return null
+    const out: number[] = []
+    for (const r of Array.isArray(res.data) ? res.data : []) {
+      const id = idNum(asRecord(r)?.staff_id)
+      if (id !== null) out.push(id)
+    }
+    return out
+  } catch {
+    return null
+  }
+}
+
 // ── 食い違いの解決画面（くらべて選ぶ）が使う「いまの1行」 ─────────────────────
 //
 // 競合した行だけを、開いた時点のサーバーの最新で取り直す（範囲は1行＝全件ロードしない）。

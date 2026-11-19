@@ -293,8 +293,10 @@ if (D === null) {
       const F = (work, nightIn, workStart = null, nightStart = null) => ({ work, nightIn, unknown: false, workStart, nightStart })
       assert.deepEqual(duty.get('2026-11-20').get('夜勤01'), F(false, true, null, 22 * 60))
       assert.deepEqual(duty.get('2026-11-21').get('夜勤01'), F(false, false))
-      assert.deepEqual(duty.get('2026-11-20').get('訪問01'), F(false, false), '訪問の主の欄は数えない')
-      assert.deepEqual(duty.get('2026-11-21').get('訪問01'), F(true, false, 13 * 60), '施設の応援は数える')
+      // 2026-11-19 訂正（施設の勤務の数え方）: 住宅型のため、主の区分が訪問の人の主の欄にも施設の勤務が入る＝数える。
+      // 前は「訪問の主の欄は数えない」を固定していた（その決まりのせいで施設長しか数えていなかった）。意図を変えたので期待値を書き換えた
+      assert.deepEqual(duty.get('2026-11-20').get('訪問01'), F(true, false, 9 * 60), '主の区分が訪問の人の主の欄も数える')
+      assert.deepEqual(duty.get('2026-11-21').get('訪問01'), F(true, false, 9 * 60), '主の欄（9-12）と施設の応援（13-16）の早い方')
       const st = { id: 'n', name: '夜勤02', mainDivision: '施設' }
       assert.equal(D.staffDayFacility(st, 1, { cells: { n: { 1: '（21' } } }, null, []).nightIn, true, '全角の括弧の夜勤入り（勤務表の実際の書き方）')
       assert.equal(D.staffDayFacility(st, 1, { cells: { n: { 1: '7)(21' } } }, null, []).nightIn, true)
@@ -302,14 +304,15 @@ if (D === null) {
     })
     it('日報 R を読む人＝R の夜勤入りの人と、R の翌日に日勤の人', () => {
       const s = R.buildUnreadSummary({ today, staff, duty, checks: empty })
-      // 19日の勤務表は無い（予定はあるが19日の欄が空）→ 19日は「20日に日勤の日勤01」だけ
-      assert.deepEqual([...s.byDay.get('2026-11-19')].sort(), [1])
-      // 20日: 夜勤01（20日の夜勤入り）と日勤01（21日に早番）・訪問01（21日に施設の応援）
+      // 2026-11-19 訂正: 訪問01（主の区分が訪問・主の欄に毎日 9-12）も施設の勤務に数える（前は数えなかった＝意図を変えて書き換えた）
+      // 19日の勤務表は無い（予定はあるが19日の欄が空）→ 19日は「20日に日勤の日勤01・訪問01」
+      assert.deepEqual([...s.byDay.get('2026-11-19')].sort(), [1, 4])
+      // 20日: 夜勤01（20日の夜勤入り）と日勤01（21日に早番）・訪問01（21日に日勤）
       assert.deepEqual([...s.byDay.get('2026-11-20')].sort(), [1, 2, 4])
-      // 21日: 22日に日勤の人はいない（日勤01 は休み）・21日の夜勤入りもいない
-      assert.deepEqual([...s.byDay.get('2026-11-21')], [])
-      // 22日: 23日に日勤の日勤01（休み明け）
-      assert.deepEqual([...s.byDay.get('2026-11-22')], [1])
+      // 21日: 22日に日勤は訪問01 だけ（日勤01 は休み）・21日の夜勤入りはいない
+      assert.deepEqual([...s.byDay.get('2026-11-21')], [4])
+      // 22日: 23日に日勤の日勤01（休み明け）と訪問01
+      assert.deepEqual([...s.byDay.get('2026-11-22')].sort(), [1, 4])
     })
     it('デイ職員・厨房の職員（勤務表の名簿に居ない）・休みの人は氏名が出ない', () => {
       const s = R.buildUnreadSummary({ today, staff, duty, checks: empty })
@@ -549,6 +552,81 @@ if (D === null) {
       const f2 = D.buildFacilityDutyTable(src, ['2026-11-18', '2026-11-19'])
       const s2 = R.buildUnreadSummary({ today: '2026-11-19', staff, duty: f2, checks: new Map(), rosterKeys, dayKeys: new Set(), nowMin: 21 * 60 })
       assert.equal(s2.undeterminedDays.includes('2026-11-19'), false, '今日の日報は翌日の勤務表が無くても数えられる')
+    })
+  })
+
+  // 2026-11-19 訂正（代表者の指示「施設長だけが確認欄に表示されている」の原因）: 住宅型のため、施設で早番・遅番・日勤・夜勤に入る職員の
+  // 多くは主の区分が訪問で、主の欄に施設の勤務が入っている。訪問の応援の欄にも夜勤入りがある。前は主の区分が施設の人の主の欄と
+  // 施設の応援の欄しか見ていなかった。新しい決まり: 主の区分が通所でない人の主の欄と、通所以外の全区分の応援の欄
+  describe('施設の勤務の数え方（主の区分が訪問の人も数える・2026-11-19 訂正）', () => {
+    const roster = [
+      { id: 'v', name: '職員01', mainDivision: '訪問' },
+      { id: 'w', name: '職員02', mainDivision: '訪問' },
+      { id: 'c', name: 'デイ01', mainDivision: '通所' },
+      { id: 'm', name: '施設長01', mainDivision: '施設' },
+      { id: 'x', name: '職員03', mainDivision: '施設' },
+      { id: 'n', name: '職員04' },
+    ]
+    const plan = {
+      cells: {
+        v: { 1: '早', 2: '遅' },
+        w: { 1: '', 2: '休' },
+        c: { 1: '日1', 2: '日1' },
+        m: { 1: '日1', 2: '休' },
+        x: { 1: '休', 2: '' },
+        n: { 1: '日2', 2: '' },
+      },
+      subCells: {
+        w: { 訪問: { 1: '(22' } },
+        c: { 施設: { 1: '(22' }, 通所: { 2: '9-12' } },
+        x: { 通所: { 1: '9-12', 2: '13-16' } },
+      },
+    }
+    const SYM = [
+      { code: '早', type: 'work', start: '07:00' },
+      { code: '遅', type: 'work', start: '11:00' },
+      { code: '日1', type: 'work', start: '09:00' },
+      { code: '日2', type: 'work', start: '08:30' },
+      { code: '(22', type: 'nightIn', start: '22:00' },
+      { code: '休', type: 'off' },
+    ]
+    const src = { staff: roster, symbols: SYM, months: { '2026-12': { plan, actual: null } } }
+    const t = D.buildFacilityDutyTable(src, ['2026-12-01', '2026-12-02'])
+    const d1 = t.get('2026-12-01')
+    const d2 = t.get('2026-12-02')
+    it('主の区分が訪問で主の欄に早番・遅番がある人を数える（時刻も持つ）', () => {
+      assert.equal(d1.get('職員01').work, true)
+      assert.equal(d1.get('職員01').workStart, 7 * 60)
+      assert.equal(d2.get('職員01').work, true)
+      assert.equal(d2.get('職員01').workStart, 11 * 60)
+    })
+    it('訪問の応援の欄（subCells 訪問）の夜勤入りを数える', () => {
+      assert.equal(d1.get('職員02').nightIn, true)
+      assert.equal(d1.get('職員02').nightStart, 22 * 60)
+      assert.equal(d2.get('職員02').nightIn, false)
+    })
+    it('主の区分が通所の人は数えない（施設の応援の欄があっても）', () => {
+      assert.equal(d1.has('デイ01'), false)
+      assert.equal(d2.has('デイ01'), false)
+    })
+    it('通所の応援の欄（subCells 通所）は数えない', () => {
+      assert.deepEqual([d1.get('職員03').work, d1.get('職員03').nightIn], [false, false], '1日は主の欄が休み・通所の応援だけ')
+      assert.deepEqual([d2.get('職員03').work, d2.get('職員03').nightIn], [false, false])
+    })
+    it('主の区分が施設の人（施設長も）と、主の区分が無い人（施設とみなす）は今までどおり数える', () => {
+      assert.equal(d1.get('施設長01').work, true)
+      assert.equal(d2.get('施設長01').work, false)
+      assert.equal(d1.get('職員04').work, true)
+      assert.equal(d1.get('職員04').workStart, 8 * 60 + 30)
+    })
+    it('未読者・確認欄にも主の区分が訪問の人が並ぶ（施設長だけにならない）', () => {
+      const staff = [
+        { id: 1, name: '職員01', hire_order: 1 },
+        { id: 2, name: '職員02', hire_order: 2 },
+        { id: 9, name: '施設長01', hire_order: 9 },
+      ]
+      const p = R.buildCheckPanel({ day: '2026-12-01', today: '2026-12-02', staff, duty: t, checkedIds: new Set(), rosterKeys: new Set(roster.map((r) => r.name)), dayKeys: new Set(['デイ01']), nowMin: 12 * 60 })
+      assert.deepEqual(p.members.map((m) => [m.name, m.why]), [['職員01', 'day'], ['職員02', 'night']])
     })
   })
 
