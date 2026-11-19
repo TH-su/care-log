@@ -3357,6 +3357,9 @@ export function DailySheetPage({
    */
   const jumpRef = useRef<{ day: string; until: number } | null>(null)
   const [jumpTick, setJumpTick] = useState(0)
+  /** 今表示している日（移る先の日を確認の窓で待っている間は、まだ前の日） */
+  const curDayRef = useRef(day)
+  curDayRef.current = day
   const goUnreadDay = useCallback(
     (next: string) => {
       if (!ISO_DATE_RE.test(next)) return
@@ -3371,11 +3374,23 @@ export function DailySheetPage({
   )
   useEffect(() => {
     if (jumpTick === 0) return
+    const j0 = jumpRef.current
+    if (j0 === null) return
+    // 別の区切りへ移る時は、書きかけの確認の窓を待つことがある。目的の日に切り替わってから（この effect が day で
+    // やり直された時から）時間を数え始める（反証 low: 窓に長く留まると期限が切れていた）
+    if (j0.day === day) j0.until = Date.now() + JUMP_HOLD_MS
     let raf = 0
     let lastTop: number | null = null
     const stop = () => {
+      // 目的の日に移る前（確認の窓のボタンを押した時など）は打ち切らない
+      if (jumpRef.current !== null && curDayRef.current !== jumpRef.current.day) return
       jumpRef.current = null
       window.cancelAnimationFrame(raf)
+    }
+    const targetTop = (): number | null => {
+      const j = jumpRef.current
+      const el = j ? dayElsRef.current.get(j.day) : undefined
+      return el ? el.getBoundingClientRect().top : null
     }
     const step = () => {
       const j = jumpRef.current
@@ -3383,25 +3398,33 @@ export function DailySheetPage({
         jumpRef.current = null
         return
       }
-      const el = dayElsRef.current.get(j.day)
-      if (el) {
-        const top = el.getBoundingClientRect().top
-        if (lastTop === null || Math.abs(top - lastTop) > 2) {
-          scrollToDay(j.day)
-          lastTop = el.getBoundingClientRect().top
-        }
+      const top = j.day === curDayRef.current ? targetTop() : null
+      if (top !== null && (lastTop === null || Math.abs(top - lastTop) > 2)) {
+        scrollToDay(j.day)
+        lastTop = targetTop()
       }
       raf = window.requestAnimationFrame(step)
+    }
+    // 利用者のスクロール（ホイール・トラックパッドも）: 自分の位置合わせの直後を除くスクロールで、目的の日が合わせた位置から
+    // 動いていれば打ち切る（上の日が描かれた時のスクロールの錨合わせは目的の日を動かさないので打ち切らない）。
+    // wheel・touchmove の受け手は付けない（iPhone の重さの規約）
+    const onScroll = () => {
+      if (jumpRef.current === null || lastTop === null) return
+      if (performance.now() < selfScrollUntilRef.current) return
+      const top = targetTop()
+      if (top !== null && Math.abs(top - lastTop) > 2) stop()
     }
     raf = window.requestAnimationFrame(step)
     window.addEventListener('pointerdown', stop, { passive: true })
     window.addEventListener('keydown', stop)
+    window.addEventListener('scroll', onScroll, { passive: true, capture: true })
     return () => {
       window.cancelAnimationFrame(raf)
       window.removeEventListener('pointerdown', stop)
       window.removeEventListener('keydown', stop)
+      window.removeEventListener('scroll', onScroll, { capture: true })
     }
-  }, [jumpTick, scrollToDay])
+  }, [jumpTick, day, scrollToDay])
 
   const goUnit = useCallback(
     (next: SheetUnit) => {
