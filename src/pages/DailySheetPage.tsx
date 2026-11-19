@@ -270,10 +270,10 @@ import type {
   Vital,
 } from '../lib/types'
 // 日報の確認欄（その日の日報を読んだ ✔）と未読者欄（2026-11-19・0065）。画面だけ（print:hidden）
-import { ReadCheckBanner, ReadCheckPanel } from '../components/DailyReadCheck'
-import { useReadChecks } from '../hooks/useReadChecks'
+import { ReadCheckPanel, UnreadSummaryBanner } from '../components/DailyReadCheck'
+import { useReadChecks, useUnreadSource } from '../hooks/useReadChecks'
 import type { ReadChecksState } from '../hooks/useReadChecks'
-import { buildReadCheckView } from '../lib/readCheck'
+import { buildReadCheckView, buildUnreadSummary } from '../lib/readCheck'
 
 // ══════════════════════════════════════════════════════════════
 // 定数・文言
@@ -741,6 +741,8 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 /** 参照の同一性を保つための空配列 */
 const NO_RESIDENTS: Resident[] = []
 const NO_STAFF: Staff[] = []
+/** 未読の人がいない日（確認欄の赤い印を出さない） */
+const NO_UNREAD: ReadonlySet<number> = new Set<number>()
 
 // ══════════════════════════════════════════════════════════════
 // 小さなヘルパ（純関数）
@@ -2397,6 +2399,8 @@ interface DaySheetProps {
   readChecks: ReadChecksState
   /** 今日（端末の暦の日付）。確認欄が「まだ来ていない日」を見分ける */
   today: string
+  /** 未読者欄の数え方での、この日の未読の人（読み終える前・数えない日は空） */
+  unreadIds: ReadonlySet<number>
 }
 
 /**
@@ -3108,6 +3112,15 @@ export function DailySheetPage({
   const [today, setToday] = useState(todayIso)
   /** 日付が変わったことを確かめ済みの今日（〔今日を開く〕・日付や表示の切り替えで、帯を閉じる） */
   const [ackToday, setAckToday] = useState(today)
+  // 未読者欄（ページの上に1つ・2026-11-19 代表者の指示）。昨日までの日報を、日勤は翌日の勤務・夜勤はその日の夜勤入りで数える
+  const unreadSource = useUnreadSource(today, reload, readChecks.version)
+  const unreadSummary = useMemo(
+    () =>
+      unreadSource.ready && !unreadSource.failed && !unreadSource.missing && unreadSource.today === today
+        ? buildUnreadSummary({ today, staff, duty: unreadSource.duty, checks: unreadSource.checks })
+        : null,
+    [unreadSource, today, staff],
+  )
   useEffect(() => {
     const check = () => {
       if (aliveRef.current) setToday(todayIso())
@@ -3289,6 +3302,25 @@ export function DailySheetPage({
       })
     },
     [askLeave, day, unit, visibleDays],
+  )
+
+  /** 未読者欄の日を押した: その日へ移り、その日の確認欄が描けたら見える所まで送る（最大3秒待つ） */
+  const goReadCheck = useCallback(
+    (next: string) => {
+      if (!ISO_DATE_RE.test(next)) return
+      const t0 = Date.now()
+      const tryScroll = () => {
+        const el = document.getElementById(`readcheck-${next}`)
+        if (el) {
+          el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+          return
+        }
+        if (Date.now() - t0 < 3000) window.setTimeout(tryScroll, 150)
+      }
+      if (next !== day) goDay(next)
+      window.setTimeout(tryScroll, 0)
+    },
+    [day, goDay],
   )
 
   const goUnit = useCallback(
@@ -3551,6 +3583,8 @@ export function DailySheetPage({
       {/* 要約の行と表の枠は間を詰めて1つにまとめる（B1 の余白・2026-09-29。上の操作の行との間も半分に）。
           表の見える高さを増やすため。要約の行は無い時も1行の高さを取る（出ても表を押し下げない＝従来どおり） */}
       <div className="dsheet-stack !mt-2 space-y-1">
+        {/* 未読者欄（画面だけ・押すまで氏名を出さない・日を押すとその日の確認欄へ。2026-11-19 代表者の指示） */}
+        <UnreadSummaryBanner summary={unreadSummary} source={unreadSource} onPickDay={goReadCheck} />
         {/* 他の端末が入力中のバイタルの欄の要約（誰が・どこを）。無い時も1行の高さを取る＝出ても表を押し下げない */}
         <PresenceSummary
           text={presence.summary((p) => {
@@ -3623,6 +3657,7 @@ export function DailySheetPage({
                   onNotesShown={handleNotesShown}
                   readChecks={readChecks}
                   today={today}
+                  unreadIds={unreadSummary?.byDay.get(d) ?? NO_UNREAD}
                 />
               </section>
             ))}
@@ -3692,6 +3727,7 @@ function DaySheet({
   onNotesShown,
   readChecks,
   today,
+  unreadIds,
 }: DaySheetProps) {
   const [phase, setPhase] = useState<Phase>('loading')
   const [reload, setReload] = useState(0)
@@ -6390,9 +6426,6 @@ function DaySheet({
         }}
       />
 
-      {/* 未読者欄（画面だけ・日付の見出しのすぐ下＝10日表示でも日の頭で目に入る。2026-11-19） */}
-      {phase === 'ready' && <ReadCheckBanner day={day} view={readCheckView} state={readChecks} />}
-
       {/* 送れていない申し送り（この日の分。1件も無い時は何も出さない＝見た目は変わらない・2026-09-29 H1） */}
       <UnsentNotes
         style={NARROW_STICKY}
@@ -6607,7 +6640,7 @@ function DaySheet({
             />
 
             {/* 確認欄（画面だけ・1日の枠の末尾。2026-11-19） */}
-            <ReadCheckPanel day={day} view={readCheckView} state={readChecks} actorId={actorId} />
+            <ReadCheckPanel day={day} view={readCheckView} state={readChecks} actorId={actorId} unreadIds={unreadIds} />
           </>
         )}
       </div>

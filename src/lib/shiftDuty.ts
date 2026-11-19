@@ -344,3 +344,79 @@ export function projectShiftMonth(data: unknown): ShiftMonth | null {
   const subCells = r.subCells && typeof r.subCells === 'object' && !Array.isArray(r.subCells) ? (r.subCells as ShiftMonth['subCells']) : {}
   return { cells, subCells }
 }
+
+// ── 未読者欄の数え方（2026-11-19 代表者の指示「日勤者は前日分から・夜勤者は当日の日中分から」「デイ職員・厨房職員は氏名を出さない」）──
+// 未読者欄は施設（ラウレアハレ）の勤務だけで数える: 主の区分が施設の職員の主の欄と、全職員の施設の応援の欄。
+// 主の区分が通所（デイ職員）の人は外す（施設の応援の欄があっても外す＝仮置き）。厨房の職員は勤務表の名簿に居ない（2026-11-19 実測）ので
+// 名簿で見つからない人は数えない（＝氏名は出ない）。日勤（勤務の部分）と夜勤入りを分けて持つ（日報 R を読む人＝R の夜勤入り＋R の翌日の日勤）。
+
+/** 施設の勤務の1人1日ぶん */
+export interface FacilityDuty {
+  /** 施設で日勤（勤務の部分）がある */
+  work: boolean
+  /** 施設で夜勤入りがある */
+  nightIn: boolean
+  /** 勤務の部分が無く、読めない欄がある */
+  unknown: boolean
+}
+
+/** 日 → 氏名の鍵 → 施設の勤務。その日の月の勤務表（予定）が無い日は入れない */
+export type FacilityDutyTable = Map<string, Map<string, FacilityDuty>>
+
+function facilityCells(st: ShiftStaff, month: ShiftMonth | null | undefined, d: number): unknown[] {
+  if (!month) return []
+  const out: unknown[] = []
+  if (mainDivisionOf(st) === '施設') out.push(cellOf(month.cells?.[st.id], d))
+  const subs = month.subCells?.[st.id]
+  if (subs && typeof subs === 'object') out.push(cellOf(subs['施設'], d))
+  return out
+}
+
+/** 1人・1日の施設の勤務（実績に施設の欄のセルが1つでもあれば実績だけ、無ければ予定） */
+export function staffDayFacility(
+  st: ShiftStaff,
+  d: number,
+  plan: ShiftMonth | null | undefined,
+  actual: ShiftMonth | null | undefined,
+  symbols: readonly ShiftSymbol[],
+): FacilityDuty {
+  const act = facilityCells(st, actual, d)
+  const cells = hasAny(act) ? act : facilityCells(st, plan, d)
+  let work = false
+  let nightIn = false
+  let err = false
+  for (const c of cells) {
+    const { parts, error } = parseCellKinds(c, symbols)
+    if (parts.includes('work')) work = true
+    if (parts.includes('nightIn')) nightIn = true
+    if (error && parts.length === 0) err = true
+  }
+  return { work, nightIn, unknown: err && !work && !nightIn }
+}
+
+/**
+ * 日ごとの施設の勤務の表。主の区分が通所の人は入れない。同じ氏名が2人いる時は勤務の部分を合わせる（見落とさない側）。
+ */
+export function buildFacilityDutyTable(src: ShiftSource, days: readonly string[]): FacilityDutyTable {
+  const out: FacilityDutyTable = new Map()
+  for (const day of days) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day)
+    if (!m) continue
+    const ym = `${m[1]}-${m[2]}`
+    const mon = src.months[ym]
+    if (!mon || !mon.plan) continue
+    const d = parseInt(m[3], 10)
+    const row = new Map<string, FacilityDuty>()
+    for (const st of src.staff) {
+      if (!shiftStaffVisible(st, ym)) continue
+      if (mainDivisionOf(st) === '通所') continue
+      const key = nameKey(st.name)
+      if (!key) continue
+      const v = staffDayFacility(st, d, mon.plan, mon.actual, src.symbols.length ? src.symbols : DEFAULT_SHIFT_SYMBOLS)
+      const prev = row.get(key)
+      row.set(key, prev ? { work: prev.work || v.work, nightIn: prev.nightIn || v.nightIn, unknown: prev.unknown || v.unknown } : v)
+    }
+    out.set(day, row)
+  }
+  return out
+}

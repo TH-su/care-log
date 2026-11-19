@@ -242,6 +242,101 @@ if (D === null) {
     })
   })
 
+  describe('未読者欄の数え方（日勤は前日の分・夜勤はその日の日中の分から・施設だけ）', () => {
+    const roster = [
+      { id: 'a', name: '日勤01', mainDivision: '施設' },
+      { id: 'b', name: '夜勤01', mainDivision: '施設' },
+      { id: 'c', name: 'デイ01', mainDivision: '通所' },
+      { id: 'd', name: '訪問01', mainDivision: '訪問' },
+      { id: 'e', name: '休み01', mainDivision: '施設' },
+    ]
+    // 11月の予定: 日勤01 は 20日・21日・23日に日勤（22日 休み）、夜勤01 は 20日に夜勤入り・21日に明け、デイ01 は毎日日勤（施設の応援も）、
+    // 訪問01 は主の欄で毎日勤務・21日だけ施設の応援、休み01 は20〜23日休み
+    const plan = {
+      cells: {
+        a: { 20: '日1', 21: '早', 22: '休', 23: '遅' },
+        b: { 20: '(22', 21: '8)', 22: '休', 23: '休' },
+        c: { 20: '日1', 21: '日1', 22: '日1', 23: '日1' },
+        d: { 20: '9-12', 21: '9-12', 22: '9-12', 23: '9-12' },
+        e: { 20: '休', 21: '休', 22: '休', 23: '休' },
+      },
+      subCells: { c: { 施設: { 21: '9-12' } }, d: { 施設: { 21: '13-16' } } },
+    }
+    const src = { staff: roster, symbols: [], months: { '2026-11': { plan, actual: null } } }
+    const staff = [
+      { id: 1, name: '日勤01' },
+      { id: 2, name: '夜勤01' },
+      { id: 3, name: 'デイ01' },
+      { id: 4, name: '訪問01' },
+      { id: 5, name: '休み01' },
+      { id: 6, name: '厨房01' },
+    ]
+    const today = '2026-11-23'
+    const days = R.unreadDutyDays(today)
+    const duty = D.buildFacilityDutyTable(src, days)
+    const empty = new Map(R.unreadWindow(today).map((d) => [d, new Set()]))
+
+    it('数える日は昨日まで（今日の分は数えない）・始めた日から', () => {
+      assert.deepEqual(R.unreadWindow('2026-11-19'), [])
+      assert.deepEqual(R.unreadWindow('2026-11-20'), ['2026-11-19'])
+      assert.deepEqual(R.unreadWindow(today), ['2026-11-19', '2026-11-20', '2026-11-21', '2026-11-22'])
+      assert.deepEqual(days.at(-1), today)
+      const w = R.unreadWindow('2026-12-31')
+      assert.equal(w.length, 14, '14日前から昨日まで')
+      assert.equal(w[0], '2026-12-17')
+    })
+    it('施設の勤務だけ・デイ職員（主の区分が通所）は施設の応援があっても入れない・日勤と夜勤入りを分けて持つ', () => {
+      assert.equal(duty.get('2026-11-20').has('デイ01'), false)
+      assert.deepEqual(duty.get('2026-11-20').get('夜勤01'), { work: false, nightIn: true, unknown: false })
+      assert.deepEqual(duty.get('2026-11-21').get('夜勤01'), { work: false, nightIn: false, unknown: false })
+      assert.deepEqual(duty.get('2026-11-20').get('訪問01'), { work: false, nightIn: false, unknown: false }, '訪問の主の欄は数えない')
+      assert.deepEqual(duty.get('2026-11-21').get('訪問01'), { work: true, nightIn: false, unknown: false }, '施設の応援は数える')
+      const st = { id: 'n', name: '夜勤02', mainDivision: '施設' }
+      assert.equal(D.staffDayFacility(st, 1, { cells: { n: { 1: '（21' } } }, null, []).nightIn, true, '全角の括弧の夜勤入り（勤務表の実際の書き方）')
+      assert.equal(D.staffDayFacility(st, 1, { cells: { n: { 1: '7)(21' } } }, null, []).nightIn, true)
+      assert.equal(D.staffDayFacility(st, 1, { cells: { n: { 1: '7)' } } }, null, []).work, false, '明けだけは日勤でない')
+    })
+    it('日報 R を読む人＝R の夜勤入りの人と、R の翌日に日勤の人', () => {
+      const s = R.buildUnreadSummary({ today, staff, duty, checks: empty })
+      // 19日の勤務表は無い（予定はあるが19日の欄が空）→ 19日は「20日に日勤の日勤01」だけ
+      assert.deepEqual([...s.byDay.get('2026-11-19')].sort(), [1])
+      // 20日: 夜勤01（20日の夜勤入り）と日勤01（21日に早番）・訪問01（21日に施設の応援）
+      assert.deepEqual([...s.byDay.get('2026-11-20')].sort(), [1, 2, 4])
+      // 21日: 22日に日勤の人はいない（日勤01 は休み）・21日の夜勤入りもいない
+      assert.deepEqual([...s.byDay.get('2026-11-21')], [])
+      // 22日: 23日に日勤の日勤01（休み明け）
+      assert.deepEqual([...s.byDay.get('2026-11-22')], [1])
+    })
+    it('デイ職員・厨房の職員（勤務表の名簿に居ない）・休みの人は氏名が出ない', () => {
+      const s = R.buildUnreadSummary({ today, staff, duty, checks: empty })
+      const names = s.people.map((p) => p.name)
+      assert.deepEqual(names, ['日勤01', '夜勤01', '訪問01'])
+      assert.deepEqual(s.people[0].days, ['2026-11-19', '2026-11-20', '2026-11-22'])
+    })
+    it('✔ のある日は未読から外れる', () => {
+      const checks = new Map(empty)
+      checks.set('2026-11-20', new Set([1, 2]))
+      const s = R.buildUnreadSummary({ today, staff, duty, checks })
+      assert.deepEqual([...s.byDay.get('2026-11-20')], [4])
+      assert.deepEqual(s.people.find((p) => p.id === 1).days, ['2026-11-19', '2026-11-22'])
+      assert.equal(s.people.some((p) => p.id === 2), false)
+    })
+    it('翌日の勤務表が無い日・勤務表が読めない時は判定できない（未読者なしと言い切らない）', () => {
+      const s = R.buildUnreadSummary({ today: '2026-12-01', staff, duty: D.buildFacilityDutyTable(src, R.unreadDutyDays('2026-12-01')), checks: new Map() })
+      assert.ok(s.undeterminedDays.includes('2026-11-30'), '12月の勤務表が無い＝30日の翌日が読めない')
+      const n = R.buildUnreadSummary({ today, staff, duty: null, checks: empty })
+      assert.equal(n.people.length, 0)
+      assert.deepEqual(n.undeterminedDays, R.unreadWindow(today))
+    })
+    it('読めない記号の人がいる日は判定できない日に数える', () => {
+      const p2 = { cells: { ...plan.cells, e: { ...plan.cells.e, 21: 'ABC' } }, subCells: plan.subCells }
+      const t = D.buildFacilityDutyTable({ ...src, months: { '2026-11': { plan: p2, actual: null } } }, days)
+      const s = R.buildUnreadSummary({ today, staff, duty: t, checks: empty })
+      assert.ok(s.undeterminedDays.includes('2026-11-20'), '21日の日勤が読めない人＝20日を読むか分からない')
+      assert.ok(s.undeterminedDays.includes('2026-11-21'), '21日の夜勤入りが読めない人')
+    })
+  })
+
   describe('静的検査', () => {
     const comp = read('../src/components/DailyReadCheck.tsx')
     const page = read('../src/pages/DailySheetPage.tsx')
@@ -249,17 +344,28 @@ if (D === null) {
     it('確認欄と未読者欄は画面だけ（紙の日報を変えない）', () => {
       const roots = comp.match(/<(div|section)\s[^>]*className="[^"]*"/g) ?? []
       const top = roots.filter((r) => /print:hidden/.test(r))
-      assert.ok(top.length >= 5, '未読者欄の4つの形と確認欄の外枠に print:hidden')
+      assert.ok(top.length >= 2, '未読者欄（赤）と確認欄の外枠に print:hidden')
+      assert.match(comp, /const box = 'print:hidden /, '未読者欄の「判定できない」「なし」の形も print:hidden')
       assert.match(comp, /<section\s+id=\{`readcheck-\$\{day\}`\}\s+className="print:hidden/)
     })
-    it('確認欄のボタンの赤は、読み終えた時だけ・古い日は出さない（未読者欄とそろえる）', () => {
-      assert.match(comp, /const showUnread = state\.loaded && state\.shiftLoaded && !view\.stale/)
-      assert.match(comp, /const unreadIds = new Set\(showUnread \? view\.unread\.map\(\(u\) => u\.id\) : \[\]\)/)
-      assert.match(comp, /if \(!state\.loaded \|\| !state\.shiftLoaded \|\| state\.missing \|\| state\.loadFailed\) return null/)
+    // 2026-11-19 代表者の指示で未読者欄を日ごとの見出しの下からページの上の1つへ移し、確認欄の赤い印も同じ数え方にした（下の2つは移した後の形を確かめる）
+    it('確認欄のボタンの赤は、未読者欄と同じ数え方（親から渡す日ごとの未読）で、✔ のある人には出さない', () => {
+      assert.match(comp, /const unread = !m\.checked && unreadIds\.has\(m\.id\)/)
+      assert.doesNotMatch(comp, /view\.unread/)
+      assert.match(page, /unreadIds=\{unreadSummary\?\.byDay\.get\(d\) \?\? NO_UNREAD\}/)
     })
-    it('日報の枠に置いてある（日付の見出しの下と枠の末尾）', () => {
-      assert.match(page, /<ReadCheckBanner day=\{day\} view=\{readCheckView\} state=\{readChecks\} \/>/)
-      assert.match(page, /<ReadCheckPanel day=\{day\} view=\{readCheckView\} state=\{readChecks\} actorId=\{actorId\} \/>/)
+    it('未読者欄は押すまで氏名を出さない（閉じている間は人数だけ）・日を押すとその日の確認欄へ', () => {
+      const sec = comp.slice(comp.indexOf('export function UnreadSummaryBanner'), comp.indexOf('type Pending'))
+      const closed = sec.slice(0, sec.indexOf('{open && ('))
+      assert.doesNotMatch(closed, /\.name/, '開く前の部分に氏名を使っていない')
+      assert.match(sec, /aria-expanded=\{open\}/)
+      assert.match(sec, /onClick=\{\(\) => onPickDay\(d\)\}/)
+      assert.match(sec, /useState\(false\)/, '開いた状態は覚えない（毎回閉じて始まる）')
+    })
+    it('日報に置いてある（ページの上の未読者欄と、日の枠の末尾の確認欄）', () => {
+      assert.match(page, /<UnreadSummaryBanner summary=\{unreadSummary\} source=\{unreadSource\} onPickDay=\{goReadCheck\} \/>/)
+      assert.doesNotMatch(page, /<ReadCheckBanner/)
+      assert.match(page, /<ReadCheckPanel day=\{day\} view=\{readCheckView\} state=\{readChecks\} actorId=\{actorId\} unreadIds=\{unreadIds\} \/>/)
       assert.match(page, /const readChecks = useReadChecks\(visibleDays, reload\)/)
     })
     it('勤務表は判定に要る項目だけの読み口（carelog_shift_duty）で読み、kv_get で職員の全項目を受け取らない・console・localStorage に出さない', () => {
