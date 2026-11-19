@@ -5,8 +5,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { addReadCheck, cancelReadCheck, fetchReadChecks, fetchShiftSource } from '../lib/db'
-import { buildDutyTable, nameKey } from '../lib/shiftDuty'
-import type { DutyTable } from '../lib/shiftDuty'
+import { buildDutyTable, buildFacilityDutyTable, nameKey } from '../lib/shiftDuty'
+import type { DutyTable, FacilityDutyTable } from '../lib/shiftDuty'
+import { unreadDutyDays, unreadWindow } from '../lib/readCheck'
 
 export interface ReadChecksState {
   /** 日 → ✔ のある職員の id */
@@ -27,6 +28,8 @@ export interface ReadChecksState {
   rosterKeys: Set<string> | null
   /** 送っている最中の（日|職員） */
   busy: Set<string>
+  /** ✔ を付けた・取り消した回数（未読者欄の読み直しの合図） */
+  version: number
   add: (day: string, staffId: number, recordedBy: number | null) => Promise<void>
   cancel: (day: string, staffId: number, editedBy: number | null) => Promise<void>
 }
@@ -156,7 +159,77 @@ export function useReadChecks(days: readonly string[], reloadToken: number): Rea
   const loadedNow = loaded && loadedKey === key
   const shiftNow = shiftLoaded && shiftKey === key
   return useMemo(
-    () => ({ checks, missing, loadFailed, loaded: loadedNow, shiftLoaded: shiftNow, duty, dailyKeys, rosterKeys, busy, add, cancel }),
-    [checks, missing, loadFailed, loadedNow, shiftNow, duty, dailyKeys, rosterKeys, busy, add, cancel],
+    () => ({ checks, missing, loadFailed, loaded: loadedNow, shiftLoaded: shiftNow, duty, dailyKeys, rosterKeys, busy, version: bump, add, cancel }),
+    [checks, missing, loadFailed, loadedNow, shiftNow, duty, dailyKeys, rosterKeys, busy, bump, add, cancel],
   )
+}
+
+/** 未読者欄の材料（昨日までの数える日の ✔ と、その翌日までの施設の勤務） */
+export interface UnreadSource {
+  /** 読み終えた（✔ と勤務表の両方。どちらかが読めなかった時は failed） */
+  ready: boolean
+  failed: boolean
+  missing: boolean
+  /** 読み終えた時の今日（日を替えた直後は前の今日の結果で判定しない） */
+  today: string | null
+  checks: Map<string, Set<number>>
+  duty: FacilityDutyTable | null
+  /** 勤務表の名簿の全員（在籍）の氏名の鍵・主の区分が通所の人の氏名の鍵（読めない時は null） */
+  roster: Set<string> | null
+  dayKeys: Set<string> | null
+}
+
+/**
+ * 未読者欄のための読み込み（2026-11-19 代表者の指示）。表示中の日とは別に、昨日までの数える日（最大15日）の ✔ と勤務表を読む。
+ * 読み直し: 今日が変わった時・〔最新に更新〕（reloadToken）・確認欄で ✔ を付けた／取り消した後（version）。表示系から書き込まない。
+ */
+export function useUnreadSource(today: string, reloadToken: number, version: number): UnreadSource {
+  const [st, setSt] = useState<UnreadSource>({ ready: false, failed: false, missing: false, today: null, checks: new Map(), duty: null, roster: null, dayKeys: null })
+  const genRef = useRef(0)
+  useEffect(() => {
+    const my = ++genRef.current
+    let alive = true
+    const window = unreadWindow(today)
+    if (window.length === 0) {
+      setSt({ ready: true, failed: false, missing: false, today, checks: new Map(), duty: null, roster: null, dayKeys: null })
+      return
+    }
+    void (async () => {
+      let checks = new Map<string, Set<number>>()
+      let failed = false
+      let missing = false
+      let duty: FacilityDutyTable | null = null
+      let roster: Set<string> | null = null
+      let dayKeys: Set<string> | null = null
+      try {
+        const r = await fetchReadChecks(window)
+        missing = r.missing
+        checks = new Map(window.map((d) => [d, new Set<number>()]))
+        for (const row of r.rows) checks.get(row.day)?.add(row.staff_id)
+      } catch {
+        failed = true
+      }
+      const days = unreadDutyDays(today)
+      const src = await fetchShiftSource(days)
+      if (src) {
+        const t = buildFacilityDutyTable(src, days)
+        duty = t.size > 0 ? t : null
+        roster = new Set()
+        dayKeys = new Set()
+        for (const s of src.staff) {
+          if (s.active === false || s.status === '退職') continue
+          const k = nameKey(s.name)
+          if (!k) continue
+          roster.add(k)
+          if (s.mainDivision === '通所') dayKeys.add(k)
+        }
+      } else failed = true
+      if (!alive || my !== genRef.current) return
+      setSt({ ready: true, failed, missing, today, checks, duty, roster, dayKeys })
+    })()
+    return () => {
+      alive = false
+    }
+  }, [today, reloadToken, version])
+  return st
 }

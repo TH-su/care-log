@@ -270,10 +270,10 @@ import type {
   Vital,
 } from '../lib/types'
 // 日報の確認欄（その日の日報を読んだ ✔）と未読者欄（2026-11-19・0065）。画面だけ（print:hidden）
-import { ReadCheckBanner, ReadCheckPanel } from '../components/DailyReadCheck'
-import { useReadChecks } from '../hooks/useReadChecks'
+import { ReadCheckPanel, UnreadSummaryBanner } from '../components/DailyReadCheck'
+import { useReadChecks, useUnreadSource } from '../hooks/useReadChecks'
 import type { ReadChecksState } from '../hooks/useReadChecks'
-import { buildReadCheckView } from '../lib/readCheck'
+import { buildReadCheckView, buildUnreadSummary } from '../lib/readCheck'
 
 // ══════════════════════════════════════════════════════════════
 // 定数・文言
@@ -741,6 +741,10 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 /** 参照の同一性を保つための空配列 */
 const NO_RESIDENTS: Resident[] = []
 const NO_STAFF: Staff[] = []
+/** 未読の人がいない日（確認欄の赤い印を出さない） */
+const NO_UNREAD: ReadonlySet<number> = new Set<number>()
+/** 未読者欄から確認欄へ送った後に取り直す間隔（ms） */
+const READCHECK_RESCROLL_MS = [500, 1000, 1500]
 
 // ══════════════════════════════════════════════════════════════
 // 小さなヘルパ（純関数）
@@ -2397,6 +2401,8 @@ interface DaySheetProps {
   readChecks: ReadChecksState
   /** 今日（端末の暦の日付）。確認欄が「まだ来ていない日」を見分ける */
   today: string
+  /** 未読者欄の数え方での、この日の未読の人（読み終える前・数えない日は空） */
+  unreadIds: ReadonlySet<number>
 }
 
 /**
@@ -3108,6 +3114,22 @@ export function DailySheetPage({
   const [today, setToday] = useState(todayIso)
   /** 日付が変わったことを確かめ済みの今日（〔今日を開く〕・日付や表示の切り替えで、帯を閉じる） */
   const [ackToday, setAckToday] = useState(today)
+  // 未読者欄（ページの上に1つ・2026-11-19 代表者の指示）。昨日までの日報を、日勤は翌日の勤務・夜勤はその日の夜勤入りで数える
+  const unreadSource = useUnreadSource(today, reload, readChecks.version)
+  const unreadSummary = useMemo(
+    () =>
+      unreadSource.ready && !unreadSource.failed && !unreadSource.missing && unreadSource.today === today
+        ? buildUnreadSummary({
+            today,
+            staff,
+            duty: unreadSource.duty,
+            checks: unreadSource.checks,
+            rosterKeys: unreadSource.roster,
+            dayKeys: unreadSource.dayKeys,
+          })
+        : null,
+    [unreadSource, today, staff],
+  )
   useEffect(() => {
     const check = () => {
       if (aliveRef.current) setToday(todayIso())
@@ -3221,9 +3243,11 @@ export function DailySheetPage({
   useEffect(() => {
     const cancel = () => {
       pendingScrollRef.current = null
+      // 未読者欄から確認欄へ送っている途中も止める（送り始める前＝確認の窓の「切り替える」を押した時は止めない）
+      if (readCheckTargetRef.current?.started) readCheckTargetRef.current = null
     }
     const onScroll = () => {
-      if (pendingScrollRef.current === null) return
+      if (pendingScrollRef.current === null && !readCheckTargetRef.current?.started) return
       if (performance.now() < selfScrollUntilRef.current) return // 自分の位置合わせのスクロール
       cancel()
     }
@@ -3290,6 +3314,59 @@ export function DailySheetPage({
     },
     [askLeave, day, unit, visibleDays],
   )
+
+  /**
+   * 未読者欄の日を押した: その日へ移り、その日の確認欄を見える所まで送る。
+   * 未保存の確認の窓が出た時は「切り替える」を押して日が移ってから送る（押した時から数えない）。
+   * 日の頭への位置合わせ（pendingScrollRef）は止める＝確認欄へ送った後に日の頭へ引き戻さない。
+   * 上の日が後から読み込まれてずれた分を、0.5秒後に1回だけ取り直す。画面に触れたら止める。
+   */
+  const readCheckTargetRef = useRef<{ day: string; until: number; started: boolean } | null>(null)
+  const scrollToReadCheck = useCallback((target: string) => {
+    const t0 = Date.now()
+    let hits = 0
+    if (readCheckTargetRef.current?.day === target) readCheckTargetRef.current.started = true
+    const tick = () => {
+      const cur = readCheckTargetRef.current
+      if (!cur || cur.day !== target) return
+      const el = document.getElementById(`readcheck-${target}`)
+      if (el) {
+        pendingScrollRef.current = null
+        selfScrollUntilRef.current = performance.now() + SELF_SCROLL_GRACE_MS
+        el.scrollIntoView({ block: 'center' })
+        hits += 1
+        // 上の日が後から読み終わって押し下げられた分を、0.5・1.5・3秒後に取り直す（利用者が触る・スクロールすると止まる）
+        const next = READCHECK_RESCROLL_MS[hits - 1]
+        if (next === undefined) {
+          readCheckTargetRef.current = null
+          return
+        }
+        window.setTimeout(tick, next)
+        return
+      }
+      if (Date.now() - t0 < 8000) window.setTimeout(tick, 150)
+      else readCheckTargetRef.current = null
+    }
+    window.setTimeout(tick, 50)
+  }, [])
+  const goReadCheck = useCallback(
+    (next: string) => {
+      if (!ISO_DATE_RE.test(next)) return
+      readCheckTargetRef.current = { day: next, until: Date.now() + 60_000, started: false }
+      if (next === day) scrollToReadCheck(next)
+      else goDay(next)
+    },
+    [day, goDay, scrollToReadCheck],
+  )
+  useEffect(() => {
+    const t = readCheckTargetRef.current
+    if (!t) return
+    if (t.day !== day || Date.now() > t.until) {
+      readCheckTargetRef.current = null
+      return
+    }
+    scrollToReadCheck(day)
+  }, [day, scrollToReadCheck])
 
   const goUnit = useCallback(
     (next: SheetUnit) => {
@@ -3551,6 +3628,8 @@ export function DailySheetPage({
       {/* 要約の行と表の枠は間を詰めて1つにまとめる（B1 の余白・2026-09-29。上の操作の行との間も半分に）。
           表の見える高さを増やすため。要約の行は無い時も1行の高さを取る（出ても表を押し下げない＝従来どおり） */}
       <div className="dsheet-stack !mt-2 space-y-1">
+        {/* 未読者欄（画面だけ・押すまで氏名を出さない・日を押すとその日の確認欄へ。2026-11-19 代表者の指示） */}
+        <UnreadSummaryBanner summary={unreadSummary} source={unreadSource} onPickDay={goReadCheck} />
         {/* 他の端末が入力中のバイタルの欄の要約（誰が・どこを）。無い時も1行の高さを取る＝出ても表を押し下げない */}
         <PresenceSummary
           text={presence.summary((p) => {
@@ -3623,6 +3702,7 @@ export function DailySheetPage({
                   onNotesShown={handleNotesShown}
                   readChecks={readChecks}
                   today={today}
+                  unreadIds={unreadSummary?.byDay.get(d) ?? NO_UNREAD}
                 />
               </section>
             ))}
@@ -3637,7 +3717,10 @@ export function DailySheetPage({
         confirmLabel={confirm?.confirmLabel}
         danger
         onConfirm={() => confirm?.onConfirm()}
-        onCancel={() => setConfirm(null)}
+        onCancel={() => {
+          readCheckTargetRef.current = null // 未読者欄の日を押して出た窓を取りやめた＝その日の確認欄へは送らない
+          setConfirm(null)
+        }}
       />
       <CategoryExtractDialog
         open={extractOpen}
@@ -3692,6 +3775,7 @@ function DaySheet({
   onNotesShown,
   readChecks,
   today,
+  unreadIds,
 }: DaySheetProps) {
   const [phase, setPhase] = useState<Phase>('loading')
   const [reload, setReload] = useState(0)
@@ -6390,9 +6474,6 @@ function DaySheet({
         }}
       />
 
-      {/* 未読者欄（画面だけ・日付の見出しのすぐ下＝10日表示でも日の頭で目に入る。2026-11-19） */}
-      {phase === 'ready' && <ReadCheckBanner day={day} view={readCheckView} state={readChecks} />}
-
       {/* 送れていない申し送り（この日の分。1件も無い時は何も出さない＝見た目は変わらない・2026-09-29 H1） */}
       <UnsentNotes
         style={NARROW_STICKY}
@@ -6607,7 +6688,7 @@ function DaySheet({
             />
 
             {/* 確認欄（画面だけ・1日の枠の末尾。2026-11-19） */}
-            <ReadCheckPanel day={day} view={readCheckView} state={readChecks} actorId={actorId} />
+            <ReadCheckPanel day={day} view={readCheckView} state={readChecks} actorId={actorId} unreadIds={unreadIds} />
           </>
         )}
       </div>

@@ -13986,11 +13986,13 @@ export async function cancelReadCheck(p: { day: string; staffId: number }, opts?
 const SHIFT_CACHE_MS = 5 * 60 * 1000
 /** 読めなかった時の控え（短く持って、すぐ読み直す） */
 const SHIFT_FAIL_MS = 30 * 1000
-let shiftCache: { at: number; key: string; value: ShiftSource | null } | null = null
+/** 月の組ごとの控え（表示中の日の組と未読者欄の組が別の月になっても追い出し合わない・4組まで） */
+const shiftCache = new Map<string, { at: number; value: ShiftSource | null }>()
+const SHIFT_CACHE_KEYS = 4
 
 /** 勤務表の控えを捨てる（ログインし直した時・試験） */
 export function clearShiftCache(): void {
-  shiftCache = null
+  shiftCache.clear()
 }
 
 /**
@@ -14001,7 +14003,8 @@ export async function fetchShiftSource(days: readonly string[]): Promise<ShiftSo
   const yms = [...new Set(days.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)).map((d) => d.slice(0, 7)))].sort().slice(0, 3)
   if (yms.length === 0) return null
   const key = yms.join(',')
-  if (shiftCache && shiftCache.key === key && Date.now() - shiftCache.at < (shiftCache.value ? SHIFT_CACHE_MS : SHIFT_FAIL_MS)) return shiftCache.value
+  const hit = shiftCache.get(key)
+  if (hit && Date.now() - hit.at < (hit.value ? SHIFT_CACHE_MS : SHIFT_FAIL_MS)) return hit.value
   let value: ShiftSource | null = null
   try {
     const sb = await getClient()
@@ -14022,6 +14025,12 @@ export async function fetchShiftSource(days: readonly string[]): Promise<ShiftSo
   } catch {
     value = null // 読めなくても日報は止めない（中身は出さない）
   }
-  shiftCache = { at: Date.now(), key, value }
+  shiftCache.delete(key)
+  shiftCache.set(key, { at: Date.now(), value })
+  while (shiftCache.size > SHIFT_CACHE_KEYS) {
+    const oldest = shiftCache.keys().next().value
+    if (oldest === undefined) break
+    shiftCache.delete(oldest)
+  }
   return value
 }

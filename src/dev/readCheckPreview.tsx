@@ -1,6 +1,6 @@
 // 日報の確認欄・未読者欄の開発用の見本（read-check-preview.html から開く。npx vite で開いて見るだけ・公開物に入らない）。
 // ・架空データだけ（職員は「架空職員」を名乗る）。db.ts・supabase を import しない（✔ の付け外しはこの画面のメモリだけ）
-// ・本物の画面と同じ部品（ReadCheckBanner・ReadCheckPanel）と同じ判定（readCheck.ts・shiftDuty.ts）に、架空の勤務表を流す
+// ・本物の画面と同じ部品（UnreadSummaryBanner・ReadCheckPanel）と同じ判定（readCheck.ts・shiftDuty.ts）に、架空の勤務表を流す
 // ・?mode=dark で暗い配色を見る
 
 import { StrictMode, useMemo, useState } from 'react'
@@ -8,13 +8,14 @@ import { createRoot } from 'react-dom/client'
 import '../styles/tokens.css'
 import '../index.css'
 import '../styles/sheet.css'
-import { ReadCheckBanner, ReadCheckPanel } from '../components/DailyReadCheck'
-import { buildReadCheckView } from '../lib/readCheck'
-import { buildDutyTable } from '../lib/shiftDuty'
-import type { ReadChecksState } from '../hooks/useReadChecks'
+import { ReadCheckPanel, UnreadSummaryBanner } from '../components/DailyReadCheck'
+import { buildReadCheckView, buildUnreadSummary } from '../lib/readCheck'
+import { buildDutyTable, buildFacilityDutyTable } from '../lib/shiftDuty'
+import type { ReadChecksState, UnreadSource } from '../hooks/useReadChecks'
 
 const staff = Array.from({ length: 8 }, (_, i) => ({ id: i + 1, name: `架空職員${String(i + 1).padStart(2, '0')}`, hire_order: i + 1, active: true }))
 const days = ['2026-11-19', '2026-11-20', '2026-11-21']
+const TODAY = '2026-11-21'
 const cells: Record<string, Record<string, string>> = {}
 staff.forEach((s, i) => {
   cells[`s${s.id}`] = { 19: i % 3 === 0 ? '休' : '早', 20: i % 4 === 1 ? '希' : '日1', 21: i === 2 ? '(21' : i === 5 ? '有' : '遅' }
@@ -40,6 +41,7 @@ function Preview() {
     duty,
     dailyKeys: keys,
     busy: new Set(),
+    version: 0,
     add: async (day, id) => {
       setActor(id)
       setChecks((cur) => new Map(cur).set(day, new Set([...(cur.get(day) ?? []), id])))
@@ -52,13 +54,21 @@ function Preview() {
       })
     },
   }
+  const fac = useMemo(() => buildFacilityDutyTable(src, days), [])
+  const source: UnreadSource = { ready: true, failed: false, missing: false, today: TODAY, checks, duty: fac, roster: null, dayKeys: null }
+  const summary = buildUnreadSummary({ today: TODAY, staff, duty: fac, checks })
   return (
     <div className="mx-auto max-w-5xl space-y-6 bg-surface p-4 text-ink">
       <p className="text-sm text-ink2">記録する職員（見本）: 架空職員{String(actorId ?? 0).padStart(2, '0')}</p>
+      <UnreadSummaryBanner
+        summary={summary}
+        source={source}
+        onPickDay={(d) => document.querySelector(`[data-day="${d}"]`)?.scrollIntoView({ block: 'center' })}
+      />
       {days.map((day) => {
         const view = buildReadCheckView({
           day,
-          today: '2026-11-21',
+          today: TODAY,
           staff,
           duty,
           dailyKeys: keys,
@@ -68,9 +78,8 @@ function Preview() {
         return (
           <section key={day} className="border-2 border-border-strong" data-day={day}>
             <div className="bg-surface2 px-2 py-1 font-bold">{day} の日報（見本）</div>
-            <ReadCheckBanner day={day} view={view} state={state} />
             <div className="px-2 py-6 text-ink3">（申し送りの表）</div>
-            <ReadCheckPanel day={day} view={view} state={state} actorId={actorId} />
+            <ReadCheckPanel day={day} view={view} state={state} actorId={actorId} unreadIds={summary.byDay.get(day) ?? new Set()} />
           </section>
         )
       })}

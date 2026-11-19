@@ -1,6 +1,7 @@
 // 日報の確認欄（その日の日報を読んだ ✔）と未読者欄（2026-11-19 本人指示・0065）。
 // どちらも画面だけ（print:hidden）＝紙の日報は1pxも変えない（dev-principles 原則2）。
-//   ReadCheckBanner … 日付の見出しのすぐ下。未読者がいれば赤系の地・太字で「未読者 n名：氏名…」、いなければ落ち着いた色で「未読者なし」
+//   UnreadSummaryBanner … 日報のページの上に1つ（2026-11-19 代表者の指示で、日ごとの見出しの下の欄から移した）。
+//     昨日までの日報の未読者の人数。押すと氏名と未読の日（押すとその日の確認欄へ）
 //   ReadCheckPanel  … 1日の枠の末尾。職員全員の名前の ✔ ボタン（1人1日1回）
 // ✔ は「記録する職員（操作者）」として付ける（既読と同じ・ui-design.md §0 の誤帰属の防止）。
 // 自分以外の名前を押した時は、その人に記録する職員を切り替えてから付ける（確認の窓で知らせる）。
@@ -9,60 +10,97 @@
 import { useState } from 'react'
 import { ConfirmDialog } from './ui'
 import { setActorId } from '../lib/actor'
-import type { ReadCheckView } from '../lib/readCheck'
-import type { ReadChecksState } from '../hooks/useReadChecks'
+import type { ReadCheckView, UnreadSummary } from '../lib/readCheck'
+import type { ReadChecksState, UnreadSource } from '../hooks/useReadChecks'
 
-const WHY_ATTENDANCE = '勤務表が読めないため、出勤者の欄で判定しています'
+const WEEK = ['日', '月', '火', '水', '木', '金', '土']
+/** 'YYYY-MM-DD' → 'M/D(曜)' */
+function fmtDay(iso: string): string {
+  const [y, m, d] = iso.split('-').map((x) => parseInt(x, 10))
+  const w = new Date(Date.UTC(y, m - 1, d)).getUTCDay()
+  return `${m}/${d}(${WEEK[w]})`
+}
 
-/** 未読者欄（日付の見出しの下） */
-export function ReadCheckBanner({ day, view, state }: { day: string; view: ReadCheckView; state: ReadChecksState }) {
-  if (view.source === 'future' || view.source === 'before') return null
-  if (!state.loaded || !state.shiftLoaded || state.missing || state.loadFailed) return null
-  const jump = () => {
-    const el = typeof document !== 'undefined' ? document.getElementById(`readcheck-${day}`) : null
-    el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
-  }
-  if (view.source === 'none') {
+/**
+ * 未読者欄（日報のページの上に1つ・2026-11-19 代表者の指示）。
+ * 押すまで氏名を出さない（閉じている間は人数だけ＝氏名は画面にも読み上げにも出さない）。開くと、人ごとに未読の日を並べ、
+ * 日を押すとその日の日報の確認欄へ飛ぶ。今日の分は数えない（昨日まで）。数え方は lib/readCheck.ts の buildUnreadSummary。
+ */
+export function UnreadSummaryBanner({
+  summary,
+  source,
+  onPickDay,
+}: {
+  summary: UnreadSummary | null
+  source: UnreadSource
+  onPickDay: (day: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  if (!source.ready || source.missing) return null
+  const box = 'print:hidden flex flex-wrap items-center gap-x-2 border px-2 py-1 text-sm'
+  if (source.failed) {
     return (
-      <div className="print:hidden flex flex-wrap items-center gap-x-2 border-b border-border px-2 py-1 text-sm text-ink2" role="status">
+      <div className={`${box} border-border text-ink2`} role="status">
         <span className="font-bold">未読者</span>
-        <span>判定できません（勤務表が読めず、出勤者の欄も空です）</span>
+        <span>判定できません（勤務表か確認欄を読めませんでした。〔最新に更新〕で読み直してください）</span>
       </div>
     )
   }
-  const n = view.unread.length
-  // 今日から14日より前の日: 現場の端末からはもう ✔ を付けられないので、記録として出すだけ（赤くしない・読み上げない）
-  if (view.stale) {
-    return (
-      <div className="print:hidden flex flex-wrap items-center gap-x-2 border-b border-border px-2 py-1 text-sm text-ink2" role="note">
-        <span className="font-bold">未読者</span>
-        <span>{n === 0 ? 'なし' : `${n}名：${view.unread.map((u) => u.name).join('、')}`}</span>
-        <span>（14日より前の日のため、現場の端末からは ✔ を付けられません）</span>
-      </div>
-    )
-  }
+  if (summary === null || summary.window.length === 0) return null
+  const n = summary.people.length
+  const und = summary.undeterminedDays.length
+  const undNote = (
+    <>
+      {und > 0 && <span className="text-ink2">・判定できない日 {und}日（勤務表が無い・読めない記号）</span>}
+      {summary.unmatched > 0 && <span className="text-ink2">・勤務表で名前が見つからない職員 {summary.unmatched}名（数えていません）</span>}
+    </>
+  )
   if (n === 0) {
+    // 判定できない日・数えていない職員がいる時は「なし」と言い切らない（落ち着いた色で「未読者 0名」）
+    const sure = und === 0 && summary.unmatched === 0
     return (
-      <div className="print:hidden flex flex-wrap items-center gap-x-2 border-b border-border bg-ok-bg px-2 py-1 text-sm text-ok" role="status">
-        <span className="font-bold">✓ 未読者なし</span>
-        {view.source === 'attendance' && <span className="text-ink2">（{WHY_ATTENDANCE}）</span>}
-        {view.undetermined.length > 0 && <span className="text-ink2">・判定できない {view.undetermined.length}名</span>}
+      <div className={`${box} ${sure ? 'border-ok bg-ok-bg text-ok' : 'border-border text-ink2'}`} role="status">
+        <span className="font-bold">{sure ? '✓ 未読者なし' : '未読者 0名'}</span>
+        <span className="text-ink2">（昨日までの日報・今日の分は明日から数えます）</span>
+        {undNote}
       </div>
     )
   }
   return (
-    <div
-      className="print:hidden flex flex-wrap items-center gap-x-3 gap-y-1 border-2 border-danger bg-danger-bg px-2 py-1.5 text-base text-danger"
-      role="alert"
-      data-readcheck-unread={n}
-    >
-      <span className="rounded-sm bg-danger px-2 py-0.5 font-bold text-surface">⚠ 未読者 {n}名</span>
-      <span className="font-bold">{view.unread.map((u) => u.name).join('、')}</span>
-      {view.source === 'attendance' && <span className="text-sm text-ink2">（{WHY_ATTENDANCE}）</span>}
-      {view.undetermined.length > 0 && <span className="text-sm text-ink2">・判定できない {view.undetermined.length}名</span>}
-      <button type="button" className="ml-auto min-h-tap rounded-sm border border-danger px-3 text-sm font-bold text-danger" onClick={jump}>
-        確認欄へ
-      </button>
+    <div className="print:hidden border-2 border-danger bg-danger-bg px-2 py-1.5 text-danger" data-readcheck-unread={n}>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <button
+          type="button"
+          className="min-h-tap rounded-sm bg-danger px-3 text-base font-bold text-surface"
+          aria-expanded={open}
+          aria-controls="unread-summary-list"
+          onClick={() => setOpen((v) => !v)}
+        >
+          ⚠ 未読者 {n}名 {open ? '▲ 閉じる' : '▼ 押すと氏名を表示'}
+        </button>
+        <span className="text-sm text-ink2">昨日までの日報（日勤は前日の分・夜勤はその日の日中の分から）</span>
+        {undNote}
+      </div>
+      {open && (
+        <ul id="unread-summary-list" className="mt-1 space-y-1" role="list">
+          {summary.people.map((p) => (
+            <li key={p.id} className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="min-w-[6rem] font-bold">{p.name}</span>
+              {p.days.map((d) => (
+                <button
+                  key={d}
+                  type="button"
+                  className="min-h-tap rounded-sm border border-danger bg-surface px-2 text-sm font-bold text-danger underline"
+                  aria-label={`${p.name}さんの未読 ${fmtDay(d)} の日報の確認欄へ`}
+                  onClick={() => onPickDay(d)}
+                >
+                  {fmtDay(d)}
+                </button>
+              ))}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }
@@ -77,19 +115,20 @@ export function ReadCheckPanel({
   view,
   state,
   actorId,
+  unreadIds,
 }: {
   day: string
   view: ReadCheckView
   state: ReadChecksState
   actorId: number | null
+  /** この日の未読の人（未読者欄と同じ数え方・今日と14日より前の日は空） */
+  unreadIds: ReadonlySet<number>
 }) {
   const [pending, setPending] = useState<Pending | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
   if (view.source === 'future' || view.source === 'before') return null
 
-  // 赤い「未読」は、表示中の日の ✔ と勤務表の両方を読み終えた時だけ・14日より前の日（現場から付けられない）は出さない（未読者欄と同じ）
-  const showUnread = state.loaded && state.shiftLoaded && !view.stale
-  const unreadIds = new Set(showUnread ? view.unread.map((u) => u.id) : [])
+  // 赤い「未読」は未読者欄と同じ数え方（昨日まで・日勤は翌日の勤務・夜勤はその日の夜勤入り）。✔ はこの画面の最新で外す
   const disabled = !state.loaded || state.missing || state.loadFailed
 
   const doAdd = async (id: number) => {
@@ -143,7 +182,7 @@ export function ReadCheckPanel({
       <ul className="flex flex-wrap gap-2 p-2" role="list">
         {view.members.map((m) => {
           const busy = state.busy.has(`${day}|${m.id}`)
-          const unread = unreadIds.has(m.id)
+          const unread = !m.checked && unreadIds.has(m.id)
           const tone = m.checked
             ? 'border-ok bg-ok-bg text-ok'
             : unread
