@@ -376,7 +376,8 @@ if (D === null) {
     })
     it('未読者欄の日を押すと、日が移ってから（確認の窓の後でも）確認欄へ送り、日の頭への位置合わせで引き戻さない', () => {
       const sec = page.slice(page.indexOf('const readCheckTargetRef'), page.indexOf('const goUnit = useCallback('))
-      assert.match(sec, /pendingScrollRef\.current = null\s+el\.scrollIntoView/)
+      assert.match(sec, /pendingScrollRef\.current = null\s+selfScrollUntilRef\.current = [^\n]+\s+el\.scrollIntoView/)
+      assert.match(page, /onCancel=\{\(\) => \{\s+readCheckTargetRef\.current = null/, '確認の窓を取りやめたら送らない')
       assert.match(sec, /if \(next === day\) scrollToReadCheck\(next\)\s+else goDay\(next\)/)
       assert.match(sec, /\}, \[day, scrollToReadCheck\]\)/, '日が移った時に送る')
       assert.match(page, /if \(readCheckTargetRef\.current\?\.started\) readCheckTargetRef\.current = null/, '「切り替える」を押した時は止めない')

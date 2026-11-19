@@ -56,9 +56,11 @@ export function UnreadSummaryBanner({
     </>
   )
   if (n === 0) {
+    // 判定できない日・数えていない職員がいる時は「なし」と言い切らない（落ち着いた色で「未読者 0名」）
+    const sure = und === 0 && summary.unmatched === 0
     return (
-      <div className={`${box} ${und > 0 ? 'border-border text-ink2' : 'border-ok bg-ok-bg text-ok'}`} role="status">
-        <span className="font-bold">{und > 0 ? '未読者' : '✓ 未読者なし'}</span>
+      <div className={`${box} ${sure ? 'border-ok bg-ok-bg text-ok' : 'border-border text-ink2'}`} role="status">
+        <span className="font-bold">{sure ? '✓ 未読者なし' : '未読者 0名'}</span>
         <span className="text-ink2">（昨日までの日報・今日の分は明日から数えます）</span>
         {undNote}
       </div>

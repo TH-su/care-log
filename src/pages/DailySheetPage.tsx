@@ -743,6 +743,8 @@ const NO_RESIDENTS: Resident[] = []
 const NO_STAFF: Staff[] = []
 /** 未読の人がいない日（確認欄の赤い印を出さない） */
 const NO_UNREAD: ReadonlySet<number> = new Set<number>()
+/** 未読者欄から確認欄へ送った後に取り直す間隔（ms） */
+const READCHECK_RESCROLL_MS = [500, 1000, 1500]
 
 // ══════════════════════════════════════════════════════════════
 // 小さなヘルパ（純関数）
@@ -3245,7 +3247,7 @@ export function DailySheetPage({
       if (readCheckTargetRef.current?.started) readCheckTargetRef.current = null
     }
     const onScroll = () => {
-      if (pendingScrollRef.current === null) return
+      if (pendingScrollRef.current === null && !readCheckTargetRef.current?.started) return
       if (performance.now() < selfScrollUntilRef.current) return // 自分の位置合わせのスクロール
       cancel()
     }
@@ -3330,13 +3332,16 @@ export function DailySheetPage({
       const el = document.getElementById(`readcheck-${target}`)
       if (el) {
         pendingScrollRef.current = null
+        selfScrollUntilRef.current = performance.now() + SELF_SCROLL_GRACE_MS
         el.scrollIntoView({ block: 'center' })
         hits += 1
-        if (hits >= 2) {
+        // 上の日が後から読み終わって押し下げられた分を、0.5・1.5・3秒後に取り直す（利用者が触る・スクロールすると止まる）
+        const next = READCHECK_RESCROLL_MS[hits - 1]
+        if (next === undefined) {
           readCheckTargetRef.current = null
           return
         }
-        window.setTimeout(tick, 500)
+        window.setTimeout(tick, next)
         return
       }
       if (Date.now() - t0 < 8000) window.setTimeout(tick, 150)
@@ -3712,7 +3717,10 @@ export function DailySheetPage({
         confirmLabel={confirm?.confirmLabel}
         danger
         onConfirm={() => confirm?.onConfirm()}
-        onCancel={() => setConfirm(null)}
+        onCancel={() => {
+          readCheckTargetRef.current = null // 未読者欄の日を押して出た窓を取りやめた＝その日の確認欄へは送らない
+          setConfirm(null)
+        }}
       />
       <CategoryExtractDialog
         open={extractOpen}
