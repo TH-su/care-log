@@ -4534,9 +4534,11 @@ function DaySheet({
       if (landed === null) return // 封鎖中・通信できない＝黙って次の分でまた試す
       // 送れた人は覚える（入った人も、既に行があって飛ばした人も。送り直さない）
       for (const r of rows) tried.add(r.staff_id)
-      if (landed.length === 0 || !aliveRef.current || dayRef.current !== day) return
+      if (!aliveRef.current || dayRef.current !== day) return
       markSelfWrite()
-      // その日の出勤者を読み直す（日の枠ごとの読み直しは画面が一度消えるので、出勤者の欄だけを取り直す）
+      // その日の出勤者を読み直す（日の枠ごとの読み直しは画面が一度消えるので、出勤者の欄だけを取り直す）。
+      // 入った行が0件でも読み直す（ほかの端末が先に足した・取り置きの古い一覧から描いた時に、欄が空のまま残らないように。
+      // 送れた人は覚えるので、読み直しは1人につき1回まで）
       try {
         const fresh = await fetchAttendanceForDay(day)
         if (aliveRef.current && dayRef.current === day) applyAttendance(fresh)

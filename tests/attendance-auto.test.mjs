@@ -320,6 +320,7 @@ if (A === null) {
       assert.match(sec, /existing: attendanceRef\.current/)
       assert.match(sec, /await autoAddAttendance\(day, rows\)/)
       assert.match(sec, /fetchAttendanceForDay\(day\)/, '書いた後はその日の出勤者を読み直す')
+      assert.doesNotMatch(sec, /landed\.length === 0/, '読み直しを入った件数で絞らない（ほかの端末が先に足した時も欄に出す）')
       assert.match(sec, /\[day, today, nowMin, phase, enabled, todayFac,/, '1分ごとの見直し（nowMin）と読み込みのたび')
       assert.doesNotMatch(sec, /saveAttendance\(/, '取り消した行を戻す saveAttendance を使わない')
     })
