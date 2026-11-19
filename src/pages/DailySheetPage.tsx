@@ -105,6 +105,7 @@ import {
   saveAttendance,
   autoAddAttendance,
   fetchAttendanceForDay,
+  hasPendingAttendance,
   saveVitalEdits,
   setOutingEnd,
   softDeleteOuting,
@@ -277,7 +278,7 @@ import { useReadChecks, useUnreadSource } from '../hooks/useReadChecks'
 import type { ReadChecksState, UnreadSource } from '../hooks/useReadChecks'
 import type { UnreadSummary } from '../lib/readCheck'
 import { buildCheckPanel, buildUnreadSummary } from '../lib/readCheck'
-import { attendDisplayNames, attendRedDays, planAutoAttendance } from '../lib/attendanceAuto'
+import { attendDisplayNames, attendRedDays, planAutoAttendance, undoAttendanceRows } from '../lib/attendanceAuto'
 
 // ══════════════════════════════════════════════════════════════
 // 定数・文言
@@ -4422,8 +4423,10 @@ function DaySheet({
         if (undoLabel !== null) {
           show(undoLabel, () => {
             // 戻す操作も同じ列に並べる（戻した内容が、後から届いた保存で上書きされないように）。
-            // baseline は戻す時点の一覧から組み直す＝直列化後の実際の前状態になる
-            enqueueAttendanceRef.current(dayIso, () => ({ rows: prev, undoLabel: null }))
+            // baseline は戻す時点の一覧から組み直す＝直列化後の実際の前状態になる。
+            // 送る一覧は「外す前の一覧」ではなく、戻す時点の一覧にこの操作の分だけを戻したもの（2026-11-19 反証 medium1:
+            // その間に自動入力・ほかの端末が足した人を外さない。外すと取り消し済みになり、二度と自動では入らない）
+            enqueueAttendanceRef.current(dayIso, (cur) => ({ rows: undoAttendanceRows(prev, next, cur), undoLabel: null }))
           })
         }
       } catch (err) {
@@ -4510,6 +4513,9 @@ function DaySheet({
   const todayFac = day === today && readChecks.shiftLoaded ? (readChecks.fac?.get(today) ?? null) : null
   useEffect(() => {
     if (day !== today || phase !== 'ready' || !enabled || todayFac === null || autoBusyRef.current) return
+    // その日の出勤者に送信待ち（圏外で手で足した・外した）がある間は、書き込みも読み直しもしない（反証 low2:
+    // サーバーの一覧だけで画面を差し替えると送信待ちの人が一時的に消える）。送れた後の見直し（次の分）でまた試す
+    if (hasPendingAttendance(day)) return
     if (autoTriedRef.current.day !== day) autoTriedRef.current = { day, ids: new Set() }
     const tried = autoTriedRef.current.ids
     const first = planAutoAttendance({
@@ -4528,6 +4534,7 @@ function DaySheet({
     const job = async () => {
       if (!aliveRef.current || dayRef.current !== day) return
       // 列の順番が来た時の一覧で決め直す（前の保存の結果を基準にする）
+      if (hasPendingAttendance(day)) return
       const rows = planAutoAttendance({ day, today, nowMin, staff, duty: todayFac, existing: attendanceRef.current, managerStaffId, skip: tried })
       if (rows.length === 0) return
       const landed = await autoAddAttendance(day, rows)
@@ -4541,7 +4548,7 @@ function DaySheet({
       // 送れた人は覚えるので、読み直しは1人につき1回まで）
       try {
         const fresh = await fetchAttendanceForDay(day)
-        if (aliveRef.current && dayRef.current === day) applyAttendance(fresh)
+        if (aliveRef.current && dayRef.current === day && !hasPendingAttendance(day)) applyAttendance(fresh)
       } catch {
         // 読めない時は今の一覧のまま（次の読み込み・〔最新に更新〕で出る）
       }
@@ -7478,10 +7485,12 @@ function DayHeader({
   const managerName =
     manager === null ? null : staffName(ctx.staffById.get(manager.staff_id), manager.staff_id)
   // 欄に出す名前は苗字（同じ苗字が2人以上の時はその人たちだけ氏名・2026-11-19 代表者の指示）。読み上げは氏名のまま
-  const shown = attendDisplayNames([
-    ...(managerName === null ? [] : [managerName]),
-    ...workers.map((a) => staffName(ctx.staffById.get(a.staff_id), a.staff_id)),
-  ])
+  // 名簿に無い職員（「職員ID n」と出る人）は縮めない（反証 low3）
+  const shownIds = [...(manager === null ? [] : [manager.staff_id]), ...workers.map((a) => a.staff_id)]
+  const shown = attendDisplayNames(
+    shownIds.map((id) => staffName(ctx.staffById.get(id), id)),
+    shownIds.map((id) => !ctx.staffById.has(id)),
+  )
   const managerShown = managerName === null ? null : shown[0]
   const workerShown = managerName === null ? shown : shown.slice(1)
   /** 赤い枠を押して開いた未読の日の窓（画面だけ・覚えない） */

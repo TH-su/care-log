@@ -151,6 +151,33 @@ if (A === null) {
       assert.deepEqual(A.attendDisplayNames(['空白なし']), ['空白なし'], '苗字と名前の区切りが無い氏名はそのまま')
       assert.deepEqual(A.attendDisplayNames([]), [])
     })
+    it('名簿に無い職員（「職員ID n」）は縮めず、今までどおり「職員ID n」で出す・苗字の数にも入れない（反証 low3）', () => {
+      assert.deepEqual(A.attendDisplayNames(['職員ID 12', '早番 見本01', '職員ID 15'], [true, false, true]), ['職員ID 12', '早番', '職員ID 15'])
+      assert.deepEqual(A.attendDisplayNames(['職員ID 12', '職員 見本01'], [true, false]), ['職員ID 12', '職員'], '名簿に無い人と苗字が同じに見えても氏名にしない')
+    })
+  })
+
+  describe('〔元に戻す〕は今の一覧から組み直す（反証 medium1: 自動で入った人・ほかの端末が足した人を外さない）', () => {
+    const R = (id, role = 'staff', sort = 0) => ({ day: today, staff_id: id, role, sort })
+    const pairs = (rows) => rows.map((r) => [r.staff_id, r.role])
+    it('8:29 に A を外し、8:30 に自動入力が B を足した後で戻す: A が戻り、B は残る', () => {
+      assert.deepEqual(pairs(A.undoAttendanceRows([R(1), R(3)], [R(3)], [R(3), R(2)])), [[1, 'staff'], [3, 'staff'], [2, 'staff']])
+    })
+    it('施設長の入れ替えの戻し: 前の施設長を施設長に戻し、入れ替えで選んだ人を外す。その間に入った人は残す', () => {
+      const got = A.undoAttendanceRows([R(5, 'manager'), R(3)], [R(3), R(9, 'manager')], [R(3), R(9, 'manager'), R(2)])
+      assert.deepEqual(pairs(got), [[5, 'manager'], [3, 'staff'], [2, 'staff']])
+    })
+    it('出勤者だった人を施設長にした入れ替えの戻し: その人は職員に戻り、前の施設長が施設長に戻る', () => {
+      const got = A.undoAttendanceRows([R(5, 'manager'), R(9)], [R(9, 'manager')], [R(9, 'manager'), R(2)])
+      assert.deepEqual(pairs(got), [[5, 'manager'], [9, 'staff'], [2, 'staff']])
+    })
+    it('戻す時点でほかの端末が別の施設長を選んでいたら、前の施設長は職員として戻す（施設長は1人）', () => {
+      const got = A.undoAttendanceRows([R(5, 'manager'), R(3)], [R(3)], [R(3), R(7, 'manager')])
+      assert.deepEqual(pairs(got), [[5, 'staff'], [3, 'staff'], [7, 'manager']])
+    })
+    it('今の一覧で既に戻っている人は二重にしない', () => {
+      assert.deepEqual(pairs(A.undoAttendanceRows([R(1), R(3)], [R(3)], [R(3), R(1)])), [[3, 'staff'], [1, 'staff']])
+    })
   })
 
   describe('未読の人の赤い氏名枠（今日の日報・出勤時刻から）', () => {
@@ -305,6 +332,16 @@ if (A === null) {
       assert.equal(calls.filter((c) => c.table === 'attendance').length, 0)
       DB.__testHooks.setClient(null)
     })
+    it('hasPendingAttendance: 圏外で手で足した出勤者が送信待ちに積まれた日だけ true（反証 low2・自動入力はその間に読み直さない）', async () => {
+      const { sb } = fake([{ data: null, error: { message: 'fetch failed' }, status: 0 }])
+      DB.__testHooks.setClient(sb)
+      assert.equal(DB.hasPendingAttendance(today), false)
+      const res = await DB.saveAttendance(today, [{ staff_id: 1, role: 'staff', sort: 0 }], { baseline: [] })
+      assert.equal(res, 'queued', '送信待ちに積まれた')
+      assert.equal(DB.hasPendingAttendance(today), true)
+      assert.equal(DB.hasPendingAttendance('2026-11-30'), false, '別の日は数えない')
+      DB.__testHooks.setClient(null)
+    })
   })
 
   describe('静的検査', () => {
@@ -323,6 +360,18 @@ if (A === null) {
       assert.doesNotMatch(sec, /landed\.length === 0/, '読み直しを入った件数で絞らない（ほかの端末が先に足した時も欄に出す）')
       assert.match(sec, /\[day, today, nowMin, phase, enabled, todayFac,/, '1分ごとの見直し（nowMin）と読み込みのたび')
       assert.doesNotMatch(sec, /saveAttendance\(/, '取り消した行を戻す saveAttendance を使わない')
+      assert.ok((sec.match(/hasPendingAttendance\(day\)/g) ?? []).length >= 3, '送信待ちがある間は書き込みも読み直しもしない（反証 low2）')
+      assert.match(sec, /dayRef\.current === day && !hasPendingAttendance\(day\)\) applyAttendance\(fresh\)/)
+    })
+    it('〔元に戻す〕は外す前の一覧をそのまま送らず、今の一覧から undoAttendanceRows で組み直す（反証 medium1）', () => {
+      const sec = page.slice(page.indexOf('const persistAttendance = useCallback('), page.indexOf('const enqueueAttendance = useCallback('))
+      assert.ok(sec.length > 0)
+      assert.match(sec, /enqueueAttendanceRef\.current\(dayIso, \(cur\) => \(\{ rows: undoAttendanceRows\(prev, next, cur\), undoLabel: null \}\)\)/)
+      assert.doesNotMatch(sec, /\(\) => \(\{ rows: prev, undoLabel: null \}\)/)
+    })
+    it('DayHeader は名簿に無い職員を縮めない（staffById に無い人をそのまま出す・反証 low3）', () => {
+      const sec = page.slice(page.indexOf('function DayHeader('), page.indexOf('<StatusText status={ctx.status.attendance} />'))
+      assert.match(sec, /shownIds\.map\(\(id\) => !ctx\.staffById\.has\(id\)\)/)
     })
     it('autoAddAttendance は送信待ちに積まない・取り消した行を更新しない（insert の ON CONFLICT DO NOTHING だけ）', () => {
       const sec = strip(db.slice(db.indexOf('export async function autoAddAttendance'), db.indexOf('// ── 食い違いの解決画面')))

@@ -13026,6 +13026,19 @@ async function insertAttendanceRows(
 }
 
 /**
+ * その日の出勤者の送信待ち（圏外で手で足した・外した操作・止まった分も含む）があるか（2026-11-19 反証 low2）。
+ * ある間は自動入力が書き込み・読み直しをしない（サーバーの一覧だけで画面を差し替えると、送信待ちの人が一時的に消える）
+ */
+export function hasPendingAttendance(day: string): boolean {
+  const opDone = opDoneIndex(readStoresQuiet().s2?.done)
+  for (const op of [...queue.filter((o) => !isOpDone(o, opDone)), ...storedOps()]) {
+    if (op.table !== 'attendance' || op.kind !== 'attendance' || sentQids.has(op.qid)) continue
+    if (str(asRecord(op.payload)?.day) === day) return true
+  }
+  return false
+}
+
+/**
  * 出勤者の欄の自動入力（今日の日報・勤務表で出勤時刻の30分前を過ぎた人・2026-11-19 代表者の指示）。
  * 2026-11-07 の決定「勤務表から日報の出勤者の欄への自動の書き写しはしない」を、この指示で置き換えた。
  * **足すだけ**: 同じ (施設, 日, 職員) の行が既にあれば何もしない（取り消し済み＝sort < 0 の行も含む＝人が外した人を戻さない）。

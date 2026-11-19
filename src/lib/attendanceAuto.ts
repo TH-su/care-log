@@ -98,12 +98,58 @@ export function planAutoAttendance(args: {
 
 /**
  * 出勤者・施設長の欄に出す名前（並びは渡した順）。苗字で出し、同じ苗字が2人以上いる時はその人たちだけ氏名のまま。
+ * @param asIs 縮めずにそのまま出す名前（名簿に無い職員の「職員ID n」など。苗字の数にも入れない）
  */
-export function attendDisplayNames(names: readonly string[]): string[] {
-  const sur = names.map((n) => surnameOf(n) || n)
+export function attendDisplayNames(names: readonly string[], asIs?: readonly boolean[]): string[] {
+  const keep = (i: number) => asIs?.[i] === true
+  const sur = names.map((n, i) => (keep(i) ? n : surnameOf(n) || n))
   const count = new Map<string, number>()
-  for (const s of sur) count.set(s, (count.get(s) ?? 0) + 1)
-  return names.map((n, i) => ((count.get(sur[i]) ?? 0) > 1 ? n : sur[i]))
+  sur.forEach((s, i) => {
+    if (!keep(i)) count.set(s, (count.get(s) ?? 0) + 1)
+  })
+  return names.map((n, i) => (keep(i) ? n : (count.get(sur[i]) ?? 0) > 1 ? n : sur[i]))
+}
+
+/**
+ * 出勤者の〔元に戻す〕で送る一覧（2026-11-19 反証 medium1）。外す前の一覧をそのまま送ると、その後に自動入力・ほかの端末が足した人が
+ * 外されて（sort < 0）二度と自動では入らない。そこで「今の一覧」から組み直し、この操作で変えた所だけを戻す:
+ *   - この操作で外した人（before にいて after にいない）を元の役割で戻す（今の一覧に別の施設長がいれば職員として戻す）
+ *   - この操作で足した人（after にいて before にいない＝施設長の入れ替えで選んだ人）を外す
+ *   - この操作で役割を変えた人の役割を元に戻す
+ *   - それ以外の今の一覧の人（自動で入った人・ほかの端末が足した人）はそのまま残す
+ * @param before 操作の前の一覧
+ * @param after 操作で送った一覧
+ * @param current 戻す時点の一覧
+ */
+export function undoAttendanceRows<T extends AttendRow>(before: readonly T[], after: readonly T[], current: readonly T[]): T[] {
+  const afterBy = new Map(after.map((a) => [a.staff_id, a]))
+  const beforeBy = new Map(before.map((a) => [a.staff_id, a]))
+  const out: T[] = []
+  for (const c of current) {
+    const b = beforeBy.get(c.staff_id)
+    const a = afterBy.get(c.staff_id)
+    if (b === undefined && a !== undefined) continue // この操作で足した人
+    if (b !== undefined && a !== undefined && a.role !== b.role && c.role === a.role) out.push({ ...c, role: b.role })
+    else out.push(c)
+  }
+  const have = new Set(out.map((a) => a.staff_id))
+  before.forEach((b, i) => {
+    if (afterBy.has(b.staff_id) || have.has(b.staff_id)) return
+    const managerTaken = out.some((a) => a.role === 'manager')
+    const row = b.role === 'manager' && managerTaken ? { ...b, role: 'staff' as const } : b
+    out.splice(Math.min(i, out.length), 0, row)
+    have.add(b.staff_id)
+  })
+  // 施設長は1人（役割を戻した結果2人になった時は、先の人を残す）
+  let seen = false
+  return out.map((a) => {
+    if (a.role !== 'manager') return a
+    if (!seen) {
+      seen = true
+      return a
+    }
+    return { ...a, role: 'staff' as const }
+  })
 }
 
 /**
