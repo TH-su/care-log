@@ -87,7 +87,9 @@ export function ReadCheckPanel({
   const [msg, setMsg] = useState<string | null>(null)
   if (view.source === 'future' || view.source === 'before') return null
 
-  const unreadIds = new Set(view.unread.map((u) => u.id))
+  // 赤い「未読」は、表示中の日の ✔ と勤務表の両方を読み終えた時だけ・14日より前の日（現場から付けられない）は出さない（未読者欄と同じ）
+  const showUnread = state.loaded && state.shiftLoaded && !view.stale
+  const unreadIds = new Set(showUnread ? view.unread.map((u) => u.id) : [])
   const disabled = !state.loaded || state.missing || state.loadFailed
 
   const doAdd = async (id: number) => {

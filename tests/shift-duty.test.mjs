@@ -252,6 +252,11 @@ if (D === null) {
       assert.ok(top.length >= 5, '未読者欄の4つの形と確認欄の外枠に print:hidden')
       assert.match(comp, /<section\s+id=\{`readcheck-\$\{day\}`\}\s+className="print:hidden/)
     })
+    it('確認欄のボタンの赤は、読み終えた時だけ・古い日は出さない（未読者欄とそろえる）', () => {
+      assert.match(comp, /const showUnread = state\.loaded && state\.shiftLoaded && !view\.stale/)
+      assert.match(comp, /const unreadIds = new Set\(showUnread \? view\.unread\.map\(\(u\) => u\.id\) : \[\]\)/)
+      assert.match(comp, /if \(!state\.loaded \|\| !state\.shiftLoaded \|\| state\.missing \|\| state\.loadFailed\) return null/)
+    })
     it('日報の枠に置いてある（日付の見出しの下と枠の末尾）', () => {
       assert.match(page, /<ReadCheckBanner day=\{day\} view=\{readCheckView\} state=\{readChecks\} \/>/)
       assert.match(page, /<ReadCheckPanel day=\{day\} view=\{readCheckView\} state=\{readChecks\} actorId=\{actorId\} \/>/)
