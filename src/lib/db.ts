@@ -13033,6 +13033,9 @@ export function hasPendingAttendance(day: string): boolean {
   const opDone = opDoneIndex(readStoresQuiet().s2?.done)
   for (const op of [...queue.filter((o) => !isOpDone(o, opDone)), ...storedOps()]) {
     if (op.table !== 'attendance' || op.kind !== 'attendance' || sentQids.has(op.qid)) continue
+    // 止まった送信待ち（blocked＝競合・拒否）はもう自動では送られず、人が「送れていない記録」で選ぶまで残る。
+    // 数えると、その端末ではその日の自動入力が一日中止まる（再レビュー medium）ので数えない
+    if (op.blocked !== undefined) continue
     if (str(asRecord(op.payload)?.day) === day) return true
   }
   return false

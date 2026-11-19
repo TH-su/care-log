@@ -342,6 +342,11 @@ if (A === null) {
       assert.equal(DB.hasPendingAttendance('2026-11-30'), false, '別の日は数えない')
       DB.__testHooks.setClient(null)
     })
+    it('hasPendingAttendance: 止まった送信待ち（blocked）は数えない（数えるとその日の自動入力が一日中止まる・再レビュー medium）', () => {
+      const db = read('../src/lib/db.ts')
+      const f = db.slice(db.indexOf('export function hasPendingAttendance'), db.indexOf('export async function autoAddAttendance'))
+      assert.match(f, /if \(op\.blocked !== undefined\) continue/)
+    })
   })
 
   describe('静的検査', () => {
