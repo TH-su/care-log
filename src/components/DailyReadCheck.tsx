@@ -67,7 +67,7 @@ function UnreadButton({
         {n > 0 ? `⚠ 未読者 ${n}名 ${open ? '▲' : '▼'}` : '未読者 0名'}
       </button>
       <span className="text-ink2">
-        {n > 0 ? (open ? '日付を押すと、その日の申送へ移ります' : '押すと氏名と未読の日付が出ます') : '昨日までの日報'}
+        {n > 0 ? (open ? '日付を押すと、その日の申送へ移ります' : '押すと氏名と未読の日付が出ます') : '読む番が来た日報（出勤の30分前から）'}
       </span>
       {notes}
       {open && n > 0 && (
@@ -194,8 +194,8 @@ export function ReadCheckPanel({
       {shiftReady && panel.source === 'shift' && members.length === 0 && (
         <p className="px-2 pt-1 text-sm text-ink2">
           {panel.isToday
-            ? 'この日の日報を読む夜勤の人はいません（日勤の人は明日、この日の確認欄に並びます）。'
-            : 'この日の日報を読む人は勤務表にいません。'}
+            ? '夜勤の人は入りの30分前から、日勤の人は明日の出勤の30分前から、ここに並びます。'
+            : 'この日の日報を読む人は、出勤の30分前から並びます。'}
         </p>
       )}
       {shiftReady && panel.stale && (
