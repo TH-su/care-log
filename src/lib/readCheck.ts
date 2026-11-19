@@ -164,6 +164,8 @@ export interface UnreadSummary {
   byDay: Map<string, Set<number>>
   /** 判定できない日（勤務表が無い・読めない記号の人がいる） */
   undeterminedDays: string[]
+  /** 勤務表の名簿で名前が見つからない職員の人数（勤務表から同期した人＝hire_order がある人だけ。数えていないことを知らせる・氏名は出さない） */
+  unmatched: number
 }
 
 /** 数える日（古い順）。今日の前日まで・始めた日から・14日前まで */
@@ -186,8 +188,14 @@ export function buildUnreadSummary(args: {
   staff: readonly ReadCheckStaff[]
   duty: FacilityDutyTable | null
   checks: ReadonlyMap<string, ReadonlySet<number>>
+  /** 勤務表の名簿の全員（在籍）の氏名の鍵（読めない時は null） */
+  rosterKeys?: ReadonlySet<string> | null
+  /** 主の区分が通所（デイ職員）の氏名の鍵。同じ氏名の施設の職員がいても数えない（代表者の指示「デイ職員は氏名を出さない」を先にする） */
+  dayKeys?: ReadonlySet<string> | null
 }): UnreadSummary {
   const { today, staff, duty, checks } = args
+  const rosterKeys = args.rosterKeys ?? null
+  const dayKeys = args.dayKeys ?? null
   const window = unreadWindow(today)
   const byDay = new Map<string, Set<number>>()
   const undeterminedDays: string[] = []
@@ -204,7 +212,7 @@ export function buildUnreadSummary(args: {
     let unknown = false
     for (const s of staff) {
       const k = nameKey(s.name)
-      if (!k) continue
+      if (!k || dayKeys?.has(k)) continue
       const a = rowR.get(k)
       const b = rowN.get(k)
       if (a === undefined && b === undefined) continue // 勤務表の名簿に居ない・デイ職員
@@ -230,5 +238,9 @@ export function buildUnreadSummary(args: {
     seen.add(s.id)
     people.push({ id: s.id, name: s.name, days: d })
   }
-  return { window, people, byDay, undeterminedDays: [...new Set(undeterminedDays)].sort() }
+  const unmatched =
+    rosterKeys === null || window.length === 0
+      ? 0
+      : staff.filter((s) => s.hire_order !== null && s.hire_order !== undefined && !rosterKeys.has(nameKey(s.name))).length
+  return { window, people, byDay, undeterminedDays: [...new Set(undeterminedDays)].sort(), unmatched }
 }

@@ -3117,7 +3117,14 @@ export function DailySheetPage({
   const unreadSummary = useMemo(
     () =>
       unreadSource.ready && !unreadSource.failed && !unreadSource.missing && unreadSource.today === today
-        ? buildUnreadSummary({ today, staff, duty: unreadSource.duty, checks: unreadSource.checks })
+        ? buildUnreadSummary({
+            today,
+            staff,
+            duty: unreadSource.duty,
+            checks: unreadSource.checks,
+            rosterKeys: unreadSource.roster,
+            dayKeys: unreadSource.dayKeys,
+          })
         : null,
     [unreadSource, today, staff],
   )
@@ -3234,6 +3241,8 @@ export function DailySheetPage({
   useEffect(() => {
     const cancel = () => {
       pendingScrollRef.current = null
+      // 未読者欄から確認欄へ送っている途中も止める（送り始める前＝確認の窓の「切り替える」を押した時は止めない）
+      if (readCheckTargetRef.current?.started) readCheckTargetRef.current = null
     }
     const onScroll = () => {
       if (pendingScrollRef.current === null) return
@@ -3304,24 +3313,55 @@ export function DailySheetPage({
     [askLeave, day, unit, visibleDays],
   )
 
-  /** 未読者欄の日を押した: その日へ移り、その日の確認欄が描けたら見える所まで送る（最大3秒待つ） */
+  /**
+   * 未読者欄の日を押した: その日へ移り、その日の確認欄を見える所まで送る。
+   * 未保存の確認の窓が出た時は「切り替える」を押して日が移ってから送る（押した時から数えない）。
+   * 日の頭への位置合わせ（pendingScrollRef）は止める＝確認欄へ送った後に日の頭へ引き戻さない。
+   * 上の日が後から読み込まれてずれた分を、0.5秒後に1回だけ取り直す。画面に触れたら止める。
+   */
+  const readCheckTargetRef = useRef<{ day: string; until: number; started: boolean } | null>(null)
+  const scrollToReadCheck = useCallback((target: string) => {
+    const t0 = Date.now()
+    let hits = 0
+    if (readCheckTargetRef.current?.day === target) readCheckTargetRef.current.started = true
+    const tick = () => {
+      const cur = readCheckTargetRef.current
+      if (!cur || cur.day !== target) return
+      const el = document.getElementById(`readcheck-${target}`)
+      if (el) {
+        pendingScrollRef.current = null
+        el.scrollIntoView({ block: 'center' })
+        hits += 1
+        if (hits >= 2) {
+          readCheckTargetRef.current = null
+          return
+        }
+        window.setTimeout(tick, 500)
+        return
+      }
+      if (Date.now() - t0 < 8000) window.setTimeout(tick, 150)
+      else readCheckTargetRef.current = null
+    }
+    window.setTimeout(tick, 50)
+  }, [])
   const goReadCheck = useCallback(
     (next: string) => {
       if (!ISO_DATE_RE.test(next)) return
-      const t0 = Date.now()
-      const tryScroll = () => {
-        const el = document.getElementById(`readcheck-${next}`)
-        if (el) {
-          el.scrollIntoView({ block: 'center', behavior: 'smooth' })
-          return
-        }
-        if (Date.now() - t0 < 3000) window.setTimeout(tryScroll, 150)
-      }
-      if (next !== day) goDay(next)
-      window.setTimeout(tryScroll, 0)
+      readCheckTargetRef.current = { day: next, until: Date.now() + 60_000, started: false }
+      if (next === day) scrollToReadCheck(next)
+      else goDay(next)
     },
-    [day, goDay],
+    [day, goDay, scrollToReadCheck],
   )
+  useEffect(() => {
+    const t = readCheckTargetRef.current
+    if (!t) return
+    if (t.day !== day || Date.now() > t.until) {
+      readCheckTargetRef.current = null
+      return
+    }
+    scrollToReadCheck(day)
+  }, [day, scrollToReadCheck])
 
   const goUnit = useCallback(
     (next: SheetUnit) => {

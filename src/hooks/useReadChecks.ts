@@ -174,6 +174,9 @@ export interface UnreadSource {
   today: string | null
   checks: Map<string, Set<number>>
   duty: FacilityDutyTable | null
+  /** 勤務表の名簿の全員（在籍）の氏名の鍵・主の区分が通所の人の氏名の鍵（読めない時は null） */
+  roster: Set<string> | null
+  dayKeys: Set<string> | null
 }
 
 /**
@@ -181,14 +184,14 @@ export interface UnreadSource {
  * 読み直し: 今日が変わった時・〔最新に更新〕（reloadToken）・確認欄で ✔ を付けた／取り消した後（version）。表示系から書き込まない。
  */
 export function useUnreadSource(today: string, reloadToken: number, version: number): UnreadSource {
-  const [st, setSt] = useState<UnreadSource>({ ready: false, failed: false, missing: false, today: null, checks: new Map(), duty: null })
+  const [st, setSt] = useState<UnreadSource>({ ready: false, failed: false, missing: false, today: null, checks: new Map(), duty: null, roster: null, dayKeys: null })
   const genRef = useRef(0)
   useEffect(() => {
     const my = ++genRef.current
     let alive = true
     const window = unreadWindow(today)
     if (window.length === 0) {
-      setSt({ ready: true, failed: false, missing: false, today, checks: new Map(), duty: null })
+      setSt({ ready: true, failed: false, missing: false, today, checks: new Map(), duty: null, roster: null, dayKeys: null })
       return
     }
     void (async () => {
@@ -196,6 +199,8 @@ export function useUnreadSource(today: string, reloadToken: number, version: num
       let failed = false
       let missing = false
       let duty: FacilityDutyTable | null = null
+      let roster: Set<string> | null = null
+      let dayKeys: Set<string> | null = null
       try {
         const r = await fetchReadChecks(window)
         missing = r.missing
@@ -209,9 +214,18 @@ export function useUnreadSource(today: string, reloadToken: number, version: num
       if (src) {
         const t = buildFacilityDutyTable(src, days)
         duty = t.size > 0 ? t : null
+        roster = new Set()
+        dayKeys = new Set()
+        for (const s of src.staff) {
+          if (s.active === false || s.status === '退職') continue
+          const k = nameKey(s.name)
+          if (!k) continue
+          roster.add(k)
+          if (s.mainDivision === '通所') dayKeys.add(k)
+        }
       } else failed = true
       if (!alive || my !== genRef.current) return
-      setSt({ ready: true, failed, missing, today, checks, duty })
+      setSt({ ready: true, failed, missing, today, checks, duty, roster, dayKeys })
     })()
     return () => {
       alive = false

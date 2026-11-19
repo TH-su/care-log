@@ -49,7 +49,12 @@ export function UnreadSummaryBanner({
   if (summary === null || summary.window.length === 0) return null
   const n = summary.people.length
   const und = summary.undeterminedDays.length
-  const undNote = und > 0 ? <span className="text-ink2">・判定できない日 {und}日（勤務表が無い・読めない記号）</span> : null
+  const undNote = (
+    <>
+      {und > 0 && <span className="text-ink2">・判定できない日 {und}日（勤務表が無い・読めない記号）</span>}
+      {summary.unmatched > 0 && <span className="text-ink2">・勤務表で名前が見つからない職員 {summary.unmatched}名（数えていません）</span>}
+    </>
+  )
   if (n === 0) {
     return (
       <div className={`${box} ${und > 0 ? 'border-border text-ink2' : 'border-ok bg-ok-bg text-ok'}`} role="status">

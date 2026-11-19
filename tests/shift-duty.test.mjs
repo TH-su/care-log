@@ -328,6 +328,18 @@ if (D === null) {
       assert.equal(n.people.length, 0)
       assert.deepEqual(n.undeterminedDays, R.unreadWindow(today))
     })
+    it('勤務表で名前が見つからない職員（勤務表から同期した人）は数えず、人数だけ知らせる（厨房など hire_order の無い人は数えない）', () => {
+      const st2 = [...staff.map((x) => ({ ...x, hire_order: x.id })), { id: 7, name: '表記違い01', hire_order: 7 }, { id: 8, name: '厨房02', hire_order: null }]
+      const roster2 = new Set(roster.map((r) => r.name))
+      const s = R.buildUnreadSummary({ today, staff: st2, duty, checks: empty, rosterKeys: roster2 })
+      assert.equal(s.unmatched, 2, '表記違い01 と 厨房01（hire_order あり）')
+      assert.equal(s.people.some((p) => p.id === 7 || p.id === 8), false)
+      assert.equal(R.buildUnreadSummary({ today, staff: st2, duty, checks: empty }).unmatched, 0, '名簿が読めない時は数えない')
+    })
+    it('デイ職員と同じ氏名の施設の職員がいても、デイ職員の氏名は出さない（指示を先にする）', () => {
+      const s = R.buildUnreadSummary({ today, staff, duty, checks: empty, dayKeys: new Set(['日勤01']) })
+      assert.equal(s.people.some((p) => p.name === '日勤01'), false)
+    })
     it('読めない記号の人がいる日は判定できない日に数える', () => {
       const p2 = { cells: { ...plan.cells, e: { ...plan.cells.e, 21: 'ABC' } }, subCells: plan.subCells }
       const t = D.buildFacilityDutyTable({ ...src, months: { '2026-11': { plan: p2, actual: null } } }, days)
@@ -361,6 +373,13 @@ if (D === null) {
       assert.match(sec, /aria-expanded=\{open\}/)
       assert.match(sec, /onClick=\{\(\) => onPickDay\(d\)\}/)
       assert.match(sec, /useState\(false\)/, '開いた状態は覚えない（毎回閉じて始まる）')
+    })
+    it('未読者欄の日を押すと、日が移ってから（確認の窓の後でも）確認欄へ送り、日の頭への位置合わせで引き戻さない', () => {
+      const sec = page.slice(page.indexOf('const readCheckTargetRef'), page.indexOf('const goUnit = useCallback('))
+      assert.match(sec, /pendingScrollRef\.current = null\s+el\.scrollIntoView/)
+      assert.match(sec, /if \(next === day\) scrollToReadCheck\(next\)\s+else goDay\(next\)/)
+      assert.match(sec, /\}, \[day, scrollToReadCheck\]\)/, '日が移った時に送る')
+      assert.match(page, /if \(readCheckTargetRef\.current\?\.started\) readCheckTargetRef\.current = null/, '「切り替える」を押した時は止めない')
     })
     it('日報に置いてある（ページの上の未読者欄と、日の枠の末尾の確認欄）', () => {
       assert.match(page, /<UnreadSummaryBanner summary=\{unreadSummary\} source=\{unreadSource\} onPickDay=\{goReadCheck\} \/>/)

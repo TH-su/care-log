@@ -55,7 +55,7 @@ function Preview() {
     },
   }
   const fac = useMemo(() => buildFacilityDutyTable(src, days), [])
-  const source: UnreadSource = { ready: true, failed: false, missing: false, today: TODAY, checks, duty: fac }
+  const source: UnreadSource = { ready: true, failed: false, missing: false, today: TODAY, checks, duty: fac, roster: null, dayKeys: null }
   const summary = buildUnreadSummary({ today: TODAY, staff, duty: fac, checks })
   return (
     <div className="mx-auto max-w-5xl space-y-6 bg-surface p-4 text-ink">
