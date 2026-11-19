@@ -157,7 +157,9 @@ export function ReadCheckPanel({
 }) {
   const [pending, setPending] = useState<Pending | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
-  if (panel.source === 'future' || panel.source === 'before') return null
+  // 確認欄を出さない日（始める前の日）でも、〔未読者〕の置き場の日なら〔未読者〕だけは出す（読み込み中と読み終えた後で見え方を変えない・反証レビュー medium）
+  if (panel.source === 'future' || panel.source === 'before')
+    return showUnread ? <UnreadOnlyPanel summary={summary} unreadSource={unreadSource} onPickDay={onPickDay} /> : null
   // 勤務表を読み終える前は並べない（読む前の仮の並びで押し間違えないように）
   const shiftReady = state.shiftLoaded
 

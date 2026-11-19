@@ -674,6 +674,12 @@ if (D === null) {
       assert.match(only, /if \(!unreadShown\(summary, unreadSource\)\) return null/, '出すものが無い時は空の枠を出さない')
       assert.match(only, /className="dsheet-readcheck print:hidden/, '画面だけ・確認欄と同じ細い枠')
       assert.match(only, /<UnreadButton summary=\{summary\} source=\{unreadSource\} onPickDay=\{onPickDay\} \/>/)
+      const panelSec = comp.slice(comp.indexOf('export function ReadCheckPanel'))
+      assert.match(
+        panelSec,
+        /if \(panel\.source === 'future' \|\| panel\.source === 'before'\)\s+return showUnread \? <UnreadOnlyPanel /,
+        '確認欄を出さない日でも、読み終えた後に〔未読者〕が消えない',
+      )
       assert.match(page, /\{phase !== 'ready' && showUnread && \(\s+<UnreadOnlyPanel summary=\{unreadSummary\} unreadSource=\{unreadSource\} onPickDay=\{onPickUnread\} \/>/)
     })
     it('未読の日付を押すと、その日の申送の頭へ移る（すぐ読めるように）', () => {
