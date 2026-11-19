@@ -410,9 +410,11 @@ if (D === null) {
       const p = panel('2026-11-20', '2026-11-21')
       assert.deepEqual(p.members.map((m) => [m.name, m.why]), [['早番01', 'day'], ['遅番01', 'day'], ['夜勤01', 'night']])
     })
-    it('✔ を付けた人は並びの外でも並ぶ（取り消せるように）', () => {
+    // 2026-11-19 代表者の指示（今日の確認欄に、読む番でないのに ✔ の付いた人が別に出ていた＝他者と同様に）で、
+    // 前の決まり「✔ を付けた人は並びの外でも並ぶ」を改めた（意図を変えた書き換え）
+    it('✔ を付けただけの人は、読む番でなければ並ばない（ほかの職員と同じ）', () => {
       const p = panel('2026-11-20', '2026-11-20', [1])
-      assert.deepEqual(p.members.map((m) => [m.name, m.why, m.checked]), [['早番01', 'checked', true], ['夜勤01', 'night', false]])
+      assert.deepEqual(p.members.map((m) => [m.name, m.why, m.checked]), [['夜勤01', 'night', false]])
     })
     it('翌日の勤務表が無い・勤務表が読めない時は、デイ職員を除く名簿の全員を並べる', () => {
       const p = R.buildCheckPanel({ day: '2026-11-20', today: '2026-11-21', staff, duty: null, checkedIds: new Set(), rosterKeys, dayKeys })
@@ -631,6 +633,12 @@ if (D === null) {
   })
 
   describe('静的検査', () => {
+    it('未読の日へ移った後、目的の日の頭に合わせ続ける（上の日が描かれてずれても日の頭へ・2026-11-19 代表者の指示）', () => {
+      const page = read('../src/pages/DailySheetPage.tsx')
+      assert.match(page, /const JUMP_HOLD_MS = 2500/)
+      assert.match(page, /jumpRef\.current = \{ day: next, until: Date\.now\(\) \+ JUMP_HOLD_MS \}/)
+      assert.match(page, /window\.addEventListener\('pointerdown', stop, \{ passive: true \}\)/)
+    })
     const comp = read('../src/components/DailyReadCheck.tsx')
     const page = read('../src/pages/DailySheetPage.tsx')
     const db = read('../src/lib/db.ts')

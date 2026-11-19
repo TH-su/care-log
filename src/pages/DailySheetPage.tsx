@@ -783,6 +783,9 @@ function noteTargetName(r: Resident | undefined, id: number | null): string {
  * 表の幅が画面より広い時（狭い画面）でも、行の下の一言・送れていない申し送りの一覧が画面の中に収まるようにする
  * （横にずらしても左端に留め、幅を画面に収める。広い画面では幅いっぱいのまま＝見た目は変わらない）
  */
+/** 未読の日へ移った後、目的の日の頭に合わせ続ける時間（2026-11-19・その間に上の日が描かれて位置がずれるため） */
+const JUMP_HOLD_MS = 2500
+
 const NARROW_STICKY: CSSProperties = {
   position: 'sticky',
   left: 0,
@@ -3346,16 +3349,82 @@ export function DailySheetPage({
    * 日が変わる時は、日を変えた時の位置合わせ（上の effect）がその日の頭へ送る。未保存の入力があれば確認の窓の後に移る。
    * もう表示中の日なら、その日の頭へ送るだけ。
    */
+  /**
+   * 未読の日への移動（〔未読者〕の日付・赤い氏名枠の日付）。2026-11-19 代表者の指示「未確認日のトップに飛ぶ」:
+   * 移った後に、上にある日の中身が描かれて（content-visibility の仮の高さが本当の高さに変わって）目的の日が下へずれ、
+   * その日の確認欄の辺りに着いていた。移ってから JUMP_HOLD_MS の間、目的の日の頭の位置を毎フレーム見て、ずれたら合わせ直す。
+   * 利用者が画面に触れた・キーを押したら打ち切る（読み始めた所を動かさない。wheel・touchmove の受け手は付けない＝iPhone の重さの規約）
+   */
+  const jumpRef = useRef<{ day: string; until: number } | null>(null)
+  const [jumpTick, setJumpTick] = useState(0)
+  /** 今表示している日（移る先の日を確認の窓で待っている間は、まだ前の日） */
+  const curDayRef = useRef(day)
+  curDayRef.current = day
   const goUnreadDay = useCallback(
     (next: string) => {
       if (!ISO_DATE_RE.test(next)) return
+      jumpRef.current = { day: next, until: Date.now() + JUMP_HOLD_MS }
       if (next === day) {
         pendingScrollRef.current = { day: next, until: Date.now() + 5000 }
         scrollToDay(next)
       } else goDay(next)
+      setJumpTick((n) => n + 1)
     },
     [day, goDay, scrollToDay],
   )
+  useEffect(() => {
+    if (jumpTick === 0) return
+    const j0 = jumpRef.current
+    if (j0 === null) return
+    // 別の区切りへ移る時は、書きかけの確認の窓を待つことがある。目的の日に切り替わってから（この effect が day で
+    // やり直された時から）時間を数え始める（反証 low: 窓に長く留まると期限が切れていた）
+    if (j0.day === day) j0.until = Date.now() + JUMP_HOLD_MS
+    let raf = 0
+    let lastTop: number | null = null
+    const stop = () => {
+      // 目的の日に移る前（確認の窓のボタンを押した時など）は打ち切らない
+      if (jumpRef.current !== null && curDayRef.current !== jumpRef.current.day) return
+      jumpRef.current = null
+      window.cancelAnimationFrame(raf)
+    }
+    const targetTop = (): number | null => {
+      const j = jumpRef.current
+      const el = j ? dayElsRef.current.get(j.day) : undefined
+      return el ? el.getBoundingClientRect().top : null
+    }
+    const step = () => {
+      const j = jumpRef.current
+      if (j === null || Date.now() > j.until) {
+        jumpRef.current = null
+        return
+      }
+      const top = j.day === curDayRef.current ? targetTop() : null
+      if (top !== null && (lastTop === null || Math.abs(top - lastTop) > 2)) {
+        scrollToDay(j.day)
+        lastTop = targetTop()
+      }
+      raf = window.requestAnimationFrame(step)
+    }
+    // 利用者のスクロール（ホイール・トラックパッドも）: 自分の位置合わせの直後を除くスクロールで、目的の日が合わせた位置から
+    // 動いていれば打ち切る（上の日が描かれた時のスクロールの錨合わせは目的の日を動かさないので打ち切らない）。
+    // wheel・touchmove の受け手は付けない（iPhone の重さの規約）
+    const onScroll = () => {
+      if (jumpRef.current === null || lastTop === null) return
+      if (performance.now() < selfScrollUntilRef.current) return
+      const top = targetTop()
+      if (top !== null && Math.abs(top - lastTop) > 2) stop()
+    }
+    raf = window.requestAnimationFrame(step)
+    window.addEventListener('pointerdown', stop, { passive: true })
+    window.addEventListener('keydown', stop)
+    window.addEventListener('scroll', onScroll, { passive: true, capture: true })
+    return () => {
+      window.cancelAnimationFrame(raf)
+      window.removeEventListener('pointerdown', stop)
+      window.removeEventListener('keydown', stop)
+      window.removeEventListener('scroll', onScroll, { capture: true })
+    }
+  }, [jumpTick, day, scrollToDay])
 
   const goUnit = useCallback(
     (next: SheetUnit) => {
