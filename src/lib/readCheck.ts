@@ -292,7 +292,7 @@ export function buildUnreadSummary(args: {
 // 日報 R の確認欄には、R を読む人だけを並べる:
 //   - R の夜勤入りの人（夜勤は当日の日報から。今日の日報にも出る）
 //   - R の翌日に日勤（早番・遅番を含む）の人（日勤は前日までの日報。R が昨日以前の時だけ＝今日の日報には出さない）
-//   - R に ✔ を付けた人（取り消せるように）
+//   - ✔ を付けただけの人は並べない（読む番の人だけ。2026-11-19 代表者の指示「他者と同様の扱い」＝番でない日に付いた ✔ の人を別に並べない）
 // 施設の勤務の欄だけで決める。デイ職員（主の区分が通所）は並べない。
 // 勤務表が読めない・R（昨日以前は R の翌日も）の月の勤務表が無い時は、勤務表から同期した職員のうちデイ職員を除いた全員を並べる（fallback）。
 
@@ -366,7 +366,6 @@ export function buildCheckPanel(args: {
     if (night) members.push({ id: s.id, name: s.name, checked, why: 'night' })
     else if (dayW) members.push({ id: s.id, name: s.name, checked, why: 'day' })
     else if (same) members.push({ id: s.id, name: s.name, checked, why: 'sameday' })
-    else if (checked) members.push({ id: s.id, name: s.name, checked, why: 'checked' })
     else if (noMatch) members.push({ id: s.id, name: s.name, checked, why: 'nomatch' })
   }
   return { source: noNext ? 'nonext' : 'shift', members, stale, isToday }
