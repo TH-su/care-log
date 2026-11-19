@@ -542,13 +542,15 @@ if (D === null) {
       const p = R.buildCheckPanel({ day: '2026-11-19', today: '2026-11-19', staff, duty: f3, checkedIds: new Set(), rosterKeys, dayKeys: new Set(), nowMin: 23 * 60 + 45 })
       assert.equal(p.members.some((m) => m.id === 1), false)
     })
-    it('未読者: 公開より前に番が来た分（前日の夜勤）は数えず、今日の朝の日勤の人・今夜の夜勤の人は番が来てから数える', () => {
+    // 2026-11-19 代表者の指示「夜勤者は当日日中の分から確認する。18日の分はすでに未読」で意図を変えた: 前日（11-18）の夜勤の分も数える
+    // （以前はこの検査で「公開より前に番が来た前日の夜勤は数えない」を固定していた）
+    it('未読者: 前日（11-18）の夜勤の人はその日の夜勤入りの30分前から数え、今日の朝の日勤の人・今夜の夜勤の人は番が来てから数える', () => {
       const at = (h) => R.buildUnreadSummary({ today: '2026-11-19', staff, duty: fac, checks: new Map(), rosterKeys, dayKeys: new Set(), nowMin: h * 60 })
       const s8 = at(8)
-      assert.deepEqual([...s8.byDay.get('2026-11-18')].sort(), [1], '8時: 早番01 だけ（夜勤01 は 11-18 の 20:30 に番が来た＝公開より前・遅番01 は 10:30 から）')
+      assert.deepEqual([...s8.byDay.get('2026-11-18')].sort(), [1, 3], '8時: 早番01 と夜勤01（11-18 の 20:30 に番が来た＝夜勤は当日の分から）。遅番01 は 10:30 から')
       assert.deepEqual([...s8.byDay.get('2026-11-19')], [], '今日の日報は夜勤の番の前')
       const s21 = at(21)
-      assert.deepEqual([...s21.byDay.get('2026-11-18')].sort(), [1, 2])
+      assert.deepEqual([...s21.byDay.get('2026-11-18')].sort(), [1, 2, 3])
       assert.deepEqual([...s21.byDay.get('2026-11-19')], [2], '21時: 今夜の夜勤（遅番01 の (21）は 20:30 から')
       assert.deepEqual(s21.undeterminedDays, [])
       const f2 = D.buildFacilityDutyTable(src, ['2026-11-18', '2026-11-19'])

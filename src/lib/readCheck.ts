@@ -33,7 +33,9 @@ export const READ_CHECK_FROM = '2026-11-19'
 export const READ_CHECK_FIELD_DAYS = 14
 /**
  * 確認欄を出し始める日（2026-11-19 代表者の指示「前日の確認欄自体が出ていない」への直し）。始めた日の朝の日勤の人は前日の日報を読むので、
- * 確認欄は始めた日の前日から出す。未読に数えるのは、読む番が来た時刻が始めた日の0時より後の分だけ（公開より前の夜勤の分で赤くしない）
+ * 確認欄は始めた日の前日から出す。未読に数えるのも確認欄を出した日（この日）の0時より後に番が来た分から
+ * （2026-11-19 代表者の指示「夜勤者は当日日中の分から確認する。18日の分はすでに未読になっている必要がある」＝前日の夜勤の分も数える。
+ *  以前の「始めた日（READ_CHECK_FROM）の0時より後の分だけ」を置き換えた）
  */
 export const READ_CHECK_PANEL_FROM = '2026-11-18'
 /** 出勤の何分前から、確認欄・未読者に名前を出すか（2026-11-19 代表者の指示「出勤時間30分前」） */
@@ -235,7 +237,7 @@ export function buildUnreadSummary(args: {
   const undeterminedDays: string[] = []
   const per = new Map<number, string[]>()
   const nowAbs = absMinute(today, nowMin)
-  const launch = absMinute(READ_CHECK_FROM, 0)
+  const launch = absMinute(READ_CHECK_PANEL_FROM, 0)
   for (const r of window) {
     const rowR = duty?.get(r) ?? null
     // 今日の日報の日勤の人の番は翌日に来るので、今日は翌日の勤務表が無くても数えられる
@@ -254,7 +256,7 @@ export function buildUnreadSummary(args: {
       const b = rowN.get(k)
       if (a === undefined && b === undefined) continue // 勤務表の名簿に居ない・デイ職員
       // 読む番が来た人だけ（夜勤は入りの30分前・日勤は翌日の出勤の30分前から・2026-11-19 代表者の指示）。
-      // 始めた日（READ_CHECK_FROM）の0時より前に番が来た分は数えない（公開より前の分で赤くしない）
+      // 確認欄を出した日（READ_CHECK_PANEL_FROM）の0時より前に番が来た分は数えない（夜勤の人の当日の分は数える・2026-11-19 代表者の指示）
       const t = readTurns(r, a, b)
       const due = (x: number | null) => x !== null && x <= nowAbs && x >= launch
       // 今日の日報は日勤の番を数えない（日勤の人は翌日、前日の分として読む。確認欄の並びとそろえる＝翌日 0:00〜0:29 の出勤の人を今日の未読に出さない）
