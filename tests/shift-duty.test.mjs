@@ -668,6 +668,14 @@ if (D === null) {
       assert.match(panel, /\{showUnread && <UnreadButton /, '10日表示でも1つだけ')
       assert.match(page, /showUnread=\{d === unreadHost\}/)
     })
+    // 2026-11-19 代表者の指示「未読者の表示を直す」: この日の日報が読み込み中・失敗の間も〔未読者〕を出す
+    it('日報の読み込み中・失敗の間も〔未読者〕だけは出す（確認欄は読み終えてから）', () => {
+      const only = comp.slice(comp.indexOf('export function UnreadOnlyPanel'), comp.indexOf('type Pending'))
+      assert.match(only, /if \(!unreadShown\(summary, unreadSource\)\) return null/, '出すものが無い時は空の枠を出さない')
+      assert.match(only, /className="dsheet-readcheck print:hidden/, '画面だけ・確認欄と同じ細い枠')
+      assert.match(only, /<UnreadButton summary=\{summary\} source=\{unreadSource\} onPickDay=\{onPickDay\} \/>/)
+      assert.match(page, /\{phase !== 'ready' && showUnread && \(\s+<UnreadOnlyPanel summary=\{unreadSummary\} unreadSource=\{unreadSource\} onPickDay=\{onPickUnread\} \/>/)
+    })
     it('未読の日付を押すと、その日の申送の頭へ移る（すぐ読めるように）', () => {
       const sec = page.slice(page.indexOf('const goUnreadDay'), page.indexOf('const goUnit = useCallback('))
       assert.match(sec, /scrollToDay\(next\)\s+\} else goDay\(next\)/)
