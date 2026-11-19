@@ -513,6 +513,26 @@ if (D === null) {
       const s = R.buildUnreadSummary({ today: '2026-11-19', staff, duty: fac, checks: new Map(), rosterKeys, dayKeys: new Set(), nowMin: 23 * 60 })
       assert.equal(s.people.some((p) => p.name === '施設長01'), false)
     })
+    it('施設長が勤務表で日勤・夜勤に入っていても、未読には数えない（確認欄の赤い「未読」も出ない）', () => {
+      const st2 = [...staff, { id: 10, name: '早番02', hire_order: 10 }]
+      const r2 = [...roster, { id: 'f', name: '早番02', mainDivision: '施設' }]
+      const p2 = { cells: { ...plan.cells, f: { 18: '早', 19: '早' } }, subCells: plan.subCells }
+      const f2 = D.buildFacilityDutyTable({ ...src, staff: r2, months: { '2026-11': { plan: p2, actual: null } } }, ['2026-11-18', '2026-11-19', '2026-11-20'])
+      const s = R.buildUnreadSummary({ today: '2026-11-19', staff: st2, duty: f2, checks: new Map(), rosterKeys: new Set(r2.map((r) => r.name)), dayKeys: new Set(), nowMin: 10 * 60, managerId: 10 })
+      assert.equal(s.people.some((p) => p.id === 10), false)
+      assert.equal(s.byDay.get('2026-11-18').has(10), false)
+      const s0 = R.buildUnreadSummary({ today: '2026-11-19', staff: st2, duty: f2, checks: new Map(), rosterKeys: new Set(r2.map((r) => r.name)), dayKeys: new Set(), nowMin: 10 * 60 })
+      assert.equal(s0.byDay.get('2026-11-18').has(10), true, '施設長でなければ数える（見本の確かめ）')
+    })
+    it('今日の日報は日勤の番を数えない（23:30 以降でも、翌日 0 時台の出勤の人を今日の未読に出さない・確認欄とそろえる）', () => {
+      const SYM0 = [...SYM, { code: '深', type: 'work', start: '00:00' }]
+      const p3 = { cells: { ...plan.cells, a: { 18: '早', 19: '早', 20: '深' } }, subCells: plan.subCells }
+      const f3 = D.buildFacilityDutyTable({ ...src, symbols: SYM0, months: { '2026-11': { plan: p3, actual: null } } }, ['2026-11-18', '2026-11-19', '2026-11-20'])
+      const s = R.buildUnreadSummary({ today: '2026-11-19', staff, duty: f3, checks: new Map(), rosterKeys, dayKeys: new Set(), nowMin: 23 * 60 + 45 })
+      assert.equal(s.byDay.get('2026-11-19').has(1), false)
+      const p = R.buildCheckPanel({ day: '2026-11-19', today: '2026-11-19', staff, duty: f3, checkedIds: new Set(), rosterKeys, dayKeys: new Set(), nowMin: 23 * 60 + 45 })
+      assert.equal(p.members.some((m) => m.id === 1), false)
+    })
     it('未読者: 公開より前に番が来た分（前日の夜勤）は数えず、今日の朝の日勤の人・今夜の夜勤の人は番が来てから数える', () => {
       const at = (h) => R.buildUnreadSummary({ today: '2026-11-19', staff, duty: fac, checks: new Map(), rosterKeys, dayKeys: new Set(), nowMin: h * 60 })
       const s8 = at(8)

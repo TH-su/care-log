@@ -224,8 +224,11 @@ export function buildUnreadSummary(args: {
   dayKeys?: ReadonlySet<string> | null
   /** 今の時刻（今日の0時からの分）。今日が出勤の日の人は、その出勤の時刻より後に名前を出す（省略＝一日の終わり＝出す） */
   nowMin?: number
+  /** 施設長（設定の manager_staff_id）。確認欄にはいつも並ぶが、未読には数えない（2026-11-19 代表者の指示「常に表示で問題ない」） */
+  managerId?: number | null
 }): UnreadSummary {
   const { today, staff, duty, checks } = args
+  const managerId = args.managerId ?? null
   const nowMin = args.nowMin ?? 24 * 60
   const rosterKeys = args.rosterKeys ?? null
   const dayKeys = args.dayKeys ?? null
@@ -248,7 +251,7 @@ export function buildUnreadSummary(args: {
     let unknown = false
     for (const s of staff) {
       const k = nameKey(s.name)
-      if (!k || dayKeys?.has(k)) continue
+      if (!k || dayKeys?.has(k) || s.id === managerId) continue
       const a = rowR.get(k)
       const b = rowN.get(k)
       if (a === undefined && b === undefined) continue // 勤務表の名簿に居ない・デイ職員
@@ -256,7 +259,8 @@ export function buildUnreadSummary(args: {
       // 始めた日（READ_CHECK_FROM）の0時より前に番が来た分は数えない（公開より前の分で赤くしない）
       const t = readTurns(r, a, b)
       const due = (x: number | null) => x !== null && x <= nowAbs && x >= launch
-      const must = due(t.night) || due(t.day)
+      // 今日の日報は日勤の番を数えない（日勤の人は翌日、前日の分として読む。確認欄の並びとそろえる＝翌日 0:00〜0:29 の出勤の人を今日の未読に出さない）
+      const must = due(t.night) || (r < today && due(t.day))
       if (!must) {
         // 読めない記号の人は「判定できない日」に数える（出勤の時刻より前の日勤の人も、昨日のセルが読めなければ数える）
         if (a?.unknown || (r < today && b?.unknown)) unknown = true

@@ -3147,9 +3147,10 @@ export function DailySheetPage({
             rosterKeys: unreadSource.roster,
             dayKeys: unreadSource.dayKeys,
             nowMin,
+            managerId: managerStaffId,
           })
         : null,
-    [unreadSource, today, staff, nowMin],
+    [unreadSource, today, staff, nowMin, managerStaffId],
   )
   useEffect(() => {
     const check = () => {
