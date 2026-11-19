@@ -2414,6 +2414,8 @@ interface DaySheetProps {
   onPickUnread: (day: string) => void
   /** この日の確認欄の下に〔未読者〕を出す */
   showUnread: boolean
+  /** 今の時刻（0時からの分）。確認欄には読む番が来た人（出勤の30分前から）だけを並べる */
+  nowMin: number
 }
 
 /**
@@ -3145,9 +3147,10 @@ export function DailySheetPage({
             rosterKeys: unreadSource.roster,
             dayKeys: unreadSource.dayKeys,
             nowMin,
+            managerId: managerStaffId,
           })
         : null,
-    [unreadSource, today, staff, nowMin],
+    [unreadSource, today, staff, nowMin, managerStaffId],
   )
   useEffect(() => {
     const check = () => {
@@ -3688,6 +3691,7 @@ export function DailySheetPage({
                   unreadSource={unreadSource}
                   onPickUnread={goUnreadDay}
                   showUnread={d === unreadHost}
+                  nowMin={nowMin}
                 />
               </section>
             ))}
@@ -3762,6 +3766,7 @@ function DaySheet({
   unreadSource,
   onPickUnread,
   showUnread,
+  nowMin,
 }: DaySheetProps) {
   const [phase, setPhase] = useState<Phase>('loading')
   const [reload, setReload] = useState(0)
@@ -6283,8 +6288,10 @@ function DaySheet({
         checkedIds: readChecks.checks.get(day) ?? new Set<number>(),
         rosterKeys: readChecks.rosterKeys,
         dayKeys: readChecks.dayKeys,
+        nowMin,
+        managerId: managerStaffId,
       }),
-    [day, today, staff, readChecks.fac, readChecks.checks, readChecks.rosterKeys, readChecks.dayKeys],
+    [day, today, staff, readChecks.fac, readChecks.checks, readChecks.rosterKeys, readChecks.dayKeys, nowMin, managerStaffId],
   )
 
   /** この日に保存されている記録の数（0 のときは空状態の一言を出す） */

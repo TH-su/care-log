@@ -276,13 +276,15 @@ if (D === null) {
     const duty = D.buildFacilityDutyTable(src, days)
     const empty = new Map(R.unreadWindow(today).map((d) => [d, new Set()]))
 
-    it('数える日は昨日まで（今日の分は数えない）・始めた日から', () => {
-      assert.deepEqual(R.unreadWindow('2026-11-19'), [])
-      assert.deepEqual(R.unreadWindow('2026-11-20'), ['2026-11-19'])
-      assert.deepEqual(R.unreadWindow(today), ['2026-11-19', '2026-11-20', '2026-11-21', '2026-11-22'])
-      assert.deepEqual(days.at(-1), today)
+    // 2026-11-19 代表者の指示（現場の端末で見た後）: 今日の日報も夜勤の人は入りの30分前から読む番＝今日まで数える。
+    // 確認欄は始めた日の前日（11-18）から出す（始めた日の朝の日勤の人が読む前日の分）。前の「昨日まで・始めた日から」の検査は置き換えた
+    it('数える日は確認欄を出し始めた日（始めた日の前日）から今日まで・14日前まで', () => {
+      assert.deepEqual(R.unreadWindow('2026-11-17'), [])
+      assert.deepEqual(R.unreadWindow('2026-11-19'), ['2026-11-18', '2026-11-19'])
+      assert.deepEqual(R.unreadWindow(today), ['2026-11-18', '2026-11-19', '2026-11-20', '2026-11-21', '2026-11-22', '2026-11-23'])
+      assert.deepEqual(days.at(-1), '2026-11-24', '勤務表は今日の翌日まで読む')
       const w = R.unreadWindow('2026-12-31')
-      assert.equal(w.length, 14, '14日前から昨日まで')
+      assert.equal(w.length, 15, '14日前から今日まで')
       assert.equal(w[0], '2026-12-17')
     })
     it('施設の勤務だけ・デイ職員（主の区分が通所）は施設の応援があっても入れない・日勤と夜勤入りを分けて持つ', () => {
@@ -433,7 +435,8 @@ if (D === null) {
     })
     it('まだ来ていない日・始める前の日は確認欄を出さない', () => {
       assert.equal(panel('2026-11-22', '2026-11-21').source, 'future')
-      assert.equal(panel('2026-11-18', '2026-11-21').source, 'before')
+      // 2026-11-19: 確認欄は始めた日の前日（11-18）から出すので、出さないのは 11-17 より前
+      assert.equal(panel('2026-11-17', '2026-11-21').source, 'before')
     })
     it('休み明けの出勤の日の人は、出勤の時刻より後に未読者に名前が出る', () => {
       const empty = new Map([['2026-11-19', new Set()], ['2026-11-20', new Set()]])
@@ -442,6 +445,106 @@ if (D === null) {
       assert.deepEqual([...at(7)].sort(), [1, 3], '7時: 早番01 も')
       assert.deepEqual([...at(11)].sort(), [1, 2, 3], '11時: 休み明けの遅番01 も')
       assert.equal([...at(11)].includes(4), false, 'デイ職員は出ない')
+    })
+  })
+
+  describe('出勤の30分前から名前を出す・前日の確認欄・施設長（2026-11-19 代表者の指示・現場の端末で見た後）', () => {
+    const SYM = [
+      { code: '早', type: 'work', start: '07:00' },
+      { code: '遅', type: 'work', start: '11:00' },
+      { code: '(21', type: 'nightIn', start: '21:00' },
+      { code: '7)', type: 'nightOut' },
+      { code: '休', type: 'off' },
+    ]
+    const roster = [
+      { id: 'a', name: '早番01', mainDivision: '施設' },
+      { id: 'b', name: '遅番01', mainDivision: '施設' },
+      { id: 'c', name: '夜勤01', mainDivision: '施設' },
+      { id: 'e', name: '休み01', mainDivision: '施設' },
+      { id: 'm', name: '施設長01', mainDivision: '施設' },
+    ]
+    // 18日: 夜勤01 (21／19日: 早番01 早・遅番01 遅・夜勤01 7)・休み01 休・夜勤02 なし／19日夜: 早番01 は休み、遅番01 が (21
+    const plan = {
+      cells: {
+        a: { 18: '早', 19: '早', 20: '休' },
+        b: { 18: '休', 19: '遅', 20: '7)' },
+        c: { 18: '(21', 19: '7)', 20: '休' },
+        e: { 18: '休', 19: '休', 20: '早' },
+        m: { 18: '休', 19: '休', 20: '休' },
+      },
+      subCells: { b: { 施設: { 19: '(21' } } },
+    }
+    const src = { staff: roster, symbols: SYM, months: { '2026-11': { plan, actual: null } } }
+    const staff = [
+      { id: 1, name: '早番01', hire_order: 1 },
+      { id: 2, name: '遅番01', hire_order: 2 },
+      { id: 3, name: '夜勤01', hire_order: 3 },
+      { id: 5, name: '休み01', hire_order: 5 },
+      { id: 9, name: '施設長01', hire_order: 9 },
+    ]
+    const fac = D.buildFacilityDutyTable(src, ['2026-11-18', '2026-11-19', '2026-11-20', '2026-11-21'])
+    const rosterKeys = new Set(roster.map((r) => r.name))
+    const panel = (day, h, extra = {}) =>
+      R.buildCheckPanel({ day, today: '2026-11-19', staff, duty: fac, checkedIds: new Set(), rosterKeys, dayKeys: new Set(), nowMin: h * 60, ...extra })
+    const names = (p) => p.members.map((m) => [m.name, m.why])
+    it('不具合の再現: 始めた日（11-19）に前日（11-18）の確認欄が出ていなかった＝出す（前日の夜勤入りの人と、今日の出勤の30分前を過ぎた日勤の人）', () => {
+      const p = panel('2026-11-18', 12)
+      assert.equal(p.source, 'shift')
+      assert.deepEqual(names(p), [['早番01', 'day'], ['遅番01', 'day'], ['夜勤01', 'night']])
+    })
+    it('日勤の人は翌日の出勤の30分前から前日の確認欄に並ぶ（早番 7:00 → 6:30・遅番 11:00 → 10:30）', () => {
+      assert.deepEqual(names(panel('2026-11-18', 6)), [['夜勤01', 'night']])
+      assert.deepEqual(names(panel('2026-11-18', 6.5)), [['早番01', 'day'], ['夜勤01', 'night']])
+      assert.deepEqual(names(panel('2026-11-18', 10.5)), [['早番01', 'day'], ['遅番01', 'day'], ['夜勤01', 'night']])
+    })
+    it('夜勤の人は入りの30分前から当日の確認欄に並ぶ（21:00 → 20:30）', () => {
+      assert.deepEqual(names(panel('2026-11-19', 20)), [])
+      assert.deepEqual(names(panel('2026-11-19', 20.5)), [['遅番01', 'night']])
+    })
+    it('休みの人は、休み明けの出勤の30分前にその前日の確認欄に並ぶ', () => {
+      const p = R.buildCheckPanel({ day: '2026-11-19', today: '2026-11-20', staff, duty: fac, checkedIds: new Set(), rosterKeys, dayKeys: new Set(), nowMin: 6 * 60 + 29 })
+      assert.equal(p.members.some((m) => m.name === '休み01'), false, '6:29 はまだ')
+      const q = R.buildCheckPanel({ day: '2026-11-19', today: '2026-11-20', staff, duty: fac, checkedIds: new Set(), rosterKeys, dayKeys: new Set(), nowMin: 6 * 60 + 30 })
+      assert.ok(q.members.some((m) => m.name === '休み01' && m.why === 'day'), '6:30 から')
+    })
+    it('施設長（設定の施設長）は勤務に関わらず、どの日の確認欄にも並ぶ（未読には数えない）', () => {
+      assert.deepEqual(names(panel('2026-11-19', 8, { managerId: 9 })), [['施設長01', 'manager']])
+      assert.ok(names(panel('2026-11-18', 3, { managerId: 9 })).some(([n, w]) => n === '施設長01' && w === 'manager'))
+      const s = R.buildUnreadSummary({ today: '2026-11-19', staff, duty: fac, checks: new Map(), rosterKeys, dayKeys: new Set(), nowMin: 23 * 60 })
+      assert.equal(s.people.some((p) => p.name === '施設長01'), false)
+    })
+    it('施設長が勤務表で日勤・夜勤に入っていても、未読には数えない（確認欄の赤い「未読」も出ない）', () => {
+      const st2 = [...staff, { id: 10, name: '早番02', hire_order: 10 }]
+      const r2 = [...roster, { id: 'f', name: '早番02', mainDivision: '施設' }]
+      const p2 = { cells: { ...plan.cells, f: { 18: '早', 19: '早' } }, subCells: plan.subCells }
+      const f2 = D.buildFacilityDutyTable({ ...src, staff: r2, months: { '2026-11': { plan: p2, actual: null } } }, ['2026-11-18', '2026-11-19', '2026-11-20'])
+      const s = R.buildUnreadSummary({ today: '2026-11-19', staff: st2, duty: f2, checks: new Map(), rosterKeys: new Set(r2.map((r) => r.name)), dayKeys: new Set(), nowMin: 10 * 60, managerId: 10 })
+      assert.equal(s.people.some((p) => p.id === 10), false)
+      assert.equal(s.byDay.get('2026-11-18').has(10), false)
+      const s0 = R.buildUnreadSummary({ today: '2026-11-19', staff: st2, duty: f2, checks: new Map(), rosterKeys: new Set(r2.map((r) => r.name)), dayKeys: new Set(), nowMin: 10 * 60 })
+      assert.equal(s0.byDay.get('2026-11-18').has(10), true, '施設長でなければ数える（見本の確かめ）')
+    })
+    it('今日の日報は日勤の番を数えない（23:30 以降でも、翌日 0 時台の出勤の人を今日の未読に出さない・確認欄とそろえる）', () => {
+      const SYM0 = [...SYM, { code: '深', type: 'work', start: '00:00' }]
+      const p3 = { cells: { ...plan.cells, a: { 18: '早', 19: '早', 20: '深' } }, subCells: plan.subCells }
+      const f3 = D.buildFacilityDutyTable({ ...src, symbols: SYM0, months: { '2026-11': { plan: p3, actual: null } } }, ['2026-11-18', '2026-11-19', '2026-11-20'])
+      const s = R.buildUnreadSummary({ today: '2026-11-19', staff, duty: f3, checks: new Map(), rosterKeys, dayKeys: new Set(), nowMin: 23 * 60 + 45 })
+      assert.equal(s.byDay.get('2026-11-19').has(1), false)
+      const p = R.buildCheckPanel({ day: '2026-11-19', today: '2026-11-19', staff, duty: f3, checkedIds: new Set(), rosterKeys, dayKeys: new Set(), nowMin: 23 * 60 + 45 })
+      assert.equal(p.members.some((m) => m.id === 1), false)
+    })
+    it('未読者: 公開より前に番が来た分（前日の夜勤）は数えず、今日の朝の日勤の人・今夜の夜勤の人は番が来てから数える', () => {
+      const at = (h) => R.buildUnreadSummary({ today: '2026-11-19', staff, duty: fac, checks: new Map(), rosterKeys, dayKeys: new Set(), nowMin: h * 60 })
+      const s8 = at(8)
+      assert.deepEqual([...s8.byDay.get('2026-11-18')].sort(), [1], '8時: 早番01 だけ（夜勤01 は 11-18 の 20:30 に番が来た＝公開より前・遅番01 は 10:30 から）')
+      assert.deepEqual([...s8.byDay.get('2026-11-19')], [], '今日の日報は夜勤の番の前')
+      const s21 = at(21)
+      assert.deepEqual([...s21.byDay.get('2026-11-18')].sort(), [1, 2])
+      assert.deepEqual([...s21.byDay.get('2026-11-19')], [2], '21時: 今夜の夜勤（遅番01 の (21）は 20:30 から')
+      assert.deepEqual(s21.undeterminedDays, [])
+      const f2 = D.buildFacilityDutyTable(src, ['2026-11-18', '2026-11-19'])
+      const s2 = R.buildUnreadSummary({ today: '2026-11-19', staff, duty: f2, checks: new Map(), rosterKeys, dayKeys: new Set(), nowMin: 21 * 60 })
+      assert.equal(s2.undeterminedDays.includes('2026-11-19'), false, '今日の日報は翌日の勤務表が無くても数えられる')
     })
   })
 

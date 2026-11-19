@@ -15,7 +15,7 @@
 //   - 今日から14日より前の日は、現場の端末から ✔ を付けられない（0065 の守り）ので、未読者は出すが目立たせない（stale）。
 // 個人情報: 職員の id と氏名だけを扱う（勤務記号は持たない）。
 
-import type { DutyStatus, DutyTable, FacilityDutyTable } from './shiftDuty.ts'
+import type { DutyStatus, DutyTable, FacilityDuty, FacilityDutyTable } from './shiftDuty.ts'
 import { nameKey } from './shiftDuty.ts'
 
 export interface ReadCheckStaff {
@@ -31,6 +31,35 @@ export type ReadCheckSource = 'shift' | 'attendance' | 'none' | 'future' | 'befo
 export const READ_CHECK_FROM = '2026-11-19'
 /** 現場の端末が ✔ を付けられる日数（今日から何日前まで・0065 の守りと同じ） */
 export const READ_CHECK_FIELD_DAYS = 14
+/**
+ * 確認欄を出し始める日（2026-11-19 代表者の指示「前日の確認欄自体が出ていない」への直し）。始めた日の朝の日勤の人は前日の日報を読むので、
+ * 確認欄は始めた日の前日から出す。未読に数えるのは、読む番が来た時刻が始めた日の0時より後の分だけ（公開より前の夜勤の分で赤くしない）
+ */
+export const READ_CHECK_PANEL_FROM = '2026-11-18'
+/** 出勤の何分前から、確認欄・未読者に名前を出すか（2026-11-19 代表者の指示「出勤時間30分前」） */
+export const READ_CHECK_LEAD_MIN = 30
+
+/** 日と0時からの分を、比べられる1本の数（分）にする。分が負・1440以上でも前後の日へ正しく繰り越す */
+export function absMinute(iso: string, min: number): number {
+  const [y, m, d] = iso.split('-').map((x) => parseInt(x, 10))
+  return Math.round(Date.UTC(y, m - 1, d) / 60000) + min
+}
+
+/**
+ * 日報 R を読む番が来る時刻（absMinute の値）。
+ * 夜勤: R の夜勤入りの時刻の30分前（夜勤は当日の日中の分から読む）。日勤（早番・遅番を含む）: R の翌日の出勤の時刻の30分前（前日の分を読む）。
+ * 休みの人は R の翌日に出勤が無いので、その次の出勤の前日の日報で番が来る（休み明けの出勤の30分前）。時刻が分からない時はその日の0時の30分前。
+ */
+export function readTurns(
+  r: string,
+  a: FacilityDuty | undefined,
+  b: FacilityDuty | undefined,
+): { night: number | null; day: number | null } {
+  return {
+    night: a?.nightIn ? absMinute(r, (a.nightStart ?? 0) - READ_CHECK_LEAD_MIN) : null,
+    day: b?.work ? absMinute(shiftIso(r, 1), (b.workStart ?? 0) - READ_CHECK_LEAD_MIN) : null,
+  }
+}
 
 /** 'YYYY-MM-DD' に日数を足す（暦の日・時刻帯に依らない） */
 export function shiftIso(iso: string, n: number): string {
@@ -170,17 +199,18 @@ export interface UnreadSummary {
 
 /** 数える日（古い順）。今日の前日まで・始めた日から・14日前まで */
 export function unreadWindow(today: string): string[] {
+  // 2026-11-19 代表者の指示: 今日の日報も、夜勤の人は入りの30分前から読む番（今日まで数える。日勤の人の番は翌日に来る）
   const out: string[] = []
   const from = shiftIso(today, -READ_CHECK_FIELD_DAYS)
-  const start = from > READ_CHECK_FROM ? from : READ_CHECK_FROM
-  for (let d = start; d < today; d = shiftIso(d, 1)) out.push(d)
+  const start = from > READ_CHECK_PANEL_FROM ? from : READ_CHECK_PANEL_FROM
+  for (let d = start; d <= today; d = shiftIso(d, 1)) out.push(d)
   return out
 }
 
-/** 勤務表を読むのに要る日（数える日と、その翌日＝最後は今日） */
+/** 勤務表を読むのに要る日（数える日と、その翌日） */
 export function unreadDutyDays(today: string): string[] {
   const w = unreadWindow(today)
-  return w.length === 0 ? [] : [...w, today]
+  return w.length === 0 ? [] : [...w, shiftIso(today, 1)]
 }
 
 export function buildUnreadSummary(args: {
@@ -194,8 +224,11 @@ export function buildUnreadSummary(args: {
   dayKeys?: ReadonlySet<string> | null
   /** 今の時刻（今日の0時からの分）。今日が出勤の日の人は、その出勤の時刻より後に名前を出す（省略＝一日の終わり＝出す） */
   nowMin?: number
+  /** 施設長（設定の manager_staff_id）。確認欄にはいつも並ぶが、未読には数えない（2026-11-19 代表者の指示「常に表示で問題ない」） */
+  managerId?: number | null
 }): UnreadSummary {
   const { today, staff, duty, checks } = args
+  const managerId = args.managerId ?? null
   const nowMin = args.nowMin ?? 24 * 60
   const rosterKeys = args.rosterKeys ?? null
   const dayKeys = args.dayKeys ?? null
@@ -203,9 +236,12 @@ export function buildUnreadSummary(args: {
   const byDay = new Map<string, Set<number>>()
   const undeterminedDays: string[] = []
   const per = new Map<number, string[]>()
+  const nowAbs = absMinute(today, nowMin)
+  const launch = absMinute(READ_CHECK_FROM, 0)
   for (const r of window) {
     const rowR = duty?.get(r) ?? null
-    const rowN = duty?.get(shiftIso(r, 1)) ?? null
+    // 今日の日報の日勤の人の番は翌日に来るので、今日は翌日の勤務表が無くても数えられる
+    const rowN = duty?.get(shiftIso(r, 1)) ?? (r === today ? new Map<string, FacilityDuty>() : null)
     if (!rowR || !rowN) {
       undeterminedDays.push(r)
       continue
@@ -215,17 +251,19 @@ export function buildUnreadSummary(args: {
     let unknown = false
     for (const s of staff) {
       const k = nameKey(s.name)
-      if (!k || dayKeys?.has(k)) continue
+      if (!k || dayKeys?.has(k) || s.id === managerId) continue
       const a = rowR.get(k)
       const b = rowN.get(k)
       if (a === undefined && b === undefined) continue // 勤務表の名簿に居ない・デイ職員
-      // 休み明けの出勤の日が今日の日勤の人は、出勤の時刻（記号の start・時刻の範囲の始まり）より後に名前を出す（2026-11-19 代表者の指示）。
-      // 時刻が分からない時はその日の0時とみなす（出す側に倒す）。夜勤入りは R が昨日までなので、もう入りの時刻を過ぎている
-      const dayDue = !!b?.work && (shiftIso(r, 1) < today || nowMin >= (b?.workStart ?? 0))
-      const must = !!a?.nightIn || dayDue
+      // 読む番が来た人だけ（夜勤は入りの30分前・日勤は翌日の出勤の30分前から・2026-11-19 代表者の指示）。
+      // 始めた日（READ_CHECK_FROM）の0時より前に番が来た分は数えない（公開より前の分で赤くしない）
+      const t = readTurns(r, a, b)
+      const due = (x: number | null) => x !== null && x <= nowAbs && x >= launch
+      // 今日の日報は日勤の番を数えない（日勤の人は翌日、前日の分として読む。確認欄の並びとそろえる＝翌日 0:00〜0:29 の出勤の人を今日の未読に出さない）
+      const must = due(t.night) || (r < today && due(t.day))
       if (!must) {
         // 読めない記号の人は「判定できない日」に数える（出勤の時刻より前の日勤の人も、昨日のセルが読めなければ数える）
-        if (a?.unknown || b?.unknown) unknown = true
+        if (a?.unknown || (r < today && b?.unknown)) unknown = true
         continue
       }
       if (checked.has(s.id)) continue
@@ -265,7 +303,7 @@ export interface CheckPanelMember {
   name: string
   checked: boolean
   /** 並べた理由（夜勤入り・翌日の日勤・その日に施設で勤務（翌日の勤務表が無い時）・✔ を付けた・勤務表の名簿に名前が無い・勤務表が読めない） */
-  why: 'night' | 'day' | 'sameday' | 'checked' | 'nomatch' | 'fallback'
+  why: 'night' | 'day' | 'sameday' | 'checked' | 'manager' | 'nomatch' | 'fallback'
 }
 
 export interface CheckPanel {
@@ -286,14 +324,20 @@ export function buildCheckPanel(args: {
   checkedIds: ReadonlySet<number>
   rosterKeys?: ReadonlySet<string> | null
   dayKeys?: ReadonlySet<string> | null
+  /** 今の時刻（今日の0時からの分）。読む番が来た人（出勤の30分前から）だけを並べる。省略＝一日の終わり */
+  nowMin?: number
+  /** 施設長（設定の manager_staff_id）。いつも並べる（2026-11-19 代表者の指示・仮置き: 施設長の設定で決める） */
+  managerId?: number | null
 }): CheckPanel {
   const { day, today, staff, duty, checkedIds } = args
   const rosterKeys = args.rosterKeys ?? null
   const dayKeys = args.dayKeys ?? null
+  const managerId = args.managerId ?? null
+  const nowAbs = absMinute(today, args.nowMin ?? 24 * 60)
   const stale = day < shiftIso(today, -READ_CHECK_FIELD_DAYS)
   const isToday = day === today
   if (day > today) return { source: 'future', members: [], stale, isToday }
-  if (day < READ_CHECK_FROM) return { source: 'before', members: [], stale, isToday }
+  if (day < READ_CHECK_PANEL_FROM) return { source: 'before', members: [], stale, isToday }
   const rowR = duty?.get(day) ?? null
   const past = day < today
   const rowN = past ? (duty?.get(shiftIso(day, 1)) ?? null) : null
@@ -304,7 +348,8 @@ export function buildCheckPanel(args: {
       const checked = checkedIds.has(s.id)
       const synced = s.hire_order !== null && s.hire_order !== undefined
       const inRoster = rosterKeys === null ? synced : rosterKeys.has(k)
-      if (checked || (inRoster && !dayKeys?.has(k))) members.push({ id: s.id, name: s.name, checked, why: checked ? 'checked' : 'fallback' })
+      if (checked || s.id === managerId || (inRoster && !dayKeys?.has(k)))
+        members.push({ id: s.id, name: s.name, checked, why: checked ? 'checked' : s.id === managerId ? 'manager' : 'fallback' })
     }
     return { source: 'fallback', members, stale, isToday }
   }
@@ -317,14 +362,17 @@ export function buildCheckPanel(args: {
     const synced = s.hire_order !== null && s.hire_order !== undefined
     // 勤務表の名簿に名前が無い（表記が違う・名簿から外れた）職員も並べる（✔ を付けられなくならないように・判定はしない）
     const noMatch = !isDay && synced && rosterKeys !== null && !!k && !rosterKeys.has(k)
-    const night = !isDay && !!rowR.get(k)?.nightIn
-    const dayW = !isDay && past && !noNext && !!rowN?.get(k)?.work
+    // 読む番が来た人だけ（夜勤は入りの30分前・日勤は翌日の出勤の30分前から）
+    const t = readTurns(day, rowR.get(k), noNext ? undefined : rowN?.get(k))
+    const night = !isDay && t.night !== null && t.night <= nowAbs
+    const dayW = !isDay && past && !noNext && t.day !== null && t.day <= nowAbs
     const same = !isDay && noNext && !!rowR.get(k)?.work
     if (night) members.push({ id: s.id, name: s.name, checked, why: 'night' })
     else if (dayW) members.push({ id: s.id, name: s.name, checked, why: 'day' })
     else if (same) members.push({ id: s.id, name: s.name, checked, why: 'sameday' })
-    else if (noMatch) members.push({ id: s.id, name: s.name, checked, why: 'nomatch' })
     else if (checked) members.push({ id: s.id, name: s.name, checked, why: 'checked' })
+    else if (s.id === managerId) members.push({ id: s.id, name: s.name, checked, why: 'manager' })
+    else if (noMatch) members.push({ id: s.id, name: s.name, checked, why: 'nomatch' })
   }
   return { source: noNext ? 'nonext' : 'shift', members, stale, isToday }
 }
