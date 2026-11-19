@@ -273,7 +273,7 @@ import type {
   Vital,
 } from '../lib/types'
 // 日報の確認欄（その日の日報を読んだ ✔）と未読者欄（2026-11-19・0065）。画面だけ（print:hidden）
-import { ReadCheckPanel } from '../components/DailyReadCheck'
+import { ReadCheckPanel, UnreadOnlyPanel } from '../components/DailyReadCheck'
 import { useReadChecks, useUnreadSource } from '../hooks/useReadChecks'
 import type { ReadChecksState, UnreadSource } from '../hooks/useReadChecks'
 import type { UnreadSummary } from '../lib/readCheck'
@@ -6635,6 +6635,10 @@ function DaySheet({
         {phase === 'loading' && <LoadingBlock label={`${fmtSheetDay(day)}の申送を読み込んでいます…`} />}
         {phase === 'error' && (
           <ErrorBlock message={ERR_LOAD} onRetry={() => setReload((n) => n + 1)} />
+        )}
+        {/* この日の日報が読み込み中・失敗の間も〔未読者〕は出す（確認欄は読み終えてから・2026-11-19） */}
+        {phase !== 'ready' && showUnread && (
+          <UnreadOnlyPanel summary={unreadSummary} unreadSource={unreadSource} onPickDay={onPickUnread} />
         )}
 
         {phase === 'ready' && (

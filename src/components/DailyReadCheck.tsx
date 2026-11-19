@@ -97,6 +97,34 @@ function UnreadButton({
   )
 }
 
+/** 〔未読者〕が何かを出すか（UnreadButton が null を返す時は外枠も出さない） */
+function unreadShown(summary: UnreadSummary | null, source: UnreadSource): boolean {
+  if (!source.ready || source.missing) return false
+  if (source.failed) return true
+  return summary !== null && summary.window.length > 0
+}
+
+/**
+ * 〔未読者〕だけの枠。この日の日報が読み込み中・読み込みに失敗した間も、ほかの日の未読へ移れるように出す
+ * （2026-11-19 代表者の指示「未読者の表示を直す」。確認欄は日報を読み終えてから出す＝今のまま）
+ */
+export function UnreadOnlyPanel({
+  summary,
+  unreadSource,
+  onPickDay,
+}: {
+  summary: UnreadSummary | null
+  unreadSource: UnreadSource
+  onPickDay: (day: string) => void
+}) {
+  if (!unreadShown(summary, unreadSource)) return null
+  return (
+    <section className="dsheet-readcheck print:hidden mt-3 border-2 border-border-strong bg-surface" aria-label="未読者">
+      <UnreadButton summary={summary} source={unreadSource} onPickDay={onPickDay} />
+    </section>
+  )
+}
+
 type Pending =
   | { kind: 'other'; id: number; name: string }
   | { kind: 'cancel'; id: number; name: string }
@@ -129,7 +157,9 @@ export function ReadCheckPanel({
 }) {
   const [pending, setPending] = useState<Pending | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
-  if (panel.source === 'future' || panel.source === 'before') return null
+  // 確認欄を出さない日（始める前の日）でも、〔未読者〕の置き場の日なら〔未読者〕だけは出す（読み込み中と読み終えた後で見え方を変えない・反証レビュー medium）
+  if (panel.source === 'future' || panel.source === 'before')
+    return showUnread ? <UnreadOnlyPanel summary={summary} unreadSource={unreadSource} onPickDay={onPickDay} /> : null
   // 勤務表を読み終える前は並べない（読む前の仮の並びで押し間違えないように）
   const shiftReady = state.shiftLoaded
 
