@@ -192,8 +192,11 @@ export function buildUnreadSummary(args: {
   rosterKeys?: ReadonlySet<string> | null
   /** 主の区分が通所（デイ職員）の氏名の鍵。同じ氏名の施設の職員がいても数えない（代表者の指示「デイ職員は氏名を出さない」を先にする） */
   dayKeys?: ReadonlySet<string> | null
+  /** 今の時刻（今日の0時からの分）。今日が出勤の日の人は、その出勤の時刻より後に名前を出す（省略＝一日の終わり＝出す） */
+  nowMin?: number
 }): UnreadSummary {
   const { today, staff, duty, checks } = args
+  const nowMin = args.nowMin ?? 24 * 60
   const rosterKeys = args.rosterKeys ?? null
   const dayKeys = args.dayKeys ?? null
   const window = unreadWindow(today)
@@ -216,8 +219,12 @@ export function buildUnreadSummary(args: {
       const a = rowR.get(k)
       const b = rowN.get(k)
       if (a === undefined && b === undefined) continue // 勤務表の名簿に居ない・デイ職員
-      const must = !!a?.nightIn || !!b?.work
+      // 休み明けの出勤の日が今日の日勤の人は、出勤の時刻（記号の start・時刻の範囲の始まり）より後に名前を出す（2026-11-19 代表者の指示）。
+      // 時刻が分からない時はその日の0時とみなす（出す側に倒す）。夜勤入りは R が昨日までなので、もう入りの時刻を過ぎている
+      const dayDue = !!b?.work && (shiftIso(r, 1) < today || nowMin >= (b?.workStart ?? 0))
+      const must = !!a?.nightIn || dayDue
       if (!must) {
+        // 読めない記号の人は「判定できない日」に数える（出勤の時刻より前の日勤の人も、昨日のセルが読めなければ数える）
         if (a?.unknown || b?.unknown) unknown = true
         continue
       }
@@ -243,4 +250,91 @@ export function buildUnreadSummary(args: {
       ? 0
       : staff.filter((s) => s.hire_order !== null && s.hire_order !== undefined && !rosterKeys.has(nameKey(s.name))).length
   return { window, people, byDay, undeterminedDays: [...new Set(undeterminedDays)].sort(), unmatched }
+}
+
+// ── 確認欄に並べる人（2026-11-19 代表者の指示「夜勤者は当日分から・日勤者は前日までの記事の下に」）──────────
+// 日報 R の確認欄には、R を読む人だけを並べる:
+//   - R の夜勤入りの人（夜勤は当日の日報から。今日の日報にも出る）
+//   - R の翌日に日勤（早番・遅番を含む）の人（日勤は前日までの日報。R が昨日以前の時だけ＝今日の日報には出さない）
+//   - R に ✔ を付けた人（取り消せるように）
+// 施設の勤務の欄だけで決める。デイ職員（主の区分が通所）は並べない。
+// 勤務表が読めない・R（昨日以前は R の翌日も）の月の勤務表が無い時は、勤務表から同期した職員のうちデイ職員を除いた全員を並べる（fallback）。
+
+export interface CheckPanelMember {
+  id: number
+  name: string
+  checked: boolean
+  /** 並べた理由（夜勤入り・翌日の日勤・その日に施設で勤務（翌日の勤務表が無い時）・✔ を付けた・勤務表の名簿に名前が無い・勤務表が読めない） */
+  why: 'night' | 'day' | 'sameday' | 'checked' | 'nomatch' | 'fallback'
+}
+
+export interface CheckPanel {
+  /** shift＝勤務表で決めた／nonext＝翌日の勤務表がまだ無い（その日に施設で勤務の人を並べた）／fallback＝勤務表が読めない */
+  source: 'shift' | 'nonext' | 'fallback' | 'future' | 'before'
+  members: CheckPanelMember[]
+  /** 今日から14日より前の日（現場の端末からは ✔ を付けられない） */
+  stale: boolean
+  /** 今日の日報（日勤の人はまだ並ばない） */
+  isToday: boolean
+}
+
+export function buildCheckPanel(args: {
+  day: string
+  today: string
+  staff: readonly ReadCheckStaff[]
+  duty: FacilityDutyTable | null
+  checkedIds: ReadonlySet<number>
+  rosterKeys?: ReadonlySet<string> | null
+  dayKeys?: ReadonlySet<string> | null
+}): CheckPanel {
+  const { day, today, staff, duty, checkedIds } = args
+  const rosterKeys = args.rosterKeys ?? null
+  const dayKeys = args.dayKeys ?? null
+  const stale = day < shiftIso(today, -READ_CHECK_FIELD_DAYS)
+  const isToday = day === today
+  if (day > today) return { source: 'future', members: [], stale, isToday }
+  if (day < READ_CHECK_FROM) return { source: 'before', members: [], stale, isToday }
+  const rowR = duty?.get(day) ?? null
+  const past = day < today
+  const rowN = past ? (duty?.get(shiftIso(day, 1)) ?? null) : null
+  const members: CheckPanelMember[] = []
+  if (!rowR) {
+    for (const s of staff) {
+      const k = nameKey(s.name)
+      const checked = checkedIds.has(s.id)
+      const synced = s.hire_order !== null && s.hire_order !== undefined
+      const inRoster = rosterKeys === null ? synced : rosterKeys.has(k)
+      if (checked || (inRoster && !dayKeys?.has(k))) members.push({ id: s.id, name: s.name, checked, why: checked ? 'checked' : 'fallback' })
+    }
+    return { source: 'fallback', members, stale, isToday }
+  }
+  // 翌日の勤務表がまだ無い（月末で翌月の予定が未作成など）時は、翌日の日勤の代わりにその日に施設で勤務の人を並べる
+  const noNext = past && !rowN
+  for (const s of staff) {
+    const k = nameKey(s.name)
+    const checked = checkedIds.has(s.id)
+    const isDay = !!k && !!dayKeys?.has(k)
+    const synced = s.hire_order !== null && s.hire_order !== undefined
+    // 勤務表の名簿に名前が無い（表記が違う・名簿から外れた）職員も並べる（✔ を付けられなくならないように・判定はしない）
+    const noMatch = !isDay && synced && rosterKeys !== null && !!k && !rosterKeys.has(k)
+    const night = !isDay && !!rowR.get(k)?.nightIn
+    const dayW = !isDay && past && !noNext && !!rowN?.get(k)?.work
+    const same = !isDay && noNext && !!rowR.get(k)?.work
+    if (night) members.push({ id: s.id, name: s.name, checked, why: 'night' })
+    else if (dayW) members.push({ id: s.id, name: s.name, checked, why: 'day' })
+    else if (same) members.push({ id: s.id, name: s.name, checked, why: 'sameday' })
+    else if (noMatch) members.push({ id: s.id, name: s.name, checked, why: 'nomatch' })
+    else if (checked) members.push({ id: s.id, name: s.name, checked, why: 'checked' })
+  }
+  return { source: noNext ? 'nonext' : 'shift', members, stale, isToday }
+}
+
+/** 確認欄に要る勤務表の日（表示中の日と、その翌日） */
+export function checkPanelDutyDays(days: readonly string[]): string[] {
+  const out = new Set<string>()
+  for (const d of days) {
+    out.add(d)
+    out.add(shiftIso(d, 1))
+  }
+  return [...out].sort()
 }

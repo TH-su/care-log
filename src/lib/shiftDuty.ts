@@ -18,6 +18,8 @@ export interface ShiftSymbol {
   code: string
   type: string
   disabled?: boolean
+  /** 開始の時刻（記号マスタの start・'07:00' の形。0066 から読み口が返す。無い時は分からない扱い） */
+  start?: string
 }
 
 /** 既定の記号（シフト作成アプリの DEFAULT_SYMBOLS の code と type。記号マスタが読めない時だけ使う） */
@@ -152,6 +154,57 @@ export function parseCellKinds(raw: unknown, symbols: readonly ShiftSymbol[] = D
     }
   }
   return { parts, error: parts.length === 0 || rest !== '' }
+}
+
+/** 早い方の時刻（片方が分からなければもう片方） */
+function earlierMin(a: number | null, b: number | null): number | null {
+  if (a === null) return b
+  if (b === null) return a
+  return Math.min(a, b)
+}
+
+/**
+ * セルの日勤の部分の一番早い開始と、夜勤入りの時刻（0時からの分）。読み方は parseCellKinds と同じ順で、
+ * 時刻の範囲（7-16）はその始まり、夜勤入り（(21・8)(22）は括弧の後ろの時刻、記号マスタの記号は start を使う。分からない所は null。
+ */
+export function cellStarts(raw: unknown, symbols: readonly ShiftSymbol[] = DEFAULT_SHIFT_SYMBOLS): { work: number | null; nightIn: number | null } {
+  let rawStr = raw === null || raw === undefined ? '' : String(raw)
+  const gm = rawStr.match(/[/／][\s　]*同[\s　]*$/)
+  if (gm && gm.index !== undefined) rawStr = rawStr.slice(0, gm.index)
+  const toks = rawStr.split(/[\s　\t]+/).filter((t) => t !== '')
+  if (toks.length >= 2) {
+    let work: number | null = null
+    let nightIn: number | null = null
+    for (const t of toks) {
+      const sub = cellStarts(t, symbols)
+      work = earlierMin(work, sub.work)
+      nightIn = earlierMin(nightIn, sub.nightIn)
+    }
+    return { work, nightIn }
+  }
+  let norm = normalizeCell(rawStr)
+  if (norm === '') return { work: null, nightIn: null }
+  if (ALIASES[norm]) norm = ALIASES[norm]
+  const sym = findSymbol(symbols, norm)
+  if (sym) {
+    const k = symbolKind(sym)
+    const st = typeof sym.start === 'string' ? timeToMin(sym.start) : null
+    if (k === 'work') return { work: st, nightIn: null }
+    if (k === 'nightIn') {
+      const mi = norm.match(RE_NIGHT_IN)
+      return { work: null, nightIn: st ?? (mi ? timeToMin(mi[1]) : null) }
+    }
+    return { work: null, nightIn: null }
+  }
+  const m = norm.match(RE_RANGE)
+  if (m) return { work: timeToMin(m[1]), nightIn: null }
+  let rest = norm
+  const mo = rest.match(RE_NIGHT_OUT)
+  if (mo) rest = rest.slice(mo[0].length)
+  else if (rest.charAt(0) === ')') rest = rest.slice(1)
+  const mi = rest.match(RE_NIGHT_IN)
+  if (mi && rest.charAt(0) === '(') return { work: null, nightIn: timeToMin(mi[1]) }
+  return { work: null, nightIn: null }
 }
 
 /** その日の勤務の区分 */
@@ -332,7 +385,12 @@ export function projectShiftSymbols(data: unknown): ShiftSymbol[] {
     if (!it || typeof it !== 'object') continue
     const r = it as Record<string, unknown>
     if (typeof r.code !== 'string' || typeof r.type !== 'string') continue
-    out.push({ code: r.code, type: r.type, disabled: r.disabled === true ? true : undefined })
+    out.push({
+      code: r.code,
+      type: r.type,
+      disabled: r.disabled === true ? true : undefined,
+      start: typeof r.start === 'string' && r.start.length <= 8 ? r.start : undefined,
+    })
   }
   return out
 }
@@ -358,6 +416,10 @@ export interface FacilityDuty {
   nightIn: boolean
   /** 勤務の部分が無く、読めない欄がある */
   unknown: boolean
+  /** 日勤の部分の一番早い開始（0時からの分）。分からない時は null（その日の0時とみなす） */
+  workStart: number | null
+  /** 夜勤入りの一番早い時刻（0時からの分）。分からない時は null */
+  nightStart: number | null
 }
 
 /** 日 → 氏名の鍵 → 施設の勤務。その日の月の勤務表（予定）が無い日は入れない */
@@ -385,13 +447,18 @@ export function staffDayFacility(
   let work = false
   let nightIn = false
   let err = false
+  let workStart: number | null = null
+  let nightStart: number | null = null
   for (const c of cells) {
     const { parts, error } = parseCellKinds(c, symbols)
     if (parts.includes('work')) work = true
     if (parts.includes('nightIn')) nightIn = true
     if (error && parts.length === 0) err = true
+    const st = cellStarts(c, symbols)
+    workStart = earlierMin(workStart, st.work)
+    nightStart = earlierMin(nightStart, st.nightIn)
   }
-  return { work, nightIn, unknown: err && !work && !nightIn }
+  return { work, nightIn, unknown: err && !work && !nightIn, workStart: work ? workStart : null, nightStart: nightIn ? nightStart : null }
 }
 
 /**
@@ -414,7 +481,18 @@ export function buildFacilityDutyTable(src: ShiftSource, days: readonly string[]
       if (!key) continue
       const v = staffDayFacility(st, d, mon.plan, mon.actual, src.symbols.length ? src.symbols : DEFAULT_SHIFT_SYMBOLS)
       const prev = row.get(key)
-      row.set(key, prev ? { work: prev.work || v.work, nightIn: prev.nightIn || v.nightIn, unknown: prev.unknown || v.unknown } : v)
+      row.set(
+        key,
+        prev
+          ? {
+              work: prev.work || v.work,
+              nightIn: prev.nightIn || v.nightIn,
+              unknown: prev.unknown || v.unknown,
+              workStart: earlierMin(prev.workStart, v.workStart),
+              nightStart: earlierMin(prev.nightStart, v.nightStart),
+            }
+          : v,
+      )
     }
     out.set(day, row)
   }

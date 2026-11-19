@@ -287,10 +287,12 @@ if (D === null) {
     })
     it('施設の勤務だけ・デイ職員（主の区分が通所）は施設の応援があっても入れない・日勤と夜勤入りを分けて持つ', () => {
       assert.equal(duty.get('2026-11-20').has('デイ01'), false)
-      assert.deepEqual(duty.get('2026-11-20').get('夜勤01'), { work: false, nightIn: true, unknown: false })
-      assert.deepEqual(duty.get('2026-11-21').get('夜勤01'), { work: false, nightIn: false, unknown: false })
-      assert.deepEqual(duty.get('2026-11-20').get('訪問01'), { work: false, nightIn: false, unknown: false }, '訪問の主の欄は数えない')
-      assert.deepEqual(duty.get('2026-11-21').get('訪問01'), { work: true, nightIn: false, unknown: false }, '施設の応援は数える')
+      // 2026-11-19 確認欄の出し方（0066）: 出勤の時刻（workStart・nightStart）を持つようになった
+      const F = (work, nightIn, workStart = null, nightStart = null) => ({ work, nightIn, unknown: false, workStart, nightStart })
+      assert.deepEqual(duty.get('2026-11-20').get('夜勤01'), F(false, true, null, 22 * 60))
+      assert.deepEqual(duty.get('2026-11-21').get('夜勤01'), F(false, false))
+      assert.deepEqual(duty.get('2026-11-20').get('訪問01'), F(false, false), '訪問の主の欄は数えない')
+      assert.deepEqual(duty.get('2026-11-21').get('訪問01'), F(true, false, 13 * 60), '施設の応援は数える')
       const st = { id: 'n', name: '夜勤02', mainDivision: '施設' }
       assert.equal(D.staffDayFacility(st, 1, { cells: { n: { 1: '（21' } } }, null, []).nightIn, true, '全角の括弧の夜勤入り（勤務表の実際の書き方）')
       assert.equal(D.staffDayFacility(st, 1, { cells: { n: { 1: '7)(21' } } }, null, []).nightIn, true)
@@ -349,43 +351,138 @@ if (D === null) {
     })
   })
 
+  describe('確認欄に並ぶ人と、未読者に名前が出る時刻（2026-11-19 代表者の指示・0066）', () => {
+    const SYM = [
+      { code: '早', type: 'work', start: '07:00' },
+      { code: '遅', type: 'work', start: '11:00' },
+      { code: '日1', type: 'work' },
+      { code: '(21', type: 'nightIn', start: '21:00' },
+      { code: '7)', type: 'nightOut' },
+      { code: '休', type: 'off' },
+    ]
+    it('出勤の時刻: 記号は記号マスタの start、時刻の範囲は始まり、夜勤入りは括弧の後ろ、分からなければ null', () => {
+      assert.deepEqual(D.cellStarts('早', SYM), { work: 420, nightIn: null })
+      assert.deepEqual(D.cellStarts('遅', SYM), { work: 660, nightIn: null })
+      assert.deepEqual(D.cellStarts('日1', SYM), { work: null, nightIn: null }, 'start の無い記号')
+      assert.deepEqual(D.cellStarts('8:30-16', SYM), { work: 510, nightIn: null })
+      assert.deepEqual(D.cellStarts('(21', SYM), { work: null, nightIn: 1260 })
+      assert.deepEqual(D.cellStarts('（22', SYM), { work: null, nightIn: 1320 }, '全角の括弧')
+      assert.deepEqual(D.cellStarts('7)(21', SYM), { work: null, nightIn: 1260 })
+      assert.deepEqual(D.cellStarts('7-9 17-21', SYM), { work: 420, nightIn: null }, '2つの勤務は早い方')
+      assert.deepEqual(D.cellStarts('休', SYM), { work: null, nightIn: null })
+      assert.deepEqual(D.projectShiftSymbols([{ code: '早', type: 'work', start: '07:00', color: '#fff' }]), [{ code: '早', type: 'work', disabled: undefined, start: '07:00' }])
+    })
+    const roster = [
+      { id: 'a', name: '早番01', mainDivision: '施設' },
+      { id: 'b', name: '遅番01', mainDivision: '施設' },
+      { id: 'c', name: '夜勤01', mainDivision: '施設' },
+      { id: 'd', name: 'デイ01', mainDivision: '通所' },
+    ]
+    // 20日: 早番01 早・遅番01 休・夜勤01 (21・デイ01 日1（施設の応援も）／21日: 早番01 早・遅番01 遅（休み明け）・夜勤01 7)・デイ01 日1
+    const plan = {
+      cells: { a: { 20: '早', 21: '早' }, b: { 20: '休', 21: '遅' }, c: { 20: '(21', 21: '7)' }, d: { 20: '日1', 21: '日1' } },
+      subCells: { d: { 施設: { 20: '9-12' } } },
+    }
+    const src = { staff: roster, symbols: SYM, months: { '2026-11': { plan, actual: null } } }
+    const staff = [
+      { id: 1, name: '早番01', hire_order: 1 },
+      { id: 2, name: '遅番01', hire_order: 2 },
+      { id: 3, name: '夜勤01', hire_order: 3 },
+      { id: 4, name: 'デイ01', hire_order: 4 },
+    ]
+    const fac = D.buildFacilityDutyTable(src, ['2026-11-20', '2026-11-21', '2026-11-22'])
+    const dayKeys = new Set(['デイ01'])
+    const rosterKeys = new Set(roster.map((r) => r.name))
+    const panel = (day, today, checked = []) =>
+      R.buildCheckPanel({ day, today, staff, duty: fac, checkedIds: new Set(checked), rosterKeys, dayKeys })
+    it('今日の日報の確認欄は夜勤入りの人だけ（日勤の人は前日までの日報に並ぶ）', () => {
+      const p = panel('2026-11-20', '2026-11-20')
+      assert.equal(p.source, 'shift')
+      assert.deepEqual(p.members.map((m) => [m.name, m.why]), [['夜勤01', 'night']])
+      assert.equal(p.isToday, true)
+    })
+    it('前日の日報の確認欄は、その日の夜勤入りの人と翌日に日勤の人（早番・遅番を含む）・デイ職員は並ばない', () => {
+      const p = panel('2026-11-20', '2026-11-21')
+      assert.deepEqual(p.members.map((m) => [m.name, m.why]), [['早番01', 'day'], ['遅番01', 'day'], ['夜勤01', 'night']])
+    })
+    it('✔ を付けた人は並びの外でも並ぶ（取り消せるように）', () => {
+      const p = panel('2026-11-20', '2026-11-20', [1])
+      assert.deepEqual(p.members.map((m) => [m.name, m.why, m.checked]), [['早番01', 'checked', true], ['夜勤01', 'night', false]])
+    })
+    it('翌日の勤務表が無い・勤務表が読めない時は、デイ職員を除く名簿の全員を並べる', () => {
+      const p = R.buildCheckPanel({ day: '2026-11-20', today: '2026-11-21', staff, duty: null, checkedIds: new Set(), rosterKeys, dayKeys })
+      assert.equal(p.source, 'fallback')
+      assert.deepEqual(p.members.map((m) => m.name), ['早番01', '遅番01', '夜勤01'])
+    })
+    it('勤務表の名簿に名前が無い職員（取り込んだ人）も確認欄に並ぶ（✔ を付けられなくならない）', () => {
+      const st2 = [...staff, { id: 9, name: '表記違い01', hire_order: 9 }, { id: 10, name: '手で足した01', hire_order: null }]
+      const p = R.buildCheckPanel({ day: '2026-11-20', today: '2026-11-20', staff: st2, duty: fac, checkedIds: new Set(), rosterKeys, dayKeys })
+      assert.deepEqual(p.members.map((m) => [m.name, m.why]), [['夜勤01', 'night'], ['表記違い01', 'nomatch']])
+    })
+    it('翌日の勤務表がまだ無い日は、その日に施設で勤務の人を並べる（nonext）', () => {
+      const f2 = D.buildFacilityDutyTable(src, ['2026-11-20'])
+      const p = R.buildCheckPanel({ day: '2026-11-20', today: '2026-11-21', staff, duty: f2, checkedIds: new Set(), rosterKeys, dayKeys })
+      assert.equal(p.source, 'nonext')
+      assert.deepEqual(p.members.map((m) => [m.name, m.why]), [['早番01', 'sameday'], ['夜勤01', 'night']])
+    })
+    it('出勤の時刻より前でも、昨日のセルが読めない人がいる日は「判定できない日」に数える', () => {
+      const p2 = { cells: { ...plan.cells, a: { 20: 'ABC', 21: '早' } }, subCells: plan.subCells }
+      const f2 = D.buildFacilityDutyTable({ ...src, months: { '2026-11': { plan: p2, actual: null } } }, ['2026-11-20', '2026-11-21'])
+      const s = R.buildUnreadSummary({ today: '2026-11-21', staff, duty: f2, checks: new Map([['2026-11-20', new Set([3])]]), rosterKeys, dayKeys, nowMin: 6 * 60 })
+      assert.ok(s.undeterminedDays.includes('2026-11-20'))
+    })
+    it('まだ来ていない日・始める前の日は確認欄を出さない', () => {
+      assert.equal(panel('2026-11-22', '2026-11-21').source, 'future')
+      assert.equal(panel('2026-11-18', '2026-11-21').source, 'before')
+    })
+    it('休み明けの出勤の日の人は、出勤の時刻より後に未読者に名前が出る', () => {
+      const empty = new Map([['2026-11-19', new Set()], ['2026-11-20', new Set()]])
+      const at = (h) => R.buildUnreadSummary({ today: '2026-11-21', staff, duty: fac, checks: empty, rosterKeys, dayKeys, nowMin: h * 60 }).byDay.get('2026-11-20')
+      assert.deepEqual([...at(6)].sort(), [3], '6時: 夜勤01 だけ（早番01 は7時から・遅番01 は11時から）')
+      assert.deepEqual([...at(7)].sort(), [1, 3], '7時: 早番01 も')
+      assert.deepEqual([...at(11)].sort(), [1, 2, 3], '11時: 休み明けの遅番01 も')
+      assert.equal([...at(11)].includes(4), false, 'デイ職員は出ない')
+    })
+  })
+
   describe('静的検査', () => {
     const comp = read('../src/components/DailyReadCheck.tsx')
     const page = read('../src/pages/DailySheetPage.tsx')
     const db = read('../src/lib/db.ts')
-    it('確認欄と未読者欄は画面だけ（紙の日報を変えない）', () => {
-      const roots = comp.match(/<(div|section)\s[^>]*className="[^"]*"/g) ?? []
-      const top = roots.filter((r) => /print:hidden/.test(r))
-      assert.ok(top.length >= 2, '未読者欄（赤）と確認欄の外枠に print:hidden')
-      assert.match(comp, /const box = 'print:hidden /, '未読者欄の「判定できない」「なし」の形も print:hidden')
-      assert.match(comp, /<section\s+id=\{`readcheck-\$\{day\}`\}\s+className="print:hidden/)
+    // 2026-11-19 確認欄の出し方（0066）: 代表者の指示で、未読者をページの上から確認欄の下の〔未読者〕へ移し、
+    // 日付を押した時の飛び先を確認欄から「その日の申送の頭」へ変えた。下の5つは移した後の形を確かめる（前の形の検査は置き換えた）
+    it('確認欄は画面だけ（紙の日報を変えない）・夜勤の枠より左右に細い', () => {
+      assert.match(comp, /<section\s+id=\{`readcheck-\$\{day\}`\}\s+className="dsheet-readcheck print:hidden/)
+      const css = read('../src/styles/sheet.css')
+      const sec = css.slice(css.indexOf('.dsheet-body > section.dsheet-readcheck'))
+      assert.match(sec, /margin-left: calc\(var\(--sp-6\) \+ var\(--sheet-rule-bold\)\)/, '夜勤（--sp-4）より内側')
+      assert.match(css.slice(0, css.indexOf('.dsheet-body > section.dsheet-readcheck')), /@media screen \{\s*$/, '画面だけ')
     })
-    // 2026-11-19 代表者の指示で未読者欄を日ごとの見出しの下からページの上の1つへ移し、確認欄の赤い印も同じ数え方にした（下の2つは移した後の形を確かめる）
-    it('確認欄のボタンの赤は、未読者欄と同じ数え方（親から渡す日ごとの未読）で、✔ のある人には出さない', () => {
+    it('確認欄のボタンの赤は、未読者と同じ数え方（親から渡す日ごとの未読）で、✔ のある人には出さない', () => {
       assert.match(comp, /const unread = !m\.checked && unreadIds\.has\(m\.id\)/)
-      assert.doesNotMatch(comp, /view\.unread/)
       assert.match(page, /unreadIds=\{unreadSummary\?\.byDay\.get\(d\) \?\? NO_UNREAD\}/)
     })
-    it('未読者欄は押すまで氏名を出さない（閉じている間は人数だけ）・日を押すとその日の確認欄へ', () => {
-      const sec = comp.slice(comp.indexOf('export function UnreadSummaryBanner'), comp.indexOf('type Pending'))
-      const closed = sec.slice(0, sec.indexOf('{open && ('))
+    it('〔未読者〕は確認欄の下にあり、押すまで氏名を出さない・氏名の右に未読の日付・日付を押すとその日へ', () => {
+      const sec = comp.slice(comp.indexOf('function UnreadButton'), comp.indexOf('type Pending'))
+      const closed = sec.slice(0, sec.indexOf('{open && n > 0 && ('))
       assert.doesNotMatch(closed, /\.name/, '開く前の部分に氏名を使っていない')
       assert.match(sec, /aria-expanded=\{open\}/)
+      assert.match(sec, /\{p\.name\}<\/span>\s+\{\/\*[^*]*\*\/\}\s+<span className="flex flex-1 flex-wrap gap-1">\s+\{p\.days\.map/, '氏名の右に日付（右側の中で折り返す）')
       assert.match(sec, /onClick=\{\(\) => onPickDay\(d\)\}/)
       assert.match(sec, /useState\(false\)/, '開いた状態は覚えない（毎回閉じて始まる）')
+      const panel = comp.slice(comp.indexOf('export function ReadCheckPanel'))
+      assert.ok(panel.indexOf('<UnreadButton') > panel.indexOf('</ul>'), '名前の ✔ の下')
+      assert.match(panel, /\{showUnread && <UnreadButton /, '10日表示でも1つだけ')
+      assert.match(page, /showUnread=\{d === unreadHost\}/)
     })
-    it('未読者欄の日を押すと、日が移ってから（確認の窓の後でも）確認欄へ送り、日の頭への位置合わせで引き戻さない', () => {
-      const sec = page.slice(page.indexOf('const readCheckTargetRef'), page.indexOf('const goUnit = useCallback('))
-      assert.match(sec, /pendingScrollRef\.current = null\s+selfScrollUntilRef\.current = [^\n]+\s+el\.scrollIntoView/)
-      assert.match(page, /onCancel=\{\(\) => \{\s+readCheckTargetRef\.current = null/, '確認の窓を取りやめたら送らない')
-      assert.match(sec, /if \(next === day\) scrollToReadCheck\(next\)\s+else goDay\(next\)/)
-      assert.match(sec, /\}, \[day, scrollToReadCheck\]\)/, '日が移った時に送る')
-      assert.match(page, /if \(readCheckTargetRef\.current\?\.started\) readCheckTargetRef\.current = null/, '「切り替える」を押した時は止めない')
+    it('未読の日付を押すと、その日の申送の頭へ移る（すぐ読めるように）', () => {
+      const sec = page.slice(page.indexOf('const goUnreadDay'), page.indexOf('const goUnit = useCallback('))
+      assert.match(sec, /scrollToDay\(next\)\s+\} else goDay\(next\)/)
+      assert.doesNotMatch(page, /readCheckTargetRef|UnreadSummaryBanner/)
     })
-    it('日報に置いてある（ページの上の未読者欄と、日の枠の末尾の確認欄）', () => {
-      assert.match(page, /<UnreadSummaryBanner summary=\{unreadSummary\} source=\{unreadSource\} onPickDay=\{goReadCheck\} \/>/)
-      assert.doesNotMatch(page, /<ReadCheckBanner/)
-      assert.match(page, /<ReadCheckPanel day=\{day\} view=\{readCheckView\} state=\{readChecks\} actorId=\{actorId\} unreadIds=\{unreadIds\} \/>/)
+    it('日報の枠の末尾に確認欄を置き、確認欄に並ぶ人は buildCheckPanel で決める', () => {
+      assert.match(page, /<ReadCheckPanel\s+day=\{day\}\s+panel=\{checkPanel\}/)
+      assert.match(page, /buildCheckPanel\(\{/)
       assert.match(page, /const readChecks = useReadChecks\(visibleDays, reload\)/)
     })
     it('勤務表は判定に要る項目だけの読み口（carelog_shift_duty）で読み、kv_get で職員の全項目を受け取らない・console・localStorage に出さない', () => {

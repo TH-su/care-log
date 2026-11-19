@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { addReadCheck, cancelReadCheck, fetchReadChecks, fetchShiftSource } from '../lib/db'
 import { buildDutyTable, buildFacilityDutyTable, nameKey } from '../lib/shiftDuty'
 import type { DutyTable, FacilityDutyTable } from '../lib/shiftDuty'
-import { unreadDutyDays, unreadWindow } from '../lib/readCheck'
+import { checkPanelDutyDays, unreadDutyDays, unreadWindow } from '../lib/readCheck'
 
 export interface ReadChecksState {
   /** 日 → ✔ のある職員の id */
@@ -26,6 +26,10 @@ export interface ReadChecksState {
   dailyKeys: Set<string> | null
   /** 勤務表の名簿の全員（在籍）の氏名の鍵（読めない時は null） */
   rosterKeys: Set<string> | null
+  /** 表示中の日とその翌日の施設の勤務（確認欄に並べる人を決める・読めない時は null） */
+  fac: FacilityDutyTable | null
+  /** 主の区分が通所（デイ職員）の氏名の鍵（読めない時は null） */
+  dayKeys: Set<string> | null
   /** 送っている最中の（日|職員） */
   busy: Set<string>
   /** ✔ を付けた・取り消した回数（未読者欄の読み直しの合図） */
@@ -47,6 +51,8 @@ export function useReadChecks(days: readonly string[], reloadToken: number): Rea
   const [duty, setDuty] = useState<DutyTable | null>(null)
   const [dailyKeys, setDailyKeys] = useState<Set<string> | null>(null)
   const [rosterKeys, setRosterKeys] = useState<Set<string> | null>(null)
+  const [fac, setFac] = useState<FacilityDutyTable | null>(null)
+  const [dayKeys, setDayKeys] = useState<Set<string> | null>(null)
   const [busy, setBusy] = useState<Set<string>>(new Set())
   const [bump, setBump] = useState(0)
   const genRef = useRef(0)
@@ -76,7 +82,9 @@ export function useReadChecks(days: readonly string[], reloadToken: number): Rea
       }
     })()
     void (async () => {
-      const src = await fetchShiftSource(list)
+      // 確認欄は日報 R に「R の翌日に日勤の人」も並べるので、表示中の日の翌日の勤務表も読む
+      const dutyDays = checkPanelDutyDays(list)
+      const src = await fetchShiftSource(dutyDays)
       if (!alive || my !== genRef.current) return
       setShiftLoaded(true)
       setShiftKey(key)
@@ -84,8 +92,19 @@ export function useReadChecks(days: readonly string[], reloadToken: number): Rea
         setDuty(null)
         setDailyKeys(null)
         setRosterKeys(null)
+        setFac(null)
+        setDayKeys(null)
         return
       }
+      const ft = buildFacilityDutyTable(src, dutyDays)
+      const dk = new Set<string>()
+      for (const st of src.staff) {
+        if (st.active === false || st.status === '退職') continue
+        const k = nameKey(st.name)
+        if (k && st.mainDivision === '通所') dk.add(k)
+      }
+      setFac(ft.size > 0 ? ft : null)
+      setDayKeys(dk)
       const table = buildDutyTable(src, list)
       const keys = new Set<string>()
       for (const row of table.values()) for (const k of row.keys()) keys.add(k)
@@ -159,8 +178,8 @@ export function useReadChecks(days: readonly string[], reloadToken: number): Rea
   const loadedNow = loaded && loadedKey === key
   const shiftNow = shiftLoaded && shiftKey === key
   return useMemo(
-    () => ({ checks, missing, loadFailed, loaded: loadedNow, shiftLoaded: shiftNow, duty, dailyKeys, rosterKeys, busy, version: bump, add, cancel }),
-    [checks, missing, loadFailed, loadedNow, shiftNow, duty, dailyKeys, rosterKeys, busy, bump, add, cancel],
+    () => ({ checks, missing, loadFailed, loaded: loadedNow, shiftLoaded: shiftNow, duty, dailyKeys, rosterKeys, fac, dayKeys, busy, version: bump, add, cancel }),
+    [checks, missing, loadFailed, loadedNow, shiftNow, duty, dailyKeys, rosterKeys, fac, dayKeys, busy, bump, add, cancel],
   )
 }
 

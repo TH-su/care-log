@@ -246,7 +246,7 @@ await inTx('勤務表の読み口: 要る項目だけ・自分の施設だけ・
     { id: 's2', name: '職員02', mainDivision: '訪問', status: '退職', retireMonth: '2026-10' },
     'こわれた要素',
   ])
-  const symData = JSON.stringify([{ code: '早', type: 'work', label: 'L', color: '#fff' }, { code: '研', type: 'work', disabled: true }])
+  const symData = JSON.stringify([{ code: '早', type: 'work', label: 'L', color: '#fff', start: '07:00', end: '16:00' }, { code: '研', type: 'work', disabled: true }])
   const plan = JSON.stringify({ cells: { s1: { 1: '早' } }, subCells: { s2: { 施設: { 2: '遅' } } }, colors: { a: 1 }, notes: 'メモ', dailyNeeds: {} })
   await q(`insert into public.kv_entries (tenant_id, key, data, mode) values
            ($1, 'staff', $2::jsonb, 'live'), ($1, 'symbols', $3::jsonb, 'live'), ($1, 'sched:2026-11:plan', $4::jsonb, 'live'),
@@ -258,7 +258,8 @@ await inTx('勤務表の読み口: 要る項目だけ・自分の施設だけ・
       && r.staff[1].status === '退職' && r.staff[1].retireMonth === '2026-10'
       && r.staff.every((s) => Object.keys(s).every((k) => ['id', 'name', 'mainDivision', 'active', 'status', 'retireMonth'].includes(k))), r.staff)
   ok('職員の項目に労務の項目が無い', !JSON.stringify(r.staff).match(/empCode|rules|qualifications|employment|E1|常勤/), r.staff)
-  ok('記号は code・type・disabled だけ', JSON.stringify(r.symbols) === JSON.stringify([{ code: '早', type: 'work' }, { code: '研', type: 'work', disabled: true }]), r.symbols)
+  // 2026-11-19 0066: 記号の開始時刻（start）も返す（未読者に名前を出すのを出勤の時刻より後にするため）。終わり・色・名前は返さない
+  ok('記号は code・type・disabled・start だけ', JSON.stringify(r.symbols) === JSON.stringify([{ code: '早', type: 'work', start: '07:00' }, { code: '研', type: 'work', disabled: true }]), r.symbols)
   ok('月は cells・subCells だけ（色・メモ・必要数は返さない）・無い月・無い実績は null',
     JSON.stringify(r.months['2026-11'].plan) === JSON.stringify({ cells: { s1: { 1: '早' } }, subCells: { s2: { 施設: { 2: '遅' } } } })
       && r.months['2026-11'].actual === null && r.months['2026-12'].plan === null, r.months)
