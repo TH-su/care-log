@@ -2412,6 +2412,8 @@ interface DaySheetProps {
   unreadSource: UnreadSource
   /** 〔未読者〕の日付を押した: その日の申送へ移る */
   onPickUnread: (day: string) => void
+  /** この日の確認欄の下に〔未読者〕を出す */
+  showUnread: boolean
 }
 
 /**
@@ -3127,6 +3129,11 @@ export function DailySheetPage({
   const [ackToday, setAckToday] = useState(today)
   // 未読者（確認欄の下の〔未読者〕・2026-11-19 代表者の指示）。昨日までの日報を、日勤は翌日の勤務・夜勤はその日の夜勤入りで数える
   const unreadSource = useUnreadSource(today, reload, readChecks.version)
+  // 〔未読者〕は表示中の日のうち1つの確認欄の下だけに出す（10日表示で同じボタンを並べない）。今日以前で一番新しい日
+  const unreadHost = useMemo(() => {
+    const past = visibleDays.filter((d) => d <= today)
+    return past.length > 0 ? past[past.length - 1] : null
+  }, [visibleDays, today])
   const unreadSummary = useMemo(
     () =>
       unreadSource.ready && !unreadSource.failed && !unreadSource.missing && unreadSource.today === today
@@ -3680,6 +3687,7 @@ export function DailySheetPage({
                   unreadSummary={unreadSummary}
                   unreadSource={unreadSource}
                   onPickUnread={goUnreadDay}
+                  showUnread={d === unreadHost}
                 />
               </section>
             ))}
@@ -3753,6 +3761,7 @@ function DaySheet({
   unreadSummary,
   unreadSource,
   onPickUnread,
+  showUnread,
 }: DaySheetProps) {
   const [phase, setPhase] = useState<Phase>('loading')
   const [reload, setReload] = useState(0)
@@ -6674,6 +6683,7 @@ function DaySheet({
               summary={unreadSummary}
               unreadSource={unreadSource}
               onPickDay={onPickUnread}
+              showUnread={showUnread}
             />
           </>
         )}

@@ -98,6 +98,7 @@ function Preview() {
                 summary={summary}
                 unreadSource={source}
                 onPickDay={pick}
+                showUnread={day === TODAY}
               />
             </div>
           </section>

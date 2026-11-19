@@ -111,6 +111,7 @@ export function ReadCheckPanel({
   summary,
   unreadSource,
   onPickDay,
+  showUnread,
 }: {
   day: string
   panel: CheckPanel
@@ -123,6 +124,8 @@ export function ReadCheckPanel({
   unreadSource: UnreadSource
   /** 未読の日付を押した: その日の申送へ移る */
   onPickDay: (day: string) => void
+  /** 〔未読者〕をこの確認欄の下に出すか（10日表示でも1つだけ＝表示中の日のうち今日に一番近い日） */
+  showUnread: boolean
 }) {
   const [pending, setPending] = useState<Pending | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
@@ -183,7 +186,10 @@ export function ReadCheckPanel({
         <p className="px-2 py-1 text-sm text-warn">確認欄を読み込めませんでした。〔最新に更新〕で読み直してください。</p>
       )}
       {shiftReady && panel.source === 'fallback' && (
-        <p className="px-2 pt-1 text-sm text-ink2">勤務表が読めないため、施設の職員を全員並べています。</p>
+        <p className="px-2 pt-1 text-sm text-ink2">勤務表が読めないため、勤務表から取り込んだ職員を全員並べています（読む番の人だけには絞れていません）。</p>
+      )}
+      {shiftReady && panel.source === 'nonext' && (
+        <p className="px-2 pt-1 text-sm text-ink2">翌日の勤務表がまだ無いため、この日に施設で勤務の人を並べています。</p>
       )}
       {shiftReady && panel.source === 'shift' && members.length === 0 && (
         <p className="px-2 pt-1 text-sm text-ink2">
@@ -230,7 +236,7 @@ export function ReadCheckPanel({
           ▲ {msg}
         </p>
       )}
-      <UnreadButton summary={summary} source={unreadSource} onPickDay={onPickDay} />
+      {showUnread && <UnreadButton summary={summary} source={unreadSource} onPickDay={onPickDay} />}
       <ConfirmDialog
         open={pending !== null}
         title={

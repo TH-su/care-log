@@ -224,7 +224,8 @@ export function buildUnreadSummary(args: {
       const dayDue = !!b?.work && (shiftIso(r, 1) < today || nowMin >= (b?.workStart ?? 0))
       const must = !!a?.nightIn || dayDue
       if (!must) {
-        if ((a?.unknown || b?.unknown) && !b?.work) unknown = true
+        // 読めない記号の人は「判定できない日」に数える（出勤の時刻より前の日勤の人も、昨日のセルが読めなければ数える）
+        if (a?.unknown || b?.unknown) unknown = true
         continue
       }
       if (checked.has(s.id)) continue
@@ -263,12 +264,13 @@ export interface CheckPanelMember {
   id: number
   name: string
   checked: boolean
-  /** 並べた理由（夜勤入り・翌日の日勤・✔ を付けた・勤務表が読めない） */
-  why: 'night' | 'day' | 'checked' | 'fallback'
+  /** 並べた理由（夜勤入り・翌日の日勤・その日に施設で勤務（翌日の勤務表が無い時）・✔ を付けた・勤務表の名簿に名前が無い・勤務表が読めない） */
+  why: 'night' | 'day' | 'sameday' | 'checked' | 'nomatch' | 'fallback'
 }
 
 export interface CheckPanel {
-  source: 'shift' | 'fallback' | 'future' | 'before'
+  /** shift＝勤務表で決めた／nonext＝翌日の勤務表がまだ無い（その日に施設で勤務の人を並べた）／fallback＝勤務表が読めない */
+  source: 'shift' | 'nonext' | 'fallback' | 'future' | 'before'
   members: CheckPanelMember[]
   /** 今日から14日より前の日（現場の端末からは ✔ を付けられない） */
   stale: boolean
@@ -296,7 +298,7 @@ export function buildCheckPanel(args: {
   const past = day < today
   const rowN = past ? (duty?.get(shiftIso(day, 1)) ?? null) : null
   const members: CheckPanelMember[] = []
-  if (!rowR || (past && !rowN)) {
+  if (!rowR) {
     for (const s of staff) {
       const k = nameKey(s.name)
       const checked = checkedIds.has(s.id)
@@ -306,17 +308,25 @@ export function buildCheckPanel(args: {
     }
     return { source: 'fallback', members, stale, isToday }
   }
+  // 翌日の勤務表がまだ無い（月末で翌月の予定が未作成など）時は、翌日の日勤の代わりにその日に施設で勤務の人を並べる
+  const noNext = past && !rowN
   for (const s of staff) {
     const k = nameKey(s.name)
     const checked = checkedIds.has(s.id)
     const isDay = !!k && !!dayKeys?.has(k)
+    const synced = s.hire_order !== null && s.hire_order !== undefined
+    // 勤務表の名簿に名前が無い（表記が違う・名簿から外れた）職員も並べる（✔ を付けられなくならないように・判定はしない）
+    const noMatch = !isDay && synced && rosterKeys !== null && !!k && !rosterKeys.has(k)
     const night = !isDay && !!rowR.get(k)?.nightIn
-    const dayW = !isDay && past && !!rowN?.get(k)?.work
+    const dayW = !isDay && past && !noNext && !!rowN?.get(k)?.work
+    const same = !isDay && noNext && !!rowR.get(k)?.work
     if (night) members.push({ id: s.id, name: s.name, checked, why: 'night' })
     else if (dayW) members.push({ id: s.id, name: s.name, checked, why: 'day' })
+    else if (same) members.push({ id: s.id, name: s.name, checked, why: 'sameday' })
+    else if (noMatch) members.push({ id: s.id, name: s.name, checked, why: 'nomatch' })
     else if (checked) members.push({ id: s.id, name: s.name, checked, why: 'checked' })
   }
-  return { source: 'shift', members, stale, isToday }
+  return { source: noNext ? 'nonext' : 'shift', members, stale, isToday }
 }
 
 /** 確認欄に要る勤務表の日（表示中の日と、その翌日） */

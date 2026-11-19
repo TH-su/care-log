@@ -414,6 +414,23 @@ if (D === null) {
       assert.equal(p.source, 'fallback')
       assert.deepEqual(p.members.map((m) => m.name), ['早番01', '遅番01', '夜勤01'])
     })
+    it('勤務表の名簿に名前が無い職員（取り込んだ人）も確認欄に並ぶ（✔ を付けられなくならない）', () => {
+      const st2 = [...staff, { id: 9, name: '表記違い01', hire_order: 9 }, { id: 10, name: '手で足した01', hire_order: null }]
+      const p = R.buildCheckPanel({ day: '2026-11-20', today: '2026-11-20', staff: st2, duty: fac, checkedIds: new Set(), rosterKeys, dayKeys })
+      assert.deepEqual(p.members.map((m) => [m.name, m.why]), [['夜勤01', 'night'], ['表記違い01', 'nomatch']])
+    })
+    it('翌日の勤務表がまだ無い日は、その日に施設で勤務の人を並べる（nonext）', () => {
+      const f2 = D.buildFacilityDutyTable(src, ['2026-11-20'])
+      const p = R.buildCheckPanel({ day: '2026-11-20', today: '2026-11-21', staff, duty: f2, checkedIds: new Set(), rosterKeys, dayKeys })
+      assert.equal(p.source, 'nonext')
+      assert.deepEqual(p.members.map((m) => [m.name, m.why]), [['早番01', 'sameday'], ['夜勤01', 'night']])
+    })
+    it('出勤の時刻より前でも、昨日のセルが読めない人がいる日は「判定できない日」に数える', () => {
+      const p2 = { cells: { ...plan.cells, a: { 20: 'ABC', 21: '早' } }, subCells: plan.subCells }
+      const f2 = D.buildFacilityDutyTable({ ...src, months: { '2026-11': { plan: p2, actual: null } } }, ['2026-11-20', '2026-11-21'])
+      const s = R.buildUnreadSummary({ today: '2026-11-21', staff, duty: f2, checks: new Map([['2026-11-20', new Set([3])]]), rosterKeys, dayKeys, nowMin: 6 * 60 })
+      assert.ok(s.undeterminedDays.includes('2026-11-20'))
+    })
     it('まだ来ていない日・始める前の日は確認欄を出さない', () => {
       assert.equal(panel('2026-11-22', '2026-11-21').source, 'future')
       assert.equal(panel('2026-11-18', '2026-11-21').source, 'before')
@@ -455,6 +472,8 @@ if (D === null) {
       assert.match(sec, /useState\(false\)/, '開いた状態は覚えない（毎回閉じて始まる）')
       const panel = comp.slice(comp.indexOf('export function ReadCheckPanel'))
       assert.ok(panel.indexOf('<UnreadButton') > panel.indexOf('</ul>'), '名前の ✔ の下')
+      assert.match(panel, /\{showUnread && <UnreadButton /, '10日表示でも1つだけ')
+      assert.match(page, /showUnread=\{d === unreadHost\}/)
     })
     it('未読の日付を押すと、その日の申送の頭へ移る（すぐ読めるように）', () => {
       const sec = page.slice(page.indexOf('const goUnreadDay'), page.indexOf('const goUnit = useCallback('))
