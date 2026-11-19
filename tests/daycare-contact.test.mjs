@@ -565,9 +565,10 @@ describe('移行 0061_daycare_contact.sql（静的検査）', () => {
     const all = read('./pg-run-all.mjs')
     // 2026-11-10 未測定（固定し直し・意図は同じ）: 0062（〔未測定〕の印の表）も同じく組の外部キーを持って作るので、理由と施設の印の試験の一覧に足した（0061 の2表は残る）
     assert.match(all, /\['0053_tenant_stage3\.sql', '利用者・職員・申し送りを指す外部キーが決まった76本かの確かめ（0061・0062 が組の外部キーを足した）'\]/)
-    assert.match(read('./tenant-stage1-pg.mjs'), /export const LATER_TENANT_TABLES = \['daycare_day_notes', 'daycare_contact_notes', 'daycare_vital_unmeasured'\]/)
-    assert.match(read('./tenant-stage3-pg.mjs'), /const LATER_TABLES = \['daycare_day_notes', 'daycare_contact_notes', 'daycare_vital_unmeasured'\]/)
-    assert.match(read('./tenant-stage4-pg.mjs'), /const LATER_TABLES = \['daycare_day_notes', 'daycare_contact_notes', 'daycare_vital_unmeasured'\]/)
+    // 2026-11-19 確認欄（固定し直し・意図は同じ）: 0065（日報の確認欄の表）も施設の印を持って作るので、施設の印の試験の一覧の後ろに足した
+    assert.match(read('./tenant-stage1-pg.mjs'), /export const LATER_TENANT_TABLES = \['daycare_day_notes', 'daycare_contact_notes', 'daycare_vital_unmeasured', 'daily_read_checks'\]/)
+    assert.match(read('./tenant-stage3-pg.mjs'), /const LATER_TABLES = \['daycare_day_notes', 'daycare_contact_notes', 'daycare_vital_unmeasured', 'daily_read_checks'\]/)
+    assert.match(read('./tenant-stage4-pg.mjs'), /const LATER_TABLES = \['daycare_day_notes', 'daycare_contact_notes', 'daycare_vital_unmeasured', 'daily_read_checks'\]/)
     assert.match(read('./daycare-contact-pg.mjs'), /daycare_contact_notes/)
   })
 })

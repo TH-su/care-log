@@ -293,7 +293,8 @@ describe('「許可リスト外か」の確かめは同じ瞬間の分を1本に
     const src = read('../src/lib/db.ts')
     // 2026-11-08: 体重のメモリを捨てる1行（clearWeightCache・care-backend 0077）を、居場所のトピックの後に足してよい
     // 2026-11-15: 排便の記録のメモリを捨てる1行（clearExcretionCache・care-backend 0094）を、体重の後に足してよい
-    assert.match(src, /forgetMyRole\(\)\n[^\n]*\n    deniedProbeInFlight = null\n(    forgetPresenceTopic\(\)[^\n]*\n)?(    clearWeightCache\(\)[^\n]*\n)?(    clearExcretionCache\(\)[^\n]*\n)?  \}/)
+    // 2026-11-19（固定し直し・意図は同じ）: 勤務表のメモリを捨てる1行（clearShiftCache・日報の確認欄 0065）を、排便の後に足してよい
+    assert.match(src, /forgetMyRole\(\)\n[^\n]*\n    deniedProbeInFlight = null\n(    forgetPresenceTopic\(\)[^\n]*\n)?(    clearWeightCache\(\)[^\n]*\n)?(    clearExcretionCache\(\)[^\n]*\n)?(    clearShiftCache\(\)[^\n]*\n)?  \}/)
     assert.match(src, /if \(deniedProbeInFlight === run\) deniedProbeInFlight = null/)
   })
 })

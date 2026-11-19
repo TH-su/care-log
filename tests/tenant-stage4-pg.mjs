@@ -42,7 +42,8 @@ const TABLES = ['residents', 'staff', 'vitals', 'meals', 'fluid_intake', 'notes'
  * 2026-11-09 計画C（固定し直し・意図は同じ）: 0061 の連絡帳の2表。0054 の守りの本数は27表で数え、この表は同じ守りを持つことを別に確かめる
  * 2026-11-10 未測定（固定し直し・意図は同じ）: 0062 の〔未測定〕の印の表も同じ
  */
-const LATER_TABLES = ['daycare_day_notes', 'daycare_contact_notes', 'daycare_vital_unmeasured']
+// 2026-11-19 確認欄（固定し直し・意図は同じ）: 0065 の日報の確認欄の表を後ろに足した
+const LATER_TABLES = ['daycare_day_notes', 'daycare_contact_notes', 'daycare_vital_unmeasured', 'daily_read_checks']
 /** 27表の tenant_only の本数（0054 が足す・戻す本数） */
 const N27_SQL = `select count(*)::int n from pg_policies where schemaname = 'public' and policyname = 'tenant_only' and tablename = any($1)`
 const QUAL = '(tenant_id = ( SELECT private.my_tenant() AS my_tenant))'

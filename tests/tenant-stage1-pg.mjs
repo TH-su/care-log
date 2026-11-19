@@ -31,8 +31,9 @@ const STUB_TABLES = ['kv_entries', 'master_residents', 'tenants']
  * 段階4の後に、施設の印・印を入れるトリガを最初から持って作った表（0051 の27表には入れない）。
  * 2026-11-09 計画C（固定し直し・意図は同じ）: 0061 の連絡帳の2表。27表の確かめは27表のまま、この表も同じ印と同じトリガを持つことを確かめる
  * 2026-11-10 未測定（固定し直し・意図は同じ）: 0062 の〔未測定〕の印の表も同じ（27表の数は変えない）
+ * 2026-11-19 確認欄（固定し直し・意図は同じ）: 0065 の日報の確認欄の表も同じ（27表の数は変えない）
  */
-export const LATER_TENANT_TABLES = ['daycare_day_notes', 'daycare_contact_notes', 'daycare_vital_unmeasured']
+export const LATER_TENANT_TABLES = ['daycare_day_notes', 'daycare_contact_notes', 'daycare_vital_unmeasured', 'daily_read_checks']
 const A = '00000000-0000-0000-0000-0000000000aa'
 const B = '00000000-0000-0000-0000-0000000000bb'
 

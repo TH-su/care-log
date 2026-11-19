@@ -112,6 +112,8 @@ import {
   trainingResultOf,
 } from './daycareTraining'
 import type { DaycareStaffing, DaycareTrainingSession, StaffingRole, trainingPayload } from './daycareTraining'
+import { projectShiftMonth, projectShiftStaff, projectShiftSymbols } from './shiftDuty'
+import type { ShiftSource } from './shiftDuty'
 import { normalizeReporterName } from './reporterName'
 import { EXPLAINED_TOS, HOME_VISIT_PURPOSES, HOME_VISIT_TEXT_MAX } from './daycareHomeVisit'
 import type { DaycareHomeVisit, ExplainedTo, HomeVisitPurpose, homeVisitPayload } from './daycareHomeVisit'
@@ -593,6 +595,7 @@ async function onAuthEvent(event: string): Promise<void> {
     forgetPresenceTopic() // 居場所のトピック名も前のアカウントの施設のもの（0056）
     clearWeightCache() // メモリの体重も前のアカウントのもの（共通の DB から読んだ分を使い回さない・0077）
     clearExcretionCache() // 排便の記録も同じ（0094）
+    clearShiftCache() // 勤務表も前のアカウントの施設のもの（0065 の確認欄）
   }
   if (event !== 'SIGNED_IN' && event !== 'TOKEN_REFRESHED') return
   // ログインし直した: 拒否で止まった退避 op を1回だけ送り直す（F37。権限が直った後なら届く。TOKEN_REFRESHED では解かない）。
@@ -13868,4 +13871,157 @@ export const __testHooks = import.meta.env?.PROD === true ? undefined : {
   async authEvent(event: string): Promise<void> {
     await onAuthEvent(event)
   },
+}
+
+// ── 日報の確認欄（その日の日報を読んだ ✔・2026-11-19 本人指示・0065_daily_read_checks.sql） ─────────────
+// 確認の印（daily_read_checks）を読む・付ける・取り消す関数と、未読者の判定に使う勤務表（共通の DB の kv_entries）の読み取り。
+// ここに足すのはこの表と勤務表の読み取りの関数だけ（既存の関数・送信待ちの経路は変えない）。
+// ・✔ は記録ではなく「読んだ」印なので入力解禁（native_input_enabled）に合わせない（既読と同じ扱い）。未来の日は書かない
+// ・付ける: insert。2台が同時に同じ人の ✔ を付けた 23505 は「付いている」とみなす
+// ・取り消す: 論理削除（deleted_at）。0行（他の端末が先に取り消した）は取り消せた扱い
+// ・送信待ちは作らない。通信できない時は DbError('network')、画面は ✔ を付けない（押し直してもらう）
+// ・勤務表は読むだけ（読み口 carelog_shift_duty・0065。サーバーが職員の id・氏名・区分・在籍、記号の code・type、月の cells・subCells だけを返す＝
+//   労務の項目は端末に届かない）。画面のメモリにだけ5分持つ（console・localStorage に出さない）。live でない・読めない時は null（出勤者の欄で判定）
+
+const READ_CHECK_MSG = {
+  missing: '確認欄はまだ使えません（サーバー側の設定待ち）。管理者に連絡してください。',
+  offline: '確認を付けられませんでした。通信状態を確認して、もう一度押してください。',
+  offlineClear: '確認を取り消せませんでした。通信状態を確認して、もう一度押してください。',
+  pastOffice: '14日より前の日の確認は、事務所のログインでだけ付け・取り消しできます。',
+  future: 'まだ来ていない日の確認は付けられません。',
+} as const
+
+const READ_CHECK_COLS = 'id,day,staff_id,rev'
+/** 確認の印の取得上限（10日×職員40名＝400件。これを超える運用は無い） */
+const READ_CHECK_ROWS = MAX_ROWS
+
+export interface ReadCheckRow {
+  id: number
+  day: string
+  staff_id: number
+  rev: number
+}
+
+function normalizeReadCheck(row: unknown): ReadCheckRow | null {
+  const r = asRecord(row)
+  if (!r) return null
+  const id = idNum(r.id)
+  const day = dateStr(r.day)
+  const staff_id = idNum(r.staff_id)
+  const rev = num(r.rev)
+  if (id === null || day === null || staff_id === null || rev === null) return null
+  return { id, day, staff_id, rev }
+}
+
+function readCheckWriteError(res: Res<unknown>, offline: string = READ_CHECK_MSG.offline): DbError {
+  if (isMissingTable(res)) return new DbError('server', READ_CHECK_MSG.missing)
+  const message = typeof res.error?.message === 'string' ? res.error.message : ''
+  if (errCode(res) === '42501' && message.startsWith('read_check_past_office_only:')) return new DbError('server', READ_CHECK_MSG.pastOffice)
+  if (errCode(res) === '22023' && message.startsWith('read_check_future:')) return new DbError('server', READ_CHECK_MSG.future)
+  if (isAuthFail(res)) {
+    fireAuthExpired()
+    return new DbError('auth', MSG.authWrite)
+  }
+  if (isTransient(res)) return new DbError('network', offline)
+  return rejectError('保存でき', errCode(res), res.status)
+}
+
+/**
+ * 表示中の日の確認の印（取り消した行を除く）。表が無い DB（0065 未適用）では missing=true・行は空。読めない時は例外（DbError）
+ */
+export async function fetchReadChecks(days: readonly string[]): Promise<{ rows: ReadCheckRow[]; missing: boolean }> {
+  const list0 = [...new Set(days)]
+  for (const d of list0) assertDay(d)
+  if (list0.length === 0) return { rows: [], missing: false }
+  const sb = await getClient()
+  const res = (await sb
+    .from('daily_read_checks')
+    .select(READ_CHECK_COLS)
+    .in('day', list0)
+    .is('deleted_at', null)
+    .order('id', { ascending: true })
+    .limit(READ_CHECK_ROWS)) as Res<unknown>
+  if (res.error !== null) {
+    if (isMissingTable(res)) return { rows: [], missing: true }
+    throw readError(res)
+  }
+  return { rows: list(res.data, normalizeReadCheck, READ_CHECK_ROWS), missing: false }
+}
+
+/** ✔ を付ける。同じ人・同じ日に生きている印があれば（2台が同時に付けた 23505）付いている扱い */
+export async function addReadCheck(p: { day: string; staffId: number; recordedBy: number | null }): Promise<void> {
+  assertDay(p.day)
+  if (idNum(p.staffId) === null) throw new DbError('server', MSG.broken)
+  if (p.day > localToday()) throw new DbError('server', READ_CHECK_MSG.future)
+  const sb = await getClient()
+  const res = await bounded(
+    sb.from('daily_read_checks').insert({ day: p.day, staff_id: p.staffId, recorded_by: idNum(p.recordedBy) }).select('id').maybeSingle(),
+  )
+  if (res.error === null || isUniqueViolation(res)) {
+    kickAfterDelivered()
+    return
+  }
+  throw readCheckWriteError(res)
+}
+
+/** ✔ を取り消す（論理削除）。その人・その日の生きている印をすべて取り消す。0行（もう無い）は取り消せた扱い */
+export async function cancelReadCheck(p: { day: string; staffId: number }, opts?: WriteOpts): Promise<void> {
+  assertDay(p.day)
+  if (idNum(p.staffId) === null) throw new DbError('server', MSG.broken)
+  const sb = await getClient()
+  const sent = withEditor({ deleted_at: new Date().toISOString() }, opts?.editedBy)
+  sent.deleted_by = idNum(sent.edited_by ?? opts?.editedBy)
+  const res = await sendWithEditor(sent, (x) =>
+    bounded(
+      sb.from('daily_read_checks').update(x).eq('day', p.day).eq('staff_id', p.staffId).is('deleted_at', null).select('id'),
+    ),
+  )
+  if (res.error !== null) throw readCheckWriteError(res, READ_CHECK_MSG.offlineClear)
+  // ログインの控えが無い間（anon キーで出た）の0行は取り消せていない（F58）
+  if (Array.isArray(res.data) && res.data.length === 0 && (await sessionMissing(sb))) throw new DbError('network', READ_CHECK_MSG.offlineClear)
+  kickAfterDelivered()
+}
+
+/** 勤務表の読み取りの控え（メモリだけ・5分） */
+const SHIFT_CACHE_MS = 5 * 60 * 1000
+/** 読めなかった時の控え（短く持って、すぐ読み直す） */
+const SHIFT_FAIL_MS = 30 * 1000
+let shiftCache: { at: number; key: string; value: ShiftSource | null } | null = null
+
+/** 勤務表の控えを捨てる（ログインし直した時・試験） */
+export function clearShiftCache(): void {
+  shiftCache = null
+}
+
+/**
+ * 表示中の日の月の勤務表（予定・実績）と職員・記号を、読み口 carelog_shift_duty（0065・判定に要る項目だけ）で読む。
+ * 読めない・関数が無い・切り替え前（live でない）・職員が0人の時は null（画面は出勤者の欄で判定する）。例外は投げない
+ */
+export async function fetchShiftSource(days: readonly string[]): Promise<ShiftSource | null> {
+  const yms = [...new Set(days.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)).map((d) => d.slice(0, 7)))].sort().slice(0, 3)
+  if (yms.length === 0) return null
+  const key = yms.join(',')
+  if (shiftCache && shiftCache.key === key && Date.now() - shiftCache.at < (shiftCache.value ? SHIFT_CACHE_MS : SHIFT_FAIL_MS)) return shiftCache.value
+  let value: ShiftSource | null = null
+  try {
+    const sb = await getClient()
+    const res = await bounded(sb.rpc('carelog_shift_duty', { p_months: yms }))
+    const r = res.error === null ? asRecord(res.data) : null
+    if (r && r.mode === 'live') {
+      const staff = projectShiftStaff(r.staff)
+      const mon = asRecord(r.months)
+      if (staff !== null && staff.length > 0 && mon) {
+        const months: ShiftSource['months'] = {}
+        for (const ym of yms) {
+          const m = asRecord(mon[ym])
+          months[ym] = { plan: projectShiftMonth(m?.plan ?? null), actual: projectShiftMonth(m?.actual ?? null) }
+        }
+        value = { staff, symbols: projectShiftSymbols(r.symbols), months }
+      }
+    }
+  } catch {
+    value = null // 読めなくても日報は止めない（中身は出さない）
+  }
+  shiftCache = { at: Date.now(), key, value }
+  return value
 }

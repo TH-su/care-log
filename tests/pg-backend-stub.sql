@@ -43,6 +43,8 @@ create table if not exists public.kv_entries (
 );
 -- 版（本番の care-backend 0005_kv_store.sql の kv_entries.rev と同じ形）。0041 の daycare_plan が写しの版として返す
 alter table public.kv_entries add column if not exists rev int not null default 0;
+-- 切り替えの印（本番の care-backend 0005 の kv_entries.mode と同じ形）。0065 の勤務表の読み口が見る（2026-11-19）
+alter table public.kv_entries add column if not exists mode text not null default 'shadow';
 
 -- 入居者マスタの写しの最小の真似（本番は care-backend 0004_master_residents_shadow.sql）。0015・0016 の入浴・与薬の
 -- 自動の記録（private.care_auto_bath_on など）が入院中の判定に読む。試験で自動の記録を動かす時に要る（2026-10-22 デイ段階1）
