@@ -8,6 +8,8 @@
 --        staff_id＝読んだ職員・day＝読んだ日報の日（業務日・JST）・checked_at＝✔ を付けた時刻・recorded_by＝押した端末の記録者。
 --        ✔ の取り消しは論理削除（deleted_at／deleted_by）。取り消した後にもう一度 ✔ を付けると新しい行になる。
 --   2. 書ける日の守り public.daily_read_check_guard()（トリガ専用・誰にも実行の権限を渡さない）
+--   3. 未読者の判定に使う勤務表の読み口 public.carelog_shift_duty(text[])（読むだけ・判定に要る項目だけ・許可リストの人・自分の施設だけ）
+--      現場の端末が勤務表の職員の全項目（労務の項目）を受け取らないように、画面は kv_get でなくこの関数を呼ぶ
 --
 -- 作り（0061・0062 と同じ形）:
 --   - 施設の印 tenant_id … 必須（not null）・care-backend の tenants を参照。既定は足す前のトリガ carelog_fill_tenant
@@ -152,6 +154,87 @@ create policy tenant_only on public.daily_read_checks as restrictive for all to 
 revoke all on public.daily_read_checks from anon;
 revoke delete, truncate on public.daily_read_checks from authenticated;
 
+-- ---------- 4. 未読者の判定に使う勤務表の読み口（読むだけ・要る項目だけ） ----------
+-- 勤務表（共通 DB の kv_entries の staff・symbols・sched:YYYY-MM:plan／actual）から、判定に要る項目だけを返す。
+-- 職員は id・氏名・主の区分・在籍の印（active・status・retireMonth）だけ（勤務の決まり・社員番号・雇用・資格などの労務の項目は返さない＝
+-- care-backend 0076 の carelog_staff_names と同じ考え）。記号は code・type・disabled だけ。月は cells・subCells だけ（色・メモ・必要数は返さない）。
+-- 呼べるのは許可リストの人（is_member）で、読むのは自分の施設（my_tenant）の行だけ。勤務表が切り替え後（live）でない時は {mode} だけを返す
+-- （画面は日報の出勤者の欄で判定する）。p_months は 'YYYY-MM' の1〜3個（10日表示が月をまたいでも2つ）。
+create or replace function public.carelog_shift_duty(p_months text[])
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $fn$
+declare
+  v_tenant uuid := private.my_tenant();
+  v_mode text;
+  v_staff jsonb;
+  v_syms jsonb;
+  v_months jsonb := '{}'::jsonb;
+  v_ym text;
+begin
+  if not private.is_member() or v_tenant is null then
+    raise exception 'not allowed' using errcode = '42501';
+  end if;
+  if p_months is null or pg_catalog.cardinality(p_months) < 1 or pg_catalog.cardinality(p_months) > 3 then
+    raise exception 'carelog_shift_duty: 月は1〜3個' using errcode = '22023';
+  end if;
+  foreach v_ym in array p_months loop
+    if v_ym is null or v_ym !~ '^[0-9]{4}-(0[1-9]|1[0-2])$' then
+      raise exception 'carelog_shift_duty: 月の形が違います' using errcode = '22023';
+    end if;
+  end loop;
+  -- 切り替えの印: 種類ごとの印（care-backend 0007）があればそれ、無ければ staff の行の印
+  if pg_catalog.to_regprocedure('private.kv_family_mode(uuid,text)') is not null then
+    execute 'select private.kv_family_mode($1, ''shift'')' into v_mode using v_tenant;
+  else
+    select e.mode into v_mode from public.kv_entries e where e.tenant_id = v_tenant and e.key = 'staff';
+  end if;
+  if v_mode is distinct from 'live' then
+    return pg_catalog.jsonb_build_object('mode', coalesce(v_mode, 'none'));
+  end if;
+  select case when pg_catalog.jsonb_typeof(e.data) = 'array' then e.data end into v_staff
+    from public.kv_entries e where e.tenant_id = v_tenant and e.key = 'staff';
+  select case when pg_catalog.jsonb_typeof(e.data) = 'array' then e.data end into v_syms
+    from public.kv_entries e where e.tenant_id = v_tenant and e.key = 'symbols';
+  foreach v_ym in array p_months loop
+    v_months := v_months || pg_catalog.jsonb_build_object(v_ym, pg_catalog.jsonb_build_object(
+      'plan', (select case when pg_catalog.jsonb_typeof(e.data) = 'object'
+                           then pg_catalog.jsonb_build_object('cells', coalesce(e.data -> 'cells', '{}'::jsonb), 'subCells', coalesce(e.data -> 'subCells', '{}'::jsonb)) end
+                 from public.kv_entries e where e.tenant_id = v_tenant and e.key = 'sched:' || v_ym || ':plan'),
+      'actual', (select case when pg_catalog.jsonb_typeof(e.data) = 'object'
+                             then pg_catalog.jsonb_build_object('cells', coalesce(e.data -> 'cells', '{}'::jsonb), 'subCells', coalesce(e.data -> 'subCells', '{}'::jsonb)) end
+                   from public.kv_entries e where e.tenant_id = v_tenant and e.key = 'sched:' || v_ym || ':actual')));
+  end loop;
+  return pg_catalog.jsonb_build_object(
+    'mode', 'live',
+    'staff', coalesce((
+      select pg_catalog.jsonb_agg(pg_catalog.jsonb_strip_nulls(pg_catalog.jsonb_build_object(
+               'id', case when pg_catalog.jsonb_typeof(x -> 'id') = 'string' then x -> 'id' end,
+               'name', case when pg_catalog.jsonb_typeof(x -> 'name') = 'string' then x -> 'name' end,
+               'mainDivision', case when pg_catalog.jsonb_typeof(x -> 'mainDivision') = 'string' then x -> 'mainDivision' end,
+               'active', case when pg_catalog.jsonb_typeof(x -> 'active') = 'boolean' then x -> 'active' end,
+               'status', case when pg_catalog.jsonb_typeof(x -> 'status') = 'string' then x -> 'status' end,
+               'retireMonth', case when pg_catalog.jsonb_typeof(x -> 'retireMonth') = 'string' then x -> 'retireMonth' end)) order by i)
+        from pg_catalog.jsonb_array_elements(v_staff) with ordinality t(x, i)
+       where pg_catalog.jsonb_typeof(x) = 'object'), '[]'::jsonb),
+    'symbols', coalesce((
+      select pg_catalog.jsonb_agg(pg_catalog.jsonb_strip_nulls(pg_catalog.jsonb_build_object(
+               'code', case when pg_catalog.jsonb_typeof(x -> 'code') = 'string' then x -> 'code' end,
+               'type', case when pg_catalog.jsonb_typeof(x -> 'type') = 'string' then x -> 'type' end,
+               'disabled', case when pg_catalog.jsonb_typeof(x -> 'disabled') = 'boolean' then x -> 'disabled' end)) order by i)
+        from pg_catalog.jsonb_array_elements(v_syms) with ordinality t(x, i)
+       where pg_catalog.jsonb_typeof(x) = 'object'), '[]'::jsonb),
+    'months', v_months);
+end;
+$fn$;
+comment on function public.carelog_shift_duty(text[]) is
+  '日報の確認欄の未読者の判定に使う勤務表（職員の id・氏名・主の区分・在籍の印、記号の code・type、月の cells・subCells だけ）。許可リストの人・自分の施設だけ。live でなければ {mode} だけ。0065。';
+revoke all on function public.carelog_shift_duty(text[]) from public, anon;
+grant execute on function public.carelog_shift_duty(text[]) to authenticated;
+
 commit;
 
 notify pgrst, 'reload schema';
@@ -176,4 +259,7 @@ select '日報の確認欄の表（施設の印が必須・印のトリガ・守
                      and grantee in ('authenticated', 'anon') and privilege_type in ('DELETE', 'TRUNCATE')) = 0
              and (select pg_catalog.count(*) from pg_catalog.pg_indexes
                    where schemaname = 'public' and tablename = 'daily_read_checks' and indexname = 'uq_daily_read_checks') = 1
+             and pg_catalog.to_regprocedure('public.carelog_shift_duty(text[])') is not null
+             and pg_catalog.has_function_privilege('authenticated', 'public.carelog_shift_duty(text[])', 'execute')
+             and not pg_catalog.has_function_privilege('anon', 'public.carelog_shift_duty(text[])', 'execute')
             then 'ok' else 'NG' end as result;

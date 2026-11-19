@@ -151,8 +151,8 @@ if (D === null) {
       { id: 3, name: '職員03', hire_order: 3 },
       { id: 9, name: '事務01', hire_order: null },
     ]
-    const day = '2026-11-18'
-    const today = '2026-11-19'
+    const day = '2026-11-21'
+    const today = '2026-11-22'
     const duty = new Map([[day, new Map([['職員01', 'duty'], ['職員02', 'off'], ['職員03', 'unknown']])]])
     const keys = new Set(['職員01', '職員02', '職員03'])
     const base = { day, today, staff, duty, dailyKeys: keys, checkedIds: new Set(), attendanceIds: new Set() }
@@ -171,19 +171,42 @@ if (D === null) {
     })
     it('休み明け: 休みの日は出ず、勤務に戻った日に ✔ が無ければ出る', () => {
       const dutyTable = new Map([
-        ['2026-11-16', new Map([['職員02', 'off']])],
-        ['2026-11-17', new Map([['職員02', 'off']])],
-        ['2026-11-18', new Map([['職員02', 'duty']])],
+        ['2026-11-19', new Map([['職員02', 'off']])],
+        ['2026-11-20', new Map([['職員02', 'off']])],
+        ['2026-11-21', new Map([['職員02', 'duty']])],
       ])
       const at = (d) => R.buildReadCheckView({ ...base, day: d, duty: dutyTable }).unread.map((u) => u.id)
-      assert.deepEqual(at('2026-11-16'), [])
-      assert.deepEqual(at('2026-11-17'), [])
-      assert.deepEqual(at('2026-11-18'), [2])
+      assert.deepEqual(at('2026-11-19'), [])
+      assert.deepEqual(at('2026-11-20'), [])
+      assert.deepEqual(at('2026-11-21'), [2])
     })
     it('勤務表で名前が見つからない人は判定できない（未読には出さない）', () => {
       const v = R.buildReadCheckView({ ...base, duty: new Map([[day, new Map([['職員01', 'duty']])]]) })
       assert.deepEqual(v.unread.map((u) => u.id), [1])
       assert.deepEqual(v.undetermined.map((u) => u.id).sort(), [2, 3])
+    })
+    it('氏名の表記が勤務表と違う職員も確認欄から消えない（判定できないに数える）・名簿にいて対象でない人（訪問だけ）は並べない', () => {
+      const s2 = [...staff, { id: 4, name: '旧姓04', hire_order: 4 }, { id: 5, name: '訪問05', hire_order: 5 }]
+      const roster = new Set(['職員01', '職員02', '職員03', '訪問05'])
+      const v = R.buildReadCheckView({ ...base, staff: s2, rosterKeys: roster })
+      assert.ok(v.members.some((m) => m.id === 4 && m.duty === 'nomatch'))
+      assert.ok(!v.members.some((m) => m.id === 5))
+      assert.ok(v.undetermined.some((u) => u.id === 4))
+      assert.ok(!v.members.some((m) => m.id === 9)) // 手で足した事務職員（hire_order なし）は並べない
+    })
+    it('確認欄を始める前の日は判定しない（✔ の行が無いので全員が赤になるのを防ぐ）', () => {
+      const v = R.buildReadCheckView({ ...base, day: '2026-11-18', duty: new Map([['2026-11-18', new Map([['職員01', 'duty']])]]) })
+      assert.equal(v.source, 'before')
+      assert.deepEqual(v.unread, [])
+      assert.equal(R.READ_CHECK_FROM, '2026-11-19')
+    })
+    it('今日から14日より前の日は stale（現場の端末から付けられないので目立たせない）', () => {
+      const d = new Map([['2026-12-01', new Map([['職員01', 'duty']])], ['2026-12-02', new Map([['職員01', 'duty']])]])
+      const old = R.buildReadCheckView({ ...base, day: '2026-12-01', today: '2026-12-16', duty: d })
+      const edge = R.buildReadCheckView({ ...base, day: '2026-12-02', today: '2026-12-16', duty: d })
+      assert.equal(old.stale, true)
+      assert.deepEqual(old.unread.map((u) => u.id), [1])
+      assert.equal(edge.stale, false)
     })
     it('勤務表が読めない・その月が無い時は出勤者の欄で判定する', () => {
       const v = R.buildReadCheckView({ ...base, duty: null, dailyKeys: null, attendanceIds: new Set([2]) })
@@ -206,7 +229,7 @@ if (D === null) {
       assert.ok(v.members.some((m) => m.id === 9 && m.checked))
     })
     it('まだ来ていない日は判定しない', () => {
-      const v = R.buildReadCheckView({ ...base, day: '2026-11-20', duty: new Map([['2026-11-20', new Map([['職員01', 'duty']])]]) })
+      const v = R.buildReadCheckView({ ...base, day: '2026-11-23', duty: new Map([['2026-11-23', new Map([['職員01', 'duty']])]]) })
       assert.equal(v.source, 'future')
       assert.deepEqual(v.unread, [])
     })
@@ -226,7 +249,7 @@ if (D === null) {
     it('確認欄と未読者欄は画面だけ（紙の日報を変えない）', () => {
       const roots = comp.match(/<(div|section)\s[^>]*className="[^"]*"/g) ?? []
       const top = roots.filter((r) => /print:hidden/.test(r))
-      assert.ok(top.length >= 4, '未読者欄の3つの形と確認欄の外枠に print:hidden')
+      assert.ok(top.length >= 5, '未読者欄の4つの形と確認欄の外枠に print:hidden')
       assert.match(comp, /<section\s+id=\{`readcheck-\$\{day\}`\}\s+className="print:hidden/)
     })
     it('日報の枠に置いてある（日付の見出しの下と枠の末尾）', () => {
@@ -234,12 +257,12 @@ if (D === null) {
       assert.match(page, /<ReadCheckPanel day=\{day\} view=\{readCheckView\} state=\{readChecks\} actorId=\{actorId\} \/>/)
       assert.match(page, /const readChecks = useReadChecks\(visibleDays, reload\)/)
     })
-    it('勤務表は読むだけ（kv_get）で、応答を console・localStorage に出さない', () => {
+    it('勤務表は判定に要る項目だけの読み口（carelog_shift_duty）で読み、kv_get で職員の全項目を受け取らない・console・localStorage に出さない', () => {
       const sec = strip(db.slice(db.indexOf('// ── 日報の確認欄')))
       assert.ok(sec.length > 0)
-      assert.doesNotMatch(sec, /kv_put|kv_set/)
+      assert.doesNotMatch(sec, /kv_put|kv_set|kv_get/)
       assert.doesNotMatch(sec, /console\.|localStorage/)
-      assert.match(sec, /sb\.rpc\('kv_get'/)
+      assert.match(sec, /sb\.rpc\('carelog_shift_duty', \{ p_months: yms \}\)/)
       const lib = strip(read('../src/lib/shiftDuty.ts') + read('../src/lib/readCheck.ts') + read('../src/hooks/useReadChecks.ts') + comp)
       assert.doesNotMatch(lib, /console\.|localStorage|sessionStorage/)
     })

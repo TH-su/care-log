@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { addReadCheck, cancelReadCheck, fetchReadChecks, fetchShiftSource } from '../lib/db'
-import { buildDutyTable } from '../lib/shiftDuty'
+import { buildDutyTable, nameKey } from '../lib/shiftDuty'
 import type { DutyTable } from '../lib/shiftDuty'
 
 export interface ReadChecksState {
@@ -15,12 +15,16 @@ export interface ReadChecksState {
   missing: boolean
   /** ✔ を読めなかった（通信など） */
   loadFailed: boolean
-  /** 読み込み済みか（最初の読み込みが終わるまで false） */
+  /** 表示中の日の ✔ を読み終えたか（日を替えると false に戻る＝前の日の ✔ で判定しない） */
   loaded: boolean
+  /** 表示中の日の勤務表を読み終えたか（読めなかった時も true。読む前に出勤者の欄で判定して赤を出さない） */
+  shiftLoaded: boolean
   /** 勤務表から作った日ごとの区分（読めない時は null） */
   duty: DutyTable | null
   /** 勤務表で日報の対象の職員の氏名の鍵（読めない時は null） */
   dailyKeys: Set<string> | null
+  /** 勤務表の名簿の全員（在籍）の氏名の鍵（読めない時は null） */
+  rosterKeys: Set<string> | null
   /** 送っている最中の（日|職員） */
   busy: Set<string>
   add: (day: string, staffId: number, recordedBy: number | null) => Promise<void>
@@ -33,8 +37,13 @@ export function useReadChecks(days: readonly string[], reloadToken: number): Rea
   const [missing, setMissing] = useState(false)
   const [loadFailed, setLoadFailed] = useState(false)
   const [loaded, setLoaded] = useState(false)
+  const [shiftLoaded, setShiftLoaded] = useState(false)
+  /** どの日の組を読み終えたか（日を替えた直後は前の組の結果を使わない） */
+  const [loadedKey, setLoadedKey] = useState<string | null>(null)
+  const [shiftKey, setShiftKey] = useState<string | null>(null)
   const [duty, setDuty] = useState<DutyTable | null>(null)
   const [dailyKeys, setDailyKeys] = useState<Set<string> | null>(null)
+  const [rosterKeys, setRosterKeys] = useState<Set<string> | null>(null)
   const [busy, setBusy] = useState<Set<string>>(new Set())
   const [bump, setBump] = useState(0)
   const genRef = useRef(0)
@@ -57,22 +66,35 @@ export function useReadChecks(days: readonly string[], reloadToken: number): Rea
         if (!alive || my !== genRef.current) return
         setLoadFailed(true)
       } finally {
-        if (alive && my === genRef.current) setLoaded(true)
+        if (alive && my === genRef.current) {
+          setLoaded(true)
+          setLoadedKey(key)
+        }
       }
     })()
     void (async () => {
       const src = await fetchShiftSource(list)
       if (!alive || my !== genRef.current) return
+      setShiftLoaded(true)
+      setShiftKey(key)
       if (!src) {
         setDuty(null)
         setDailyKeys(null)
+        setRosterKeys(null)
         return
       }
       const table = buildDutyTable(src, list)
       const keys = new Set<string>()
       for (const row of table.values()) for (const k of row.keys()) keys.add(k)
+      const roster = new Set<string>()
+      for (const st of src.staff) {
+        if (st.active === false || st.status === '退職') continue
+        const k = nameKey(st.name)
+        if (k) roster.add(k)
+      }
       setDuty(table.size > 0 ? table : null)
       setDailyKeys(table.size > 0 ? keys : null)
+      setRosterKeys(table.size > 0 ? roster : null)
     })()
     return () => {
       alive = false
@@ -130,8 +152,11 @@ export function useReadChecks(days: readonly string[], reloadToken: number): Rea
     [mark],
   )
 
+  // 日を替えた直後（読み終える前）は「まだ」とみなす＝前の日の組の ✔・勤務表で判定して赤を出さない
+  const loadedNow = loaded && loadedKey === key
+  const shiftNow = shiftLoaded && shiftKey === key
   return useMemo(
-    () => ({ checks, missing, loadFailed, loaded, duty, dailyKeys, busy, add, cancel }),
-    [checks, missing, loadFailed, loaded, duty, dailyKeys, busy, add, cancel],
+    () => ({ checks, missing, loadFailed, loaded: loadedNow, shiftLoaded: shiftNow, duty, dailyKeys, rosterKeys, busy, add, cancel }),
+    [checks, missing, loadFailed, loadedNow, shiftNow, duty, dailyKeys, rosterKeys, busy, add, cancel],
   )
 }

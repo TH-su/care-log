@@ -1,7 +1,9 @@
 // 日報の確認欄（その日の日報を読んだ ✔）と未読者欄を組み立てる純粋な部品（2026-11-19 本人指示）。
 //
 // 決まり（docs は ROOT.md・仮置きを含む）:
-//   - 確認欄に並べる職員: ケアログの在籍の職員のうち、勤務表で日報の対象（施設・通所）の職員。勤務表が読めない時は、
+//   - 確認欄に並べる職員: ケアログの在籍の職員のうち、勤務表で日報の対象（施設・通所）の職員と、勤務表の名簿に名前が見つからない
+//     職員（氏名の表記が違う・手で足した人。並べて「判定できない」に数える＝✔ を押せなくならない）。勤務表の名簿にいて日報の対象で
+//     ない人（訪問だけの人）は並べない。勤務表が読めない時は、
 //     勤務表の名簿から同期した職員（hire_order がある＝事務職員など手で足した人を除く）。どの職員にも hire_order が無い
 //     （古いサーバー）時は在籍の職員全員。
 //   - 未読者: その日に勤務表で勤務の職員のうち、その日の ✔ が無い人。休み・空欄の日は未読者に出さない
@@ -9,7 +11,8 @@
 //   - 勤務表が読めない・その月の勤務表が無い日は、その日の日報の出勤者の欄に入っている人を勤務とみなす（出勤者で判定）。
 //     出勤者の欄も空なら判定しない（未読者を出さず、目立たせない）。
 //   - 勤務表で読めない記号の人・勤務表に名前が見つからない人（確認欄には並ぶ）は「判定できない」に数え、未読者には出さない。
-//   - まだ来ていない日は判定しない。
+//   - まだ来ていない日・確認欄を始める前の日（READ_CHECK_FROM より前）は判定しない（✔ の行が1件も無いので全員が赤になるため）。
+//   - 今日から14日より前の日は、現場の端末から ✔ を付けられない（0065 の守り）ので、未読者は出すが目立たせない（stale）。
 // 個人情報: 職員の id と氏名だけを扱う（勤務記号は持たない）。
 
 import type { DutyStatus, DutyTable } from './shiftDuty.ts'
@@ -22,7 +25,19 @@ export interface ReadCheckStaff {
 }
 
 /** 判定のもと */
-export type ReadCheckSource = 'shift' | 'attendance' | 'none' | 'future'
+export type ReadCheckSource = 'shift' | 'attendance' | 'none' | 'future' | 'before'
+
+/** 確認欄を始めた日（この日より前の日報は判定しない・2026-11-19 公開＝仮置き） */
+export const READ_CHECK_FROM = '2026-11-19'
+/** 現場の端末が ✔ を付けられる日数（今日から何日前まで・0065 の守りと同じ） */
+export const READ_CHECK_FIELD_DAYS = 14
+
+/** 'YYYY-MM-DD' に日数を足す（暦の日・時刻帯に依らない） */
+function shiftIso(iso: string, n: number): string {
+  const [y, m, d] = iso.split('-').map((x) => parseInt(x, 10))
+  const t = new Date(Date.UTC(y, m - 1, d + n))
+  return t.toISOString().slice(0, 10)
+}
 
 export interface ReadCheckView {
   /** 確認欄に並べる職員（並びは渡された職員の並び） */
@@ -32,11 +47,24 @@ export interface ReadCheckView {
   /** 判定できない人（✔ が無く、勤務表の記号が読めない・名前が勤務表に無い） */
   undetermined: { id: number; name: string }[]
   source: ReadCheckSource
+  /** 現場の端末からはもう ✔ を付けられない古い日（今日から14日より前）。未読者は出すが目立たせない */
+  stale: boolean
 }
 
 /** 確認欄に並べる職員 */
-export function readCheckMembers(staff: readonly ReadCheckStaff[], dailyKeys: ReadonlySet<string> | null): ReadCheckStaff[] {
-  if (dailyKeys) return staff.filter((s) => dailyKeys.has(nameKey(s.name)))
+export function readCheckMembers(
+  staff: readonly ReadCheckStaff[],
+  dailyKeys: ReadonlySet<string> | null,
+  rosterKeys: ReadonlySet<string> | null = null,
+): ReadCheckStaff[] {
+  if (dailyKeys) {
+    return staff.filter((s) => {
+      const k = nameKey(s.name)
+      if (dailyKeys.has(k)) return true
+      // 勤務表の名簿に名前が無い人は並べる（判定できない）。名簿にいて対象でない人（訪問だけ）は並べない
+      return rosterKeys !== null && !rosterKeys.has(k) && s.hire_order !== null && s.hire_order !== undefined
+    })
+  }
   const rostered = staff.filter((s) => s.hire_order !== null && s.hire_order !== undefined)
   return rostered.length > 0 ? rostered : [...staff]
 }
@@ -48,6 +76,7 @@ export function readCheckMembers(staff: readonly ReadCheckStaff[], dailyKeys: Re
  * @param staff 在籍の職員（確認欄の並び順）
  * @param duty 勤務表から作った表（読めない時は null）
  * @param dailyKeys 勤務表で日報の対象の職員の氏名の鍵（表示中のどの日かで対象の人。読めない時は null）
+ * @param rosterKeys 勤務表の名簿の全員（在籍）の氏名の鍵（読めない時は null）
  * @param checkedIds その日に ✔ のある職員の id
  * @param attendanceIds その日の出勤者の欄の職員の id
  */
@@ -57,18 +86,20 @@ export function buildReadCheckView(args: {
   staff: readonly ReadCheckStaff[]
   duty: DutyTable | null
   dailyKeys: ReadonlySet<string> | null
+  rosterKeys?: ReadonlySet<string> | null
   checkedIds: ReadonlySet<number>
   attendanceIds: ReadonlySet<number>
 }): ReadCheckView {
   const { day, today, staff, duty, dailyKeys, checkedIds, attendanceIds } = args
   const row = duty?.get(day) ?? null
-  const base = readCheckMembers(staff, dailyKeys)
+  const base = readCheckMembers(staff, dailyKeys, args.rosterKeys ?? null)
   // 確認欄には、✔ を付けた人と出勤者の欄の人も必ず並べる（並びの外の人が付けた ✔ を隠さない）
   const listedIds = new Set(base.map((s) => s.id))
   const members0 = staff.filter((s) => listedIds.has(s.id) || checkedIds.has(s.id) || attendanceIds.has(s.id))
 
   let source: ReadCheckSource
   if (day > today) source = 'future'
+  else if (day < READ_CHECK_FROM) source = 'before'
   else if (row) source = 'shift'
   else if (attendanceIds.size > 0) source = 'attendance'
   else source = 'none'
@@ -91,7 +122,7 @@ export function buildReadCheckView(args: {
     if (m.duty === 'duty' || m.duty === 'attendance') unread.push({ id: m.id, name: m.name })
     else if (source === 'shift' && (m.duty === 'unknown' || m.duty === 'nomatch')) undetermined.push({ id: m.id, name: m.name })
   }
-  return { members, unread, undetermined, source }
+  return { members, unread, undetermined, source, stale: day < shiftIso(today, -READ_CHECK_FIELD_DAYS) }
 }
 
 /** 誤りの文から、確認欄の書き込みの失敗の種類を決める（画面の案内の取り違えを防ぐ） */

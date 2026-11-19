@@ -6210,10 +6210,11 @@ function DaySheet({
         staff,
         duty: readChecks.duty,
         dailyKeys: readChecks.dailyKeys,
+        rosterKeys: readChecks.rosterKeys,
         checkedIds: readChecks.checks.get(day) ?? new Set<number>(),
         attendanceIds: new Set(attendance.map((a) => a.staff_id)),
       }),
-    [day, today, staff, readChecks.duty, readChecks.dailyKeys, readChecks.checks, attendance],
+    [day, today, staff, readChecks.duty, readChecks.dailyKeys, readChecks.rosterKeys, readChecks.checks, attendance],
   )
 
   /** この日に保存されている記録の数（0 のときは空状態の一言を出す） */

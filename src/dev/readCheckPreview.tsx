@@ -14,10 +14,10 @@ import { buildDutyTable } from '../lib/shiftDuty'
 import type { ReadChecksState } from '../hooks/useReadChecks'
 
 const staff = Array.from({ length: 8 }, (_, i) => ({ id: i + 1, name: `架空職員${String(i + 1).padStart(2, '0')}`, hire_order: i + 1, active: true }))
-const days = ['2026-11-17', '2026-11-18', '2026-11-19']
+const days = ['2026-11-19', '2026-11-20', '2026-11-21']
 const cells: Record<string, Record<string, string>> = {}
 staff.forEach((s, i) => {
-  cells[`s${s.id}`] = { 17: i % 3 === 0 ? '休' : '早', 18: i % 4 === 1 ? '希' : '日1', 19: i === 2 ? '(21' : i === 5 ? '有' : '遅' }
+  cells[`s${s.id}`] = { 19: i % 3 === 0 ? '休' : '早', 20: i % 4 === 1 ? '希' : '日1', 21: i === 2 ? '(21' : i === 5 ? '有' : '遅' }
 })
 const src = {
   staff: staff.map((s) => ({ id: `s${s.id}`, name: s.name, mainDivision: '施設' })),
@@ -35,6 +35,8 @@ function Preview() {
     missing: new URLSearchParams(location.search).get('missing') === '1',
     loadFailed: false,
     loaded: true,
+    shiftLoaded: true,
+    rosterKeys: keys,
     duty,
     dailyKeys: keys,
     busy: new Set(),
@@ -56,7 +58,7 @@ function Preview() {
       {days.map((day) => {
         const view = buildReadCheckView({
           day,
-          today: '2026-11-19',
+          today: '2026-11-21',
           staff,
           duty,
           dailyKeys: keys,

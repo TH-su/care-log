@@ -6,10 +6,12 @@ begin;
 set local lock_timeout = '5s';
 drop table if exists public.daily_read_checks;
 drop function if exists public.daily_read_check_guard();
+drop function if exists public.carelog_shift_duty(text[]);
 commit;
 notify pgrst, 'reload schema';
 
 select '0065 を戻した（確認欄の表と守りの関数が無い）' as what,
        case when pg_catalog.to_regclass('public.daily_read_checks') is null
              and pg_catalog.to_regprocedure('public.daily_read_check_guard()') is null
+             and pg_catalog.to_regprocedure('public.carelog_shift_duty(text[])') is null
             then 'ok' else 'NG' end as result;

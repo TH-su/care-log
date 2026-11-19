@@ -238,6 +238,47 @@ await inTx('書ける日の守り: 現場は今日から14日前まで・それ�
   ok('守りの関数は authenticated・anon が実行できない', exec.a === false && exec.b === false, exec)
 })
 
+// ── 6. 勤務表の読み口（carelog_shift_duty） ──
+await inTx('勤務表の読み口: 要る項目だけ・自分の施設だけ・live でなければ印だけ・許可リストの人だけ', async () => {
+  await seedTwo()
+  const staffData = JSON.stringify([
+    { id: 's1', name: '職員01', mainDivision: '施設', empCode: 'E1', rules: { x: 1 }, qualifications: ['q'], employment: '常勤', active: true },
+    { id: 's2', name: '職員02', mainDivision: '訪問', status: '退職', retireMonth: '2026-10' },
+    'こわれた要素',
+  ])
+  const symData = JSON.stringify([{ code: '早', type: 'work', label: 'L', color: '#fff' }, { code: '研', type: 'work', disabled: true }])
+  const plan = JSON.stringify({ cells: { s1: { 1: '早' } }, subCells: { s2: { 施設: { 2: '遅' } } }, colors: { a: 1 }, notes: 'メモ', dailyNeeds: {} })
+  await q(`insert into public.kv_entries (tenant_id, key, data, mode) values
+           ($1, 'staff', $2::jsonb, 'live'), ($1, 'symbols', $3::jsonb, 'live'), ($1, 'sched:2026-11:plan', $4::jsonb, 'live'),
+           ($5, 'staff', '[{"id":"b1","name":"よその職員"}]'::jsonb, 'live')`, [A, staffData, symData, plan, B])
+  const r = await asUser(A, async () => (await q(`select public.carelog_shift_duty(array['2026-11','2026-12']) as r`))[0].r)
+  ok('live の時は mode・staff・symbols・months を返す', r?.mode === 'live' && Array.isArray(r.staff) && Array.isArray(r.symbols) && r.months, r)
+  ok('職員は id・氏名・主の区分・在籍の印だけ（労務の項目は返さない）',
+    r.staff.length === 2 && r.staff[0].id === 's1' && r.staff[0].name === '職員01' && r.staff[0].mainDivision === '施設' && r.staff[0].active === true
+      && r.staff[1].status === '退職' && r.staff[1].retireMonth === '2026-10'
+      && r.staff.every((s) => Object.keys(s).every((k) => ['id', 'name', 'mainDivision', 'active', 'status', 'retireMonth'].includes(k))), r.staff)
+  ok('職員の項目に労務の項目が無い', !JSON.stringify(r.staff).match(/empCode|rules|qualifications|employment|E1|常勤/), r.staff)
+  ok('記号は code・type・disabled だけ', JSON.stringify(r.symbols) === JSON.stringify([{ code: '早', type: 'work' }, { code: '研', type: 'work', disabled: true }]), r.symbols)
+  ok('月は cells・subCells だけ（色・メモ・必要数は返さない）・無い月・無い実績は null',
+    JSON.stringify(r.months['2026-11'].plan) === JSON.stringify({ cells: { s1: { 1: '早' } }, subCells: { s2: { 施設: { 2: '遅' } } } })
+      && r.months['2026-11'].actual === null && r.months['2026-12'].plan === null, r.months)
+  ok('よその施設の勤務表は返さない', !JSON.stringify(r).includes('よその職員'), r)
+  await q(`update public.kv_entries set mode = 'shadow' where tenant_id = $1 and key = 'staff'`, [A])
+  const sh = await asUser(A, async () => (await q(`select public.carelog_shift_duty(array['2026-11']) as r`))[0].r)
+  ok('切り替え前（shadow）は印だけを返す', JSON.stringify(sh) === JSON.stringify({ mode: 'shadow' }), sh)
+  const nm = await asUser(A, () => q(`select public.carelog_shift_duty(array['2026-11'])`), { member: false })
+  ok('許可リストに無い人は 42501', nm.error === '42501', nm)
+  const bad = await asUser(A, () => q(`select public.carelog_shift_duty(array['2026-13'])`))
+  ok('月の形が違えば 22023', bad.error === '22023', bad)
+  const many = await asUser(A, () => q(`select public.carelog_shift_duty(array['2026-01','2026-02','2026-03','2026-04'])`))
+  ok('月が4つ以上なら 22023', many.error === '22023', many)
+  const exec = (await q(`select has_function_privilege('authenticated', 'public.carelog_shift_duty(text[])', 'execute') a,
+                                has_function_privilege('anon', 'public.carelog_shift_duty(text[])', 'execute') b`))[0]
+  ok('authenticated は呼べる・anon は呼べない', exec.a === true && exec.b === false, exec)
+  const fn = (await q(`select p.prosecdef, p.proconfig, p.provolatile from pg_proc p where p.oid = 'public.carelog_shift_duty(text[])'::regprocedure`))[0]
+  ok('security definer・search_path を空に固定・stable', fn?.prosecdef === true && JSON.stringify(fn.proconfig) === JSON.stringify(['search_path=""']) && fn.provolatile === 's', fn)
+})
+
 await client.end()
 console.log(failed ? `\n失敗 ${failed} 件` : '\nすべて成功')
 process.exit(failed === 0 ? 0 : 1)

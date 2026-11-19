@@ -16,7 +16,8 @@ const WHY_ATTENDANCE = '勤務表が読めないため、出勤者の欄で判�
 
 /** 未読者欄（日付の見出しの下） */
 export function ReadCheckBanner({ day, view, state }: { day: string; view: ReadCheckView; state: ReadChecksState }) {
-  if (view.source === 'future' || !state.loaded || state.missing || state.loadFailed) return null
+  if (view.source === 'future' || view.source === 'before') return null
+  if (!state.loaded || !state.shiftLoaded || state.missing || state.loadFailed) return null
   const jump = () => {
     const el = typeof document !== 'undefined' ? document.getElementById(`readcheck-${day}`) : null
     el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
@@ -30,6 +31,16 @@ export function ReadCheckBanner({ day, view, state }: { day: string; view: ReadC
     )
   }
   const n = view.unread.length
+  // 今日から14日より前の日: 現場の端末からはもう ✔ を付けられないので、記録として出すだけ（赤くしない・読み上げない）
+  if (view.stale) {
+    return (
+      <div className="print:hidden flex flex-wrap items-center gap-x-2 border-b border-border px-2 py-1 text-sm text-ink2" role="note">
+        <span className="font-bold">未読者</span>
+        <span>{n === 0 ? 'なし' : `${n}名：${view.unread.map((u) => u.name).join('、')}`}</span>
+        <span>（14日より前の日のため、現場の端末からは ✔ を付けられません）</span>
+      </div>
+    )
+  }
   if (n === 0) {
     return (
       <div className="print:hidden flex flex-wrap items-center gap-x-2 border-b border-border bg-ok-bg px-2 py-1 text-sm text-ok" role="status">
@@ -74,7 +85,7 @@ export function ReadCheckPanel({
 }) {
   const [pending, setPending] = useState<Pending | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
-  if (view.source === 'future') return null
+  if (view.source === 'future' || view.source === 'before') return null
 
   const unreadIds = new Set(view.unread.map((u) => u.id))
   const disabled = !state.loaded || state.missing || state.loadFailed

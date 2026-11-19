@@ -13880,8 +13880,8 @@ export const __testHooks = import.meta.env?.PROD === true ? undefined : {
 // ・付ける: insert。2台が同時に同じ人の ✔ を付けた 23505 は「付いている」とみなす
 // ・取り消す: 論理削除（deleted_at）。0行（他の端末が先に取り消した）は取り消せた扱い
 // ・送信待ちは作らない。通信できない時は DbError('network')、画面は ✔ を付けない（押し直してもらう）
-// ・勤務表は読むだけ（kv_get）。応答から使う項目（職員の id・氏名・区分・在籍、記号の code・type、月の cells・subCells）だけを取り出し、
-//   画面のメモリにだけ5分持つ（console・localStorage に出さない）。切り替えの印が live でない・読めない時は null（画面は出勤者の欄で判定）
+// ・勤務表は読むだけ（読み口 carelog_shift_duty・0065。サーバーが職員の id・氏名・区分・在籍、記号の code・type、月の cells・subCells だけを返す＝
+//   労務の項目は端末に届かない）。画面のメモリにだけ5分持つ（console・localStorage に出さない）。live でない・読めない時は null（出勤者の欄で判定）
 
 const READ_CHECK_MSG = {
   missing: '確認欄はまだ使えません（サーバー側の設定待ち）。管理者に連絡してください。',
@@ -13993,42 +13993,31 @@ export function clearShiftCache(): void {
   shiftCache = null
 }
 
-/** kv_get の1件を呼ぶ。live で ok の時は data、live でない・行が無い時は undefined、読めない時は 'broken' */
-async function kvGetLive(sb: SupabaseClient, key: string): Promise<unknown | undefined | 'broken' | 'notlive'> {
-  const res = await bounded(sb.rpc('kv_get', { p_key: key }))
-  if (res.error !== null) return 'broken'
-  const r = res.data
-  if (!r || typeof r !== 'object' || Array.isArray(r)) return 'broken'
-  const rec = r as { ok?: unknown; mode?: unknown; data?: unknown }
-  if (typeof rec.mode === 'string' && rec.mode !== 'live') return 'notlive'
-  if (rec.ok !== true) return undefined // 行が無い（その月の勤務表がまだ無い・実績が無い）
-  return rec.data
-}
-
 /**
- * 表示中の日の月の勤務表（予定・実績）と職員・記号を読む。読めない・切り替え前（live でない）・職員が0人の時は null
- * （画面は出勤者の欄で判定する）。例外は投げない
+ * 表示中の日の月の勤務表（予定・実績）と職員・記号を、読み口 carelog_shift_duty（0065・判定に要る項目だけ）で読む。
+ * 読めない・関数が無い・切り替え前（live でない）・職員が0人の時は null（画面は出勤者の欄で判定する）。例外は投げない
  */
 export async function fetchShiftSource(days: readonly string[]): Promise<ShiftSource | null> {
-  const yms = [...new Set(days.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)).map((d) => d.slice(0, 7)))].sort()
+  const yms = [...new Set(days.filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)).map((d) => d.slice(0, 7)))].sort().slice(0, 3)
   if (yms.length === 0) return null
   const key = yms.join(',')
   if (shiftCache && shiftCache.key === key && Date.now() - shiftCache.at < (shiftCache.value ? SHIFT_CACHE_MS : SHIFT_FAIL_MS)) return shiftCache.value
   let value: ShiftSource | null = null
   try {
     const sb = await getClient()
-    const keys = ['staff', 'symbols', ...yms.flatMap((ym) => [`sched:${ym}:plan`, `sched:${ym}:actual`])]
-    const got = await Promise.all(keys.map((k) => kvGetLive(sb, k)))
-    const bad = got.some((g) => g === 'broken' || g === 'notlive')
-    const staff = bad ? null : projectShiftStaff(got[0])
-    if (staff !== null && staff.length > 0) {
-      const months: ShiftSource['months'] = {}
-      yms.forEach((ym, i) => {
-        const plan = got[2 + i * 2]
-        const actual = got[3 + i * 2]
-        months[ym] = { plan: projectShiftMonth(plan), actual: projectShiftMonth(actual) }
-      })
-      value = { staff, symbols: projectShiftSymbols(got[1]), months }
+    const res = await bounded(sb.rpc('carelog_shift_duty', { p_months: yms }))
+    const r = res.error === null ? asRecord(res.data) : null
+    if (r && r.mode === 'live') {
+      const staff = projectShiftStaff(r.staff)
+      const mon = asRecord(r.months)
+      if (staff !== null && staff.length > 0 && mon) {
+        const months: ShiftSource['months'] = {}
+        for (const ym of yms) {
+          const m = asRecord(mon[ym])
+          months[ym] = { plan: projectShiftMonth(m?.plan ?? null), actual: projectShiftMonth(m?.actual ?? null) }
+        }
+        value = { staff, symbols: projectShiftSymbols(r.symbols), months }
+      }
     }
   } catch {
     value = null // 読めなくても日報は止めない（中身は出さない）
