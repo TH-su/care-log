@@ -269,6 +269,11 @@ import type {
   Staff,
   Vital,
 } from '../lib/types'
+// 日報の確認欄（その日の日報を読んだ ✔）と未読者欄（2026-11-19・0065）。画面だけ（print:hidden）
+import { ReadCheckBanner, ReadCheckPanel } from '../components/DailyReadCheck'
+import { useReadChecks } from '../hooks/useReadChecks'
+import type { ReadChecksState } from '../hooks/useReadChecks'
+import { buildReadCheckView } from '../lib/readCheck'
 
 // ══════════════════════════════════════════════════════════════
 // 定数・文言
@@ -2388,6 +2393,10 @@ interface DaySheetProps {
   searchTerms: readonly string[]
   /** この日の画面に出している申し送り（分類で抽出の一覧に使う）。null＝枠が外れた */
   onNotesShown: (day: string, notes: readonly Note[] | null) => void
+  /** 確認欄（表示中の日の ✔ と勤務表・2026-11-19）。画面が1つだけ持って配る */
+  readChecks: ReadChecksState
+  /** 今日（端末の暦の日付）。確認欄が「まだ来ていない日」を見分ける */
+  today: string
 }
 
 /**
@@ -2783,6 +2792,8 @@ export function DailySheetPage({
   )
 
   const visibleDays = useMemo(() => (unit === '1' ? [day] : blockDays(day)), [day, unit])
+  // 確認欄（✔ と勤務表）は表示中の日の分をまとめて読む（日ごとに読みに行かない）。〔最新に更新〕で読み直す
+  const readChecks = useReadChecks(visibleDays, reload)
 
   // ── ログインの役割（2026-10-15 仕様 §2。〔ロック解除〕は事務所・管理者だけ）──────────────
   // 起動時に問い合わせ、ログインし直した（db.ts が控えを捨てた）時に問い合わせ直す。分からない（null）は現場と同じ扱い
@@ -3610,6 +3621,8 @@ export function DailySheetPage({
                   canUnlock={canUnlock}
                   searchTerms={searchTerms}
                   onNotesShown={handleNotesShown}
+                  readChecks={readChecks}
+                  today={today}
                 />
               </section>
             ))}
@@ -3677,6 +3690,8 @@ function DaySheet({
   canUnlock,
   searchTerms,
   onNotesShown,
+  readChecks,
+  today,
 }: DaySheetProps) {
   const [phase, setPhase] = useState<Phase>('loading')
   const [reload, setReload] = useState(0)
@@ -6186,6 +6201,21 @@ function DaySheet({
   const manager = attendance.find((a) => a.role === 'manager') ?? null
   const workers = attendance.filter((a) => a.role !== 'manager')
 
+  // 確認欄と未読者欄（2026-11-19・lib/readCheck.ts の決まり）。出勤者の欄は勤務表が読めない時の判定のもと
+  const readCheckView = useMemo(
+    () =>
+      buildReadCheckView({
+        day,
+        today,
+        staff,
+        duty: readChecks.duty,
+        dailyKeys: readChecks.dailyKeys,
+        checkedIds: readChecks.checks.get(day) ?? new Set<number>(),
+        attendanceIds: new Set(attendance.map((a) => a.staff_id)),
+      }),
+    [day, today, staff, readChecks.duty, readChecks.dailyKeys, readChecks.checks, attendance],
+  )
+
   /** この日に保存されている記録の数（0 のときは空状態の一言を出す） */
   const savedRows =
     notes.length + observations.length + symptoms.length + outings.length + attendance.length
@@ -6358,6 +6388,9 @@ function DaySheet({
           removeAttendance(staffId)
         }}
       />
+
+      {/* 未読者欄（画面だけ・日付の見出しのすぐ下＝10日表示でも日の頭で目に入る。2026-11-19） */}
+      {phase === 'ready' && <ReadCheckBanner day={day} view={readCheckView} state={readChecks} />}
 
       {/* 送れていない申し送り（この日の分。1件も無い時は何も出さない＝見た目は変わらない・2026-09-29 H1） */}
       <UnsentNotes
@@ -6571,6 +6604,9 @@ function DaySheet({
               onHistory={openNoteHistory}
               onTouch={touchNoteRow}
             />
+
+            {/* 確認欄（画面だけ・1日の枠の末尾。2026-11-19） */}
+            <ReadCheckPanel day={day} view={readCheckView} state={readChecks} actorId={actorId} />
           </>
         )}
       </div>

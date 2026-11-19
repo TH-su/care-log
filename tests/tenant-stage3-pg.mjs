@@ -42,9 +42,10 @@ const TABLES = ['residents', 'staff', 'vitals', 'meals', 'fluid_intake', 'notes'
  * 0053 の後に、施設の印と（施設の印, 番号）の組の外部キーを最初から持って作った表と、その外部キーの数
  * （2026-11-09 計画C（固定し直し・意図は同じ）: 0061 の連絡帳の2表。0053 が付け直す76本は27表のまま数える）
  * （2026-11-10 未測定（固定し直し・意図は同じ）: 0062 の〔未測定〕の印の表。組の外部キーは 0061 の7本＋0062 の4本＝11本）
+ * （2026-11-19 確認欄（固定し直し・意図は同じ）: 0065 の日報の確認欄の表。職員を指す組の外部キー4本を足して15本）
  */
-const LATER_TABLES = ['daycare_day_notes', 'daycare_contact_notes', 'daycare_vital_unmeasured']
-const LATER_FKS = 11
+const LATER_TABLES = ['daycare_day_notes', 'daycare_contact_notes', 'daycare_vital_unmeasured', 'daily_read_checks']
+const LATER_FKS = 15
 
 const client = new pg.Client({ connectionString: url })
 await client.connect()

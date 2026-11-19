@@ -567,8 +567,9 @@ describe('移行 0062_daycare_vital_unmeasured.sql（静的検査）', () => {
   })
   it('素の Postgres の契約: 0053 の流し直しの除外の理由に 0062・施設の印の試験の一覧に表・新しい実行器がある', () => {
     assert.match(read('./pg-run-all.mjs'), /0061・0062 が組の外部キーを足した/)
-    for (const f of ['./tenant-stage1-pg.mjs', './tenant-stage3-pg.mjs', './tenant-stage4-pg.mjs']) assert.match(read(f), /'daycare_vital_unmeasured'\]/, f)
-    assert.match(read('./tenant-stage3-pg.mjs'), /const LATER_FKS = 11/)
+    for (const f of ['./tenant-stage1-pg.mjs', './tenant-stage3-pg.mjs', './tenant-stage4-pg.mjs']) assert.match(read(f), /'daycare_vital_unmeasured'(, 'daily_read_checks')?\]/, f)
+    // 2026-11-19 日報の確認欄（固定し直し・意図は同じ）: 0065 の表が一覧の後ろに続き、組の外部キーは 11＋4＝15本
+    assert.match(read('./tenant-stage3-pg.mjs'), /const LATER_FKS = 15/)
     assert.match(read('./daycare-unmeasured-pg.mjs'), /daycare_vital_unmeasured_day_guard/)
   })
 })
