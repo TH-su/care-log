@@ -3147,10 +3147,9 @@ export function DailySheetPage({
             rosterKeys: unreadSource.roster,
             dayKeys: unreadSource.dayKeys,
             nowMin,
-            managerId: managerStaffId,
           })
         : null,
-    [unreadSource, today, staff, nowMin, managerStaffId],
+    [unreadSource, today, staff, nowMin],
   )
   useEffect(() => {
     const check = () => {
@@ -6289,9 +6288,8 @@ function DaySheet({
         rosterKeys: readChecks.rosterKeys,
         dayKeys: readChecks.dayKeys,
         nowMin,
-        managerId: managerStaffId,
       }),
-    [day, today, staff, readChecks.fac, readChecks.checks, readChecks.rosterKeys, readChecks.dayKeys, nowMin, managerStaffId],
+    [day, today, staff, readChecks.fac, readChecks.checks, readChecks.rosterKeys, readChecks.dayKeys, nowMin],
   )
 
   /** この日に保存されている記録の数（0 のときは空状態の一言を出す） */

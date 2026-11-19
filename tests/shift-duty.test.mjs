@@ -507,22 +507,26 @@ if (D === null) {
       const q = R.buildCheckPanel({ day: '2026-11-19', today: '2026-11-20', staff, duty: fac, checkedIds: new Set(), rosterKeys, dayKeys: new Set(), nowMin: 6 * 60 + 30 })
       assert.ok(q.members.some((m) => m.name === '休み01' && m.why === 'day'), '6:30 から')
     })
-    it('施設長（設定の施設長）は勤務に関わらず、どの日の確認欄にも並ぶ（未読には数えない）', () => {
-      assert.deepEqual(names(panel('2026-11-19', 8, { managerId: 9 })), [['施設長01', 'manager']])
-      assert.ok(names(panel('2026-11-18', 3, { managerId: 9 })).some(([n, w]) => n === '施設長01' && w === 'manager'))
-      const s = R.buildUnreadSummary({ today: '2026-11-19', staff, duty: fac, checks: new Map(), rosterKeys, dayKeys: new Set(), nowMin: 23 * 60 })
-      assert.equal(s.people.some((p) => p.name === '施設長01'), false)
+    // 2026-11-19 代表者の指示（施設長をほかの職員と同じ扱いにする）で、施設長だけの特別扱い（いつも並べる・未読に数えない）をやめた。
+    // 下の2つは前の決まり（PR #126）の試験を、新しい決まりに合わせて書き換えたもの（意図を変えた＝固定し直しではない）
+    it('施設長もほかの職員と同じ: 勤務の無い日は確認欄に並ばない（managerId を渡しても特別扱いしない）', () => {
+      assert.deepEqual(names(panel('2026-11-19', 8, { managerId: 9 })), [])
+      assert.equal(names(panel('2026-11-18', 3, { managerId: 9 })).some(([n]) => n === '施設長01'), false)
     })
-    it('施設長が勤務表で日勤・夜勤に入っていても、未読には数えない（確認欄の赤い「未読」も出ない）', () => {
+    it('施設長もほかの職員と同じ: 勤務表で日勤に入っていれば読む番から並び、✔ が無ければ未読に数える', () => {
       const st2 = [...staff, { id: 10, name: '早番02', hire_order: 10 }]
       const r2 = [...roster, { id: 'f', name: '早番02', mainDivision: '施設' }]
       const p2 = { cells: { ...plan.cells, f: { 18: '早', 19: '早' } }, subCells: plan.subCells }
       const f2 = D.buildFacilityDutyTable({ ...src, staff: r2, months: { '2026-11': { plan: p2, actual: null } } }, ['2026-11-18', '2026-11-19', '2026-11-20'])
       const s = R.buildUnreadSummary({ today: '2026-11-19', staff: st2, duty: f2, checks: new Map(), rosterKeys: new Set(r2.map((r) => r.name)), dayKeys: new Set(), nowMin: 10 * 60, managerId: 10 })
-      assert.equal(s.people.some((p) => p.id === 10), false)
-      assert.equal(s.byDay.get('2026-11-18').has(10), false)
-      const s0 = R.buildUnreadSummary({ today: '2026-11-19', staff: st2, duty: f2, checks: new Map(), rosterKeys: new Set(r2.map((r) => r.name)), dayKeys: new Set(), nowMin: 10 * 60 })
-      assert.equal(s0.byDay.get('2026-11-18').has(10), true, '施設長でなければ数える（見本の確かめ）')
+      assert.equal(s.byDay.get('2026-11-18').has(10), true)
+      assert.ok(s.people.some((p) => p.id === 10))
+      const p = R.buildCheckPanel({ day: '2026-11-18', today: '2026-11-19', staff: st2, duty: f2, checkedIds: new Set(), rosterKeys: new Set(r2.map((r) => r.name)), dayKeys: new Set(), nowMin: 10 * 60, managerId: 10 })
+      assert.ok(p.members.some((m) => m.id === 10 && m.why === 'day'))
+    })
+    it('施設長の特別扱いの印（manager）は画面にも判定にも残っていない', () => {
+      assert.doesNotMatch(read('../src/lib/readCheck.ts'), /managerId|'manager'/)
+      assert.doesNotMatch(read('../src/pages/DailySheetPage.tsx'), /managerId: managerStaffId/)
     })
     it('今日の日報は日勤の番を数えない（23:30 以降でも、翌日 0 時台の出勤の人を今日の未読に出さない・確認欄とそろえる）', () => {
       const SYM0 = [...SYM, { code: '深', type: 'work', start: '00:00' }]
