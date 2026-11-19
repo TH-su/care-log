@@ -1881,3 +1881,15 @@ main:has(.dsheet-frame) {
     letter-spacing: inherit;
   }
 }
+
+/* 出勤者・施設長の欄の未読の人の赤い氏名枠（2026-11-19 代表者の指示）。今日の日報で、前日までの日報に ✔ の無い日があり、
+   出勤時刻を過ぎた人。画面だけ（@media screen）＝紙は赤くしない。枠は内側の影で描く＝欄の幅・行の高さを変えない。
+   クラスを2つ重ねて、文字色の text-link・text-ink2 より強くする */
+@media screen {
+  .dsheet-attend-unread.dsheet-attend-unread {
+    background: var(--c-danger-bg);
+    color: var(--c-danger);
+    font-weight: var(--fw-bold);
+    box-shadow: inset 0 0 0 2px var(--c-danger);
+  }
+}
