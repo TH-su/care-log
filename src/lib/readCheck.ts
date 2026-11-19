@@ -224,11 +224,9 @@ export function buildUnreadSummary(args: {
   dayKeys?: ReadonlySet<string> | null
   /** 今の時刻（今日の0時からの分）。今日が出勤の日の人は、その出勤の時刻より後に名前を出す（省略＝一日の終わり＝出す） */
   nowMin?: number
-  /** 施設長（設定の manager_staff_id）。確認欄にはいつも並ぶが、未読には数えない（2026-11-19 代表者の指示「常に表示で問題ない」） */
-  managerId?: number | null
 }): UnreadSummary {
+  // 施設長もほかの職員と同じに数える（2026-11-19 代表者の指示「施設長の扱いも他の職員と同様」の趣旨＝施設長だけの特別扱いをやめた）
   const { today, staff, duty, checks } = args
-  const managerId = args.managerId ?? null
   const nowMin = args.nowMin ?? 24 * 60
   const rosterKeys = args.rosterKeys ?? null
   const dayKeys = args.dayKeys ?? null
@@ -251,7 +249,7 @@ export function buildUnreadSummary(args: {
     let unknown = false
     for (const s of staff) {
       const k = nameKey(s.name)
-      if (!k || dayKeys?.has(k) || s.id === managerId) continue
+      if (!k || dayKeys?.has(k)) continue
       const a = rowR.get(k)
       const b = rowN.get(k)
       if (a === undefined && b === undefined) continue // 勤務表の名簿に居ない・デイ職員
@@ -303,7 +301,7 @@ export interface CheckPanelMember {
   name: string
   checked: boolean
   /** 並べた理由（夜勤入り・翌日の日勤・その日に施設で勤務（翌日の勤務表が無い時）・✔ を付けた・勤務表の名簿に名前が無い・勤務表が読めない） */
-  why: 'night' | 'day' | 'sameday' | 'checked' | 'manager' | 'nomatch' | 'fallback'
+  why: 'night' | 'day' | 'sameday' | 'checked' | 'nomatch' | 'fallback'
 }
 
 export interface CheckPanel {
@@ -326,13 +324,11 @@ export function buildCheckPanel(args: {
   dayKeys?: ReadonlySet<string> | null
   /** 今の時刻（今日の0時からの分）。読む番が来た人（出勤の30分前から）だけを並べる。省略＝一日の終わり */
   nowMin?: number
-  /** 施設長（設定の manager_staff_id）。いつも並べる（2026-11-19 代表者の指示・仮置き: 施設長の設定で決める） */
-  managerId?: number | null
 }): CheckPanel {
+  // 施設長もほかの職員と同じに、読む番が来た時だけ並べる（2026-11-19 代表者の指示・施設長だけの特別扱いをやめた）
   const { day, today, staff, duty, checkedIds } = args
   const rosterKeys = args.rosterKeys ?? null
   const dayKeys = args.dayKeys ?? null
-  const managerId = args.managerId ?? null
   const nowAbs = absMinute(today, args.nowMin ?? 24 * 60)
   const stale = day < shiftIso(today, -READ_CHECK_FIELD_DAYS)
   const isToday = day === today
@@ -348,8 +344,8 @@ export function buildCheckPanel(args: {
       const checked = checkedIds.has(s.id)
       const synced = s.hire_order !== null && s.hire_order !== undefined
       const inRoster = rosterKeys === null ? synced : rosterKeys.has(k)
-      if (checked || s.id === managerId || (inRoster && !dayKeys?.has(k)))
-        members.push({ id: s.id, name: s.name, checked, why: checked ? 'checked' : s.id === managerId ? 'manager' : 'fallback' })
+      if (checked || (inRoster && !dayKeys?.has(k)))
+        members.push({ id: s.id, name: s.name, checked, why: checked ? 'checked' : 'fallback' })
     }
     return { source: 'fallback', members, stale, isToday }
   }
@@ -371,7 +367,6 @@ export function buildCheckPanel(args: {
     else if (dayW) members.push({ id: s.id, name: s.name, checked, why: 'day' })
     else if (same) members.push({ id: s.id, name: s.name, checked, why: 'sameday' })
     else if (checked) members.push({ id: s.id, name: s.name, checked, why: 'checked' })
-    else if (s.id === managerId) members.push({ id: s.id, name: s.name, checked, why: 'manager' })
     else if (noMatch) members.push({ id: s.id, name: s.name, checked, why: 'nomatch' })
   }
   return { source: noNext ? 'nonext' : 'shift', members, stale, isToday }
