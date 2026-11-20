@@ -4101,7 +4101,10 @@ function DaySheet({
   const phaseRef = useRef<Phase>('loading')
   phaseRef.current = phase
   const loadKeyRef = useRef<string | null>(null)
-  /** 申し送り・外出を保存できた回数（中身を出したまま読み直す間に保存したら、その読み込みの結果で上書きせずに読み直す） */
+  /**
+   * 申し送り・外出をこの画面で書き換えた回数（足す・直す・消す）。中身を出したまま読み直す間に
+   * 書き換えたら、その読み込みの結果で上書きせずに読み直す（反証 low: 直した本文が戻る・消した行がまた出る）
+   */
   const savedSeqRef = useRef(0)
   /** 次の読み直しも今の中身を出したまま行う（上の保存と行き違った時の読み直し） */
   const keepNextRef = useRef(false)
@@ -4322,6 +4325,7 @@ function DaySheet({
       .then((rows) => {
         if (!aliveRef.current) return
         const got = new Map(rows.map((r) => [r.id, r]))
+        savedSeqRef.current += 1
         setNotes((cur) =>
           cur
             // 読み直して見つからない＝取り消された（自分の削除が届いた・他の端末が消した）
@@ -4720,6 +4724,7 @@ function DaySheet({
   )
 
   const patchNote = useCallback((id: number, patch: Partial<Note>) => {
+    savedSeqRef.current += 1
     setNotes((prev) => prev.map((n) => (n.id === id ? { ...n, ...patch } : n)))
   }, [])
 
@@ -5270,7 +5275,10 @@ function DaySheet({
                 if (res.row !== null) patchNote(note.id, res.row)
                 return
               }
-              if (res !== 'queued') setNotes((prev) => prev.filter((n) => n.id !== note.id))
+              if (res !== 'queued') {
+                savedSeqRef.current += 1
+                setNotes((prev) => prev.filter((n) => n.id !== note.id))
+              }
               setExpanded(null)
               // 送信待ちに退避した削除も一覧からは外す（押した操作のとおりに見せる）。
               // 行が無くなるので一言は行ではなくトーストで出す（電波が戻れば自動で送られる）
@@ -6160,12 +6168,14 @@ function DaySheet({
           if (res === 'queued') {
             // 記入したとおりに帰着を出したまま送信待ちにする（値を巻き戻さない）
             const shown = { ...o, end_on: endOn, end_at: endAt }
+            savedSeqRef.current += 1
             setOutings((prev) => prev.map((x) => (x.id === o.id ? shown : x)))
             // 同じ画面の他の日（外泊の続きの日）にも同じ値を配る（F65。版は変えない＝送信待ちと同じ版）
             onOutingChanged({ before: o, after: shown })
             setRowStatus(key, { tone: 'warn', text: queuedMsg() })
             return
           }
+          savedSeqRef.current += 1
           setOutings((prev) => prev.map((x) => (x.id === o.id ? res : x)))
           // 帰着を延ばした・早めた結果を、同じ画面の他の日へ配る（新しい版がそろう＝他の日の行から直しても偽の競合にならない・F65）
           onOutingChanged({ before: o, after: res })
@@ -6209,6 +6219,7 @@ function DaySheet({
                 return
               }
               // 送信待ちに退避した削除も一覧からは外す（押した操作のとおりに見せる。電波が戻れば自動で送られる）
+              savedSeqRef.current += 1
               setOutings((prev) => prev.filter((x) => x.id !== o.id))
               // 同じ画面の他の日（外泊の続きの日）からも外す（F65）
               onOutingChanged({ before: o, after: null })
@@ -6594,7 +6605,10 @@ function DaySheet({
           if (!aliveRef.current) return
           const row = rows[0]
           if (row) patchNote(id, row)
-          else if (!r.queued) setNotes((cur) => cur.filter((n) => n.id !== id))
+          else if (!r.queued) {
+            savedSeqRef.current += 1
+            setNotes((cur) => cur.filter((n) => n.id !== id))
+          }
         })
         .catch(() => undefined)
       focusAfterResolve(`cl-note-row-${day}-${id}`)
