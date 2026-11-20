@@ -5,11 +5,12 @@
 // ・?mode=dark で暗い配色を見る
 
 import { StrictMode, useMemo, useState } from 'react'
+import type { UnreadWho } from '../lib/readCheck'
 import { createRoot } from 'react-dom/client'
 import '../styles/tokens.css'
 import '../index.css'
 import '../styles/sheet.css'
-import { ReadCheckPanel } from '../components/DailyReadCheck'
+import { ReadCheckPanel, UnreadTrailBar } from '../components/DailyReadCheck'
 import { buildCheckPanel, buildUnreadSummary } from '../lib/readCheck'
 import { buildFacilityDutyTable } from '../lib/shiftDuty'
 import type { ReadChecksState, UnreadSource } from '../hooks/useReadChecks'
@@ -77,7 +78,12 @@ function Preview() {
   }
   const source: UnreadSource = { ready: true, failed: false, missing: false, today: TODAY, checks, duty: fac, roster, dayKeys }
   const summary = buildUnreadSummary({ today: TODAY, staff, duty: fac, checks, rosterKeys: roster, dayKeys, nowMin: NOW_MIN })
-  const pick = (d: string) => document.querySelector(`[data-day="${d}"]`)?.scrollIntoView({ block: 'start' })
+  // 未読の日を続けて読む窓（2026-11-20）: 〔未読者〕の日付から開いた人と日を覚え、その日に ✔ が付いたら確認欄の下に出す
+  const [trail, setTrail] = useState<(UnreadWho & { day: string }) | null>(null)
+  const pick = (d: string, who?: UnreadWho) => {
+    setTrail(who ? { ...who, day: d } : null)
+    document.querySelector(`[data-day="${d}"]`)?.scrollIntoView({ block: 'start' })
+  }
   return (
     <div className="mx-auto max-w-5xl space-y-6 bg-surface p-4 text-ink">
       <p className="text-sm text-ink2">記録する職員（見本）: 架空職員{String(actorId ?? 0).padStart(2, '0')}・今日は {TODAY} の 10:00 とみなす</p>
@@ -100,6 +106,16 @@ function Preview() {
                 onPickDay={pick}
                 showUnread={day === TODAY}
               />
+              {trail !== null && trail.day === day && (
+                <UnreadTrailBar
+                  trail={trail}
+                  summary={summary}
+                  checks={checks}
+                  onPick={(d) => pick(d, trail)}
+                  onToday={() => pick(TODAY)}
+                  onClose={() => setTrail(null)}
+                />
+              )}
             </div>
           </section>
         )

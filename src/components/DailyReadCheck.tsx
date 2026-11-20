@@ -11,6 +11,7 @@ import { useState } from 'react'
 import { ConfirmDialog } from './ui'
 import { setActorId } from '../lib/actor'
 import type { CheckPanel, CheckPanelMember, UnreadSummary, UnreadWho } from '../lib/readCheck'
+import { nextUnreadDays } from '../lib/readCheck'
 import type { ReadChecksState, UnreadSource } from '../hooks/useReadChecks'
 
 const WEEK = ['日', '月', '火', '水', '木', '金', '土']
@@ -291,6 +292,69 @@ export function ReadCheckPanel({
           }
         }}
       />
+    </section>
+  )
+}
+
+/**
+ * 未読の日を続けて読む窓（2026-11-20 代表者の指示）。その日の確認欄のすぐ下に出す（✔ を押した所の下＝上の位置は動かさない・紙には出さない）。
+ * 開いた日にその人の ✔ が付くまでは出さない。付いたら、ほかの未読の日のボタン（押すとその日の申送の頭へ）。全部読み終えたら〔本日に戻る〕
+ */
+export function UnreadTrailBar({
+  trail,
+  summary,
+  checks,
+  onPick,
+  onToday,
+  onClose,
+}: {
+  trail: UnreadWho & { day: string }
+  summary: UnreadSummary | null
+  checks: ReadonlyMap<string, ReadonlySet<number>>
+  onPick: (day: string) => void
+  onToday: () => void
+  onClose: () => void
+}) {
+  const { checked, rest } = nextUnreadDays({ trailDay: trail.day, staffId: trail.id, summary, checks })
+  // 未読者を読めない間（読み直しの失敗・日付をまたいだ直後）は出さない（残りが分からないのに「すべて確認しました」と言わない・反証 medium）
+  if (summary === null || !checked) return null
+  return (
+    <section className="dsheet-readcheck print:hidden mt-2 border-2 border-danger bg-surface" aria-label={`${trail.name}さんの未読の日`}>
+      <div className="space-y-2 p-3" aria-live="polite">
+        {rest.length > 0 ? (
+          <>
+            <p className="font-bold text-ink">
+              他の未読日を読む　<span className="text-danger">{trail.name}</span>
+              <span className="ml-2 text-sm font-normal text-ink2">あと{rest.length}日</span>
+            </p>
+            <div className="flex flex-wrap gap-1">
+              {rest.map((d) => (
+                <button
+                  key={d}
+                  type="button"
+                  className="min-h-tap rounded-sm border border-danger bg-surface px-2 text-sm font-bold text-danger underline"
+                  aria-label={`${trail.name}さんの未読 ${fmtDay(d)} の申送へ`}
+                  onClick={() => onPick(d)}
+                >
+                  {fmtDay(d)}
+                </button>
+              ))}
+            </div>
+          </>
+        ) : (
+          <p className="font-bold text-ok">{trail.name}さんの未読の日は、すべて確認しました。</p>
+        )}
+        <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-2">
+          {rest.length === 0 && (
+            <button type="button" className="min-h-tap rounded-sm border-2 border-link bg-link px-3 font-bold text-surface" onClick={onToday}>
+              本日に戻る
+            </button>
+          )}
+          <button type="button" className="min-h-tap rounded-sm border border-border px-3" onClick={onClose}>
+            閉じる
+          </button>
+        </div>
+      </div>
     </section>
   )
 }
