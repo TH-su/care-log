@@ -1417,6 +1417,39 @@ main:has(.dsheet-frame) {
   }
 }
 
+/* 日報の表題行を iPhone（640px 未満）で薄くし、上に固定しない（2026-11-20 本人指示「上部帯は上下幅を縮めて良い・帯の文字は小さくなって良い」）。
+   縦の短い端末では日報の枠が最小の高さ（--sheet-frame-min）で止まり、ページ全体が少しスクロールする。表題行は上に固定（sticky）なので、
+   高さ 149px の帯が日報の枠の上端に重なり、日付の枠の上半分が隠れていた（390×546 の実測で表題行 149px・ページのスクロール 37px）。
+   1. 並び（見出し／日付の操作／検索欄の3段）は変えず、上下の余白を詰め、ボタンと検索欄の高さ 44→36px・文字を一回り小さくする
+      （見出しと日付の操作を同じ段に並べる形は、検索欄が押し込まれてかえって高くなった＝同日実測）
+   2. 表題行は上に固定せず、ページと一緒に流す＝ページがスクロールしても日付の上にかぶらない
+   日報（#cl-daily-header-slot がある時）だけ・画面だけ。640px 以上と他の画面、紙は変えない */
+@media screen and (max-width: 639.98px) {
+  header:has(#cl-daily-header-slot) {
+    position: relative;
+  }
+  header:has(#cl-daily-header-slot) .cl-daily-header-row {
+    min-height: 0;
+    padding-top: var(--sp-1);
+    padding-bottom: var(--sp-1);
+    row-gap: var(--sp-1);
+  }
+  header:has(#cl-daily-header-slot) .cl-daily-title > h1 {
+    font-size: 1rem;
+  }
+  header:has(#cl-daily-header-slot) .cl-daily-title > span {
+    font-size: 0.75rem;
+  }
+  header #cl-daily-header-slot :is(button, input, select, label) {
+    min-height: 2.25rem;
+  }
+  /* 文字を小さくするのはボタンだけ。検索欄・日付・倍率の選択は 16px のまま（iPhone の Safari は 16px 未満の入力欄に触れると
+     画面を勝手に拡大する＝同日の反証レビュー） */
+  header #cl-daily-header-slot button {
+    font-size: 0.875rem;
+  }
+}
+
 /* ── バイタル一覧の画面の文字と列幅（2026-11-01 本人裁定・案C「日数を保つ」）──────────────
    バイタル一覧の枠（SheetFrame に付ける .vsheet-legible）の中だけ、画面に限って素の値（--*-base）を差し替える。
    シートの文字 13→14px・行 22→23px（見出しは 24px のまま）。iPad 横（表の幅 1,052px）で今と同じ3日が欠けずに見え、

@@ -435,6 +435,28 @@ describe('7b. 日付の枠を上と左へはみ出させる（2026-11-07 本人�
     // 日付の文字は DayPicker の head の形の span（ラベルの直下）にある
     assert.match(daily, /<label className=\{`dsheet-date \$\{head \? 'dsheet-date-head' : ''\}[^`]*`\}>\s*\{\/\*[^*]*\*\/\}\s*<span aria-hidden="true"/)
   })
+  it('iPhone（640px 未満）の日報だけ、表題行を薄くし上に固定しない（2026-11-20 本人指示・帯が日付の枠の上半分にかぶった）', () => {
+    const s = stripComments(css)
+    const at = s.indexOf('@media screen and (max-width: 639.98px) {\n  header:has(#cl-daily-header-slot)')
+    assert.ok(at >= 0, '640px 未満の日報の表題行の指定が無い')
+    const block = mediaBlocks(css, 'screen and (max-width: 639.98px)').find((b) => /header:has\(#cl-daily-header-slot\) \{/.test(b))
+    assert.ok(block, '640px 未満の日報の表題行の指定が塊として取れない')
+    // 上に固定しない（ページと一緒に流れる＝ページがスクロールしても日付の上にかぶらない）
+    assert.match(block, /header:has\(#cl-daily-header-slot\) \{\s*position: relative;\s*\}/)
+    // 上下の余白を詰め、ボタン・検索欄の高さ 36px・文字を一回り小さくする（並びは変えない）
+    assert.match(block, /\.cl-daily-header-row \{\s*min-height: 0;\s*padding-top: var\(--sp-1\);\s*padding-bottom: var\(--sp-1\);\s*row-gap: var\(--sp-1\);/)
+    assert.match(block, /#cl-daily-header-slot :is\(button, input, select, label\) \{\s*min-height: 2\.25rem;\s*\}/)
+    // 文字を小さくするのはボタンだけ。入力欄・選択欄を 16px 未満にすると iPhone の Safari が触れた時に画面を拡大する
+    assert.match(block, /#cl-daily-header-slot button \{\s*font-size: 0\.875rem;\s*\}/)
+    assert.doesNotMatch(block, /(input|select|label)[^{}]*\{[^}]*font-size/)
+    assert.doesNotMatch(block, /flex-basis|basis-/)
+    // 置き場の id と header の sticky は App.tsx のまま（640px 以上と他の画面は今までどおり上に固定）
+    const app = read('App.tsx')
+    assert.match(app, /<header className="sticky top-0 z-20 /)
+    assert.match(app, /<div id="cl-daily-header-slot" /)
+    // 紙には効かせない
+    for (const p of mediaBlocks(css, 'print')) assert.doesNotMatch(p, /cl-daily-header-slot/)
+  })
   it('申し送りのタイトル帯の先頭の日付は画面では出さず、紙には出す', () => {
     assert.match(daily, /<span className="tabular hidden print:inline">\{fmtSheetDayShort\(day\)\}<\/span>\n\s*<span>\{title\}<\/span>/)
   })
