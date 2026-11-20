@@ -332,8 +332,9 @@ if (DP === null) {
       // 2026-11-18 連絡帳の項目ごとの記載（固定し直し・意図は同じ）: 0064 も段階2a の分ではない
       // 2026-11-19 日報の確認欄（固定し直し・意図は同じ）: 0065 も段階2a の分ではない
       // 2026-11-19 確認欄の出し方（固定し直し・意図は同じ）: 勤務表の読み口が記号の開始時刻を返す 0066 も段階2a の分ではない
+      // 2026-11-20 外部支援専任の職員を日報に出さない（固定し直し・意図は同じ）: 読み口が外部支援専任の印を返す 0067 も段階2a の分ではない
       assert.deepEqual(
-        after.filter((f) => !['0044_daycare_activity.sql', '0045_resident_vital_limits.sql', '0046_daycare_training.sql', '0047_daycare_auto_attendance.sql', '0048_daycare_auto_attendance_fix.sql', '0049_daycare_auto_leave_editor.sql', '0050_pinned_open_lookback.sql', '0051_tenant_stage1.sql', '0052_tenant_stage2.sql', '0053_tenant_stage3.sql', '0054_tenant_stage4.sql', '0055_tenant_client_key.sql', '0056_presence_tenant.sql', '0057_import_tool_ver.sql', '0058_note_reporter_name.sql', '0059_trigger_fn_hardening.sql', '0060_trigger_fn_revoke_rest.sql', '0061_daycare_contact.sql', '0062_daycare_vital_unmeasured.sql', '0063_daycare_note_lock_19.sql', '0064_daycare_contact_sections.sql', '0065_daily_read_checks.sql', '0066_shift_duty_symbol_start.sql'].includes(f)),
+        after.filter((f) => !['0044_daycare_activity.sql', '0045_resident_vital_limits.sql', '0046_daycare_training.sql', '0047_daycare_auto_attendance.sql', '0048_daycare_auto_attendance_fix.sql', '0049_daycare_auto_leave_editor.sql', '0050_pinned_open_lookback.sql', '0051_tenant_stage1.sql', '0052_tenant_stage2.sql', '0053_tenant_stage3.sql', '0054_tenant_stage4.sql', '0055_tenant_client_key.sql', '0056_presence_tenant.sql', '0057_import_tool_ver.sql', '0058_note_reporter_name.sql', '0059_trigger_fn_hardening.sql', '0060_trigger_fn_revoke_rest.sql', '0061_daycare_contact.sql', '0062_daycare_vital_unmeasured.sql', '0063_daycare_note_lock_19.sql', '0064_daycare_contact_sections.sql', '0065_daily_read_checks.sql', '0066_shift_duty_symbol_start.sql', '0067_shift_duty_facwork_exclude.sql'].includes(f)),
         [],
         '段階2a は移行を足さない',
       )

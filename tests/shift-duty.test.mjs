@@ -136,8 +136,12 @@ if (D === null) {
       assert.equal(row.has('職員03'), false) // 訪問だけの人は日報の対象でない
     })
     it('勤務表の応答から使う項目だけを取り出す（労務の項目は捨てる）', () => {
-      const s = D.projectShiftStaff([{ id: 's1', name: '職員01', mainDivision: '施設', empCode: 'X', rules: {}, qualifications: [] }, { id: 2, name: 'x' }, null])
-      assert.deepEqual(s, [{ id: 's1', name: '職員01', mainDivision: '施設', active: undefined, status: undefined, retireMonth: undefined }])
+      // 2026-11-20 固定し直し・意図は同じ（使う項目だけ）: 外部支援専任の印 facworkExclude（0067）も取り出す
+      const s = D.projectShiftStaff([{ id: 's1', name: '職員01', mainDivision: '施設', empCode: 'X', rules: {}, qualifications: [] }, { id: 's3', name: '職員03', mainDivision: '訪問', facworkExclude: true }, { id: 2, name: 'x' }, null])
+      assert.deepEqual(s, [
+        { id: 's1', name: '職員01', mainDivision: '施設', active: undefined, status: undefined, retireMonth: undefined, facworkExclude: undefined },
+        { id: 's3', name: '職員03', mainDivision: '訪問', active: undefined, status: undefined, retireMonth: undefined, facworkExclude: true },
+      ])
       assert.equal(D.projectShiftStaff({}), null)
       assert.deepEqual(D.projectShiftMonth({ cells: { s1: { 1: '早' } }, notes: 'x', colors: {} }), { cells: { s1: { 1: '早' } }, subCells: {} })
       assert.equal(D.projectShiftMonth(null), null)
@@ -704,6 +708,33 @@ if (D === null) {
       assert.match(sec, /sb\.rpc\('carelog_shift_duty', \{ p_months: yms \}\)/)
       const lib = strip(read('../src/lib/shiftDuty.ts') + read('../src/lib/readCheck.ts') + read('../src/hooks/useReadChecks.ts') + comp)
       assert.doesNotMatch(lib, /console\.|localStorage|sessionStorage/)
+    })
+  })
+
+  // 2026-11-20 代表者の指示「施設外での訪問介護に従事する職員は出勤者に表示しなくて良い」: シフト作成アプリの外部支援専任の印
+  // （rules.facworkExclude・読み口 0067 の facworkExclude）が付いた職員は、施設の勤務に数えない＝出勤者の自動入力・確認欄・未読者に出ない
+  describe('外部支援専任の職員を施設の勤務に数えない（2026-11-20）', () => {
+    const roster = [
+      { id: 'a', name: '職員01', mainDivision: '訪問' },
+      { id: 'x', name: '職員09', mainDivision: '訪問', facworkExclude: true },
+      { id: 'd', name: '職員07', mainDivision: '通所' },
+    ]
+    const plan = { cells: { a: { 20: '早' }, x: { 20: '日1' }, d: { 20: '日1' } }, subCells: { x: { 施設: { 21: '(21' } } } }
+    const src = { staff: roster, symbols: [], months: { '2026-11': { plan, actual: null } } }
+    it('外部支援専任の人は、主の欄にも施設の応援の欄にも勤務があっても表に入らない（同じ訪問が主の人は入る）', () => {
+      const t = D.buildFacilityDutyTable(src, ['2026-11-20', '2026-11-21'])
+      assert.equal(t.get('2026-11-20').get('職員01').work, true)
+      assert.equal(t.get('2026-11-20').has('職員09'), false)
+      assert.equal(t.get('2026-11-21').has('職員09'), false)
+      assert.equal(t.get('2026-11-20').has('職員07'), false, 'デイ職員も今までどおり入らない')
+    })
+    it('数えない人の判定（通所が主・外部支援専任）は1つの部品で、確認欄と未読者の除外の鍵にも使う', () => {
+      assert.equal(D.notFacilityStaff({ id: 'x', name: 'n', mainDivision: '訪問', facworkExclude: true }), true)
+      assert.equal(D.notFacilityStaff({ id: 'd', name: 'n', mainDivision: '通所' }), true)
+      assert.equal(D.notFacilityStaff({ id: 'a', name: 'n', mainDivision: '訪問' }), false)
+      const hook = read('../src/hooks/useReadChecks.ts')
+      assert.equal((hook.match(/notFacilityStaff\(/g) ?? []).length, 2, '確認欄の読み込みと未読者の読み込みの両方')
+      assert.doesNotMatch(hook, /=== '通所'/)
     })
   })
 
