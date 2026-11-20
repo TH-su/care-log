@@ -4024,7 +4024,11 @@ function DaySheet({
   // 同じ画面の他の日の枠（または自分）で登録・帰着・削除した外出・外泊を、この日の一覧へ当てる（F65。期間で各日に出る
   // 行なので、自分の日だけ直すと他の日の外泊者の人数・帰着が古いまま残り、古い版から直すと偽の競合になっていた）
   useEffect(
-    () => outingBus.subscribe((change) => setOutings((cur) => applyOutingChange(cur, change, day))),
+    () =>
+      outingBus.subscribe((change) => {
+        savedSeqRef.current += 1
+        setOutings((cur) => applyOutingChange(cur, change, day))
+      }),
     [outingBus, day],
   )
   // この日の枠に出している外出・外泊の id を親へ伝える（他の端末がその行を直した時に、日付に関係なく案内する・F16）
@@ -4102,7 +4106,7 @@ function DaySheet({
   phaseRef.current = phase
   const loadKeyRef = useRef<string | null>(null)
   /**
-   * 申し送り・外出をこの画面で書き換えた回数（足す・直す・消す）。中身を出したまま読み直す間に
+   * 申し送り・外出をこの画面で書き換えた回数（足す・直す・消す・ほかの日の枠からの外泊の知らせ・出勤者の欄）。中身を出したまま読み直す間に
    * 書き換えたら、その読み込みの結果で上書きせずに読み直す（反証 low: 直した本文が戻る・消した行がまた出る）
    */
   const savedSeqRef = useRef(0)
@@ -4547,6 +4551,7 @@ function DaySheet({
         if (!aliveRef.current || dayRef.current !== dayIso) return
         // 送信待ちに退避した時も画面は操作したとおりにする（巻き戻すと「選んだのに消えた」になる）。
         // 電波が戻れば同じ内容が自動で送られる＝この行に未送信の一言を残しておく
+        savedSeqRef.current += 1
         applyAttendance(next)
         if (res === 'queued') setRowStatus('attendance', { tone: 'warn', text: queuedMsg() })
         if (undoLabel !== null) {
@@ -4677,7 +4682,10 @@ function DaySheet({
       // 送れた人は覚えるので、読み直しは1人につき1回まで）
       try {
         const fresh = await fetchAttendanceForDay(day)
-        if (aliveRef.current && dayRef.current === day && !hasPendingAttendance(day)) applyAttendance(fresh)
+        if (aliveRef.current && dayRef.current === day && !hasPendingAttendance(day)) {
+          savedSeqRef.current += 1
+          applyAttendance(fresh)
+        }
       } catch {
         // 読めない時は今の一覧のまま（次の読み込み・〔最新に更新〕で出る）
       }

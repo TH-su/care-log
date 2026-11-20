@@ -240,7 +240,9 @@ describe('★F65 複数日にまたがる外泊の登録・帰着・削除を、
     assert.match(end, /onOutingChanged\(\{ before: o, after: shown \}\)/)
     assert.match(end, /onOutingChanged\(\{ before: o, after: res \}\)/)
     assert.match(cbSrc(daily, 'deleteOutingRow'), /onOutingChanged\(\{ before: o, after: null \}\)/)
-    assert.match(daily, /outingBus\.subscribe\(\(change\) => setOutings\(\(cur\) => applyOutingChange\(cur, change, day\)\)\)/)
+    // 2026-11-20 固定し直し・意図は同じ（各日の枠が受け取って当てる）: 受け取った時に書き換えの回数も数える
+    // （中身を出したまま読み直す間に届いた知らせを、古い読み込みの結果で戻さないため）
+    assert.match(daily, /outingBus\.subscribe\(\(change\) => \{\s*savedSeqRef\.current \+= 1\s*setOutings\(\(cur\) => applyOutingChange\(cur, change, day\)\)\s*\}\)/)
     const parent = cbSrc(daily, 'handleOutingChanged')
     assert.match(parent, /if \(d >= from\) dropCachedDay\(d\)/)
     assert.match(parent, /outingBusRef\.current\.emit\(change\)/)

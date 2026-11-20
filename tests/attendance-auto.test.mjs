@@ -366,7 +366,9 @@ if (A === null) {
       assert.match(sec, /\[day, today, nowMin, phase, enabled, todayFac,/, '1分ごとの見直し（nowMin）と読み込みのたび')
       assert.doesNotMatch(sec, /saveAttendance\(/, '取り消した行を戻す saveAttendance を使わない')
       assert.ok((sec.match(/hasPendingAttendance\(day\)/g) ?? []).length >= 3, '送信待ちがある間は書き込みも読み直しもしない（反証 low2）')
-      assert.match(sec, /dayRef\.current === day && !hasPendingAttendance\(day\)\) applyAttendance\(fresh\)/)
+      // 2026-11-20 固定し直し・意図は同じ（送信待ちが無い時だけ取り直した欄を当てる）: 当てる時に書き換えの回数も数える
+      // （中身を出したまま読み直す間に足した人を、古い読み込みの結果で消さないため）
+      assert.match(sec, /dayRef\.current === day && !hasPendingAttendance\(day\)\) \{\s*savedSeqRef\.current \+= 1\s*applyAttendance\(fresh\)/)
     })
     it('〔元に戻す〕は外す前の一覧をそのまま送らず、今の一覧から undoAttendanceRows で組み直す（反証 medium1）', () => {
       const sec = page.slice(page.indexOf('const persistAttendance = useCallback('), page.indexOf('const enqueueAttendance = useCallback('))
