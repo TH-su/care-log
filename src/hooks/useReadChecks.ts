@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { addReadCheck, cancelReadCheck, fetchReadChecks, fetchShiftSource } from '../lib/db'
-import { buildDutyTable, buildFacilityDutyTable, nameKey } from '../lib/shiftDuty'
+import { buildDutyTable, buildFacilityDutyTable, nameKey, notFacilityStaff } from '../lib/shiftDuty'
 import type { DutyTable, FacilityDutyTable } from '../lib/shiftDuty'
 import { checkPanelDutyDays, unreadDutyDays, unreadWindow } from '../lib/readCheck'
 
@@ -101,7 +101,7 @@ export function useReadChecks(days: readonly string[], reloadToken: number): Rea
       for (const st of src.staff) {
         if (st.active === false || st.status === '退職') continue
         const k = nameKey(st.name)
-        if (k && st.mainDivision === '通所') dk.add(k)
+        if (k && notFacilityStaff(st)) dk.add(k)
       }
       setFac(ft.size > 0 ? ft : null)
       setDayKeys(dk)
@@ -240,7 +240,7 @@ export function useUnreadSource(today: string, reloadToken: number, version: num
           const k = nameKey(s.name)
           if (!k) continue
           roster.add(k)
-          if (s.mainDivision === '通所') dayKeys.add(k)
+          if (notFacilityStaff(s)) dayKeys.add(k)
         }
       } else failed = true
       if (!alive || my !== genRef.current) return

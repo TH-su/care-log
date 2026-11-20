@@ -243,7 +243,7 @@ await inTx('勤務表の読み口: 要る項目だけ・自分の施設だけ・
   await seedTwo()
   const staffData = JSON.stringify([
     { id: 's1', name: '職員01', mainDivision: '施設', empCode: 'E1', rules: { x: 1 }, qualifications: ['q'], employment: '常勤', active: true },
-    { id: 's2', name: '職員02', mainDivision: '訪問', status: '退職', retireMonth: '2026-10' },
+    { id: 's2', name: '職員02', mainDivision: '訪問', status: '退職', retireMonth: '2026-10', rules: { facworkExclude: true, note: 'N1' } },
     'こわれた要素',
   ])
   const symData = JSON.stringify([{ code: '早', type: 'work', label: 'L', color: '#fff', start: '07:00', end: '16:00' }, { code: '研', type: 'work', disabled: true }])
@@ -253,11 +253,13 @@ await inTx('勤務表の読み口: 要る項目だけ・自分の施設だけ・
            ($5, 'staff', '[{"id":"b1","name":"よその職員"}]'::jsonb, 'live')`, [A, staffData, symData, plan, B])
   const r = await asUser(A, async () => (await q(`select public.carelog_shift_duty(array['2026-11','2026-12']) as r`))[0].r)
   ok('live の時は mode・staff・symbols・months を返す', r?.mode === 'live' && Array.isArray(r.staff) && Array.isArray(r.symbols) && r.months, r)
-  ok('職員は id・氏名・主の区分・在籍の印だけ（労務の項目は返さない）',
+  // 2026-11-20 0067: 外部支援専任の印（rules.facworkExclude が true の人だけ facworkExclude: true）も返す。rules のほかの中身は返さない
+  ok('職員は id・氏名・主の区分・在籍の印・外部支援専任の印だけ（労務の項目は返さない）',
     r.staff.length === 2 && r.staff[0].id === 's1' && r.staff[0].name === '職員01' && r.staff[0].mainDivision === '施設' && r.staff[0].active === true
-      && r.staff[1].status === '退職' && r.staff[1].retireMonth === '2026-10'
-      && r.staff.every((s) => Object.keys(s).every((k) => ['id', 'name', 'mainDivision', 'active', 'status', 'retireMonth'].includes(k))), r.staff)
-  ok('職員の項目に労務の項目が無い', !JSON.stringify(r.staff).match(/empCode|rules|qualifications|employment|E1|常勤/), r.staff)
+      && r.staff[0].facworkExclude === undefined
+      && r.staff[1].status === '退職' && r.staff[1].retireMonth === '2026-10' && r.staff[1].facworkExclude === true
+      && r.staff.every((s) => Object.keys(s).every((k) => ['id', 'name', 'mainDivision', 'active', 'status', 'retireMonth', 'facworkExclude'].includes(k))), r.staff)
+  ok('職員の項目に労務の項目が無い', !JSON.stringify(r.staff).match(/empCode|rules|qualifications|employment|E1|常勤|N1/), r.staff)
   // 2026-11-19 0066: 記号の開始時刻（start）も返す（未読者に名前を出すのを出勤の時刻より後にするため）。終わり・色・名前は返さない
   ok('記号は code・type・disabled・start だけ', JSON.stringify(r.symbols) === JSON.stringify([{ code: '早', type: 'work', start: '07:00' }, { code: '研', type: 'work', disabled: true }]), r.symbols)
   ok('月は cells・subCells だけ（色・メモ・必要数は返さない）・無い月・無い実績は null',

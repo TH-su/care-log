@@ -226,6 +226,19 @@ export interface ShiftStaff {
   active?: boolean
   status?: string
   retireMonth?: string
+  /**
+   * 外部支援専任（施設の業務を入れない職員・シフト作成アプリの rules.facworkExclude）。日報の出勤者・確認欄・未読者に出さない
+   * （2026-11-20 代表者の指示「施設外の訪問介護に従事する職員は出勤者に表示しなくて良い」）。読み口 0067 から来る
+   */
+  facworkExclude?: boolean
+}
+
+/**
+ * 日報の施設の勤務に数えない職員（主の区分が通所＝デイ職員・外部支援専任）。確認欄・未読者・出勤者の自動入力のどれにも出さない。
+ * 氏名の鍵はこの人たちを「数えない人」として持つ（名簿に名前が無い人と取り違えて並べないため）
+ */
+export function notFacilityStaff(st: ShiftStaff): boolean {
+  return st.mainDivision === '通所' || st.facworkExclude === true
 }
 
 /** 勤務表の月（cells・subCells だけ） */
@@ -373,6 +386,7 @@ export function projectShiftStaff(data: unknown): ShiftStaff[] | null {
       active: r.active === false ? false : undefined,
       status: typeof r.status === 'string' ? r.status : undefined,
       retireMonth: typeof r.retireMonth === 'string' ? r.retireMonth : undefined,
+      facworkExclude: r.facworkExclude === true ? true : undefined,
     })
   }
   return out
@@ -467,7 +481,7 @@ export function staffDayFacility(
 }
 
 /**
- * 日ごとの施設の勤務の表。主の区分が通所の人は入れない。同じ氏名が2人いる時は勤務の部分を合わせる（見落とさない側）。
+ * 日ごとの施設の勤務の表。主の区分が通所の人・外部支援専任の人（facworkExclude）は入れない。同じ氏名が2人いる時は勤務の部分を合わせる（見落とさない側）。
  */
 export function buildFacilityDutyTable(src: ShiftSource, days: readonly string[]): FacilityDutyTable {
   const out: FacilityDutyTable = new Map()
@@ -481,7 +495,7 @@ export function buildFacilityDutyTable(src: ShiftSource, days: readonly string[]
     const row = new Map<string, FacilityDuty>()
     for (const st of src.staff) {
       if (!shiftStaffVisible(st, ym)) continue
-      if (mainDivisionOf(st) === '通所') continue
+      if (mainDivisionOf(st) === '通所' || st.facworkExclude === true) continue
       const key = nameKey(st.name)
       if (!key) continue
       const v = staffDayFacility(st, d, mon.plan, mon.actual, src.symbols.length ? src.symbols : DEFAULT_SHIFT_SYMBOLS)
