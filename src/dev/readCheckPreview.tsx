@@ -10,7 +10,7 @@ import { createRoot } from 'react-dom/client'
 import '../styles/tokens.css'
 import '../index.css'
 import '../styles/sheet.css'
-import { ReadCheckPanel, UnreadTrailBar } from '../components/DailyReadCheck'
+import { ReadCheckPanel, UnreadTrailDialog } from '../components/DailyReadCheck'
 import { buildCheckPanel, buildUnreadSummary } from '../lib/readCheck'
 import { buildFacilityDutyTable } from '../lib/shiftDuty'
 import type { ReadChecksState, UnreadSource } from '../hooks/useReadChecks'
@@ -107,7 +107,7 @@ function Preview() {
                 showUnread={day === TODAY}
               />
               {trail !== null && trail.day === day && (
-                <UnreadTrailBar
+                <UnreadTrailDialog
                   trail={trail}
                   summary={summary}
                   checks={checks}

@@ -181,3 +181,23 @@ export function attendRedDays(args: {
   }
   return out
 }
+
+/**
+ * ほかの端末の出勤者の欄の変更を、帯（「他の端末で記録が更新されました」）を出さずに出勤者の欄だけ読み直してよい日（2026-11-20 代表者の指示
+ * 「帯が何度も出てじゃまになっている」）。出勤者の欄は、今日の日報を開いている端末がそれぞれ出勤時刻の30分前から自動で足すので、
+ * ほかの端末が足した行の通知のたびに帯が出ていた。出勤者の欄は押したらすぐ保存する作り（書きかけが無い）なので、帯の代わりにその日の欄だけ取り直す。
+ * 返すのは、行が読めて（足す・直す）、その日が表示中の時のその日。それ以外（削除・行や日付が読めない・表示していない日・ほかの表）は null
+ * ＝呼び手は今までどおり（帯を出す・取り置きを捨てる）。
+ */
+export function quietAttendanceDay(
+  table: unknown,
+  info: { event?: unknown; row?: Record<string, unknown> | null } | null | undefined,
+  visibleDays: readonly string[],
+): string | null {
+  if (table !== 'attendance' || info == null) return null
+  if (info.event !== 'INSERT' && info.event !== 'UPDATE') return null
+  const row = info.row
+  if (row == null || typeof row['day'] !== 'string') return null
+  const d = row['day'].slice(0, 10)
+  return /^\d{4}-\d{2}-\d{2}$/.test(d) && visibleDays.includes(d) ? d : null
+}

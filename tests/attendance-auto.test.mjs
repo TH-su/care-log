@@ -419,4 +419,38 @@ if (A === null) {
       assert.doesNotMatch(strip(lib), /console\.|localStorage|sessionStorage/)
     })
   })
+
+  // 2026-11-20 代表者の指示「他の端末で更新の帯が何度も出てじゃまになっている」: 自動入力は今日の日報を開いている端末ごとに足すので、
+  // ほかの端末が足した出勤者の通知のたびに帯が出ていた。出勤者の欄の変更は帯を出さずに、その日の出勤者の欄だけ読み直す
+  describe('ほかの端末の出勤者の欄の変更は帯を出さずに読み直す（2026-11-20）', () => {
+    const days = ['2026-11-20', '2026-11-21']
+    it('足す・直すで、表示中の日の行なら、その日を返す', () => {
+      assert.equal(A.quietAttendanceDay('attendance', { event: 'INSERT', row: { day: '2026-11-20', staff_id: 3 } }, days), '2026-11-20')
+      assert.equal(A.quietAttendanceDay('attendance', { event: 'UPDATE', row: { day: '2026-11-21T00:00:00', staff_id: 3, sort: -1 } }, days), '2026-11-21')
+    })
+    it('判定できない・関係しない時は null（今までどおり帯を出す）', () => {
+      assert.equal(A.quietAttendanceDay('attendance', { event: 'DELETE', row: null }, days), null, '削除は行が無い')
+      assert.equal(A.quietAttendanceDay('attendance', { event: 'RESYNC', row: null }, days), null, 'つながり直し')
+      assert.equal(A.quietAttendanceDay('attendance', { event: 'INSERT', row: null }, days), null)
+      assert.equal(A.quietAttendanceDay('attendance', { event: 'INSERT', row: { staff_id: 3 } }, days), null, '日付が無い')
+      assert.equal(A.quietAttendanceDay('attendance', { event: 'INSERT', row: { day: 'x', staff_id: 3 } }, days), null)
+      assert.equal(A.quietAttendanceDay('attendance', { event: 'INSERT', row: { day: '2026-11-19', staff_id: 3 } }, days), null, '表示していない日')
+      assert.equal(A.quietAttendanceDay('notes', { event: 'INSERT', row: { day: '2026-11-20' } }, days), null, '申し送りは今までどおり帯')
+      assert.equal(A.quietAttendanceDay('attendance', undefined, days), null)
+    })
+    it('画面: 帯の代わりにその日の出勤者の欄だけ読み直し、送信待ち・読み込み中・読めない時は帯を出す', () => {
+      const page = strip(read('../src/pages/DailySheetPage.tsx'))
+      const h = page.slice(page.indexOf('if (isSelfWrite(table, info?.row)) return'), page.indexOf('if (!touchesVisibleDay(table, info, visibleDaysRef.current)) return'))
+      assert.match(h, /dropHiddenCached\(cachedDaysHit\(table, info\?\.row, knownDays\(\)\)\)\s+const quietDay = quietAttendanceDay\(table, info, visibleDaysRef\.current\)\s+if \(quietDay !== null\) \{\s+dropCachedDay\(quietDay\)\s+setAttendanceTicks/, '自分の書込は先に捨てる・取り置きは捨てる')
+      assert.match(page, /attendanceTick=\{attendanceTicks\.get\(d\) \?\? 0\}/)
+      const e = page.slice(page.indexOf('const attendanceTickRef = useRef(attendanceTick)'))
+      const eff = e.slice(0, e.indexOf('}, [attendanceTick, day, onStale, applyAttendance])'))
+      assert.ok(eff.length > 0)
+      assert.match(eff, /if \(phaseRef\.current !== 'ready' \|\| hasPendingAttendance\(day\)\) \{\s+onStale\(\)/)
+      assert.match(eff, /const fresh = await fetchAttendanceForDay\(day\)/)
+      assert.match(eff, /savedSeqRef\.current \+= 1\s+applyAttendance\(fresh\)\s+\} catch \{\s+onStale\(\)/, '読めない時は帯（黙って古いまま残さない）')
+      assert.match(eff, /chain\.get\(day\) \?\? Promise\.resolve\(\)/, '手で足す・外す保存と同じ列に並べる')
+      assert.ok((eff.match(/hasPendingAttendance\(day\)/g) ?? []).length >= 3, '送信待ちがある間は一覧を差し替えない')
+    })
+  })
 }

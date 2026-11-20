@@ -408,3 +408,25 @@ export function checkPanelDutyDays(days: readonly string[]): string[] {
   }
   return [...out].sort()
 }
+
+/**
+ * 続けて読む窓に出す残りの日（2026-11-20 反証 low: 窓の振る舞いを試験で動かして確かめるため、部品から切り出した）。
+ * - 未読者を読めた時（summary あり）: その人の ✔ がその日に付いていれば残りの日（空＝〔本日に戻る〕）、付いていなければ null（窓を出さない）
+ * - 読み直しの間（summary が null）: 同じ人・同じ日（key）で前に出していた時だけ、前の残りから画面で ✔ を付けた日を外して出す（閉じて開き直すとちらつく）。
+ *   前に出していない・別の人や別の日なら null（残りが分からないのに「すべて確認しました」と言わない）
+ */
+export function trailDialogDays(args: {
+  trail: { id: number; day: string }
+  summary: UnreadSummary | null
+  checks: ReadonlyMap<string, ReadonlySet<number>>
+  prev: { key: string; rest: readonly string[] } | null
+}): { key: string; rest: string[] } | null {
+  const { trail, summary, checks, prev } = args
+  const key = `${trail.id}|${trail.day}`
+  if (summary !== null) {
+    const r = nextUnreadDays({ trailDay: trail.day, staffId: trail.id, summary, checks })
+    return r.checked ? { key, rest: r.rest } : null
+  }
+  if (prev === null || prev.key !== key) return null
+  return { key, rest: prev.rest.filter((d) => !(checks.get(d)?.has(trail.id) ?? false)) }
+}
