@@ -5,10 +5,10 @@
 //     下に〔未読者〕ボタン。押すまで氏名を出さず、押すと昨日までの未読の人と、その右に未読の日付。日付を押すとその日の申送へ飛ぶ
 //     （2026-11-19 代表者の指示で、ページの上の未読者欄から確認欄の下へ移した）。
 // ✔ は「記録する職員（操作者）」として付ける（既読と同じ・ui-design.md §0 の誤帰属の防止）。
-// 自分以外の名前を押した時は、その人に記録する職員を切り替えてから付ける（確認の窓で知らせる）。
+// 自分以外の名前を押した時は、その人に記録する職員を切り替えてから付ける（2026-11-20 代表者の指示で、切り替えの確認の窓は出さない）。
 
-import { useState } from 'react'
-import { ConfirmDialog } from './ui'
+import { useRef, useState } from 'react'
+import { ConfirmDialog, ModalShell } from './ui'
 import { setActorId } from '../lib/actor'
 import type { CheckPanel, CheckPanelMember, UnreadSummary, UnreadWho } from '../lib/readCheck'
 import { nextUnreadDays } from '../lib/readCheck'
@@ -126,9 +126,8 @@ export function UnreadOnlyPanel({
   )
 }
 
-type Pending =
-  | { kind: 'other'; id: number; name: string }
-  | { kind: 'cancel'; id: number; name: string }
+/** 確認の窓を出す操作（取り消しだけ。付ける時は窓を出さない＝2026-11-20 代表者の指示「次の記録もこの人になる」の確認は不要） */
+type Pending = { kind: 'cancel'; id: number; name: string }
 
 /** 確認欄（1日の枠の末尾） */
 export function ReadCheckPanel({
@@ -191,11 +190,9 @@ export function ReadCheckPanel({
       setPending({ kind: 'cancel', id: m.id, name: m.name })
       return
     }
-    if (actorId === m.id) {
-      void doAdd(m.id)
-      return
-    }
-    setPending({ kind: 'other', id: m.id, name: m.name })
+    // 自分以外の名前は、記録する職員をその人に切り替えてから付ける（確認の窓は出さない・2026-11-20 代表者の指示）
+    if (actorId !== m.id) setActorId(m.id)
+    void doAdd(m.id)
   }
 
   const members = shiftReady ? panel.members : []
@@ -270,26 +267,15 @@ export function ReadCheckPanel({
       {showUnread && <UnreadButton summary={summary} source={unreadSource} onPickDay={onPickDay} />}
       <ConfirmDialog
         open={pending !== null}
-        title={
-          pending?.kind === 'cancel' ? `${pending.name}さんの確認を取り消しますか？` : `${pending?.name ?? ''}さんとして確認を付けますか？`
-        }
-        body={
-          pending?.kind === 'cancel'
-            ? 'この日の ✔ が外れます。取り消した後に、もう一度付けることもできます。'
-            : '記録する職員も、この人に切り替わります（このあとの記録・既読はこの人の名前で付きます）。'
-        }
-        confirmLabel={pending?.kind === 'cancel' ? '取り消す' : '確認を付ける'}
-        danger={pending?.kind === 'cancel'}
+        title={`${pending?.name ?? ''}さんの確認を取り消しますか？`}
+        body="この日の ✔ が外れます。取り消した後に、もう一度付けることもできます。"
+        confirmLabel="取り消す"
+        danger
         onCancel={() => setPending(null)}
         onConfirm={() => {
           const p = pending
           setPending(null)
-          if (!p) return
-          if (p.kind === 'cancel') void doCancel(p.id)
-          else {
-            setActorId(p.id)
-            void doAdd(p.id)
-          }
+          if (p) void doCancel(p.id)
         }}
       />
     </section>
@@ -297,10 +283,12 @@ export function ReadCheckPanel({
 }
 
 /**
- * 未読の日を続けて読む窓（2026-11-20 代表者の指示）。その日の確認欄のすぐ下に出す（✔ を押した所の下＝上の位置は動かさない・紙には出さない）。
- * 開いた日にその人の ✔ が付くまでは出さない。付いたら、ほかの未読の日のボタン（押すとその日の申送の頭へ）。全部読み終えたら〔本日に戻る〕
+ * 未読の日を続けて読む窓（2026-11-20 代表者の指示）。確認の窓と同じ、画面の中央に開く窓（日報の中には差し込まない・紙には出さない）。
+ * 開いた日にその人の ✔ が付くまでは出さない。付いたら、ほかの未読の日のボタン（押すとその日の申送の頭へ）。全部読み終えたら〔本日に戻る〕。
+ * 未読者の読み直しの間（summary が null）は、開いている窓を閉じずに前の中身のまま出す（閉じて開き直すとちらつき、押す所が動く）。
+ * 一度も出していない間に読めない時は出さない（残りが分からないのに「すべて確認しました」と言わない・反証 medium）
  */
-export function UnreadTrailBar({
+export function UnreadTrailDialog({
   trail,
   summary,
   checks,
@@ -315,24 +303,35 @@ export function UnreadTrailBar({
   onToday: () => void
   onClose: () => void
 }) {
-  const { checked, rest } = nextUnreadDays({ trailDay: trail.day, staffId: trail.id, summary, checks })
-  // 未読者を読めない間（読み直しの失敗・日付をまたいだ直後）は出さない（残りが分からないのに「すべて確認しました」と言わない・反証 medium）
-  if (summary === null || !checked) return null
+  const closeRef = useRef<HTMLButtonElement>(null)
+  /** 今の窓（誰の・どの日の分か）で最後に出した残りの日 */
+  const lastRef = useRef<{ key: string; rest: string[] } | null>(null)
+  const key = `${trail.id}|${trail.day}`
+  let rest: string[] | null = null
+  if (summary !== null) {
+    const r = nextUnreadDays({ trailDay: trail.day, staffId: trail.id, summary, checks })
+    rest = r.checked ? r.rest : null
+  } else if (lastRef.current?.key === key) {
+    // 読み直しの間は前の中身のまま（画面で ✔ を付けた日は外す）
+    rest = lastRef.current.rest.filter((d) => !(checks.get(d)?.has(trail.id) ?? false))
+  }
+  lastRef.current = rest === null ? null : { key, rest }
+  const days = rest ?? []
   return (
-    <section className="dsheet-readcheck print:hidden mt-2 border-2 border-danger bg-surface" aria-label={`${trail.name}さんの未読の日`}>
-      <div className="space-y-2 p-3" aria-live="polite">
-        {rest.length > 0 ? (
+    <ModalShell open={rest !== null} label={`${trail.name}さんの未読の日`} onClose={onClose} initialFocus={closeRef} restoreNoScroll>
+      <div className="dsheet-readcheck print:hidden space-y-3 p-4" aria-live="polite">
+        {days.length > 0 ? (
           <>
-            <p className="font-bold text-ink">
+            <h2 className="text-lg font-bold text-ink">
               他の未読日を読む　<span className="text-danger">{trail.name}</span>
-              <span className="ml-2 text-sm font-normal text-ink2">あと{rest.length}日</span>
-            </p>
-            <div className="flex flex-wrap gap-1">
-              {rest.map((d) => (
+            </h2>
+            <p className="text-base text-ink2">読む日を押してください（あと{days.length}日）。</p>
+            <div className="flex flex-wrap gap-2">
+              {days.map((d) => (
                 <button
                   key={d}
                   type="button"
-                  className="min-h-tap rounded-sm border border-danger bg-surface px-2 text-sm font-bold text-danger underline"
+                  className="min-h-tap min-w-[6rem] rounded-sm border-2 border-danger bg-surface px-3 text-base font-bold text-danger underline"
                   aria-label={`${trail.name}さんの未読 ${fmtDay(d)} の申送へ`}
                   onClick={() => onPick(d)}
                 >
@@ -342,19 +341,19 @@ export function UnreadTrailBar({
             </div>
           </>
         ) : (
-          <p className="font-bold text-ok">{trail.name}さんの未読の日は、すべて確認しました。</p>
+          <h2 className="text-lg font-bold text-ok">{trail.name}さんの未読の日は、すべて確認しました。</h2>
         )}
-        <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-2">
-          {rest.length === 0 && (
-            <button type="button" className="min-h-tap rounded-sm border-2 border-link bg-link px-3 font-bold text-surface" onClick={onToday}>
-              本日に戻る
-            </button>
-          )}
-          <button type="button" className="min-h-tap rounded-sm border border-border px-3" onClick={onClose}>
-            閉じる
-          </button>
-        </div>
       </div>
-    </section>
+      <div className="dsheet-readcheck print:hidden flex flex-wrap justify-end gap-gap border-t border-border p-4">
+        <button type="button" ref={closeRef} className="min-h-tap rounded border border-border-strong px-4 text-base text-ink" onClick={onClose}>
+          閉じる
+        </button>
+        {days.length === 0 && (
+          <button type="button" className="min-h-tap rounded border-2 border-link bg-link px-4 text-base font-bold text-surface" onClick={onToday}>
+            本日に戻る
+          </button>
+        )}
+      </div>
+    </ModalShell>
   )
 }

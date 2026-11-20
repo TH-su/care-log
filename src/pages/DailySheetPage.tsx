@@ -273,12 +273,12 @@ import type {
   Vital,
 } from '../lib/types'
 // 日報の確認欄（その日の日報を読んだ ✔）と未読者欄（2026-11-19・0065）。画面だけ（print:hidden）
-import { ReadCheckPanel, UnreadOnlyPanel, UnreadTrailBar } from '../components/DailyReadCheck'
+import { ReadCheckPanel, UnreadOnlyPanel, UnreadTrailDialog } from '../components/DailyReadCheck'
 import { useReadChecks, useUnreadSource } from '../hooks/useReadChecks'
 import type { ReadChecksState, UnreadSource } from '../hooks/useReadChecks'
 import type { UnreadSummary, UnreadWho } from '../lib/readCheck'
 import { buildCheckPanel, buildUnreadSummary } from '../lib/readCheck'
-import { attendDisplayNames, attendRedDays, planAutoAttendance, undoAttendanceRows } from '../lib/attendanceAuto'
+import { attendDisplayNames, attendRedDays, planAutoAttendance, quietAttendanceDay, undoAttendanceRows } from '../lib/attendanceAuto'
 
 // ══════════════════════════════════════════════════════════════
 // 定数・文言
@@ -2421,10 +2421,10 @@ interface DaySheetProps {
   onPickUnread: (day: string, who?: UnreadWho) => void
   /** この日の確認欄の下に〔未読者〕を出す */
   showUnread: boolean
-  /** 未読の日を続けて読む窓（この日を誰かの未読として開いた時だけ・確認欄のすぐ下に出す） */
-  trailBar?: ReactNode
   /** 今の時刻（0時からの分）。確認欄には読む番が来た人（出勤の30分前から）だけを並べる */
   nowMin: number
+  /** 増えたら出勤者の欄だけを読み直す（ほかの端末の出勤者の欄の変更・帯の代わり。2026-11-20） */
+  attendanceTick: number
 }
 
 /**
@@ -3047,6 +3047,15 @@ export function DailySheetPage({
         // 候補は取り置きにある日と、取りに行っている最中の日（手直し。取得中の日へ当たった通知でも世代を進め、通知より前の
         // 内容を読んだ遅い応答を取り置きに入れない）
         dropHiddenCached(cachedDaysHit(table, info?.row, knownDays()))
+        // ほかの端末が出勤者の欄に足した・直した（自動入力が端末ごとに毎朝何度も足す）時は、帯を出さずにその日の出勤者の欄だけ読み直す
+        // （2026-11-20 代表者の指示「帯が何度も出てじゃまになっている」）。読み直せない時は日の枠が帯を出す（onStale）
+        const quietDay = quietAttendanceDay(table, info, visibleDaysRef.current)
+        if (quietDay !== null) {
+          // 表示中の日の取り置きも捨てる（区切りを行き来して戻った時に、読み直す前の出勤者の欄を出さない）
+          dropCachedDay(quietDay)
+          setAttendanceTicks((prev) => new Map(prev).set(quietDay, (prev.get(quietDay) ?? 0) + 1))
+          return
+        }
         // 表示中の外出・外泊の行が直された時は、日付に関係なく案内する（帰着を早めた時など、変更後の期間が表示中の日に
         // 当たらなくても、画面には変更前の期間で出ている・F16）
         const rowId = table === 'outings' ? info?.row?.id : undefined
@@ -3111,7 +3120,7 @@ export function DailySheetPage({
       }
     }
     // dropHiddenCached は変わらない（張り直さない）
-  }, [dropHiddenCached, knownDays])
+  }, [dropHiddenCached, dropCachedDay, knownDays])
 
   // ── 外出・外泊の変更を同じ画面の他の日へ配る（F65）──────────────
   /** 各日の枠が受け取る口（画面にいる間1つ） */
@@ -3130,6 +3139,8 @@ export function DailySheetPage({
   const handleStale = useCallback(() => {
     if (aliveRef.current) setStale(true)
   }, [])
+  /** 日ごとの「出勤者の欄だけ読み直す」合図（ほかの端末の出勤者の欄の変更・帯の代わり。2026-11-20） */
+  const [attendanceTicks, setAttendanceTicks] = useState<ReadonlyMap<string, number>>(() => new Map())
 
   // ── 日付が変わったか（F18。日報は自動で切り替えず、帯で知らせる）──────────
   /** 今日（端末の暦の日付）。1分ごとと画面に戻った時に見直す（同じ値なら描き直さない） */
@@ -3383,27 +3394,13 @@ export function DailySheetPage({
     },
     [day, goDay, scrollToDay],
   )
-  // 続けて読む窓（その日の確認欄のすぐ下に出す）。枠へ渡す関数は固定する（描き直しのたびに10日ぶんを描き直さない・F64）
+  // 続けて読む窓（確認の窓と同じ、画面の中央に開く窓・2026-11-20 代表者の指示。日の枠の中には差し込まない）
   const pickTrail = useCallback((n: string) => goUnreadDay(n, unreadTrail ?? undefined), [goUnreadDay, unreadTrail])
   const trailToday = useCallback(() => {
     setUnreadTrail(null)
     goUnreadDay(today)
   }, [goUnreadDay, today])
   const closeTrail = useCallback(() => setUnreadTrail(null), [])
-  const trailBar = useMemo(
-    () =>
-      unreadTrail === null ? null : (
-        <UnreadTrailBar
-          trail={unreadTrail}
-          summary={unreadSummary}
-          checks={readChecks.checks}
-          onPick={pickTrail}
-          onToday={trailToday}
-          onClose={closeTrail}
-        />
-      ),
-    [unreadTrail, unreadSummary, readChecks.checks, pickTrail, trailToday, closeTrail],
-  )
   useEffect(() => {
     if (jumpTick === 0) return
     const j0 = jumpRef.current
@@ -3796,7 +3793,7 @@ export function DailySheetPage({
                   onPickUnread={goUnreadDay}
                   showUnread={d === unreadHost}
                   nowMin={nowMin}
-                  trailBar={unreadTrail !== null && unreadTrail.day === d ? trailBar : null}
+                  attendanceTick={attendanceTicks.get(d) ?? 0}
                 />
               </section>
             ))}
@@ -3813,6 +3810,16 @@ export function DailySheetPage({
         onConfirm={() => confirm?.onConfirm()}
         onCancel={() => setConfirm(null)}
       />
+      {unreadTrail !== null && visibleDays.includes(unreadTrail.day) && (
+        <UnreadTrailDialog
+          trail={unreadTrail}
+          summary={unreadSummary}
+          checks={readChecks.checks}
+          onPick={pickTrail}
+          onToday={trailToday}
+          onClose={closeTrail}
+        />
+      )}
       <CategoryExtractDialog
         open={extractOpen}
         onClose={() => setExtractOpen(false)}
@@ -3872,7 +3879,7 @@ function DaySheet({
   onPickUnread,
   showUnread,
   nowMin,
-  trailBar = null,
+  attendanceTick,
 }: DaySheetProps) {
   const [phase, setPhase] = useState<Phase>('loading')
   const [reload, setReload] = useState(0)
@@ -4700,6 +4707,47 @@ function DaySheet({
       })
     chain.set(day, nextChain)
   }, [day, today, nowMin, phase, enabled, todayFac, staff, managerStaffId, attendance, applyAttendance, markSelfWrite])
+
+  // ほかの端末の出勤者の欄の変更（親が帯の代わりに attendanceTick を増やす・2026-11-20 代表者の指示「帯が何度も出てじゃまになっている」）。
+  // 出勤者の欄だけを取り直す（日の枠ごとの読み直しは画面が一度消える）。手で足す・外す保存と同じ列に並べる（応答待ちの一覧と行き違わない）。
+  // 送信待ちがある・読み込み中・読めなかった時は、今までどおり帯を出す（黙って古いまま残さない）
+  const attendanceTickRef = useRef(attendanceTick)
+  useEffect(() => {
+    if (attendanceTickRef.current === attendanceTick) return
+    attendanceTickRef.current = attendanceTick
+    if (phaseRef.current !== 'ready' || hasPendingAttendance(day)) {
+      onStale()
+      return
+    }
+    const chain = attendanceChainRef.current
+    const job = async () => {
+      if (!aliveRef.current || dayRef.current !== day) return
+      if (hasPendingAttendance(day)) {
+        onStale()
+        return
+      }
+      try {
+        const fresh = await fetchAttendanceForDay(day)
+        if (!aliveRef.current || dayRef.current !== day) return
+        if (hasPendingAttendance(day)) {
+          onStale()
+          return
+        }
+        savedSeqRef.current += 1
+        applyAttendance(fresh)
+      } catch {
+        onStale()
+      }
+    }
+    const prevChain = chain.get(day) ?? Promise.resolve()
+    chain.set(
+      day,
+      prevChain
+        .catch(() => undefined)
+        .then(job)
+        .catch(() => undefined),
+    )
+  }, [attendanceTick, day, onStale, applyAttendance])
 
   // ── 申し送り ───────────────────────────────────────────────
 
@@ -6925,7 +6973,6 @@ function DaySheet({
               onPickDay={onPickUnread}
               showUnread={showUnread}
             />
-            {trailBar}
           </>
         )}
       </div>

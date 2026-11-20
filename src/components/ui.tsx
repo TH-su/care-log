@@ -222,15 +222,17 @@ const FOCUSABLE =
  * - Escape は onClose がある時だけ閉じる（必須選択のピッカーは閉じられない＝仕様どおり）
  * - 背面スクロールを止め、閉じたら元の値へ戻す
  */
-function useDialog(open: boolean, onClose?: () => void, initialFocus?: RefObject<HTMLElement>) {
+function useDialog(open: boolean, onClose?: () => void, initialFocus?: RefObject<HTMLElement>, restoreNoScroll = false) {
   const panelRef = useRef<HTMLDivElement>(null)
   const closeRef = useRef<(() => void) | undefined>(onClose)
   const focusRef = useRef<RefObject<HTMLElement> | undefined>(initialFocus)
+  const noScrollRef = useRef(restoreNoScroll)
 
   // 毎レンダーで最新のハンドラを保持する（インライン関数で effect が再実行されるのを防ぐ）
   useEffect(() => {
     closeRef.current = onClose
     focusRef.current = initialFocus
+    noScrollRef.current = restoreNoScroll
   })
 
   useEffect(() => {
@@ -268,7 +270,9 @@ function useDialog(open: boolean, onClose?: () => void, initialFocus?: RefObject
     return () => {
       document.removeEventListener('keydown', onKeyDown)
       document.body.style.overflow = prevOverflow
-      restore?.focus?.()
+      // 窓の中のボタンで別の日へ移った時は、元の要素へ戻すついでに画面を元の場所へ引き戻さない（restoreNoScroll）
+      if (noScrollRef.current) restore?.focus?.({ preventScroll: true })
+      else restore?.focus?.()
     }
   }, [open])
 
@@ -288,6 +292,8 @@ export interface ModalShellProps {
    * 広くなり、窓の右側が切れる。指定した窓だけ、見えている範囲の位置・大きさに合わせる防御
    */
   fitVisualViewport?: boolean
+  /** 閉じた時に元の要素へフォーカスを戻すが、画面はその要素の所へ動かさない（窓から別の場所へ移る窓・既定 false＝従来どおり） */
+  restoreNoScroll?: boolean
   children: ReactNode
 }
 
@@ -331,9 +337,10 @@ export function ModalShell({
   initialFocus,
   narrow = false,
   fitVisualViewport = false,
+  restoreNoScroll = false,
   children,
 }: ModalShellProps) {
-  const panelRef = useDialog(open, onClose, initialFocus)
+  const panelRef = useDialog(open, onClose, initialFocus, restoreNoScroll)
   const box = useVisualViewportBox(open && fitVisualViewport)
   if (!open) return null
   return (
