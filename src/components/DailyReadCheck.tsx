@@ -10,7 +10,7 @@
 import { useState } from 'react'
 import { ConfirmDialog } from './ui'
 import { setActorId } from '../lib/actor'
-import type { CheckPanel, CheckPanelMember, UnreadSummary } from '../lib/readCheck'
+import type { CheckPanel, CheckPanelMember, UnreadSummary, UnreadWho } from '../lib/readCheck'
 import type { ReadChecksState, UnreadSource } from '../hooks/useReadChecks'
 
 const WEEK = ['日', '月', '火', '水', '木', '金', '土']
@@ -33,7 +33,7 @@ function UnreadButton({
 }: {
   summary: UnreadSummary | null
   source: UnreadSource
-  onPickDay: (day: string) => void
+  onPickDay: (day: string, who?: UnreadWho) => void
 }) {
   const [open, setOpen] = useState(false)
   if (!source.ready || source.missing) return null
@@ -83,7 +83,7 @@ function UnreadButton({
                     type="button"
                     className="min-h-tap rounded-sm border border-danger bg-surface px-2 text-sm font-bold text-danger underline"
                     aria-label={`${p.name}さんの未読 ${fmtDay(d)} の申送へ`}
-                    onClick={() => onPickDay(d)}
+                    onClick={() => onPickDay(d, { id: p.id, name: p.name })}
                   >
                     {fmtDay(d)}
                   </button>
@@ -115,7 +115,7 @@ export function UnreadOnlyPanel({
 }: {
   summary: UnreadSummary | null
   unreadSource: UnreadSource
-  onPickDay: (day: string) => void
+  onPickDay: (day: string, who?: UnreadWho) => void
 }) {
   if (!unreadShown(summary, unreadSource)) return null
   return (
@@ -151,7 +151,7 @@ export function ReadCheckPanel({
   summary: UnreadSummary | null
   unreadSource: UnreadSource
   /** 未読の日付を押した: その日の申送へ移る */
-  onPickDay: (day: string) => void
+  onPickDay: (day: string, who?: UnreadWho) => void
   /** 〔未読者〕をこの確認欄の下に出すか（10日表示でも1つだけ＝表示中の日のうち今日に一番近い日） */
   showUnread: boolean
 }) {

@@ -663,7 +663,8 @@ if (D === null) {
       assert.doesNotMatch(closed, /\.name/, '開く前の部分に氏名を使っていない')
       assert.match(sec, /aria-expanded=\{open\}/)
       assert.match(sec, /\{p\.name\}<\/span>\s+\{\/\*[^*]*\*\/\}\s+<span className="flex flex-1 flex-wrap gap-1">\s+\{p\.days\.map/, '氏名の右に日付（右側の中で折り返す）')
-      assert.match(sec, /onClick=\{\(\) => onPickDay\(d\)\}/)
+      // 2026-11-20 固定し直し・意図は同じ: 日付と一緒に誰の未読かも渡す（他の未読日を続けて読む窓のため）
+      assert.match(sec, /onClick=\{\(\) => onPickDay\(d, \{ id: p\.id, name: p\.name \}\)\}/)
       assert.match(sec, /useState\(false\)/, '開いた状態は覚えない（毎回閉じて始まる）')
       const panel = comp.slice(comp.indexOf('export function ReadCheckPanel'))
       assert.ok(panel.indexOf('<UnreadButton') > panel.indexOf('</ul>'), '名前の ✔ の下')
@@ -702,6 +703,54 @@ if (D === null) {
       assert.match(sec, /sb\.rpc\('carelog_shift_duty', \{ p_months: yms \}\)/)
       const lib = strip(read('../src/lib/shiftDuty.ts') + read('../src/lib/readCheck.ts') + read('../src/hooks/useReadChecks.ts') + comp)
       assert.doesNotMatch(lib, /console\.|localStorage|sessionStorage/)
+    })
+  })
+
+  // 2026-11-20 代表者の指示: 出勤者の欄から未読の日へ飛び、確認欄で ✔ を付けた後に別の場所へスクロールしない・
+  // 「他の未読日を読む」の窓で続けて読み、全部読んだら〔本日に戻る〕
+  describe('未読の日を続けて読む窓と、✔ の後に画面が動かないこと（2026-11-20）', () => {
+    const summary = {
+      window: [],
+      people: [
+        { id: 7, name: '職員07', days: ['2026-11-15', '2026-11-17', '2026-11-18'] },
+        { id: 8, name: '職員08', days: ['2026-11-16'] },
+      ],
+      byDay: new Map(),
+      undeterminedDays: [],
+      unmatched: 0,
+    }
+    it('開いた日にその人の ✔ が付くまでは窓を出さない', () => {
+      const r = R.nextUnreadDays({ trailDay: '2026-11-17', staffId: 7, summary, checks: new Map([['2026-11-17', new Set([8])]]) })
+      assert.equal(r.checked, false)
+    })
+    it('✔ が付いたら、ほかの未読の日を古い順に出す（開いた日・画面で ✔ 済みの日は除く）', () => {
+      const checks = new Map([['2026-11-17', new Set([7])], ['2026-11-15', new Set([7])]])
+      const r = R.nextUnreadDays({ trailDay: '2026-11-17', staffId: 7, summary, checks })
+      assert.equal(r.checked, true)
+      assert.deepEqual(r.rest, ['2026-11-18'])
+    })
+    it('全部読み終えたら rest は空（〔本日に戻る〕を出す）。未読者の読み直しの前でも、付けたばかりの日は出さない', () => {
+      const r = R.nextUnreadDays({ trailDay: '2026-11-16', staffId: 8, summary, checks: new Map([['2026-11-16', new Set([8])]]) })
+      assert.deepEqual(r, { checked: true, rest: [] })
+      const r2 = R.nextUnreadDays({ trailDay: '2026-11-16', staffId: 9, summary, checks: new Map([['2026-11-16', new Set([9])]]) })
+      assert.deepEqual(r2, { checked: true, rest: [] }, '未読者に居ない人（読み直しで消えた）も同じ')
+    })
+    it('画面: 誰の未読として開いたかを渡し、窓は紙に出さず、〔本日に戻る〕は今日へ移る', () => {
+      const page = read('../src/pages/DailySheetPage.tsx')
+      const comp = read('../src/components/DailyReadCheck.tsx')
+      assert.match(comp, /onClick=\{\(\) => onPickDay\(d, \{ id: p\.id, name: p\.name \}\)\}/, '〔未読者〕の日付は誰の分かを渡す')
+      assert.match(page, /onPickUnread\(d, \{ id: unreadOpen\.id, name: unreadOpen\.name \}\)/, '出勤者の赤い枠の日付も誰の分かを渡す')
+      const bar = page.slice(page.indexOf('function UnreadTrailBar('), page.indexOf('function fmtUnreadDay('))
+      assert.match(bar, /print:hidden fixed/)
+      assert.match(bar, /他の未読日を読む/)
+      assert.match(bar, /本日に戻る/)
+      assert.match(page, /onToday=\{\(\) => \{\s*setUnreadTrail\(null\)\s*goUnreadDay\(today\)/)
+    })
+    it('画面: 記録する職員が替わって読み直す間も、同じ日の中身を「読み込んでいます」に差し替えない（日の高さが縮んで画面がずれていた）', () => {
+      const page = strip(read('../src/pages/DailySheetPage.tsx'))
+      assert.match(page, /const keep = phaseRef\.current === 'ready' && loadKeyRef\.current === loadKey/)
+      assert.match(page, /if \(!keep\) setPhase\('loading'\)/)
+      assert.match(page, /const loadKey = `\$\{day\}\|\$\{reload\}\|\$\{reloadToken\}`/, '日を替えた・〔最新に更新〕・読み直しのボタンでは今までどおり読み込み中を出す')
     })
   })
 }

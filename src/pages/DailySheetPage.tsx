@@ -276,8 +276,8 @@ import type {
 import { ReadCheckPanel, UnreadOnlyPanel } from '../components/DailyReadCheck'
 import { useReadChecks, useUnreadSource } from '../hooks/useReadChecks'
 import type { ReadChecksState, UnreadSource } from '../hooks/useReadChecks'
-import type { UnreadSummary } from '../lib/readCheck'
-import { buildCheckPanel, buildUnreadSummary } from '../lib/readCheck'
+import type { UnreadSummary, UnreadWho } from '../lib/readCheck'
+import { buildCheckPanel, buildUnreadSummary, nextUnreadDays } from '../lib/readCheck'
 import { attendDisplayNames, attendRedDays, planAutoAttendance, undoAttendanceRows } from '../lib/attendanceAuto'
 
 // ══════════════════════════════════════════════════════════════
@@ -2418,7 +2418,7 @@ interface DaySheetProps {
   unreadSummary: UnreadSummary | null
   unreadSource: UnreadSource
   /** 〔未読者〕の日付を押した: その日の申送へ移る */
-  onPickUnread: (day: string) => void
+  onPickUnread: (day: string, who?: UnreadWho) => void
   /** この日の確認欄の下に〔未読者〕を出す */
   showUnread: boolean
   /** 今の時刻（0時からの分）。確認欄には読む番が来た人（出勤の30分前から）だけを並べる */
@@ -3360,9 +3360,15 @@ export function DailySheetPage({
   /** 今表示している日（移る先の日を確認の窓で待っている間は、まだ前の日） */
   const curDayRef = useRef(day)
   curDayRef.current = day
+  /**
+   * 誰の未読として開いた日か（2026-11-20 代表者の指示）。その人の ✔ がその日に付いたら、画面の下に「他の未読日を読む」の窓を出し、
+   * ほかの未読の日を続けて開けるようにする。全部読み終えたら〔本日に戻る〕。誰の分か分からない移動・本日に戻った時・窓を閉じた時は消す
+   */
+  const [unreadTrail, setUnreadTrail] = useState<(UnreadWho & { day: string }) | null>(null)
   const goUnreadDay = useCallback(
-    (next: string) => {
+    (next: string, who?: UnreadWho) => {
       if (!ISO_DATE_RE.test(next)) return
+      setUnreadTrail(who ? { id: who.id, name: who.name, day: next } : null)
       jumpRef.current = { day: next, until: Date.now() + JUMP_HOLD_MS }
       if (next === day) {
         pendingScrollRef.current = { day: next, until: Date.now() + 5000 }
@@ -3771,6 +3777,19 @@ export function DailySheetPage({
         </SheetFrame>
       </div>
 
+      {unreadTrail !== null && (
+        <UnreadTrailBar
+          trail={unreadTrail}
+          summary={unreadSummary}
+          checks={readChecks.checks}
+          onPick={(d) => goUnreadDay(d, unreadTrail)}
+          onToday={() => {
+            setUnreadTrail(null)
+            goUnreadDay(today)
+          }}
+          onClose={() => setUnreadTrail(null)}
+        />
+      )}
       <ConfirmDialog
         open={confirm !== null}
         title={confirm?.title ?? ''}
@@ -4060,9 +4079,19 @@ function DaySheet({
 
   // ── 読み込み ───────────────────────────────────────────────
 
+  // 読み直しの間も今の中身を出したままにするか（2026-11-20 代表者の指示「確認欄でチェックを入れた後に別の場所にスクロールする」への直し）。
+  // 確認欄で自分以外の名前を押すと記録する職員が切り替わり、取り置きを捨てて表示中の日をすべて読み直す（loadDay が変わる）。
+  // その間「読み込んでいます」に差し替えていたので、日の高さが縮んで画面が別の場所へずれていた。
+  // 同じ日・〔最新に更新〕でも読み直しでもない（記録者が替わった・ほかの端末の更新で取り置きを捨てた）時は、読み終えるまで今の中身を出しておく
+  const phaseRef = useRef<Phase>('loading')
+  phaseRef.current = phase
+  const loadKeyRef = useRef<string | null>(null)
   useEffect(() => {
     let alive = true
-    setPhase('loading')
+    const loadKey = `${day}|${reload}|${reloadToken}`
+    const keep = phaseRef.current === 'ready' && loadKeyRef.current === loadKey
+    loadKeyRef.current = loadKey
+    if (!keep) setPhase('loading')
     void (async () => {
       try {
         // 1日ぶんだけを取りに行く（10日表示でも全件ロードしない）。
@@ -7436,6 +7465,72 @@ function DayPicker({
 
 const UNREAD_WEEK = ['日', '月', '火', '水', '木', '金', '土']
 /** 'YYYY-MM-DD' → 'M/D(曜)'（未読の日のボタン・DailyReadCheck の〔未読者〕と同じ書き方） */
+/**
+ * 未読の日を続けて読む窓（2026-11-20 代表者の指示）。画面の下に重ねて出す（日報の位置は動かさない・紙には出さない）。
+ * 開いた日にその人の ✔ が付くまでは出さない。付いたら、ほかの未読の日のボタン（押すとその日の申送の頭へ）。全部読み終えたら〔本日に戻る〕
+ */
+function UnreadTrailBar({
+  trail,
+  summary,
+  checks,
+  onPick,
+  onToday,
+  onClose,
+}: {
+  trail: UnreadWho & { day: string }
+  summary: UnreadSummary | null
+  checks: ReadonlyMap<string, ReadonlySet<number>>
+  onPick: (day: string) => void
+  onToday: () => void
+  onClose: () => void
+}) {
+  const { checked, rest } = nextUnreadDays({ trailDay: trail.day, staffId: trail.id, summary, checks })
+  if (!checked) return null
+  return (
+    <div
+      className="print:hidden fixed inset-x-0 bottom-0 z-40 flex justify-center px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
+      role="region"
+      aria-label={`${trail.name}さんの未読の日`}
+    >
+      <div className="w-full max-w-xl space-y-2 rounded-sm border-2 border-border-strong bg-surface p-3 shadow-lg" aria-live="polite">
+        {rest.length > 0 ? (
+          <>
+            <p className="font-bold text-ink">
+              他の未読日を読む　<span className="text-danger">{trail.name}</span>
+              <span className="ml-2 text-sm font-normal text-ink2">あと{rest.length}日</span>
+            </p>
+            <div className="flex flex-wrap gap-1">
+              {rest.map((d) => (
+                <button
+                  key={d}
+                  type="button"
+                  className="min-h-tap rounded-sm border border-danger bg-surface px-2 text-sm font-bold text-danger underline"
+                  aria-label={`${trail.name}さんの未読 ${fmtUnreadDay(d)} の申送へ`}
+                  onClick={() => onPick(d)}
+                >
+                  {fmtUnreadDay(d)}
+                </button>
+              ))}
+            </div>
+          </>
+        ) : (
+          <p className="font-bold text-ok">{trail.name}さんの未読の日は、すべて確認しました。</p>
+        )}
+        <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-2">
+          {rest.length === 0 && (
+            <button type="button" className="min-h-tap rounded-sm border-2 border-link bg-link px-3 font-bold text-surface" onClick={onToday}>
+              本日に戻る
+            </button>
+          )}
+          <button type="button" className="min-h-tap rounded-sm border border-border px-3" onClick={onClose}>
+            閉じる
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function fmtUnreadDay(iso: string): string {
   const [y, m, d] = iso.split('-').map((x) => parseInt(x, 10))
   return `${m}/${d}(${UNREAD_WEEK[new Date(Date.UTC(y, m - 1, d)).getUTCDay()]})`
@@ -7553,7 +7648,7 @@ function DayHeader({
   /** 赤い氏名枠にする人（id → 前日までの未読の日・古い順）。今日の日報だけ（lib/attendanceAuto.ts の attendRedDays） */
   redDays: ReadonlyMap<number, readonly string[]>
   /** 未読の日を押した: その日の申送の頭へ移る（goUnreadDay） */
-  onPickUnread: (day: string) => void
+  onPickUnread: (day: string, who?: UnreadWho) => void
 }) {
   const managerName =
     manager === null ? null : staffName(ctx.staffById.get(manager.staff_id), manager.staff_id)
@@ -7674,7 +7769,7 @@ function DayHeader({
                     aria-label={`${unreadOpen.name}さんの未読 ${fmtUnreadDay(d)} の申送へ`}
                     onClick={() => {
                       setUnreadOpen(null)
-                      onPickUnread(d)
+                      onPickUnread(d, { id: unreadOpen.id, name: unreadOpen.name })
                     }}
                   >
                     {fmtUnreadDay(d)}

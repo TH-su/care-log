@@ -407,7 +407,8 @@ if (A === null) {
       assert.match(cell, /className="hidden truncate print:block"/, '紙は今までと同じ形')
       const head = page.slice(page.indexOf('function DayHeader('), page.indexOf('<StatusText status={ctx.status.attendance} />'))
       assert.match(head, /<div className="print:hidden">\s*<ModalShell/)
-      assert.match(head, /onPickUnread\(d\)/, '日付を押すとその日へ（goUnreadDay）')
+      // 2026-11-20 固定し直し・意図は同じ: 日付と一緒に誰の未読かも渡す（他の未読日を続けて読む窓のため）
+      assert.match(head, /onPickUnread\(d, \{ id: unreadOpen\.id, name: unreadOpen\.name \}\)/, '日付を押すとその日へ（goUnreadDay）')
       assert.match(head, /onRemoveAttendance\(id\)/, '窓の〔出勤者から外す〕は今までの取り消し')
       assert.match(head, /red \? setUnreadOpen\(\{ id: a\.staff_id, name: full \}\) : onRemoveAttendance\(a\.staff_id\)/, '赤くない枠は今までどおり取り消し')
       assert.match(page, /onPickUnread=\{onPickUnread\}/)
