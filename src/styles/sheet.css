@@ -1157,6 +1157,23 @@
   color: var(--c-ink);
 }
 
+/* 日付の枠の文字は1行に固定し、枠に入りきらない時だけ小さくする（2026-11-20 本人指示）。
+   枠の幅（--w-facility）は倍率（--sheet-zoom）で縮むのに文字は 18px のままで、iPhone で倍率を下げると
+   「26年11月20」「日(金)」の2行に折れ、上の行が上の帯に隠れて読めなかった。
+   「26年10月31日(土)」の太字は 18px で 163.5px＝約 9.1 文字ぶん（--w-facility-base の実測）なので、枠の中身の幅の 1/9.5（10.5cqi）を上限にする。
+   倍率 100% 以上の枠では 18px のまま（上限に届かない）＝iPad・Mac の見た目は変わらない。
+   cqi を読めない古い端末では1つ目の指定（倍率に合わせて縮める）が効く。画面だけ・印刷は変えない */
+@media screen {
+  .dsheet-date-head {
+    container-type: inline-size;
+  }
+  .dsheet-date-head > span {
+    white-space: nowrap;
+    font-size: min(1.125rem, calc(1.125rem * var(--sheet-zoom, 1)));
+    font-size: min(1.125rem, 10.5cqi);
+  }
+}
+
 /* 土日は枠ごと色を変える。.dsheet-date の background より後に置いて後勝ちにする
    （同じ詳細度なので順序で決まる。曜日は日付文字の（土）（日）にも出るので色は補助） */
 .dsheet-date.sheet-sat {

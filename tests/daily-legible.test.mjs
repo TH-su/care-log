@@ -421,6 +421,20 @@ describe('7b. 日付の枠を上と左へはみ出させる（2026-11-07 本人�
     assert.match(block, /\.dsheet-legible \.dsheet-day > \[data-day-bar\] \{\s*top: var\(--dsheet-date-out\);\s*box-shadow:\s*0 var\(--sheet-rule\) 0 var\(--c-border-strong\),\s*0 calc\(var\(--dsheet-date-out\) \* -1\) 0 var\(--c-surface\);/)
     assert.match(block, /\.dsheet-legible \.dsheet-note-title \{\s*top: calc\(var\(--dsheet-daybar-h, 0px\) \+ var\(--dsheet-date-out\)\);/)
   })
+  it('日付の文字は1行に固定し、枠に入りきらない時だけ小さくする（2026-11-20 本人指示・iPhone で2行に折れて上の行が隠れた）', () => {
+    const block = mediaBlocks(css, 'screen').find((b) => /\.dsheet-date-head \{\s*container-type: inline-size;/.test(b))
+    assert.ok(block, '日付の枠を文字の幅の基準にする指定が画面だけの中に無い')
+    // 上限は 18px のまま（倍率 100% 以上の枠では今と同じ）。縮めるのは枠の中身の幅の 10.5cqi を超える時だけ。
+    // cqi を読めない端末向けに、倍率に合わせて縮める指定を先に置く
+    assert.match(
+      block,
+      /\.dsheet-date-head > span \{\s*white-space: nowrap;\s*font-size: min\(1\.125rem, calc\(1\.125rem \* var\(--sheet-zoom, 1\)\)\);\s*font-size: min\(1\.125rem, 10\.5cqi\);\s*\}/,
+    )
+    // 紙には効かせない（印刷の塊に同じ指定が無い）
+    for (const p of mediaBlocks(css, 'print')) assert.doesNotMatch(p, /dsheet-date-head > span/)
+    // 日付の文字は DayPicker の head の形の span（ラベルの直下）にある
+    assert.match(daily, /<label className=\{`dsheet-date \$\{head \? 'dsheet-date-head' : ''\}[^`]*`\}>\s*\{\/\*[^*]*\*\/\}\s*<span aria-hidden="true"/)
+  })
   it('申し送りのタイトル帯の先頭の日付は画面では出さず、紙には出す', () => {
     assert.match(daily, /<span className="tabular hidden print:inline">\{fmtSheetDayShort\(day\)\}<\/span>\n\s*<span>\{title\}<\/span>/)
   })
