@@ -445,7 +445,10 @@ describe('7b. 日付の枠を上と左へはみ出させる（2026-11-07 本人�
     assert.match(block, /header:has\(#cl-daily-header-slot\) \{\s*position: relative;\s*\}/)
     // 上下の余白を詰め、ボタン・検索欄の高さ 36px・文字を一回り小さくする（並びは変えない）
     assert.match(block, /\.cl-daily-header-row \{\s*min-height: 0;\s*padding-top: var\(--sp-1\);\s*padding-bottom: var\(--sp-1\);\s*row-gap: var\(--sp-1\);/)
-    assert.match(block, /#cl-daily-header-slot :is\(button, input, select, label\) \{\s*min-height: 2\.25rem;\s*font-size: 0\.875rem;/)
+    assert.match(block, /#cl-daily-header-slot :is\(button, input, select, label\) \{\s*min-height: 2\.25rem;\s*\}/)
+    // 文字を小さくするのはボタンだけ。入力欄・選択欄を 16px 未満にすると iPhone の Safari が触れた時に画面を拡大する
+    assert.match(block, /#cl-daily-header-slot button \{\s*font-size: 0\.875rem;\s*\}/)
+    assert.doesNotMatch(block, /(input|select|label)[^{}]*\{[^}]*font-size/)
     assert.doesNotMatch(block, /flex-basis|basis-/)
     // 置き場の id と header の sticky は App.tsx のまま（640px 以上と他の画面は今までどおり上に固定）
     const app = read('App.tsx')

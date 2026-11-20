@@ -1442,6 +1442,10 @@ main:has(.dsheet-frame) {
   }
   header #cl-daily-header-slot :is(button, input, select, label) {
     min-height: 2.25rem;
+  }
+  /* 文字を小さくするのはボタンだけ。検索欄・日付・倍率の選択は 16px のまま（iPhone の Safari は 16px 未満の入力欄に触れると
+     画面を勝手に拡大する＝同日の反証レビュー） */
+  header #cl-daily-header-slot button {
     font-size: 0.875rem;
   }
 }
