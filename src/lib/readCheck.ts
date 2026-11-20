@@ -215,6 +215,32 @@ export function unreadDutyDays(today: string): string[] {
   return w.length === 0 ? [] : [...w, shiftIso(today, 1)]
 }
 
+/** 未読の日を誰の分として開いたか（〔未読者〕の氏名・出勤者の赤い枠から。2026-11-20 代表者の指示「他の未読日を連続して確認」） */
+export interface UnreadWho {
+  id: number
+  name: string
+}
+
+/**
+ * 未読の日を続けて読むための窓の中身（2026-11-20 代表者の指示）。その人の分として開いた日（trailDay）に ✔ が付いたら出す。
+ * - checked: 開いた日にその人の ✔ が付いたか（付く前は窓を出さない）
+ * - rest: まだ ✔ の無い、ほかの未読の日（古い順）。空なら「本日に戻る」だけを出す
+ * ✔ は画面の最新（checks＝表示中の日の ✔）でも外す（未読者の読み直しが終わる前に、付けたばかりの日を出さない）
+ */
+export function nextUnreadDays(args: {
+  trailDay: string
+  staffId: number
+  summary: UnreadSummary | null
+  checks: ReadonlyMap<string, ReadonlySet<number>>
+}): { checked: boolean; rest: string[] } {
+  const { trailDay, staffId, summary, checks } = args
+  const has = (d: string) => checks.get(d)?.has(staffId) === true
+  const checked = has(trailDay)
+  const days = summary?.people.find((p) => p.id === staffId)?.days ?? []
+  const rest = days.filter((d) => d !== trailDay && !has(d))
+  return { checked, rest }
+}
+
 export function buildUnreadSummary(args: {
   today: string
   staff: readonly ReadCheckStaff[]

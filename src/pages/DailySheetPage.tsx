@@ -273,10 +273,10 @@ import type {
   Vital,
 } from '../lib/types'
 // 日報の確認欄（その日の日報を読んだ ✔）と未読者欄（2026-11-19・0065）。画面だけ（print:hidden）
-import { ReadCheckPanel, UnreadOnlyPanel } from '../components/DailyReadCheck'
+import { ReadCheckPanel, UnreadOnlyPanel, UnreadTrailBar } from '../components/DailyReadCheck'
 import { useReadChecks, useUnreadSource } from '../hooks/useReadChecks'
 import type { ReadChecksState, UnreadSource } from '../hooks/useReadChecks'
-import type { UnreadSummary } from '../lib/readCheck'
+import type { UnreadSummary, UnreadWho } from '../lib/readCheck'
 import { buildCheckPanel, buildUnreadSummary } from '../lib/readCheck'
 import { attendDisplayNames, attendRedDays, planAutoAttendance, undoAttendanceRows } from '../lib/attendanceAuto'
 
@@ -2418,9 +2418,11 @@ interface DaySheetProps {
   unreadSummary: UnreadSummary | null
   unreadSource: UnreadSource
   /** 〔未読者〕の日付を押した: その日の申送へ移る */
-  onPickUnread: (day: string) => void
+  onPickUnread: (day: string, who?: UnreadWho) => void
   /** この日の確認欄の下に〔未読者〕を出す */
   showUnread: boolean
+  /** 未読の日を続けて読む窓（この日を誰かの未読として開いた時だけ・確認欄のすぐ下に出す） */
+  trailBar?: ReactNode
   /** 今の時刻（0時からの分）。確認欄には読む番が来た人（出勤の30分前から）だけを並べる */
   nowMin: number
 }
@@ -3331,11 +3333,12 @@ export function DailySheetPage({
   }, [])
 
   const goDay = useCallback(
-    (next: string) => {
+    (next: string, onApplied?: () => void) => {
       if (!ISO_DATE_RE.test(next) || next === day) return
       const nextDays = unit === '1' ? [next] : blockDays(next)
       const leaving = visibleDays.filter((d) => !nextDays.includes(d))
       askLeave(leaving, () => {
+        onApplied?.()
         setDay(next)
         // 日付を選び直した＝日付が変わったことは確かめた（過去の日を見に行った時に、帯を出し続けない・F18）
         setAckToday(todayIso())
@@ -3360,17 +3363,46 @@ export function DailySheetPage({
   /** 今表示している日（移る先の日を確認の窓で待っている間は、まだ前の日） */
   const curDayRef = useRef(day)
   curDayRef.current = day
+  /**
+   * 誰の未読として開いた日か（2026-11-20 代表者の指示）。その人の ✔ がその日に付いたら、画面の下に「他の未読日を読む」の窓を出し、
+   * ほかの未読の日を続けて開けるようにする。全部読み終えたら〔本日に戻る〕。誰の分か分からない移動・本日に戻った時・窓を閉じた時は消す
+   */
+  const [unreadTrail, setUnreadTrail] = useState<(UnreadWho & { day: string }) | null>(null)
   const goUnreadDay = useCallback(
-    (next: string) => {
+    (next: string, who?: UnreadWho) => {
       if (!ISO_DATE_RE.test(next)) return
+      // 移った時に覚える（未保存の書きかけの確認で〔キャンセル〕したら、今の窓の続きを残す）
+      const trail = who ? { id: who.id, name: who.name, day: next } : null
       jumpRef.current = { day: next, until: Date.now() + JUMP_HOLD_MS }
       if (next === day) {
+        setUnreadTrail(trail)
         pendingScrollRef.current = { day: next, until: Date.now() + 5000 }
         scrollToDay(next)
-      } else goDay(next)
+      } else goDay(next, () => setUnreadTrail(trail))
       setJumpTick((n) => n + 1)
     },
     [day, goDay, scrollToDay],
+  )
+  // 続けて読む窓（その日の確認欄のすぐ下に出す）。枠へ渡す関数は固定する（描き直しのたびに10日ぶんを描き直さない・F64）
+  const pickTrail = useCallback((n: string) => goUnreadDay(n, unreadTrail ?? undefined), [goUnreadDay, unreadTrail])
+  const trailToday = useCallback(() => {
+    setUnreadTrail(null)
+    goUnreadDay(today)
+  }, [goUnreadDay, today])
+  const closeTrail = useCallback(() => setUnreadTrail(null), [])
+  const trailBar = useMemo(
+    () =>
+      unreadTrail === null ? null : (
+        <UnreadTrailBar
+          trail={unreadTrail}
+          summary={unreadSummary}
+          checks={readChecks.checks}
+          onPick={pickTrail}
+          onToday={trailToday}
+          onClose={closeTrail}
+        />
+      ),
+    [unreadTrail, unreadSummary, readChecks.checks, pickTrail, trailToday, closeTrail],
   )
   useEffect(() => {
     if (jumpTick === 0) return
@@ -3764,6 +3796,7 @@ export function DailySheetPage({
                   onPickUnread={goUnreadDay}
                   showUnread={d === unreadHost}
                   nowMin={nowMin}
+                  trailBar={unreadTrail !== null && unreadTrail.day === d ? trailBar : null}
                 />
               </section>
             ))}
@@ -3839,6 +3872,7 @@ function DaySheet({
   onPickUnread,
   showUnread,
   nowMin,
+  trailBar = null,
 }: DaySheetProps) {
   const [phase, setPhase] = useState<Phase>('loading')
   const [reload, setReload] = useState(0)
@@ -3990,7 +4024,11 @@ function DaySheet({
   // 同じ画面の他の日の枠（または自分）で登録・帰着・削除した外出・外泊を、この日の一覧へ当てる（F65。期間で各日に出る
   // 行なので、自分の日だけ直すと他の日の外泊者の人数・帰着が古いまま残り、古い版から直すと偽の競合になっていた）
   useEffect(
-    () => outingBus.subscribe((change) => setOutings((cur) => applyOutingChange(cur, change, day))),
+    () =>
+      outingBus.subscribe((change) => {
+        savedSeqRef.current += 1
+        setOutings((cur) => applyOutingChange(cur, change, day))
+      }),
     [outingBus, day],
   )
   // この日の枠に出している外出・外泊の id を親へ伝える（他の端末がその行を直した時に、日付に関係なく案内する・F16）
@@ -4060,9 +4098,28 @@ function DaySheet({
 
   // ── 読み込み ───────────────────────────────────────────────
 
+  // 読み直しの間も今の中身を出したままにするか（2026-11-20 代表者の指示「確認欄でチェックを入れた後に別の場所にスクロールする」への直し）。
+  // 確認欄で自分以外の名前を押すと記録する職員が切り替わり、取り置きを捨てて表示中の日をすべて読み直す（loadDay が変わる）。
+  // その間「読み込んでいます」に差し替えていたので、日の高さが縮んで画面が別の場所へずれていた。
+  // 同じ日・〔最新に更新〕でも読み直しでもない（記録者が替わった・ほかの端末の更新で取り置きを捨てた）時は、読み終えるまで今の中身を出しておく
+  const phaseRef = useRef<Phase>('loading')
+  phaseRef.current = phase
+  const loadKeyRef = useRef<string | null>(null)
+  /**
+   * 申し送り・外出をこの画面で書き換えた回数（足す・直す・消す・ほかの日の枠からの外泊の知らせ・出勤者の欄）。中身を出したまま読み直す間に
+   * 書き換えたら、その読み込みの結果で上書きせずに読み直す（反証 low: 直した本文が戻る・消した行がまた出る）
+   */
+  const savedSeqRef = useRef(0)
+  /** 次の読み直しも今の中身を出したまま行う（上の保存と行き違った時の読み直し） */
+  const keepNextRef = useRef(false)
   useEffect(() => {
     let alive = true
-    setPhase('loading')
+    const loadKey = `${day}|${reload}|${reloadToken}`
+    const keep = phaseRef.current === 'ready' && (loadKeyRef.current === loadKey || keepNextRef.current)
+    keepNextRef.current = false
+    loadKeyRef.current = loadKey
+    if (!keep) setPhase('loading')
+    const seq0 = savedSeqRef.current
     void (async () => {
       try {
         // 1日ぶんだけを取りに行く（10日表示でも全件ロードしない）。
@@ -4086,6 +4143,12 @@ function DaySheet({
         ])
         if (waitTimer !== null) clearTimeout(waitTimer)
         if (!alive || !aliveRef.current) return
+        if (keep && savedSeqRef.current !== seq0) {
+          // 読み直しの間に保存した行がこの結果に入っていないかもしれない＝今の中身のまま、もう一度読み直す
+          keepNextRef.current = true
+          setReload((n) => n + 1)
+          return
+        }
         setThresholdsLate(false)
 
         const safeNotes = Array.isArray(report?.notes) ? report.notes.filter((n) => n != null) : []
@@ -4266,6 +4329,7 @@ function DaySheet({
       .then((rows) => {
         if (!aliveRef.current) return
         const got = new Map(rows.map((r) => [r.id, r]))
+        savedSeqRef.current += 1
         setNotes((cur) =>
           cur
             // 読み直して見つからない＝取り消された（自分の削除が届いた・他の端末が消した）
@@ -4487,6 +4551,7 @@ function DaySheet({
         if (!aliveRef.current || dayRef.current !== dayIso) return
         // 送信待ちに退避した時も画面は操作したとおりにする（巻き戻すと「選んだのに消えた」になる）。
         // 電波が戻れば同じ内容が自動で送られる＝この行に未送信の一言を残しておく
+        savedSeqRef.current += 1
         applyAttendance(next)
         if (res === 'queued') setRowStatus('attendance', { tone: 'warn', text: queuedMsg() })
         if (undoLabel !== null) {
@@ -4617,7 +4682,10 @@ function DaySheet({
       // 送れた人は覚えるので、読み直しは1人につき1回まで）
       try {
         const fresh = await fetchAttendanceForDay(day)
-        if (aliveRef.current && dayRef.current === day && !hasPendingAttendance(day)) applyAttendance(fresh)
+        if (aliveRef.current && dayRef.current === day && !hasPendingAttendance(day)) {
+          savedSeqRef.current += 1
+          applyAttendance(fresh)
+        }
       } catch {
         // 読めない時は今の一覧のまま（次の読み込み・〔最新に更新〕で出る）
       }
@@ -4664,6 +4732,7 @@ function DaySheet({
   )
 
   const patchNote = useCallback((id: number, patch: Partial<Note>) => {
+    savedSeqRef.current += 1
     setNotes((prev) => prev.map((n) => (n.id === id ? { ...n, ...patch } : n)))
   }, [])
 
@@ -5091,6 +5160,7 @@ function DaySheet({
         }
         // 同じ id が既に入っていれば入れ替える（再読込と行き違っても行が2つにならない）
         notesRef.current = [...notesRef.current.filter((n) => n.id !== res.id), res]
+        savedSeqRef.current += 1
         setNotes((prev) => [...prev.filter((n) => n.id !== res.id), res])
         // 保存中に開いたままのピッカーを、保存済みの行のキーへ移す（選択を取りこぼさない）
         rebindPick(key, `n${res.id}`)
@@ -5213,7 +5283,10 @@ function DaySheet({
                 if (res.row !== null) patchNote(note.id, res.row)
                 return
               }
-              if (res !== 'queued') setNotes((prev) => prev.filter((n) => n.id !== note.id))
+              if (res !== 'queued') {
+                savedSeqRef.current += 1
+                setNotes((prev) => prev.filter((n) => n.id !== note.id))
+              }
               setExpanded(null)
               // 送信待ちに退避した削除も一覧からは外す（押した操作のとおりに見せる）。
               // 行が無くなるので一言は行ではなくトーストで出す（電波が戻れば自動で送られる）
@@ -6047,6 +6120,7 @@ function DaySheet({
           return
         }
         // 同じ id が既に入っていれば入れ替える（再読込と行き違っても行が2つにならない）
+        savedSeqRef.current += 1
         setOutings((prev) => [...prev.filter((o) => o.id !== res.id), res])
         saveOk(`o${res.id}`)
       } catch (err) {
@@ -6102,12 +6176,14 @@ function DaySheet({
           if (res === 'queued') {
             // 記入したとおりに帰着を出したまま送信待ちにする（値を巻き戻さない）
             const shown = { ...o, end_on: endOn, end_at: endAt }
+            savedSeqRef.current += 1
             setOutings((prev) => prev.map((x) => (x.id === o.id ? shown : x)))
             // 同じ画面の他の日（外泊の続きの日）にも同じ値を配る（F65。版は変えない＝送信待ちと同じ版）
             onOutingChanged({ before: o, after: shown })
             setRowStatus(key, { tone: 'warn', text: queuedMsg() })
             return
           }
+          savedSeqRef.current += 1
           setOutings((prev) => prev.map((x) => (x.id === o.id ? res : x)))
           // 帰着を延ばした・早めた結果を、同じ画面の他の日へ配る（新しい版がそろう＝他の日の行から直しても偽の競合にならない・F65）
           onOutingChanged({ before: o, after: res })
@@ -6151,6 +6227,7 @@ function DaySheet({
                 return
               }
               // 送信待ちに退避した削除も一覧からは外す（押した操作のとおりに見せる。電波が戻れば自動で送られる）
+              savedSeqRef.current += 1
               setOutings((prev) => prev.filter((x) => x.id !== o.id))
               // 同じ画面の他の日（外泊の続きの日）からも外す（F65）
               onOutingChanged({ before: o, after: null })
@@ -6536,7 +6613,10 @@ function DaySheet({
           if (!aliveRef.current) return
           const row = rows[0]
           if (row) patchNote(id, row)
-          else if (!r.queued) setNotes((cur) => cur.filter((n) => n.id !== id))
+          else if (!r.queued) {
+            savedSeqRef.current += 1
+            setNotes((cur) => cur.filter((n) => n.id !== id))
+          }
         })
         .catch(() => undefined)
       focusAfterResolve(`cl-note-row-${day}-${id}`)
@@ -6845,6 +6925,7 @@ function DaySheet({
               onPickDay={onPickUnread}
               showUnread={showUnread}
             />
+            {trailBar}
           </>
         )}
       </div>
@@ -7553,7 +7634,7 @@ function DayHeader({
   /** 赤い氏名枠にする人（id → 前日までの未読の日・古い順）。今日の日報だけ（lib/attendanceAuto.ts の attendRedDays） */
   redDays: ReadonlyMap<number, readonly string[]>
   /** 未読の日を押した: その日の申送の頭へ移る（goUnreadDay） */
-  onPickUnread: (day: string) => void
+  onPickUnread: (day: string, who?: UnreadWho) => void
 }) {
   const managerName =
     manager === null ? null : staffName(ctx.staffById.get(manager.staff_id), manager.staff_id)
@@ -7674,7 +7755,7 @@ function DayHeader({
                     aria-label={`${unreadOpen.name}さんの未読 ${fmtUnreadDay(d)} の申送へ`}
                     onClick={() => {
                       setUnreadOpen(null)
-                      onPickUnread(d)
+                      onPickUnread(d, { id: unreadOpen.id, name: unreadOpen.name })
                     }}
                   >
                     {fmtUnreadDay(d)}
