@@ -1,8 +1,8 @@
 # 本番に流した移行の照合の記録（2026-11-14・形は仮置き）
 
-本番の Supabase に移行（`supabase/migrations/*.sql`）か応急の直し（`supabase/hotfix/*.sql`）を流したら、同じ日のうちにこのフォルダへ1つ残す。毎週月曜の週報（care-tools の `check/routine/weekly-auto-ops.md`・共通 DB と同じ一覧を読む）は、ここを照合の結果のいちばんの材料として読む。
+本番の Supabase に移行（`supabase/migrations/*.sql`）か応急の直し（`supabase/hotfix/*.sql`）を流したら、同じ日のうちにこのフォルダへ1つ残す。毎朝の点検（care-backend の `ops-health.yml`・`tools/applied-records.mjs`）がこのフォルダを main から直接読み、本番の移行の一覧（2026-11-14 0:00 日本時間より後の分）と照らす。流してから48時間を過ぎても記録のファイルか回の見出し（流した時刻の分と同じ）が無いと赤になる。care-backend のフォルダへ写す必要はない（2026-11-21〜。それまでは写さないと赤になっていた）。毎週月曜の週報（care-tools の `check/routine/weekly-auto-ops.md`・共通 DB と同じ一覧を読む）は、ここを照合の結果のいちばんの材料として読む。
 
-- ファイル名は、流した移行ファイルの名前の `.sql` を `.md` に替えたもの（例 `0062_daycare_vital_unmeasured.sql` → `0062_daycare_vital_unmeasured.md`）。
+- ファイル名は、流した移行ファイルの名前の `.sql` を `.md` に替え、頭に `carelog_` を付けたもの（例 `0062_daycare_vital_unmeasured.sql` → `carelog_0062_daycare_vital_unmeasured.md`）。毎朝の点検は、このフォルダの `0062_….md` も `carelog_0062_….md` も care-log の 0062 として読む（care-backend の同じ番号とは分けて当てる）が、名前をそろえるため `carelog_` を付ける。
 - 同じ移行を2回以上流した時（2段に分けた・流し直した・戻した）は、同じファイルに回ごとの塊を下へ足す。前の塊は書き換えない。
 - 書くのは下の4項目だけ。個人情報・鍵・プロジェクトの番号・行の中身（件数・型・長さ以外）は書かない。
 - 「確かめの結果」は、確かめの行が全部 ok の時だけ `ok` と書く。1つでも違えば `ok でない` と書き、何が違ったかを短く添える。ただし権限・RLS・公開の口の食い違いは、このリポジトリが公開なので、直すまでは中身を書かず「ok でない（権限）」だけにする。確かめていない回も、その回の塊を「確かめの結果: ok でない（確かめていない）」で足す（同じ日に同じ名前で流し直した分を、確かめた回の ok と取り違えないため）。
@@ -16,8 +16,9 @@
 - 戻す SQL: supabase/rollback/0062_back.sql
 ```
 
-- 見出しの日時は、移行の一覧（`supabase_migrations.schema_migrations` の version）の日本時間と同じ分にする。
+- 見出しの日時は、移行の一覧（`supabase_migrations.schema_migrations` の version）の日本時間と同じ分にする。日付だけ・1分ずれの見出しは、毎朝の点検が「この回の見出しが無い」として赤にする。流した直後に移行の一覧（Supabase の list_migrations）で version を読み、日本時間の分に直して書く（例 version `20261118113456` → `2026-11-18 20:34`。秒は切り捨て）。
 - 「流した時の名前」は、移行の道具に渡した名前をそのまま書く（`carelog_` や `_phase1` が付いていればそのまま）。週報はこの名前と日付で回を当てる。
 - 戻しの SQL（`supabase/rollback/`）を移行の道具で流す時は、流した時の名前を元の移行の名前に `_back` を付けたもの（例 `carelog_0062_daycare_vital_unmeasured_back`）にし、元の移行の記録のファイルに塊を足す（戻す SQL の欄は「—（これが戻し）」）。
 - 移行の道具でなく SQL Editor などで流した時は、道具の欄にそう書き、流した時の名前は「なし」と書く。
 - 応急の直しは、そのファイルの名前の `.sql` を `.md` に替える（例 `2026-11-05_import_days_bridge.md`。戻した時も元のファイルの記録に塊を足す）。
+- 名前に4桁の番号が無い名前（`hotfix_…` など）で移行の道具に流した時は、毎朝の点検が流した時の名前そのままのファイル（`hotfix_….md`）で当てるので、そのファイル名で残す。できれば流す時の名前に `carelog_` と番号を入れる。
