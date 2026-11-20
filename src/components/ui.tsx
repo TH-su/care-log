@@ -239,7 +239,12 @@ function useDialog(open: boolean, onClose?: () => void, initialFocus?: RefObject
     if (!open) return
     const restore = document.activeElement as HTMLElement | null
     const prevOverflow = document.body.style.overflow
+    const prevPadding = document.body.style.paddingRight
+    // 画面を動かさない窓（restoreNoScroll）は、幅をとるスクロールバーが消えて本文が横に広がり折り返しが変わる（上下にずれる）のを、
+    // 消えた幅の余白で埋める（2026-11-20 反証 要確認。重ねて出すスクロールバーの端末では幅が 0 で何もしない）
+    const gutter = noScrollRef.current ? window.innerWidth - document.documentElement.clientWidth : 0
     document.body.style.overflow = 'hidden'
+    if (gutter > 0) document.body.style.paddingRight = `${gutter}px`
     ;(focusRef.current?.current ?? panelRef.current)?.focus()
 
     const onKeyDown = (e: KeyboardEvent) => {
@@ -270,6 +275,7 @@ function useDialog(open: boolean, onClose?: () => void, initialFocus?: RefObject
     return () => {
       document.removeEventListener('keydown', onKeyDown)
       document.body.style.overflow = prevOverflow
+      if (gutter > 0) document.body.style.paddingRight = prevPadding
       // 窓の中のボタンで別の日へ移った時は、元の要素へ戻すついでに画面を元の場所へ引き戻さない（restoreNoScroll）
       if (noScrollRef.current) restore?.focus?.({ preventScroll: true })
       else restore?.focus?.()

@@ -11,7 +11,7 @@ import { useRef, useState } from 'react'
 import { ConfirmDialog, ModalShell } from './ui'
 import { setActorId } from '../lib/actor'
 import type { CheckPanel, CheckPanelMember, UnreadSummary, UnreadWho } from '../lib/readCheck'
-import { nextUnreadDays } from '../lib/readCheck'
+import { trailDialogDays } from '../lib/readCheck'
 import type { ReadChecksState, UnreadSource } from '../hooks/useReadChecks'
 
 const WEEK = ['日', '月', '火', '水', '木', '金', '土']
@@ -306,19 +306,12 @@ export function UnreadTrailDialog({
   const closeRef = useRef<HTMLButtonElement>(null)
   /** 今の窓（誰の・どの日の分か）で最後に出した残りの日 */
   const lastRef = useRef<{ key: string; rest: string[] } | null>(null)
-  const key = `${trail.id}|${trail.day}`
-  let rest: string[] | null = null
-  if (summary !== null) {
-    const r = nextUnreadDays({ trailDay: trail.day, staffId: trail.id, summary, checks })
-    rest = r.checked ? r.rest : null
-  } else if (lastRef.current?.key === key) {
-    // 読み直しの間は前の中身のまま（画面で ✔ を付けた日は外す）
-    rest = lastRef.current.rest.filter((d) => !(checks.get(d)?.has(trail.id) ?? false))
-  }
-  lastRef.current = rest === null ? null : { key, rest }
-  const days = rest ?? []
+  // 読み直しの間は前の中身のまま（決め方は lib/readCheck.ts の trailDialogDays）
+  const shown = trailDialogDays({ trail, summary, checks, prev: lastRef.current })
+  lastRef.current = shown
+  const days = shown?.rest ?? []
   return (
-    <ModalShell open={rest !== null} label={`${trail.name}さんの未読の日`} onClose={onClose} initialFocus={closeRef} restoreNoScroll>
+    <ModalShell open={shown !== null} label={`${trail.name}さんの未読の日`} onClose={onClose} initialFocus={closeRef} restoreNoScroll>
       <div className="dsheet-readcheck print:hidden space-y-3 p-4" aria-live="polite">
         {days.length > 0 ? (
           <>

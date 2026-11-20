@@ -3810,7 +3810,9 @@ export function DailySheetPage({
         onConfirm={() => confirm?.onConfirm()}
         onCancel={() => setConfirm(null)}
       />
-      {unreadTrail !== null && visibleDays.includes(unreadTrail.day) && (
+      {/* 共有の確認の窓（未保存の入力があります 等）が開いている間は出さない（同じ重なり順で後に描く窓が上に来て、確認の窓が裏に隠れる・反証 medium）。
+          確認の窓で〔キャンセル〕したら、窓はまた開く（unreadTrail は移れた時に変わる） */}
+      {unreadTrail !== null && confirm === null && visibleDays.includes(unreadTrail.day) && (
         <UnreadTrailDialog
           trail={unreadTrail}
           summary={unreadSummary}
